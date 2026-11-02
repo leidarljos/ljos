@@ -29974,6 +29974,12 @@ pub const SITTING_TIMELINE: usize = 12;
 
 /// The review clock as a sitting prints it: a short prefix, then the summary.
 pub fn sitting_due_report(island: &Value) -> Result<String> {
+    Ok(sitting_due_and_atoms(island)?.0)
+}
+
+/// [`sitting_due_report`] and the listing it read, so the sitting ranks
+/// memories from the same atoms instead of asking the pack twice.
+fn sitting_due_and_atoms(island: &Value) -> Result<(String, Vec<Value>)> {
     let client = pack()?;
     // The same sweep `ljos due` runs. A sitting is the clock's ordinary
     // opening; a review left due past twice its interval lapses here.
@@ -29983,12 +29989,13 @@ pub fn sitting_due_report(island: &Value) -> Result<String> {
     let due = due_on_island_first(due_of(&atoms, &now), island);
     let shown = due.len().min(SITTING_DUE);
     record_due_shown(&due[..shown]);
-    Ok(format!(
+    let text = format!(
         "{}{}{}\n",
         format_due(&due[..shown]),
         review_summary(&atoms, &now),
         format_sweep(swept.as_ref())
-    ))
+    );
+    Ok((text, atoms))
 }
 
 /// The review clock as `ljos due` prints it: the soonest [`SITTING_DUE`]
@@ -33645,6 +33652,191 @@ pub fn open_blockers(issue: &str) -> Vec<String> {
     out
 }
 
+/// Words that name the project, not the ticket. A sitting that shares
+/// only these with a note has not found a memory of the work.
+const SITTING_WIDE: &[&str] = &["ljos", "seat", "sitting", "note", "ticket"];
+
+/// How many memories a sitting prints. Fewer when fewer clear the floor.
+const SITTING_RECALL_CAP: usize = 5;
+
+/// The least share of the ticket's own words a memory must cover.
+const SITTING_RECALL_FLOOR: f64 = 0.34;
+
+/// Title, body and logbook notes of the issue, for the sitting's recall.
+fn sitting_ticket_text(issue: &str, title: &str) -> String {
+    let mut parts = vec![title.to_string()];
+    if let Ok(card) = tracker_show_json(issue) {
+        if let Some(body) = card["body"].as_str() {
+            parts.push(body.to_string());
+        }
+        if let Some(log) = card["logbook"].as_array() {
+            for line in log {
+                if let Some(note) = line["note"].as_str() {
+                    parts.push(note.to_string());
+                }
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+/// Content words of `ticket` with the project-wide ones taken out.
+fn sitting_terms(ticket: &str) -> Vec<String> {
+    prompt_words(ticket)
+        .into_iter()
+        .filter(|word| !sitting_wide(word))
+        .collect()
+}
+
+fn sitting_wide(word: &str) -> bool {
+    SITTING_WIDE
+        .iter()
+        .any(|wide| *wide == word || *wide == singular(word))
+}
+
+/// A ticket id in `text` that is not `issue`, when `issue` itself is not
+/// named. The note is about that other ticket.
+fn names_another_ticket(issue: &str, text: &str) -> bool {
+    let issue = issue.trim().to_ascii_lowercase();
+    let Some((prefix, _)) = issue.rsplit_once('-') else {
+        return false;
+    };
+    if prefix.is_empty() {
+        return false;
+    }
+    let prefix = format!("{prefix}-");
+    let mut other = false;
+    let mut here = false;
+    for token in text
+        .to_ascii_lowercase()
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+    {
+        if token == issue {
+            here = true;
+        } else if token.starts_with(&prefix) && token.len() > prefix.len() {
+            other = true;
+        }
+    }
+    other && !here
+}
+
+fn atom_seat(atom: &Value) -> Option<&str> {
+    atom["source"]["seat"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            atom["entities"].as_array().and_then(|list| {
+                list.iter().find_map(|item| {
+                    item.as_str()
+                        .and_then(|tag| tag.strip_prefix(SEAT_ENTITY))
+                        .filter(|s| !s.is_empty())
+                })
+            })
+        })
+}
+
+fn junk_preference(kind: &str, text: &str) -> bool {
+    kind == "preference" && text.trim().to_ascii_lowercase().starts_with("test")
+}
+
+fn process_note(atom: &Value) -> bool {
+    let kind = atom["kind"].as_str().unwrap_or("");
+    kind == "note" || (kind != "lesson" && kind != "rule" && !person_stored(atom))
+}
+
+/// Memories worth showing for a sitting, best first.
+///
+/// Overlap is with the ticket's own words, not with `ljos`, `seat`,
+/// `sitting`, `note` or `ticket`. This seat's lessons and user rules
+/// outrank another seat's agent notes. Old process notes fade. A note
+/// about some other ticket is left out. Nothing under the floor is
+/// printed, so a weak match does not fill the list.
+pub(crate) fn rank_sitting_memories(
+    issue: &str,
+    ticket: &str,
+    atoms: &[Value],
+    now: &str,
+    seat: &str,
+) -> Vec<Value> {
+    let terms = sitting_terms(ticket);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    let mut scored: Vec<(usize, f64, i64)> = atoms
+        .iter()
+        .enumerate()
+        .filter(|(_, atom)| atom["tombstone"] != Value::Bool(true))
+        .filter(|(_, atom)| reviewable(atom))
+        .filter_map(|(index, atom)| {
+            let text = atom["text"].as_str().unwrap_or("").trim();
+            if text.is_empty() || names_another_ticket(issue, text) {
+                return None;
+            }
+            let have = prompt_words(text);
+            let shared = terms
+                .iter()
+                .filter(|term| have.binary_search(term).is_ok())
+                .count();
+            if shared == 0 {
+                return None;
+            }
+            let mut score = shared as f64 / terms.len() as f64;
+            let kind = atom["kind"].as_str().unwrap_or("");
+            let here = atom_seat(atom) == Some(seat);
+            let elsewhere = atom_seat(atom).is_some_and(|other| other != seat);
+            let rule = kind == "rule" || (kind == "preference" && person_stored(atom));
+            if junk_preference(kind, text) {
+                score *= 0.45;
+            } else if here && (kind == "lesson" || rule) {
+                score *= 1.15;
+            } else if elsewhere && process_note(atom) {
+                score *= 0.45;
+            }
+            if process_note(atom) {
+                let days = days_of_stamp(Some(now))
+                    .zip(days_of_stamp(written_at(atom).as_deref()))
+                    .map(|(today, then)| today.saturating_sub(then).max(0))
+                    .unwrap_or(0);
+                score *= 0.5_f64.powf(days as f64 / 7.0);
+            }
+            (score >= SITTING_RECALL_FLOOR).then_some((
+                index,
+                score,
+                days_of_stamp(written_at(atom).as_deref()).unwrap_or(0),
+            ))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
+    scored.truncate(SITTING_RECALL_CAP);
+    scored
+        .into_iter()
+        .map(|(index, score, _)| {
+            let mut row = atoms[index].clone();
+            row["activation"] = serde_json::json!(score);
+            row["seed"] = Value::Bool(true);
+            row
+        })
+        .collect()
+}
+
+/// The island lines a compact sitting reads as its memories.
+fn format_sitting_recall(rows: &[Value]) -> String {
+    let now = now_utc();
+    let mut out = String::new();
+    for atom in rows {
+        out.push_str(&format!(
+            "{:.3}\tseed\t{}\t{}\t[{}] {}\n",
+            atom["activation"].as_f64().unwrap_or(0.0),
+            atom["id"].as_str().unwrap_or("-"),
+            age_of(written_at(atom).as_deref(), &now),
+            atom_label(atom),
+            atom["text"].as_str().unwrap_or("").trim()
+        ));
+    }
+    out
+}
+
 /// [`sitting`], and with `anyway` the claim goes through even when the
 /// issue's blockers are open. Without it a blocked issue is refused before
 /// anything is claimed: the tracker's graph says what is workable, and a
@@ -33711,15 +33903,15 @@ pub fn sitting_gated(
     let _quiet_pack = pack_link::QuietPack::enter();
     let island = packset_island(&title, false)?;
     sections.heading(&mut out, "due");
-    out.push_str(&sitting_due_report(&island)?);
+    let (due, atoms) = sitting_due_and_atoms(&island)?;
+    out.push_str(&due);
     sections.heading_titled(&mut out, "island", &title);
-    // The strongest eight: a sitting wants orientation, not the whole
-    // cluster; `ljos island` prints it all.
-    let mut top = island.clone();
-    if let Some(rows) = top["island"].as_array_mut() {
-        rows.truncate(8);
-    }
-    out.push_str(&format_island(&top));
+    // The pack's island is activation along links, which is not what the
+    // ticket is about. The lines a sitting shows are the memories that
+    // share the ticket's own words.
+    let ticket = sitting_ticket_text(issue, &title);
+    let ranked = rank_sitting_memories(issue, &ticket, &atoms, &now_utc(), &seat_name());
+    out.push_str(&format_sitting_recall(&ranked));
     sections.heading(&mut out, "blockers");
     let blockers = open_blockers(issue);
     if blockers.is_empty() {
@@ -53639,6 +53831,112 @@ What the seat remembers for this task:\n\
 - Keep hooks under 8 s.\n\
 Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sitting; `ljos sitting Software-x --verbose` prints every section.\n"
         );
+    }
+
+    /// A sitting's recall is the ticket's own words. Project words, another
+    /// seat's old notes, a test preference and a note about some other
+    /// ticket do not fill the list.
+    #[test]
+    fn a_sitting_recall_keeps_the_lesson_about_the_ticket() {
+        let issue = "sample-dkib";
+        let ticket = "\
+Sitting recall surfaces other seats' unrelated agent notes instead of memories about the ticket.
+The body asks the recall to rank memories by the ticket, not by a process log.
+";
+        let now = "2026-11-02T12:00:00Z";
+        let row = |id: &str, kind: &str, text: &str, seat: &str, ts: &str, origin: &str| {
+            serde_json::json!({
+                "id": id,
+                "kind": kind,
+                "text": text,
+                "ts": ts,
+                "origin": origin,
+                "source": {"seat": seat, "basis": "agent"},
+                "entities": [format!("seat:{seat}")],
+            })
+        };
+        let atoms = vec![
+            row(
+                "fix-a",
+                "note",
+                "The fixer run rewrote the process log and left the branch dirty.",
+                "bee",
+                "2026-10-31T12:00:00Z",
+                "agent-derived",
+            ),
+            row(
+                "fix-b",
+                "note",
+                "Correction for sample-other: recall the parser change on that ticket.",
+                "bee",
+                "2026-10-31T12:00:00Z",
+                "agent-derived",
+            ),
+            row(
+                "rules",
+                "note",
+                "The rules file from last month still lists the old matcher.",
+                "bee",
+                "2026-10-30T12:00:00Z",
+                "agent-derived",
+            ),
+            row(
+                "deploy",
+                "note",
+                "Deploy the catalog after the smoke run passes.",
+                "bee",
+                "2026-10-31T12:00:00Z",
+                "agent-derived",
+            ),
+            row(
+                "export",
+                "preference",
+                "Export the seat name before the other seat starts its own work.",
+                "bee",
+                "2026-10-31T12:00:00Z",
+                "agent-derived",
+            ),
+            row(
+                "chain",
+                "preference",
+                "test pref: chain commands after sourcing the shell file.",
+                "bee",
+                "2026-11-01T12:00:00Z",
+                "agent-derived",
+            ),
+            row(
+                "lesson",
+                "lesson",
+                "Recall ranks a memory by the ticket's own words and drops an unrelated agent note.",
+                "ada",
+                "2026-11-01T12:00:00Z",
+                "user-declared",
+            ),
+        ];
+        let ranked = super::rank_sitting_memories(issue, ticket, &atoms, now, "ada");
+        let texts: Vec<&str> = ranked
+            .iter()
+            .filter_map(|row| row["text"].as_str())
+            .collect();
+        assert!(
+            texts
+                .first()
+                .is_some_and(|text| text.contains("Recall ranks a memory")),
+            "recall put something else first: {texts:?}"
+        );
+        let joined = texts.join("\n");
+        for left in [
+            "fixer run",
+            "sample-other",
+            "rules file",
+            "Deploy the catalog",
+            "Export the seat",
+            "test pref",
+        ] {
+            assert!(!joined.contains(left), "{left} was shown:\n{joined}");
+        }
+        let bare = super::rank_sitting_memories("sample-none", "Sitting note", &atoms, now, "ada");
+        assert!(bare.is_empty(), "an empty ticket printed {bare:?}");
     }
 
     /// A removal is an appended ledger event. The heading that already
