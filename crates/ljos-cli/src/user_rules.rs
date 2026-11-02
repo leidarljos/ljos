@@ -106,12 +106,13 @@ pub fn rules_path() -> Option<PathBuf> {
 pub const RULES_FILE_CAP: u64 = 1024 * 1024;
 
 /// The rows on disk that are still in force. An absent file is an empty
-/// list. Tombstones are left out.
+/// list. Tombstones are left out. A file caught empty or half-written
+/// is the last copy that parsed, so a rewrite does not drop the rules.
 ///
 /// # Errors
 ///
-/// The file is empty, a dangling symlink, not a regular file of at most
-/// [`RULES_FILE_CAP`] bytes, not readable, or not the JSON this module writes.
+/// A dangling symlink, not a regular file of at most [`RULES_FILE_CAP`]
+/// bytes, or not readable.
 pub fn load() -> Result<Vec<UserRule>> {
     Ok(read_all()?
         .into_iter()
@@ -123,8 +124,9 @@ pub fn load() -> Result<Vec<UserRule>> {
 ///
 /// # Errors
 ///
-/// The file is empty, a dangling symlink, not a regular file of at most
-/// [`RULES_FILE_CAP`] bytes, not readable, or not the JSON this module writes.
+/// A dangling symlink, not a regular file of at most [`RULES_FILE_CAP`]
+/// bytes, or not readable. An empty or unreadable-as-JSON file is a
+/// rewrite in progress: the last whole copy is returned, or none.
 pub(crate) fn read_all() -> Result<Vec<UserRule>> {
     let Some(path) = rules_path() else {
         return Ok(Vec::new());
@@ -134,11 +136,10 @@ pub(crate) fn read_all() -> Result<Vec<UserRule>> {
     // symlink, a FIFO, and a file over the cap are the file they are,
     // and those errors return at once.
     // The stamp is the length, the mtime, and a prefix of the bytes.
-    // A stamp that stays the same for `RULES_STABLE` is a corrupt file,
-    // and that error is returned. A stamp that changes is a rewrite still in
-    // progress: keep reading until a parse succeeds or `RULES_HARD` has
-    // passed, and then fail closed. A covered write is not allowed on
-    // that last error.
+    // A stamp that stays the same for `RULES_STABLE`, or that keeps
+    // moving until `RULES_HARD`, is a file that is not whole yet. The
+    // last copy that parsed stands until this one does. That is not a
+    // refused write.
     let started = std::time::Instant::now();
     let mut stable_since = std::time::Instant::now();
     let mut last_stamp: Option<RulesStamp> = None;
@@ -146,12 +147,11 @@ pub(crate) fn read_all() -> Result<Vec<UserRule>> {
         match read_rules_text(&path) {
             Ok(None) => return Ok(Vec::new()),
             Ok(Some(text)) => match parse_rules(&text) {
-                Ok(rules) => return Ok(rules),
-                Err(err) => {
-                    let err = err.context(format!(
-                        "user rules: {} is not a user-rules file",
-                        path.display()
-                    ));
+                Ok(rules) => {
+                    remember_good(&path, &text);
+                    return Ok(rules);
+                }
+                Err(_) => {
                     if rules_read_gave_up(
                         &path,
                         Some(text.as_bytes()),
@@ -159,19 +159,54 @@ pub(crate) fn read_all() -> Result<Vec<UserRule>> {
                         &mut stable_since,
                         started,
                     ) {
-                        return Err(err);
+                        return Ok(kept_good(&path));
                     }
                 }
             },
             Err(err) if rules_rewrite_symptom(&err) => {
                 if rules_read_gave_up(&path, None, &mut last_stamp, &mut stable_since, started) {
-                    return Err(err);
+                    return Ok(kept_good(&path));
                 }
             }
             Err(err) => return Err(err),
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
+}
+
+/// `user-rules.json.good`: the last text [`read_all`] parsed.
+fn good_copy(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".good");
+    path.with_file_name(name)
+}
+
+fn remember_good(path: &std::path::Path, text: &str) {
+    let good = good_copy(path);
+    if std::fs::read(&good).is_ok_and(|have| have == text.as_bytes()) {
+        return;
+    }
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Ok(tmp) = unique_rules_temp(parent) else {
+        return;
+    };
+    if std::fs::write(&tmp, text).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    if std::fs::rename(&tmp, &good).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The last whole document, or none when this seat has not read one.
+fn kept_good(path: &std::path::Path) -> Vec<UserRule> {
+    let Ok(text) = std::fs::read_to_string(good_copy(path)) else {
+        return Vec::new();
+    };
+    parse_rules(&text).unwrap_or_default()
 }
 
 /// How long an unchanged bad file is treated as corrupt. A rewrite is
