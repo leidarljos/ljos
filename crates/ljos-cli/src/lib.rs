@@ -26851,21 +26851,14 @@ pub fn parse_semver(text: &str) -> Option<&str> {
 }
 
 fn bin_version(bin: &str) -> Option<String> {
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     let path = which::which(bin).ok()?;
-    // MCP servers that do not implement --version sit on stdio.
-    // Cap the wait so doctor cannot hang the seat.
+    // A binary that does not implement --version, or never exits, used to
+    // hold doctor for as long as it sat. Every seat binary gets the same
+    // short wait, and a grandchild it leaves on the pipe is stopped with it.
     let mut cmd = Command::new(&path);
     cmd.arg("--version");
-    let said = if bin.ends_with("-mcp") || bin == "ljos-policyd" {
-        output_within(cmd, None, SEAT_ANSWER_BUDGET).ok()?
-    } else {
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .ok()?
-    };
+    let said = output_within(cmd, None, SEAT_ANSWER_BUDGET).ok()?;
     let stdout = String::from_utf8_lossy(&said.stdout);
     let stderr = String::from_utf8_lossy(&said.stderr);
     parse_semver(&stdout)
@@ -28094,6 +28087,10 @@ pub fn doctor_seat() -> Vec<Habitat> {
     out.push(cloud::cloud_age_row());
     // A fresh install has no writer until its first memory verb starts one;
     // doctor starts it the same way, so the rows below ask a live pack.
+    // One silent accept is one command budget, shared by every probe below,
+    // so a sitting is not the sum of thirty-second reads.
+    let _pack_clock = arm_cmd_pack();
+    let _quiet_pack = pack_link::QuietPack::enter();
     wake_writer();
     // How many stored preferences the hook enforces: a preference with no
     // rule is recalled and never holds the agent to it.
@@ -28255,43 +28252,48 @@ pub fn doctor_seat() -> Vec<Habitat> {
         ("tracker", "vissue", &["identity"][..]),
         ("claim graph", "claimdag", &["list"][..]),
     ] {
-        out.push(match run_captured(bin, args) {
-            Ok(said) if name == "tracker" => {
-                let (state, ok) = tracker_state(&said.stdout, &root_source());
-                Habitat { name, state, ok }
-            }
-            Ok(said) => Habitat {
-                name,
-                state: said.stdout.lines().next().unwrap_or("").to_string(),
-                ok: true,
-            },
-            Err(e) if name == "tracker" => {
-                let mut state = e.to_string().lines().next().unwrap_or("").to_string();
-                if let Some(root) = std::env::var_os("VISSUE_ROOT").filter(|v| !v.is_empty()) {
-                    if let Some((extra, _)) = tracker_git_drift(Path::new(&root)) {
-                        state = format!("{state}; {extra}");
+        // A habitat that accepts the probe and never answers used to hold
+        // the sitting for the full capture wait. Two seconds is enough for
+        // identity, a log head, or an empty graph, and then the row says so.
+        out.push(
+            match run_captured_within(bin, args, None, std::time::Duration::from_secs(2)) {
+                Ok(said) if name == "tracker" => {
+                    let (state, ok) = tracker_state(&said.stdout, &root_source());
+                    Habitat { name, state, ok }
+                }
+                Ok(said) => Habitat {
+                    name,
+                    state: said.stdout.lines().next().unwrap_or("").to_string(),
+                    ok: true,
+                },
+                Err(e) if name == "tracker" => {
+                    let mut state = e.to_string().lines().next().unwrap_or("").to_string();
+                    if let Some(root) = std::env::var_os("VISSUE_ROOT").filter(|v| !v.is_empty()) {
+                        if let Some((extra, _)) = tracker_git_drift(Path::new(&root)) {
+                            state = format!("{state}; {extra}");
+                        }
+                    }
+                    Habitat {
+                        name,
+                        state,
+                        ok: false,
                     }
                 }
-                Habitat {
+                Err(e) if name == "claim graph" && claim_graph_absent(&e.to_string()).is_some() => {
+                    let dir = claim_graph_absent(&e.to_string()).unwrap_or_default();
+                    Habitat {
+                        name,
+                        state: format!("none yet; the first claim creates it at {dir}"),
+                        ok: true,
+                    }
+                }
+                Err(e) => Habitat {
                     name,
-                    state,
+                    state: e.to_string().lines().next().unwrap_or("").to_string(),
                     ok: false,
-                }
-            }
-            Err(e) if name == "claim graph" && claim_graph_absent(&e.to_string()).is_some() => {
-                let dir = claim_graph_absent(&e.to_string()).unwrap_or_default();
-                Habitat {
-                    name,
-                    state: format!("none yet; the first claim creates it at {dir}"),
-                    ok: true,
-                }
-            }
-            Err(e) => Habitat {
-                name,
-                state: e.to_string().lines().next().unwrap_or("").to_string(),
-                ok: false,
+                },
             },
-        });
+        );
     }
     out
 }
@@ -31126,7 +31128,15 @@ pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, running:
 /// Reads only; a node the claim graph lacks is not minted.
 #[must_use]
 pub fn assist_note_line(issue: &str) -> Option<String> {
-    let got = run_captured("claimdag", &["get", &work_id(issue)]).ok()?;
+    // claimdag is a read of the hold. A copy that never exits is skipped:
+    // the note is already in the logbook, and the assist line is optional.
+    let got = run_captured_within(
+        "claimdag",
+        &["get", &work_id(issue)],
+        None,
+        std::time::Duration::from_secs(2),
+    )
+    .ok()?;
     let line = got.stdout.lines().next().unwrap_or_default();
     let live = matches!(line.split_whitespace().nth(1), Some("claimed" | "running"));
     if !live {
@@ -39236,6 +39246,23 @@ pub fn run(bin: &str, args: &[impl AsRef<str>]) -> Result<()> {
     run_as(bin, args, None)
 }
 
+/// [`run`] that stops `bin` at `deadline` and prints what it wrote.
+/// A habitat that never exits used to hold the verb with it.
+///
+/// # Errors
+///
+/// `bin` is not on `PATH`, it did not answer in time, or it exited non-zero.
+pub fn run_within(
+    bin: &str,
+    args: &[impl AsRef<str>],
+    deadline: std::time::Duration,
+) -> Result<()> {
+    let said = run_captured_within(bin, args, None, deadline)?;
+    print!("{}", said.stdout);
+    eprint!("{}", said.stderr);
+    Ok(())
+}
+
 /// The identity a ballot is cast under: the persona named, else the seat
 /// ([`whoami`]), the same name across a runner's conversations so its
 /// record accrues to one voter.
@@ -39389,6 +39416,10 @@ fn capture_timed_out(err: &anyhow::Error) -> bool {
 /// `stdin` is written and closed first, so a child that reads until
 /// end of file can finish. Stdout and stderr are drained while it runs.
 /// The `timeout` program is not used: macOS does not ship it.
+///
+/// The child leads its own process group. A grandchild left on a pipe,
+/// or one that `setsid` was not used for, is stopped with the child, so
+/// the wait ends when the deadline does.
 fn output_within(
     mut cmd: std::process::Command,
     stdin: Option<&[u8]>,
@@ -39396,6 +39427,11 @@ fn output_within(
 ) -> std::io::Result<std::process::Output> {
     use std::io::{Read, Write};
     use std::process::Stdio;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.stdin(if stdin.is_some() {
         Stdio::piped()
     } else {
@@ -39435,10 +39471,9 @@ fn output_within(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = out_task.join();
-                let _ = err_task.join();
+                stop_output_group(&mut child);
+                let _ = join_soon(out_task);
+                let _ = join_soon(err_task);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "the command was still running",
@@ -39446,21 +39481,68 @@ fn output_within(
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
             Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = out_task.join();
-                let _ = err_task.join();
+                stop_output_group(&mut child);
+                let _ = join_soon(out_task);
+                let _ = join_soon(err_task);
                 return Err(err);
             }
         }
     };
-    let stdout = out_task.join().unwrap_or_default();
-    let stderr = err_task.join().unwrap_or_default();
+    let stdout = take_output(out_task, &mut child);
+    let stderr = take_output(err_task, &mut child);
     Ok(std::process::Output {
         status,
         stdout,
         stderr,
     })
+}
+
+/// Stop `child` and the process group it leads. A grandchild that kept
+/// the pipe open dies with the group, so the reader is not left waiting.
+fn stop_output_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: `pid` is the child's process group, started with
+        // `process_group(0)`. The signal does not go to this process.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Join `handle`. When it is still blocked because a grandchild holds the
+/// pipe, stop that group. An empty buffer is what a reader that never
+/// got an end of file could not finish.
+fn take_output(
+    handle: std::thread::JoinHandle<Vec<u8>>,
+    child: &mut std::process::Child,
+) -> Vec<u8> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(handle.join());
+    });
+    if let Ok(Ok(buf)) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+        return buf;
+    }
+    // A grandchild still holds the pipe. Stop the group and read what
+    // arrived. A large answer that was only slow is still in the buffer
+    // once the read is allowed to finish.
+    stop_output_group(child);
+    rx.recv_timeout(std::time::Duration::from_secs(2))
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+}
+
+fn join_soon<T: Send + 'static>(handle: std::thread::JoinHandle<T>) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(handle.join());
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(200))
+        .ok()
+        .and_then(Result::ok)
 }
 
 /// Stop `child`. When `group` is set, also signal the process group the
@@ -39502,10 +39584,11 @@ fn run_captured_within(
         cmd.arg(a.as_ref());
     }
     git_hooks::hook_child_env(&mut cmd);
-    // A pre-push check kills the whole group. A shell that sleeps in a
-    // child would otherwise keep the pipe open after the shell is gone.
-    let group = in_push_check();
-    if group {
+    // The child leads its own group. A shell that sleeps in a grandchild
+    // would otherwise keep the pipe open after the deadline, and the
+    // caller would sit there past it.
+    #[cfg(unix)]
+    {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
@@ -39546,22 +39629,22 @@ fn run_captured_within(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= deadline => {
-                stop_captured(&mut child, group);
-                let _ = out_task.join();
-                let _ = err_task.join();
+                stop_captured(&mut child, true);
+                let _ = join_soon(out_task);
+                let _ = join_soon(err_task);
                 bail!("{bin} did not answer in time");
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
             Err(e) => {
-                stop_captured(&mut child, group);
-                let _ = out_task.join();
-                let _ = err_task.join();
+                stop_captured(&mut child, true);
+                let _ = join_soon(out_task);
+                let _ = join_soon(err_task);
                 bail!("{bin}: {e}");
             }
         }
     };
-    let stdout = String::from_utf8_lossy(&out_task.join().unwrap_or_default()).into_owned();
-    let stderr = String::from_utf8_lossy(&err_task.join().unwrap_or_default()).into_owned();
+    let stdout = String::from_utf8_lossy(&take_output(out_task, &mut child)).into_owned();
+    let stderr = String::from_utf8_lossy(&take_output(err_task, &mut child)).into_owned();
     if !status.success() {
         bail!("{}", tool_failure(bin, &status, &stdout, &stderr));
     }
@@ -43874,6 +43957,25 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(output_within(cmd, None, SEAT_ANSWER_BUDGET).is_err());
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        // The child exits and leaves a grandchild on stdout. Joining that
+        // pipe used to wait out the grandchild, so a sitting stayed up
+        // after the probe that spawned it was already gone.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("hold");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30 >&1 &\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let held = std::process::Command::new(&script);
+        let started = std::time::Instant::now();
+        let _ = output_within(held, None, std::time::Duration::from_secs(2));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "a grandchild kept the pipe for {:?}",
+            started.elapsed()
+        );
     }
 
     /// Older preferences and lessons are a warning. They are named, and

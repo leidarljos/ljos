@@ -1617,6 +1617,11 @@ fn run_command() -> Result<()> {
                 bail!("remember: pass --transient or --standing, not both");
             }
             ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
+            // A silent pack is one command budget, then the usual busy line.
+            // Asking again, or waiting out the thirty-second default, is
+            // what held the first remember.
+            let _pack_clock = ljos_cli::arm_cmd_pack();
+            let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
             let text = join(&text);
             // A paragraph or a session is several claims: each goes in on
             // its own, where the whole was refused at the pack's cap.
@@ -1936,6 +1941,12 @@ fn run_command() -> Result<()> {
             explain,
         } => {
             ljos_cli::log_recall("search", &query.join(" "));
+            // A rerank used to wait at least a minute, and a silent writer
+            // was asked again after that. The command budget covers the
+            // proof and the search once. A server call keeps the timeout
+            // it was given; this is the verb a person runs.
+            let _pack_clock = ljos_cli::arm_cmd_pack();
+            let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
             let day = match valid_at.as_deref().map(str::trim) {
                 Some("any") => None,
                 Some(d) => {
@@ -2144,7 +2155,14 @@ fn run_command() -> Result<()> {
         }
         Cmd::Note { issue, text } => {
             let text = text.join(" ");
-            run("vissue", &["note", &issue, &text])?;
+            // The tracker's own lock has no deadline. Wait as long as a
+            // tracker commit waits, then say so. A second note once the
+            // lock is free is the retry that used to be instant.
+            ljos_cli::run_within(
+                "vissue",
+                &["note", &issue, &text],
+                ljos_cli::tracker_lock_wait(),
+            )?;
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
                 print!("{line}");
             }
@@ -3450,8 +3468,10 @@ fn run_command() -> Result<()> {
             quorum,
             deadline,
         } => {
-            // One silent pack is waited out once. Trust, the roster and the
-            // listing each ask, and a second wait would hold the reading.
+            // One silent pack is waited out once, inside the command budget.
+            // Trust, the roster and the listing each ask, and a second wait
+            // on the thirty-second default would hold the reading past it.
+            let _pack_clock = ljos_cli::arm_cmd_pack();
             let _quiet = ljos_cli::pack_link::QuietPack::enter();
             // Each ticket of the family is read once for the whole reading.
             // A dissent filed below is a write, and is read afresh.
