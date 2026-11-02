@@ -29972,29 +29972,35 @@ pub const SITTING_DUE: usize = 8;
 /// How many dated events a sitting's timeline prints. Protocol: last twelve.
 pub const SITTING_TIMELINE: usize = 12;
 
-/// The review clock as a sitting prints it: a short prefix, then the summary.
-pub fn sitting_due_report(island: &Value) -> Result<String> {
-    Ok(sitting_due_and_atoms(island)?.0)
+/// The review clock as a sitting prints it: the due cards that overlap
+/// the ticket, then the count. When no card clears the recall rule, the
+/// line is only the count.
+pub fn sitting_due_report(issue: &str) -> Result<String> {
+    let title = issue_title(issue).unwrap_or_else(|_| issue.to_string());
+    Ok(sitting_due_and_atoms(issue, &title)?.0)
 }
 
 /// [`sitting_due_report`] and the listing it read, so the sitting ranks
 /// memories from the same atoms instead of asking the pack twice.
-fn sitting_due_and_atoms(island: &Value) -> Result<(String, Vec<Value>)> {
+fn sitting_due_and_atoms(issue: &str, title: &str) -> Result<(String, Vec<Value>)> {
     let client = pack()?;
     // The same sweep `ljos due` runs. A sitting is the clock's ordinary
     // opening; a review left due past twice its interval lapses here.
     let swept = client.sweep(&client.workspace()).ok();
     let atoms = atoms_lean(&client, &client.workspace()).context("due: GET /v1/atoms failed")?;
     let now = now_utc();
-    let due = due_on_island_first(due_of(&atoms, &now), island);
-    let shown = due.len().min(SITTING_DUE);
-    record_due_shown(&due[..shown]);
-    let text = format!(
-        "{}{}{}\n",
-        format_due(&due[..shown]),
-        review_summary(&atoms, &now),
-        format_sweep(swept.as_ref())
-    );
+    let ticket = sitting_ticket_text(issue, title);
+    let seat = seat_name();
+    let due = due_of(&atoms, &now);
+    let kept: Vec<Value> = due
+        .into_iter()
+        .filter(|atom| sitting_memory_score(issue, &ticket, atom, &now, &seat).is_some())
+        .take(SITTING_DUE)
+        .collect();
+    record_due_shown(&kept);
+    let cards = format_due(&kept);
+    let count = review_summary(&atoms, &now);
+    let text = format!("{cards}{count}{}\n", format_sweep(swept.as_ref()));
     Ok((text, atoms))
 }
 
@@ -32969,11 +32975,15 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
             let skip = events.len().saturating_sub(limit);
             return Ok((title, events[skip..].to_vec()));
         }
+        let ticket = sitting_ticket_text(issue, &title);
+        let now = now_utc();
+        let seat = seat_name();
         for atom in island["island"]
             .as_array()
             .into_iter()
             .flatten()
             .filter(|a| reviewable(a))
+            .filter(|a| sitting_memory_score(issue, &ticket, a, &now, &seat).is_some())
             .take(8)
         {
             if let Some((days, clock)) = stamp_key(atom["ts"].as_str().map(local_stamp).as_deref())
@@ -33745,13 +33755,59 @@ fn process_note(atom: &Value) -> bool {
     kind == "note" || (kind != "lesson" && kind != "rule" && !person_stored(atom))
 }
 
-/// Memories worth showing for a sitting, best first.
+/// The recall overlap rule. `None` when the memory does not clear it.
 ///
 /// Overlap is with the ticket's own words, not with `ljos`, `seat`,
 /// `sitting`, `note` or `ticket`. This seat's lessons and user rules
 /// outrank another seat's agent notes. Old process notes fade. A note
-/// about some other ticket is left out. Nothing under the floor is
-/// printed, so a weak match does not fill the list.
+/// about some other ticket is left out. Nothing under the floor is kept.
+fn sitting_memory_score(
+    issue: &str,
+    ticket: &str,
+    atom: &Value,
+    now: &str,
+    seat: &str,
+) -> Option<f64> {
+    let terms = sitting_terms(ticket);
+    if terms.is_empty() || atom["tombstone"] == Value::Bool(true) || !reviewable(atom) {
+        return None;
+    }
+    let text = atom["text"].as_str().unwrap_or("").trim();
+    if text.is_empty() || names_another_ticket(issue, text) {
+        return None;
+    }
+    let have = prompt_words(text);
+    let shared = terms
+        .iter()
+        .filter(|term| have.binary_search(term).is_ok())
+        .count();
+    if shared == 0 {
+        return None;
+    }
+    let mut score = shared as f64 / terms.len() as f64;
+    let kind = atom["kind"].as_str().unwrap_or("");
+    let here = atom_seat(atom) == Some(seat);
+    let elsewhere = atom_seat(atom).is_some_and(|other| other != seat);
+    let rule = kind == "rule" || (kind == "preference" && person_stored(atom));
+    if junk_preference(kind, text) {
+        score *= 0.45;
+    } else if here && (kind == "lesson" || rule) {
+        score *= 1.15;
+    } else if elsewhere && process_note(atom) {
+        score *= 0.45;
+    }
+    if process_note(atom) {
+        let days = days_of_stamp(Some(now))
+            .zip(days_of_stamp(written_at(atom).as_deref()))
+            .map(|(today, then)| today.saturating_sub(then).max(0))
+            .unwrap_or(0);
+        score *= 0.5_f64.powf(days as f64 / 7.0);
+    }
+    (score >= SITTING_RECALL_FLOOR).then_some(score)
+}
+
+/// Memories worth showing for a sitting, best first. The cut is
+/// [`sitting_memory_score`].
 pub(crate) fn rank_sitting_memories(
     issue: &str,
     ticket: &str,
@@ -33759,48 +33815,12 @@ pub(crate) fn rank_sitting_memories(
     now: &str,
     seat: &str,
 ) -> Vec<Value> {
-    let terms = sitting_terms(ticket);
-    if terms.is_empty() {
-        return Vec::new();
-    }
     let mut scored: Vec<(usize, f64, i64)> = atoms
         .iter()
         .enumerate()
-        .filter(|(_, atom)| atom["tombstone"] != Value::Bool(true))
-        .filter(|(_, atom)| reviewable(atom))
         .filter_map(|(index, atom)| {
-            let text = atom["text"].as_str().unwrap_or("").trim();
-            if text.is_empty() || names_another_ticket(issue, text) {
-                return None;
-            }
-            let have = prompt_words(text);
-            let shared = terms
-                .iter()
-                .filter(|term| have.binary_search(term).is_ok())
-                .count();
-            if shared == 0 {
-                return None;
-            }
-            let mut score = shared as f64 / terms.len() as f64;
-            let kind = atom["kind"].as_str().unwrap_or("");
-            let here = atom_seat(atom) == Some(seat);
-            let elsewhere = atom_seat(atom).is_some_and(|other| other != seat);
-            let rule = kind == "rule" || (kind == "preference" && person_stored(atom));
-            if junk_preference(kind, text) {
-                score *= 0.45;
-            } else if here && (kind == "lesson" || rule) {
-                score *= 1.15;
-            } else if elsewhere && process_note(atom) {
-                score *= 0.45;
-            }
-            if process_note(atom) {
-                let days = days_of_stamp(Some(now))
-                    .zip(days_of_stamp(written_at(atom).as_deref()))
-                    .map(|(today, then)| today.saturating_sub(then).max(0))
-                    .unwrap_or(0);
-                score *= 0.5_f64.powf(days as f64 / 7.0);
-            }
-            (score >= SITTING_RECALL_FLOOR).then_some((
+            let score = sitting_memory_score(issue, ticket, atom, now, seat)?;
+            Some((
                 index,
                 score,
                 days_of_stamp(written_at(atom).as_deref()).unwrap_or(0),
@@ -33901,9 +33921,8 @@ pub fn sitting_gated(
     // due line share one more, so a quiet pack does not hold the claim.
     let _pack_clock = arm_cmd_pack();
     let _quiet_pack = pack_link::QuietPack::enter();
-    let island = packset_island(&title, false)?;
     sections.heading(&mut out, "due");
-    let (due, atoms) = sitting_due_and_atoms(&island)?;
+    let (due, atoms) = sitting_due_and_atoms(issue, &title)?;
     out.push_str(&due);
     sections.heading_titled(&mut out, "island", &title);
     // The pack's island is activation along links, which is not what the
@@ -53937,6 +53956,163 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
         let bare = super::rank_sitting_memories("sample-none", "Sitting note", &atoms, now, "ada");
         assert!(bare.is_empty(), "an empty ticket printed {bare:?}");
+    }
+
+    fn recall_fixture(due_at: &str) -> (String, Vec<serde_json::Value>) {
+        let ticket = "\
+Sitting recall surfaces other seats' unrelated agent notes instead of memories about the ticket.
+The body asks the recall to rank memories by the ticket, not by a process log.
+"
+        .to_string();
+        let row = |id: &str, kind: &str, text: &str, seat: &str| {
+            serde_json::json!({
+                "id": id,
+                "kind": kind,
+                "text": text,
+                "ts": "2026-10-31T08:46:00Z",
+                "due_at": due_at,
+                "origin": "agent-derived",
+                "source": {"seat": seat, "basis": "agent"},
+                "entities": [format!("seat:{seat}")],
+            })
+        };
+        let mut atoms = vec![
+            row(
+                "fix-a",
+                "note",
+                "The fixer run rewrote the process log and left the branch dirty.",
+                "bee",
+            ),
+            row(
+                "fix-b",
+                "note",
+                "Correction for sample-other: recall the parser change on that ticket.",
+                "bee",
+            ),
+            row(
+                "rules",
+                "note",
+                "The rules file from last month still lists the old matcher.",
+                "bee",
+            ),
+            row(
+                "deploy",
+                "note",
+                "Deploy the catalog after the smoke run passes.",
+                "bee",
+            ),
+            row(
+                "export",
+                "preference",
+                "Export the seat name before the other seat starts its own work.",
+                "bee",
+            ),
+            row(
+                "chain",
+                "preference",
+                "test pref: chain commands after sourcing the shell file.",
+                "bee",
+            ),
+        ];
+        let mut lesson = row(
+            "lesson",
+            "lesson",
+            "Recall ranks a memory by the ticket's own words and drops an unrelated agent note.",
+            "ada",
+        );
+        lesson["origin"] = serde_json::json!("user-declared");
+        lesson["ts"] = serde_json::json!("2026-11-01T12:00:00Z");
+        atoms.push(lesson);
+        (ticket, atoms)
+    }
+
+    /// The due list used to print every old process note. It now prints
+    /// the count, and only the cards that pass the recall overlap rule.
+    #[test]
+    fn a_sitting_due_list_keeps_cards_that_overlap_the_ticket() {
+        let now = "2026-11-02T12:00:00Z";
+        let (ticket, atoms) = recall_fixture("2026-10-31T08:46:00Z");
+        let due = super::due_of(&atoms, now);
+        let before = format!(
+            "{}{}",
+            super::format_due(&due),
+            super::review_summary(&atoms, now)
+        );
+        let kept: Vec<_> = due
+            .iter()
+            .filter(|atom| {
+                super::sitting_memory_score("sample-dkib", &ticket, atom, now, "ada").is_some()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let cards = super::format_due(&kept);
+        let count = super::review_summary(&atoms, now);
+        let after = format!("{cards}{count}");
+        assert!(
+            before.contains("The fixer run rewrote the process log")
+                && before.contains("Deploy the catalog")
+                && before.contains("test pref:"),
+            "before:\n{before}"
+        );
+        assert!(
+            before.lines().filter(|l| l.contains('\t')).count() >= 6,
+            "before did not list the old notes:\n{before}"
+        );
+        assert_eq!(
+            after,
+            format!(
+                "2026-10-31T08:46:00Z\tlesson\tlesson\tRecall ranks a memory by the ticket's own words and drops an unrelated agent note.\n{count}"
+            ),
+            "before:\n{before}\nafter:\n{after}"
+        );
+        assert!(!after.contains("fixer run"), "after:\n{after}");
+        assert!(after.contains("7 due"), "after:\n{after}");
+        let unrelated: Vec<_> = atoms.iter().take(6).cloned().collect();
+        let none: Vec<_> = super::due_of(&unrelated, now)
+            .into_iter()
+            .filter(|atom| {
+                super::sitting_memory_score("sample-dkib", &ticket, atom, now, "ada").is_some()
+            })
+            .collect();
+        let only_count = super::review_summary(&unrelated, now);
+        assert!(none.is_empty(), "a process note cleared the rule");
+        assert_eq!(only_count, "6 due; nothing else scheduled");
+    }
+
+    /// The timeline used to date every nearby note. Tracker events stay.
+    /// A memory stays only when it passes the same overlap rule.
+    #[test]
+    fn a_sitting_timeline_keeps_tracker_events_and_overlapping_memories() {
+        let now = "2026-11-02T12:00:00Z";
+        let (ticket, atoms) = recall_fixture("");
+        let memory_line = |atom: &serde_json::Value| {
+            format!(
+                "2026-10-31 08:46\tmemory\t{}",
+                atom["text"].as_str().unwrap_or("")
+            )
+        };
+        let mut before = String::from("2026-10-20\ttracker\tcreated\n");
+        for atom in &atoms {
+            before.push_str(&memory_line(atom));
+            before.push('\n');
+        }
+        let mut after = String::from("2026-10-20\ttracker\tcreated\n");
+        for atom in &atoms {
+            if super::sitting_memory_score("sample-dkib", &ticket, atom, now, "ada").is_some() {
+                after.push_str(&memory_line(atom));
+                after.push('\n');
+            }
+        }
+        assert!(
+            before.contains("fixer run") && before.contains("Deploy the catalog"),
+            "before:\n{before}"
+        );
+        assert!(before.contains("tracker\tcreated"), "before:\n{before}");
+        assert_eq!(
+            after,
+            "2026-10-20\ttracker\tcreated\n2026-10-31 08:46\tmemory\tRecall ranks a memory by the ticket's own words and drops an unrelated agent note.\n",
+            "before:\n{before}\nafter:\n{after}"
+        );
     }
 
     /// A removal is an appended ledger event. The heading that already
