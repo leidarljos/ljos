@@ -179,4 +179,4 @@ A push onto `develop` or `main` from the shell warns when the sitting's ticket h
 
 The guard reads only the lines a runner types. `ljos git-hooks install` adds `pre-commit` and `pre-push` hooks for the commits and pushes a script makes. The `pre-commit` hook books the sitting and never refuses. The `pre-push` hook is stricter. It refuses a push onto a protected branch until the ticket's seats clear it, and it refuses one when the settings do not read. One listed seat clears it with its own vote. With two or more, the seats that clear it must run two model families. A store and a tracker checkout are not checked. `--no-verify` skips these hooks as it skips any other.
 
-`ljos doctor` prints a row for this check. Under a runner it is `ok` and names the seat, the sitting it found and the quorum, or `warn` when the settings do not read. On the person's machine it is `info` and fails nothing.
+`ljos doctor` prints a `sitting gate` row. Under a runner it is `ok` and names the seat, the sitting it found and the quorum, or `warn` when the settings do not read. On the person's machine it is `info` and fails nothing.
