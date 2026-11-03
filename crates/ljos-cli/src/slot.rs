@@ -54,17 +54,59 @@ const SLOT_LINE: &str = "Note: \"slot: ";
 ///
 /// A pickaxe of the slot note over the whole tracker held about 1.1 GiB
 /// of RSS for over two minutes on a 16 GiB machine with no swap, and
-/// several at once exhausted it. The lookup greps whole trees, a
-/// logarithmic number of times when the note is still in `HEAD`, and
-/// keeps that answer. Thirty seconds covers a slow disk and a long
-/// history, and it is well under the two minutes that filled the machine.
-/// Past it the seat returns the introductions already found and prints
-/// [`SLOT_HISTORY_PARTIAL`].
+/// several at once exhausted it. The lookup greps the commits that can
+/// introduce the note, keeps a finished answer, and the next vote
+/// continues a read that stopped. Thirty seconds is one slice of that
+/// read, so one vote stays under the two minutes that filled the machine.
+/// The lock wait shares this budget: a seat that cannot take the lock
+/// before it ends leaves the saved progress and decides nothing.
+///
+/// On a synthetic tracker of 21521 commits, one slot note and the rest
+/// empty, a cold lookup took a median of 1.988 s (IQR 0.015 s, n=6) on
+/// x86_64, 8 cores, Intel(R) Xeon(R) Processor. Thirty seconds covers that
+/// lookup and a slower disk.
 const SLOT_LOOKUP_BUDGET: Duration = Duration::from_secs(30);
 
-/// Printed when the lookup stops at [`SLOT_LOOKUP_BUDGET`]. The
-/// introductions already found are still returned.
+/// Printed when the lookup stops at [`SLOT_LOOKUP_BUDGET`]. A partial read
+/// decides nothing. The progress stays saved and the next vote continues it.
 const SLOT_HISTORY_PARTIAL: &str = "slot history: partial";
+
+/// Commits named in one `git grep`. One process per commit spent the slice
+/// starting git. Sixty-four keeps a stopped batch to those commits unread
+/// on the next vote, and the argument list stays short of a page.
+const TREE_GREP_BATCH: usize = 64;
+
+// Tests stop the lookup after this many tree reads. `None` uses the wall
+// budget alone. `Some(0)` stops before the first read.
+#[cfg(test)]
+std::thread_local! {
+    static LOOKUP_READS_LEFT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Replace the wall budget with a count of tree reads, so a test can stop
+/// the lookup without waiting. `None` clears the override.
+#[cfg(test)]
+pub(crate) fn override_lookup_budget_for_test(reads: Option<usize>) {
+    LOOKUP_READS_LEFT.with(|cell| cell.set(reads));
+}
+
+fn take_tree_reads(want: usize) -> usize {
+    #[cfg(test)]
+    {
+        LOOKUP_READS_LEFT.with(|cell| match cell.get() {
+            Some(left) => {
+                let take = want.min(left);
+                cell.set(Some(left - take));
+                take
+            }
+            None => want,
+        })
+    }
+    #[cfg(not(test))]
+    {
+        want
+    }
+}
 
 /// Where slots began in this tracker, by commit order: the parents of each
 /// commit that brought a slot note into a tree none of its parents held
@@ -84,18 +126,20 @@ pub fn starts() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
 
 /// [`starts`] for the tracker at `root`.
 ///
-/// The note is read from the trees, not by diffing every commit. While it
-/// is still in `HEAD`, the oldest commit on each first-parent line that
-/// holds it is found by binary search. An answer for this `HEAD` and its
-/// reachable count is kept under the git directory, so the next vote does
-/// not search again. A shallow checkout's `HEAD` hash matches the full
-/// history, which is why the count is part of the key. Two seats take one
-/// lock for that directory. Past [`SLOT_LOOKUP_BUDGET`] the introductions
-/// already found are returned and [`SLOT_HISTORY_PARTIAL`] is printed.
+/// The note is read from the trees, not by diffing every commit. A
+/// finished answer for an ancestor of `HEAD` is extended by the commits
+/// after that tip. Anything else is a full read, saved as it goes, and the
+/// next vote continues it. The answer lives in the private state directory,
+/// keyed by the canonical tracker path. A shallow checkout's `HEAD` hash
+/// matches the full history, which is why the count is part of an exact
+/// hit. Two seats take one lock for that file. The lock wait shares
+/// [`SLOT_LOOKUP_BUDGET`]. Past it the seat decides nothing and prints
+/// [`SLOT_HISTORY_PARTIAL`].
 ///
 /// # Errors
 ///
-/// As [`starts`].
+/// As [`starts`], and when the read stops at the budget or cannot take the
+/// lock in that time. A partial read is not an empty history.
 pub fn starts_in(root: &Path) -> std::result::Result<Option<Vec<Vec<String>>>, String> {
     if ballot_sig::git_in(root, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true")
     {
@@ -106,53 +150,110 @@ pub fn starts_in(root: &Path) -> std::result::Result<Option<Vec<Vec<String>>>, S
         return Ok(Some(Vec::new()));
     };
     let Some((lock_path, index_path)) = slot_index_paths(root) else {
-        let (starts, partial) =
-            find_slot_starts(root, &tip.sha, Instant::now() + SLOT_LOOKUP_BUDGET);
-        if partial {
-            eprintln!("{SLOT_HISTORY_PARTIAL}");
-        }
-        return Ok(Some(starts));
+        return scan_without_cache(root, &tip);
     };
     let deadline = Instant::now() + SLOT_LOOKUP_BUDGET;
-    let held = crate::CommitLock::acquire_by(&lock_path, deadline);
+    let held = crate::CommitLock::acquire_private_by(&lock_path, deadline);
     if held.is_none() {
-        if let Some(Saved::Complete(starts)) = read_saved(&index_path, &tip) {
+        if let Some(starts) = exact_complete(&index_path, &tip, root, deadline) {
             return Ok(Some(starts));
         }
-        eprintln!("{SLOT_HISTORY_PARTIAL}");
-        return Ok(Some(Vec::new()));
+        return partial_stopped();
     }
-    if let Some(Saved::Complete(starts)) = read_saved(&index_path, &tip) {
+    let _held = held;
+    if let Some(starts) = exact_complete(&index_path, &tip, root, deadline) {
         return Ok(Some(starts));
     }
-    let head_holds = tree_holds_uncached(root, &tip.sha);
-    if head_holds {
-        let (starts, partial) = find_slot_starts(root, &tip.sha, deadline);
-        if partial {
-            eprintln!("{SLOT_HISTORY_PARTIAL}");
-        } else {
-            write_saved(&index_path, &tip, &Saved::Complete(starts.clone()));
-        }
-        return Ok(Some(starts));
+    let cached = read_cache(&index_path);
+    if let Some(Saved::Partial { next, starts, base }) = cached
+        .as_ref()
+        .filter(|cache| cache.count == tip.count && cache.sha == tip.sha)
+        .map(|cache| cache.saved.clone())
+    {
+        return finish_scan(root, &index_path, &tip, next, starts, base, deadline);
     }
-    let (mut next, mut starts) = match read_saved(&index_path, &tip) {
-        Some(Saved::Partial { next, starts }) => (next, starts),
-        _ => (0, Vec::new()),
-    };
-    let partial = scan_introductions(root, &tip.sha, &mut next, &mut starts, deadline);
-    if partial {
-        write_saved(
+    if let Some(cache) = cached.as_ref().filter(|cache| {
+        matches!(cache.saved, Saved::Complete(_))
+            && is_ancestor(root, &cache.sha, &tip.sha)
+            && !empty_complete_while_head_holds(root, &tip.sha, cache, deadline)
+    }) {
+        let Saved::Complete(starts) = cache.saved.clone() else {
+            return scan_fresh(root, &index_path, &tip, deadline);
+        };
+        return finish_scan(
+            root,
             &index_path,
             &tip,
-            &Saved::Partial {
-                next,
-                starts: starts.clone(),
-            },
+            0,
+            starts,
+            Some(cache.sha.clone()),
+            deadline,
         );
-        eprintln!("{SLOT_HISTORY_PARTIAL}");
-    } else {
-        write_saved(&index_path, &tip, &Saved::Complete(starts.clone()));
     }
+    scan_fresh(root, &index_path, &tip, deadline)
+}
+
+fn partial_message() -> String {
+    format!(
+        "{SLOT_HISTORY_PARTIAL}: the slot history read stopped at the {}-second budget; the next vote continues the read",
+        SLOT_LOOKUP_BUDGET.as_secs()
+    )
+}
+
+fn partial_stopped() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
+    eprintln!("{SLOT_HISTORY_PARTIAL}");
+    Err(partial_message())
+}
+
+fn scan_without_cache(
+    root: &Path,
+    tip: &Tip,
+) -> std::result::Result<Option<Vec<Vec<String>>>, String> {
+    let deadline = Instant::now() + SLOT_LOOKUP_BUDGET;
+    let mut next = 0;
+    let mut starts = Vec::new();
+    let partial = scan_introductions(root, &tip.sha, &mut next, &mut starts, deadline);
+    if partial {
+        partial_stopped()
+    } else {
+        Ok(Some(starts))
+    }
+}
+
+fn scan_fresh(
+    root: &Path,
+    index_path: &Path,
+    tip: &Tip,
+    deadline: Instant,
+) -> std::result::Result<Option<Vec<Vec<String>>>, String> {
+    finish_scan(root, index_path, tip, 0, Vec::new(), None, deadline)
+}
+
+fn finish_scan(
+    root: &Path,
+    index_path: &Path,
+    tip: &Tip,
+    mut next: usize,
+    mut starts: Vec<Vec<String>>,
+    base: Option<String>,
+    deadline: Instant,
+) -> std::result::Result<Option<Vec<Vec<String>>>, String> {
+    let partial = match &base {
+        Some(base) if is_ancestor(root, base, &tip.sha) => {
+            scan_range(root, base, &tip.sha, &mut next, &mut starts, deadline)
+        }
+        Some(_) => {
+            next = 0;
+            starts.clear();
+            scan_introductions(root, &tip.sha, &mut next, &mut starts, deadline)
+        }
+        None => scan_introductions(root, &tip.sha, &mut next, &mut starts, deadline),
+    };
+    if partial {
+        write_saved(index_path, tip, &Saved::Partial { next, starts, base });
+        return partial_stopped();
+    }
+    write_saved(index_path, tip, &Saved::Complete(starts.clone()));
     Ok(Some(starts))
 }
 
@@ -168,43 +269,97 @@ fn tip_of(root: &Path) -> Option<Tip> {
 }
 
 fn slot_index_paths(root: &Path) -> Option<(PathBuf, PathBuf)> {
-    let dir = PathBuf::from(ballot_sig::git_in(
-        root,
-        &["rev-parse", "--absolute-git-dir"],
-    )?);
-    Some((
-        dir.join("ljos-slot-starts.lock"),
-        dir.join("ljos-slot-starts"),
-    ))
+    use sha2::Digest;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let canon = std::fs::canonicalize(root).ok()?;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(canon.as_os_str().as_bytes());
+    let key = hex::encode(sha2::Digest::finalize(hasher));
+    let dir = crate::state_base_dir().join("slot-starts");
+    std::fs::create_dir_all(&dir).ok()?;
+    // The directory is one this process made. 0700 matches the files under
+    // it, which are opened with O_NOFOLLOW and written mode 0600.
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    Some((dir.join(format!("{key}.lock")), dir.join(key)))
 }
 
+struct CacheFile {
+    count: String,
+    sha: String,
+    saved: Saved,
+}
+
+#[derive(Clone)]
 enum Saved {
     Complete(Vec<Vec<String>>),
     Partial {
         next: usize,
         starts: Vec<Vec<String>>,
+        /// Cached tip the `starts` already cover. `next` indexes
+        /// `base..HEAD`. Absent on a full read.
+        base: Option<String>,
     },
 }
 
-fn read_saved(path: &Path, tip: &Tip) -> Option<Saved> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines();
-    let mut header = lines.next()?.split_whitespace();
-    let kind = header.next()?;
-    let count = header.next()?;
-    let sha = header.next()?;
-    if count != tip.count || sha != tip.sha {
+fn read_cache(path: &Path) -> Option<CacheFile> {
+    let bytes = crate::read_state_file(path).ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    if text.is_empty() {
         return None;
     }
+    let mut lines = text.lines();
+    let mut header = lines.next()?.split_whitespace();
+    if header.next()? != "v2" {
+        return None;
+    }
+    let kind = header.next()?;
+    let count = header.next()?.to_string();
+    let sha = header.next()?.to_string();
     let starts: Vec<Vec<String>> = lines.map(parse_parent_line).collect();
-    match kind {
-        "complete" => Some(Saved::Complete(starts)),
+    let saved = match kind {
+        "complete" => Saved::Complete(starts),
         "partial" => {
             let next = header.next()?.parse().ok()?;
-            Some(Saved::Partial { next, starts })
+            let base = header.next().map(str::to_string);
+            Saved::Partial { next, starts, base }
         }
-        _ => None,
+        _ => return None,
+    };
+    Some(CacheFile { count, sha, saved })
+}
+
+/// A finished answer for this exact tip. An empty list while `HEAD` holds
+/// the note is a miss: that file would make every pin stand.
+fn exact_complete(
+    path: &Path,
+    tip: &Tip,
+    root: &Path,
+    deadline: Instant,
+) -> Option<Vec<Vec<String>>> {
+    let cache = read_cache(path)?;
+    if cache.count != tip.count || cache.sha != tip.sha {
+        return None;
     }
+    let Saved::Complete(starts) = cache.saved else {
+        return None;
+    };
+    if starts.is_empty() && head_holds(root, &tip.sha, deadline) != Some(false) {
+        return None;
+    }
+    Some(starts)
+}
+
+fn empty_complete_while_head_holds(
+    root: &Path,
+    head: &str,
+    cache: &CacheFile,
+    deadline: Instant,
+) -> bool {
+    let Saved::Complete(starts) = &cache.saved else {
+        return false;
+    };
+    starts.is_empty() && head_holds(root, head, deadline) != Some(false)
 }
 
 fn parse_parent_line(line: &str) -> Vec<String> {
@@ -216,13 +371,18 @@ fn parse_parent_line(line: &str) -> Vec<String> {
 }
 
 fn write_saved(path: &Path, tip: &Tip, saved: &Saved) {
-    let (kind, starts) = match saved {
-        Saved::Complete(starts) => (format!("complete {} {}", tip.count, tip.sha), starts),
-        Saved::Partial { next, starts } => {
-            (format!("partial {} {} {next}", tip.count, tip.sha), starts)
+    let (header, starts) = match saved {
+        Saved::Complete(starts) => (format!("v2 complete {} {}", tip.count, tip.sha), starts),
+        Saved::Partial { next, starts, base } => {
+            let mut header = format!("v2 partial {} {} {next}", tip.count, tip.sha);
+            if let Some(base) = base {
+                header.push(' ');
+                header.push_str(base);
+            }
+            (header, starts)
         }
     };
-    let mut body = kind;
+    let mut body = header;
     body.push('\n');
     for parents in starts {
         if parents.is_empty() {
@@ -232,26 +392,99 @@ fn write_saved(path: &Path, tip: &Tip, saved: &Saved) {
             body.push('\n');
         }
     }
-    let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, body).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
+    let _ = crate::rewrite_state_file(path, body.as_bytes());
+}
+
+fn is_ancestor(root: &Path, older: &str, head: &str) -> bool {
+    older == head
+        || ballot_sig::git_in(root, &["merge-base", "--is-ancestor", older, head]).is_some()
+}
+
+fn head_holds(root: &Path, commit: &str, deadline: Instant) -> Option<bool> {
+    if Instant::now() >= deadline || take_tree_reads(1) == 0 {
+        return None;
     }
+    let mut has = BTreeMap::new();
+    if !grep_into(root, std::slice::from_ref(&commit.to_string()), &mut has) {
+        return Some(false);
+    }
+    Some(has.get(commit).copied().unwrap_or(false))
 }
 
-fn tree_holds_uncached(root: &Path, commit: &str) -> bool {
-    ballot_sig::git_in(
-        root,
-        &["--no-pager", "grep", "-q", "-F", "-e", SLOT_LINE, commit],
-    )
-    .is_some()
+/// `true` when a commit in `commits` was left unread.
+fn mark_holds(
+    root: &Path,
+    commits: &[String],
+    has: &mut BTreeMap<String, bool>,
+    deadline: Instant,
+) -> bool {
+    let pending: Vec<String> = commits
+        .iter()
+        .filter(|commit| !has.contains_key(*commit))
+        .cloned()
+        .collect();
+    let mut rest = pending.as_slice();
+    while !rest.is_empty() {
+        if Instant::now() >= deadline {
+            return true;
+        }
+        let allow = take_tree_reads(rest.len().min(TREE_GREP_BATCH));
+        if allow == 0 {
+            return true;
+        }
+        let (chunk, tail) = rest.split_at(allow);
+        rest = tail;
+        if grep_into(root, chunk, has) {
+            continue;
+        }
+        for commit in chunk {
+            if Instant::now() >= deadline || take_tree_reads(1) == 0 {
+                return true;
+            }
+            let mut one = BTreeMap::new();
+            let held = grep_into(root, std::slice::from_ref(commit), &mut one)
+                && one.get(commit).copied().unwrap_or(false);
+            has.insert(commit.clone(), held);
+        }
+    }
+    false
 }
 
-/// Parents of the commits that introduced [`SLOT_LINE`], newest history
-/// first. `partial` when the budget ran out.
-fn find_slot_starts(root: &Path, head: &str, deadline: Instant) -> (Vec<Vec<String>>, bool) {
-    let Some(text) = ballot_sig::git_in(root, &["rev-list", "--parents", head]) else {
-        return (Vec::new(), false);
+/// Grep `commits` in one process. `false` when git could not answer, so the
+/// caller reads them one by one. No match is an answer: none of them hold
+/// the note.
+fn grep_into(root: &Path, commits: &[String], has: &mut BTreeMap<String, bool>) -> bool {
+    if commits.is_empty() {
+        return true;
+    }
+    let out = ballot_sig::git_history(root)
+        .args(["--no-pager", "grep", "-l", "-F", "-e", SLOT_LINE])
+        .args(commits)
+        .output();
+    let Ok(out) = out else {
+        return false;
     };
+    let no_match = out.status.code() == Some(1) && out.stdout.is_empty();
+    if !out.status.success() && !no_match {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut found = HashSet::new();
+    for line in text.lines() {
+        let Some((sha, _)) = line.split_once(':') else {
+            continue;
+        };
+        if commits.iter().any(|commit| commit == sha) {
+            found.insert(sha.to_string());
+        }
+    }
+    for commit in commits {
+        has.insert(commit.clone(), found.contains(commit));
+    }
+    true
+}
+
+fn parent_rows(text: &str) -> BTreeMap<String, Vec<String>> {
     let mut parents = BTreeMap::new();
     for line in text.lines() {
         let mut parts = line.split_whitespace();
@@ -260,238 +493,79 @@ fn find_slot_starts(root: &Path, head: &str, deadline: Instant) -> (Vec<Vec<Stri
         };
         parents.insert(commit.to_string(), parts.map(str::to_string).collect());
     }
-    if !parents.contains_key(head) {
-        return (Vec::new(), false);
-    }
-    let mut has = BTreeMap::new();
-    let mut seen = HashSet::new();
-    let mut walk = Walk {
-        root,
-        parents: &parents,
-        has: &mut has,
-        seen: &mut seen,
-        deadline,
-        partial: false,
-    };
-    let mut starts = walk.introductions_at(head);
-    if walk.partial {
-        return (starts, true);
-    }
-    // A gap on the first-parent line (the note removed, then added again)
-    // is not a single suffix. The binary search would keep one edge of it.
-    if !walk.suffix_holds(head) || walk.partial {
-        if walk.partial {
-            return (starts, true);
-        }
-        return every_introduction(root, &parents, deadline);
-    }
-    dedupe_starts(&mut starts);
-    (starts, false)
+    parents
 }
 
-struct Walk<'a> {
-    root: &'a Path,
-    parents: &'a BTreeMap<String, Vec<String>>,
-    has: &'a mut BTreeMap<String, bool>,
-    seen: &'a mut HashSet<String>,
-    deadline: Instant,
-    partial: bool,
+fn row_known(has: &BTreeMap<String, bool>, commit: &str, parents: &[String]) -> bool {
+    has.contains_key(commit) && parents.iter().all(|parent| has.contains_key(parent))
 }
 
-impl Walk<'_> {
-    fn holds(&mut self, commit: &str) -> Option<bool> {
-        if let Some(found) = self.has.get(commit) {
-            return Some(*found);
-        }
-        if Instant::now() >= self.deadline {
-            self.partial = true;
-            return None;
-        }
-        let found = tree_holds_uncached(self.root, commit);
-        self.has.insert(commit.to_string(), found);
-        Some(found)
-    }
-
-    fn introductions_at(&mut self, tip: &str) -> Vec<Vec<String>> {
-        if self.partial || !self.seen.insert(tip.to_string()) {
-            return Vec::new();
-        }
-        let chain = first_parent_chain(self.parents, tip);
-        let Some(lo) = self.oldest_holding(&chain) else {
-            return Vec::new();
-        };
-        let boundary = chain[lo].clone();
-        let boundary_parents = self.parents.get(&boundary).cloned().unwrap_or_default();
-        let mut starts = Vec::new();
-        let mut parent_holds = false;
-        for parent in &boundary_parents {
-            match self.holds(parent) {
-                Some(true) => {
-                    parent_holds = true;
-                    starts.extend(self.introductions_at(parent));
-                }
-                Some(false) => {}
-                None => return starts,
-            }
-        }
-        if !parent_holds && !self.partial {
-            starts.push(boundary_parents);
-        }
-        if lo == 0 || self.partial {
-            return starts;
-        }
-        // A side parent merged in after the note appeared on this line
-        // introduces it only when that side did not inherit this boundary.
-        let covered = descendants_of(self.parents, &boundary);
-        for commit in &chain[..lo] {
-            let Some(parents) = self.parents.get(commit) else {
-                continue;
-            };
-            for parent in parents.iter().skip(1) {
-                if covered.contains(parent) {
-                    continue;
-                }
-                match self.holds(parent) {
-                    Some(true) => starts.extend(self.introductions_at(parent)),
-                    Some(false) => {}
-                    None => return starts,
-                }
-            }
-        }
-        starts
-    }
-
-    /// Oldest index on `chain` (newest first) whose tree holds the note,
-    /// or `None` when `chain[0]` does not. The line is treated as a suffix
-    /// of the chain; [`Self::suffix_holds`] checks that.
-    fn oldest_holding(&mut self, chain: &[String]) -> Option<usize> {
-        if chain.is_empty() || self.holds(&chain[0]) != Some(true) {
-            return None;
-        }
-        let mut lo = 0usize;
-        let mut hi = chain.len();
-        while lo + 1 < hi {
-            let mid = (lo + hi) / 2;
-            match self.holds(&chain[mid]) {
-                Some(true) => lo = mid,
-                Some(false) => hi = mid,
-                None => return None,
-            }
-        }
-        Some(lo)
-    }
-
-    /// Whether every commit from `tip` back to the oldest one that holds
-    /// the note also holds it. One commit in the middle is enough to catch
-    /// a removal: the binary search already checked the two ends.
-    fn suffix_holds(&mut self, tip: &str) -> bool {
-        let chain = first_parent_chain(self.parents, tip);
-        let Some(lo) = self.oldest_holding(&chain) else {
-            return true;
-        };
-        if lo < 2 {
-            return true;
-        }
-        self.holds(&chain[lo / 2]) == Some(true)
-    }
-}
-
-fn first_parent_chain(parents: &BTreeMap<String, Vec<String>>, tip: &str) -> Vec<String> {
-    let mut chain = Vec::new();
-    let mut cur = Some(tip.to_string());
-    while let Some(commit) = cur {
-        if chain.len() > parents.len() {
-            break;
-        }
-        cur = parents.get(&commit).and_then(|p| p.first().cloned());
-        chain.push(commit);
-    }
-    chain
-}
-
-fn descendants_of(parents: &BTreeMap<String, Vec<String>>, start: &str) -> HashSet<String> {
-    let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for (commit, commit_parents) in parents {
-        for parent in commit_parents {
-            children
-                .entry(parent.as_str())
-                .or_default()
-                .push(commit.as_str());
-        }
-    }
-    let mut out = HashSet::new();
-    let mut stack = vec![start];
-    while let Some(commit) = stack.pop() {
-        if !out.insert(commit.to_string()) {
-            continue;
-        }
-        if let Some(kids) = children.get(commit) {
-            stack.extend(kids.iter().copied());
-        }
-    }
-    out
-}
-
-/// Every introduction under `head`, for a history whose note is not a
-/// single suffix. Stops at the budget.
-fn every_introduction(
-    root: &Path,
-    parents: &BTreeMap<String, Vec<String>>,
-    deadline: Instant,
-) -> (Vec<Vec<String>>, bool) {
-    let mut has = BTreeMap::new();
-    let mut out = Vec::new();
-    for commit in parents.keys() {
-        if Instant::now() >= deadline {
-            return (out, true);
-        }
-        let Some(holds) = remembered(root, &mut has, commit, deadline) else {
-            return (out, true);
-        };
-        if !holds {
-            continue;
-        }
-        let commit_parents = parents.get(commit).cloned().unwrap_or_default();
-        let mut parent_holds = false;
-        for parent in &commit_parents {
-            match remembered(root, &mut has, parent.as_str(), deadline) {
-                Some(true) => {
-                    parent_holds = true;
-                    break;
-                }
-                Some(false) => {}
-                None => return (out, true),
-            }
-        }
-        if !parent_holds {
-            out.push(commit_parents);
-        }
-    }
-    dedupe_starts(&mut out);
-    (out, false)
-}
-
-fn remembered(
-    root: &Path,
-    has: &mut BTreeMap<String, bool>,
+fn push_introduction(
+    has: &BTreeMap<String, bool>,
     commit: &str,
+    parents: &[String],
+    starts: &mut Vec<Vec<String>>,
+) {
+    if !has.get(commit).copied().unwrap_or(false) {
+        return;
+    }
+    let parent_holds = parents
+        .iter()
+        .any(|parent| has.get(parent).copied().unwrap_or(false));
+    if !parent_holds {
+        starts.push(parents.to_vec());
+    }
+}
+
+fn walk_rows(
+    root: &Path,
+    rows: &[(String, Vec<String>)],
+    next: &mut usize,
+    starts: &mut Vec<Vec<String>>,
     deadline: Instant,
-) -> Option<bool> {
-    if let Some(found) = has.get(commit) {
-        return Some(*found);
+) -> bool {
+    if *next > rows.len() {
+        *next = 0;
     }
-    if Instant::now() >= deadline {
-        return None;
+    let mut has = BTreeMap::new();
+    let mut i = *next;
+    while i < rows.len() {
+        if Instant::now() >= deadline {
+            *next = i;
+            dedupe_starts(starts);
+            return true;
+        }
+        let end = (i + TREE_GREP_BATCH).min(rows.len());
+        let mut need = Vec::new();
+        for (commit, parents) in &rows[i..end] {
+            if !has.contains_key(commit) {
+                need.push(commit.clone());
+            }
+            for parent in parents {
+                if !has.contains_key(parent) && !need.iter().any(|have| have == parent) {
+                    need.push(parent.clone());
+                }
+            }
+        }
+        let stopped = mark_holds(root, &need, &mut has, deadline);
+        while i < end && row_known(&has, &rows[i].0, &rows[i].1) {
+            let (commit, parents) = &rows[i];
+            push_introduction(&has, commit, parents, starts);
+            i += 1;
+        }
+        if stopped || i < end {
+            *next = i;
+            dedupe_starts(starts);
+            return true;
+        }
     }
-    let found = tree_holds_uncached(root, commit);
-    has.insert(commit.to_string(), found);
-    Some(found)
+    *next = rows.len();
+    dedupe_starts(starts);
+    false
 }
 
 /// Introductions in commit-id order, resuming at `next`. `next` advances
-/// past the commits this call read. The note is not in `HEAD`, so the
-/// current tree does not name the files; each commit is grepped until the
-/// budget, and the next call continues.
+/// past the commits this call read.
 fn scan_introductions(
     root: &Path,
     head: &str,
@@ -500,58 +574,40 @@ fn scan_introductions(
     deadline: Instant,
 ) -> bool {
     let Some(text) = ballot_sig::git_in(root, &["rev-list", "--parents", head]) else {
-        return false;
+        return true;
     };
-    let mut parents = BTreeMap::new();
+    let parents = parent_rows(&text);
+    let rows: Vec<(String, Vec<String>)> = parents
+        .iter()
+        .map(|(commit, commit_parents)| (commit.clone(), commit_parents.clone()))
+        .collect();
+    walk_rows(root, &rows, next, starts, deadline)
+}
+
+/// Introductions in `base..head` only. `base` is an ancestor whose
+/// introductions are already in `starts`.
+fn scan_range(
+    root: &Path,
+    base: &str,
+    head: &str,
+    next: &mut usize,
+    starts: &mut Vec<Vec<String>>,
+    deadline: Instant,
+) -> bool {
+    let range = format!("{base}..{head}");
+    let Some(text) = ballot_sig::git_in(root, &["rev-list", "--parents", &range]) else {
+        return true;
+    };
+    // rev-list order, not commit-id order: `next` is an index into this range.
+    let mut ordered = Vec::new();
     for line in text.lines() {
         let mut parts = line.split_whitespace();
         let Some(commit) = parts.next() else {
             continue;
         };
-        parents.insert(commit.to_string(), parts.map(str::to_string).collect());
+        ordered.push((commit.to_string(), parts.map(str::to_string).collect()));
     }
-    let keys: Vec<String> = parents.keys().cloned().collect();
-    let mut has = BTreeMap::new();
-    let mut i = *next;
-    while i < keys.len() {
-        if Instant::now() >= deadline {
-            *next = i;
-            dedupe_starts(starts);
-            return true;
-        }
-        let commit = &keys[i];
-        let Some(holds) = remembered(root, &mut has, commit, deadline) else {
-            *next = i;
-            dedupe_starts(starts);
-            return true;
-        };
-        i += 1;
-        if !holds {
-            continue;
-        }
-        let commit_parents: Vec<String> = parents.get(commit).cloned().unwrap_or_default();
-        let mut parent_holds = false;
-        for parent in &commit_parents {
-            match remembered(root, &mut has, parent.as_str(), deadline) {
-                Some(true) => {
-                    parent_holds = true;
-                    break;
-                }
-                Some(false) => {}
-                None => {
-                    *next = i - 1;
-                    dedupe_starts(starts);
-                    return true;
-                }
-            }
-        }
-        if !parent_holds {
-            starts.push(commit_parents);
-        }
-    }
-    *next = keys.len();
-    dedupe_starts(starts);
-    false
+    walk_rows(root, &ordered, next, starts, deadline)
 }
 
 fn dedupe_starts(starts: &mut Vec<Vec<String>>) {
@@ -1511,6 +1567,7 @@ fn ere_escape(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn key(b: u8) -> SigningKey {
         SigningKey::from_bytes(&[b; 32])
@@ -2260,6 +2317,286 @@ mod tests {
             at.iter()
                 .any(|parents| parents.iter().any(|p| p == &side_parent)),
             "side introduction missing: {at:?}"
+        );
+    }
+
+    struct BudgetReset;
+
+    impl Drop for BudgetReset {
+        fn drop(&mut self) {
+            override_lookup_budget_for_test(None);
+        }
+    }
+
+    fn cache_path(state: &std::path::Path, repo: &std::path::Path) -> std::path::PathBuf {
+        use sha2::Digest;
+        use std::os::unix::ffi::OsStrExt;
+        let canon = std::fs::canonicalize(repo).unwrap();
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(canon.as_os_str().as_bytes());
+        let key = hex::encode(hasher.finalize());
+        state.join("ljos").join("slot-starts").join(key)
+    }
+
+    fn partial_next(text: &str) -> usize {
+        let mut parts = text.lines().next().unwrap_or("").split_whitespace();
+        assert_eq!(parts.next(), Some("v2"), "{text}");
+        assert_eq!(parts.next(), Some("partial"), "{text}");
+        let _count = parts.next();
+        let _sha = parts.next();
+        parts.next().unwrap_or("0").parse().expect("partial index")
+    }
+
+    /// The note is added, a seat is pinned, every note is removed, and a
+    /// note is added again. The new seat does not stand, and the earliest
+    /// introduction is still in the answer.
+    #[test]
+    fn a_note_removed_and_added_again_does_not_let_the_later_pin_stand() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
+        let repo = root.path().join("repo");
+        init_repo(&repo);
+        std::fs::write(repo.join("issues.org"), "board\n").unwrap();
+        commit_all(&repo, "base");
+        let base = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: first\"\n").unwrap();
+        commit_all(&repo, "slot");
+        std::fs::write(repo.join(".ljos-seat-keys"), "newseat kk\n").unwrap();
+        commit_all(&repo, "pin");
+        std::fs::write(repo.join("issues.org"), "board\n").unwrap();
+        commit_all(&repo, "remove");
+        let removed = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: again\"\n").unwrap();
+        commit_all(&repo, "slot again");
+        let at = starts_in(&repo).unwrap().expect("a git tracker");
+        assert!(
+            at.iter().any(|parents| parents == &vec![base.clone()]),
+            "earliest introduction missing: {at:?}"
+        );
+        assert!(
+            at.iter().any(|parents| parents == &vec![removed.clone()]),
+            "the later introduction is missing: {at:?}"
+        );
+        assert!(
+            !stood_in(&repo, &at, "newseat", "kk").unwrap(),
+            "a pin added after slots began stood: {at:?}"
+        );
+        assert!(
+            !repo.join(".git").join("ljos-slot-starts").exists(),
+            "the answer was written in the git directory"
+        );
+    }
+
+    /// A third note is merged into a branch that forked after the first
+    /// introduction. That introduction is read with the other two.
+    #[test]
+    fn a_note_merged_through_a_later_fork_is_read() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
+        let repo = root.path().join("repo");
+        init_repo(&repo);
+        std::fs::write(repo.join("issues.org"), "board\n").unwrap();
+        commit_all(&repo, "root");
+        let root_sha = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("main-work"), "m\n").unwrap();
+        commit_all(&repo, "main work");
+        let main_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("main-slot"), "Note: \"slot: main\"\n").unwrap();
+        commit_all(&repo, "slot on main");
+        git_ok(&repo, &["checkout", "-q", "-b", "side"]);
+        // The fork is after the main note, so this branch still holds it.
+        // Dropping that note and adding another is this branch's introduction.
+        std::fs::remove_file(repo.join("main-slot")).unwrap();
+        commit_all(&repo, "drop main note");
+        let side_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("side-slot"), "Note: \"slot: side\"\n").unwrap();
+        commit_all(&repo, "slot on side");
+        git_ok(&repo, &["checkout", "-q", "-b", "third", &root_sha]);
+        std::fs::write(repo.join("third-work"), "t\n").unwrap();
+        commit_all(&repo, "third work");
+        let third_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("third-slot"), "Note: \"slot: third\"\n").unwrap();
+        commit_all(&repo, "slot on third");
+        git_ok(&repo, &["checkout", "-q", "side"]);
+        git_ok(
+            &repo,
+            &["merge", "-q", "--no-ff", "-m", "merge third", "third"],
+        );
+        git_ok(&repo, &["checkout", "-q", "main"]);
+        git_ok(
+            &repo,
+            &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+        );
+        let at = starts_in(&repo).unwrap().expect("a git tracker");
+        for (name, parent) in [
+            ("main", &main_parent),
+            ("side", &side_parent),
+            ("third", &third_parent),
+        ] {
+            assert!(
+                at.iter().any(|parents| parents.iter().any(|p| p == parent)),
+                "{name} introduction missing: {at:?}"
+            );
+        }
+    }
+
+    /// The budget stops the read. The pin added after the note does not
+    /// stand once the read finishes, and the saved index is kept.
+    #[test]
+    fn a_partial_read_keeps_progress_and_a_later_pin_does_not_stand() {
+        let _lock = crate::test_env_lock();
+        let _budget = BudgetReset;
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        std::env::set_var("XDG_STATE_HOME", &state);
+        let repo = root.path().join("repo");
+        init_repo(&repo);
+        std::fs::write(repo.join("issues.org"), "board\n").unwrap();
+        commit_all(&repo, "base");
+        let base = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: one\"\n").unwrap();
+        commit_all(&repo, "slot");
+        std::fs::write(repo.join(".ljos-seat-keys"), "newseat kk\n").unwrap();
+        commit_all(&repo, "pin");
+
+        override_lookup_budget_for_test(Some(0));
+        let err = starts_in(&repo).unwrap_err();
+        assert!(err.contains(SLOT_HISTORY_PARTIAL), "{err}");
+        let saved = std::fs::read_to_string(cache_path(&state, &repo)).unwrap();
+        assert!(saved.starts_with("v2 partial"), "{saved}");
+        assert_eq!(partial_next(&saved), 0, "{saved}");
+
+        override_lookup_budget_for_test(Some(2));
+        let err = starts_in(&repo).unwrap_err();
+        assert!(err.contains(SLOT_HISTORY_PARTIAL), "{err}");
+        let advanced = partial_next(&std::fs::read_to_string(cache_path(&state, &repo)).unwrap());
+        assert!(advanced > 0, "progress did not move");
+
+        override_lookup_budget_for_test(Some(0));
+        let err = starts_in(&repo).unwrap_err();
+        assert!(err.contains(SLOT_HISTORY_PARTIAL), "{err}");
+        assert_eq!(
+            partial_next(&std::fs::read_to_string(cache_path(&state, &repo)).unwrap()),
+            advanced,
+            "a stopped read rewound the saved progress"
+        );
+
+        override_lookup_budget_for_test(None);
+        let at = starts_in(&repo).unwrap().expect("a git tracker");
+        assert!(
+            at.iter().any(|parents| parents == &vec![base.clone()]),
+            "earliest introduction missing after resume: {at:?}"
+        );
+        assert!(
+            !stood_in(&repo, &at, "newseat", "kk").unwrap(),
+            "a pin added after slots began stood: {at:?}"
+        );
+    }
+
+    /// A partial read does not refuse the vote. The name is recorded under
+    /// the caster's label, the answer an unproven name gets.
+    #[test]
+    fn a_partial_read_records_the_ballot_under_the_protected_label() {
+        let _lock = crate::test_env_lock();
+        let _budget = BudgetReset;
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
+        let repo = root.path().join("repo");
+        init_repo(&repo);
+        std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: one\"\n").unwrap();
+        commit_all(&repo, "slot");
+        std::fs::write(repo.join(".ljos-seat-keys"), "postslot kk\n").unwrap();
+        commit_all(&repo, "pin");
+        std::env::set_var("VISSUE_ROOT", &repo);
+        std::env::set_var("LJOS_SEAT", "ada");
+        override_lookup_budget_for_test(Some(0));
+        let who = crate::ballot_voter("vote", Some("postslot")).expect("the vote was refused");
+        assert_eq!(who, "persona:ada:postslot", "{who}");
+    }
+
+    /// After a finished answer, a merge that brings a new introduction is
+    /// included the next time the history is read.
+    #[test]
+    fn a_cached_answer_gains_an_introduction_brought_by_a_merge() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        std::env::set_var("XDG_STATE_HOME", &state);
+        let repo = root.path().join("repo");
+        init_repo(&repo);
+        std::fs::write(repo.join("issues.org"), "board\n").unwrap();
+        commit_all(&repo, "root");
+        let root_sha = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("main-slot"), "Note: \"slot: main\"\n").unwrap();
+        commit_all(&repo, "slot on main");
+        let at = starts_in(&repo).unwrap().expect("a git tracker");
+        assert!(
+            at.iter().any(|parents| parents == &vec![root_sha.clone()]),
+            "{at:?}"
+        );
+        let cache = cache_path(&state, &repo);
+        let body = std::fs::read_to_string(&cache).unwrap();
+        assert!(body.starts_with("v2 complete"), "{body}");
+        let mode = std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "cache mode {mode:o}");
+
+        git_ok(&repo, &["checkout", "-q", "-b", "side", &root_sha]);
+        std::fs::write(repo.join("side-work"), "s\n").unwrap();
+        commit_all(&repo, "side work");
+        let side_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("side-slot"), "Note: \"slot: side\"\n").unwrap();
+        commit_all(&repo, "slot on side");
+        git_ok(&repo, &["checkout", "-q", "main"]);
+        git_ok(
+            &repo,
+            &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+        );
+        let at = starts_in(&repo).unwrap().expect("a git tracker");
+        assert!(
+            at.iter().any(|parents| parents == &vec![root_sha.clone()]),
+            "the cached introduction was dropped: {at:?}"
+        );
+        assert!(
+            at.iter()
+                .any(|parents| parents == &vec![side_parent.clone()]),
+            "the merged introduction is missing: {at:?}"
+        );
+    }
+
+    /// An empty finished list while `HEAD` holds the note is not trusted,
+    /// and neither is a cache written by the previous format.
+    #[test]
+    fn an_empty_or_unversioned_cache_is_reread_when_head_holds_the_note() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        std::env::set_var("XDG_STATE_HOME", &state);
+        let repo = root.path().join("repo");
+        init_repo(&repo);
+        std::fs::write(repo.join("issues.org"), "board\n").unwrap();
+        commit_all(&repo, "base");
+        let base = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("slot"), "Note: \"slot: one\"\n").unwrap();
+        commit_all(&repo, "slot");
+        let count = git_ok(&repo, &["rev-list", "--count", "HEAD"])
+            .trim()
+            .to_string();
+        let sha = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        let _ = starts_in(&repo).unwrap();
+        let cache = cache_path(&state, &repo);
+        std::fs::write(&cache, format!("complete {count} {sha}\n")).unwrap();
+        let at = starts_in(&repo).unwrap().expect("a git tracker");
+        assert!(
+            at.iter().any(|parents| parents == &vec![base.clone()]),
+            "an old cache hid the introduction: {at:?}"
+        );
+        std::fs::write(&cache, format!("v2 complete {count} {sha}\n")).unwrap();
+        let at = starts_in(&repo).unwrap().expect("a git tracker");
+        assert!(
+            at.iter().any(|parents| parents == &vec![base.clone()]),
+            "an empty complete list hid the introduction: {at:?}"
         );
     }
 }

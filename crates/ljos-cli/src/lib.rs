@@ -4792,7 +4792,11 @@ fn protected_ballot_name(name: &str) -> bool {
             let key = pins.get(&slug).map(String::as_str);
             slot::stands(&slug, key, Some(starts.as_slice())).unwrap_or(false)
         }
-        _ => false,
+        // Not a git tracker: a name is not protected by pin order.
+        Ok(None) => false,
+        // A partial read has not proved the name. The pickaxe treated an
+        // unproven name as protected, so the vote records under that label.
+        Err(_) => true,
     }
 }
 
@@ -36198,6 +36202,58 @@ impl CommitLock {
         // SAFETY: flock on a descriptor this struct owns until drop.
         let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0;
         Self(ok.then_some(file))
+    }
+
+    /// [`Self::acquire_private`], given up at `deadline`. `None` when another
+    /// holder still has it then. A lock that cannot be opened is no lock.
+    #[must_use]
+    pub(crate) fn acquire_private_by(
+        path: &std::path::Path,
+        mut deadline: std::time::Instant,
+    ) -> Option<Self> {
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        if let Some(wall) = wall_deadline() {
+            deadline = deadline.min(wall);
+        }
+        let Ok((dir, name)) = open_state_dir(path) else {
+            return Some(Self(None));
+        };
+        // SAFETY: `dir` is an open directory descriptor; `name` has no
+        // interior NUL. openat returns a new descriptor or -1. Mode 0600
+        // applies when the file is created.
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Some(Self(None));
+        }
+        // SAFETY: `fd` was just opened above and nothing else owns it.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        // Ten milliseconds makes a short critical section visible quickly.
+        // The 100 ms ceiling keeps a two-second hook budget responsive.
+        let mut pause = std::time::Duration::from_millis(10);
+        const MAX_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+        loop {
+            // SAFETY: flock on a descriptor this function owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Some(Self(Some(file)));
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EWOULDBLOCK | libc::EINTR) => {}
+                _ => return Some(Self(None)),
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(pause.min(left));
+            pause = pause.saturating_mul(2).min(MAX_PAUSE);
+        }
     }
 
     /// [`CommitLock::acquire`], given up at `deadline`: `None` when another
