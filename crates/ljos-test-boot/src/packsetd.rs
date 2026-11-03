@@ -437,8 +437,32 @@ fn port_in_log(log: &str) -> Option<u16> {
 }
 
 fn proc_listen_port(pid: u32) -> Option<u16> {
+    let mut inodes = socket_inodes(&pid.to_string())?;
+    // Until exec closes them, a new child holds a copy of every descriptor
+    // this process had, other tests' listeners among them, and spawn can
+    // return before that close: the parent resumes once the new image is
+    // mapped. A socket this process holds is not the writer's.
+    if let Some(mine) = socket_inodes("self") {
+        inodes.retain(|inode| !mine.contains(inode));
+    }
+    if inodes.is_empty() {
+        return None;
+    }
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(text) = std::fs::read_to_string(table) else {
+            continue;
+        };
+        if let Some(port) = listen_port(&inodes, &text) {
+            return Some(port);
+        }
+    }
+    None
+}
+
+/// The socket inodes among the descriptors of `/proc/{process}`.
+fn socket_inodes(process: &str) -> Option<BTreeSet<u64>> {
     let mut inodes = BTreeSet::new();
-    let entries = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
+    let entries = std::fs::read_dir(format!("/proc/{process}/fd")).ok()?;
     for entry in entries.flatten() {
         let Ok(target) = std::fs::read_link(entry.path()) else {
             continue;
@@ -454,18 +478,7 @@ fn proc_listen_port(pid: u32) -> Option<u16> {
             inodes.insert(inode);
         }
     }
-    if inodes.is_empty() {
-        return None;
-    }
-    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(text) = std::fs::read_to_string(table) else {
-            continue;
-        };
-        if let Some(port) = listen_port(&inodes, &text) {
-            return Some(port);
-        }
-    }
-    None
+    Some(inodes)
 }
 
 fn listen_port(inodes: &BTreeSet<u64>, table: &str) -> Option<u16> {
@@ -754,6 +767,20 @@ int main(void) {
         assert!(alive(pid), "the writer was not alive");
         drop(daemon);
         assert!(!alive(pid), "drop left writer pid {pid} alive");
+    }
+
+    /// A child that has not finished exec holds a copy of this process's
+    /// descriptors, so its table reads as this one does. A listener this
+    /// process holds is not read back as the writer's port.
+    #[test]
+    fn a_listener_the_test_process_holds_is_not_the_writers_port() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = held.local_addr().unwrap().port();
+        assert_eq!(
+            proc_listen_port(std::process::id()),
+            None,
+            "read back {port}, which this process holds"
+        );
     }
 
     #[test]
