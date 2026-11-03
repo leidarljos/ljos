@@ -7,7 +7,7 @@
 ljos_test_boot::harness!();
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 const POLICYD: &str = r#"#!/bin/sh
@@ -18,6 +18,8 @@ if [ "$1" = --config ]; then conf=$2; shift 2; fi
 case "$*" in
   *sudo*) rule=sudo; said='a privilege runner is on the command' ;;
   *"rm -r"*) rule=rm-rf-outside-tmp; said='a recursive delete reaches outside /tmp and /var/tmp' ;;
+  *"git clean -f"*) rule=git-clean-force; said='git clean -f deletes untracked files' ;;
+  *"find "*" -delete"*) rule=find-delete; said='find -delete reaches outside /tmp and /var/tmp' ;;
   *) echo allow; exit 0 ;;
 esac
 if [ -n "$conf" ]; then
@@ -36,6 +38,10 @@ printf 'allow\twarn\t%s\t%s\n' "$rule" "$said"
 "#;
 
 const BLOCKS: &str = "block-on-warning true\n";
+
+/// A command run through a guard shim: the exit code, stderr, and whether
+/// its victim is still there.
+type Shimmed = (Option<i32>, String, bool);
 
 struct Seat {
     home: tempfile::TempDir,
@@ -56,7 +62,9 @@ impl Seat {
         assert!(init.status.success(), "{init:?}");
         let seat = Self { home, seat: None };
         seat.executable("bin/ljos-policyd", POLICYD);
-        seat.executable("guard/rm", ljos_cli::GUARD_SHIM);
+        for shimmed in ljos_cli::GUARD_SHIMMED {
+            seat.executable(&format!("guard/{shimmed}"), ljos_cli::GUARD_SHIM);
+        }
         seat
     }
 
@@ -156,29 +164,70 @@ impl Seat {
         (out.status.code(), rows)
     }
 
-    /// `rm -r` on a fresh directory through the guard shim: the exit code,
-    /// stderr, and whether the directory is still there.
-    fn shim_rm(&self) -> (Option<i32>, String, bool) {
-        let victim = self.path("victim");
-        std::fs::create_dir_all(&victim).unwrap();
+    /// `line` through the guard shims from `cwd`, with `victim` as what it
+    /// would remove.
+    fn shim(&self, line: &str, cwd: &Path, victim: &Path) -> Shimmed {
         let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(format!("rm -r '{}'", victim.display()))
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}:/usr/bin:/bin",
-                    self.path("guard").display(),
-                    self.path("bin").display()
-                ),
-            );
+        cmd.arg("-c").arg(line).env(
+            "PATH",
+            format!(
+                "{}:{}:/usr/bin:/bin",
+                self.path("guard").display(),
+                self.path("bin").display()
+            ),
+        );
         self.env(&mut cmd);
-        let out = cmd.output().unwrap();
+        let out = cmd.current_dir(cwd).output().unwrap();
         (
             out.status.code(),
             String::from_utf8(out.stderr).unwrap(),
             victim.exists(),
         )
+    }
+
+    /// `rm -r`, `git clean -fdq` and `find -delete`, each on a fresh victim
+    /// through its shim: the rule policyd warns of, how the shim names the
+    /// command, and what [`Seat::shim`] says.
+    fn shims(&self) -> [(&'static str, &'static str, Shimmed); 3] {
+        let fresh = |rel: &str| {
+            let dir = self.path(rel);
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let work = self.path("work");
+        let victim = fresh("victim");
+        let repo = fresh("repo");
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{init:?}");
+        std::fs::write(repo.join("untracked"), "").unwrap();
+        let found = fresh("found");
+        std::fs::write(found.join("file"), "").unwrap();
+        [
+            (
+                "rm-rf-outside-tmp",
+                "rm -r ",
+                self.shim(&format!("rm -r '{}'", victim.display()), &work, &victim),
+            ),
+            (
+                "git-clean-force",
+                "git clean -fdq",
+                self.shim("git clean -fdq", &repo, &repo.join("untracked")),
+            ),
+            (
+                "find-delete",
+                "find ",
+                self.shim(
+                    &format!("find '{}' -delete", found.display()),
+                    &work,
+                    &found,
+                ),
+            ),
+        ]
     }
 }
 
@@ -205,8 +254,17 @@ fn assert_label(seat: &Seat, why: &str) {
         "{why}"
     );
     assert_eq!(seat.hook(), "", "{why}: the hook allows");
-    let (code, err, kept) = seat.shim_rm();
-    assert_eq!((code, err.as_str(), kept), (Some(0), "", false), "{why}");
+    assert_shims_allow(seat, why);
+}
+
+/// Each guard shim ran its command: exit 0, nothing on stderr, and the
+/// victim gone.
+fn assert_shims_allow(seat: &Seat, why: &str) {
+    let ran = seat.shims().map(|(rule, _, said)| (rule, said));
+    let allowed = ran
+        .clone()
+        .map(|(rule, _)| (rule, (Some(0), String::new(), false)));
+    assert_eq!(ran, allowed, "{why}");
 }
 
 fn assert_denied(seat: &Seat, why: &str) {
@@ -224,13 +282,14 @@ fn assert_denied(seat: &Seat, why: &str) {
         reason.starts_with("sudo: ") && reason.contains("`ljos-policyd`"),
         "{why}: {reason}"
     );
-    let (code, err, kept) = seat.shim_rm();
-    assert_eq!(code, Some(126), "{why}: {err}");
-    assert!(
-        err.starts_with("ljos guard: denied (rm-rf-outside-tmp): rm -r "),
-        "{why}: {err}"
-    );
-    assert!(kept, "{why}: the refused rm did not run");
+    for (rule, command, (code, err, kept)) in seat.shims() {
+        assert_eq!(code, Some(126), "{why}: {err}");
+        assert!(
+            err.starts_with(&format!("ljos guard: denied ({rule}): {command}")),
+            "{why}: {err}"
+        );
+        assert!(kept, "{why}: the refused {rule} command ran");
+    }
 }
 
 /// A config that would block warnings changes nothing until the person's
@@ -298,8 +357,28 @@ fn a_check_that_fails_open_still_allows() {
         )
     );
     assert_eq!(seat.hook(), "", "the hook allows");
-    let (code, err, kept) = seat.shim_rm();
-    assert_eq!((code, err.as_str(), kept), (Some(0), "", false));
+    assert_shims_allow(&seat, "a named config that is not there");
+}
+
+/// `policyd_config` names a config only at the top of `ljos.toml` or under
+/// `[gates]`. Under `[identity]` it names none: `ljos policy`, the hook
+/// and the rm, git and find shims all leave the warning a label. Under
+/// `[identity]` after `[gates]`, it does not replace the one `[gates]`
+/// names.
+#[test]
+fn a_policyd_config_under_another_table_names_none() {
+    let seat = Seat::new();
+    seat.write(".config/ljos/blocks.conf", BLOCKS);
+    seat.write(
+        ".config/ljos/ljos.toml",
+        "[identity]\nname = \"A Person\"\npolicyd_config = \"blocks.conf\"\n",
+    );
+    assert_label(&seat, "the user's ljos.toml names it under [identity]");
+    seat.write(
+        ".config/ljos/ljos.toml",
+        "[gates]\npolicyd_config = \"blocks.conf\"\n\n[identity]\npolicyd_config = \"gone.conf\"\n",
+    );
+    assert_denied(&seat, "[gates] names it and [identity] names another");
 }
 
 /// `ljos doctor` names a `policyd_config` that is not there on a `warn`

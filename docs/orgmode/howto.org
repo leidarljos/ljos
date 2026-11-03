@@ -310,11 +310,12 @@ Each swap also shows a note naming both commands and leaves a row in
 
 * Let policyd refuse what it warns about
 
-Blocking on a warning is off by default. policyd answers a command it warns about with =allow=, the rule and
-one warning, and the command runs. The warning is a label. ljos stops nothing on it.
+Blocking on a warning is off by default.
+policyd answers a command it warns about with =allow=, the rule and one warning, and the command runs.
+The warning is a label.
+ljos stops nothing on it.
 
-To have those warnings refuse instead, name a policyd config in your own =ljos.toml= and put
-one line in that config:
+To have those warnings refuse instead, name a policyd config in your own =ljos.toml= and put one line in that config:
 
 #+begin_src toml
 # ~/.config/ljos/ljos.toml, or ~/.config/ljos/seats/SEAT/ljos.toml
@@ -326,11 +327,10 @@ policyd_config = "policyd.conf"
 block-on-warning true
 #+end_src
 
-ljos then passes that file every time it asks policyd, as
-=ljos-policyd check --config PATH -- COMMAND=: the hook, =ljos policy=, =ljos doctor= and the
-guard shims alike. With that line, policyd answers a warned command with =deny=, the same rule
-and the same warning, and exits 2. ljos reports it as policyd's deny: the hook blocks the tool
-call, =ljos policy --fail-on-deny= exits 1, and a guard shim exits 126. A force push still asks.
+ljos then passes that file every time it asks policyd, as =ljos-policyd check --config PATH -- COMMAND=: the hook, =ljos policy=, =ljos doctor= and the guard shims alike.
+With that line, policyd answers a warned command with =deny=, the same rule and the same warning, and exits 2.
+ljos reports it as policyd's deny: the hook blocks the tool call, =ljos policy --fail-on-deny= exits 1, and a guard shim exits 126.
+A force push still asks.
 An =ljos-policyd= that does not read the line, 0.7.0 among them, leaves its warnings as labels.
 
 #+begin_src console
@@ -339,15 +339,14 @@ sudo true
 deny	sudo	a privilege runner is on the command
 #+end_src
 
-=policyd_config= is read from the user's =ljos.toml= and then the seat's, at the top of the
-file or under =[gates]=. The seat's file wins, and =policyd_config = ""= there names none. A
-relative path is from the directory of the file that names it. A repository's =ljos.toml=,
-=.ljos/gates.toml= and =LJOS_CONFIG= do not name it, since a runner can write them.
+=policyd_config= is read from the user's =ljos.toml= and then the seat's, at the top of the file or under =[gates]=.
+The seat's file wins, and =policyd_config = ""= there names none.
+A relative path is from the directory of the file that names it.
+A repository's =ljos.toml=, =.ljos/gates.toml= and =LJOS_CONFIG= do not name it, since a runner can write them.
 
-A check that fails open still allows. A named config that is not there is one: policyd answers
-every command with =allow= and =fail-open=, without a rule or a warning, and the command runs.
-With no =policyd_config=, ljos asks =check= exactly as it did before, and every warning stays a
-label.
+A check that fails open still allows.
+A named config that is not there is one: policyd answers every command with =allow= and =fail-open=, without a rule or a warning, and the command runs.
+With no =policyd_config=, ljos asks =check= exactly as it did before, and every warning stays a label.
 
 * Choose which branches the push check covers
 

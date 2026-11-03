@@ -6928,9 +6928,10 @@ lower_ascii() {
   printf '%s' "$out"
 }
 # The file `ljos-policyd check --config` reads, as the hook finds it:
-# `policyd_config` in the user's ljos.toml, then the seat's, the later
-# one winning. A relative path is from that file's directory. Unset or
-# "", conf is empty and check is asked as it always was.
+# `policyd_config` at the top of the user's ljos.toml or under [gates],
+# then the seat's, the later one winning. Under any other table it names
+# nothing. A relative path is from that file's directory. Unset or "",
+# conf is empty and check is asked as it always was.
 policyd_conf() {
   conf=
   case ${XDG_CONFIG_HOME-} in
@@ -6943,7 +6944,20 @@ policyd_conf() {
   esac
   for cf in "$cbase/ljos.toml" "$cseat"; do
     [ -f "$cf" ] && [ -r "$cf" ] || continue
+    ctable=
     while IFS= read -r cl || [ -n "$cl" ]; do
+      case "$cl" in
+        *\[*)
+          chead=$(trim_ws "$cl")
+          case "$chead" in
+            \[\[*) ctable='[['; continue ;;
+            \[*) chead=${chead#?}; ctable=$(trim_ws "${chead%%\]*}"); continue ;;
+          esac ;;
+      esac
+      case "$ctable" in
+        ""|gates|\"gates\"|\'gates\') ;;
+        *) continue ;;
+      esac
       case "$cl" in
         *policyd_config*) ;;
         *) continue ;;
