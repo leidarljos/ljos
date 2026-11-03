@@ -177,18 +177,42 @@ fn is_sha1(commit: &str) -> bool {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// A stand-in binary. `0o755` is the mode a shell needs to exec a script
+/// A stand-in binary. `755` is the mode a shell needs to exec a script
 /// the owner wrote.
+///
+/// A write descriptor in this process would be inherited by a parallel
+/// test's fork until that child execs, and exec of the stand-in answers
+/// ETXTBSY meanwhile. A short-lived `cat` writes it under a temporary
+/// name, and it is renamed into place after `cat` has exited.
 #[cfg(test)]
 fn stand_in(dir: &std::path::Path, name: &str, body: &str) {
+    use std::io::Write;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .unwrap_or_else(|e| panic!("mode {}: {e}", path.display()));
-    }
+    let tmp = dir.join(format!(".{name}.new"));
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("/bin/cat > \"$1\" && /bin/chmod 755 \"$1\"")
+        .arg("stand-in")
+        .arg(&tmp)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin
+        .write_all(body.as_bytes())
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    drop(stdin);
+    let out = child
+        .wait_with_output()
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    assert!(
+        out.status.success(),
+        "write {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::rename(&tmp, &path).unwrap_or_else(|e| panic!("install {}: {e}", path.display()));
 }
 
 #[cfg(test)]
