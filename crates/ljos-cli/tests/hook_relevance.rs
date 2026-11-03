@@ -1,24 +1,90 @@
-//! The prompt hook ranks what it hands over by how much of the prompt a
-//! memory bears on, not by its age or one rare word.
+//! For a fixed lesson set and prompt set, the lessons a seat sees in what
+//! `ljos hook` prints.
 //!
-//! A fresh home, the hooks `ljos onboard --harness claude` writes, packsetd
-//! on a free port. Lessons are posted with the stamp they were written at,
-//! so the pack's fused score decays the old ones as it would in use.
+//! `fixtures/hook_relevance.json` is the oracle. Each case names the
+//! lessons the hook prints and the rule that picks them, worked by hand.
+//! Nothing here asks the pack what it would rank, so the hook and its
+//! check cannot share a bug.
+//!
+//! packsetd runs with its token, as on a seat: with auth off the hook
+//! reads the stored atoms and never searches. A stand-in encoder that
+//! counts the fixture's word groups gives the pack a dense ballot where
+//! the model is not installed.
+//!
+//! Each way a hook can go wrong has a broken hook here: the real one
+//! behind a proxy that changes the pack's search answers, or with its
+//! output rewritten. The fixture fails every one.
 
 ljos_test_boot::harness!();
-use std::io::Write;
-use std::net::TcpListener;
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
 use serde_json::Value;
 
-const FRESH: &str = "2026-10-21T09:00:00.000Z";
-const JANUARY: &str = "2026-01-14T09:00:00.000Z";
+#[derive(Deserialize)]
+struct Fixture {
+    encoder: Encoder,
+    lessons: Vec<Lesson>,
+    cases: Vec<Case>,
+}
 
-const CI_SECRET: &str = "The registry rejected the token because the CI secret \
-                         expired; refresh it from 1Password.";
+#[derive(Deserialize)]
+struct Encoder {
+    groups: Vec<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct Lesson {
+    name: String,
+    id: String,
+    ts: String,
+    text: String,
+}
+
+/// A prompt, or a shell command that failed.
+#[derive(Deserialize)]
+struct Case {
+    name: String,
+    prompt: Option<String>,
+    failure: Option<Failure>,
+    shows: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct Failure {
+    command: String,
+    error: String,
+}
+
+fn fixture() -> Fixture {
+    serde_json::from_str(include_str!("fixtures/hook_relevance.json")).expect("fixture")
+}
+
+/// packset-embed's line protocol over the groups in the file beside the
+/// script. An argument asks for the reranker or another stage this
+/// stand-in does not have, so it exits and the pack runs without it.
+const ENCODER: &str = r#"#!/usr/bin/env python3
+import json, re, sys
+if len(sys.argv) > 1:
+    sys.exit(1)
+groups = json.load(open(sys.argv[0] + ".json"))
+def vector(text):
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return [float(sum(w in group for w in words)) for group in groups]
+for line in sys.stdin:
+    asked = json.loads(line)
+    if "texts" in asked:
+        print(json.dumps({"vs": [vector(t) for t in asked["texts"]]}), flush=True)
+    else:
+        print(json.dumps({"v": vector(asked.get("text", ""))}), flush=True)
+"#;
 
 struct Daemon(Child);
 
@@ -41,93 +107,88 @@ fn free_port() -> u16 {
     listener.local_addr().expect("addr").port()
 }
 
+/// Held from picking a seat's port until packsetd listens on it, and
+/// while a proxy binds, so a proxy in another test cannot take the port
+/// [`free_port`] let go of.
+static PORTS: Mutex<()> = Mutex::new(());
+
+fn ports() -> MutexGuard<'static, ()> {
+    PORTS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 struct Seat {
     dir: tempfile::TempDir,
     port: u16,
     path: String,
-    hook: String,
+    token: String,
     _daemon: Daemon,
 }
 
 impl Seat {
-    fn env(&self, cmd: &mut Command) {
-        env_for(cmd, self.dir.path(), &self.path, self.port);
+    fn url(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}{path}", self.port)
     }
 
-    fn url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
-    }
-
-    /// A standing lesson written at `ts`.
-    fn lesson(&self, text: &str, ts: &str) {
-        self.lesson_as(None, text, ts);
-    }
-
-    /// [`Self::lesson`] under `id` when one is given.
-    fn lesson_as(&self, id: Option<&str>, text: &str, ts: &str) {
-        let mut atom = serde_json::json!({
-            "schema": "inside.atom/v1",
-            "kind": "lesson",
-            "level": "explicit",
-            "text": text,
-            "workspace": ljos_cli::SEAT_WORKSPACE,
-            "entities": ["horizon:standing"],
-            "ts": ts,
-        });
-        if let Some(id) = id {
-            atom["id"] = id.into();
-        }
-        let posted = ureq::post(&format!("{}/v1/atoms", self.url()))
+    fn get(&self, path: &str) -> Value {
+        ureq::get(&self.url(path))
+            .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(Duration::from_secs(10))
-            .send_json(atom);
-        assert!(posted.is_ok(), "post {text:?}: {posted:?}");
-    }
-
-    /// What the pack answers to `GET path` with `query`, asked directly.
-    fn get(&self, path: &str, query: &[(&str, &str)]) -> Value {
-        let mut req = ureq::get(&format!("{}{path}", self.url())).timeout(Duration::from_secs(10));
-        for (key, value) in query {
-            req = req.query(key, value);
-        }
-        req.call()
+            .call()
             .unwrap_or_else(|e| panic!("GET {path}: {e}"))
             .into_json()
             .unwrap_or_else(|e| panic!("GET {path}: {e}"))
     }
 
-    /// The context the prompt hook onboard wrote gives back, and how long
-    /// the hook took.
-    fn prompt(&self, session: &str, prompt: &str) -> (String, Duration) {
-        self.fire(
-            "UserPromptSubmit",
-            serde_json::json!({ "session_id": session, "prompt": prompt }),
-        )
+    fn lesson(&self, lesson: &Lesson) {
+        let posted = ureq::post(&self.url("/v1/atoms"))
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .timeout(Duration::from_secs(10))
+            .send_json(serde_json::json!({
+                "schema": "inside.atom/v1",
+                "kind": "lesson",
+                "level": "explicit",
+                "text": lesson.text,
+                "workspace": ljos_cli::SEAT_WORKSPACE,
+                "entities": ["horizon:standing"],
+                "ts": lesson.ts,
+                "id": lesson.id,
+            }));
+        assert!(posted.is_ok(), "post {}: {posted:?}", lesson.name);
     }
 
-    /// The context the hook onboard wrote gives back for `event` and
-    /// `payload`, and how long it took. One command serves every event.
-    fn fire(&self, event: &str, mut payload: Value) -> (String, Duration) {
-        payload["hook_event_name"] = event.into();
-        payload["cwd"] = self.dir.path().to_str().expect("utf-8").into();
-        let payload = payload.to_string();
-        let hook = &self.hook;
-        let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", hook]);
-        self.env(&mut cmd);
-        let started = Instant::now();
-        let said = run(cmd, Some(&payload));
-        let took = started.elapsed();
-        assert!(said.status.success(), "{hook}: {}", text(&said));
+    /// The context `ljos hook` prints for `case` when it reaches the pack
+    /// on `port`. Each case is its own session, so none is told a lesson
+    /// was already handed over.
+    fn hook(&self, case: &Case, port: u16) -> String {
+        let mut payload = serde_json::json!({ "session_id": case.name, "cwd": self.dir.path() });
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        match (&case.prompt, &case.failure) {
+            (Some(prompt), None) => {
+                cmd.args(["hook", "--prompt"]);
+                payload["hook_event_name"] = "UserPromptSubmit".into();
+                payload["prompt"] = prompt.as_str().into();
+            }
+            (None, Some(failure)) => {
+                cmd.arg("hook");
+                payload["hook_event_name"] = "PostToolUseFailure".into();
+                payload["tool_name"] = "Bash".into();
+                payload["tool_input"] = serde_json::json!({ "command": failure.command });
+                payload["error"] = failure.error.as_str().into();
+            }
+            _ => panic!("{} names one of a prompt or a failure", case.name),
+        }
+        env_for(&mut cmd, self.dir.path(), &self.path, port);
+        let said = run(cmd, Some(&payload.to_string()));
+        assert!(said.status.success(), "{}: {}", case.name, text(&said));
         if said.stdout.iter().all(u8::is_ascii_whitespace) {
-            return (String::new(), took);
+            return String::new();
         }
         let out: Value = serde_json::from_slice(&said.stdout)
-            .unwrap_or_else(|e| panic!("{e}: {hook} printed {}", text(&said)));
-        let context = out["hookSpecificOutput"]["additionalContext"]
+            .unwrap_or_else(|e| panic!("{e}: {} printed {}", case.name, text(&said)));
+        out["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap_or_default()
-            .to_string();
-        (context, took)
+            .to_string()
     }
 }
 
@@ -144,7 +205,6 @@ fn env_for(cmd: &mut Command, home: &Path, path: &str, port: u16) {
         .env("XDG_CACHE_HOME", home.join(".cache"))
         .env("XDG_RUNTIME_DIR", home.join("run"))
         .env("PACKSET_PORT", port.to_string())
-        .env("PACKSET_AUTH", "off")
         .env("LJOS_TRACKER_GIT", "off");
 }
 
@@ -171,11 +231,13 @@ fn text(out: &Output) -> String {
     )
 }
 
-/// A fresh home with packsetd on a free port and the hooks `ljos onboard
-/// --harness claude` wrote.
-fn seat() -> Seat {
+/// A fresh home with packsetd on a free port, the stand-in encoder as its
+/// model, holding the fixture's lessons. `None` where packsetd is not
+/// installed.
+fn seat(fixture: &Fixture) -> Option<Seat> {
     let Some(packsetd) = on_path("packsetd") else {
-        panic!("packsetd is not on PATH; CI builds it from packset develop");
+        eprintln!("skipped: packsetd is not installed");
+        return None;
     };
     let dir = tempfile::tempdir().expect("home");
     for sub in [
@@ -188,6 +250,11 @@ fn seat() -> Seat {
     ] {
         std::fs::create_dir_all(dir.path().join(sub)).expect("home dirs");
     }
+    let encoder = dir.path().join("packset-embed");
+    std::fs::write(&encoder, ENCODER).expect("encoder");
+    std::fs::set_permissions(&encoder, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let groups = serde_json::to_string(&fixture.encoder.groups).expect("groups");
+    std::fs::write(dir.path().join("packset-embed.json"), groups).expect("groups");
     let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos"))
         .parent()
         .expect("bin dir");
@@ -200,6 +267,7 @@ fn seat() -> Seat {
     .expect("PATH")
     .into_string()
     .expect("utf-8 PATH");
+    let ports = ports();
     let port = free_port();
     let pack_home = dir.path().join(".local/share/packset");
     std::fs::create_dir_all(&pack_home).expect("pack home");
@@ -214,6 +282,7 @@ fn seat() -> Seat {
     let daemon = Daemon(
         daemon
             .env("PACKSET_HOME", &pack_home)
+            .env("PACKSET_EMBED", &encoder)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -225,218 +294,283 @@ fn seat() -> Seat {
         assert!(Instant::now() < deadline, "packsetd did not listen");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let mut onboard = Command::new(env!("CARGO_BIN_EXE_ljos"));
-    onboard.args(["onboard", "--harness", "claude"]);
-    env_for(&mut onboard, dir.path(), &path, port);
-    let onboarded = run(onboard, None);
-    let settings = dir.path().join(".claude/settings.json");
-    let settings: Value = serde_json::from_str(
-        &std::fs::read_to_string(&settings).unwrap_or_else(|e| panic!("{e}: {}", text(&onboarded))),
-    )
-    .expect("settings.json");
-    let hook = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no UserPromptSubmit hook: {settings}"))
-        .to_string();
-    Seat {
+    drop(ports);
+    let token = std::fs::read_to_string(pack_home.join("token")).expect("packsetd token");
+    let token = token.trim().to_string();
+    let seat = Seat {
         dir,
         port,
         path,
-        hook,
+        token,
         _daemon: daemon,
+    };
+    for lesson in &fixture.lessons {
+        seat.lesson(lesson);
     }
-}
-
-/// The review's case: every lookalike names the prompt's subject, so a
-/// flat score tied them all with the January lesson that answers it, and
-/// the age-decayed fused score cut that lesson behind three fresh ones.
-#[test]
-fn the_lesson_that_covers_the_prompt_beats_fresher_lookalikes() {
-    if !ljos_cli::tool_installed("packsetd") {
-        eprintln!("skipped: packsetd is not installed");
-        return;
-    }
-    let seat = seat();
-    seat.lesson(CI_SECRET, JANUARY);
-    for lookalike in [
-        "Figma rejected the export token for the design file; ask the design lead.",
-        "The quokka sticker registry hands out one token per sticker pack.",
-        "Host 13 rejected the deploy token after the reboot; re-add it there.",
-        "The staging registry rejected a token once during the outage.",
-    ] {
-        seat.lesson(lookalike, FRESH);
-    }
-    let (context, took) = seat.prompt("registry-1", "the registry rejected my token");
-    eprintln!("prompt hook took {took:?}");
-    assert!(
-        context.contains("CI secret expired"),
-        "the hook left out the lesson that answers the prompt: {context}"
-    );
-}
-
-/// A prompt that says `always` is not about every rule that says it.
-#[test]
-fn always_does_not_bring_in_a_rule_about_something_else() {
-    if !ljos_cli::tool_installed("packsetd") {
-        eprintln!("skipped: packsetd is not installed");
-        return;
-    }
-    let seat = seat();
-    seat.lesson("Always squash commits before merging to main.", FRESH);
-    seat.lesson(
-        "Format the Rust code with cargo fmt, not rustfmt alone.",
-        FRESH,
-    );
-    let (context, _) = seat.prompt("always-1", "always run the formatter");
-    assert!(
-        !context.contains("squash commits"),
-        "a shared `always` brought in an unrelated rule: {context}"
-    );
-}
-
-/// A word no other lesson here says: `n` read as three consonant-vowel
-/// pairs. Lessons that carry a few each stay apart under packset's
-/// rewrite test, token Jaccard 0.6, so none replaces another.
-fn unique_word(n: usize) -> String {
-    const CONSONANTS: &[u8] = b"bdfgklmnprstvz";
-    const VOWELS: &[u8] = b"aeiou";
-    let mut n = n;
-    let mut word = String::new();
-    for _ in 0..3 {
-        word.push(char::from(CONSONANTS[n % CONSONANTS.len()]));
-        n /= CONSONANTS.len();
-        word.push(char::from(VOWELS[n % VOWELS.len()]));
-        n /= VOWELS.len();
-    }
-    word
-}
-
-fn unique_words(from: usize, count: usize) -> String {
-    (from..from + count)
-        .map(unique_word)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Twenty-four fresh lessons that tie the old one on every word the pack
-/// scores: registry, rejected and token. Each carries eight words of its
-/// own.
-fn lookalikes() -> Vec<String> {
-    (0..24)
-        .map(|i| {
-            let own = 100 + i * 8;
-            format!(
-                "Operator {} recorded that the registry rejected the token during incident {}. {}",
-                unique_word(own),
-                unique_word(own + 1),
-                unique_words(own + 2, 6)
-            )
-        })
-        .collect()
-}
-
-/// The old lesson. It says `pnpm`, which is in the alias group of the
-/// prompt's `yarn`, so it covers more of the prompt than any lookalike.
-/// The pack does not match the two: both are four letters, past its
-/// exact-match floor, and neither is a prefix, a part or one edit of the
-/// other. Thirty words of its own make it long, so BM25 ranks it under
-/// every lookalike.
-fn pnpm_lesson() -> String {
-    format!(
-        "With pnpm the registry rejected the token because the CI secret expired; \
-         refresh it from 1Password. {}",
-        unique_words(0, 30)
-    )
-}
-
-const PNPM_ID: &str = "a0000000000000000000000000000000";
-
-/// A stamp `days` before now. The pack adds recency against its own
-/// clock, so a fixed date drifts out of the half-life it was picked for.
-fn days_ago(days: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after 1970")
-        .as_secs();
-    ljos_cli::utc_at(now - days * 86_400)
-}
-
-/// More live lookalikes than the hook's window of twenty, and the
-/// relevance cut keeps the old lesson on one ballot of two. The pack's
-/// lexical ballot ties all twenty-five and keeps the twenty whose ids
-/// sort first, so the ids pin it inside that cut; BM25 leaves it out.
-/// The lookalikes are a day old and the lesson nine months, so the fused
-/// cut, which adds recency to that ballot, leaves it out. Each of these
-/// is asked of the writer before a hook fires, so a packsetd that does
-/// not rank by relevance fails here. The failure note and the prompt
-/// hook both hand the lesson over.
-#[test]
-fn an_old_lesson_one_ballot_kept_in_a_full_window_still_arrives() {
-    if !ljos_cli::tool_installed("packsetd") {
-        eprintln!("skipped: packsetd is not installed");
-        return;
-    }
-    let seat = seat();
-    let status = seat.get("/v1/status", &[]);
-    let ranks = status["search"]["ranks"].as_array();
-    assert!(
-        ranks.is_some_and(|r| r.iter().any(|v| v == "relevance")),
-        "packsetd does not list rank=relevance; CI builds packset develop: {status}"
-    );
-    seat.lesson_as(Some(PNPM_ID), &pnpm_lesson(), &days_ago(280));
-    let fresh = days_ago(1);
-    for (i, text) in lookalikes().iter().enumerate() {
-        seat.lesson_as(Some(&format!("f{i:031}")), text, &fresh);
-    }
-    let workspace = ("workspace", ljos_cli::SEAT_WORKSPACE);
-    let listed = seat.get("/v1/atoms", &[workspace]);
+    let listed = seat.get(&format!("/v1/atoms?workspace={}", ljos_cli::SEAT_WORKSPACE));
     let live = listed["atoms"].as_array().map_or(0, Vec::len);
-    assert_eq!(live, 25, "a lookalike replaced another: {listed}");
-    let prompt = "yarn: the registry rejected my token";
-    let cut = |rank| {
-        let query = [workspace, ("q", prompt), ("limit", "20"), ("rank", rank)];
-        seat.get("/v1/search", &query)
-    };
-    let fused = cut("fused");
-    let ids = |cut: &Value| -> Vec<Value> {
-        let hits = cut["hits"].as_array().cloned().unwrap_or_default();
-        hits.into_iter().map(|h| h["id"].clone()).collect()
-    };
-    assert!(
-        !ids(&fused).contains(&PNPM_ID.into()),
-        "the fused cut kept the old lesson, so age did not cut it: {fused}"
-    );
-    let cut = cut("relevance");
-    assert_eq!(cut["rank"], "relevance", "no relevance cut: {cut}");
-    let hits = cut["hits"].as_array().cloned().unwrap_or_default();
-    assert_eq!(hits.len(), 20, "the window is not full: {cut}");
-    let kept = hits
-        .iter()
-        .find(|h| h["id"] == PNPM_ID)
-        .unwrap_or_else(|| panic!("the cut left the lesson out: {cut}"));
     assert_eq!(
-        (kept["ballots"].as_u64(), kept["of"].as_u64()),
-        (Some(1), Some(2)),
-        "the cut did not keep the lesson on one ballot: {kept}"
+        live,
+        fixture.lessons.len(),
+        "the pack let one lesson replace another: {listed}"
     );
-    let (context, took) = seat.fire(
-        "PostToolUseFailure",
-        serde_json::json!({
-            "session_id": "pool-1",
-            "tool_name": "Bash",
-            "tool_input": {"command": "yarn publish"},
-            "error": "E401: the registry rejected the token",
-        }),
+    let status = seat.get("/v1/status");
+    assert_eq!(
+        status["embedder"]["answering"], true,
+        "the stand-in encoder did not answer: {status}"
     );
-    eprintln!("failure hook took {took:?}");
-    assert!(
-        context.contains("CI secret expired"),
-        "the failure note never saw the old lesson: {context}"
+    Some(seat)
+}
+
+/// Each case where `hook` printed other lessons than the fixture names,
+/// in another order, or a text no lesson has, with what it printed.
+fn misses(fixture: &Fixture, hook: impl Fn(&Case) -> String) -> Vec<(String, String)> {
+    let names: HashMap<&str, &str> = fixture
+        .lessons
+        .iter()
+        .map(|l| (l.text.as_str(), l.name.as_str()))
+        .collect();
+    let mut misses = Vec::new();
+    for case in &fixture.cases {
+        let context = hook(case);
+        let shown: Vec<&str> = context
+            .lines()
+            .filter_map(|line| line.strip_prefix("- ["))
+            .map(|line| line.split_once("] ").map_or(line, |(_, text)| text))
+            .map(|text| names.get(text).copied().unwrap_or("a text no lesson has"))
+            .collect();
+        if shown != case.shows {
+            misses.push((
+                case.name.clone(),
+                format!("shows {shown:?}, not {:?}:\n{context}", case.shows),
+            ));
+        }
+    }
+    misses
+}
+
+fn report(misses: &[(String, String)]) -> String {
+    misses
+        .iter()
+        .map(|(case, miss)| format!("{case}: {miss}"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The fixture failed the broken hook on each of `cases`.
+fn assert_caught(misses: &[(String, String)], cases: &[&str]) {
+    for case in cases {
+        assert!(
+            misses.iter().any(|(name, _)| name == case),
+            "the broken hook passed {case}; it missed only:\n{}",
+            report(misses)
+        );
+    }
+}
+
+/// What a broken hook does to the pack's search answers.
+#[derive(Clone, Copy)]
+enum Broken {
+    /// Leaves out the encoder's rank and cosine, as if the pack sent no
+    /// dense ballot.
+    DropsDense,
+    /// Answers every search with the first answer it got.
+    ReplaysSearch,
+    /// Hands over the hits in reverse, scores and all, so where the hook's
+    /// own keys tie it falls back on the reverse of the pack's order.
+    ReversesTies,
+}
+
+impl Broken {
+    fn search(self, answer: Vec<u8>, kept: &Mutex<Option<Vec<u8>>>) -> Vec<u8> {
+        if let Self::ReplaysSearch = self {
+            return kept
+                .lock()
+                .expect("kept answer")
+                .get_or_insert(answer)
+                .clone();
+        }
+        let Some(at) = find(&answer, b"\r\n\r\n") else {
+            return answer;
+        };
+        let Ok(mut body) = serde_json::from_slice::<Value>(&answer[at + 4..]) else {
+            return answer;
+        };
+        let Some(hits) = body["hits"].as_array_mut() else {
+            return answer;
+        };
+        if let Self::DropsDense = self {
+            for hit in hits.iter_mut().filter_map(Value::as_object_mut) {
+                hit.remove("dense_rank");
+                hit.remove("cosine");
+            }
+        } else {
+            hits.reverse();
+            for (score, hit) in (1..=hits.len()).rev().zip(hits.iter_mut()) {
+                hit["score"] = score.into();
+            }
+        }
+        let body = serde_json::to_vec(&body).expect("search body");
+        let mut out: Vec<u8> = String::from_utf8_lossy(&answer[..at])
+            .lines()
+            .filter(|line| !line.to_ascii_lowercase().starts_with("content-length:"))
+            .flat_map(|line| [line, "\r\n"])
+            .collect::<String>()
+            .into_bytes();
+        out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// A port that passes each request to packsetd on `upstream` and changes
+/// its search answers as `broken` does. packsetd closes each connection
+/// after its answer, so one read to the end is one answer.
+fn broken_pack(upstream: u16, broken: Broken) -> u16 {
+    let listener = {
+        let _ports = ports();
+        TcpListener::bind("127.0.0.1:0").expect("proxy port")
+    };
+    let port = listener.local_addr().expect("addr").port();
+    let kept: Arc<Mutex<Option<Vec<u8>>>> = Arc::default();
+    std::thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            let kept = Arc::clone(&kept);
+            std::thread::spawn(move || relay(client, upstream, broken, &kept));
+        }
+    });
+    port
+}
+
+fn relay(mut client: TcpStream, upstream: u16, broken: Broken, kept: &Mutex<Option<Vec<u8>>>) {
+    let Some(request) = read_request(&mut client) else {
+        return;
+    };
+    let Ok(mut pack) = TcpStream::connect(("127.0.0.1", upstream)) else {
+        return;
+    };
+    let mut answer = Vec::new();
+    if pack.write_all(&request).is_err() || pack.read_to_end(&mut answer).is_err() {
+        return;
+    }
+    if request.starts_with(b"GET /v1/search") {
+        answer = broken.search(answer, kept);
+    }
+    let _ = client.write_all(&answer);
+}
+
+/// One request: its head and the `Content-Length` bytes after it.
+fn read_request(client: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut request = Vec::new();
+    let mut chunk = [0; 4096];
+    let head = loop {
+        if let Some(at) = find(&request, b"\r\n\r\n") {
+            break at + 4;
+        }
+        let n = client.read(&mut chunk).ok().filter(|n| *n > 0)?;
+        request.extend_from_slice(&chunk[..n]);
+    };
+    let length = String::from_utf8_lossy(&request[..head])
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    while request.len() < head + length {
+        let n = client.read(&mut chunk).ok().filter(|n| *n > 0)?;
+        request.extend_from_slice(&chunk[..n]);
+    }
+    Some(request)
+}
+
+/// `context` with each lesson cut at its first clause, as a hook that
+/// shortens what it hands over prints it.
+fn first_clauses(context: &str) -> String {
+    context
+        .lines()
+        .map(|line| match line.split_once("; ") {
+            Some((clause, _)) if line.starts_with("- [") => format!("{clause}."),
+            _ => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn each_case_shows_the_lessons_the_fixture_names() {
+    let fixture = fixture();
+    let Some(seat) = seat(&fixture) else {
+        return;
+    };
+    let misses = misses(&fixture, |case| seat.hook(case, seat.port));
+    assert!(misses.is_empty(), "{}", report(&misses));
+}
+
+/// Without the cosine the paraphrase, which shares no word with any
+/// lesson, gets nothing, and the words alone let the signing ceremony in
+/// beside the signing key.
+#[test]
+fn a_hook_that_drops_the_dense_ballot_misses_the_paraphrase() {
+    let fixture = fixture();
+    let Some(seat) = seat(&fixture) else {
+        return;
+    };
+    let port = broken_pack(seat.port, Broken::DropsDense);
+    let misses = misses(&fixture, |case| seat.hook(case, port));
+    assert_caught(&misses, &["paraphrase", "dense-band"]);
+}
+
+/// Every later search is answered with the first case's, about a rejected
+/// token: the paraphrase is handed those lessons, and the dense band gets
+/// no cosine.
+#[test]
+fn a_hook_that_replays_a_cached_search_misses_the_paraphrase() {
+    let fixture = fixture();
+    let Some(seat) = seat(&fixture) else {
+        return;
+    };
+    let port = broken_pack(seat.port, Broken::ReplaysSearch);
+    let misses = misses(&fixture, |case| seat.hook(case, port));
+    assert_caught(&misses, &["paraphrase", "dense-band"]);
+}
+
+#[test]
+fn a_hook_that_rewrites_lesson_text_shows_a_text_no_lesson_has() {
+    let fixture = fixture();
+    let Some(seat) = seat(&fixture) else {
+        return;
+    };
+    let misses = misses(&fixture, |case| first_clauses(&seat.hook(case, seat.port)));
+    assert_caught(
+        &misses,
+        &[
+            "covers-the-prompt",
+            "alias-in-a-full-window",
+            "failure-note",
+        ],
     );
-    let (context, took) = seat.prompt("pool-2", prompt);
-    eprintln!("prompt hook took {took:?}");
-    assert!(
-        context.contains("CI secret expired"),
-        "the prompt hook dropped the lesson the cut kept on one ballot: {context}"
+}
+
+/// The lookalikes tie on words and length, so the other order hands over
+/// the ones in the window whose ids sort last.
+#[test]
+fn a_hook_that_breaks_ties_the_other_way_shows_other_lookalikes() {
+    let fixture = fixture();
+    let Some(seat) = seat(&fixture) else {
+        return;
+    };
+    let port = broken_pack(seat.port, Broken::ReversesTies);
+    let misses = misses(&fixture, |case| seat.hook(case, port));
+    assert_caught(
+        &misses,
+        &[
+            "covers-the-prompt",
+            "alias-in-a-full-window",
+            "failure-note",
+        ],
     );
 }

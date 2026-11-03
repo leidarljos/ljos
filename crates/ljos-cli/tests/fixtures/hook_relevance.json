@@ -1,0 +1,110 @@
+{
+  "about": [
+    "What a seat must see for each prompt, worked by hand from the rule each case's why names.",
+    "The lessons are posted in this order, each a standing lesson with its id and stamp.",
+    "The lookalikes tie on every word the pack and the hook score, and are posted in reverse id order, so only packset's order for a tie, by id, puts look-00 first.",
+    "A case's shows lists the lessons the hook prints, in the order it prints them."
+  ],
+  "encoder": {
+    "about": [
+      "A stand-in for packset-embed: a text's vector counts its words in each group.",
+      "A prompt with none of these words has a zero vector, so the pack sends no dense ballot and the hook ranks by words alone."
+    ],
+    "groups": [["rotate", "change"], ["key", "credentials"], ["signing", "cryptographic"]]
+  },
+  "lessons": [
+    {"name": "ci-secret", "id": "c0000000000000000000000000000000", "ts": "2026-01-14T09:00:00.000Z", "text": "The registry rejected the token because the CI secret expired; refresh it from 1Password."},
+    {"name": "pnpm", "id": "a0000000000000000000000000000000", "ts": "2026-02-03T09:00:00.000Z", "text": "With pnpm the registry rejected the token because the CI secret expired; refresh it from 1Password. bababa dababa fababa gababa kababa lababa mababa nababa pababa rababa sababa tababa vababa zababa bebaba debaba febaba gebaba kebaba lebaba mebaba nebaba pebaba rebaba sebaba tebaba vebaba zebaba bibaba dibaba"},
+    {"name": "squash", "id": "d1000000000000000000000000000000", "ts": "2026-10-21T09:00:00.000Z", "text": "Always squash commits before merging to main."},
+    {"name": "fmt", "id": "d2000000000000000000000000000000", "ts": "2026-10-21T09:00:00.000Z", "text": "Format the Rust code with cargo fmt, not rustfmt alone."},
+    {"name": "signing", "id": "e1000000000000000000000000000000", "ts": "2026-03-02T09:00:00.000Z", "text": "Rotate the signing key before the quarterly audit."},
+    {"name": "ceremony", "id": "e2000000000000000000000000000000", "ts": "2026-09-15T09:00:00.000Z", "text": "The signing ceremony needs two people in the room; the key cards are at reception."},
+    {"name": "look-23", "id": "f0000000000000000000000000000023", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator kakaba recorded that the registry rejected the token during incident lakaba. makaba nakaba pakaba rakaba sakaba takaba"},
+    {"name": "look-22", "id": "f0000000000000000000000000000022", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator sugaba recorded that the registry rejected the token during incident tugaba. vugaba zugaba bakaba dakaba fakaba gakaba"},
+    {"name": "look-21", "id": "f0000000000000000000000000000021", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator fugaba recorded that the registry rejected the token during incident gugaba. kugaba lugaba mugaba nugaba pugaba rugaba"},
+    {"name": "look-20", "id": "f0000000000000000000000000000020", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator pogaba recorded that the registry rejected the token during incident rogaba. sogaba togaba vogaba zogaba bugaba dugaba"},
+    {"name": "look-19", "id": "f0000000000000000000000000000019", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator bogaba recorded that the registry rejected the token during incident dogaba. fogaba gogaba kogaba logaba mogaba nogaba"},
+    {"name": "look-18", "id": "f0000000000000000000000000000018", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator migaba recorded that the registry rejected the token during incident nigaba. pigaba rigaba sigaba tigaba vigaba zigaba"},
+    {"name": "look-17", "id": "f0000000000000000000000000000017", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator vegaba recorded that the registry rejected the token during incident zegaba. bigaba digaba figaba gigaba kigaba ligaba"},
+    {"name": "look-16", "id": "f0000000000000000000000000000016", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator kegaba recorded that the registry rejected the token during incident legaba. megaba negaba pegaba regaba segaba tegaba"},
+    {"name": "look-15", "id": "f0000000000000000000000000000015", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator sagaba recorded that the registry rejected the token during incident tagaba. vagaba zagaba begaba degaba fegaba gegaba"},
+    {"name": "look-14", "id": "f0000000000000000000000000000014", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator fagaba recorded that the registry rejected the token during incident gagaba. kagaba lagaba magaba nagaba pagaba ragaba"},
+    {"name": "look-13", "id": "f0000000000000000000000000000013", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator pufaba recorded that the registry rejected the token during incident rufaba. sufaba tufaba vufaba zufaba bagaba dagaba"},
+    {"name": "look-12", "id": "f0000000000000000000000000000012", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator bufaba recorded that the registry rejected the token during incident dufaba. fufaba gufaba kufaba lufaba mufaba nufaba"},
+    {"name": "look-11", "id": "f0000000000000000000000000000011", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator mofaba recorded that the registry rejected the token during incident nofaba. pofaba rofaba sofaba tofaba vofaba zofaba"},
+    {"name": "look-10", "id": "f0000000000000000000000000000010", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator vifaba recorded that the registry rejected the token during incident zifaba. bofaba dofaba fofaba gofaba kofaba lofaba"},
+    {"name": "look-09", "id": "f0000000000000000000000000000009", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator kifaba recorded that the registry rejected the token during incident lifaba. mifaba nifaba pifaba rifaba sifaba tifaba"},
+    {"name": "look-08", "id": "f0000000000000000000000000000008", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator sefaba recorded that the registry rejected the token during incident tefaba. vefaba zefaba bifaba difaba fifaba gifaba"},
+    {"name": "look-07", "id": "f0000000000000000000000000000007", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator fefaba recorded that the registry rejected the token during incident gefaba. kefaba lefaba mefaba nefaba pefaba refaba"},
+    {"name": "look-06", "id": "f0000000000000000000000000000006", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator pafaba recorded that the registry rejected the token during incident rafaba. safaba tafaba vafaba zafaba befaba defaba"},
+    {"name": "look-05", "id": "f0000000000000000000000000000005", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator bafaba recorded that the registry rejected the token during incident dafaba. fafaba gafaba kafaba lafaba mafaba nafaba"},
+    {"name": "look-04", "id": "f0000000000000000000000000000004", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator mudaba recorded that the registry rejected the token during incident nudaba. pudaba rudaba sudaba tudaba vudaba zudaba"},
+    {"name": "look-03", "id": "f0000000000000000000000000000003", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator vodaba recorded that the registry rejected the token during incident zodaba. budaba dudaba fudaba gudaba kudaba ludaba"},
+    {"name": "look-02", "id": "f0000000000000000000000000000002", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator kodaba recorded that the registry rejected the token during incident lodaba. modaba nodaba podaba rodaba sodaba todaba"},
+    {"name": "look-01", "id": "f0000000000000000000000000000001", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator sidaba recorded that the registry rejected the token during incident tidaba. vidaba zidaba bodaba dodaba fodaba godaba"},
+    {"name": "look-00", "id": "f0000000000000000000000000000000", "ts": "2026-10-30T09:00:00.000Z", "text": "Operator fidaba recorded that the registry rejected the token during incident gidaba. kidaba lidaba midaba nidaba pidaba ridaba"}
+  ],
+  "cases": [
+    {
+      "name": "covers-the-prompt",
+      "prompt": "the registry rejected my token",
+      "shows": ["ci-secret", "look-00", "look-01"],
+      "why": [
+        "No word of the prompt is in an encoder group, so the hook ranks by words.",
+        "ci-secret, pnpm and every lookalike say registry, rejected and token, and BM25 puts ci-secret, the shortest, first.",
+        "The lookalikes tie on words and length, so packset's order for a tie, by id, puts look-00 and look-01 next, and the hook hands over three.",
+        "Printed oldest first: ci-secret from January, then the two lookalikes, which share a stamp and keep their order."
+      ]
+    },
+    {
+      "name": "alias-in-a-full-window",
+      "prompt": "yarn: the registry rejected my token",
+      "shows": ["ci-secret", "pnpm", "look-00"],
+      "why": [
+        "yarn and pnpm are one alias group in the hook's subject test, so pnpm covers the most of the prompt.",
+        "pnpm is the longest lesson, so only the pack's lexical ballot keeps it, last of the twenty the hook asks for, as the tied lesson whose id sorts first.",
+        "ci-secret comes next by BM25 and look-00 by id.",
+        "Printed oldest first: ci-secret from January, pnpm from February, look-00 from October."
+      ]
+    },
+    {
+      "name": "failure-note",
+      "failure": {"command": "yarn publish", "error": "E401: the registry rejected the token"},
+      "shows": ["pnpm", "ci-secret", "look-00"],
+      "why": [
+        "The note searches on the command and its error, so it reads the window alias-in-a-full-window reads.",
+        "It prints the most relevant first and does not sort by age: pnpm by its alias, ci-secret by BM25, look-00 by id."
+      ]
+    },
+    {
+      "name": "always-names-no-subject",
+      "prompt": "always run cargo fmt",
+      "shows": ["fmt"],
+      "why": [
+        "always is a rule word, not a subject.",
+        "squash says always and the pack's two ballots both name it, but it shares no other word with the prompt; fmt says cargo and fmt."
+      ]
+    },
+    {
+      "name": "paraphrase",
+      "prompt": "how often do we change our cryptographic credentials",
+      "shows": ["signing"],
+      "why": [
+        "No lesson says a word of the prompt, so only the dense ballot names any.",
+        "The prompt counts one word in each group and so does signing: cosine 1 at dense rank 1, past DENSE_ALONE_AT, 0.66, which a hit that shares no word must reach.",
+        "ceremony counts key and signing, cosine 2/sqrt(6) = 0.82, at dense rank 2.",
+        "Its key names the subject through the hook's alias group of credentials, but it sits more than DENSE_WORD_BEHIND, 0.05, behind signing, so it stays out."
+      ]
+    },
+    {
+      "name": "dense-band",
+      "prompt": "rotate the signing key",
+      "shows": ["signing"],
+      "why": [
+        "signing and ceremony both name the subject, signing and key.",
+        "On words alone ceremony covers two of the three and clears HOOK_SCORE_FLOOR, 0.6 of the best lexical match.",
+        "With the encoder's cosine, ceremony at 0.82 sits more than DENSE_WORD_BEHIND, 0.05, behind signing at 1 and stays out."
+      ]
+    }
+  ]
+}
