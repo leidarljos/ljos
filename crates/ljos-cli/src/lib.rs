@@ -37507,6 +37507,9 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
     }
     git_hooks::hook_child_env(&mut push);
     no_git_prompt(&mut push);
+    // The push text is matched by `unreached` and `rejected`, which read
+    // English git and ssh messages. `LC_ALL=C` keeps that text in one language.
+    push.env("LC_ALL", "C");
     let mut child = match push.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -42071,6 +42074,7 @@ pub(crate) fn git_cmd() -> std::process::Command {
 /// host-key answer from the terminal itself, so it runs with `BatchMode`.
 /// A `core.sshCommand` still runs, without that option, and a set
 /// `GIT_SSH_COMMAND` or `GIT_SSH` is left alone: each must not prompt.
+/// An empty `core.sshCommand` is skipped, and batch ssh runs.
 pub(crate) fn no_git_prompt(cmd: &mut std::process::Command) {
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "")
@@ -42084,8 +42088,7 @@ pub(crate) fn no_git_prompt(cmd: &mut std::process::Command) {
 /// The ssh git runs for ljos. git appends `"$@"` and runs it with `sh`.
 /// `GIT_SSH_COMMAND` outranks `core.sshCommand`, so this one runs that
 /// command when it is set.
-const BATCH_SSH: &str =
-    r#"c=$(git config --get core.sshCommand) && eval "exec $c \"\$@\""; exec ssh -o BatchMode=yes"#;
+const BATCH_SSH: &str = r#"c=$(git config --get core.sshCommand) && [ -n "$c" ] && eval "exec $c \"\$@\""; exec ssh -o BatchMode=yes"#;
 
 /// [`std::process::Command::output`], stopped when a wall budget is armed
 /// and spent. The child is killed. The caller treats that as no answer.
@@ -43514,6 +43517,11 @@ mod tests {
         );
     }
 
+    /// Longer than the stand-in pre-push hook's four-second sleep, so that
+    /// push has exited before the next tracker write. Five seconds is also
+    /// the wait used when `LJOS_TRACKER_PUSH_WAIT` is unset.
+    const PUSH_WAIT_SECS: u64 = 5;
+
     #[test]
     fn a_slow_tracker_push_finishes_in_the_background() {
         let _env = env_guard();
@@ -43588,7 +43596,7 @@ mod tests {
             .success();
         assert!(alive, "the pre-push hook had already exited: {said}");
 
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        std::thread::sleep(std::time::Duration::from_secs(PUSH_WAIT_SECS));
         std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
         std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "10");
@@ -43602,6 +43610,57 @@ mod tests {
         ] {
             std::env::remove_var(var);
         }
+    }
+
+    /// An empty `core.sshCommand` is not a command. The batch ssh runs.
+    #[test]
+    fn an_empty_core_ssh_command_runs_batch_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let log = dir.path().join("calls.log");
+        let write = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, body).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write("git", "#!/bin/sh\nexit 0\n");
+        write(
+            "ssh",
+            &format!(
+                "#!/bin/sh\nprintf 'ssh %s\\n' \"$*\" >> '{}'\nexit 0\n",
+                log.display()
+            ),
+        );
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{} \"$@\"", super::BATCH_SSH))
+            .arg("sh")
+            .arg("git@example.invalid")
+            .arg("git-upload-pack")
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            calls.contains("ssh -o BatchMode=yes"),
+            "batch ssh did not run: {calls}"
+        );
+        assert!(
+            calls.contains("git@example.invalid"),
+            "the host was dropped: {calls}"
+        );
     }
 
     #[test]

@@ -794,6 +794,9 @@ fn git(dir: &Path, args: &[&str]) -> Output {
     cmd.args(args)
         .env("GIT_EDITOR", "true")
         .env("GIT_SEQUENCE_EDITOR", "true")
+        // `unreached` and `rejected` match English git and ssh text.
+        // `LC_ALL=C` makes git print that text whatever locale the seat is in.
+        .env("LC_ALL", "C")
         .stdin(std::process::Stdio::null());
     crate::git_hooks::hook_child_env(&mut cmd);
     crate::seat_git_child(&mut cmd);
@@ -1496,6 +1499,36 @@ note from b
         assert!(!rejected(
             "fatal: 'origin' does not appear to be a git repository"
         ));
+    }
+
+    /// A seat locale that is not English still yields the English text
+    /// `unreached` matches, because the git child runs with `LC_ALL=C`.
+    #[test]
+    fn a_non_english_locale_still_matches_english_git_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let git_bin = bin.join("git");
+        std::fs::write(
+            &git_bin,
+            "#!/bin/sh\necho \"LC_ALL=${LC_ALL-unset}\" >&2\n\
+             echo 'fatal: Could not resolve host: example.invalid' >&2\nexit 128\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&git_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _env = crate::test_env_lock();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        std::env::set_var("LC_ALL", "fr_FR.UTF-8");
+        std::env::set_var("LANG", "fr_FR.UTF-8");
+        std::env::set_var("LANGUAGE", "fr");
+        let out = git(dir.path(), &["push", "origin", "HEAD"]);
+        let said = output_text(&out);
+        assert!(said.contains("LC_ALL=C"), "{said}");
+        assert!(
+            unreached(out.status, &said),
+            "english host failure was not recognised: {said}"
+        );
     }
 
     #[test]
