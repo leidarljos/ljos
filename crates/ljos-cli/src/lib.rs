@@ -60283,8 +60283,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     /// A python body is judged as python, not as shell: `import` there
     /// is no ImageMagick call. The guard allows a python body whose shell
-    /// call deletes a tree, and its reading carries the one-line warning
-    /// ljos-policyd prints for it, which names `rm-rf-outside-tmp`.
+    /// call deletes a tree, a shell body that deletes one, and an unquoted
+    /// body whose substitution does. Each reading carries the one-line
+    /// warning ljos-policyd prints for it, which names `rm-rf-outside-tmp`.
     #[test]
     fn a_python_heredoc_is_judged_as_python() {
         if !crate::tool_installed("ljos-policyd") {
@@ -60307,6 +60308,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         for line in [
             "python3 - <<'EOF'\nimport subprocess\nsubprocess.run('rm -rf /srv/data', shell=True)\nEOF",
             "python3 - <<'EOF'\nimport os\nos.system('rm -rf /srv/data')\nEOF",
+            "bash <<'EOF'\necho $(rm -rf /srv/data)\nEOF",
+            "python3 - <<EOF\nprint('''$(rm -rf /srv/data)''')\nEOF",
         ] {
             assert!(!tcb_argvs(line)[0][2].contains("import"), "{line:?}");
             let report =
