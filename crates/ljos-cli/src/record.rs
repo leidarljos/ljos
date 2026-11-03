@@ -2028,8 +2028,8 @@ mod tests {
         let _home = test_home();
         for (one, two) in [
             ("alpha/judge-model-a-120b", "beta/judge-model-a-20b"),
-            ("alpha/judge-llama-3-70b", "beta/judge-llama-3-8b"),
-            ("alpha/judge-qwen", "beta/judge-qwen-72"),
+            ("alpha/judge-model-c-70b", "beta/judge-model-c-8b"),
+            ("alpha/judge-model-d", "beta/judge-model-d-72"),
             ("alpha/run-pr-1234", "beta/run-pr-5678"),
             ("alpha/judge-model-4", "beta/model-4"),
         ] {

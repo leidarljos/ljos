@@ -49206,14 +49206,14 @@ mod tests {
         let known = std::collections::BTreeSet::new();
         for (a, b) in [
             ("node-01", "node-02"),
-            ("qwen-72", "qwen"),
+            ("model-72", "model"),
             ("inky-10", "inky"),
             ("run-12", "run-34"),
         ] {
             assert!(!same_holder(a, b), "a digit suffix folded: {a} {b}");
             assert!(!same_seat(a, b, &known), "a digit suffix folded: {a} {b}");
         }
-        for name in ["node-01", "qwen-72", "inky-10", "inky-12345"] {
+        for name in ["node-01", "model-72", "inky-10", "inky-12345"] {
             assert_eq!(
                 holder_parts(name),
                 (name.to_string(), None),
@@ -49260,9 +49260,9 @@ mod tests {
         }
         for (held, holder) in [
             ("eessi-bot", "eessi"),
-            ("qwen-72", "qwen"),
+            ("model-72", "model"),
             ("node-01", "node"),
-            ("judge-qwen-ab", "judge-qwen"),
+            ("judge-model-ab", "judge-model"),
             ("run-pr-abc", "run-pr"),
             ("free-claude-sandbox", "free-claude"),
         ] {
@@ -49995,7 +49995,7 @@ mod tests {
             r#"[{"agent":"ljos-bot","choice":"guard-fix","confidence":"0.6"},
                 {"agent":"hn-skeptic","choice":"guard-fix","confidence":"0.75"},
                 {"agent":"agent-daily-user","choice":"install"},
-                {"agent":"judge:qwen","choice":"install"},
+                {"agent":"judge:model-d","choice":"install"},
                 {"agent":"inky","choice":"guard-fix"}]"#,
         )
         .unwrap();
@@ -56419,7 +56419,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let only = [
             ballot("reviewer", "ship"),
             ballot("reader", "ship"),
-            ballot("judge:grok-4", "ship"),
+            ballot("judge:model-a", "ship"),
         ];
         let err = seats_decide("surf-ab12", &only, &personas, "grok").unwrap_err();
         assert_eq!(
@@ -56434,7 +56434,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ballot("codex", "ship"),
             ballot("reviewer", "hold"),
             ballot("reader", "hold"),
-            ballot("judge:grok-4", "hold"),
+            ballot("judge:model-a", "hold"),
         ];
         let d = seats_decide("surf-ab12", &outvoted, &personas, "grok").unwrap();
         assert_eq!(d.choice, "ship");
