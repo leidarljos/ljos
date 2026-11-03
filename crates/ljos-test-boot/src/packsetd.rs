@@ -387,20 +387,19 @@ fn unique_dir() -> PathBuf {
 }
 
 fn health(port: u16) -> bool {
-    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
-        return false;
-    };
+    get_health(port).is_some_and(|said| said.starts_with("HTTP/1.1 200"))
+}
+
+fn get_health(port: u16) -> Option<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let _ = stream.set_read_timeout(Some(HEALTH_IO));
     let _ = stream.set_write_timeout(Some(HEALTH_IO));
-    if stream
+    stream
         .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
-        return false;
-    }
+        .ok()?;
     let mut said = String::new();
     let _ = stream.read_to_string(&mut said);
-    said.starts_with("HTTP/1.1 200")
+    Some(said)
 }
 
 /// The port `pid` is listening on.
@@ -648,6 +647,7 @@ mod tests {
     const STANDIN_C: &str = r#"
 #include <netinet/in.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -667,13 +667,22 @@ int main(void) {
     fprintf(stderr, "packsetd: listening on http://127.0.0.1:%u with 1 workers\n",
             ntohs(bound.sin_port));
     fflush(stderr);
+    /* The body is the HOME this process was given, so a test on a host
+       without /proc can still read it. 4096 is Linux PATH_MAX, the longest
+       of the hosts the suite runs on; the reply adds a header under 100
+       bytes. */
+    const char *home = getenv("HOME");
+    char body[4096];
+    snprintf(body, sizeof body, "HOME=%s", home ? home : "");
+    char msg[4200];
+    snprintf(msg, sizeof msg,
+             "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+             strlen(body), body);
     for (;;) {
         int c = accept(fd, 0, 0);
         if (c < 0) continue;
         char buf[1024];
         (void)read(c, buf, sizeof buf);
-        const char *msg =
-            "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\npacksetd ok";
         (void)write(c, msg, strlen(msg));
         close(c);
     }
@@ -721,13 +730,11 @@ int main(void) {
             process_home.as_deref(),
             "the writer inherited the process home"
         );
-        let env = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
-        let text = String::from_utf8_lossy(&env);
+        let said = get_health(daemon.port()).unwrap_or_default();
         let home = daemon.home().to_string_lossy();
         assert!(
-            text.split('\0')
-                .any(|entry| entry == format!("HOME={home}")),
-            "HOME in the writer: {text}"
+            said.ends_with(&format!("\r\n\r\nHOME={home}")),
+            "HOME in the writer: {said}"
         );
         assert!(alive(pid), "the writer was not alive");
         drop(daemon);
