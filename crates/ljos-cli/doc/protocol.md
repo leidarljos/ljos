@@ -252,7 +252,7 @@ cloud seat git runs only the hooks the repository and the login name.
   --outcome OPTION` (or `ljos learn`) writes every voter's record of
   outcomes as its weight, so the next settle weighs a voter by what it
   got right. A record's accuracy is first shrunk toward the panel's
-  pooled accuracy, and the outcome is kept: once five issues have one, the
+  pooled accuracy, and the outcome is kept: once six issues have one, the
   settle discounts voters who err together. When the person's answer was
   none of the options (a tie broken with a third answer), add
   `--new-option`: every voter is scored a miss on it. Without the flag an

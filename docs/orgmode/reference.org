@@ -63,7 +63,7 @@
 | =predict ID --expect OPTION\vert JSON [--as PERSONA]= | pack | forecast the others' shares; two or more and =consensus= names the answer more popular than forecast (Prelec, doi:10.1038/nature21054) |
 | =rule PATTERN [--verdict deny\vert ask] --why TEXT [--user]= | pack, user config | argv law the hook and =policy= enforce: a glob, or a regular expression (=re:= or a =\b=, =\s= or =(a\vert b)= in it) anchored at the start, tried on the whole line and on each command it runs; [[*What a rule reads][What a rule reads]] lists which those are. =--why= is the reason a stopped reader sees. =--user= writes the law into the user config instead of the seat pack, shared by every seat and never reviewed |
 | =rules [--json]= | pack | the rules the hook and =policy= judge by: verdict, pattern and reason, deny first |
-| =consensus ID [--compare]= | consensus, tracker | first what the seat ballots alone decide for the push check; then the settle under the pack's rows that apply to the issue, with every persona's anchor, as advice; an issue tagged =broad= runs bounded confidence; once five issues have an outcome, voters shown to err together are discounted; =--compare= adds the tracker's own settle, and so does a missing model crate; an issue with no ballots is refused before a settle runs; =--json= prints one JSON document, the seat tally at the top level and each reading under its own key |
+| =consensus ID [--compare]= | consensus, tracker | first what the seat ballots alone decide for the push check; then the settle under the pack's rows that apply to the issue, with every persona's anchor, as advice; an issue tagged =broad= runs bounded confidence; once six issues have an outcome, voters shown to err together are discounted; =--compare= adds the tracker's own settle, and so does a missing model crate; an issue with no ballots is refused before a settle runs; =--json= prints one JSON document, the seat tally at the top level and each reading under its own key |
 | =claim [ID] [--next] [--role ROLE] [--slack N] [--assignee NAME]= | claim graph | claim a session node. With =--next=, or with no id, it claims the first ready node in claimdag's order for the name, the way =claim ID= claims one; =--role= and =--slack= set the affinity and the depth slack. A busy refusal names what the name has still claimed |
 | =release ID [--assignee NAME]= | claim graph | hand the session node back unfinished: ready, generation moved; a node another conversation of this seat holds (a worker it started, or the one that started it) is released under that name |
 | =reap [--idle 6h] [--apply]= | claim graph | release claims idle past a window and mail each seat. Without =--apply= it prints what would happen. =--idle= is how long a claim may sit with no claim or tracker commit: =6h=, =90m=, =2d= |
@@ -536,7 +536,7 @@ floored at 0.01. A vindicated voter keeps its weight, and a missing row
 starts at 1.
 
 =consensus= reads each issue's ballots beside the option it closed on once
-five issues have an outcome, and asks =ljos-consensus correlation= how far
+six issues have an outcome, and asks =ljos-consensus correlation= how far
 the voters share their mistakes. A pair counts only when its correlation
 passes the one-sided test of independence at five percent. A voter's
 inbound weight in the settle is multiplied by

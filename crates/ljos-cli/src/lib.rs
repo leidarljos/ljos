@@ -26375,10 +26375,16 @@ pub fn outcomes_of(atoms: &[Value]) -> std::collections::BTreeMap<String, String
     latest.into_iter().map(|(k, (_, c))| (k, c)).collect()
 }
 
-/// Named outcomes a pair must share before `ljos-consensus correlation`
-/// reads its correlation (its `--min-shared` default). Below it no
-/// discount can move, so the reading is not asked for.
-pub const MIN_NAMED_OUTCOMES: usize = 5;
+/// Named outcomes the seat waits for before it asks
+/// `ljos-consensus correlation` for a reading. Consensus checks each pair
+/// of voters with Fisher's one-sided exact test, and at 5% no pair passes
+/// on five shared outcomes or fewer. The smallest tail over m shared
+/// outcomes is 1 / C(m, m / 2), which is 1/10 at five and first reaches
+/// 1/20 at six. A pair shares at most as many outcomes as are named, so
+/// below six no discount can move, and the reading is not asked for.
+/// leidarljos/consensus derives this in `derive/sympy/constants.py` and
+/// states it in the `src/correlation.rs` module doc.
+pub const MIN_NAMED_OUTCOMES: usize = 6;
 
 /// The correlation reading over the issues whose outcome is named: each
 /// issue's ballots beside the option it closed on. None below
