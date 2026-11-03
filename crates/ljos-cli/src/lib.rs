@@ -69410,7 +69410,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// `bytes/` and digest sidecars. CI builds that same file. The binary
     /// is installed on PATH the way CI installs deedar. A failed build
     /// fails the test. One process builds that pin once. The tree is
-    /// named by the pin sha, and an existing tree is left in place: two
+    /// named by the pin sha, and an existing tree is left in place: three
     /// tests call this, and deleting the shared directory races the build.
     /// The caller holds the env lock: git and cargo read HOME and git
     /// config from the process environment, which other tests change
