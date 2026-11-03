@@ -4,8 +4,9 @@
 # <rgoswami@ieee.org>, the committer date is not the author date, or a
 # message line is a by-trailer, a made-with line, a generated line, or a
 # machine account mark. A Tests or note paragraph is not that line.
-# Exit 2 when no range was given. Commits outside the arguments
-# are not read.
+# Dates match as seconds since the epoch, so one instant written with
+# two offsets still matches. Exit 2 when no range was given. Commits
+# outside the arguments are not read.
 # Usage: identity-gate.sh <git rev-list arguments>
 set -eu
 
@@ -34,7 +35,7 @@ for hash in $hashes; do
       status=1
       ;;
   esac
-  dates=$(git log -1 --format='%aI %cI' "$hash") || {
+  dates=$(git log -1 --format='%at %ct' "$hash") || {
     echo "identity-gate: cannot read $hash" >&2
     exit 1
   }
