@@ -20,7 +20,6 @@ ignore = [
     # fail the check on any webpki-roots release that ships its own copy of
     # the emSign root, and crates/ljos-cli/tests/tls_roots.rs checks the
     # root is not in the build.
-    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 re-exports the 1.0.10 roots" },
 ]
 
 [bans]
@@ -43,7 +42,6 @@ allow = [
     "ISC",
     "MIT",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
 ]
 confidence-threshold = 0.8
