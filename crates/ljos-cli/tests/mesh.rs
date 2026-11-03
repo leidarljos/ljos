@@ -218,6 +218,67 @@ fn running_up_twice_joins_once_and_down_leaves() {
     assert!(again.contains("not on the mesh"), "{again}");
 }
 
+/// A process group that is not tailscaled, as a reused pid would name.
+struct Bystander(std::process::Child);
+
+impl Bystander {
+    fn start() -> Self {
+        use std::os::unix::process::CommandExt;
+        let child = Command::new("sleep")
+            .arg("600")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        Self(child)
+    }
+
+    fn pid(&self) -> String {
+        self.0.id().to_string()
+    }
+
+    fn alive(&mut self) -> bool {
+        self.0.try_wait().unwrap().is_none()
+    }
+}
+
+impl Drop for Bystander {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn a_stale_pid_file_signals_nothing_on_up_or_down() {
+    let world = World::new();
+    let mut other = Bystander::start();
+    let pid = other.pid();
+    let state = world.path("run/ljos/mesh");
+    let stale = |contents: String| {
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("tailscaled.pid"), contents).unwrap();
+    };
+    let named = format!("tailscaled.pid named pid {pid}");
+
+    stale(format!("{pid}\n"));
+    let up = one_line(&world.up(), "up over a stale pid file");
+    assert!(other.alive(), "up signalled the group pid {pid} leads");
+    assert!(up.contains("joined") && up.contains(&named), "{up}");
+    let ours = world.daemon_pid().expect("the daemon recorded its pid");
+    assert_ne!(ours, pid);
+    one_line(&world.down(), "down");
+    assert!(gone(&ours), "tailscaled {ours} is still running after down");
+
+    stale(format!("{pid}\n1\n"));
+    let down = one_line(&world.down(), "down over a stale pid file");
+    assert!(other.alive(), "down signalled the group pid {pid} leads");
+    assert!(
+        down.contains("left the mesh") && down.contains(&named),
+        "{down}"
+    );
+}
+
 #[test]
 fn every_failure_is_one_line_and_exit_0() {
     let world = World::new();
@@ -476,4 +537,17 @@ fn a_write_on_the_mesh_carries_the_node_and_the_seat_it_claims() {
     one_line(&world.down(), "down");
     let off = remember("The staging host keeps three days of logs.");
     assert!(off["source"].get("mesh").is_none(), "{off}");
+
+    one_line(&world.up(), "up again");
+    let pid = world.daemon_pid().expect("the daemon recorded its pid");
+    let killed = Command::new("kill").args(["-9", &pid]).status().unwrap();
+    assert!(killed.success(), "kill -9 {pid}");
+    // Up to the `-k 5` grace a sitting gets. ljos reads a zombie that
+    // nobody has reaped yet as gone, so the wait only keeps /proc tidy.
+    let until = Instant::now() + Duration::from_secs(5);
+    while !gone(&pid) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let crashed = remember("The release job tags the commit it built.");
+    assert!(crashed["source"].get("mesh").is_none(), "{crashed}");
 }

@@ -44,11 +44,17 @@ const WAIT_SECS: u64 = 30;
 /// How long a stopped tailscaled has to exit before it is killed: the
 /// `-k 5` of that bound.
 const GRACE: Duration = Duration::from_secs(5);
-/// The step between looks at a socket or a process. A look is one stat or
-/// one signal, so 50 a second cost nothing and end a wait within 20 ms.
-const POLL: Duration = Duration::from_millis(20);
-/// Random hex digits in a node name. Three bytes give 2^24 names, so 40
-/// nodes in one swarm share a name with odds near 1 in 21,000 (n²/2N).
+/// A delay a person reads as no delay: 0.1 s (Nielsen, Usability
+/// Engineering, 1993, §5.5).
+const INSTANT_MS: u64 = 100;
+/// The step between looks at a socket or a process. Each polled wait ends
+/// up to one step late, and one `up` sits through at most two of them (a
+/// stale daemon's exit, then the new socket), so two steps fit in
+/// `INSTANT_MS`. A look is one stat or one signal.
+const POLL: Duration = Duration::from_millis(INSTANT_MS / 2);
+/// Random hex digits in a node name. Three bytes give N = 2^24 names, so n
+/// nodes in one swarm share a name with odds near n²/2N (the birthday
+/// bound): under 1 in 1,000 below 183 nodes, under 1 in 100 below 579.
 const NODE_HEX: usize = 6;
 /// The longest swarm id a node name fits: a DNS label is at most 63
 /// octets (RFC 1035 §2.3.4), less `ag-`, a dash and the hex digits.
@@ -77,13 +83,60 @@ fn state_dir() -> PathBuf {
     crate::runtime_dir_path().join("mesh")
 }
 
-/// The node `ljos mesh up` joined as, until `ljos mesh down`.
+/// The node `ljos mesh up` joined as, while the tailscaled it started runs.
+/// A daemon that is gone takes the label with it.
 #[must_use]
 pub fn joined_node() -> Option<String> {
-    std::fs::read_to_string(state_dir().join(JOINED))
+    let dir = state_dir();
+    let node = std::fs::read_to_string(dir.join(JOINED))
         .ok()
         .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty())
+        .filter(|n| !n.is_empty())?;
+    if recorded(&dir).is_some_and(|(_, ours)| ours) {
+        return Some(node);
+    }
+    let _ = std::fs::remove_file(dir.join(JOINED));
+    None
+}
+
+/// Returns the start time of `pid` in clock ticks since boot. It returns
+/// none when no live process has that pid. A reused pid starts later, so
+/// the start time pins down one process.
+#[cfg(target_os = "linux")]
+fn started(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The name before the last `)` may contain spaces. After it come the
+    // state (field 3) and, 19 fields on, the start time (field 22), as
+    // proc_pid_stat(5) numbers them.
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    if matches!(fields.next()?, "Z" | "X") {
+        return None;
+    }
+    fields.nth(18).map(str::to_string)
+}
+
+/// When `pid` started, as `ps` prints it, or none when no process has it.
+#[cfg(not(target_os = "linux"))]
+fn started(pid: u32) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let when = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !when.is_empty()).then_some(when)
+}
+
+/// The pid in the pid file, and whether it still names the tailscaled
+/// `start_daemon` recorded: the same pid with the same start time.
+fn recorded(dir: &Path) -> Option<(u32, bool)> {
+    let text = std::fs::read_to_string(dir.join(PID)).ok()?;
+    let mut lines = text.lines();
+    let pid = lines.next()?.trim().parse::<u32>().ok()?;
+    let at = lines.next().map(str::trim).filter(|at| !at.is_empty());
+    let ours = at.is_some_and(|at| started(pid).as_deref() == Some(at));
+    Some((pid, ours))
 }
 
 fn load() -> Result<Config> {
@@ -166,8 +219,9 @@ fn join(config: &Config, key: Option<&str>, deadline: Instant) -> Result<String>
     let key = key.ok_or_else(|| anyhow!("{} is unset", config.key_env))?;
     let kernel = kernel_tun();
     let mut started = None;
+    let mut stale = None;
     if answered.is_none() {
-        stop_daemon(&dir, deadline);
+        stale = stop_daemon(&dir, deadline);
         let _ = std::fs::remove_file(&socket);
         started = Some(start_daemon(&tailscaled, &dir, config, kernel)?);
     }
@@ -188,7 +242,10 @@ fn join(config: &Config, key: Option<&str>, deadline: Instant) -> Result<String>
     } else {
         format!("userspace mode, SOCKS5 on localhost:{}", config.ports.socks)
     };
-    Ok(format!("mesh up: {node} joined swarm {swarm} in {mode}"))
+    let stale = stale.map(|note| format!("; {note}")).unwrap_or_default();
+    Ok(format!(
+        "mesh up: {node} joined swarm {swarm} in {mode}{stale}"
+    ))
 }
 
 /// `ag-<swarm>-<hex>`, made once per state directory. The machine's host
@@ -302,7 +359,8 @@ fn start_daemon(tailscaled: &Path, dir: &Path, config: &Config, kernel: bool) ->
         .stderr(log)
         .process_group(0);
     let child = cmd.spawn().context("tailscaled could not start")?;
-    std::fs::write(dir.join(PID), child.id().to_string())?;
+    let at = started(child.id()).unwrap_or_default();
+    std::fs::write(dir.join(PID), format!("{}\n{at}\n", child.id()))?;
     Ok(child)
 }
 
@@ -363,21 +421,27 @@ fn kill_group(pid: u32, signal: libc::c_int) -> bool {
     unsafe { libc::kill(-pid, signal) == 0 }
 }
 
-/// Stop the tailscaled `start_daemon` recorded, within the grace.
-fn stop_daemon(dir: &Path, deadline: Instant) {
-    let pid = std::fs::read_to_string(dir.join(PID))
-        .ok()
-        .and_then(|p| p.trim().parse::<u32>().ok());
-    if let Some(pid) = pid {
-        if kill_group(pid, libc::SIGTERM) {
-            let until = deadline.min(Instant::now() + GRACE);
-            while kill_group(pid, 0) && Instant::now() < until {
-                std::thread::sleep(POLL);
+/// Stop the tailscaled `start_daemon` recorded, within the grace. A pid
+/// that no longer names it is never signalled, and the note says so.
+fn stop_daemon(dir: &Path, deadline: Instant) -> Option<String> {
+    let note = match recorded(dir) {
+        Some((pid, true)) => {
+            if kill_group(pid, libc::SIGTERM) {
+                let until = deadline.min(Instant::now() + GRACE);
+                while kill_group(pid, 0) && Instant::now() < until {
+                    std::thread::sleep(POLL);
+                }
+                kill_group(pid, libc::SIGKILL);
             }
-            kill_group(pid, libc::SIGKILL);
+            None
         }
-    }
+        Some((pid, false)) => Some(format!(
+            "{PID} named pid {pid}, no longer the tailscaled ljos started, so nothing was signalled"
+        )),
+        None => None,
+    };
     let _ = std::fs::remove_file(dir.join(PID));
+    note
 }
 
 /// `ljos mesh down`: log out, stop tailscaled, remove the state directory.
@@ -409,7 +473,7 @@ pub fn down() -> String {
             Err(_) => notes.push("tailscale is not on PATH, so there was no logout".into()),
         }
     }
-    stop_daemon(&dir, deadline);
+    notes.extend(stop_daemon(&dir, deadline));
     if let Err(e) = std::fs::remove_dir_all(&dir) {
         notes.push(format!("{} stays: {e}", dir.display()));
     }

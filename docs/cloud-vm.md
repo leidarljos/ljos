@@ -109,17 +109,75 @@ A clone that fails does not stop `cloud up`. The line names the remote without i
 
 ## The mesh
 
-`ljos mesh up` joins this machine to its swarm's tailnet on a Headscale login server, where the box's services listen. `ljos mesh down` leaves it. Both read `mesh.toml` in the ljos config directory, `$XDG_CONFIG_HOME/ljos/mesh.toml` or `~/.config/ljos/mesh.toml`. [examples/mesh.toml](../examples/mesh.toml) is a commented copy that names no real host. The file holds the login server URL, the swarm id, the name of the environment variable that holds the join key, and the ports: the ljos API, store-ro, docs-ro and drop on the box, and this machine's SOCKS5 port for userspace mode. Each port is written there once. `ljos mesh acl` reads the same file.
+`ljos mesh up` joins this machine to its swarm's tailnet on a Headscale login server.
+The box's services listen on that tailnet.
+`ljos mesh down` leaves it.
+Both verbs read `mesh.toml` in the ljos config directory.
+That file is `$XDG_CONFIG_HOME/ljos/mesh.toml` or `~/.config/ljos/mesh.toml`.
+[examples/mesh.toml](../examples/mesh.toml) is a commented copy that names no real host.
+The file names the login server URL, the swarm id and the join key's environment variable.
+It also lists the ports.
+Four sit on the box: the ljos API, store-ro, docs-ro and drop.
+The fifth is this machine's SOCKS5 port for userspace mode.
+Each port is written there once, and `ljos mesh acl` reads the same file.
 
-The join key is read from that variable. It is never printed, logged or written to disk, and no child but `tailscale up` sees it. It is on that command's line for the length of the join, where another process of the same user can read it, so use an ephemeral pre-auth key that carries one swarm's tag. The node name is `ag-<swarm>-<6 hex digits>`. ljos makes it once per state directory and never reads the machine's host name for it. With CAP_NET_ADMIN and `/dev/net/tun`, tailscaled uses a kernel TUN. Otherwise it runs in userspace networking mode with a SOCKS5 proxy on `localhost:<socks>`. tailscaled keeps its node key in memory (`--state=mem:`) and uploads no logs. The join passes `--accept-routes=false` and `--accept-dns=false`, so no route outside the mesh and no DNS setting changes.
+The join key comes from that variable.
+ljos never prints it, logs it or writes it to disk.
+No child but `tailscale up` sees it.
+It sits on that command's line for the length of the join.
+Another process of the same user can read it there.
+So use an ephemeral pre-auth key that carries one swarm's tag.
 
-If this node is already running on the mesh, `mesh up` says so and joins nothing. Otherwise it starts tailscaled if none answers on its socket, then runs `tailscale up`. There is no lock and no step on the server per join, so a whole swarm can join at once. Each failure is one line and exit status 0: no config, no tailscale on PATH, no key, a key the server refuses, or a join still running at the bound. The seat carries on without the mesh. The bound is 30 seconds, the `timeout -k 5 30` a sitting already runs under. `LJOS_MESH_WAIT` sets it in seconds.
+The node name is `ag-<swarm>-<6 hex digits>`.
+ljos makes it once per state directory.
+It never reads the machine's host name for it.
+With CAP_NET_ADMIN and `/dev/net/tun`, tailscaled uses a kernel network tunnel (TUN) device.
+Otherwise it runs in userspace networking mode.
+That mode serves a SOCKS5 proxy on `localhost:<socks>`.
+macOS always takes userspace mode, since ljos reads the capability from `/proc`.
+tailscaled keeps its node key in memory (`--state=mem:`) and uploads no logs.
+The join passes `--accept-routes=false` and `--accept-dns=false`.
+So no route outside the mesh changes, and no Domain Name System (DNS) setting changes.
 
-`mesh down` logs out, stops the tailscaled `mesh up` started, and removes the state directory, within the same bound. The state directory is `mesh/` under the ljos runtime directory and holds the socket, the node name and tailscaled's log, never anything in a checkout. Neither verb touches git config, hooks, a checkout or `~/.gitconfig`.
+If this node already runs on the mesh, `mesh up` says so and joins nothing.
+Otherwise it starts tailscaled when none answers on its socket.
+Then it runs `tailscale up`.
+A join needs no lock and no server step.
+A whole swarm can join at once.
+Each failure prints one line and exits 0.
+That covers no config, no tailscale on PATH, no key, a refused key, and a slow join.
+The seat carries on without the mesh.
+The bound is 30 seconds, the `timeout -k 5 30` a sitting already runs under.
+`LJOS_MESH_WAIT` sets it in seconds.
 
-While this machine is on the mesh, every write ljos records in the pack, mail included, carries `source.mesh`: the node name and the seat it claims. Consensus reads it like any other provenance. Nothing is refused, held back or slowed for it. The seat is whatever the writer says, so the label records a claim and proves nothing.
+`mesh down` logs out, stops the tailscaled `mesh up` started, and removes the state directory.
+It finishes within the same bound.
+The state directory is `mesh/` under the ljos runtime directory.
+It keeps the socket, the node name, the pid file and tailscaled's log.
+Nothing of it lives in a checkout.
+The pid file records tailscaled's start time next to its pid.
+Before either verb signals tailscaled, it checks that the pid still started at that time.
+A pid that no longer names that tailscaled gets no signal.
+The verb then drops the pid file and says so in its line.
+Neither verb touches git config, hooks, a checkout or `~/.gitconfig`.
 
-`ljos mesh acl` prints the Headscale ACL policy as JSON. Each swarm reaches its own nodes on every port and `tag:box` on the four box ports, and there is no other rule. So no swarm reaches another, and the box reaches no swarm. The join key carries the swarm's tag and no user owns a tag, so a node cannot tag itself into another swarm. `ljos mesh acl SWARM...` adds the same pair of rules for each swarm named.
+ljos labels each write it records in the pack with `source.mesh`, mail included.
+It does so while the tailscaled `mesh up` started still runs.
+The label names the node and the seat the writer claims.
+Once that tailscaled exits or crashes, the next write carries no label.
+Consensus reads the label like any other provenance.
+Nothing waits on it, and nothing is refused for it.
+The seat is whatever the writer says, so the label records a claim and nothing more.
+
+`ljos mesh acl` prints the Headscale access control list (ACL) policy as JSON.
+Each swarm reaches its own nodes on every port.
+It also reaches `tag:box` on the four box ports.
+No other rule exists, so no swarm reaches another, and the box reaches no swarm.
+The join key carries the swarm's tag.
+No user owns a tag, so a node cannot tag itself into another swarm.
+`ljos mesh acl SWARM...` adds the same pair of rules for each swarm it names.
+
+The mesh tests run on Linux only, with a fake tailscale and tailscaled.
 
 ## Deeds
 
