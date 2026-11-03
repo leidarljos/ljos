@@ -32069,6 +32069,10 @@ fn with_tracker(said: String, node: &str, assignee: &str) -> Result<String> {
     Ok(out)
 }
 
+/// What `claim` says to a blank id.
+pub const EMPTY_CLAIM_ID: &str =
+    "claim: the id is empty; pass a tracker id, or omit it to claim the next ready node";
+
 /// Take a session node, and when the claim graph refuses because the
 /// assignee still holds another node, say which tracker id that is and the
 /// two verbs that free it. The bare refusal names a 32-hex id nobody can
@@ -32078,6 +32082,9 @@ fn with_tracker(said: String, node: &str, assignee: &str) -> Result<String> {
 ///
 /// The refusal, explained, or any other failure of the claim graph.
 pub fn claim(node: &str, assignee: &str) -> Result<String> {
+    if node.trim().is_empty() {
+        bail!(EMPTY_CLAIM_ID);
+    }
     let assignee = claim_holder(assignee)?;
     let assignee = assignee.as_str();
     let id = node_for(node)?;

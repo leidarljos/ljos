@@ -990,8 +990,8 @@ enum Cmd {
     /// Take a session node for an issue. One live claim per assignee.
     Claim {
         /// A tracker id, or a 32-hex claim-graph id. Omit when claiming next.
-        #[arg(default_value = "")]
-        node: String,
+        #[arg(value_parser = named_node)]
+        node: Option<String>,
         /// Your name; mapped to one actor id. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
@@ -1597,6 +1597,16 @@ fn vissue_id_parts(word: &str) -> Option<(&str, &str)> {
             .bytes()
             .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase()))
     .then_some((project, suffix))
+}
+
+/// A node named on the command line. A blank one is an error at once,
+/// not the next ready node: only an omitted id claims next.
+fn named_node(raw: &str) -> Result<String, String> {
+    let node = raw.trim();
+    if node.is_empty() {
+        return Err(ljos_cli::EMPTY_CLAIM_ID.to_string());
+    }
+    Ok(node.to_string())
 }
 
 /// The write acknowledgement: the plain sentence for a person at a
@@ -2809,16 +2819,19 @@ fn run_command() -> Result<()> {
             slack,
         } => {
             let assignee = assignee_for("claim", assignee.as_deref(), false)?;
-            if next || node.is_empty() {
-                let said = claim_next(&assignee, role.as_deref(), slack)?;
-                let taken = said.split_whitespace().next().unwrap_or("").to_string();
-                print!("{said}");
-                if !taken.is_empty() {
-                    print!("{}", ljos_cli::persist_tracker(&taken, "claimed"));
+            match node.filter(|_| !next) {
+                Some(node) => {
+                    print!("{}", claim(&node, &assignee)?);
+                    print!("{}", ljos_cli::persist_tracker(&node, "claimed"));
                 }
-            } else {
-                print!("{}", claim(&node, &assignee)?);
-                print!("{}", ljos_cli::persist_tracker(&node, "claimed"));
+                None => {
+                    let said = claim_next(&assignee, role.as_deref(), slack)?;
+                    let taken = said.split_whitespace().next().unwrap_or("").to_string();
+                    print!("{said}");
+                    if !taken.is_empty() {
+                        print!("{}", ljos_cli::persist_tracker(&taken, "claimed"));
+                    }
+                }
             }
         }
         Cmd::Release { node, assignee } => {
