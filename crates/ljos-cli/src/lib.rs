@@ -12423,11 +12423,11 @@ fn runner_record_holders(chain: &[(u32, String)]) -> Vec<String> {
 }
 
 /// Where `ljos file` puts a new issue: its parent, its project, and a line
-/// for the agent when the held issue was passed over. `--top` files with
-/// no parent and `--parent` names one. Otherwise the held issue is the
-/// parent, unless `-p` names another project: a child lives in its
-/// parent's project, so a tool bug filed with `-p` mid-sitting goes to
-/// the top of that project, not under the work being sat on. For the
+/// for the agent. `--top` files with no parent and `--parent` names one.
+/// Otherwise the held issue is the parent, and the line names that issue
+/// and its project, unless `-p` names another project: a child lives in
+/// its parent's project, so a tool bug filed with `-p` mid-sitting goes
+/// to the top of that project, not under the work being sat on. For the
 /// same reason a `--parent` files in that parent's project whatever `-p`
 /// names, and the line says so.
 #[must_use]
@@ -12440,6 +12440,9 @@ pub fn file_placement(
     fn project_of(id: &str) -> Option<&str> {
         id.rsplit_once('-').map(|(proj, _)| proj)
     }
+    // A parent the seat did not type is the hold. The line names it, so a
+    // sitting on one project does not file a child there without saying so.
+    let from_hold = !top && parent.is_none();
     let mut passed_over = None;
     let parent = if top {
         None
@@ -12469,6 +12472,14 @@ pub fn file_placement(
         }
         (home, asked) => asked.or_else(|| home.map(str::to_string)),
     };
+    if let (Some(id), Some(proj)) = (parent.as_deref(), project.as_deref()) {
+        if from_hold && passed_over.is_none() {
+            passed_over = Some(format!(
+                "filed under {id} in {proj}, the issue this conversation holds; \
+                 --top -p {proj} files at the top of {proj}\n"
+            ));
+        }
+    }
     (parent, project, passed_over)
 }
 
@@ -45306,15 +45317,20 @@ mod tests {
     fn file_with_another_project_mid_sitting_goes_to_its_top() {
         let held = || Some("garden-06v8".to_string());
         let s = |v: &str| Some(v.to_string());
-        // The default: a child of the held issue, in its project.
+        // The default: a child of the held issue, in its project, and a
+        // line that names the hold so the filing is not silent.
         let (parent, project, said) = file_placement(false, None, None, held());
         assert_eq!(parent, s("garden-06v8"));
         assert_eq!(project, s("garden"));
-        assert_eq!(said, None);
-        // The same project named: still a child.
+        let said = said.expect("a line");
+        assert!(said.contains("filed under garden-06v8 in garden"), "{said}");
+        assert!(said.contains("--top -p garden"), "{said}");
+        // The same project named: still a child, and the same line.
         let (parent, _, said) = file_placement(false, None, s("garden"), held());
         assert_eq!(parent, s("garden-06v8"));
-        assert_eq!(said, None);
+        let said = said.expect("a line");
+        assert!(said.contains("filed under garden-06v8 in garden"), "{said}");
+        assert!(said.contains("this conversation holds"), "{said}");
         // A tool bug against another project: top level there, and a line
         // that says how to file under the held issue after all.
         let (parent, project, said) = file_placement(false, None, s("Tools"), held());

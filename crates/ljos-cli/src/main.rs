@@ -2217,15 +2217,35 @@ fn run_command() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("--deadline {d:?} is not RFC 3339: {e}"))?;
             }
             let body = ljos_cli::body_with_options(body, &options.into_iter().collect::<Vec<_>>())?;
-            let held = if top || parent.is_some() {
+            let named_parent = parent.is_some();
+            let named_project = project.is_some();
+            // `--top` and `--parent` are a parent the seat chose. Only the
+            // plain command asks what this conversation holds.
+            let held = if top || named_parent {
                 None
             } else {
                 ljos_cli::held_issue()
             };
-            let (parent, project, passed_over) =
+            let no_hold = held.is_none();
+            let (parent, mut project, passed_over) =
                 ljos_cli::file_placement(top, parent, project, held);
             if let Some(line) = passed_over {
                 eprint!("{line}");
+            }
+            // No hold, no `--parent` and no `-p`: the `prefix=` line
+            // `vissue identity` prints for this checkout. `--top` still
+            // needs a named project. No prefix keeps today's error.
+            if project.is_none() && no_hold && !top && !named_parent && !named_project {
+                let prefix = run_captured("vissue", &["identity"]).ok().and_then(|said| {
+                    said.stdout.lines().find_map(|line| {
+                        let value = line.trim().strip_prefix("prefix=")?.trim();
+                        (!value.is_empty()).then(|| value.to_string())
+                    })
+                });
+                if let Some(prefix) = prefix {
+                    eprintln!("filed in {prefix}, this checkout's project");
+                    project = Some(prefix);
+                }
             }
             let Some(project) = project else {
                 anyhow::bail!("no project: name one with -p, or a parent with --parent");
