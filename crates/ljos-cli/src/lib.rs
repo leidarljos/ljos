@@ -33501,9 +33501,34 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
         Err(_) => Vec::new(),
     };
     let mut cues = vec![issue.to_string()];
-    if let Ok(t) = issue_title(issue) {
-        if t != issue {
-            cues.push(t);
+    // The title and the tags come off one card. The tags are the words a
+    // seat chose to classify the work, and a short title such as
+    // "Follow-up" shares none of them with the memories filed under those
+    // tags, so the joined tags are asked after the title. Lower case, so
+    // `Mail` and `mail` ask for the same word; space around a tag is not
+    // part of it. A card the tracker does not return, or one whose
+    // `org_tags` is missing or not a list of words, adds no cue and
+    // prints no line. The same words as the id or the title are not asked
+    // again: a second search cannot add a hit the first one missed.
+    if let Ok(card) = tracker_show_json(issue) {
+        if let Some(title) = card.get("title").and_then(Value::as_str) {
+            if title != issue {
+                cues.push(title.to_string());
+            }
+        }
+        let joined = card
+            .get("org_tags")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !joined.is_empty() && cues.iter().all(|cue| cue != &joined) {
+            cues.push(joined);
         }
     }
     let pool = u32::try_from(RELATED_MEMORY_CAP * POOL_PER_SHOWN).unwrap_or(u32::MAX);
