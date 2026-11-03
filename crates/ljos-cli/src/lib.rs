@@ -37686,13 +37686,18 @@ fn prune_push_logs(keep: Option<&Path>) {
     }
 }
 
+/// Seconds a sitting waits for the tracker push when
+/// `LJOS_TRACKER_PUSH_WAIT` is unset. A finish is wrapped in a timeout
+/// of about ten seconds, and this wait is half of that.
+pub const DEFAULT_PUSH_WAIT_SECS: u64 = 5;
+
 /// How long a sitting waits for the tracker push: `LJOS_TRACKER_PUSH_WAIT`
-/// seconds, else 5: agents wrap a finish in a timeout of about ten seconds.
+/// seconds, else [`DEFAULT_PUSH_WAIT_SECS`].
 fn push_wait() -> std::time::Duration {
     let secs = std::env::var("LJOS_TRACKER_PUSH_WAIT")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(5);
+        .unwrap_or(DEFAULT_PUSH_WAIT_SECS);
     std::time::Duration::from_secs(secs)
 }
 
@@ -43517,14 +43522,18 @@ mod tests {
         );
     }
 
-    /// Longer than the stand-in pre-push hook's four-second sleep, so that
-    /// push has exited before the next tracker write. Five seconds is also
-    /// the wait used when `LJOS_TRACKER_PUSH_WAIT` is unset.
-    const PUSH_WAIT_SECS: u64 = 5;
-
     #[test]
     fn a_slow_tracker_push_finishes_in_the_background() {
         let _env = env_guard();
+        // One second under the default wait, so a wait of the default lets
+        // this hook exit before the next tracker write.
+        let hook_sleep = super::DEFAULT_PUSH_WAIT_SECS - 1;
+        // One second, under the hook sleep, so the first push is still
+        // running when the wait ends.
+        let short_wait: u64 = 1;
+        // Twice the default, past the hook, so the next push finishes.
+        let long_wait = 2 * super::DEFAULT_PUSH_WAIT_SECS;
+        let slow_hook = format!("#!/bin/sh\nsleep {hook_sleep}\n");
         let dir = tempfile::tempdir().unwrap();
         let (root, remote, hooks) = (
             dir.path().join("work"),
@@ -43554,7 +43563,7 @@ mod tests {
             git(&root, &["config", k, v]);
         }
         let hook = hooks.join("pre-push");
-        std::fs::write(&hook, "#!/bin/sh\nsleep 4\n").unwrap();
+        std::fs::write(&hook, &slow_hook).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         let issues = root.join("Software/probe/issues.org");
@@ -43568,20 +43577,24 @@ mod tests {
         );
         std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
         git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
-        std::fs::write(&hook, "#!/bin/sh\nsleep 4\n").unwrap();
+        std::fs::write(&hook, &slow_hook).unwrap();
         std::env::set_var("VISSUE_ROOT", &root);
         std::env::set_var("VISSUE_NO_ROUTE", "1");
         std::env::remove_var("ISSUE_ROOT");
         std::env::remove_var("LJOS_TRACKER_GIT");
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "1");
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", short_wait.to_string());
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
 
         std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
         let said = super::persist_tracker("probe-c3d4", "claimed");
-        assert!(said.contains("still running after 1s"), "{said}");
-        // The pre-push hook sleeps 4s. Returning while that process is
-        // still alive is the bound: a wall clock of a few seconds is eaten
-        // by git itself when the rest of the suite is also running git.
+        assert!(
+            said.contains(&format!("still running after {short_wait}s")),
+            "{said}"
+        );
+        // The pre-push hook sleeps `hook_sleep` seconds. Returning while
+        // that process is still alive is the bound: a wall clock of a few
+        // seconds is eaten by git itself when the rest of the suite is
+        // also running git.
         let log = said
             .split("(log ")
             .nth(1)
@@ -43596,10 +43609,12 @@ mod tests {
             .success();
         assert!(alive, "the pre-push hook had already exited: {said}");
 
-        std::thread::sleep(std::time::Duration::from_secs(PUSH_WAIT_SECS));
+        std::thread::sleep(std::time::Duration::from_secs(
+            super::DEFAULT_PUSH_WAIT_SECS,
+        ));
         std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "10");
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", long_wait.to_string());
         let said = super::persist_tracker("probe-c3d4", "finished");
         assert!(said.contains("committed and pushed"), "{said}");
         for var in [
@@ -43610,6 +43625,90 @@ mod tests {
         ] {
             std::env::remove_var(var);
         }
+    }
+
+    /// A French seat still hears that the remote was not reached. The
+    /// stand-in git prints a French host failure unless `LC_ALL` is `C`,
+    /// which is what the push in `persist_tracker_writes` sets.
+    #[test]
+    fn a_french_locale_still_says_the_remote_was_not_reached() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, remote) = (dir.path().join("work"), dir.path().join("remote.git"));
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let o = git_cmd().arg("-C").arg(cwd).args(args).output().unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        git(&root, &["init", "-q"]);
+        for (k, v) in [
+            ("user.email", "seat@example.invalid"),
+            ("user.name", "seat"),
+        ] {
+            git(&root, &["config", k, v]);
+        }
+        let issues = root.join("Software/probe/issues.org");
+        let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-fr37\n:END:\n";
+        std::fs::write(&issues, heading).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+
+        let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|path| path.is_file())
+            .expect("git on PATH");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let git_bin = bin.join("git");
+        std::fs::write(
+            &git_bin,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$1\" = push ]; then\n\
+                   if [ \"$LC_ALL\" = C ]; then\n\
+                     echo 'fatal: Could not resolve host: example.invalid' >&2\n\
+                   else\n\
+                     echo \"fatal: impossible de résoudre l'hôte: example.invalid\" >&2\n\
+                   fi\n\
+                   exit 128\n\
+                 fi\n\
+                 exec '{}' \"$@\"\n",
+                real_git.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&git_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        std::env::set_var("LC_ALL", "fr_FR.UTF-8");
+        std::env::set_var("LANG", "fr_FR.UTF-8");
+        std::env::set_var("LANGUAGE", "fr");
+        std::env::set_var("VISSUE_ROOT", &root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::remove_var("LJOS_TRACKER_GIT");
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+
+        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        let said = super::persist_tracker("probe-fr37", "claimed");
+        assert!(
+            said.contains("the remote was not reached (fatal: Could not resolve host:"),
+            "{said}"
+        );
     }
 
     /// An empty `core.sshCommand` is not a command. The batch ssh runs.

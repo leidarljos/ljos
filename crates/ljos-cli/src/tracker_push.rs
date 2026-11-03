@@ -1502,7 +1502,8 @@ note from b
     }
 
     /// A seat locale that is not English still yields the English text
-    /// `unreached` matches, because the git child runs with `LC_ALL=C`.
+    /// `unreached` matches. The stand-in git prints a French host failure
+    /// unless `LC_ALL` is `C`, which is what the git child sets.
     #[test]
     fn a_non_english_locale_still_matches_english_git_text() {
         let dir = tempfile::tempdir().unwrap();
@@ -1511,8 +1512,13 @@ note from b
         let git_bin = bin.join("git");
         std::fs::write(
             &git_bin,
-            "#!/bin/sh\necho \"LC_ALL=${LC_ALL-unset}\" >&2\n\
-             echo 'fatal: Could not resolve host: example.invalid' >&2\nexit 128\n",
+            "#!/bin/sh\n\
+             if [ \"$LC_ALL\" = C ]; then\n\
+               echo 'fatal: Could not resolve host: example.invalid' >&2\n\
+             else\n\
+               echo \"fatal: impossible de résoudre l'hôte: example.invalid\" >&2\n\
+             fi\n\
+             exit 128\n",
         )
         .unwrap();
         std::fs::set_permissions(&git_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1524,7 +1530,6 @@ note from b
         std::env::set_var("LANGUAGE", "fr");
         let out = git(dir.path(), &["push", "origin", "HEAD"]);
         let said = output_text(&out);
-        assert!(said.contains("LC_ALL=C"), "{said}");
         assert!(
             unreached(out.status, &said),
             "english host failure was not recognised: {said}"

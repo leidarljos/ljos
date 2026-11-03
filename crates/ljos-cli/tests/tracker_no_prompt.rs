@@ -14,15 +14,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-/// The tracker push wait each run is given, ljos's default (`push_wait`):
-/// half the timeout of about ten seconds a runner wraps a sitting in.
-const PUSH_WAIT_SECS: u64 = 5;
-/// That runner timeout, two push waits. A remote that fails at once
+/// That runner timeout, two of ljos's default push waits
+/// ([`ljos_cli::DEFAULT_PUSH_WAIT_SECS`]). A remote that fails at once
 /// leaves both verbs far inside it; a prompt never returns.
-const BUDGET: Duration = Duration::from_secs(2 * PUSH_WAIT_SECS);
+const BUDGET: Duration = Duration::from_secs(2 * ljos_cli::DEFAULT_PUSH_WAIT_SECS);
 /// How long the 401 server waits for git's request, half a push wait: git
 /// writes it as soon as it connects.
-const REQUEST_WAIT: Duration = Duration::from_secs(PUSH_WAIT_SECS / 2);
+const REQUEST_WAIT: Duration = Duration::from_secs(ljos_cli::DEFAULT_PUSH_WAIT_SECS / 2);
 /// What one read of that request takes. git's first request is a GET of
 /// `info/refs` with a few headers, a few hundred bytes; one page holds it.
 const REQUEST_BYTES: usize = 4096;
@@ -219,7 +217,10 @@ impl Board {
             .env("LJOS_HOOKD", "off")
             .env("PACKSET_AUTH", "off")
             .env("PACKSET_URL", "http://127.0.0.1:1")
-            .env("LJOS_TRACKER_PUSH_WAIT", PUSH_WAIT_SECS.to_string())
+            .env(
+                "LJOS_TRACKER_PUSH_WAIT",
+                ljos_cli::DEFAULT_PUSH_WAIT_SECS.to_string(),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
