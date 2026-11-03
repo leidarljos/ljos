@@ -11,7 +11,8 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
@@ -30,12 +31,6 @@ const POLL: Duration = Duration::from_millis(50);
 /// [`READY`], so one stuck connection does not spend the whole wait.
 const HEALTH_IO: Duration = Duration::from_secs(1);
 
-/// Slots for writers this process has started and not yet stopped.
-/// `cargo test` runs one binary's tests in parallel, a test starts one
-/// writer or two, and the default thread count is the CPU count. 128
-/// covers a host that reports a few dozen cores, with room to spare.
-const LIVE: usize = 128;
-
 /// POSIX signal numbers. Linux and macOS use the same values.
 const SIGKILL: i32 = 9;
 const SIGINT: i32 = 2;
@@ -46,7 +41,27 @@ const SIG_DFL: usize = 0;
 #[cfg(test)]
 const ESRCH: i32 = 3;
 
-static PIDS: [AtomicU32; LIVE] = [const { AtomicU32::new(0) }; LIVE];
+/// Writers this process has started and not yet stopped.
+///
+/// A fixed length chosen for a large host is the wrong bound: `cargo test`
+/// runs one test per available thread by default, and one test can hold
+/// more writers than that, or be started with more threads. Each node is
+/// one writer. A free node (pid 0) is reused. A new node is added only
+/// when every node is taken, and it stays allocated so the SIGINT handler
+/// can walk the list with atomics and `kill`.
+struct Live {
+    pid: AtomicU32,
+    next: AtomicPtr<Live>,
+}
+
+static LIVE: AtomicPtr<Live> = AtomicPtr::new(std::ptr::null_mut());
+
+/// The node whose pid this guard clears on drop.
+struct Slot(NonNull<AtomicU32>);
+
+// SAFETY: the node is never freed. Moving the pointer does not race: the
+// pid is an atomic, and the signal handler and `Drop` both use that atomic.
+unsafe impl Send for Slot {}
 
 thread_local! {
     static MINE: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -63,7 +78,7 @@ unsafe extern "C" {
 #[must_use = "dropping this stops packsetd"]
 pub struct Packsetd {
     child: Child,
-    slot: Option<usize>,
+    slot: Option<Slot>,
     port: u16,
     url: String,
     home: PathBuf,
@@ -140,7 +155,9 @@ impl Drop for Packsetd {
     fn drop(&mut self) {
         let pid = self.child.id();
         if let Some(slot) = self.slot.take() {
-            PIDS[slot].store(0, Ordering::SeqCst);
+            // SAFETY: the node is still allocated. Clearing the pid frees
+            // the slot for the next writer.
+            unsafe { slot.0.as_ref().store(0, Ordering::SeqCst) };
         }
         untrack(pid);
         stop_child(&mut self.child);
@@ -243,17 +260,11 @@ impl Builder {
             // writer also stops children it spawned.
             cmd.process_group(0);
         }
-        let mut child = cmd
+        let child = cmd
             .spawn()
             .unwrap_or_else(|err| panic!("spawn {}: {err}", program.display()));
         let pid = child.id();
-        let slot = match try_register(pid) {
-            Some(slot) => slot,
-            None => {
-                stop_child(&mut child);
-                panic!("this process is already tracking {LIVE} packsetd writers");
-            }
-        };
+        let slot = claim(pid);
         track(pid);
         let log = Arc::new(Mutex::new(String::new()));
         let mut started = Packsetd {
@@ -485,16 +496,37 @@ fn listen_port(inodes: &BTreeSet<u64>, table: &str) -> Option<u16> {
     None
 }
 
-fn try_register(pid: u32) -> Option<usize> {
-    for (index, slot) in PIDS.iter().enumerate() {
-        if slot
+fn claim(pid: u32) -> Slot {
+    let mut cur = LIVE.load(Ordering::SeqCst);
+    while !cur.is_null() {
+        // SAFETY: a published node is never freed.
+        let node = unsafe { &*cur };
+        if node
+            .pid
             .compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            return Some(index);
+            return Slot(NonNull::from(&node.pid));
+        }
+        cur = node.next.load(Ordering::SeqCst);
+    }
+    let node = Box::into_raw(Box::new(Live {
+        pid: AtomicU32::new(pid),
+        next: AtomicPtr::new(std::ptr::null_mut()),
+    }));
+    loop {
+        let head = LIVE.load(Ordering::SeqCst);
+        // SAFETY: `node` is unpublished until the swap below succeeds, so
+        // only this thread writes `next`.
+        unsafe { (*node).next.store(head, Ordering::SeqCst) };
+        if LIVE
+            .compare_exchange(head, node, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            // SAFETY: the node stays allocated, and `pid` is its first field.
+            return Slot(NonNull::from(unsafe { &(*node).pid }));
         }
     }
-    None
 }
 
 fn track(pid: u32) {
@@ -525,11 +557,16 @@ fn stop_pid(pid: u32) {
 }
 
 fn stop_all() {
-    for slot in &PIDS {
-        let pid = slot.swap(0, Ordering::SeqCst);
+    let mut cur = LIVE.load(Ordering::SeqCst);
+    while !cur.is_null() {
+        // SAFETY: a published node is never freed. This runs in the SIGINT
+        // handler, so it only loads atomics and calls `kill`.
+        let node = unsafe { &*cur };
+        let pid = node.pid.swap(0, Ordering::SeqCst);
         if pid != 0 {
             stop_pid(pid);
         }
+        cur = node.next.load(Ordering::SeqCst);
     }
 }
 
@@ -699,6 +736,31 @@ int main(void) {
         assert_ne!(first.port(), second.port());
         assert_ne!(first.port(), 8761);
         assert_ne!(second.port(), 8761);
+    }
+
+    /// The default harness runs one test per available thread. This test
+    /// holds one more writer than that and still stops every one on drop.
+    #[test]
+    fn more_writers_than_harness_threads_all_stop() {
+        let threads = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        let mut writers = Vec::new();
+        for _ in 0..threads + 1 {
+            writers.push(start_standin());
+        }
+        let mut ports = BTreeSet::new();
+        for writer in &writers {
+            assert_ne!(writer.port(), 0, "the bound port was not read back");
+            assert_ne!(writer.port(), 8761, "a writer took the default port");
+            assert!(ports.insert(writer.port()), "two writers shared a port");
+            assert!(alive(writer.id()), "a writer exited during start");
+        }
+        let pids: Vec<u32> = writers.iter().map(|writer| writer.id()).collect();
+        drop(writers);
+        for pid in pids {
+            assert!(!alive(pid), "writer pid {pid} was still alive after drop");
+        }
     }
 
     #[test]
