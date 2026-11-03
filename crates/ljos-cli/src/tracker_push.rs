@@ -1533,6 +1533,9 @@ note from b
 
     #[test]
     fn two_clones_race_and_both_headings_land() {
+        // The locale test puts a fake git first on PATH. This race needs
+        // the real git, so it waits until that test has put PATH back.
+        let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let origin = dir.path().join("origin.git");
         let a = dir.path().join("a");

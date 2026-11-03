@@ -18,8 +18,9 @@
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::ballot_sig;
 
@@ -49,6 +50,22 @@ pub fn standing(seat: &str) -> bool {
 /// The text a slot note carries in a tracker file.
 const SLOT_LINE: &str = "Note: \"slot: ";
 
+/// How long one seat may spend finding where slots began.
+///
+/// A pickaxe of the slot note over the whole tracker held about 1.1 GiB
+/// of RSS for over two minutes on a 16 GiB machine with no swap, and
+/// several at once exhausted it. The lookup greps whole trees, a
+/// logarithmic number of times when the note is still in `HEAD`, and
+/// keeps that answer. Thirty seconds covers a slow disk and a long
+/// history, and it is well under the two minutes that filled the machine.
+/// Past it the seat returns the introductions already found and prints
+/// [`SLOT_HISTORY_PARTIAL`].
+const SLOT_LOOKUP_BUDGET: Duration = Duration::from_secs(30);
+
+/// Printed when the lookup stops at [`SLOT_LOOKUP_BUDGET`]. The
+/// introductions already found are still returned.
+const SLOT_HISTORY_PARTIAL: &str = "slot history: partial";
+
 /// Where slots began in this tracker, by commit order: the parents of each
 /// commit that brought a slot note into a tree none of its parents held
 /// one in. Empty when no slot is committed yet. `Ok(None)` when the
@@ -67,6 +84,15 @@ pub fn starts() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
 
 /// [`starts`] for the tracker at `root`.
 ///
+/// The note is read from the trees, not by diffing every commit. While it
+/// is still in `HEAD`, the oldest commit on each first-parent line that
+/// holds it is found by binary search. An answer for this `HEAD` and its
+/// reachable count is kept under the git directory, so the next vote does
+/// not search again. A shallow checkout's `HEAD` hash matches the full
+/// history, which is why the count is part of the key. Two seats take one
+/// lock for that directory. Past [`SLOT_LOOKUP_BUDGET`] the introductions
+/// already found are returned and [`SLOT_HISTORY_PARTIAL`] is printed.
+///
 /// # Errors
 ///
 /// As [`starts`].
@@ -76,37 +102,461 @@ pub fn starts_in(root: &Path) -> std::result::Result<Option<Vec<Vec<String>>>, S
         return Ok(None);
     }
     require_tracker_history(root)?;
-    let pick = format!("-S{SLOT_LINE}");
-    let log = ballot_sig::git_in(
-        root,
-        &[
-            "--no-pager",
-            "log",
-            "--full-history",
-            "--format=%H %P",
-            pick.as_str(),
-        ],
-    )
-    .unwrap_or_default();
-    let held = |commit: &str| {
-        ballot_sig::git_in(
-            root,
-            &["--no-pager", "grep", "-q", "-F", "-e", SLOT_LINE, commit],
-        )
-        .is_some()
+    let Some(tip) = tip_of(root) else {
+        return Ok(Some(Vec::new()));
     };
-    let mut out = Vec::new();
-    for line in log.lines() {
+    let Some((lock_path, index_path)) = slot_index_paths(root) else {
+        let (starts, partial) =
+            find_slot_starts(root, &tip.sha, Instant::now() + SLOT_LOOKUP_BUDGET);
+        if partial {
+            eprintln!("{SLOT_HISTORY_PARTIAL}");
+        }
+        return Ok(Some(starts));
+    };
+    let deadline = Instant::now() + SLOT_LOOKUP_BUDGET;
+    let held = crate::CommitLock::acquire_by(&lock_path, deadline);
+    if held.is_none() {
+        if let Some(Saved::Complete(starts)) = read_saved(&index_path, &tip) {
+            return Ok(Some(starts));
+        }
+        eprintln!("{SLOT_HISTORY_PARTIAL}");
+        return Ok(Some(Vec::new()));
+    }
+    if let Some(Saved::Complete(starts)) = read_saved(&index_path, &tip) {
+        return Ok(Some(starts));
+    }
+    let head_holds = tree_holds_uncached(root, &tip.sha);
+    if head_holds {
+        let (starts, partial) = find_slot_starts(root, &tip.sha, deadline);
+        if partial {
+            eprintln!("{SLOT_HISTORY_PARTIAL}");
+        } else {
+            write_saved(&index_path, &tip, &Saved::Complete(starts.clone()));
+        }
+        return Ok(Some(starts));
+    }
+    let (mut next, mut starts) = match read_saved(&index_path, &tip) {
+        Some(Saved::Partial { next, starts }) => (next, starts),
+        _ => (0, Vec::new()),
+    };
+    let partial = scan_introductions(root, &tip.sha, &mut next, &mut starts, deadline);
+    if partial {
+        write_saved(
+            &index_path,
+            &tip,
+            &Saved::Partial {
+                next,
+                starts: starts.clone(),
+            },
+        );
+        eprintln!("{SLOT_HISTORY_PARTIAL}");
+    } else {
+        write_saved(&index_path, &tip, &Saved::Complete(starts.clone()));
+    }
+    Ok(Some(starts))
+}
+
+struct Tip {
+    sha: String,
+    count: String,
+}
+
+fn tip_of(root: &Path) -> Option<Tip> {
+    let sha = ballot_sig::git_in(root, &["rev-parse", "HEAD"])?;
+    let count = ballot_sig::git_in(root, &["rev-list", "--count", "HEAD"]).unwrap_or_default();
+    Some(Tip { sha, count })
+}
+
+fn slot_index_paths(root: &Path) -> Option<(PathBuf, PathBuf)> {
+    let dir = PathBuf::from(ballot_sig::git_in(
+        root,
+        &["rev-parse", "--absolute-git-dir"],
+    )?);
+    Some((
+        dir.join("ljos-slot-starts.lock"),
+        dir.join("ljos-slot-starts"),
+    ))
+}
+
+enum Saved {
+    Complete(Vec<Vec<String>>),
+    Partial {
+        next: usize,
+        starts: Vec<Vec<String>>,
+    },
+}
+
+fn read_saved(path: &Path, tip: &Tip) -> Option<Saved> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    let mut header = lines.next()?.split_whitespace();
+    let kind = header.next()?;
+    let count = header.next()?;
+    let sha = header.next()?;
+    if count != tip.count || sha != tip.sha {
+        return None;
+    }
+    let starts: Vec<Vec<String>> = lines.map(parse_parent_line).collect();
+    match kind {
+        "complete" => Some(Saved::Complete(starts)),
+        "partial" => {
+            let next = header.next()?.parse().ok()?;
+            Some(Saved::Partial { next, starts })
+        }
+        _ => None,
+    }
+}
+
+fn parse_parent_line(line: &str) -> Vec<String> {
+    if line == "-" {
+        Vec::new()
+    } else {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+}
+
+fn write_saved(path: &Path, tip: &Tip, saved: &Saved) {
+    let (kind, starts) = match saved {
+        Saved::Complete(starts) => (format!("complete {} {}", tip.count, tip.sha), starts),
+        Saved::Partial { next, starts } => {
+            (format!("partial {} {} {next}", tip.count, tip.sha), starts)
+        }
+    };
+    let mut body = kind;
+    body.push('\n');
+    for parents in starts {
+        if parents.is_empty() {
+            body.push_str("-\n");
+        } else {
+            body.push_str(&parents.join(" "));
+            body.push('\n');
+        }
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, body).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+fn tree_holds_uncached(root: &Path, commit: &str) -> bool {
+    ballot_sig::git_in(
+        root,
+        &["--no-pager", "grep", "-q", "-F", "-e", SLOT_LINE, commit],
+    )
+    .is_some()
+}
+
+/// Parents of the commits that introduced [`SLOT_LINE`], newest history
+/// first. `partial` when the budget ran out.
+fn find_slot_starts(root: &Path, head: &str, deadline: Instant) -> (Vec<Vec<String>>, bool) {
+    let Some(text) = ballot_sig::git_in(root, &["rev-list", "--parents", head]) else {
+        return (Vec::new(), false);
+    };
+    let mut parents = BTreeMap::new();
+    for line in text.lines() {
         let mut parts = line.split_whitespace();
         let Some(commit) = parts.next() else {
             continue;
         };
-        let parents: Vec<String> = parts.map(str::to_string).collect();
-        if held(commit) && !parents.iter().any(|p| held(p)) {
-            out.push(parents);
+        parents.insert(commit.to_string(), parts.map(str::to_string).collect());
+    }
+    if !parents.contains_key(head) {
+        return (Vec::new(), false);
+    }
+    let mut has = BTreeMap::new();
+    let mut seen = HashSet::new();
+    let mut walk = Walk {
+        root,
+        parents: &parents,
+        has: &mut has,
+        seen: &mut seen,
+        deadline,
+        partial: false,
+    };
+    let mut starts = walk.introductions_at(head);
+    if walk.partial {
+        return (starts, true);
+    }
+    // A gap on the first-parent line (the note removed, then added again)
+    // is not a single suffix. The binary search would keep one edge of it.
+    if !walk.suffix_holds(head) || walk.partial {
+        if walk.partial {
+            return (starts, true);
+        }
+        return every_introduction(root, &parents, deadline);
+    }
+    dedupe_starts(&mut starts);
+    (starts, false)
+}
+
+struct Walk<'a> {
+    root: &'a Path,
+    parents: &'a BTreeMap<String, Vec<String>>,
+    has: &'a mut BTreeMap<String, bool>,
+    seen: &'a mut HashSet<String>,
+    deadline: Instant,
+    partial: bool,
+}
+
+impl Walk<'_> {
+    fn holds(&mut self, commit: &str) -> Option<bool> {
+        if let Some(found) = self.has.get(commit) {
+            return Some(*found);
+        }
+        if Instant::now() >= self.deadline {
+            self.partial = true;
+            return None;
+        }
+        let found = tree_holds_uncached(self.root, commit);
+        self.has.insert(commit.to_string(), found);
+        Some(found)
+    }
+
+    fn introductions_at(&mut self, tip: &str) -> Vec<Vec<String>> {
+        if self.partial || !self.seen.insert(tip.to_string()) {
+            return Vec::new();
+        }
+        let chain = first_parent_chain(self.parents, tip);
+        let Some(lo) = self.oldest_holding(&chain) else {
+            return Vec::new();
+        };
+        let boundary = chain[lo].clone();
+        let boundary_parents = self.parents.get(&boundary).cloned().unwrap_or_default();
+        let mut starts = Vec::new();
+        let mut parent_holds = false;
+        for parent in &boundary_parents {
+            match self.holds(parent) {
+                Some(true) => {
+                    parent_holds = true;
+                    starts.extend(self.introductions_at(parent));
+                }
+                Some(false) => {}
+                None => return starts,
+            }
+        }
+        if !parent_holds && !self.partial {
+            starts.push(boundary_parents);
+        }
+        if lo == 0 || self.partial {
+            return starts;
+        }
+        // A side parent merged in after the note appeared on this line
+        // introduces it only when that side did not inherit this boundary.
+        let covered = descendants_of(self.parents, &boundary);
+        for commit in &chain[..lo] {
+            let Some(parents) = self.parents.get(commit) else {
+                continue;
+            };
+            for parent in parents.iter().skip(1) {
+                if covered.contains(parent) {
+                    continue;
+                }
+                match self.holds(parent) {
+                    Some(true) => starts.extend(self.introductions_at(parent)),
+                    Some(false) => {}
+                    None => return starts,
+                }
+            }
+        }
+        starts
+    }
+
+    /// Oldest index on `chain` (newest first) whose tree holds the note,
+    /// or `None` when `chain[0]` does not. The line is treated as a suffix
+    /// of the chain; [`Self::suffix_holds`] checks that.
+    fn oldest_holding(&mut self, chain: &[String]) -> Option<usize> {
+        if chain.is_empty() || self.holds(&chain[0]) != Some(true) {
+            return None;
+        }
+        let mut lo = 0usize;
+        let mut hi = chain.len();
+        while lo + 1 < hi {
+            let mid = (lo + hi) / 2;
+            match self.holds(&chain[mid]) {
+                Some(true) => lo = mid,
+                Some(false) => hi = mid,
+                None => return None,
+            }
+        }
+        Some(lo)
+    }
+
+    /// Whether every commit from `tip` back to the oldest one that holds
+    /// the note also holds it. One commit in the middle is enough to catch
+    /// a removal: the binary search already checked the two ends.
+    fn suffix_holds(&mut self, tip: &str) -> bool {
+        let chain = first_parent_chain(self.parents, tip);
+        let Some(lo) = self.oldest_holding(&chain) else {
+            return true;
+        };
+        if lo < 2 {
+            return true;
+        }
+        self.holds(&chain[lo / 2]) == Some(true)
+    }
+}
+
+fn first_parent_chain(parents: &BTreeMap<String, Vec<String>>, tip: &str) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut cur = Some(tip.to_string());
+    while let Some(commit) = cur {
+        if chain.len() > parents.len() {
+            break;
+        }
+        cur = parents.get(&commit).and_then(|p| p.first().cloned());
+        chain.push(commit);
+    }
+    chain
+}
+
+fn descendants_of(parents: &BTreeMap<String, Vec<String>>, start: &str) -> HashSet<String> {
+    let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (commit, commit_parents) in parents {
+        for parent in commit_parents {
+            children
+                .entry(parent.as_str())
+                .or_default()
+                .push(commit.as_str());
         }
     }
-    Ok(Some(out))
+    let mut out = HashSet::new();
+    let mut stack = vec![start];
+    while let Some(commit) = stack.pop() {
+        if !out.insert(commit.to_string()) {
+            continue;
+        }
+        if let Some(kids) = children.get(commit) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+    out
+}
+
+/// Every introduction under `head`, for a history whose note is not a
+/// single suffix. Stops at the budget.
+fn every_introduction(
+    root: &Path,
+    parents: &BTreeMap<String, Vec<String>>,
+    deadline: Instant,
+) -> (Vec<Vec<String>>, bool) {
+    let mut has = BTreeMap::new();
+    let mut out = Vec::new();
+    for commit in parents.keys() {
+        if Instant::now() >= deadline {
+            return (out, true);
+        }
+        let Some(holds) = remembered(root, &mut has, commit, deadline) else {
+            return (out, true);
+        };
+        if !holds {
+            continue;
+        }
+        let commit_parents = parents.get(commit).cloned().unwrap_or_default();
+        let mut parent_holds = false;
+        for parent in &commit_parents {
+            match remembered(root, &mut has, parent.as_str(), deadline) {
+                Some(true) => {
+                    parent_holds = true;
+                    break;
+                }
+                Some(false) => {}
+                None => return (out, true),
+            }
+        }
+        if !parent_holds {
+            out.push(commit_parents);
+        }
+    }
+    dedupe_starts(&mut out);
+    (out, false)
+}
+
+fn remembered(
+    root: &Path,
+    has: &mut BTreeMap<String, bool>,
+    commit: &str,
+    deadline: Instant,
+) -> Option<bool> {
+    if let Some(found) = has.get(commit) {
+        return Some(*found);
+    }
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let found = tree_holds_uncached(root, commit);
+    has.insert(commit.to_string(), found);
+    Some(found)
+}
+
+/// Introductions in commit-id order, resuming at `next`. `next` advances
+/// past the commits this call read. The note is not in `HEAD`, so the
+/// current tree does not name the files; each commit is grepped until the
+/// budget, and the next call continues.
+fn scan_introductions(
+    root: &Path,
+    head: &str,
+    next: &mut usize,
+    starts: &mut Vec<Vec<String>>,
+    deadline: Instant,
+) -> bool {
+    let Some(text) = ballot_sig::git_in(root, &["rev-list", "--parents", head]) else {
+        return false;
+    };
+    let mut parents = BTreeMap::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(commit) = parts.next() else {
+            continue;
+        };
+        parents.insert(commit.to_string(), parts.map(str::to_string).collect());
+    }
+    let keys: Vec<String> = parents.keys().cloned().collect();
+    let mut has = BTreeMap::new();
+    let mut i = *next;
+    while i < keys.len() {
+        if Instant::now() >= deadline {
+            *next = i;
+            dedupe_starts(starts);
+            return true;
+        }
+        let commit = &keys[i];
+        let Some(holds) = remembered(root, &mut has, commit, deadline) else {
+            *next = i;
+            dedupe_starts(starts);
+            return true;
+        };
+        i += 1;
+        if !holds {
+            continue;
+        }
+        let commit_parents: Vec<String> = parents.get(commit).cloned().unwrap_or_default();
+        let mut parent_holds = false;
+        for parent in &commit_parents {
+            match remembered(root, &mut has, parent.as_str(), deadline) {
+                Some(true) => {
+                    parent_holds = true;
+                    break;
+                }
+                Some(false) => {}
+                None => {
+                    *next = i - 1;
+                    dedupe_starts(starts);
+                    return true;
+                }
+            }
+        }
+        if !parent_holds {
+            starts.push(commit_parents);
+        }
+    }
+    *next = keys.len();
+    dedupe_starts(starts);
+    false
+}
+
+fn dedupe_starts(starts: &mut Vec<Vec<String>>) {
+    let mut seen = HashSet::new();
+    starts.retain(|parents| seen.insert(parents.clone()));
 }
 
 /// Whether `seat`'s pin `key` was committed before slots began: its line
@@ -870,19 +1320,24 @@ pub fn recorded_before_pin(
 /// do not already hold it. Every branch is read: a merge that kept the
 /// same line from both sides would otherwise hide one introduction.
 fn pin_introductions(seat: &str, key: &str) -> std::result::Result<Vec<String>, String> {
-    if let Some(root) = ballot_sig::env_root() {
-        require_tracker_history(&root)?;
-    }
-    let pick = format!("-S{seat} {key}");
-    let log = ballot_sig::tracker_git(&[
-        "--no-pager",
-        "log",
-        "--full-history",
-        "--format=%H %P",
-        pick.as_str(),
-        "--",
-        ballot_sig::PIN_FILE,
-    ])
+    let Some(root) = ballot_sig::env_root() else {
+        return Ok(Vec::new());
+    };
+    require_tracker_history(&root)?;
+    // Commits that touch the pin file, on every branch. A content pickaxe
+    // of that line would diff the file at each of them anyway; reading the
+    // file is the same answer and does not scan the rest of the tree.
+    let log = ballot_sig::git_in(
+        &root,
+        &[
+            "rev-list",
+            "--full-history",
+            "--parents",
+            "HEAD",
+            "--",
+            ballot_sig::PIN_FILE,
+        ],
+    )
     .unwrap_or_default();
     let mut out = Vec::new();
     for line in log.lines() {
@@ -1767,5 +2222,44 @@ mod tests {
             "a grafts file changed the parent pin order reads: {parents}"
         );
         assert_rewrite_refused(&repo, "grafts");
+    }
+
+    /// Two branches each add a slot note, then merge. Both introductions
+    /// count: a pin has to be in every one of those parents.
+    #[test]
+    fn slot_notes_introduced_on_two_branches_are_both_read() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        init_repo(&repo);
+        std::fs::write(repo.join("issues.org"), "board\n").unwrap();
+        commit_all(&repo, "board");
+        git_ok(&repo, &["branch", "side"]);
+        std::fs::write(repo.join("a"), "main\n").unwrap();
+        commit_all(&repo, "main extra");
+        let main_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("main-slot"), "Note: \"slot: main\"\n").unwrap();
+        commit_all(&repo, "slot on main");
+        git_ok(&repo, &["checkout", "-q", "side"]);
+        std::fs::write(repo.join("b"), "side\n").unwrap();
+        commit_all(&repo, "side extra");
+        let side_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("side-slot"), "Note: \"slot: side\"\n").unwrap();
+        commit_all(&repo, "slot on side");
+        git_ok(&repo, &["checkout", "-q", "main"]);
+        git_ok(
+            &repo,
+            &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+        );
+        let at = starts_in(&repo).unwrap().expect("a git tracker");
+        assert!(
+            at.iter()
+                .any(|parents| parents.iter().any(|p| p == &main_parent)),
+            "main introduction missing: {at:?}"
+        );
+        assert!(
+            at.iter()
+                .any(|parents| parents.iter().any(|p| p == &side_parent)),
+            "side introduction missing: {at:?}"
+        );
     }
 }
