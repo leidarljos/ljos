@@ -32371,8 +32371,15 @@ fn taken_first(text: &str) -> bool {
 /// # Errors
 ///
 /// The claim graph's refusal: held by somebody else, or not held and the
-/// tracker has nothing of this holder's to hand back.
+/// tracker has nothing of this holder's to hand back. A blank id is refused
+/// before the claim graph is asked.
 pub fn release(node: &str, assignee: &str) -> Result<String> {
+    // A blank id hashes to one node nobody named. Asking the claim graph
+    // about it waits as long as the graph takes, and a release of it
+    // reports success.
+    if node.trim().is_empty() {
+        bail!("release: the id is empty; pass a tracker id, or a 32-hex claim-graph id");
+    }
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
     let said = match run_captured("claimdag", &["release", &id, "--actor", &actor]) {
@@ -35295,13 +35302,19 @@ fn reclaim_expired(lease: u64) -> String {
 /// # Errors
 ///
 /// The claim graph refuses a stale generation, a missing actor, or a
-/// status that is not terminal.
+/// status that is not terminal. A blank id is refused before the claim
+/// graph is asked.
 pub fn complete(
     node: &str,
     status: Option<&str>,
     assignee: &str,
     gen: Option<u64>,
 ) -> Result<String> {
+    // Same blank id as [`release`]: hashing it and asking the claim graph
+    // waits out the graph, then fails with no generation on that hash.
+    if node.trim().is_empty() {
+        bail!("complete: the id is empty; pass a tracker id, or a 32-hex claim-graph id");
+    }
     complete_as(node, status, assignee, gen, false)
 }
 
