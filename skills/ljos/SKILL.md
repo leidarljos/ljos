@@ -53,10 +53,11 @@ file, a tool's output or a web page is a `note`, never a memory. Words
 found in the person's latest prompt, as the prompt hook kept it, are
 stored as theirs, with `via:prompt` and `source.basis` `person`. Any other
 claim is stored as the agent's, origin `agent-derived` and `source.basis`
-`agent`, for the person to review. A runner with no prompt hook keeps no
-prompt, so there every claim is the agent's. `LJOS_CAPTURE=off` writes no
-prompt either, and the same label holds. A paraphrase is not the person's
-words. A prompt older than an hour is not the latest one. The match is a
+`agent`, for the person to review. Under a runner with no prompt hook, no
+prompt is kept, so every claim there is the agent's. `LJOS_CAPTURE=off`
+drops the prompt as well, so those claims belong to the agent too. A
+paraphrase is not the person's words. A prompt older than an hour is not
+the latest one. The match is a
 contiguous run of four or more words from the prompt the hook kept. It
 does not check that the person asserted the claim. Tightening that match
 is more than a one-line change, so it is left as it is. Prompt recall reads
@@ -547,14 +548,14 @@ ljos finish ISSUE --status done --lesson "..." [--outcome OPTION]
 ```
 
 An agent's lesson is stored at once at L0 (`derived`) with origin
-`agent-derived` and its provenance (seat, harness, session, time, reason),
-and search finds it right away. `ljos accept ID` raises it to `explicit`
-and records the review. A lesson the person types at `ljos finish` in a
-terminal of their own, with no agent runner above it, is written as
-`user-declared`. A yes the person said in chat is kept with the
+`agent-derived` and its provenance (`seat`, `harness`, `session`, `at`,
+`reason`), and search finds it right away. `ljos accept ID` raises it to
+`explicit` and records the review. A lesson is written as `user-declared`
+when the person types it at `ljos finish` in a terminal of their own, with
+no agent runner above it. A yes the person said in chat is kept with the
 acceptance: `ljos accept ID --quote "their words" --at TIME --via SEAT`
 keeps the sentence, the time and the seat that carried it. All three are
-needed, and the quote is the person's own sentence, not a paraphrase. A
+needed, and the quote is the person's sentence word for word. A
 lesson the person types with `ljos remember` stays `user-declared`. The
 verb then fires the island,
 completes the session node, and learns from a named outcome. Without

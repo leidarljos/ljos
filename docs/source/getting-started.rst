@@ -178,7 +178,7 @@ Finish
    $ ljos finish demo-fhy7 --assignee alice --lesson "The codec is one file." --outcome keep
    completed the session node for demo-fhy7 as done
    tracker: demo-fhy7 no longer claimed by alice; back to TODO
-   remembered the lesson as agent-derived, unreviewed (id 081ce739...); search finds it now, and `ljos accept 081ce739...` marks it reviewed
+   remembered the lesson as agent-derived, unreviewed (id 081ce739); search finds it now, and `ljos accept 081ce739` marks it reviewed
    the ticket demo-fhy7 stays open and nobody holds it; a person closes it when the work is accepted
 
 ``ljos finish`` hands the claim back and stores the lesson, labelled agent-derived and
