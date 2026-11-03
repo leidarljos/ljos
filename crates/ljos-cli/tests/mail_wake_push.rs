@@ -10,10 +10,9 @@
 //! remote only lists.
 
 ljos_test_boot::harness!();
-use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const SENDER: &str = "example-host";
@@ -28,15 +27,6 @@ const SEND_BUDGET: Duration = Duration::from_secs(4);
 const HOOK_SLEEP_SECS: u64 = 5;
 /// Past the recipient's first fetch, well inside its 30 s wait.
 const LATE_PUSH: Duration = Duration::from_secs(2);
-
-struct Daemon(Child);
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 struct World {
     root: tempfile::TempDir,
@@ -67,103 +57,17 @@ fn packsetd_bin() -> PathBuf {
         .unwrap_or_else(|| panic!("packsetd is not on PATH; CI builds it from packset develop"))
 }
 
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("free port");
-    listener.local_addr().expect("addr").port()
-}
-
-/// Inodes of sockets listening on `port`. The probe in [`free_port`] drops
-/// its socket before packsetd binds, so another test can take the port in
-/// between. A later connect then talks to that test's daemon, which is
-/// gone by the time reply runs.
-fn listen_inodes(port: u16) -> Vec<String> {
-    let needle = format!(":{port:04X}");
-    let mut inodes = Vec::new();
-    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(text) = std::fs::read_to_string(table) else {
-            continue;
-        };
-        for line in text.lines().skip(1) {
-            let mut cols = line.split_whitespace();
-            let Some(local) = cols.nth(1) else {
-                continue;
-            };
-            // sl local rem st. nth(1) skips the remote address.
-            let Some(state) = cols.nth(1) else {
-                continue;
-            };
-            if state != "0A" || !local.to_ascii_uppercase().ends_with(&needle) {
-                continue;
-            }
-            // tx:rx tr:tm retrnsmt uid timeout inode
-            let Some(inode) = cols.nth(5) else {
-                continue;
-            };
-            inodes.push(inode.to_string());
-        }
-    }
-    inodes
-}
-
-fn holds_socket(pid: u32, inode: &str) -> bool {
-    let needle = format!("socket:[{inode}]");
-    let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        std::fs::read_link(entry.path())
-            .ok()
-            .is_some_and(|target| target.to_string_lossy() == needle)
-    })
-}
-
-fn owns_listen(pid: u32, port: u16) -> bool {
-    listen_inodes(port)
-        .iter()
-        .any(|inode| holds_socket(pid, inode))
-}
-
-/// Spawn packsetd and return only once that process holds the listening socket.
-fn start_packsetd(pack_home: &Path, mut configure: impl FnMut(&mut Command, u16)) -> (Daemon, u16) {
+/// Spawn packsetd under `pack_home` and return once `/health` answers.
+fn start_packsetd(
+    pack_home: &Path,
+    configure: impl FnOnce(&mut Command),
+) -> ljos_test_boot::Packsetd {
     std::fs::create_dir_all(pack_home).expect("pack home");
-    for _ in 0..8 {
-        let port = free_port();
-        let err_path = pack_home.join(format!("stderr-{port}"));
-        let stderr = std::fs::File::create(&err_path).expect("stderr");
-        let mut cmd = Command::new(packsetd_bin());
-        cmd.args([
-            "--port",
-            &port.to_string(),
-            "--home",
-            pack_home.to_str().expect("utf-8"),
-        ]);
-        configure(&mut cmd, port);
-        cmd.env("PACKSET_HOME", pack_home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(stderr);
-        let mut child = cmd.spawn().expect("spawn packsetd");
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if owns_listen(child.id(), port) {
-                return (Daemon(child), port);
-            }
-            if let Some(status) = child.try_wait().expect("packsetd") {
-                eprintln!(
-                    "packsetd on {port} exited {status}: {}",
-                    std::fs::read_to_string(&err_path).unwrap_or_default()
-                );
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "packsetd did not own {port}: {}",
-                std::fs::read_to_string(&err_path).unwrap_or_default()
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-    panic!("packsetd never owned its port");
+    let mut started = ljos_test_boot::Packsetd::build();
+    started.bin(packsetd_bin());
+    started.pack_at(pack_home);
+    configure(started.command());
+    started.spawn()
 }
 
 fn git(cfg: &Path, dir: &Path, args: &[&str]) -> String {
@@ -261,7 +165,7 @@ fn home_dirs(home: &Path) {
     }
 }
 
-fn world(slow_push: bool, reject: bool) -> (World, Daemon) {
+fn world(slow_push: bool, reject: bool) -> (World, ljos_test_boot::Packsetd) {
     let root = tempfile::tempdir().expect("root");
     let gitconfig = root.path().join("gitconfig");
     std::fs::write(
@@ -377,9 +281,10 @@ fn world(slow_push: bool, reject: bool) -> (World, Daemon) {
     .into_string()
     .expect("utf-8 PATH");
     let pack_home = root.path().join("pack");
-    let (daemon, port) = start_packsetd(&pack_home, |cmd, port| {
-        apply_env(cmd, &sender_home, &path, port, &gitconfig, &origin);
+    let daemon = start_packsetd(&pack_home, |cmd| {
+        apply_env(cmd, &sender_home, &path, None, &gitconfig, &origin);
     });
+    let port = daemon.port();
     let world = World {
         origin,
         sender_repo,
@@ -399,7 +304,7 @@ fn apply_env(
     cmd: &mut Command,
     home: &Path,
     path: &str,
-    port: u16,
+    port: Option<u16>,
     gitconfig: &Path,
     origin: &Path,
 ) {
@@ -414,7 +319,6 @@ fn apply_env(
         .env("XDG_STATE_HOME", home.join(".local/state"))
         .env("XDG_CACHE_HOME", home.join(".cache"))
         .env("XDG_RUNTIME_DIR", home.join("run"))
-        .env("PACKSET_PORT", port.to_string())
         .env("PACKSET_AUTH", "off")
         .env("LJOS_TRACKER_GIT", "push")
         .env("LJOS_USER_RULES_SYNC", "off")
@@ -426,6 +330,9 @@ fn apply_env(
         .env("GIT_COMMITTER_NAME", "seat")
         .env("GIT_COMMITTER_EMAIL", "seat@example.invalid")
         .env("ORIGIN", origin);
+    if let Some(port) = port {
+        cmd.env("PACKSET_PORT", port.to_string());
+    }
 }
 
 impl World {
@@ -434,7 +341,7 @@ impl World {
             cmd,
             home,
             &self.path,
-            self.port,
+            Some(self.port),
             &self.gitconfig,
             &self.origin,
         );
@@ -483,11 +390,10 @@ impl World {
 }
 
 /// A pack of its own, so a letter that was pushed is not already local.
-fn extra_pack(world: &World, label: &str) -> (Daemon, u16) {
+fn extra_pack(world: &World, label: &str) -> ljos_test_boot::Packsetd {
     let pack_home = world.root.path().join(label);
-    start_packsetd(&pack_home, |cmd, port| {
+    start_packsetd(&pack_home, |cmd| {
         world.env(cmd, &world.recipient_home);
-        cmd.env("PACKSET_PORT", port.to_string());
     })
 }
 
@@ -800,7 +706,8 @@ fn a_recipients_inbox_sync_reads_the_pushed_letter() {
     });
     let commit = recorded_commit(&world.sender_home);
 
-    let (_pack, port) = extra_pack(&world, "recipient-pack");
+    let pack = extra_pack(&world, "recipient-pack");
+    let port = pack.port();
     let bare = world.run(
         &world.recipient_home,
         RECIPIENT_HOST,
@@ -838,7 +745,8 @@ fn a_recipients_inbox_sync_reads_the_pushed_letter() {
         text(&synced)
     );
 
-    let (_other, other_port) = extra_pack(&world, "fallback-pack");
+    let other = extra_pack(&world, "fallback-pack");
+    let other_port = other.port();
     let missing = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let fell = world.run(
         &world.recipient_home,
@@ -953,7 +861,8 @@ fn inbox_sync_waits_for_a_push_that_lands_late() {
     let commit = recorded_commit(&world.sender_home);
     std::fs::remove_file(world.origin.join("hooks/pre-receive")).expect("open the remote");
 
-    let (_pack, port) = extra_pack(&world, "late-pack");
+    let pack = extra_pack(&world, "late-pack");
+    let port = pack.port();
     let (gitconfig, sender_repo) = (world.gitconfig.clone(), world.sender_repo.clone());
     let push = std::thread::spawn(move || {
         std::thread::sleep(LATE_PUSH);

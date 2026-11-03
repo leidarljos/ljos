@@ -10,32 +10,17 @@
 
 ljos_test_boot::harness!();
 use std::io::Write;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-
-struct Daemon(Child);
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 fn on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
-}
-
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("free port");
-    listener.local_addr().expect("addr").port()
 }
 
 struct Home {
@@ -55,21 +40,26 @@ impl Home {
     }
 
     fn env(&self, cmd: &mut Command) {
-        let home = self.dir.path();
-        cmd.env_clear()
-            .current_dir(home)
-            .env("HOME", home)
-            .env("PATH", &self.path)
-            .env("LANG", "C.UTF-8")
-            .env("TMPDIR", home.join("tmp"))
-            .env("XDG_CONFIG_HOME", home.join(".config"))
-            .env("XDG_DATA_HOME", home.join(".local/share"))
-            .env("XDG_STATE_HOME", home.join(".local/state"))
-            .env("XDG_CACHE_HOME", home.join(".cache"))
-            .env("XDG_RUNTIME_DIR", home.join("run"))
-            .env("PACKSET_PORT", self.port.to_string())
-            .env("PACKSET_AUTH", "off")
-            .env("LJOS_TRACKER_GIT", "off");
+        seat_env(cmd, self.dir.path(), &self.path, Some(self.port));
+    }
+}
+
+fn seat_env(cmd: &mut Command, home: &Path, path: &str, port: Option<u16>) {
+    cmd.env_clear()
+        .current_dir(home)
+        .env("HOME", home)
+        .env("PATH", path)
+        .env("LANG", "C.UTF-8")
+        .env("TMPDIR", home.join("tmp"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env("PACKSET_AUTH", "off")
+        .env("LJOS_TRACKER_GIT", "off");
+    if let Some(port) = port {
+        cmd.env("PACKSET_PORT", port.to_string());
     }
 }
 
@@ -96,7 +86,7 @@ fn text(out: &Output) -> String {
     )
 }
 
-fn home() -> (Home, Daemon) {
+fn home() -> (Home, ljos_test_boot::Packsetd) {
     let Some(packsetd) = on_path("packsetd") else {
         panic!("packsetd is not on PATH; CI builds it from packset develop");
     };
@@ -123,35 +113,18 @@ fn home() -> (Home, Daemon) {
     .expect("PATH")
     .into_string()
     .expect("utf-8 PATH");
+    let pack_home = dir.path().join(".local/share/packset");
+    std::fs::create_dir_all(&pack_home).expect("pack home");
+    let mut started = ljos_test_boot::Packsetd::build();
+    started.bin(&packsetd);
+    started.pack_at(&pack_home);
+    seat_env(started.command(), dir.path(), &path, None);
+    let daemon = started.spawn();
     let home = Home {
-        port: free_port(),
+        port: daemon.port(),
         path,
         dir,
     };
-    let pack_home = home.dir.path().join(".local/share/packset");
-    std::fs::create_dir_all(&pack_home).expect("pack home");
-    let mut daemon = Command::new(&packsetd);
-    daemon.args([
-        "--port",
-        &home.port.to_string(),
-        "--home",
-        pack_home.to_str().expect("utf-8"),
-    ]);
-    home.env(&mut daemon);
-    let daemon = Daemon(
-        daemon
-            .env("PACKSET_HOME", &pack_home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn packsetd"),
-    );
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while std::net::TcpStream::connect(("127.0.0.1", home.port)).is_err() {
-        assert!(Instant::now() < deadline, "packsetd did not listen");
-        std::thread::sleep(Duration::from_millis(50));
-    }
     (home, daemon)
 }
 

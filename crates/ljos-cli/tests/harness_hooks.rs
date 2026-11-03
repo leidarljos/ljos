@@ -5,7 +5,6 @@ ljos_test_boot::harness!();
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 #[path = "common/seat_root.rs"]
 mod seat_root;
@@ -869,56 +868,22 @@ fn payload_cwd_is_used_when_hook_process_runs_elsewhere() {
     assert!(joined.contains("payload-cwd"), "{joined}");
 }
 
-struct Daemon(std::process::Child);
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// packsetd from PATH on a free port, with its home in the habitat, and
-/// the env that points `ljos` at it.
-fn packsetd(hab: &Habitat) -> (Daemon, Vec<(&'static str, String)>) {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let Some(bin) = std::env::split_paths(&path)
-        .map(|dir| dir.join("packsetd"))
-        .find(|candidate| candidate.is_file())
-    else {
-        panic!("packsetd is not on PATH; CI builds it from packset develop");
-    };
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .unwrap()
-        .port();
+/// packsetd from PATH on a kernel-chosen port, with its home in the habitat,
+/// and the env that points `ljos` at it.
+fn packsetd(hab: &Habitat) -> (ljos_test_boot::Packsetd, Vec<(&'static str, String)>) {
     let pack_home = hab.home.join(".local/share/packset");
     std::fs::create_dir_all(&pack_home).unwrap();
-    let daemon = Daemon(
-        Command::new(bin)
-            .args(["--port", &port.to_string(), "--home"])
-            .arg(&pack_home)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", &hab.home)
-            .env("PACKSET_HOME", &pack_home)
-            .env("PACKSET_AUTH", "off")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "packsetd did not listen"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let mut started = ljos_test_boot::Packsetd::build();
+    started.pack_at(&pack_home);
+    started
+        .command()
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &hab.home)
+        .env("PACKSET_AUTH", "off");
+    let daemon = started.spawn();
     let env = vec![
-        ("PACKSET_URL", format!("http://127.0.0.1:{port}")),
+        ("PACKSET_URL", format!("http://127.0.0.1:{}", daemon.port())),
         ("PACKSET_AUTH", "off".to_string()),
     ];
     (daemon, env)

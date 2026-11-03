@@ -6,8 +6,7 @@
 //! that issue, stays an agent note, and a later prompt does not repeat
 //! the sentence.
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -18,70 +17,6 @@ const FACT: &str = "The root cause was a shared temp directory between the two t
 const ISSUE: &str = "probe-0001";
 /// Unset: extraction is on. These calls do not set `LJOS_EXTRACT`.
 const ASKED: &[(&str, &str)] = &[];
-
-struct Daemon {
-    child: std::process::Child,
-    url: String,
-    _home: tempfile::TempDir,
-}
-
-impl Daemon {
-    fn start() -> Self {
-        let home = tempfile::tempdir().unwrap();
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let dir = home.path().to_str().unwrap().to_string();
-        let mut child = Command::new("packsetd")
-            .args(["--port", &port.to_string(), "--home", &dir])
-            .env("PACKSET_AUTH", "off")
-            .env("PACKSET_HOME", &dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("packsetd is not on PATH; CI builds it from packset develop");
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                let mut err = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut err);
-                }
-                panic!("packsetd exited {status}: {err}");
-            }
-            if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-                let _ = stream.write_all(
-                    b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-                );
-                let mut said = String::new();
-                let _ = stream.read_to_string(&mut said);
-                if said.starts_with("HTTP/1.1 200") {
-                    break;
-                }
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "packsetd did not answer"
-            );
-            thread::sleep(Duration::from_millis(50));
-        }
-        Self {
-            child,
-            url: format!("http://127.0.0.1:{port}"),
-            _home: home,
-        }
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 struct Seat {
     root: tempfile::TempDir,
@@ -247,10 +182,10 @@ fn session_end_stores_facts_on_the_open_sitting() {
         eprintln!("skipped: packsetd is not installed");
         return;
     }
-    let pack = Daemon::start();
+    let pack = ljos_test_boot::Packsetd::open();
     let seat = Seat::new();
     seat.sit();
-    let out = session_end(&seat, &pack.url, ASKED);
+    let out = session_end(&seat, pack.url(), ASKED);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
     let report = wait_done(&seat);
     no_http_refusal(&report);
@@ -262,7 +197,7 @@ fn session_end_stores_facts_on_the_open_sitting() {
         report.contains("wrote 1"),
         "debug did not report the write:\n{report}"
     );
-    let stored = atoms(&pack.url);
+    let stored = atoms(pack.url());
     let atom = fact_atom(&stored).unwrap_or_else(|| {
         panic!(
             "extracted fact was not stored\n{}\natoms: {stored:?}",
@@ -290,7 +225,7 @@ fn session_end_stores_facts_on_the_open_sitting() {
         "prompt": "How should the next change be tested?",
     })
     .to_string();
-    let shown = hook(&seat, &pack.url, &prompt, &[]);
+    let shown = hook(&seat, pack.url(), &prompt, &[]);
     assert!(
         shown.status.success(),
         "prompt hook failed\n{}",
@@ -309,13 +244,13 @@ fn session_end_without_a_sitting_does_not_post() {
         eprintln!("skipped: packsetd is not installed");
         return;
     }
-    let pack = Daemon::start();
+    let pack = ljos_test_boot::Packsetd::open();
     let seat = Seat::new();
-    let out = session_end(&seat, &pack.url, ASKED);
+    let out = session_end(&seat, pack.url(), ASKED);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
     let report = wait_done(&seat);
     assert!(
-        fact_atom(&atoms(&pack.url)).is_none(),
+        fact_atom(&atoms(pack.url())).is_none(),
         "a note was stored with no sitting\n{report}"
     );
     assert!(
@@ -336,14 +271,14 @@ fn session_end_extract_off_stores_nothing() {
         eprintln!("skipped: packsetd is not installed");
         return;
     }
-    let pack = Daemon::start();
+    let pack = ljos_test_boot::Packsetd::open();
     let seat = Seat::new();
     seat.sit();
-    let out = session_end(&seat, &pack.url, &[("LJOS_EXTRACT", "off")]);
+    let out = session_end(&seat, pack.url(), &[("LJOS_EXTRACT", "off")]);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
     let report = wait_done(&seat);
     assert!(
-        fact_atom(&atoms(&pack.url)).is_none(),
+        fact_atom(&atoms(pack.url())).is_none(),
         "LJOS_EXTRACT=off still stored a note\n{report}"
     );
     assert!(
@@ -360,14 +295,14 @@ fn session_end_stores_facts_when_extract_is_unset() {
         eprintln!("skipped: packsetd is not installed");
         return;
     }
-    let pack = Daemon::start();
+    let pack = ljos_test_boot::Packsetd::open();
     let seat = Seat::new();
     seat.sit();
-    let out = session_end(&seat, &pack.url, &[]);
+    let out = session_end(&seat, pack.url(), &[]);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
     let report = wait_done(&seat);
     assert!(
-        fact_atom(&atoms(&pack.url)).is_some(),
+        fact_atom(&atoms(pack.url())).is_some(),
         "an unset session end stored no note\n{report}"
     );
     no_http_refusal(&report);

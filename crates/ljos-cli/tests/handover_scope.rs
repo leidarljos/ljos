@@ -7,22 +7,12 @@
 
 ljos_test_boot::harness!();
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Output};
 
 const CLOUD_TEXT: &str = "Cloud seats clone the tracker before they vote.";
 const BOX_TEXT: &str = "The passphrase hash lives only on the box.";
-
-struct Daemon(Child);
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 fn tools_dir() -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -58,32 +48,18 @@ fn http(port: u16, request: &str) -> Option<String> {
     Some(answer)
 }
 
-fn start_pack(home: &Path, tools: &Path) -> (Daemon, u16) {
+fn start_pack(home: &Path, tools: &Path) -> ljos_test_boot::Packsetd {
     std::fs::create_dir_all(home).unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let child = Command::new(tools.join("packsetd"))
-        .args(["--port", &port.to_string(), "--home"])
-        .arg(home)
-        .env("PACKSET_HOME", home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn packsetd");
-    let daemon = Daemon(child);
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let health = "GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
-    while !(home.join("token").is_file()
-        && http(port, health).is_some_and(|a| a.starts_with("HTTP/1.1 200")))
-    {
-        assert!(Instant::now() < deadline, "packsetd did not answer");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    (daemon, port)
+    let mut started = ljos_test_boot::Packsetd::build();
+    started.bin(tools.join("packsetd"));
+    started.pack_at(home);
+    let daemon = started.spawn();
+    assert!(
+        home.join("token").is_file(),
+        "packsetd did not write a token: {}",
+        daemon.log()
+    );
+    daemon
 }
 
 fn post_atom(port: u16, token: &str, text: &str, entities: &[&str]) {
@@ -114,7 +90,7 @@ struct World {
     tools: PathBuf,
     tracker: PathBuf,
     port: u16,
-    _pack: Daemon,
+    _pack: ljos_test_boot::Packsetd,
 }
 
 impl World {
@@ -139,7 +115,8 @@ impl World {
             ),
         )
         .unwrap();
-        let (pack, port) = start_pack(&root.path().join("box/pack"), &tools);
+        let pack = start_pack(&root.path().join("box/pack"), &tools);
+        let port = pack.port();
         let token = std::fs::read_to_string(root.path().join("box/pack/token")).unwrap();
         post_atom(
             port,

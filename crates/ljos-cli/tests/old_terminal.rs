@@ -6,12 +6,8 @@
 //! stays unverified, and `ljos prefer --review` counts and keeps it.
 
 ljos_test_boot::harness!();
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::thread;
-use std::time::Duration;
 
 use serde_json::Value;
 
@@ -21,68 +17,6 @@ mod terminal;
 const VERSIONS: &[&str] = &["0.17.0", "0.22.0", "0.25.0", "0.29.0"];
 const RUNNER_LESSON: &str = "The lint job must pass before a merge.";
 const AGENT_LESSON: &str = "The deploy window closes at four on Friday.";
-
-struct Daemon {
-    child: std::process::Child,
-    url: String,
-    _home: tempfile::TempDir,
-}
-
-impl Daemon {
-    fn start() -> Self {
-        let home = tempfile::tempdir().unwrap();
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let dir = home.path().to_str().unwrap().to_string();
-        let mut child = Command::new("packsetd")
-            .args(["--port", &port.to_string(), "--home", &dir])
-            .env("PACKSET_AUTH", "off")
-            .env("PACKSET_HOME", &dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("packsetd is not on PATH; CI builds it from packset develop");
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                let mut err = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut err);
-                }
-                panic!("packsetd exited {status}: {err}");
-            }
-            if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-                let _ = stream.write_all(b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n");
-                let mut said = String::new();
-                let _ = stream.read_to_string(&mut said);
-                if said.starts_with("HTTP/1.1 200") {
-                    break;
-                }
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "packsetd did not answer"
-            );
-            thread::sleep(Duration::from_millis(50));
-        }
-        Self {
-            child,
-            url: format!("http://127.0.0.1:{port}"),
-            _home: home,
-        }
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 struct Seat {
     home: tempfile::TempDir,
@@ -325,8 +259,8 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         eprintln!("skipped: packsetd is not installed");
         return;
     }
-    let daemon = Daemon::start();
-    let seat = Seat::on(daemon.url.clone());
+    let daemon = ljos_test_boot::Packsetd::open();
+    let seat = Seat::on(daemon.url().to_string());
     let new = env!("CARGO_BIN_EXE_ljos");
 
     for version in VERSIONS {
@@ -342,7 +276,7 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         let wrote = at_terminal(&seat, &bin, "remember", &lesson, &workspace);
         succeeded(&wrote, &format!("v{version} remember"));
 
-        let stored = atoms(&daemon.url, &workspace);
+        let stored = atoms(daemon.url(), &workspace);
         let preference = by_text(&stored, &format!("{version} notes"));
         let remembered = by_text(&stored, &format!("{version} staging"));
         assert_eq!(preference["kind"], "preference", "{preference}");
@@ -363,7 +297,7 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
             review.contains("no legacy preferences to review"),
             "{review}"
         );
-        let stored = atoms(&daemon.url, &workspace);
+        let stored = atoms(daemon.url(), &workspace);
         assert!(
             basis(by_text(&stored, &format!("{version} notes"))).is_none(),
             "v{version} preference was promoted"
@@ -398,7 +332,7 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         .unwrap();
     succeeded(&agent, "v0.32.1 runner remember");
 
-    let before = atoms(&daemon.url, "held");
+    let before = atoms(daemon.url(), "held");
     let held = by_text(&before, "lint job");
     assert_eq!(held["kind"], "lesson", "{held}");
     assert_eq!(held["origin"], "user-declared", "{held}");
@@ -438,7 +372,7 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         text_of(&doctor)
     );
 
-    let after = atoms(&daemon.url, "held");
+    let after = atoms(daemon.url(), "held");
     assert!(basis(by_text(&after, "lint job")).is_none());
     assert_eq!(by_text(&after, "deploy window")["origin"], "agent-derived");
     assert_ne!(basis(by_text(&after, "deploy window")), Some("person"));

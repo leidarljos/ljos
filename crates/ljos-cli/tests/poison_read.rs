@@ -723,8 +723,8 @@ fn a_pack_that_does_not_ask_for_the_token_confirms_no_rule() {
         );
     }
 
-    let open = Daemon::open();
-    let seat = Seat::on(open.url.clone());
+    let open = pack(true);
+    let seat = Seat::on(open.url().to_string());
     post(
         &open,
         "/v1/atoms",
@@ -1068,78 +1068,18 @@ fn the_note_tool_text_matches_the_read_side() {
     assert!(header.contains("`source.basis` is `agent`"), "{header}");
 }
 
-/// packsetd from PATH on a free port, with its own home; CI builds it from
-/// packset develop.
-struct Daemon {
-    child: std::process::Child,
-    url: String,
-    _home: tempfile::TempDir,
-}
-
-impl Daemon {
-    /// packsetd asking for [`TOKEN`], as it does by default.
-    fn start() -> Self {
-        Self::spawn(false)
+/// packsetd from PATH in its own temp home, asking for [`TOKEN`].
+/// `open` runs it with `PACKSET_AUTH=off`, so it answers anyone.
+fn pack(open: bool) -> ljos_test_boot::Packsetd {
+    let mut started = ljos_test_boot::Packsetd::build();
+    let home = started.home_path().to_path_buf();
+    std::fs::write(home.join("token"), format!("{TOKEN}\n")).unwrap();
+    let command = started.command();
+    command.env_remove("PACKSET_AUTH");
+    if open {
+        command.env("PACKSET_AUTH", "off");
     }
-
-    /// packsetd run with `PACKSET_AUTH=off`, answering anyone.
-    fn open() -> Self {
-        Self::spawn(true)
-    }
-
-    fn spawn(open: bool) -> Self {
-        let home = tempfile::tempdir().unwrap();
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let dir = home.path().to_str().unwrap().to_string();
-        std::fs::write(home.path().join("token"), format!("{TOKEN}\n")).unwrap();
-        let mut command = Command::new("packsetd");
-        command
-            .args(["--port", &port.to_string(), "--home", &dir])
-            .env_remove("PACKSET_AUTH")
-            .env("PACKSET_HOME", &dir);
-        if open {
-            command.env("PACKSET_AUTH", "off");
-        }
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("packsetd is not on PATH; CI builds it from packset develop");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        loop {
-            assert!(child.try_wait().unwrap().is_none(), "packsetd exited");
-            if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-                let _ = stream.write_all(b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n");
-                let mut said = String::new();
-                let _ = stream.read_to_string(&mut said);
-                if said.starts_with("HTTP/1.1 200") {
-                    break;
-                }
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "packsetd did not answer"
-            );
-            thread::sleep(std::time::Duration::from_millis(50));
-        }
-        Self {
-            child,
-            url: format!("http://127.0.0.1:{port}"),
-            _home: home,
-        }
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
+    started.spawn()
 }
 
 /// One `ljos-mcp` kept running across tool calls, as a runner keeps it.
@@ -1235,9 +1175,9 @@ fn a_long_lived_search_reads_the_origin_the_pack_holds_now() {
         eprintln!("skipped: packsetd is not installed");
         return;
     }
-    let daemon = Daemon::start();
-    let seat = Seat::on(daemon.url.clone());
-    let stored: serde_json::Value = ureq::post(&format!("{}/v1/atoms", daemon.url))
+    let daemon = pack(false);
+    let seat = Seat::on(daemon.url().to_string());
+    let stored: serde_json::Value = ureq::post(&format!("{}/v1/atoms", daemon.url()))
         .set("Authorization", &format!("Bearer {TOKEN}"))
         .send_json(serde_json::json!({
             "workspace": "seat", "kind": "preference", "text": KEEP_SHORT,
@@ -1257,7 +1197,7 @@ fn a_long_lived_search_reads_the_origin_the_pack_holds_now() {
     };
     assert_eq!(label(&mcp.search("deploy form")), "preference");
 
-    ureq::post(&format!("{}/v1/atoms/update", daemon.url))
+    ureq::post(&format!("{}/v1/atoms/update", daemon.url()))
         .set("Authorization", &format!("Bearer {TOKEN}"))
         .send_json(serde_json::json!({
             "workspace": "seat", "id": stored["id"],
@@ -1334,17 +1274,21 @@ fn promote(seat: &Seat, id: &str) {
 }
 
 /// POST `body` to `path` on `daemon` and return what it answers.
-fn post(daemon: &Daemon, path: &str, body: serde_json::Value) -> serde_json::Value {
+fn post(
+    daemon: &ljos_test_boot::Packsetd,
+    path: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
     try_post(daemon, path, body).unwrap_or_else(|status| panic!("{path} refused with {status}"))
 }
 
 /// [`post`], or the status `daemon` refuses the write with.
 fn try_post(
-    daemon: &Daemon,
+    daemon: &ljos_test_boot::Packsetd,
     path: &str,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, u16> {
-    match ureq::post(&format!("{}{path}", daemon.url))
+    match ureq::post(&format!("{}{path}", daemon.url()))
         .set("Authorization", &format!("Bearer {TOKEN}"))
         .send_json(body)
     {
@@ -1366,8 +1310,8 @@ fn a_lesson_id_posted_again_is_another_lesson() {
         return;
     }
     const ID: &str = "lessonid0000000000000000000001";
-    let daemon = Daemon::start();
-    let seat = Seat::on(daemon.url.clone());
+    let daemon = pack(false);
+    let seat = Seat::on(daemon.url().to_string());
     let lesson = |text: &str| {
         serde_json::json!({
             "id": ID, "workspace": "seat", "kind": "lesson", "text": text,
@@ -1421,8 +1365,8 @@ fn a_lesson_laundered_to_the_person_is_not_their_rule() {
         return;
     }
     const ID: &str = "lessonid0000000000000000000002";
-    let daemon = Daemon::start();
-    let seat = Seat::on(daemon.url.clone());
+    let daemon = pack(false);
+    let seat = Seat::on(daemon.url().to_string());
     let agents = post(
         &daemon,
         "/v1/atoms",
@@ -1505,8 +1449,8 @@ fn an_agents_soft_prefer_is_never_the_persons() {
         eprintln!("skipped: packsetd is not installed");
         return;
     }
-    let daemon = Daemon::start();
-    let seat = Seat::on(daemon.url.clone());
+    let daemon = pack(false);
+    let seat = Seat::on(daemon.url().to_string());
     let _ = seat
         .command(env!("CARGO_BIN_EXE_ljos"), &["prefer", SOFT_PLANT])
         .stdin(Stdio::null())

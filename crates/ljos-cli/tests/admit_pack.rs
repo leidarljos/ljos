@@ -7,85 +7,20 @@
 ljos_test_boot::harness!();
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use serde_json::Value;
 
-struct Daemon {
-    child: Child,
-    url: String,
-    home: tempfile::TempDir,
-    log: Arc<Mutex<String>>,
-}
-
-impl Daemon {
-    fn start() -> Self {
-        let bin = packsetd_bin();
-        let home = tempfile::tempdir().expect("pack home");
-        let port = free_port();
-        let log = Arc::new(Mutex::new(String::new()));
-        let captured = Arc::clone(&log);
-        let home_path = home.path().to_str().expect("home is utf-8");
-        // Real token support in ljos's client comes with the coordinated packset 0.14 release.
-        let mut child = Command::new(&bin)
-            .args(["--port", &port.to_string(), "--home", home_path])
-            .env("PACKSET_AUTH", "off")
-            .env("PACKSET_HOME", home_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|err| panic!("spawn {}: {err}", bin.display()));
-        let stderr = child.stderr.take().expect("stderr");
-        std::thread::spawn(move || {
-            let mut reader = std::io::BufReader::new(stderr);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match std::io::BufRead::read_line(&mut reader, &mut line) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => captured.lock().expect("log").push_str(&line),
-                }
-            }
-        });
-        let url = format!("http://127.0.0.1:{port}");
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Some(status) = child.try_wait().expect("packsetd status") {
-                panic!("packsetd exited {status}: {}", log.lock().expect("log"));
-            }
-            if http_get(&url, "/health")
-                .is_ok_and(|(code, body)| code == 200 && body.contains("ok"))
-            {
-                break;
-            }
-            if Instant::now() > deadline {
-                let _ = child.kill();
-                panic!(
-                    "packsetd did not answer /health: {}",
-                    log.lock().expect("log")
-                );
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        Self {
-            child,
-            url,
-            home,
-            log,
-        }
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
+/// packsetd from PATH, auth off, in a temp home.
+///
+/// Real token support in ljos's client comes with the coordinated packset 0.14 release.
+fn writer() -> ljos_test_boot::Packsetd {
+    let mut started = ljos_test_boot::Packsetd::build();
+    started.bin(packsetd_bin());
+    started.command().env("PACKSET_AUTH", "off");
+    started.spawn()
 }
 
 fn packsetd_bin() -> PathBuf {
@@ -97,11 +32,6 @@ fn packsetd_bin() -> PathBuf {
         }
     }
     panic!("packsetd is not on PATH; CI builds it from packset develop");
-}
-
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("free port");
-    listener.local_addr().expect("addr").port()
 }
 
 fn http_get(base: &str, path: &str) -> Result<(u16, String), String> {
@@ -247,7 +177,7 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
         return;
     }
     let _lock = env_lock();
-    let daemon = Daemon::start();
+    let daemon = writer();
     let state = tempfile::tempdir().expect("state");
     let home = tempfile::tempdir().expect("home");
     // The child packsetd is given its env on the command. The seat in this
@@ -255,7 +185,7 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
     let _env = SeatEnv::set(&[
         ("HOME", home.path().to_str().expect("home")),
         ("XDG_STATE_HOME", state.path().to_str().expect("state")),
-        ("PACKSET_URL", daemon.url.as_str()),
+        ("PACKSET_URL", daemon.url()),
         ("PACKSET_WORKSPACE", ljos_cli::SEAT_WORKSPACE),
         ("LJOS_SEAT", "smoke"),
     ]);
@@ -263,11 +193,11 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
     let client = ljos_cli::pack().unwrap_or_else(|err| panic!("{err:#}"));
     let text = "Build the lesson on the cluster fuse.";
     let filed = ljos_cli::admit::propose_atom(&client, lesson(text))
-        .unwrap_or_else(|err| panic!("{err:#}\n{}", daemon.log.lock().expect("log")));
+        .unwrap_or_else(|err| panic!("{err:#}\n{}", daemon.log()));
     if !filed.remote {
         // A writer from packset 3aec57f on stores an agent's write live, with
         // no proposal to accept: the lesson is in the pack as agent-derived.
-        let live: Vec<_> = live_atoms(&daemon.url)
+        let live: Vec<_> = live_atoms(daemon.url())
             .into_iter()
             .filter(|atom| atom["text"] == text)
             .collect();
@@ -275,11 +205,11 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
         assert_eq!(live[0]["origin"], "agent-derived", "{live:?}");
         let entities = live[0]["entities"].to_string();
         assert!(entities.contains("issue:Software-kzdk"), "{entities}");
-        assert!(open_proposals(&daemon.url).is_empty(), "nothing is held");
+        assert!(open_proposals(daemon.url()).is_empty(), "nothing is held");
         return;
     }
 
-    let open = open_proposals(&daemon.url);
+    let open = open_proposals(daemon.url());
     assert_eq!(open.len(), 1, "one filing is one proposal: {open:?}");
     if open[0].get("atom").is_none() {
         // A writer built before packset kept the held atom on the proposal
@@ -302,7 +232,7 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
     assert!(open[0]["atom"]["source"].is_object(), "{open:?}");
     let remote_id = open[0]["id"].as_str().expect("proposal id").to_string();
     assert!(
-        live_atoms(&daemon.url)
+        live_atoms(daemon.url())
             .iter()
             .all(|atom| atom["text"] != text),
         "a held lesson is not live"
@@ -313,7 +243,7 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
     let again = ljos_cli::admit::propose_atom(&client, lesson(text)).expect("refile");
     assert!(again.remote);
     assert_eq!(again.id, filed.id);
-    let open = open_proposals(&daemon.url);
+    let open = open_proposals(daemon.url());
     assert_eq!(
         open.len(),
         1,
@@ -322,9 +252,9 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
     assert_eq!(open[0]["id"], remote_id);
 
     let said = ljos_cli::admit::accept(&filed.id)
-        .unwrap_or_else(|err| panic!("{err:#}\n{}", daemon.log.lock().expect("log")));
+        .unwrap_or_else(|err| panic!("{err:#}\n{}", daemon.log()));
     assert!(said.contains("user-declared"), "{said}");
-    let live: Vec<_> = live_atoms(&daemon.url)
+    let live: Vec<_> = live_atoms(daemon.url())
         .into_iter()
         .filter(|atom| atom["text"] == text)
         .collect();
@@ -337,11 +267,11 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
     assert!(live[0]["source"].is_object(), "{live:?}");
     let atom_id = live[0]["id"].as_str().expect("atom id").to_string();
     assert!(
-        open_proposals(&daemon.url).is_empty(),
+        open_proposals(daemon.url()).is_empty(),
         "accept left a held proposal: {:?}",
-        open_proposals(&daemon.url)
+        open_proposals(daemon.url())
     );
-    let recorded = latest_proposals(daemon.home.path());
+    let recorded = latest_proposals(daemon.pack_home());
     let row = recorded.get(&remote_id).expect("proposal log");
     assert_eq!(row["status"], "accepted", "{row}");
     assert_eq!(row["atom_id"], atom_id);
@@ -349,24 +279,24 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
     let second = ljos_cli::admit::accept(&filed.id).expect("second accept");
     assert!(second.contains("already in the pack"), "{second}");
     assert_eq!(
-        live_atoms(&daemon.url)
+        live_atoms(daemon.url())
             .iter()
             .filter(|atom| atom["text"] == text)
             .count(),
         1
     );
-    assert!(open_proposals(&daemon.url).is_empty());
+    assert!(open_proposals(daemon.url()).is_empty());
 
     let typed = "Type the same words to close the hold.";
     let open_id = ljos_cli::admit::propose_atom(&client, lesson(typed))
         .expect("typed filing")
         .id;
-    assert_eq!(open_proposals(&daemon.url).len(), 1);
+    assert_eq!(open_proposals(daemon.url()).len(), 1);
     let wrote = ljos_cli::packset_write("Remember", typed)
-        .unwrap_or_else(|err| panic!("{err:#}\n{}", daemon.log.lock().expect("log")));
+        .unwrap_or_else(|err| panic!("{err:#}\n{}", daemon.log()));
     assert_eq!(wrote["origin"], "user-declared");
     assert_eq!(wrote["kind"], "lesson");
-    let live: Vec<_> = live_atoms(&daemon.url)
+    let live: Vec<_> = live_atoms(daemon.url())
         .into_iter()
         .filter(|atom| atom["text"] == typed)
         .collect();
@@ -377,9 +307,9 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
     );
     assert_eq!(live[0]["origin"], "user-declared");
     assert!(
-        open_proposals(&daemon.url).is_empty(),
+        open_proposals(daemon.url()).is_empty(),
         "remember left the hold open: {:?}",
-        open_proposals(&daemon.url)
+        open_proposals(daemon.url())
     );
     let said = ljos_cli::admit::accept(&open_id).expect("accept after remember");
     assert!(
@@ -387,11 +317,11 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
         "{said}"
     );
     assert_eq!(
-        live_atoms(&daemon.url)
+        live_atoms(daemon.url())
             .iter()
             .filter(|atom| atom["text"] == typed)
             .count(),
         1
     );
-    assert!(open_proposals(&daemon.url).is_empty());
+    assert!(open_proposals(daemon.url()).is_empty());
 }

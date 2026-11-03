@@ -15335,20 +15335,34 @@ fn pack_step(dry: bool) -> Step {
             ok: true,
         };
     }
-    match run_captured("packset", &["ensure"]) {
-        Ok(said) => Step {
+    // `packset ensure` detaches the writer, and a test process cannot stop
+    // it. Onboard in a test still reports the step: the files it writes are
+    // what those tests read. The binary a seat runs is not built this way.
+    #[cfg(test)]
+    {
+        Step {
             what,
-            detail: format!(
-                "started a writer: {}",
-                said.stdout.lines().next().unwrap_or("").trim()
-            ),
+            detail: "a test does not detach a writer".into(),
             ok: true,
-        },
-        Err(e) => Step {
-            what,
-            detail: e.to_string().lines().next().unwrap_or("").to_string(),
-            ok: false,
-        },
+        }
+    }
+    #[cfg(not(test))]
+    {
+        match run_captured("packset", &["ensure"]) {
+            Ok(said) => Step {
+                what,
+                detail: format!(
+                    "started a writer: {}",
+                    said.stdout.lines().next().unwrap_or("").trim()
+                ),
+                ok: true,
+            },
+            Err(e) => Step {
+                what,
+                detail: e.to_string().lines().next().unwrap_or("").to_string(),
+                ok: false,
+            },
+        }
     }
 }
 
@@ -16465,8 +16479,19 @@ fn ensure_writer() -> Result<()> {
             home.display()
         );
     }
-    run_captured("packset", &["ensure"]).context("packset ensure")?;
-    Ok(())
+    // `packset ensure` detaches the writer. A hook process is short and that
+    // writer is the seat's. A test process stays up for the whole suite:
+    // the rerank thread `search_within` leaves behind, and a session start
+    // on the test thread, both see the real home again and would leave a
+    // writer on the default port. The binary a seat runs is not built this
+    // way. A test that needs a writer starts it and stops it with the test.
+    #[cfg(test)]
+    bail!("the memory writer does not start from a test");
+    #[cfg(not(test))]
+    {
+        run_captured("packset", &["ensure"]).context("packset ensure")?;
+        Ok(())
+    }
 }
 
 fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
@@ -62916,6 +62941,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         // doctor looks up every habitat with which(), so it takes the same
         // lock as the other PATH readers.
         let _env = env_guard();
+        // `doctor` starts the default writer when none answers. `packset
+        // ensure` detaches that process, so it would keep the real home's
+        // port after this test. `PACKSET_URL=off` is how a seat has no pack,
+        // and the rows below do not read one.
+        // Safety: the environment lock is held for the whole test.
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
         let rows = doctor();
         let names: Vec<&str> = rows.iter().map(|h| h.name).collect();
         for want in [

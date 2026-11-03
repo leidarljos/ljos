@@ -7,11 +7,8 @@ ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
 mod terminal;
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
 
 const WORDINGS: [&str; 5] = [
     "Always run all of the database migrations before you start the server.",
@@ -26,65 +23,6 @@ const OTHERS: [&str; 3] = [
     "Name each database migration file after the ticket it belongs to.",
     "The test database replays every migration each night at midnight.",
 ];
-
-struct Daemon {
-    child: std::process::Child,
-    url: String,
-    _home: tempfile::TempDir,
-}
-
-impl Daemon {
-    fn start() -> Self {
-        let home = tempfile::tempdir().unwrap();
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let dir = home.path().to_str().unwrap().to_string();
-        let mut child = Command::new("packsetd")
-            .args(["--port", &port.to_string(), "--home", &dir])
-            .env("PACKSET_AUTH", "off")
-            .env("PACKSET_HOME", &dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("packsetd is not on PATH; CI builds it from packset develop");
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                let mut err = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut err);
-                }
-                panic!("packsetd exited {status}: {err}");
-            }
-            if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-                let _ = stream.write_all(b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n");
-                let mut said = String::new();
-                let _ = stream.read_to_string(&mut said);
-                if said.starts_with("HTTP/1.1 200") {
-                    break;
-                }
-            }
-            assert!(Instant::now() < deadline, "packsetd did not answer");
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        Self {
-            child,
-            url: format!("http://127.0.0.1:{port}"),
-            _home: home,
-        }
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -218,8 +156,8 @@ fn five_wordings_of_one_lesson_leave_room_for_three_others_at_a_sitting() {
         eprintln!("skipped: packsetd is not installed");
         return;
     }
-    let daemon = Daemon::start();
-    let seat = Seat::on(&daemon.url);
+    let daemon = ljos_test_boot::Packsetd::open();
+    let seat = Seat::on(daemon.url());
 
     let (ack, said) = seat.remember(WORDINGS[0]);
     assert!(!said.contains("reinforced"), "{said}");
@@ -288,8 +226,8 @@ fn a_person_saying_it_again_or_the_opposite_gets_a_memory_of_their_own() {
         eprintln!("skipped: packsetd is not installed");
         return;
     }
-    let daemon = Daemon::start();
-    let seat = Seat::on(&daemon.url);
+    let daemon = ljos_test_boot::Packsetd::open();
+    let seat = Seat::on(daemon.url());
     seat.remember(WORDINGS[0]);
     let opposite = "Run the database migrations after the server starts.";
     for text in [WORDINGS[1], opposite] {

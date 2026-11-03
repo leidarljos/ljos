@@ -1,6 +1,12 @@
 //! Move a test process out of a host runner cgroup, and drop runner
 //! variables, before `main`. The object is linked only into crates that
 //! name this one. `ljos` does not.
+//!
+//! [`Packsetd`] starts the pack writer for a test and stops it again.
+
+mod packsetd;
+
+pub use packsetd::{Builder, Packsetd};
 
 use std::ffi::c_char;
 

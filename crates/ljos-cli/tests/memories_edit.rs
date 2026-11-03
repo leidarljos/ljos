@@ -8,12 +8,8 @@ ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
 mod terminal;
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use std::thread;
-use std::time::Duration;
 
 use serde_json::Value;
 
@@ -26,68 +22,6 @@ const PERSON_EDIT: &str = "Store the signing key outside the repository.";
 const AGENT: &str = "The staging database resets every Sunday night.";
 const AGENT_TOO: &str = "The lint job must pass before a merge.";
 const AGENT_MERGE: &str = "Sunday resets and the lint job both stand.";
-
-struct Daemon {
-    child: std::process::Child,
-    url: String,
-    _home: tempfile::TempDir,
-}
-
-impl Daemon {
-    fn start() -> Self {
-        let home = tempfile::tempdir().unwrap();
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let dir = home.path().to_str().unwrap().to_string();
-        let mut child = Command::new("packsetd")
-            .args(["--port", &port.to_string(), "--home", &dir])
-            .env("PACKSET_AUTH", "off")
-            .env("PACKSET_HOME", &dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("packsetd is not on PATH; CI builds it from packset develop");
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                let mut err = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut err);
-                }
-                panic!("packsetd exited {status}: {err}");
-            }
-            if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-                let _ = stream.write_all(b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n");
-                let mut said = String::new();
-                let _ = stream.read_to_string(&mut said);
-                if said.starts_with("HTTP/1.1 200") {
-                    break;
-                }
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "packsetd did not answer"
-            );
-            thread::sleep(Duration::from_millis(50));
-        }
-        Self {
-            child,
-            url: format!("http://127.0.0.1:{port}"),
-            _home: home,
-        }
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 struct Seat {
     home: tempfile::TempDir,
@@ -198,8 +132,8 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
         return;
     }
     let packset = tool("packset");
-    let daemon = Daemon::start();
-    let seat = Seat::on(daemon.url.clone());
+    let daemon = ljos_test_boot::Packsetd::open();
+    let seat = Seat::on(daemon.url().to_string());
     let ljos = env!("CARGO_BIN_EXE_ljos");
 
     let planted = seat.output(
@@ -213,7 +147,7 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
     );
     succeeded(&planted_too, "packset prefer second");
 
-    let stored = atoms(&daemon.url);
+    let stored = atoms(daemon.url());
     let held = by_text(&stored, "when CI is red");
     assert_eq!(held["origin"], "user-declared", "{held}");
     assert_eq!(held["kind"], "preference", "{held}");
@@ -261,7 +195,7 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
         "{}",
         text_of(&under_merge)
     );
-    let still = atoms(&daemon.url);
+    let still = atoms(daemon.url());
     assert_eq!(still.len(), before);
     assert!(basis(by_text(&still, "when CI is red")).is_none());
     assert!(still.iter().all(|a| basis(a) != Some("person")));
@@ -276,7 +210,7 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
         "edit outside a runner",
     );
     assert!(edited.contains("edited"), "{edited}");
-    let after_edit = atoms(&daemon.url);
+    let after_edit = atoms(daemon.url());
     let rewritten = by_text(&after_edit, "force pushes");
     assert_eq!(rewritten["origin"], "user-declared", "{rewritten}");
     assert!(
@@ -301,7 +235,7 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
         "merge outside a runner",
     );
     assert!(merged.contains("merged"), "{merged}");
-    let after_merge = atoms(&daemon.url);
+    let after_merge = atoms(daemon.url());
     let joined = by_text(&after_merge, "notes on Monday");
     assert_eq!(joined["origin"], "user-declared", "{joined}");
     assert!(basis(joined).is_none(), "merge invented a basis: {joined}");
@@ -309,7 +243,7 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
     let typed = terminal::shape("terminal", ljos, &["prefer", PERSON]);
     let person = succeeded(&seat.output(terminal::PYTHON, &typed), "person prefer");
     assert!(person.contains("preference") || person.contains("kept") || !person.is_empty());
-    let live = atoms(&daemon.url);
+    let live = atoms(daemon.url());
     let person_atom = by_text(&live, "release branches");
     assert_eq!(basis(person_atom), Some("person"), "{person_atom}");
     let person_id = id_of(person_atom);
@@ -328,7 +262,7 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
         "edit a person preference",
     );
     assert!(person_edit.contains("edited"), "{person_edit}");
-    let live = atoms(&daemon.url);
+    let live = atoms(daemon.url());
     let kept_person = by_text(&live, "signing key");
     assert_eq!(basis(kept_person), Some("person"), "{kept_person}");
     assert_eq!(kept_person["origin"], "user-declared", "{kept_person}");
@@ -345,7 +279,7 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
         .output()
         .unwrap();
     succeeded(&agent_too, "agent prefer second");
-    let live = atoms(&daemon.url);
+    let live = atoms(daemon.url());
     let agent_atom = by_text(&live, "Sunday night");
     let agent_too_atom = by_text(&live, "lint job");
     assert_eq!(basis(agent_atom), Some("agent"), "{agent_atom}");
@@ -369,7 +303,7 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
         "merge agent memories",
     );
     assert!(agent_merge.contains("merged"), "{agent_merge}");
-    let live = atoms(&daemon.url);
+    let live = atoms(daemon.url());
     let agent_joined = by_text(&live, "Sunday resets");
     assert_eq!(basis(agent_joined), Some("agent"), "{agent_joined}");
     assert_eq!(agent_joined["origin"], "agent-derived", "{agent_joined}");
