@@ -41,6 +41,11 @@ const SIG_DFL: usize = 0;
 #[cfg(test)]
 const ESRCH: i32 = 3;
 
+struct Live {
+    pid: AtomicU32,
+    next: AtomicPtr<Live>,
+}
+
 /// Writers this process has started and not yet stopped.
 ///
 /// A fixed length chosen for a large host is the wrong bound: `cargo test`
@@ -49,12 +54,13 @@ const ESRCH: i32 = 3;
 /// one writer. A free node (pid 0) is reused. A new node is added only
 /// when every node is taken, and it stays allocated so the SIGINT handler
 /// can walk the list with atomics and `kill`.
-struct Live {
-    pid: AtomicU32,
-    next: AtomicPtr<Live>,
+struct Registry {
+    head: AtomicPtr<Live>,
 }
 
-static LIVE: AtomicPtr<Live> = AtomicPtr::new(std::ptr::null_mut());
+/// The process-wide list.
+/// Tests of the reuse rule build their own [`Registry`] and never put fake pids in this one.
+static LIVE: Registry = Registry::new();
 
 /// The node whose pid this guard clears on drop.
 struct Slot(NonNull<AtomicU32>);
@@ -156,9 +162,9 @@ impl Drop for Packsetd {
     fn drop(&mut self) {
         let pid = self.child.id();
         if let Some(slot) = self.slot.take() {
-            // SAFETY: the node is still allocated. Clearing the pid frees
-            // the slot for the next writer.
-            unsafe { slot.0.as_ref().store(0, Ordering::SeqCst) };
+            // Clearing the pid frees the node for the next writer.
+            // The node itself stays allocated.
+            LIVE.release(slot);
         }
         untrack(pid);
         stop_child(&mut self.child);
@@ -265,7 +271,7 @@ impl Builder {
             .spawn()
             .unwrap_or_else(|err| panic!("spawn {}: {err}", program.display()));
         let pid = child.id();
-        let slot = claim(pid);
+        let slot = LIVE.claim(pid);
         track(pid);
         let log = Arc::new(Mutex::new(String::new()));
         let mut started = Packsetd {
@@ -509,36 +515,92 @@ fn listen_port(inodes: &BTreeSet<u64>, table: &str) -> Option<u16> {
     None
 }
 
-fn claim(pid: u32) -> Slot {
-    let mut cur = LIVE.load(Ordering::SeqCst);
-    while !cur.is_null() {
-        // SAFETY: a published node is never freed.
-        let node = unsafe { &*cur };
-        if node
-            .pid
-            .compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            return Slot(NonNull::from(&node.pid));
+impl Registry {
+    const fn new() -> Self {
+        Self {
+            head: AtomicPtr::new(std::ptr::null_mut()),
         }
-        cur = node.next.load(Ordering::SeqCst);
     }
-    let node = Box::into_raw(Box::new(Live {
-        pid: AtomicU32::new(pid),
-        next: AtomicPtr::new(std::ptr::null_mut()),
-    }));
-    loop {
-        let head = LIVE.load(Ordering::SeqCst);
-        // SAFETY: `node` is unpublished until the swap below succeeds, so
-        // only this thread writes `next`.
-        unsafe { (*node).next.store(head, Ordering::SeqCst) };
-        if LIVE
-            .compare_exchange(head, node, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            // SAFETY: the node stays allocated, and `pid` is its first field.
-            return Slot(NonNull::from(unsafe { &(*node).pid }));
+
+    fn claim(&self, pid: u32) -> Slot {
+        let mut cur = self.head.load(Ordering::SeqCst);
+        while !cur.is_null() {
+            // SAFETY: a published node is never freed.
+            let node = unsafe { &*cur };
+            if node
+                .pid
+                .compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Slot(NonNull::from(&node.pid));
+            }
+            cur = node.next.load(Ordering::SeqCst);
         }
+        let node = Box::into_raw(Box::new(Live {
+            pid: AtomicU32::new(pid),
+            next: AtomicPtr::new(std::ptr::null_mut()),
+        }));
+        loop {
+            let head = self.head.load(Ordering::SeqCst);
+            // SAFETY: `node` is unpublished until the swap below succeeds, so
+            // only this thread writes `next`.
+            unsafe { (*node).next.store(head, Ordering::SeqCst) };
+            if self
+                .head
+                .compare_exchange(head, node, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                // SAFETY: the node stays allocated, and `pid` is its first field.
+                return Slot(NonNull::from(unsafe { &(*node).pid }));
+            }
+        }
+    }
+
+    /// Clear this node's pid.
+    /// The node stays in the list.
+    fn release(&self, slot: Slot) {
+        let want = slot.0.as_ptr();
+        let mut cur = self.head.load(Ordering::SeqCst);
+        while !cur.is_null() {
+            // SAFETY: a published node is never freed.
+            let node = unsafe { &*cur };
+            if std::ptr::eq(want, &node.pid) {
+                node.pid.store(0, Ordering::SeqCst);
+                return;
+            }
+            cur = node.next.load(Ordering::SeqCst);
+        }
+        panic!("released a node this registry does not hold");
+    }
+
+    fn stop_all(&self) {
+        let mut cur = self.head.load(Ordering::SeqCst);
+        while !cur.is_null() {
+            // SAFETY: a published node is never freed. This runs in the SIGINT
+            // handler, so it only loads atomics and calls `kill` and `waitpid`.
+            let node = unsafe { &*cur };
+            let pid = node.pid.swap(0, Ordering::SeqCst);
+            if pid != 0 {
+                stop_pid(pid);
+                reap(pid);
+            }
+            cur = node.next.load(Ordering::SeqCst);
+        }
+    }
+
+    /// How many nodes are allocated.
+    /// A released node still counts.
+    #[cfg(test)]
+    fn nodes(&self) -> usize {
+        let mut count = 0usize;
+        let mut cur = self.head.load(Ordering::SeqCst);
+        while !cur.is_null() {
+            count += 1;
+            // SAFETY: a published node is never freed.
+            let node = unsafe { &*cur };
+            cur = node.next.load(Ordering::SeqCst);
+        }
+        count
     }
 }
 
@@ -570,18 +632,9 @@ fn stop_pid(pid: u32) {
 }
 
 fn stop_all() {
-    let mut cur = LIVE.load(Ordering::SeqCst);
-    while !cur.is_null() {
-        // SAFETY: a published node is never freed. This runs in the SIGINT
-        // handler, so it only loads atomics and calls `kill` and `waitpid`.
-        let node = unsafe { &*cur };
-        let pid = node.pid.swap(0, Ordering::SeqCst);
-        if pid != 0 {
-            stop_pid(pid);
-            reap(pid);
-        }
-        cur = node.next.load(Ordering::SeqCst);
-    }
+    // The handler walks the process-wide list only.
+    // A local `Registry` in a unit test is not in that list.
+    LIVE.stop_all();
 }
 
 /// Wait for a killed writer to exit. A writer this process never reaps is
@@ -814,6 +867,65 @@ int main(void) {
         drop(writers);
         for pid in pids {
             assert!(!alive(pid), "writer pid {pid} was still alive after drop");
+        }
+    }
+
+    /// N is two times the test thread count, plus one.
+    ///
+    /// `cargo test` runs one test per available thread, so one set of writers is the most that run has live at once.
+    /// A second set does not fit a slot per thread.
+    /// One past both sets is not a multiple of the thread count, so two slots per thread do not fit either.
+    /// The pids are fake: this registry is not the process-wide list, and nothing is killed.
+    #[test]
+    fn a_local_registry_reuses_nodes_for_fake_pids() {
+        let threads = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        // The second set is as wide as the set the test runner runs.
+        // One past both sets keeps N off a multiple of that width.
+        let n = threads + threads + 1;
+        let registry = Registry::new();
+        let mut slots = Vec::with_capacity(n);
+        for i in 0..n {
+            // Pid 0 is a free node, so the first fake pid is 1.
+            slots.push(registry.claim(u32::try_from(i + 1).unwrap()));
+        }
+        assert_eq!(registry.nodes(), n);
+        let mut seen = BTreeSet::new();
+        for slot in &slots {
+            assert!(
+                seen.insert(slot.0.as_ptr() as usize),
+                "two claims returned one node"
+            );
+        }
+        let released = slots.remove(0);
+        let released_at = released.0.as_ptr();
+        registry.release(released);
+        assert_eq!(registry.nodes(), n, "release dropped a node");
+        // One past the pids already claimed, and still not pid 0.
+        let again = registry.claim(u32::try_from(n + 1).unwrap());
+        assert_eq!(
+            again.0.as_ptr(),
+            released_at,
+            "claim did not return the released node"
+        );
+        assert_eq!(registry.nodes(), n, "reclaim grew the list");
+        slots.push(again);
+        for slot in slots {
+            registry.release(slot);
+        }
+        assert_eq!(registry.nodes(), n, "releasing every node dropped one");
+        let mut held = Vec::with_capacity(n);
+        for i in 0..n {
+            held.push(registry.claim(u32::try_from(i + 1).unwrap()));
+        }
+        assert_eq!(
+            registry.nodes(),
+            n,
+            "claiming the same width again grew the list"
+        );
+        for slot in held {
+            registry.release(slot);
         }
     }
 
