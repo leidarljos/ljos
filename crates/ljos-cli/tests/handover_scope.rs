@@ -11,17 +11,26 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "common/sibling.rs"]
+mod sibling;
+
 const CLOUD_TEXT: &str = "Cloud seats clone the tracker before they vote.";
 const BOX_TEXT: &str = "The passphrase hash lives only on the box.";
 
+/// The directory of packset and packsetd. CI puts the sibling tools in
+/// another directory, so vissue is found on its own.
 fn tools_dir() -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .chain(std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/bin")))
-        .find(|dir| dir.join("packsetd").is_file() && dir.join("vissue").is_file())
-        .unwrap_or_else(|| {
-            panic!("packsetd and vissue are not on PATH; CI builds them from packset and vissue")
-        })
+        .find(|dir| dir.join("packsetd").is_file())
+        .unwrap_or_else(|| panic!("packsetd is not on PATH; CI builds it from packset"))
+}
+
+/// The directory of the pinned vissue on PATH.
+fn sibling_dir() -> PathBuf {
+    let vissue = sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"));
+    vissue.parent().unwrap().to_path_buf()
 }
 
 fn keygen(path: &Path) -> String {
@@ -88,6 +97,7 @@ fn post_atom(port: u16, token: &str, text: &str, entities: &[&str]) {
 struct World {
     root: tempfile::TempDir,
     tools: PathBuf,
+    siblings: PathBuf,
     tracker: PathBuf,
     port: u16,
     _pack: ljos_test_boot::Packsetd,
@@ -96,6 +106,7 @@ struct World {
 impl World {
     fn new() -> Self {
         let tools = tools_dir();
+        let siblings = sibling_dir();
         let root = tempfile::tempdir().unwrap();
         let box_public = keygen(&root.path().join("box/.config/ljos/age.key"));
         let cloud_public = keygen(&root.path().join("vm/.config/ljos/cloud.age"));
@@ -128,6 +139,7 @@ impl World {
         Self {
             root,
             tools,
+            siblings,
             tracker,
             port,
             _pack: pack,
@@ -150,7 +162,12 @@ impl World {
             .env("XDG_RUNTIME_DIR", home.join("run"))
             .env(
                 "PATH",
-                format!("{}:{}:/usr/bin:/bin", first.display(), self.tools.display()),
+                format!(
+                    "{}:{}:{}:/usr/bin:/bin",
+                    first.display(),
+                    self.tools.display(),
+                    self.siblings.display()
+                ),
             )
             .env("PACKSET_URL", format!("http://127.0.0.1:{}", self.port))
             .env("PACKSET_HOME", self.root.path().join("box/pack"))
