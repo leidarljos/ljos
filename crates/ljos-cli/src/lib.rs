@@ -27375,6 +27375,7 @@ pub fn doctor() -> Vec<Habitat> {
         std::env::current_dir().ok().as_deref(),
     ));
     out.push(policy_row());
+    out.extend(policyd_config_row());
     out.extend(guard_off_row());
     out.extend(guard_fail_open_row());
     out.push(bypass_row());
@@ -27397,6 +27398,21 @@ fn guard_off_row() -> Option<Habitat> {
     bookkeep::guard_off_reason().map(|state| Habitat {
         name: "guard",
         state,
+        ok: false,
+    })
+}
+
+/// A row only while `policyd_config` names a file that is not there.
+/// ljos-policyd then answers every `check` with a fail-open allow, with no
+/// rule or warning, so the row names the path. The commands still run.
+fn policyd_config_row() -> Option<Habitat> {
+    let path = gates::policyd_config()?;
+    (!path.is_file()).then(|| Habitat {
+        name: "policyd config",
+        state: format!(
+            "policyd_config names {}, which is not a file: every `ljos-policyd check` fails open, with no rule or warning",
+            path.display()
+        ),
         ok: false,
     })
 }
@@ -29490,7 +29506,8 @@ fn optional_bin(name: &str) -> bool {
 /// `ok` when the row answers, `warn` when the policy row names an
 /// `ljos-policyd` without phronesis, a runner skill or runner env ljos
 /// wrote is stale or edited by hand, the note queue is busy or has bytes
-/// set aside beside it, the guard bypass log is damaged, or the cloud
+/// set aside beside it, the guard bypass log is damaged, `policyd_config`
+/// names a file that is not there, or the cloud
 /// guard file is a known older
 /// version or differs from the seat refusals, `info` when the row
 /// is optional and absent, `no` when a required row failed. A stale skill,
@@ -29549,7 +29566,9 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     {
         return "warn";
     }
-    if (row.name == "guard bypass" || row.name == "seat source") && !row.ok {
+    if (row.name == "guard bypass" || row.name == "seat source" || row.name == "policyd config")
+        && !row.ok
+    {
         return "warn";
     }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {

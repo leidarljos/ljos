@@ -144,6 +144,18 @@ impl Seat {
         String::from_utf8(out.stdout).unwrap()
     }
 
+    /// `ljos doctor`: its exit code and its `policyd config` rows.
+    fn doctor(&self) -> (Option<i32>, Vec<String>) {
+        let out = self.ljos(&["doctor"], "");
+        let rows = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .filter(|line| line.split('\t').nth(1) == Some("policyd config"))
+            .map(str::to_string)
+            .collect();
+        (out.status.code(), rows)
+    }
+
     /// `rm -r` on a fresh directory through the guard shim: the exit code,
     /// stderr, and whether the directory is still there.
     fn shim_rm(&self) -> (Option<i32>, String, bool) {
@@ -288,4 +300,27 @@ fn a_check_that_fails_open_still_allows() {
     assert_eq!(seat.hook(), "", "the hook allows");
     let (code, err, kept) = seat.shim_rm();
     assert_eq!((code, err.as_str(), kept), (Some(0), "", false));
+}
+
+/// `ljos doctor` names a `policyd_config` that is not there on a `warn`
+/// row, and exits as it does with nothing named.
+#[test]
+fn the_doctor_warns_of_a_named_policyd_config_that_is_not_there() {
+    let seat = Seat::new();
+    let (code, rows) = seat.doctor();
+    assert!(rows.is_empty(), "nothing named: {rows:?}");
+    seat.write(".config/ljos/ljos.toml", "policyd_config = \"gone.conf\"\n");
+    let gone = seat.path(".config/ljos/gone.conf");
+    assert_eq!(
+        seat.doctor(),
+        (
+            code,
+            vec![format!(
+                "warn\tpolicyd config\tpolicyd_config names {}, which is not a file: every `ljos-policyd check` fails open, with no rule or warning",
+                gone.display()
+            )]
+        )
+    );
+    seat.write(".config/ljos/gone.conf", BLOCKS);
+    assert_eq!(seat.doctor(), (code, Vec::new()), "the file is there");
 }
