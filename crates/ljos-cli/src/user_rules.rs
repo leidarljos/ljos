@@ -3106,7 +3106,7 @@ mod tests {
         assert_eq!(got[0].author, "rohit");
         assert_eq!(got[0].reason, "he asked not to be pinged");
         let credit = write_preference(
-            "EasyBuild pull requests name eb-stack and gpt-oss-120b",
+            "EasyBuild pull requests name eb-stack and model-a",
             "the credit line is part of the work",
             &People::default(),
             &People::default(),

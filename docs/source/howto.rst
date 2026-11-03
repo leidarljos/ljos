@@ -421,7 +421,7 @@ model pool their ballots, and the chat model reviews due claims:
    [judges.chat]
    backend = "chat"
    endpoint = "https://llm.example.org/v1"
-   model = "gpt-oss-120b"
+   model = "model-b"
    key_env = "LLM_API_KEY"
    budget_ms = 6000
 
@@ -455,7 +455,7 @@ runner reasons in a session of its own.
 
 The runner is any coding runner the machine runs: Claude Code, Codex,
 Grok Build, omp, hermes or Antigravity's ``agy``, each on whatever model it
-is set to, from Claude Opus or GPT-5 to ``gpt-oss-120b`` on an
+is set to, from a model to ``model-b`` on an
 OpenAI-compatible endpoint. It is a ``[[harness]]`` in
 ``~/.config/ljos/harnesses.toml``. Its
 ``start`` and ``resume`` argv say how it opens a session and how it resumes

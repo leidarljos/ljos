@@ -1406,7 +1406,7 @@ mod tests {
             ("alpha/inky-n9o", "alpha/inky"),
             ("alpha/disk-saver-t4t", "alpha/disk-saver"),
             ("alpha/ljos-bot", "alpha/ljosbot"),
-            ("alpha/GPT-5", "alpha/gpt-5"),
+            ("alpha/Model-5", "alpha/model-5"),
             ("alpha/Ridley-CI-A-555001", "alpha/ridley-ci-a-555001"),
             ("alpha/judge-Model-1.5", "alpha/judge-model-1-5"),
         ] {
@@ -1434,17 +1434,20 @@ mod tests {
     fn a_version_suffix_stays_part_of_the_seat() {
         let _home = test_home();
         let at = "2026-10-21T10:00:00Z";
-        let entries = ["alpha/gpt-5", "alpha/gpt"].map(|voter| {
+        let entries = ["alpha/model-5", "alpha/model"].map(|voter| {
             sign_entry(ballot_entry(voter, "accept", at), voter)
                 .unwrap_or_else(|err| panic!("{voter}: {err:#}"))
         });
         check_entries(&entries).expect("two seats");
         let read = tally(&entries).expect("tally");
         assert_eq!(counted(&read, "accept"), Some(2), "{read:?}");
-        let err = sign_entry(ballot_entry("alpha/gpt-39u", "accept", at), "alpha/gpt-39u")
-            .expect_err("a pid tag folds");
+        let err = sign_entry(
+            ballot_entry("alpha/model-39u", "accept", at),
+            "alpha/model-39u",
+        )
+        .expect_err("a pid tag folds");
         let text = err_chain(&err);
-        assert!(text.contains("must be written `alpha/gpt`"), "{text}");
+        assert!(text.contains("must be written `alpha/model`"), "{text}");
     }
 
     #[test]
@@ -2024,11 +2027,11 @@ mod tests {
     fn runs_and_judges_keep_their_ids_whole() {
         let _home = test_home();
         for (one, two) in [
-            ("alpha/judge-gpt-oss-120b", "beta/judge-gpt-oss-20b"),
+            ("alpha/judge-model-a-120b", "beta/judge-model-a-20b"),
             ("alpha/judge-llama-3-70b", "beta/judge-llama-3-8b"),
             ("alpha/judge-qwen", "beta/judge-qwen-72"),
             ("alpha/run-pr-1234", "beta/run-pr-5678"),
-            ("alpha/judge-grok-4", "beta/grok-4"),
+            ("alpha/judge-model-4", "beta/model-4"),
         ] {
             let entries = [
                 sign_as(ballot_entry(one, "accept", "2026-10-21T10:00:00Z"), 1),

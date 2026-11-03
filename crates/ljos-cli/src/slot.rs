@@ -1142,10 +1142,10 @@ mod tests {
         assert_eq!(family(&notes, "review-r1").as_deref(), Some("opus"));
         assert_eq!(family(&notes, "review-r2").as_deref(), Some("grok"));
         assert_eq!(family(&notes, "ljosbot"), None, "no slot names it");
-        let other = [slot(1, "review-r1", "gemini-3", 4)];
+        let other = [slot(1, "review-r1", "model-c", 4)];
         assert_eq!(
             family(&other, "review-r1").as_deref(),
-            Some("gemini-3"),
+            Some("model-c"),
             "a model outside the rotation is its own family"
         );
         assert_eq!(

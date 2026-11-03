@@ -196,20 +196,20 @@ fn three_unlabelled_ballots_are_one_family() {
 
 #[test]
 fn two_labelled_ballots_are_two_families() {
-    let labelled = [("judge:gpt-5-codex", "rrf"), ("judge:claude-opus-5", "rrf")];
+    let labelled = [("judge:model-a", "rrf"), ("judge:model-b", "rrf")];
     let Some(t) = Scratch::new(&labelled) else {
         return;
     };
     let doc = t.json();
     assert_eq!(doc["families"]["voices"], 2, "{doc}");
     assert_eq!(
-        doc["families"]["of"]["codex"],
-        serde_json::json!(["judge:gpt-5-codex"]),
+        doc["families"]["of"]["model-a"],
+        serde_json::json!(["judge:model-a"]),
         "{doc}"
     );
     assert_eq!(
-        doc["families"]["of"]["opus"],
-        serde_json::json!(["judge:claude-opus-5"]),
+        doc["families"]["of"]["model-b"],
+        serde_json::json!(["judge:model-b"]),
         "{doc}"
     );
     let (ok, read, err) = t.consensus(&["--no-file"]);
@@ -233,7 +233,9 @@ fn two_labelled_ballots_are_two_families() {
     let (ok, read, err) = t.consensus(&["--no-file"]);
     assert!(ok, "{read}\n{err}");
     assert!(
-        read.contains("model families: 5 ballots from 3 families (codex 1, opus 1, unknown 3); "),
+        read.contains(
+            "model families: 5 ballots from 3 families (model-a 1, model-b 1, unknown 3); "
+        ),
         "{read}"
     );
 }
@@ -249,8 +251,8 @@ fn ten_unlabelled_ballots_do_not_outvote_two_families() {
     }
     let seats: Vec<String> = (0..10).map(|n| format!("seat{n}")).collect();
     let mut ballots: Vec<(&str, &str)> = seats.iter().map(|s| (s.as_str(), "bm25")).collect();
-    ballots.push(("judge:gpt-5-codex", "rrf"));
-    ballots.push(("judge:claude-opus-5", "rrf"));
+    ballots.push(("judge:model-a", "rrf"));
+    ballots.push(("judge:model-b", "rrf"));
     let Some(t) = Scratch::new(&ballots) else {
         return;
     };

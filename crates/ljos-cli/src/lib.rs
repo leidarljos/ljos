@@ -5357,8 +5357,8 @@ const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
 /// `free-opencode-1vmow`); a last part of one to six lowercase letters and
 /// digits with at least one of each is read as that tag, so `eessi-bot`
 /// and `disk-saver` stay whole seats, and so does a version or a number
-/// such as `gpt-5`, `node-01` or `ridley-ci-a-555001`. A run, a judge
-/// and a subagent (`run-pr-1234`, `judge-gpt-oss-120b`,
+/// such as `model-5`, `node-01` or `ridley-ci-a-555001`. A run, a judge
+/// and a subagent (`run-pr-1234`, `judge-model-a-120b`,
 /// `sand-subagent-0e61`) keep every part. An all-letter tag cannot be
 /// told from a seat's own last part here; [`same_seat`] settles it
 /// against the seats a tracker knows. The same suffix on the
@@ -49193,7 +49193,7 @@ mod tests {
         assert!(same_holder("inky@i1o6nf7w3i", "inky"));
         assert!(same_holder("disk-saver", "disk-saver-t4t"));
         assert!(same_holder("ljosbot", "ljos-bot"));
-        assert!(same_holder("GPT-5", "gpt-5"));
+        assert!(same_holder("Model-5", "model-5"));
         assert!(same_holder("Ridley-CI-A-555001", "ridley-ci-a-555001"));
         assert!(same_holder("ljos-bot", "ljosbot@q4s23e2cxd"));
         assert!(same_holder("inky-n9o", "inky@i1o6nf7w3i"));
@@ -49224,7 +49224,7 @@ mod tests {
             ("ljosbot".to_string(), Some("q4s23e2cxd".to_string()))
         );
         assert_eq!(holder_parts("eessi-bot"), ("eessi-bot".to_string(), None));
-        assert_eq!(holder_parts("gpt-5"), ("gpt-5".to_string(), None));
+        assert_eq!(holder_parts("model-5"), ("model-5".to_string(), None));
         assert_eq!(
             holder_parts("ridley-ci-a-555001"),
             ("ridley-ci-a-555001".to_string(), None)
@@ -49234,7 +49234,7 @@ mod tests {
             holder_parts("sand-subagent-0e61"),
             ("sand-subagent-0e61".to_string(), None)
         );
-        assert_eq!(holder_parts("GPT-5"), ("gpt-5".to_string(), None));
+        assert_eq!(holder_parts("Model-5"), ("model-5".to_string(), None));
         assert_eq!(
             holder_parts("Ridley-CI-A-555001"),
             ("ridley-ci-a-555001".to_string(), None)
@@ -49364,7 +49364,7 @@ mod tests {
         assert!(!same_seat("free-claude-8h", "free-codex", &known));
         assert!(same_seat("free-opencode-1v8am", "free-opencode", &known));
         assert!(!same_seat("free-claude-sandbox", "free-claude", &known));
-        assert!(same_seat("GPT-5", "gpt-5", &known));
+        assert!(same_seat("Model-5", "model-5", &known));
         assert!(same_seat(
             "Ridley-CI-A-555001",
             "ridley-ci-a-555001",
@@ -58394,12 +58394,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         // point it there, so this one waits for that lock.
         let _g = env_guard();
         let write = hook_call(
-            r##"{"artifactDirectoryPath":"/h/.gemini/antigravity-cli/brain/6839fd1e","conversationId":"6839fd1e","modelName":"gemini-3.1-pro-low","stepIdx":8,"toolCall":{"args":{"Content":"import re\n","Overwrite":false,"Path":"/h/work/slug.py"},"name":"write_file"},"transcriptPath":"/h/.gemini/antigravity-cli/brain/6839fd1e/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/h/work"]}"##,
+            r##"{"artifactDirectoryPath":"/h/.gemini/antigravity-cli/brain/6839fd1e","conversationId":"6839fd1e","modelName":"model-a","stepIdx":8,"toolCall":{"args":{"Content":"import re\n","Overwrite":false,"Path":"/h/work/slug.py"},"name":"write_file"},"transcriptPath":"/h/.gemini/antigravity-cli/brain/6839fd1e/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/h/work"]}"##,
         );
         assert_eq!(write.event, "PreToolUse");
         assert_eq!(write.cue, "write_file /h/work/slug.py");
         let edit = hook_call(
-            r##"{"artifactDirectoryPath":"/h/.gemini/antigravity-cli/brain/6839fd1e","conversationId":"6839fd1e","modelName":"gemini-3.1-pro-low","stepIdx":18,"toolCall":{"args":{"Path":"/h/work/slug.py","Replacement":"import re\n","Target":"import os\n"},"name":"edit_file"},"transcriptPath":"/h/.gemini/antigravity-cli/brain/6839fd1e/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/h/work"]}"##,
+            r##"{"artifactDirectoryPath":"/h/.gemini/antigravity-cli/brain/6839fd1e","conversationId":"6839fd1e","modelName":"model-a","stepIdx":18,"toolCall":{"args":{"Path":"/h/work/slug.py","Replacement":"import re\n","Target":"import os\n"},"name":"edit_file"},"transcriptPath":"/h/.gemini/antigravity-cli/brain/6839fd1e/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/h/work"]}"##,
         );
         assert_eq!(edit.event, "PreToolUse");
         assert_eq!(edit.cue, "edit_file /h/work/slug.py");

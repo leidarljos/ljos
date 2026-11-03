@@ -334,7 +334,7 @@ fn aider_roundtrip_and_marker_fallback_restore_the_home() {
         let bin = fake_runner_commands(home);
         write(
             &home.join(".aider.conf.yml"),
-            "model: sonnet\nread:\n  - mine.md\n",
+            "model: model-a\nread:\n  - mine.md\n",
         );
         write(&home.join("mine.md"), "mine\n");
         let before = files_under(home);

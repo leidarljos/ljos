@@ -4757,7 +4757,7 @@ fn run_key(base: &str, run: &str) -> String {
 /// the seat this process signs as.
 fn slot_run(issue: &str, base: &str, run: &str) -> anyhow::Result<String> {
     let key = run_key(base, run);
-    ljos_cli::slot::write(issue, base, "grok-4", run, &key)
+    ljos_cli::slot::write(issue, base, "model-a", run, &key)
 }
 
 /// A box clone signing as `ljosbot`, over an origin holding `issues` on
@@ -4816,7 +4816,7 @@ fn a_launcher_slots_the_seat_its_run_takes() {
         .unwrap_or_else(|| panic!("no slot on the remote: {text}"));
     let slot = ljos_cli::slot::parse(note).unwrap();
     assert_eq!(slot.seat, run_seat);
-    assert_eq!(slot.model, "grok-4");
+    assert_eq!(slot.model, "model-a");
     assert_eq!(slot.run, "cafebabe0001abcd");
     assert_eq!(slot.run_key, run_key("ridley-review", "cafebabe0001abcd"));
     assert_eq!(slot.launcher, "ljosbot");
@@ -4829,7 +4829,7 @@ fn a_launcher_slots_the_seat_its_run_takes() {
     let err = ljos_cli::slot::write(
         "probe-slot",
         "ridley-review",
-        "grok-4",
+        "model-a",
         "cafebabe0001abcd",
         "not-a-key",
     )
@@ -4864,7 +4864,7 @@ fn a_launcher_does_not_slot_a_seat_that_already_ends_with_the_run_id() {
     let err = ljos_cli::slot::write(
         "probe-slot",
         "ridley-review-cafebabe0001abcd",
-        "grok-4",
+        "model-a",
         "cafebabe0001abcd",
         &run_key("ridley-review", "cafebabe0001abcd"),
     )
