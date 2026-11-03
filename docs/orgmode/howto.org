@@ -332,7 +332,6 @@ block-on-warning true
 ljos then passes that file every time it asks policyd, as =ljos-policyd check --config PATH -- COMMAND=: the hook, =ljos policy=, =ljos doctor= and the guard shims alike.
 With that line, policyd answers a warned command with =deny=, the same rule and the same warning, and exits 2.
 ljos reports it as policyd's deny: the hook blocks the tool call, =ljos policy --fail-on-deny= exits 1, and a guard shim exits 126.
-A force push still asks.
 An =ljos-policyd= that does not read the line, 0.7.0 among them, leaves its warnings as labels.
 
 #+begin_src console

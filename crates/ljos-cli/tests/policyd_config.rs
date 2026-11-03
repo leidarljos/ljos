@@ -43,6 +43,8 @@ const BLOCKS: &str = "block-on-warning true\n";
 /// its victim is still there.
 type Shimmed = (Option<i32>, String, bool);
 
+const RM_WARNING: &str = "a recursive delete reaches outside /tmp and /var/tmp";
+
 struct Seat {
     home: tempfile::TempDir,
     seat: Option<&'static str>,
@@ -128,7 +130,12 @@ impl Seat {
 
     /// `ljos policy --fail-on-deny -- sudo true`: its exit code and stdout.
     fn policy(&self) -> (Option<i32>, String) {
-        let out = self.ljos(&["policy", "--fail-on-deny", "--", "sudo", "true"], "");
+        self.policy_on(&["sudo", "true"])
+    }
+
+    /// `ljos policy --fail-on-deny -- ARGV`: its exit code and stdout.
+    fn policy_on(&self, argv: &[&str]) -> (Option<i32>, String) {
+        let out = self.ljos(&[&["policy", "--fail-on-deny", "--"], argv].concat(), "");
         (out.status.code(), String::from_utf8(out.stdout).unwrap())
     }
 
@@ -254,16 +261,37 @@ fn assert_label(seat: &Seat, why: &str) {
         "{why}"
     );
     assert_eq!(seat.hook(), "", "{why}: the hook allows");
-    assert_shims_allow(seat, why);
+    assert_shims_allow(seat, why, shim_warning);
+    assert_eq!(
+        seat.policy_on(&["rm", "-r", "/srv/data"]),
+        (
+            Some(0),
+            format!("rm -r /srv/data\n{}", shim_warning("rm-rf-outside-tmp"))
+        ),
+        "{why}"
+    );
 }
 
-/// Each guard shim ran its command: exit 0, nothing on stderr, and the
-/// victim gone.
-fn assert_shims_allow(seat: &Seat, why: &str) {
-    let ran = seat.shims().map(|(rule, _, said)| (rule, said));
+/// The line a guard shim prints on stderr for the warning policyd gives
+/// `rule` here. ljos names a recursive delete and `find -delete`, and
+/// leaves `git clean -f` to policyd.
+fn shim_warning(rule: &str) -> String {
+    match rule {
+        "rm-rf-outside-tmp" => format!("allow\twarn\t{rule}\t{RM_WARNING}\n"),
+        "find-delete" => {
+            format!("allow\twarn\t{rule}\tfind -delete reaches outside /tmp and /var/tmp\n")
+        }
+        _ => String::new(),
+    }
+}
+
+/// Each guard shim ran its command. It exited 0, the victim is gone, and
+/// stderr shows what `said` gives for its rule.
+fn assert_shims_allow(seat: &Seat, why: &str, said: fn(&str) -> String) {
+    let ran = seat.shims().map(|(rule, _, shimmed)| (rule, shimmed));
     let allowed = ran
         .clone()
-        .map(|(rule, _)| (rule, (Some(0), String::new(), false)));
+        .map(|(rule, _)| (rule, (Some(0), said(rule), false)));
     assert_eq!(ran, allowed, "{why}");
 }
 
@@ -290,6 +318,14 @@ fn assert_denied(seat: &Seat, why: &str) {
         );
         assert!(kept, "{why}: the refused {rule} command ran");
     }
+    assert_eq!(
+        seat.policy_on(&["rm", "-r", "/srv/data"]),
+        (
+            Some(1),
+            format!("rm -r /srv/data\ndeny\trm-rf-outside-tmp\t{RM_WARNING}\n")
+        ),
+        "{why}"
+    );
 }
 
 /// A config that would block warnings changes nothing until the person's
@@ -357,7 +393,7 @@ fn a_check_that_fails_open_still_allows() {
         )
     );
     assert_eq!(seat.hook(), "", "the hook allows");
-    assert_shims_allow(&seat, "a named config that is not there");
+    assert_shims_allow(&seat, "a named config that is not there", |_| String::new());
 }
 
 /// `policyd_config` names a config only at the top of `ljos.toml` or under

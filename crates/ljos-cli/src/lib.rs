@@ -6859,7 +6859,8 @@ if command -v ljos-policyd >/dev/null 2>&1; then
           exec "$real" "$@" ;;
       esac
       # A recursive delete and a force push run, with the line
-      # ljos-policyd's allow-with-warning prints for that rule.
+      # ljos-policyd's allow-with-warning prints for that rule. A config
+      # the person named chose the deny, and ljos keeps it.
       code=$(trim_ws "${rule%%:*}")
       case "$code" in
         rm-rf-outside-tmp) warning="a recursive delete reaches outside /tmp and /var/tmp" ;;
@@ -6867,7 +6868,7 @@ if command -v ljos-policyd >/dev/null 2>&1; then
         git-force-push) warning="a force push rewrites a published branch" ;;
         *) warning= ;;
       esac
-      if [ -n "$warning" ]; then
+      if [ -n "$warning" ] && [ -z "$conf" ]; then
         printf 'allow\twarn\t%s\t%s\n' "$code" "$warning" >&2
         exec "$real" "$@"
       fi
@@ -39317,8 +39318,9 @@ fn heredoc_reading(body: &str, quoted: bool, data: bool) -> String {
 /// that names a rule replaces a bare `allow`, so a heredoc program's
 /// warning is not lost behind its shell line. A later
 /// allow does not replace a prompt. None when no ljos-policyd answered. A
-/// deny or a prompt on a labelled rule is not one: it is that rule's
-/// [`label_line`], and the call runs. Nor is a faulted guard on a
+/// deny or a prompt on a labelled rule is not one, with no policyd config
+/// named: it is that rule's [`label_line`], and the call runs. Nor is a
+/// faulted guard on a
 /// [`repair_line`], which is let through with the fault as its note.
 fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
     let weight = |t: &str| {
@@ -39374,9 +39376,14 @@ fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
 
 /// Reads a `deny` or `prompt` from ljos-policyd on a labelled rule as that
 /// rule's [`label_line`]. An older build still printed one. The rule is
-/// named on `line` and the call runs. `None` for any other answer.
+/// named on `line` and the call runs. `None` for any other answer, and
+/// when the person named a [`gates::policyd_config`], which keeps its
+/// deny.
 fn relabelled(answer: &str, line: &str) -> Option<String> {
     if !(answer.starts_with("deny") || tcb_is_prompt(answer)) {
+        return None;
+    }
+    if gates::policyd_config().is_some() {
         return None;
     }
     let said = label_line(policyd_token(answer))?;
