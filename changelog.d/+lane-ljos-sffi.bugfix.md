@@ -7,4 +7,6 @@ The seat guard used to refuse a command that deletes or moves a tree holding the
 Such a command now runs too.
 It prints `allow\twarn\tuproots-person-key\tWARNING` and leaves the same `warn` row.
 The warning names the tree and the key directory.
+A command runs with `changes-person-key` instead of being refused when it changes the key directory, a file in it or the directory above it, such as `rm -rf ~/.config`.
+A change to the runtime directory where the hook keeps the person's latest prompt runs the same way, with `changes-kept-prompt`.
 A `policyd_config` holding `block-on-warning true` denies such a command where policyd warns on it too.

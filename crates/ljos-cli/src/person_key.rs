@@ -91,9 +91,10 @@ pub fn fails_path() -> Option<PathBuf> {
     key_dir().map(|dir| dir.join(FAILS_NAME))
 }
 
-/// The directories a tool call may not write into, move, link over or
-/// change the mode of, each resolved and as spelled: the key directory
-/// with all it holds, and the config directory above it, itself only.
+/// The directories the guard names as a tool call writes into, moves,
+/// links over or changes the mode of them, each resolved and as spelled:
+/// the key directory with everything in it, and the config directory above
+/// it, itself only.
 fn guarded() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     let dir = key_dir()?;
     let both = |p: PathBuf| {
@@ -186,6 +187,16 @@ pub(crate) fn reached(words: &[String], cwd: Option<&Path>, reader: bool) -> Opt
         }
     }
     None
+}
+
+/// What the guard says as a command runs that changes `word`, a word
+/// [`reached`] found: the word and the key directory.
+pub(crate) fn changed(word: &str) -> String {
+    let key = key_dir().map_or_else(String::new, |d| d.display().to_string());
+    format!(
+        "the command changes {word}, which is the person's key directory {key}, a file in it, \
+         or the directory that holds it"
+    )
 }
 
 /// Programs a `find -exec` runs that remove or move what it finds.
@@ -473,9 +484,8 @@ pub(crate) struct Uprooted {
 }
 
 impl Uprooted {
-    /// What the guard says as the command runs. It names the tree and the
-    /// key directory inside it on one line with no tab, the same shape as
-    /// a warning field of ljos-policyd's allow-with-warning.
+    /// What the guard says as the command runs: the tree and the key
+    /// directory inside it.
     pub(crate) fn warning(&self) -> String {
         let verb = if self.moves { "moves" } else { "deletes" };
         let key = key_dir().map_or_else(String::new, |d| d.display().to_string());
@@ -483,9 +493,6 @@ impl Uprooted {
             "the command {verb} {}, a tree that holds the person's key directory {key}",
             self.tree
         )
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
     }
 }
 

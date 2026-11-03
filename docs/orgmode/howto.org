@@ -320,6 +320,8 @@ ljos stops nothing on it.
 ljos adds a label of its own the same way.
 A command that deletes or moves a tree holding your key directory, such as =rm -rf /=, =rm -rf ~= or =shutil.rmtree(os.path.expanduser('~'))=, runs with =uproots-person-key=.
 Its warning names the tree and the key directory, and the bypass log keeps the label beside policyd's.
+A command that changes the key directory, a file in it or the directory above it, such as =rm -rf ~/.config=, runs with =changes-person-key=.
+One that changes the runtime directory where the hook keeps your latest prompt runs with =changes-kept-prompt=.
 
 #+begin_src console
 $ ljos policy -- rm -rf /

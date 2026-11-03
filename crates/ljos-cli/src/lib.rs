@@ -25217,10 +25217,12 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
 }
 
 /// [`seat_guard`] for a command that starts in `cwd`, absent the process
-/// directory. A `cd` on the line moves it for the commands after. ljos
-/// does not refuse a command that deletes or moves a tree holding the
-/// person's key directory: the command names `uproots-person-key` for
-/// [`take_guard_note`] and runs.
+/// directory. A `cd` on the line moves it for the commands after. A
+/// command that changes the kept prompt names `changes-kept-prompt`, and
+/// one that changes the person's key directory names
+/// `changes-person-key`, or `uproots-person-key` when it deletes or moves
+/// a tree that contains it. None of them is refused: each names its rule
+/// for [`take_guard_note`] and runs.
 #[must_use]
 pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     refusing(seat_guard_judged(line, cwd))
@@ -25311,16 +25313,24 @@ fn seat_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                     .into(),
             });
         }
-        if let Some(t) = kept_prompt::reached(&paths, cwd.as_deref(), path_reads)
-            .or_else(|| kept_prompt::code_reaches(&words, line))
-            .or_else(|| person_key::reached(&paths, cwd.as_deref(), path_reads))
-        {
-            return Some(refuse(&t));
+        let kept = kept_prompt::reached(&paths, cwd.as_deref(), path_reads)
+            .map(|word| kept_prompt::changed(&word))
+            .or_else(|| {
+                kept_prompt::code_reaches(&words, line)
+                    .map(|program| kept_prompt::named_in_code(&program))
+            });
+        let key = match person_key::reached(&paths, cwd.as_deref(), path_reads) {
+            Some(word) => Some((CHANGES_PERSON_KEY, person_key::changed(&word))),
+            None => person_key::uproots(&paths, cwd.as_deref())
+                .or_else(|| person_key::code_uproots(&words, line, cwd.as_deref()))
+                .map(|tree| (UPROOTS_PERSON_KEY, tree.warning())),
+        };
+        let named = kept.is_some() || key.is_some();
+        if let Some(warning) = kept {
+            label_saying(CHANGES_KEPT_PROMPT, warning, line);
         }
-        if let Some(tree) = person_key::uproots(&paths, cwd.as_deref())
-            .or_else(|| person_key::code_uproots(&words, line, cwd.as_deref()))
-        {
-            label_saying(UPROOTS_PERSON_KEY, tree.warning(), line);
+        if let Some((rule, warning)) = key {
+            label_saying(rule, warning, line);
         }
         if first == "ljos" {
             // `ljos approve` is the person's, typed in a terminal of their
@@ -25440,10 +25450,10 @@ fn seat_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             .windows(2)
             .find(|w| w[0] == ">" && is_path_word(&w[1], cwd.as_deref()))
             .map(|w| w[1].clone());
-        if let Some(t) = redirect_target {
+        if let Some(t) = redirect_target.filter(|_| !named) {
             return Some(refuse(&t));
         }
-        if path_reads {
+        if path_reads || named {
             continue;
         }
         if let Some(t) = paths
@@ -39537,6 +39547,18 @@ const LABELLED: &[(&str, &str)] = &[
 /// directory, as [`person_key::Uprooted::warning`] says them.
 const UPROOTS_PERSON_KEY: &str = "uproots-person-key";
 
+/// The rule a command names that writes, moves, removes, links over or
+/// changes the mode of the person's key directory, a file in it, or the
+/// directory above it. Its warning names the word and the key directory,
+/// as [`person_key::changed`] says them.
+const CHANGES_PERSON_KEY: &str = "changes-person-key";
+
+/// The rule a command names that writes, moves or removes what is in or
+/// above the runtime directory where the hook keeps the person's latest
+/// prompt, or runs code that names it. Its warning is
+/// [`kept_prompt::changed`] or [`kept_prompt::named_in_code`].
+const CHANGES_KEPT_PROMPT: &str = "changes-kept-prompt";
+
 /// The line a labelled rule prints as its call goes ahead, in the fields
 /// of ljos-policyd's allow-with-warning: `allow`, `warn`, the rule and the
 /// warning, split by tabs. `None` for a rule that is not labelled.
@@ -39558,8 +39580,14 @@ fn label(rule: &str, line: &str) {
     }
 }
 
-/// Name `rule` on `line` with `warning` as the call goes ahead.
+/// Name `rule` on `line` with `warning` as the call goes ahead. The
+/// warning is kept on one line with no tab, as a warning field of
+/// ljos-policyd's allow-with-warning is.
 fn label_saying(rule: &'static str, warning: String, line: &str) {
+    let warning: String = warning
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     let line = line.trim().to_string();
     GUARD_LABELS.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -39642,9 +39670,9 @@ pub fn unhealthy_note(why: &str) -> String {
 /// A seat deny rule, a remote-branch delete, or a commit, push, or merge
 /// the gates refuse, judged in this process. `None` means the slow check
 /// may run. A timeout there allows the line with a warning. None of these
-/// is refused: a force push, an `rm -rf` outside a temp directory and a
-/// delete of a tree that contains the person's key directory. Each names
-/// its rule for [`take_guard_note`] and runs.
+/// is refused: a force push, an `rm -rf` outside a temp directory, and a
+/// change to the kept prompt or the person's key directory. Each names its
+/// rule for [`take_guard_note`] and runs.
 /// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
 /// `None` there too, past the sitting gate ([`sitting_gate::guard_line`]),
 /// which judges a runner's history writes under any home and with
@@ -57793,45 +57821,64 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(under_a_runner());
         assert!(approval::approve("0".repeat(32).as_str()).is_err());
         unsafe { std::env::remove_var("ACMEAGENT_CONVERSATION_ID") };
-        assert!(seat_guard("rm -rf /run/user/1000/ljos/approvals").is_some());
+        assert_runs_naming(
+            "changes-kept-prompt",
+            &["rm -rf /run/user/1000/ljos/approvals".into()],
+        );
     }
 
     /// A runner that could rewrite the person key could choose the
     /// passphrase, and one that could clear the failure count could guess
-    /// without a lockout. A write to either, or into their directory, is
-    /// refused however the path is spelled. Reading them is not.
+    /// without a lockout. A write to either, or into their directory, runs
+    /// naming `changes-person-key` however the path is spelled. Reading
+    /// them names nothing.
     #[test]
-    fn the_person_key_and_its_failure_count_are_guarded() {
+    fn a_write_to_the_person_key_or_its_failure_count_runs_with_its_warning() {
         let _g = env_guard();
         let dir = person_key::key_dir().expect("a passwd home");
         let key = dir.join("person-key");
         let fails = dir.join("person-key.failures");
-        let (dir, key, fails) = (dir.display(), key.display(), fails.display());
+        let (dir_s, key_s, fails) = (dir.display(), key.display(), fails.display());
+        assert_runs_naming(
+            "changes-person-key",
+            &[
+                format!("echo x > {key_s}"),
+                format!("rm {key_s}"),
+                format!("mv /tmp/k {key_s}"),
+                format!("cp /tmp/person-key {dir_s}"),
+                format!("Write {key_s}"),
+                format!("truncate -s 0 {fails}"),
+                "cp /tmp/person-key ~/.config/ljos".to_string(),
+                "tee ~/.config/ljos/person-key".to_string(),
+                "sed -i s/a/b/ $HOME/.config/ljos/person-key".to_string(),
+                "rm -f ~/.config/ljos/person-key.failures".to_string(),
+                "cp /tmp/k ~/.config/./ljos/../ljos/person-key".to_string(),
+                format!("cd {dir_s} && mv /tmp/k person-key"),
+                format!("cd {dir_s} && rm -f person-key.failures"),
+                format!("cd {dir_s}/.. && cp /tmp/k ljos/person-key"),
+            ],
+        );
+        let data = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
+        assert_eq!(
+            seat_note(&format!("rm {key_s}")),
+            Ok(format!(
+                "allow\twarn\tchanges-person-key\tthe command changes {key_s}, which is the \
+                 person's key directory {dir_s}, a file in it, or the directory that holds it"
+            ))
+        );
+        let rows = std::fs::read_to_string(data.path().join("ljos").join("bypass.jsonl")).unwrap();
+        let row: serde_json::Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
+        assert_eq!(row["kind"], "warn", "{row}");
+        assert_eq!(row["rule"], "changes-person-key", "{row}");
+        assert_eq!(row["command"], format!("rm {key_s}"), "{row}");
         for line in [
-            format!("echo x > {key}"),
-            format!("rm {key}"),
-            format!("mv /tmp/k {key}"),
-            format!("cp /tmp/person-key {dir}"),
-            format!("Write {key}"),
-            format!("truncate -s 0 {fails}"),
-            "cp /tmp/person-key ~/.config/ljos".to_string(),
-            "tee ~/.config/ljos/person-key".to_string(),
-            "sed -i s/a/b/ $HOME/.config/ljos/person-key".to_string(),
-            "rm -f ~/.config/ljos/person-key.failures".to_string(),
-            "cp /tmp/k ~/.config/./ljos/../ljos/person-key".to_string(),
-            format!("cd {dir} && mv /tmp/k person-key"),
-            format!("cd {dir} && rm -f person-key.failures"),
-            format!("cd {dir}/.. && cp /tmp/k ljos/person-key"),
-        ] {
-            assert!(seat_guard(&line).is_some(), "{line:?} was allowed");
-        }
-        for line in [
-            format!("cat {key}"),
-            format!("ls {dir}"),
+            format!("cat {key_s}"),
+            format!("ls {dir_s}"),
             "ljos person-key status".to_string(),
             "echo person-key".to_string(),
         ] {
-            assert!(seat_guard(&line).is_none(), "{line:?} was refused");
+            assert_eq!(seat_note(&line).ok().as_deref(), Some(""), "{line:?}");
         }
     }
 
@@ -57858,19 +57905,24 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         )
     }
 
-    /// Each line runs past the seat guard and names `uproots-person-key`.
-    /// Every line that does not is listed.
-    fn assert_runs_uprooting(lines: &[String]) {
+    /// The line `changes-kept-prompt` names when a command changes `word`.
+    fn kept_said(word: &str) -> String {
+        format!(
+            "allow\twarn\tchanges-kept-prompt\tthe command changes {word}, in or above the \
+             runtime directory where the hook keeps the person's latest prompt"
+        )
+    }
+
+    /// Each line runs past the seat guard and names `rule`. Every line
+    /// that does not is listed. The bypass rows go to a scratch directory.
+    fn assert_runs_naming(rule: &str, lines: &[String]) {
+        let data = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
+        let named = format!("allow\twarn\t{rule}\t");
         let wrong: Vec<String> = lines
             .iter()
             .filter_map(|line| match seat_note(line) {
-                Ok(note)
-                    if note
-                        .lines()
-                        .any(|l| l.starts_with("allow\twarn\tuproots-person-key\t")) =>
-                {
-                    None
-                }
+                Ok(note) if note.lines().any(|l| l.starts_with(&named)) => None,
                 verdict => Some(format!("{line:?}: {verdict:?}")),
             })
             .collect();
@@ -57881,9 +57933,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// key with it, however far above it the tree starts. It runs, and
     /// names `uproots-person-key` with the tree and the key directory, in
     /// a `warn` row of the bypass log too. A line that names the config
-    /// directory itself, or `/tmp` as `mv -t` does, is still refused by a
-    /// check made before it, as [`assert_uprooted_yet_refused`] says. A
-    /// recursive delete or move elsewhere under the home names nothing.
+    /// directory itself names `changes-person-key` instead, and one that
+    /// names `/tmp` as `mv -t` does names `changes-kept-prompt` beside it,
+    /// as [`assert_uprooted_yet_named`] says. A recursive delete or move
+    /// elsewhere under the home names nothing.
     #[test]
     fn a_tree_above_the_person_key_runs_with_its_warning() {
         let _g = env_guard();
@@ -57898,25 +57951,28 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let up = home.parent().unwrap().display().to_string();
         let name = home.file_name().unwrap().to_string_lossy().into_owned();
         let (h, home_s) = (h.display(), home.display());
-        assert_runs_uprooting(&[
-            "rm -rf ~".to_string(),
-            "rm -r ~/".to_string(),
-            "rm -rf $HOME".to_string(),
-            "rm -rf \"${HOME}\"".to_string(),
-            "rm --recursive --force ~/..".to_string(),
-            format!("rm -Rf {home_s}"),
-            format!("rm -rf {up}"),
-            format!("cd {up} && rm -rf {name}"),
-            "cd ~ && rm -rf .".to_string(),
-            format!("rm -rf {h}/"),
-            "find ~ -delete".to_string(),
-            "find -L ~ -name person-key -delete".to_string(),
-            "find ~ -name 'person-key*' -exec rm {} +".to_string(),
-            "mv ~ /tmp/x".to_string(),
-            "rsync -a --delete /tmp/empty/ ~/".to_string(),
-            "rsync -a --remove-source-files ~ /tmp/backup".to_string(),
-            "gio trash ~".to_string(),
-        ]);
+        assert_runs_naming(
+            "uproots-person-key",
+            &[
+                "rm -rf ~".to_string(),
+                "rm -r ~/".to_string(),
+                "rm -rf $HOME".to_string(),
+                "rm -rf \"${HOME}\"".to_string(),
+                "rm --recursive --force ~/..".to_string(),
+                format!("rm -Rf {home_s}"),
+                format!("rm -rf {up}"),
+                format!("cd {up} && rm -rf {name}"),
+                "cd ~ && rm -rf .".to_string(),
+                format!("rm -rf {h}/"),
+                "find ~ -delete".to_string(),
+                "find -L ~ -name person-key -delete".to_string(),
+                "find ~ -name 'person-key*' -exec rm {} +".to_string(),
+                "mv ~ /tmp/x".to_string(),
+                "rsync -a --delete /tmp/empty/ ~/".to_string(),
+                "rsync -a --remove-source-files ~ /tmp/backup".to_string(),
+                "gio trash ~".to_string(),
+            ],
+        );
         for (line, tree, moves) in [
             ("rm -rf ~", home.clone(), false),
             ("rm -rf /", PathBuf::from("/"), false),
@@ -57941,15 +57997,22 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(row["verdict"], "allow", "{row}");
         let said = uproots_said(Path::new("/"), false);
         assert_eq!(row["reason"].as_str(), said.rsplit('\t').next(), "{row}");
-        for line in [
-            "rm -r ~/.config",
-            "mv ~/.config elsewhere",
-            "trash ~/.config",
-            "mv -t /tmp ~",
-        ] {
-            let refused = seat_note(line).expect_err(line);
-            assert_eq!(refused.verdict, "deny", "{line}");
-        }
+        assert_runs_naming(
+            "changes-person-key",
+            &[
+                "rm -r ~/.config".into(),
+                "mv ~/.config elsewhere".into(),
+                "trash ~/.config".into(),
+            ],
+        );
+        assert_eq!(
+            seat_note("mv -t /tmp ~"),
+            Ok(format!(
+                "{}\n{}",
+                kept_said("/tmp"),
+                uproots_said(&home, true)
+            ))
+        );
         for line in [
             "rm -rf ~/proj/build",
             "rm -r ~/.cache",
@@ -58002,7 +58065,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         std::fs::create_dir_all(&dir).unwrap();
         let config = dir.parent().unwrap().to_path_buf();
         let cfg = config.display().to_string();
-        assert_runs_uprooting(&[
+        assert_runs_naming("uproots-person-key", &[
             r#"python3 -c "import shutil,os; shutil.rmtree(os.path.expanduser('~'))""#.to_string(),
             r#"python3 -c "import shutil; from pathlib import Path; shutil.rmtree(Path.home())""#
                 .to_string(),
@@ -58060,24 +58123,16 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// Each line is read by the person key's tree guards, and runs past
     /// the seat guard naming `uproots-person-key`.
     fn assert_uprooted(lines: &[String]) {
-        let _g = env_guard();
-        let data = tempfile::tempdir().unwrap();
-        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
-        std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
-        for line in lines {
-            assert!(
-                uprooted_by(line).is_some(),
-                "{line:?} was not read as uprooting"
-            );
-        }
-        assert_runs_uprooting(lines);
+        assert_uprooted_yet_named("uproots-person-key", lines);
     }
 
-    /// Each line is read by the person key's tree guards, and is refused
-    /// by a check the seat guard makes before them: a word that names the
-    /// config directory itself, or `/tmp`, which contains the runtime
-    /// directory a shell without `XDG_RUNTIME_DIR` uses, read as moved.
-    fn assert_uprooted_yet_refused(lines: &[String]) {
+    /// Each line is read by the person key's tree guards, and runs past
+    /// the seat guard naming `rule`. A check the seat guard makes before
+    /// them can name its own rule: `changes-person-key` for a word that
+    /// names the config directory itself, and `changes-kept-prompt` for
+    /// `/tmp`, which contains the runtime directory a shell without
+    /// `XDG_RUNTIME_DIR` uses, read as moved.
+    fn assert_uprooted_yet_named(rule: &str, lines: &[String]) {
         let _g = env_guard();
         std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
         for line in lines {
@@ -58085,9 +58140,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 uprooted_by(line).is_some(),
                 "{line:?} was not read as uprooting"
             );
-            let refused = seat_guard(line).unwrap_or_else(|| panic!("{line:?} ran"));
-            assert_eq!(refused.verdict, "deny", "{line:?}");
         }
+        assert_runs_naming(rule, lines);
     }
 
     /// GNU takes a long option by any prefix that names one option.
@@ -58098,12 +58152,15 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "rm --recursive ~".into(),
             "rm --rec -f ~".into(),
         ]);
-        assert_uprooted_yet_refused(&[
-            "rm -f --r ~/.config".into(),
-            "mv --target=/tmp ~".into(),
-            "mv --targ /tmp ~".into(),
-            "mv --target-directory /tmp ~".into(),
-        ]);
+        assert_uprooted_yet_named("changes-person-key", &["rm -f --r ~/.config".into()]);
+        assert_uprooted_yet_named(
+            "changes-kept-prompt",
+            &[
+                "mv --target=/tmp ~".into(),
+                "mv --targ /tmp ~".into(),
+                "mv --target-directory /tmp ~".into(),
+            ],
+        );
     }
 
     /// A short option's value may follow its letter in one word, and
@@ -58115,7 +58172,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "mv -ft/tmp ~".into(),
             "rm -vfR ~".into(),
         ]);
-        assert_uprooted_yet_refused(&["mv -ft /tmp ~".into(), "mv -vft /tmp ~".into()]);
+        assert_uprooted_yet_named(
+            "changes-kept-prompt",
+            &["mv -ft /tmp ~".into(), "mv -vft /tmp ~".into()],
+        );
     }
 
     /// The shell makes brace expansions before the tilde and the rest.
@@ -58167,7 +58227,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             format!("mv {l}/d/* /tmp/x"),
             format!("find {l}/d/h* -delete"),
         ]);
-        assert_uprooted_yet_refused(&[format!("rm -rf {l}/d/[h]/.config")]);
+        assert_uprooted_yet_named("changes-person-key", &[format!("rm -rf {l}/d/[h]/.config")]);
     }
 
     /// An inline program can take the tree it removes as a word after its
@@ -58184,11 +58244,14 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "sh -c 'rm -rf \"$@\"' sh /tmp/x ~".into(),
             "sh -c 'find \"$1\" -delete' _ ~".into(),
         ]);
-        assert_uprooted_yet_refused(&[
-            "python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' ~/.config 2>/dev/null"
-                .into(),
-            "bash -c 'rm -rf \"${1}\"' bash ~/.config".into(),
-        ]);
+        assert_uprooted_yet_named(
+            "changes-person-key",
+            &[
+                "python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' ~/.config 2>/dev/null"
+                    .into(),
+                "bash -c 'rm -rf \"${1}\"' bash ~/.config".into(),
+            ],
+        );
     }
 
     /// Ruby and Perl call a function without parentheses, any language
@@ -58278,12 +58341,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     /// Removing, moving, relinking or opening up a directory above the key
     /// replaces the key as surely as writing it. Every route to the key
-    /// directory and the config directory above it is refused once the
-    /// path is resolved: `~`, `$HOME`, `..`, `//`, a glob, a directory a
-    /// `cd` reached, a symlink to either, and the passwd home when `HOME`
-    /// names another. Reading them and writing beside them still pass.
+    /// directory and the config directory above it runs naming
+    /// `changes-person-key` once the path is resolved: `~`, `$HOME`, `..`,
+    /// `//`, a glob, a directory a `cd` reached, a symlink to either, and
+    /// the passwd home when `HOME` names another. Reading them and writing
+    /// beside them name nothing.
     #[test]
-    fn every_route_to_the_person_key_directory_is_guarded() {
+    fn every_route_to_the_person_key_directory_names_its_rule() {
         let _g = env_guard();
         let dir = person_key::key_dir().expect("a passwd home");
         std::fs::create_dir_all(&dir).unwrap();
@@ -58294,7 +58358,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         std::os::unix::fs::symlink(&dir, &l).unwrap();
         std::os::unix::fs::symlink(&config, &c).unwrap();
         let (l, c, cfg) = (l.display(), c.display(), config.display());
-        let refused = [
+        let changed = [
             "mv ~/.config ~/.config.old".to_string(),
             "rm -rf ~/.config".to_string(),
             "rmdir ~/.config/ljos".to_string(),
@@ -58322,9 +58386,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             format!("chmod 000 {c}"),
             format!("cd {c} && mv ljos /tmp/x"),
         ];
-        for line in &refused {
-            assert!(seat_guard(line).is_some(), "{line:?} was allowed");
-        }
+        assert_runs_naming("changes-person-key", &changed);
         for line in [
             "cat ~/.config/ljos/person-key".to_string(),
             "ls -la ~/.config".to_string(),
@@ -58346,7 +58408,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             std::env::set_var("HOME", elsewhere.path());
             std::env::set_var("LJOS_GUARD", "1");
         }
-        let moved = ["rm -rf ~/.config", "chmod 000 $HOME/.config/ljos"].map(seat_guard);
+        let moved = ["rm -rf ~/.config", "chmod 000 $HOME/.config/ljos"].map(seat_note);
         unsafe {
             for (k, v) in saved {
                 match v {
@@ -58355,32 +58417,44 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 }
             }
         }
-        assert!(moved.iter().all(Option::is_some), "{moved:?}");
+        assert!(
+            moved.iter().all(|note| note
+                .as_deref()
+                .is_ok_and(|n| n.starts_with("allow\twarn\tchanges-person-key\t"))),
+            "{moved:?}"
+        );
     }
 
-    /// The kept prompt makes a sentence the person's, so no tool call may
-    /// replace it: not by naming the runtime directory that holds it, not
-    /// by a relative name or a glob, and not through a file tool that
-    /// names its target `path`.
+    /// The kept prompt makes a sentence the person's, so a tool call that
+    /// replaces it runs naming `changes-kept-prompt`: by naming the
+    /// runtime directory it lives in, by a relative name or a glob, or
+    /// through a file tool that names its target `path`.
     #[test]
-    fn the_kept_prompt_and_its_directory_are_guarded() {
+    fn a_change_to_the_kept_prompt_or_its_directory_runs_with_its_warning() {
         let _g = env_guard();
         let prev = std::env::var_os("XDG_RUNTIME_DIR");
         // SAFETY: under env_guard, and restored below.
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000") };
-        for line in [
-            "mv /tmp/p /run/user/1000/ljos/latest-prompt",
-            "ln -sf /tmp/p $XDG_RUNTIME_DIR/ljos/latest-prompt.bind",
-            "touch -r /tmp/p ${XDG_RUNTIME_DIR}/ljos/latest-prompt",
-            "mv /run/user/1000/ljos /run/user/1000/ljos.old",
-            "rm -rf $XDG_RUNTIME_DIR/ljos/",
-            "ln -s /tmp/fake ${XDG_RUNTIME_DIR}/ljos",
-            "cd /run/user/1000/ljos && printf plant > latest-prompt",
-            "cp /tmp/bind ./latest-prompt.bind",
-            "cp /tmp/p $XDG_RUNTIME_DIR/ljos/latest-pr*",
-        ] {
-            assert!(seat_guard(line).is_some(), "allowed: {line}");
-        }
+        assert_runs_naming(
+            "changes-kept-prompt",
+            &[
+                "mv /tmp/p /run/user/1000/ljos/latest-prompt".into(),
+                "ln -sf /tmp/p $XDG_RUNTIME_DIR/ljos/latest-prompt.bind".into(),
+                "touch -r /tmp/p ${XDG_RUNTIME_DIR}/ljos/latest-prompt".into(),
+                "mv /run/user/1000/ljos /run/user/1000/ljos.old".into(),
+                "rm -rf $XDG_RUNTIME_DIR/ljos/".into(),
+                "ln -s /tmp/fake ${XDG_RUNTIME_DIR}/ljos".into(),
+                "cd /run/user/1000/ljos && printf plant > latest-prompt".into(),
+                "cp /tmp/bind ./latest-prompt.bind".into(),
+                "cp /tmp/p $XDG_RUNTIME_DIR/ljos/latest-pr*".into(),
+            ],
+        );
+        let data = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
+        assert_eq!(
+            seat_note("mv /tmp/p /run/user/1000/ljos/latest-prompt"),
+            Ok(kept_said("/run/user/1000/ljos/latest-prompt"))
+        );
         for line in [
             "cat /run/user/1000/ljos/latest-prompt",
             "ls $XDG_RUNTIME_DIR/ljos",
@@ -58392,7 +58466,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let mcp = hook_call(
             r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write_file","tool_input":{"path":"/run/user/1000/ljos/latest-prompt","content":"it's the person's words"}}"#,
         );
-        assert!(seat_guard(&mcp.cue).is_some(), "allowed: {}", mcp.cue);
+        assert_runs_naming("changes-kept-prompt", std::slice::from_ref(&mcp.cue));
         let read = hook_call(
             r#"{"hook_event_name":"PreToolUse","tool_name":"Grep","tool_input":{"path":"/run/user/1000/ljos","pattern":"x"}}"#,
         );
@@ -58408,9 +58482,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// The kept prompt's directory is the one the path names once it is
     /// resolved, however the word spells it: `.` and `..`, a variable with
     /// a default, a symlink to a parent, a relative name after `cd`, a
-    /// glob. Moving or removing a directory above it replaces it too.
+    /// glob. Moving or removing a directory above it replaces it too. Each
+    /// runs naming `changes-kept-prompt`.
     #[test]
-    fn the_kept_prompt_is_guarded_however_its_path_is_spelled() {
+    fn the_kept_prompt_is_named_however_its_path_is_spelled() {
         let _g = env_guard();
         let top = tempfile::tempdir().unwrap();
         let run = top.path().join("run");
@@ -58420,21 +58495,22 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         std::os::unix::fs::symlink(&run, &alias).unwrap();
         let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", run.to_str().unwrap())]);
         let (run, alias, top) = (run.display(), alias.display(), top.path().display());
-        for line in [
-            format!("mv {run}/ljos/. /tmp/old"),
-            format!("mv {run}/x/../ljos /tmp/old"),
-            format!("rm -rf {alias}/ljos"),
-            "mv ${XDG_RUNTIME_DIR:-/run/user/1000}/ljos /tmp/old".to_string(),
-            format!("cd {run} && mv ljos ljos.old"),
-            "cd $XDG_RUNTIME_DIR/ljos && rm -f ./*".to_string(),
-            format!("touch {run}/lj?s"),
-            format!("rm -rf {run}"),
-            format!("mv {top} /tmp/elsewhere"),
-            format!("cd {top} && rm -r run"),
-            format!("mv /tmp/ljos {run}/"),
-        ] {
-            assert!(seat_guard(&line).is_some(), "allowed: {line}");
-        }
+        assert_runs_naming(
+            "changes-kept-prompt",
+            &[
+                format!("mv {run}/ljos/. /tmp/old"),
+                format!("mv {run}/x/../ljos /tmp/old"),
+                format!("rm -rf {alias}/ljos"),
+                "mv ${XDG_RUNTIME_DIR:-/run/user/1000}/ljos /tmp/old".to_string(),
+                format!("cd {run} && mv ljos ljos.old"),
+                "cd $XDG_RUNTIME_DIR/ljos && rm -f ./*".to_string(),
+                format!("touch {run}/lj?s"),
+                format!("rm -rf {run}"),
+                format!("mv {top} /tmp/elsewhere"),
+                format!("cd {top} && rm -r run"),
+                format!("mv /tmp/ljos {run}/"),
+            ],
+        );
         for line in [
             format!("mv {run}/ljos-notes /tmp/x"),
             format!("rm -rf {run}/other"),
@@ -58443,31 +58519,47 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             format!("ls {alias}/ljos"),
             format!("cat {run}/ljos/latest-prompt"),
         ] {
-            assert!(seat_guard(&line).is_none(), "refused: {line}");
+            assert_eq!(seat_note(&line).ok().as_deref(), Some(""), "{line}");
         }
     }
 
     /// Code handed to an interpreter writes wherever it likes, so code that
     /// names the runtime directory, its variable or a kept file is a write,
     /// and so is a here-document or a pipe fed to one or to a patch tool.
+    /// Each runs naming `changes-kept-prompt`, with the program that runs
+    /// the code.
     #[test]
-    fn interpreter_code_that_names_the_kept_prompt_is_denied() {
+    fn interpreter_code_that_names_the_kept_prompt_runs_with_its_warning() {
         let _g = env_guard();
         let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
-        for line in [
-            r#"python3 -c "open('/run/user/1000/ljos/latest-prompt','w').write('x')""#,
-            r#"python3 -c 'import os; open(os.environ["XDG_RUNTIME_DIR"]+"/ljos/p","w")'"#,
-            r#"perl -e 'open F, ">", "$ENV{XDG_RUNTIME_DIR}/ljos/latest-prompt.bind"'"#,
-            r#"node -e "require('fs').writeFileSync(process.env.XDG_RUNTIME_DIR+'/ljos/x','')""#,
-            r#"ruby -e 'File.write(ENV["XDG_RUNTIME_DIR"] + "/ljos/latest-prompt", "x")'"#,
-            r#"awk 'BEGIN { print "x" > "/run/user/1000/ljos/latest-prompt" }'"#,
-            "python3 - <<'EOF'\nimport os\nos.rename('/tmp/p', '/run/user/1000/ljos/latest-prompt')\nEOF",
-            "git apply <<'EOF'\n--- /dev/null\n+++ b/run/user/1000/ljos/latest-prompt\n@@ -0,0 +1 @@\n+x\nEOF",
-            "patch -p0 <<'EOF'\n--- a\n+++ /run/user/1000/ljos/latest-prompt.bind\nEOF",
-            r#"printf 'import os\nos.remove("/run/user/1000/ljos/latest-prompt")' | python3"#,
-        ] {
-            assert!(seat_guard(line).is_some(), "allowed: {line}");
-        }
+        let environ =
+            r#"python3 -c 'import os; open(os.environ["XDG_RUNTIME_DIR"]+"/ljos/p","w")'"#;
+        assert_runs_naming(
+            "changes-kept-prompt",
+            &[
+                r#"python3 -c "open('/run/user/1000/ljos/latest-prompt','w').write('x')""#,
+                environ,
+                r#"perl -e 'open F, ">", "$ENV{XDG_RUNTIME_DIR}/ljos/latest-prompt.bind"'"#,
+                r#"node -e "require('fs').writeFileSync(process.env.XDG_RUNTIME_DIR+'/ljos/x','')""#,
+                r#"ruby -e 'File.write(ENV["XDG_RUNTIME_DIR"] + "/ljos/latest-prompt", "x")'"#,
+                r#"awk 'BEGIN { print "x" > "/run/user/1000/ljos/latest-prompt" }'"#,
+                "python3 - <<'EOF'\nimport os\nos.rename('/tmp/p', '/run/user/1000/ljos/latest-prompt')\nEOF",
+                "git apply <<'EOF'\n--- /dev/null\n+++ b/run/user/1000/ljos/latest-prompt\n@@ -0,0 +1 @@\n+x\nEOF",
+                "patch -p0 <<'EOF'\n--- a\n+++ /run/user/1000/ljos/latest-prompt.bind\nEOF",
+                r#"printf 'import os\nos.remove("/run/user/1000/ljos/latest-prompt")' | python3"#,
+            ]
+            .map(String::from),
+        );
+        let data = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
+        assert_eq!(
+            seat_note(environ),
+            Ok(
+                "allow\twarn\tchanges-kept-prompt\tthe code python3 runs names the runtime \
+                directory or the files where the hook keeps the person's latest prompt"
+                    .to_string()
+            )
+        );
         for line in [
             "python3 -c 'print(1)'",
             "node -e 'console.log(process.version)'",
@@ -58476,18 +58568,20 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "perl -ne 'print if /x/' notes.txt",
             "printf 'print(1)' | python3",
         ] {
-            assert!(seat_guard(line).is_none(), "refused: {line}");
+            assert_eq!(seat_note(line).ok().as_deref(), Some(""), "{line}");
         }
     }
 
     /// A file tool names its target whatever it likes: `destination`,
     /// `target`, `filePath`, a `path` beside `text`, a path inside a list
     /// of edits. Any string argument that resolves into the runtime ljos
-    /// directory is a target for a tool that does not only read.
+    /// directory is a target for a tool that does more than read, and the
+    /// call runs naming `changes-kept-prompt`.
     #[test]
-    fn a_file_tool_aimed_at_the_kept_prompt_by_any_key_is_denied() {
+    fn a_file_tool_aimed_at_the_kept_prompt_by_any_key_runs_with_its_warning() {
         let _g = env_guard();
         let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        let mut cues = Vec::new();
         for payload in [
             r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/p","destination":"/run/user/1000/ljos/latest-prompt"}}"#,
             r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write","tool_input":{"target":"/run/user/1000/ljos/latest-prompt.bind","text":"x"}}"#,
@@ -58499,14 +58593,14 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/notes","content":"x","also":"/run/user/1000/ljos/latest-prompt"}}"#,
             r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"preToolUse","tool_name":"mcp_fs_write","tool_input":"{\"dest\":\"/run/user/1000/ljos/latest-prompt\"}"}"#,
         ] {
-            let call = hook_call(payload);
-            assert!(seat_guard(&call.cue).is_some(), "allowed: {}", call.cue);
+            cues.push(hook_call(payload).cue);
         }
         let agy = hook_call_as(
             r#"{"toolCall":{"name":"move_file","args":{"Source":"/tmp/p","Destination":"/run/user/1000/ljos/latest-prompt"}},"conversationId":"c"}"#,
             Some("PreToolUse"),
         );
-        assert!(seat_guard(&agy.cue).is_some(), "allowed: {}", agy.cue);
+        cues.push(agy.cue);
+        assert_runs_naming("changes-kept-prompt", &cues);
         for payload in [
             r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/run/user/1000/ljos/latest-prompt"}}"#,
             r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__read_text_file","tool_input":{"path":"/run/user/1000/ljos/latest-prompt"}}"#,
@@ -58515,7 +58609,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/a","destination":"/tmp/b"}}"#,
         ] {
             let call = hook_call(payload);
-            assert!(seat_guard(&call.cue).is_none(), "refused: {}", call.cue);
+            assert_eq!(
+                seat_note(&call.cue).ok().as_deref(),
+                Some(""),
+                "{}",
+                call.cue
+            );
         }
     }
 
@@ -58581,9 +58680,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     /// The bare name `latest-prompt` says where a write lands only when a
     /// command writes what it is given. Searching for it, printing it or
-    /// testing for it touches nothing.
+    /// testing for it touches nothing, and names no rule.
     #[test]
-    fn the_bare_kept_prompt_name_is_denied_only_to_writers() {
+    fn the_bare_kept_prompt_name_is_named_only_to_writers() {
         let _g = env_guard();
         let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
         for line in [
@@ -58596,26 +58695,28 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "cargo test latest-prompt",
             "rg -n latest-prompt crates/",
         ] {
-            assert!(seat_guard(line).is_none(), "refused: {line}");
+            assert_eq!(seat_note(line).ok().as_deref(), Some(""), "{line}");
         }
-        for line in [
-            "printf x > latest-prompt",
-            "mv /tmp/p latest-prompt",
-            "rm -f latest-prompt.bind",
-            "ln -sf /tmp/p latest-prompt",
-            "cp /tmp/p latest-prompt",
-            "install -m 600 /tmp/p latest-prompt",
-            "rsync /tmp/p latest-prompt",
-            "echo x | tee latest-prompt",
-            "dd if=/tmp/p of=latest-prompt",
-            "sed -i s/a/b/ latest-prompt",
-            "vim latest-prompt.bind",
-            "touch latest-prompt",
-            "find . -name latest-prompt -delete",
-            "python3 plant.py latest-prompt",
-        ] {
-            assert!(seat_guard(line).is_some(), "allowed: {line}");
-        }
+        assert_runs_naming(
+            "changes-kept-prompt",
+            &[
+                "printf x > latest-prompt",
+                "mv /tmp/p latest-prompt",
+                "rm -f latest-prompt.bind",
+                "ln -sf /tmp/p latest-prompt",
+                "cp /tmp/p latest-prompt",
+                "install -m 600 /tmp/p latest-prompt",
+                "rsync /tmp/p latest-prompt",
+                "echo x | tee latest-prompt",
+                "dd if=/tmp/p of=latest-prompt",
+                "sed -i s/a/b/ latest-prompt",
+                "vim latest-prompt.bind",
+                "touch latest-prompt",
+                "find . -name latest-prompt -delete",
+                "python3 plant.py latest-prompt",
+            ]
+            .map(String::from),
+        );
     }
 
     /// A tool call that names a runner session for the ljos it runs is
@@ -58693,8 +58794,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             seat_guard("cp ~/.local/bin/ljos /tmp/copy").is_some(),
             "a writer naming it is refused"
         );
-        assert!(seat_guard("printf x > /run/user/1000/ljos/latest-prompt").is_some());
-        assert!(seat_guard("printf x > /run/user/1000/ljos/latest-prompt.bind").is_some());
+        assert_runs_naming(
+            "changes-kept-prompt",
+            &[
+                "printf x > /run/user/1000/ljos/latest-prompt".into(),
+                "printf x > /run/user/1000/ljos/latest-prompt.bind".into(),
+            ],
+        );
         assert!(seat_guard("ljos onboard --harness grok").is_none());
         assert!(seat_guard("cargo build --release").is_none());
         assert!(!is_seat_path("~/.local/bin/ljos.bak"));
@@ -61651,8 +61757,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 .is_none()
         );
         assert!(seat_guard(r#"git commit -m "the guard covers ~/.local/bin/ljos > x""#).is_none());
-        assert!(seat_guard("printf x>~/.config/ljos/plugins.toml").is_some());
-        assert!(seat_guard("echo x 2>>~/.config/ljos/jev.toml").is_some());
+        assert_runs_naming(
+            "changes-person-key",
+            &[
+                "printf x>~/.config/ljos/plugins.toml".into(),
+                "echo x 2>>~/.config/ljos/jev.toml".into(),
+            ],
+        );
         assert!(seat_guard(r#"cp /tmp/p "/home/u/.config/ljos/plugins.toml""#).is_some());
         assert_eq!(
             shell_words(r#"echo "a > b" 2>>f 'c d'"#),
@@ -62556,13 +62667,17 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             assert!(seat_guard(line).is_some(), "{line}");
         }
         assert!(seat_guard("nice tmux list-panes").is_none());
-        // The person's consent verb, and the store it writes, are not the
-        // agent's to touch.
+        // The person's consent verb is not the agent's to run. A write to
+        // the store it keeps runs, naming the kept prompt's directory.
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        assert_runs_naming(
+            "changes-kept-prompt",
+            &["touch /run/user/1000/ljos/approvals/0123.json".into()],
+        );
         for line in [
             "ljos approve 0123",
             "setsid -f script -qc 'env -i ljos approve 0123' /dev/null",
             "(sh -c 'sleep 1; ~/.cargo/bin/ljos approve 0123' &)",
-            "touch /run/user/1000/ljos/approvals/0123.json",
             "ljos prefer --review --keep 0123",
             "ljos prefer --review --keep=0123",
             "setsid -f script -qc 'env -i ljos prefer --review --keep 0123' /dev/null",
@@ -62577,7 +62692,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// A `for` loop over sitting records names them and writes nothing.
     /// The loop body is judged with the loop variable as the path, so a
     /// body that reads passes and one that removes or redirects into a
-    /// record is still refused, by the sitting gate and the seat guard.
+    /// record is still refused by the sitting gate. The seat guard lets it
+    /// run, naming `changes-kept-prompt`.
     #[test]
     fn a_loop_over_sitting_records_reads_them_unless_its_body_writes() {
         let _g = env_guard();
@@ -62592,18 +62708,19 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "d=\"$(ls -d /run/user/1000/ljos)\"; echo \"$d\"",
         ] {
             assert!(!writes_hold_record(line, None), "{line}");
-            assert!(seat_guard(line).is_none(), "{line}");
+            assert_eq!(seat_note(line).ok().as_deref(), Some(""), "{line}");
         }
-        for line in [
+        let writes = [
             "for f in /run/user/1000/ljos/hold-*; do rm \"$f\"; done",
             "for f in /run/user/1000/ljos/hold-*; do echo x > \"${f}\"; done",
             "for f in $(ls /run/user/1000/ljos/hold-*); do cp /tmp/x \"$f\"; done",
             "d=$(ls /tmp); cp /tmp/x /run/user/1000/ljos/hold-1",
             "rm -f $(ls -d /run/user/1000/ljos/hold-*)",
-        ] {
+        ];
+        for line in writes {
             assert!(writes_hold_record(line, None), "{line}");
-            assert!(seat_guard(line).is_some(), "{line}");
         }
+        assert_runs_naming("changes-kept-prompt", &writes.map(String::from));
     }
 
     /// prefixes come off with their flags and the values those flags take,

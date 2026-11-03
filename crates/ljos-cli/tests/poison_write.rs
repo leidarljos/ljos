@@ -856,29 +856,50 @@ fn a_hook_the_runner_spawned_keeps_the_prompt() {
     }
 }
 
-/// With the guard on, a shell write to the latest-prompt file is denied.
-/// That file is what makes a sentence count as the person's words.
+/// With the guard on, a shell write to the latest-prompt file runs, and
+/// names `changes-kept-prompt` in the answer and in a `warn` row of the
+/// bypass log. That file is what makes a sentence count as the person's
+/// words.
 #[test]
-fn a_bash_write_to_the_latest_prompt_is_denied() {
+fn a_bash_write_to_the_latest_prompt_runs_with_its_warning() {
     let seat = Seat::new();
     let prompt = seat.run.path().join("ljos/latest-prompt");
     let bind = seat.run.path().join("ljos/latest-prompt.bind");
     for path in [&prompt, &bind] {
+        let line = format!("printf plant > {}", path.display());
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "person-1",
             "tool_name": "Bash",
-            "tool_input": {"command": format!("printf plant > {}", path.display())},
+            "tool_input": {"command": line},
         })
         .to_string();
         let stdout = hook_stdout(&seat, &payload);
         let answer: serde_json::Value =
             serde_json::from_str(stdout.trim()).unwrap_or(serde_json::Value::Null);
-        assert_eq!(
-            answer["hookSpecificOutput"]["permissionDecision"],
-            "deny",
-            "a write to {} was allowed: {stdout}",
+        let out = &answer["hookSpecificOutput"];
+        assert_ne!(out["permissionDecision"], "deny", "{stdout}");
+        let said = format!(
+            "allow\twarn\tchanges-kept-prompt\tthe command changes {}, in or above the runtime \
+             directory where the hook keeps the person's latest prompt",
             path.display()
+        );
+        assert!(
+            out["additionalContext"]
+                .as_str()
+                .unwrap_or("")
+                .contains(&said),
+            "{stdout}"
+        );
+        let rows = std::fs::read_to_string(seat.home.path().join(".local/share/ljos/bypass.jsonl"))
+            .unwrap_or_default();
+        assert!(
+            rows.lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .any(|r| r["kind"] == "warn"
+                    && r["rule"] == "changes-kept-prompt"
+                    && r["command"] == line.as_str()),
+            "{rows}"
         );
     }
 }

@@ -280,7 +280,7 @@ pub(crate) fn inside(path: &Path) -> bool {
 
 /// The name right below `path` on the way down to a runtime ljos
 /// directory, when `path` is above one. The root is left to the rules
-/// that refuse removing it.
+/// that name removing it.
 pub(crate) fn above(path: &Path) -> Option<String> {
     let p: Vec<Component<'_>> = path.components().collect();
     dirs().iter().find_map(|d| {
@@ -403,11 +403,30 @@ fn interpreter(cmd: &str) -> Option<&'static str> {
     CODE_FLAGS.iter().map(|(n, _)| *n).find(|n| *n == cmd)
 }
 
-/// The code of one command, its wrappers off, that names the kept prompt.
+/// The program of one command, its wrappers off, whose code names the
+/// kept prompt.
 pub(crate) fn code_reaches(words: &[String], line: &str) -> Option<String> {
-    let (code, fed) = code_of(words, line)?;
+    let (code, _) = code_of(words, line)?;
     let cmd = words.first()?.rsplit('/').next().unwrap_or("");
-    names_it(code).then(|| if fed { cmd } else { code }.to_string())
+    names_it(code).then(|| cmd.to_string())
+}
+
+/// What the guard says as a command runs that changes `word`, a word
+/// [`reached`] found.
+pub(crate) fn changed(word: &str) -> String {
+    format!(
+        "the command changes {word}, in or above the runtime directory where the hook keeps \
+         the person's latest prompt"
+    )
+}
+
+/// What the guard says as a command runs whose code, run by `program`,
+/// names the kept prompt, as [`code_reaches`] reads it.
+pub(crate) fn named_in_code(program: &str) -> String {
+    format!(
+        "the code {program} runs names the runtime directory or the files where the hook keeps \
+         the person's latest prompt"
+    )
 }
 
 /// The code one command, its wrappers off, runs: the argument of an
