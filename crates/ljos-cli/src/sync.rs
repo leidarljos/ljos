@@ -5127,19 +5127,6 @@ const IDENTITY_ENV: &[&str] = &[
     "EMAIL",
 ];
 
-/// The `core.hooksPath` user-rules git runs with. The login's hooks and
-/// ljos's sitting gate run on none of these calls. A push still runs the
-/// destination check `ljos cloud up` installs, when it is there, since
-/// that hook is what keeps a cloud seat's pushes on its allowlist.
-fn user_rules_hooks(args: &[&str]) -> PathBuf {
-    let cloud = crate::cloud_hook::hooks_dir()
-        .filter(|dir| std::fs::symlink_metadata(dir.join("pre-push")).is_ok());
-    match cloud {
-        Some(dir) if args.first() == Some(&"push") => dir,
-        _ => PathBuf::from("/dev/null"),
-    }
-}
-
 fn git_within(
     root: &Path,
     args: &[&str],
@@ -5155,10 +5142,8 @@ fn git_within(
     }
     // A hook or a worktree script exports GIT_DIR, which outranks `-C`.
     let mut cmd = crate::git_at(root);
-    let mut hooks = std::ffi::OsString::from("core.hooksPath=");
-    hooks.push(user_rules_hooks(args));
-    cmd.arg("-c")
-        .arg(hooks)
+    // The login's hooks and ljos's sitting gate run on none of these calls.
+    cmd.args(["-c", "core.hooksPath=/dev/null"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())

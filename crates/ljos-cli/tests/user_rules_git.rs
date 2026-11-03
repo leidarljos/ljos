@@ -283,48 +283,6 @@ fn the_login_hooks_do_not_run_on_user_rules_git() {
     assert_tracker_shared(&s, &tracker, &remote, &text);
 }
 
-/// The pre-push `ljos cloud up` installs keeps a cloud seat's pushes on
-/// its allowlist. A user-rules push still runs that hook, and no other.
-#[test]
-fn the_cloud_pre_push_still_checks_a_user_rules_push() {
-    let s = Scratch::new();
-    let (remote, tracker) = s.tracker();
-    let marks = s.path("marks");
-    let hooks = s.path("login-hooks");
-    refusing_hooks(&hooks, &marks, "login", HOOKS);
-    s.must(
-        s.dir.path(),
-        &[
-            "config",
-            "--global",
-            "core.hooksPath",
-            hooks.to_str().unwrap(),
-        ],
-    );
-    refusing_hooks(
-        &s.path("home/.config/ljos/hooks"),
-        &marks,
-        "cloud",
-        &["pre-push"],
-    );
-    let out = s.exchange(&tracker, &[]);
-    let text = said(&out);
-    let ran = std::fs::read_to_string(&marks).unwrap_or_default();
-    assert!(
-        !ran.is_empty() && ran.lines().all(|line| line == "cloud pre-push"),
-        "{ran}{text}"
-    );
-    assert!(!out.status.success(), "{text}");
-    assert!(text.contains("push refused"), "{text}");
-    let subjects = s.must(&tracker, &["log", "--format=%s"]);
-    assert_eq!(subjects.lines().next(), Some(SUBJECT), "{subjects}\n{text}");
-    assert_ne!(
-        s.must(&remote, &["rev-parse", "main"]),
-        s.must(&tracker, &["rev-parse", "HEAD"]),
-        "the refused push reached the remote\n{text}"
-    );
-}
-
 /// A caller that exports an author, a committer or `EMAIL` does not sign
 /// the user-rules commit. It names the tracker checkout's `user.name` and
 /// `user.email`.

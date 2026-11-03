@@ -169,9 +169,6 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
         }
     });
     lines.push(ensure_cloud_guard_rules()?);
-    // After the rule file, so a second `cloud up` still says the refusals
-    // are already installed. Git runs this hook for every push; the rule
-    // file cannot see a push a script starts.
     lines.push(crate::cloud_hook::ensure(repoint)?);
     // Retire env-owned wakes before any later step can fail, so a removed
     // `LJOS_WAKE_<SEAT>_URL` cannot leave a stale URL that still sees a new key.
@@ -275,8 +272,7 @@ pub fn mcp_row() -> crate::Habitat {
 }
 
 /// What `ljos doctor` says about the one cloud push rule. A marked seat
-/// is `ok` when the pre-push hook is installed. An unmarked machine is
-/// told to run `ljos cloud up`.
+/// is `ok`. An unmarked machine is told to run `ljos cloud up`.
 #[must_use]
 pub fn guard_row() -> crate::Habitat {
     let Some(path) = crate::cloud_hook::allow_path() else {
@@ -296,29 +292,14 @@ pub fn guard_row() -> crate::Habitat {
             ok: false,
         };
     }
-    let base = format!(
-        "{} denies a push outside this seat's named branches and develop",
-        path.display()
-    );
-    match crate::cloud_hook::hook_line() {
-        Ok(line) => crate::Habitat {
-            name: "cloud guard",
-            state: format!("{base}; {line}"),
-            ok: true,
-        },
-        Err(why) => crate::Habitat {
-            name: "cloud guard",
-            state: format!("{base}; {why}"),
-            ok: false,
-        },
+    crate::Habitat {
+        name: "cloud guard",
+        state: format!(
+            "{} denies a push outside this seat's named branches and develop",
+            path.display()
+        ),
+        ok: true,
     }
-}
-
-/// Whether a cloud-guard doctor row should print `warn`. A missing file
-/// stays `info`.
-#[must_use]
-pub(crate) fn guard_row_is_warning(state: &str) -> bool {
-    state.contains("pre-push hook")
 }
 
 /// Whether a `cloud age` row is the unset case: no secret was named and

@@ -29556,8 +29556,6 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         "warn"
     } else if row.ok {
         "ok"
-    } else if row.name == "cloud guard" && cloud::guard_row_is_warning(&row.state) {
-        "warn"
     } else if OPTIONAL_ROWS.contains(&row.name)
         || optional_bin(row.name)
         || (row.name == "git hooks" && row.state.starts_with(git_hooks::HOOKS_UNSET))

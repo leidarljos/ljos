@@ -301,9 +301,8 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
     for dir in [&home, &rel, &search, &seat] {
         fs::create_dir_all(dir).unwrap();
     }
-    // `cloud up` points the hooks of the repository it runs in. Run from
-    // the test's cwd, that is this checkout, and its next commit runs
-    // hooks from a temp home that is gone.
+    // `cloud up` records the repository it runs in as the seat. Run from
+    // the test's cwd, that is this checkout.
     let gitconfig = root.path().join("gitconfig");
     fs::write(&gitconfig, b"").unwrap();
     let init = Command::new("git")

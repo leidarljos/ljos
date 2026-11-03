@@ -67,11 +67,10 @@ Push the tracker through ljos with LJOS_TRACKER_GIT=push. Push only this \
 seat's named branches and develop. Do not push a ref under cursor/. Do \
 not run `gh pr create` or `gh pr merge`. Do not force-push. Do not delete \
 a ref. The shell guard filters a command as it is written. It does not \
-see inside a script, make, python, or a library such as dulwich. The \
-pre-push hook `ljos cloud up` installs is what stops a git push. \
-`--no-verify` inside a script skips that hook, and git send-pack does \
-not run it. A program that calls the GitHub API with the token is not \
-stopped on this machine; that needs a server-side ruleset.
+see inside a script, make, python, or a library such as dulwich. \
+`ljos cloud up` installs no git hook, so a push a script starts is not \
+checked on this machine, and neither is a program that calls the GitHub \
+API with the token; that needs a server-side ruleset.
 "
     )
 }
@@ -199,7 +198,7 @@ mod tests {
         assert!(text.contains("gh pr create"), "{text}");
         assert!(text.contains("gh pr merge"), "{text}");
         assert!(text.contains("force-push"), "{text}");
-        assert!(text.contains("pre-push"), "{text}");
+        assert!(text.contains("installs no git hook"), "{text}");
         assert!(text.contains("server-side ruleset"), "{text}");
         assert!(text.contains("LJOS_TRACKER_REMOTE"), "{text}");
         assert!(!text.contains("secret-remote"), "{text}");

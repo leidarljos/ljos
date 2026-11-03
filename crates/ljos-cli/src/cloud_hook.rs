@@ -1,35 +1,20 @@
-//! The pre-push hook `ljos cloud up` installs.
+//! The push allowlist `ljos cloud up` records.
 //!
-//! Git runs it for every push that does not pass `--no-verify`, however
-//! that push was started, and passes the remote URL after `insteadOf`.
 //! The allowlist is the repository and the branch. A branch name on its
-//! own is not enough: `develop` on another repository is refused, and so
-//! is a tag, a delete, or a push that is not a fast-forward. The tracker
-//! is the other repository this seat may update, on any branch, still
-//! without a force or a delete.
+//! own is not enough: `develop` on another repository is not on it. The
+//! tracker is the other repository this seat may update, on any branch.
+//! `cloud up` records the seat repository once and leaves it there.
 //!
-//! The hook reads the allowlist next to its own directory. The pusher's
-//! environment does not choose that path. `cloud up` records the seat
-//! repository once and leaves it there. A commit whose message has a
-//! by-trailer, a made-with line, or a generated line is refused, and so
-//! is a push whose commits cannot be read. A directory that has a
-//! commit-msg or prepare-commit-msg hook this install did not write is
-//! not chained: that path is unset, and the repository points at the
-//! installed hook directory.
+//! `cloud up` installs no git hook and sets no `core.hooksPath`, so git
+//! runs only the hooks the repository and the login already name.
 
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-
-/// The hook git runs. The bytes on disk have to match this; `ljos doctor`
-/// treats any other text as a hook that was replaced.
-pub(crate) const HOOK_SCRIPT: &str = include_str!("cloud_pre_push.sh");
 
 const ALLOW_NAME: &str = "push-allow";
 
-/// Where the hook and its allowlist live: `$XDG_CONFIG_HOME/ljos`, or
-/// `~/.config/ljos`.
+/// Where the allowlist lives: `$XDG_CONFIG_HOME/ljos`, or `~/.config/ljos`.
 fn config_dir() -> Option<PathBuf> {
     crate::config_base().map(|base| base.join("ljos"))
 }
@@ -42,12 +27,10 @@ pub(crate) fn allow_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join(ALLOW_NAME))
 }
 
-/// Install the hook, record the repositories this process may push, and
-/// point the global `core.hooksPath` at the hook directory. `repoint`
-/// replaces a repository recorded by an earlier run. The shell guard
-/// refuses that flag.
+/// Record the repositories this process may push. `repoint` replaces a
+/// repository recorded by an earlier run. The shell guard refuses that
+/// flag.
 pub(crate) fn ensure(repoint: bool) -> Result<String> {
-    let dir = install_script()?;
     let existing = read_lists();
     let new_key = origin_url().as_deref().and_then(key_or_empty);
     let code_owned = code_keys(&existing, new_key.as_deref(), repoint)?;
@@ -64,8 +47,8 @@ pub(crate) fn ensure(repoint: bool) -> Result<String> {
         Err(_) => (Vec::new(), true),
     };
     // A cargo test of this package keeps the workspace checkout out of
-    // the seat record. Recording it would make doctor read this repo's
-    // own hooksPath, which is not the cloud hook.
+    // the seat record, so the guard does not take this checkout's own
+    // `.git/config` for the seat's.
     let seat = if invoked_from_package_under_test() {
         existing.seat.clone()
     } else {
@@ -88,13 +71,11 @@ pub(crate) fn ensure(repoint: bool) -> Result<String> {
         home.as_deref(),
         seat.as_deref(),
     )?;
-    let seat_path = if invoked_from_package_under_test() {
-        None
-    } else {
-        seat.as_deref().map(PathBuf::from)
-    };
-    point_hooks(&dir, seat_path.as_deref())?;
-    Ok(format!("hook: {} is the pre-push allowlist", dir.display()))
+    let path = allow_path().context("cloud up: no config home for the push allowlist")?;
+    Ok(format!(
+        "push allowlist: {}; no git hook is installed",
+        path.display()
+    ))
 }
 
 fn code_keys(existing: &StoredLists, new_key: Option<&str>, repoint: bool) -> Result<Vec<String>> {
@@ -136,8 +117,7 @@ pub(crate) fn write_push_allowlist(
 }
 
 /// Whether `url` is a code or tracker repository on the allowlist.
-/// `Err` when the allowlist is missing, so a caller that cannot see the
-/// hook fails closed.
+/// `Err` when the allowlist is missing.
 pub(crate) fn repo_on_allowlist(url: &str) -> std::result::Result<bool, String> {
     let key = push_repo_key(url);
     if key.is_empty() {
@@ -216,7 +196,7 @@ fn read_lists() -> StoredLists {
 /// Cargo sets `CARGO_MANIFEST_DIR` while it runs this package's tests.
 /// The test process's cwd is the workspace, a parent of the manifest, or
 /// a directory inside it. A test that `set_current_dir`s into a fixture
-/// is a seat and is recorded. The installed hook never reads this.
+/// is a seat and is recorded.
 fn invoked_from_package_under_test() -> bool {
     let (Ok(manifest), Ok(cwd)) = (std::env::var("CARGO_MANIFEST_DIR"), std::env::current_dir())
     else {
@@ -246,383 +226,6 @@ fn work_tree_of(dir: &Path) -> Option<PathBuf> {
     let path = String::from_utf8(out.stdout).ok()?;
     let path = path.trim();
     (!path.is_empty()).then(|| PathBuf::from(path))
-}
-
-fn install_script() -> Result<PathBuf> {
-    let dir = hooks_dir().context("cloud up: no config home for the pre-push hook")?;
-    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = dir.join("pre-push");
-    // `Path::is_file` follows a symlink. A symlink to a script is not the
-    // hook this binary contains, so replace it.
-    if let Ok(meta) = path.symlink_metadata() {
-        if !meta.file_type().is_file() {
-            let removed = if meta.file_type().is_dir() {
-                fs::remove_dir_all(&path)
-            } else {
-                fs::remove_file(&path)
-            };
-            removed.with_context(|| format!("remove {}", path.display()))?;
-        }
-    }
-    write_executable(&path, HOOK_SCRIPT)?;
-    Ok(dir)
-}
-
-fn write_executable(path: &Path, body: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("cloud up: hook path has no directory")?;
-    fs::create_dir_all(parent)?;
-    let tmp = parent.join(".pre-push.tmp");
-    {
-        let mut file =
-            fs::File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
-        file.write_all(body.as_bytes())?;
-    }
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
-    fs::rename(&tmp, path).with_context(|| format!("install {}", path.display()))?;
-    Ok(())
-}
-
-fn point_hooks(our_dir: &Path, seat: Option<&Path>) -> Result<()> {
-    let local_dir =
-        seat.and_then(|seat| local_hooks_path(seat).map(|value| resolve_hooks_value(&value, seat)));
-    let global_dir = global_hooks_path().ok().map(PathBuf::from);
-    let local_foreign = local_dir
-        .as_ref()
-        .is_some_and(|dir| hook_dir_is_foreign(dir, our_dir));
-    let global_foreign = global_dir
-        .as_ref()
-        .is_some_and(|dir| hook_dir_is_foreign(dir, our_dir));
-    if local_foreign || global_foreign {
-        return reclaim_foreign_hooks(
-            our_dir,
-            seat,
-            local_foreign,
-            global_foreign,
-            local_dir.is_none(),
-        );
-    }
-    if let Some(seat) = seat {
-        if let Some(local_path) = local_dir {
-            if paths_same(&local_path, our_dir) {
-                return Ok(());
-            }
-            if local_path.is_dir() {
-                if may_rewrite_hooks(&local_path, our_dir) {
-                    chain_into(&local_path, our_dir)?;
-                    return Ok(());
-                }
-                return set_local(seat, our_dir);
-            }
-        }
-        if let Some(global_path) = global_dir {
-            if paths_same(&global_path, our_dir) {
-                return set_local(seat, our_dir);
-            }
-            if global_path.is_dir() {
-                if may_rewrite_hooks(&global_path, our_dir) {
-                    chain_into(&global_path, our_dir)?;
-                    return set_local(seat, &global_path);
-                }
-                return set_local(seat, our_dir);
-            }
-        }
-        set_local(seat, our_dir)?;
-        match global_hooks_path() {
-            Err(_) => set_global(our_dir)?,
-            Ok(value) => {
-                let path = PathBuf::from(&value);
-                if !paths_same(&path, our_dir) && !path.is_dir() {
-                    set_global(our_dir)?;
-                }
-            }
-        }
-        return Ok(());
-    }
-    match global_dir {
-        Some(path) => {
-            if paths_same(&path, our_dir) {
-                return Ok(());
-            }
-            if path.is_dir() {
-                if may_rewrite_hooks(&path, our_dir) {
-                    return chain_into(&path, our_dir);
-                }
-                return set_global(our_dir);
-            }
-            set_global(our_dir)
-        }
-        None => set_global(our_dir),
-    }
-}
-
-/// A commit-msg or prepare-commit-msg hook in `dir` that this install
-/// did not write. A missing file is not one. A file that cannot be
-/// read counts, so an unreadable hook is not chained.
-fn foreign_message_hooks(dir: &Path) -> bool {
-    ["commit-msg", "prepare-commit-msg"].iter().any(|name| {
-        let path = dir.join(name);
-        path.is_file() && !ljos_owns_file(&path)
-    })
-}
-
-fn ljos_owns_file(path: &Path) -> bool {
-    let Ok(text) = fs::read_to_string(path) else {
-        return false;
-    };
-    text.as_bytes() == HOOK_SCRIPT.as_bytes() || whole_stub(&text) || whole_chain(&text)
-}
-
-fn whole_stub(text: &str) -> bool {
-    let mut lines: Vec<&str> = text.lines().collect();
-    if lines.first().is_some_and(|line| line.starts_with("#!")) {
-        lines.remove(0);
-    }
-    while lines.first().is_some_and(|line| line.trim().is_empty()) {
-        lines.remove(0);
-    }
-    while lines.last().is_some_and(|line| line.trim().is_empty()) {
-        lines.pop();
-    }
-    let Some(first) = lines.first() else {
-        return false;
-    };
-    let Some(last) = lines.last() else {
-        return false;
-    };
-    first.starts_with("# ljos:begin git-hook")
-        && last.starts_with("# ljos:end git-hook")
-        && lines
-            .iter()
-            .filter(|line| line.starts_with("# ljos:begin git-hook"))
-            .count()
-            == 1
-        && lines
-            .iter()
-            .filter(|line| line.starts_with("# ljos:end git-hook"))
-            .count()
-            == 1
-}
-
-fn whole_chain(text: &str) -> bool {
-    let mut lines: Vec<&str> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    if lines.first().is_some_and(|line| line.starts_with("#!")) {
-        lines.remove(0);
-    }
-    let Some(first) = lines.first() else {
-        return false;
-    };
-    if !first.starts_with("# ljos-cloud-chain ") {
-        return false;
-    }
-    lines.iter().all(|line| {
-        let line = line.trim();
-        line.starts_with("# ljos-cloud-chain ")
-            || line.starts_with("PATH=")
-            || line == "export PATH"
-            || line == "unset IFS"
-            || line == "set -eu"
-            || line.starts_with("prev=")
-            || line.starts_with("canon=")
-            || line.starts_with("tmp=")
-            || line.starts_with("trap ")
-            || line.starts_with("/bin/cat ")
-            || line.starts_with("\"$prev\"")
-            || line.starts_with("\"$canon\"")
-    })
-}
-
-fn hook_dir_is_protected(dir: &Path, our_dir: &Path) -> bool {
-    paths_same(dir, our_dir) || paths_same(dir, &crate::git_hooks::onboard_hooks_dir())
-}
-
-fn hook_dir_is_foreign(dir: &Path, our_dir: &Path) -> bool {
-    !hook_dir_is_protected(dir, our_dir) && foreign_message_hooks(dir)
-}
-
-fn ljos_owned_message_dir(dir: &Path) -> bool {
-    ["commit-msg", "prepare-commit-msg"].iter().any(|name| {
-        let path = dir.join(name);
-        path.is_file() && ljos_owns_file(&path)
-    })
-}
-
-fn may_rewrite_hooks(dir: &Path, our_dir: &Path) -> bool {
-    !hook_dir_is_protected(dir, our_dir) && !ljos_owned_message_dir(dir)
-}
-
-/// Unset only a level whose directory is foreign. A path that names
-/// this install's own hooks is left in place, and no file in a hooks
-/// directory is written.
-fn reclaim_foreign_hooks(
-    our_dir: &Path,
-    seat: Option<&Path>,
-    local_foreign: bool,
-    global_foreign: bool,
-    local_unset: bool,
-) -> Result<()> {
-    if local_foreign {
-        if let Some(seat) = seat {
-            unset_local(seat)?;
-        }
-    }
-    if global_foreign {
-        unset_global()?;
-    }
-    if let Some(seat) = seat {
-        if local_foreign || local_unset {
-            set_local(seat, our_dir)?;
-        }
-    } else if global_foreign {
-        set_global(our_dir)?;
-    }
-    Ok(())
-}
-
-fn unset_local(seat: &Path) -> Result<()> {
-    let seat_s = seat.display().to_string();
-    config_optional(&[
-        "-C",
-        &seat_s,
-        "config",
-        "--local",
-        "--unset-all",
-        "core.hooksPath",
-    ])
-}
-
-fn unset_global() -> Result<()> {
-    config_optional(&["config", "--global", "--unset-all", "core.hooksPath"])
-}
-
-/// `Ok` when the key was unset or was not set. Exit 5 is the missing key.
-fn config_optional(args: &[&str]) -> Result<()> {
-    let out = crate::git_cmd()
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("git config core.hooksPath")?;
-    if out.status.success() || out.status.code() == Some(5) {
-        return Ok(());
-    }
-    bail!(
-        "git config core.hooksPath: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-}
-
-fn set_global(dir: &Path) -> Result<()> {
-    let value = dir.display().to_string();
-    git_config(&["config", "--global", "core.hooksPath", &value])
-}
-
-fn set_local(seat: &Path, dir: &Path) -> Result<()> {
-    let seat_s = seat.display().to_string();
-    let value = dir.display().to_string();
-    git_config(&["-C", &seat_s, "config", "--local", "core.hooksPath", &value])
-}
-
-fn git_config(args: &[&str]) -> Result<()> {
-    let out = crate::git_cmd()
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("git config core.hooksPath")?;
-    if out.status.success() {
-        return Ok(());
-    }
-    bail!(
-        "git config core.hooksPath: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-}
-
-fn local_hooks_path(seat: &Path) -> Option<String> {
-    let seat_s = seat.display().to_string();
-    let out = crate::git_cmd()
-        .args([
-            "-C",
-            &seat_s,
-            "config",
-            "--local",
-            "--get",
-            "core.hooksPath",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let value = String::from_utf8(out.stdout).ok()?;
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_string())
-}
-
-fn global_hooks_path() -> std::result::Result<String, String> {
-    let out = crate::git_cmd()
-        .args(["config", "--global", "--get", "core.hooksPath"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|err| err.to_string())?;
-    if !out.status.success() {
-        return Err("unset".to_string());
-    }
-    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if value.is_empty() {
-        Err("unset".to_string())
-    } else {
-        Ok(value)
-    }
-}
-
-/// Run the hook that already occupies `hooks_dir`, then the hook this
-/// binary installs. A directory with no pre-push gets this script under
-/// the name git already looks up, so the other hook files stay.
-fn chain_into(hooks_dir: &Path, our_dir: &Path) -> Result<()> {
-    fs::create_dir_all(hooks_dir).with_context(|| format!("create {}", hooks_dir.display()))?;
-    let dest = hooks_dir.join("pre-push");
-    let canon = canonical_hook_path(our_dir);
-    let marker = format!("# ljos-cloud-chain {}", canon.display());
-    if let Ok(text) = fs::read_to_string(&dest) {
-        if text.lines().any(|line| line == marker) || text.as_bytes() == HOOK_SCRIPT.as_bytes() {
-            return Ok(());
-        }
-    } else if !dest.exists() {
-        return write_executable(&dest, HOOK_SCRIPT);
-    }
-    let prev = hooks_dir.join("pre-push.ljos-previous");
-    if !prev.exists() {
-        fs::rename(&dest, &prev).with_context(|| format!("keep {}", dest.display()))?;
-    }
-    write_executable(&dest, &chain_script(&prev, &canon, &marker))
-}
-
-fn chain_script(prev: &Path, canon: &Path, marker: &str) -> String {
-    let prev_q = crate::tools::sh_quote(&prev.display().to_string());
-    let canon_q = crate::tools::sh_quote(&canon.display().to_string());
-    format!(
-        r#"#!/bin/sh
-{marker}
-PATH=/usr/bin:/bin
-export PATH
-unset IFS
-set -eu
-prev={prev_q}
-canon={canon_q}
-tmp=$(/usr/bin/mktemp -p /tmp)
-trap '/bin/rm -f "$tmp"' EXIT
-/bin/cat > "$tmp"
-"$prev" "${{1-}}" "${{2-}}" < "$tmp"
-"$canon" "${{1-}}" "${{2-}}" < "$tmp"
-"#
-    )
 }
 
 fn origin_url() -> Option<String> {
@@ -705,137 +308,6 @@ fn write_lists(
 fn key_or_empty(url: &str) -> Option<String> {
     let key = push_repo_key(url);
     (!key.is_empty()).then_some(key)
-}
-
-/// What `ljos doctor` adds to the cloud-guard row when the hook is the
-/// one `cloud up` installs. `Err` is the reason it is missing or changed.
-pub(crate) fn hook_line() -> std::result::Result<String, String> {
-    let dir = hooks_dir().ok_or_else(|| "pre-push hook missing; no config home".to_string())?;
-    let path = dir.join("pre-push");
-    let meta = fs::symlink_metadata(&path).map_err(|_| {
-        format!(
-            "pre-push hook missing at {}; run `ljos cloud up`",
-            path.display()
-        )
-    })?;
-    if !meta.file_type().is_file() {
-        return Err(format!(
-            "pre-push hook at {} changed; run `ljos cloud up`",
-            path.display()
-        ));
-    }
-    let text = fs::read(&path).map_err(|_| {
-        format!(
-            "pre-push hook at {} changed; run `ljos cloud up`",
-            path.display()
-        )
-    })?;
-    if text != HOOK_SCRIPT.as_bytes() {
-        return Err(format!(
-            "pre-push hook at {} changed; run `ljos cloud up`",
-            path.display()
-        ));
-    }
-    effective_hook_ok(&dir)?;
-    Ok(format!("pre-push hook at {}", path.display()))
-}
-
-fn effective_hook_ok(our_dir: &Path) -> std::result::Result<(), String> {
-    let (value, base) = effective_hooks_value()?;
-    let resolved = resolve_hooks_value(&value, &base);
-    if foreign_message_hooks(&resolved) {
-        return Err(format!(
-            "pre-push hook not named by core.hooksPath ({value}); \
-             that directory has a commit hook this install did not write"
-        ));
-    }
-    if paths_same(&resolved, our_dir) {
-        return Ok(());
-    }
-    let pre = resolved.join("pre-push");
-    let text = fs::read(&pre).map_err(|_| {
-        format!("pre-push hook not named by core.hooksPath ({value}); run `ljos cloud up`")
-    })?;
-    if text == HOOK_SCRIPT.as_bytes() {
-        return Ok(());
-    }
-    let marker = format!(
-        "# ljos-cloud-chain {}",
-        canonical_hook_path(our_dir).display()
-    );
-    let body = String::from_utf8_lossy(&text);
-    if body.lines().any(|line| line == marker) {
-        return Ok(());
-    }
-    Err(format!(
-        "pre-push hook not named by core.hooksPath ({value}); run `ljos cloud up`"
-    ))
-}
-
-/// The hooks directory git would use for the recorded seat, or, when no
-/// seat is recorded, the value visible outside this process's checkout.
-fn effective_hooks_value() -> std::result::Result<(String, PathBuf), String> {
-    let seat = recorded_seat().filter(|path| path.is_dir());
-    let probe = if seat.is_none() {
-        Some(probe_dir()?)
-    } else {
-        None
-    };
-    let mut cmd = crate::git_cmd();
-    cmd.args(["config", "--show-origin", "--get", "core.hooksPath"]);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    let base = if let Some(seat) = &seat {
-        cmd.current_dir(seat);
-        seat.clone()
-    } else {
-        let probe = probe.clone().expect("probe");
-        cmd.current_dir(&probe);
-        probe
-    };
-    let out = cmd.output().map_err(|err| err.to_string())?;
-    if let Some(probe) = &probe {
-        let _ = fs::remove_dir_all(probe);
-    }
-    if !out.status.success() {
-        return Err("unset".to_string());
-    }
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let line = text.lines().next().unwrap_or("").trim();
-    let value = line
-        .split_once('\t')
-        .map(|(_, value)| value.trim())
-        .unwrap_or(line);
-    if value.is_empty() {
-        Err("unset".to_string())
-    } else {
-        Ok((value.to_string(), base))
-    }
-}
-
-fn probe_dir() -> std::result::Result<PathBuf, String> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let path =
-        std::env::temp_dir().join(format!("ljos-hooks-probe-{}-{nanos}", std::process::id()));
-    fs::create_dir_all(&path).map_err(|err| err.to_string())?;
-    Ok(path)
-}
-
-fn resolve_hooks_value(value: &str, base: &Path) -> PathBuf {
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        path
-    } else {
-        base.join(path)
-    }
-}
-
-fn canonical_hook_path(our_dir: &Path) -> PathBuf {
-    let path = our_dir.join("pre-push");
-    fs::canonicalize(&path).unwrap_or(path)
 }
 
 /// The hook directory, the hook file, the allowlist, the git hooks
@@ -1214,7 +686,7 @@ fn strip_hooks_prefix(path: &str) -> Option<&str> {
         .or_else(|| path.strip_prefix("${LJOS_GIT_HOOKS}/"))
 }
 
-/// The repository key the hook compares. `https`, `ssh`, and `git@host:`
+/// The repository key the allowlist records. `https`, `ssh`, and `git@host:`
 /// forms of one GitHub repository share a key. Userinfo is the last `@`
 /// in the authority, before the path, so a token is not part of the key
 /// and an `@` in the path is not userinfo.
@@ -1303,25 +775,6 @@ fn strip_git(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
-
-    fn shell_key(url: &str) -> String {
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("pre-push");
-        let prefix = HOOK_SCRIPT
-            .split_once("# ljos-push-gate\n")
-            .expect("gate marker")
-            .0;
-        let body = format!("{prefix}# ljos-push-gate\nnormalize \"$1\"\n");
-        fs::write(&script, body).unwrap();
-        let out = Command::new("sh").arg(&script).arg(url).output().unwrap();
-        assert!(
-            out.status.success(),
-            "normalize {url}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap().trim().to_string()
-    }
 
     #[test]
     fn url_forms_of_one_repository_share_a_key() {
@@ -1337,13 +790,8 @@ mod tests {
         ] {
             assert_eq!(push_repo_key(url), want, "{url}");
             assert_eq!(push_repo_key(&push_repo_key(url)), want, "{url}");
-            assert_eq!(shell_key(url), want, "{url}");
         }
         assert_ne!(push_repo_key("https://github.com/other/ljos.git"), want);
-        assert_eq!(
-            shell_key("https://github.com/other/ljos.git"),
-            push_repo_key("https://github.com/other/ljos.git")
-        );
     }
 
     #[test]
@@ -1354,7 +802,6 @@ mod tests {
         let path = origin.display().to_string();
         let file = format!("file://{path}");
         assert_eq!(push_repo_key(&path), push_repo_key(&file));
-        assert_eq!(shell_key(&path), push_repo_key(&path));
         assert!(!push_repo_key(&path).ends_with(".git"));
     }
 
@@ -1363,7 +810,6 @@ mod tests {
         let url = "git://127.0.0.1:19418/x@/home/ubuntu/seat/seat.git";
         let want = "127.0.0.1/x@/home/ubuntu/seat/seat";
         assert_eq!(push_repo_key(url), want);
-        assert_eq!(shell_key(url), want);
         assert_ne!(
             push_repo_key(url),
             push_repo_key("/home/ubuntu/seat/seat.git")
@@ -1386,32 +832,5 @@ mod tests {
         );
         assert!(hooks_path_assignment("[core \"ssh\"]\nhooksPath = /tmp/no\n").is_none());
         assert!(hooks_path_assignment("[user]\nname = x\n").is_none());
-    }
-
-    #[test]
-    fn the_shipped_hook_has_no_environment_switch() {
-        assert!(!HOOK_SCRIPT.contains("LJOS_HOOK_KEY"));
-        assert!(!HOOK_SCRIPT.contains("XDG_CONFIG_HOME"));
-        assert!(!HOOK_SCRIPT.contains("$HOME"));
-        assert!(HOOK_SCRIPT.contains("# ljos-push-gate\n"));
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("pre-push");
-        fs::write(&script, HOOK_SCRIPT).unwrap();
-        let out = Command::new("sh")
-            .arg(&script)
-            .arg("origin")
-            .arg("https://example.invalid/a.git")
-            .env("LJOS_HOOK_KEY", "1")
-            .env("XDG_CONFIG_HOME", dir.path())
-            .env("HOME", dir.path())
-            .output()
-            .unwrap();
-        assert!(
-            !out.status.success(),
-            "the gate did not run: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains("pre-push:"), "{err}");
     }
 }

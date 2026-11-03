@@ -162,6 +162,8 @@ families. A push onto your own topic branch needs only the sitting. The
 `pre-commit` and `pre-push` hooks `ljos git-hooks install` writes hold a
 script's commit and push the same way. `ljos doctor` says whether the gate
 is active for this seat. The person at their own terminal is never gated.
+`ljos cloud up` installs no git hook and sets no `core.hooksPath`, so on a
+cloud seat git runs only the hooks the repository and the login name.
 
 ## During the work
 
