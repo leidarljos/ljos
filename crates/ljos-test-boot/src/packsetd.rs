@@ -161,13 +161,19 @@ impl Packsetd {
 impl Drop for Packsetd {
     fn drop(&mut self) {
         let pid = self.child.id();
+        // Kill before the node is cleared.
+        // The SIGINT handler walks the nodes and kills the pids it still finds, then re-raises SIGINT, which ends this process.
+        // Clearing the node first would let that signal skip this writer and leave it running.
+        // The wait is last, after the node is clear, so the gap between kill and clear is the only one the handler can still see this pid in.
+        stop_pid(pid);
+        let _ = self.child.kill();
         if let Some(slot) = self.slot.take() {
             // Clearing the pid frees the node for the next writer.
             // The node itself stays allocated.
             LIVE.release(slot);
         }
         untrack(pid);
-        stop_child(&mut self.child);
+        let _ = self.child.wait();
         if let Some(path) = self.owned_home.take() {
             let _ = std::fs::remove_dir_all(path);
         }
@@ -610,12 +616,6 @@ fn track(pid: u32) {
 
 fn untrack(pid: u32) {
     MINE.with(|mine| mine.borrow_mut().retain(|held| *held != pid));
-}
-
-fn stop_child(child: &mut Child) {
-    stop_pid(child.id());
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 fn stop_pid(pid: u32) {
