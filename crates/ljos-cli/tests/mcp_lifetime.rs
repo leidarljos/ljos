@@ -239,6 +239,71 @@ fn malformed_ordered_write_does_not_block_following_writes() {
     assert!(first < second, "id 9 answered after id 10\n{stdout}");
 }
 
+/// A malformed call holds no slot at the end of input. A search is in
+/// flight when bad params, an unknown tool and a line that is not JSON
+/// arrive, and then stdin closes. The search answers and the server exits
+/// inside the longest a call may run. A slot no request owned would hold
+/// the input for the whole drain, which is that limit plus a margin; the
+/// pack gets the same limit, so the server derives its drain from it too.
+#[test]
+#[cfg(unix)]
+fn malformed_calls_hold_no_slot_and_the_call_before_eof_answers() {
+    let home = tempfile::tempdir().unwrap();
+    let bound = ljos_cli::longest_call_timeout();
+    let (url, search_arrived) = slow_pack(Duration::from_secs(7));
+    let mut child = server(home.path())
+        .env("PACKSET_URL", url)
+        .env("PACKSET_TIMEOUT_MS", bound.as_millis().to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let mut stdin = child.stdin.take().unwrap();
+    for line in initialize() {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    let search = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "ljos_search", "arguments": {"query": "review set"}}});
+    writeln!(stdin, "{search}").unwrap();
+    search_arrived
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the search never reached the pack");
+    for line in [
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"ljos_note","arguments":"bad"}}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"ljos_no_such_tool","arguments":{}}}),
+    ] {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    writeln!(stdin, "this line is not json {{").unwrap();
+    let started = Instant::now();
+    drop(stdin);
+    let ended = ended_within(pid, bound);
+    let took = started.elapsed();
+    if !ended {
+        stop(pid);
+    }
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        ended,
+        "still running {took:?} after stdin closed, past the {bound:?} a call may run\n{stdout}"
+    );
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    let answer = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| value["id"] == 2)
+        .unwrap_or_else(|| panic!("no answer to the search after {took:?}:\n{stdout}"));
+    assert!(
+        answer.to_string().contains("Pin the review set"),
+        "{answer}"
+    );
+}
+
 /// A search slower than the old fixed 35 s drain. The pack is allowed 45 s,
 /// so the server has to hold the end of stdin until the answer is written.
 #[test]
