@@ -347,8 +347,11 @@ ljos then passes that file every time it asks policyd, as =ljos-policyd check --
 With that line, policyd answers a warned command with =deny=, the same rule and the same warning, and exits 2.
 ljos reports it as policyd's deny: the hook blocks the tool call, =ljos policy --fail-on-deny= exits 1, and a guard shim exits 126.
 An =ljos-policyd= that does not read the line, 0.7.0 among them, leaves its warnings as labels.
-The line turns =uproots-person-key= into a deny only where policyd also warns on the same command.
-=rm -rf /= is one such command.
+The line reaches only the commands policyd warns on.
+A command policyd allows with no warning runs, whatever label ljos gives it.
+So each of ljos's own labels becomes a deny only where policyd warns on the same command.
+policyd warns on =rm -rf /=, for one.
+Those labels are =uproots-person-key=, =changes-person-key=, =changes-kept-prompt=, =writes-seat-file=, =prefer-keep-faked-terminal= and =git-push-delete=.
 =mv ~ /tmp/x= gets no warning from policyd, so it still runs with the label.
 
 #+begin_src console

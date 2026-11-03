@@ -424,6 +424,43 @@ fn a_named_config_holding_block_on_warning_denies_deleting_the_root() {
     assert_eq!(labelled(), 1, "the deny keeps no row for the label");
 }
 
+/// `block-on-warning true` reaches only what policyd warns on. Under the
+/// config that denies deleting the root, moving the home that contains the
+/// person's key directory and deleting a remote branch get no warning
+/// from policyd, so each still runs with ljos's own label.
+#[test]
+fn block_on_warning_leaves_a_label_policyd_does_not_warn_on() {
+    let seat = Seat::new();
+    seat.write(".config/ljos/blocks.conf", BLOCKS);
+    seat.write(
+        ".config/ljos/ljos.toml",
+        "policyd_config = \"blocks.conf\"\n",
+    );
+    let key = ljos_cli::person_key::key_dir().expect("a passwd home");
+    let home = key.ancestors().nth(2).expect("the home above the config");
+    let home = home.display().to_string();
+    let moved = format!(
+        "allow\twarn\tuproots-person-key\tthe command moves {home}, a tree that holds the \
+         person's key directory {}",
+        key.display()
+    );
+    for (argv, said) in [
+        (vec!["mv", &home, "/tmp/x"], moved.as_str()),
+        (
+            vec!["git", "push", "origin", "--delete", "old"],
+            "allow\twarn\tgit-push-delete\ta push deletes a remote branch",
+        ),
+    ] {
+        let (code, text) = seat.policy_on(&argv);
+        assert_eq!(code, Some(0), "{argv:?}\n{text}");
+        assert!(text.lines().any(|line| line == said), "{argv:?}\n{text}");
+        assert!(
+            !text.lines().any(|line| line.starts_with("deny")),
+            "{argv:?}\n{text}"
+        );
+    }
+}
+
 /// A named config policyd cannot open is a check that fails open: the
 /// command still runs.
 #[test]

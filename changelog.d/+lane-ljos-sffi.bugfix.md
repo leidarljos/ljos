@@ -12,7 +12,7 @@ That warning says `moves` for a move call that code renames, such as `from shuti
 A command runs with `changes-person-key` instead of being refused when it changes the key directory, a file in it or the directory above it, such as `rm -rf ~/.config`.
 A change to the runtime directory where the hook keeps the person's latest prompt runs the same way, with `changes-kept-prompt`.
 So does a write from a command or a file tool to another seat file, with `writes-seat-file`: an ljos binary, a hook or the file that registers one, the ljos config or an approval.
-A `policyd_config` holding `block-on-warning true` denies such a command where policyd warns on it too.
 A tool call's `ljos prefer --review --keep ID` runs with no warning, since the rule is kept as the agent's.
 It runs with `prefer-keep-faked-terminal` when run under `setsid`, `script` or `env -i`, as if from the person's terminal.
 That warning says the rule is kept as the agent's and stays unverified.
+A `policyd_config` holding `block-on-warning true` reaches only the commands policyd warns on, so each of ljos's own labels turns into a deny only where policyd warns on the same command.
