@@ -50,17 +50,48 @@ def lesson(i: int) -> str:
     return f"Case {i}: {body}."
 
 
+def token() -> str | None:
+    """The owner token, found where packset-client finds it: packset 0.14.0
+    and later answers 401 to anything but /health without it."""
+    if t := os.environ.get("PACKSET_TOKEN", "").strip():
+        return t
+    path = os.environ.get("PACKSET_TOKEN_FILE")
+    if not path:
+        home = next((os.environ[k] for k in ("PACKSET_HOME", "LJOS_HOME", "LJOS_INSIDE_MEMORY_HOME")
+                     if os.environ.get(k)), None)
+        if home is None:
+            data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+            home = os.path.join(data, "packset")
+            legacy = os.path.expanduser("~/.ljos/memory")
+            if not (os.path.isdir(home) and os.listdir(home)) and os.path.isdir(legacy):
+                home = legacy
+        path = os.path.join(home, "token")
+    try:
+        with open(path) as f:
+            return f.readline().strip() or None
+    except OSError:
+        return None
+
+
+def headers() -> dict[str, str]:
+    t = token()
+    return {"content-type": "application/json"} | ({"authorization": f"Bearer {t}"} if t else {})
+
+
 def post(url: str, workspace: str, text: str) -> None:
     # As ljos writes: the seat's name rides in entities and is not a topic.
+    # The prompt hook shows a lesson only once it stands.
     body = json.dumps({"schema": "inside.atom/v1", "kind": "lesson", "level": "explicit",
-                       "text": text, "workspace": workspace, "entities": ["seat:scale"]}).encode()
-    req = urllib.request.Request(f"{url}/v1/atoms", data=body, headers={"content-type": "application/json"})
+                       "text": text, "workspace": workspace,
+                       "entities": ["seat:scale", "horizon:standing"]}).encode()
+    req = urllib.request.Request(f"{url}/v1/atoms", data=body, headers=headers())
     with urllib.request.urlopen(req, timeout=30) as r:
         r.read()
 
 
 def live(url: str, workspace: str) -> int:
-    with urllib.request.urlopen(f"{url}/v1/atoms?workspace={workspace}", timeout=60) as r:
+    req = urllib.request.Request(f"{url}/v1/atoms?workspace={workspace}", headers=headers())
+    with urllib.request.urlopen(req, timeout=60) as r:
         body = json.load(r)
     atoms = body.get("atoms", body if isinstance(body, list) else [])
     return len(atoms)

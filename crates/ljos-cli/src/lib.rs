@@ -424,7 +424,7 @@ fn as_agents(mut atom: Value) -> Value {
 }
 
 /// The listing the preface and the cold prompt read, via [`atoms_read`].
-fn session_atoms(ms: u64) -> Result<Vec<Value>> {
+fn session_atoms(ms: u64) -> Result<SharedAtoms> {
     with_pack_timeout(ms, || {
         let client = pack()?;
         atoms_read(&client, &client.workspace())
@@ -9727,7 +9727,7 @@ fn singular(w: &str) -> String {
 /// [`singular`] makes `always` into `alway`, which is on no list.
 /// Remembered per text ([`text_memo`]): the match tokens, the cue terms
 /// and the abbreviation check each ask it of the same claim.
-fn prompt_words(text: &str) -> Vec<String> {
+fn prompt_words(text: &str) -> Tokens {
     text_memo(&PROMPT_WORDS_MEMO, text, prompt_words_of)
 }
 
@@ -9786,6 +9786,14 @@ fn identifier_parts(text: &str) -> Vec<String> {
 }
 
 fn prompt_words_of(text: &str) -> Vec<String> {
+    let mut words = word_stream(text);
+    words.dedup();
+    words
+}
+
+/// The words [`prompt_words`] keeps, sorted, each as often as `text`
+/// says it.
+fn word_stream(text: &str) -> Vec<String> {
     let mut words: Vec<String> = identifier_words(text)
         .into_iter()
         .filter(|w| w.len() >= 3)
@@ -9794,7 +9802,6 @@ fn prompt_words_of(text: &str) -> Vec<String> {
         .filter(|w| !stop_word(w))
         .collect();
     words.sort_unstable();
-    words.dedup();
     words
 }
 
@@ -9907,7 +9914,7 @@ fn alias_words(text: &str, claim: bool) -> Vec<String> {
 /// The words a claim and a prompt are matched on: [`prompt_words`]
 /// without a plural of [`RULE_WORDS`] (`keeps`), plus the alias groups
 /// each names.
-fn cue_terms(text: &str, claim: bool) -> Vec<String> {
+fn cue_terms(text: &str, claim: bool) -> Tokens {
     let memo = if claim {
         &CLAIM_TERMS_MEMO
     } else {
@@ -9918,8 +9925,9 @@ fn cue_terms(text: &str, claim: bool) -> Vec<String> {
 
 fn cue_terms_of(text: &str, claim: bool) -> Vec<String> {
     let mut words: Vec<String> = prompt_words(text)
-        .into_iter()
+        .iter()
         .filter(|w| !rule_word(w))
+        .cloned()
         .collect();
     words.extend(alias_words(text, claim));
     words.sort_unstable();
@@ -9981,12 +9989,18 @@ fn stop_word(word: &str) -> bool {
 /// passes score the same few hundred texts several times a prompt, and
 /// the cue once per text; the profile put a fifth of a prompt hook in
 /// [`phrase_acronyms`] alone. The memo is bounded so a server that lives
-/// for hours does not grow without end.
-type TextMemo = std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>;
+/// for hours does not grow without end. A hit is shared, not copied: a
+/// pass over ten thousand claims asks several memos of each.
+type TextMemo = std::sync::Mutex<std::collections::HashMap<String, Tokens>>;
+
+/// The tokens a [`TextMemo`] holds for one text.
+type Tokens = std::sync::Arc<[String]>;
 
 /// The memos the token sidecar seeds ([`seed_tokens`]): the words of a
-/// text, its phrase abbreviations and its claim terms.
+/// text, its phrase abbreviations, its claim terms and its token stream.
 static PROMPT_WORDS_MEMO: std::sync::LazyLock<TextMemo> =
+    std::sync::LazyLock::new(TextMemo::default);
+static MATCH_STREAM_MEMO: std::sync::LazyLock<TextMemo> =
     std::sync::LazyLock::new(TextMemo::default);
 static PHRASE_ACRONYMS_MEMO: std::sync::LazyLock<TextMemo> =
     std::sync::LazyLock::new(TextMemo::default);
@@ -10003,31 +10017,27 @@ fn seed_text_memo(memo: &TextMemo, text: &str, value: Vec<String>) {
     if kept.len() >= TEXT_MEMO_CAP {
         kept.clear();
     }
-    kept.insert(text.to_string(), value);
+    kept.insert(text.to_string(), value.into());
 }
 
-fn text_memo(
-    memo: &TextMemo,
-    text: &str,
-    compute: impl FnOnce(&str) -> Vec<String>,
-) -> Vec<String> {
+fn text_memo(memo: &TextMemo, text: &str, compute: impl FnOnce(&str) -> Vec<String>) -> Tokens {
     const TEXT_MEMO_CAP: usize = 20_000;
     {
         let kept = memo
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(found) = kept.get(text) {
-            return found.clone();
+            return std::sync::Arc::clone(found);
         }
     }
-    let out = compute(text);
+    let out: Tokens = compute(text).into();
     let mut kept = memo
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if kept.len() >= TEXT_MEMO_CAP {
         kept.clear();
     }
-    kept.insert(text.to_string(), out.clone());
+    kept.insert(text.to_string(), std::sync::Arc::clone(&out));
     out
 }
 
@@ -10035,7 +10045,7 @@ fn text_memo(
 /// `conflict of interest` is `coi`. A run of names with nothing between
 /// them is left alone, so `add lodash dependency` does not become a token.
 /// Remembered per text ([`text_memo`]).
-fn phrase_acronyms(text: &str) -> Vec<String> {
+fn phrase_acronyms(text: &str) -> Tokens {
     text_memo(&PHRASE_ACRONYMS_MEMO, text, phrase_acronyms_of)
 }
 
@@ -10078,14 +10088,14 @@ fn phrase_acronyms_of(text: &str) -> Vec<String> {
 
 /// Words plus the abbreviations of its phrases. A claim that says `COI`
 /// and a prompt that says `conflict of interest` share `coi`.
-fn match_tokens(text: &str) -> Vec<String> {
+fn match_tokens(text: &str) -> Tokens {
     static MEMO: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
     text_memo(&MEMO, text, match_tokens_of)
 }
 
 fn match_tokens_of(text: &str) -> Vec<String> {
-    let mut words = prompt_words(text);
-    words.extend(phrase_acronyms(text));
+    let mut words = prompt_words(text).to_vec();
+    words.extend_from_slice(&phrase_acronyms(text));
     words.sort_unstable();
     words.dedup();
     words
@@ -10093,20 +10103,18 @@ fn match_tokens_of(text: &str) -> Vec<String> {
 
 /// [`match_tokens`] with repeated words retained for term frequency.
 /// Sorting keeps equal words together for [`document_frequency`].
-fn match_token_stream(text: &str) -> Vec<String> {
-    static MEMO: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
-    text_memo(&MEMO, text, match_token_stream_of)
+fn match_token_stream(text: &str) -> Tokens {
+    text_memo(&MATCH_STREAM_MEMO, text, match_token_stream_of)
 }
 
 fn match_token_stream_of(text: &str) -> Vec<String> {
-    let mut words: Vec<String> = identifier_words(text)
-        .into_iter()
-        .filter(|word| word.len() >= 3)
-        .filter(|word| !stop_word(word))
-        .map(|word| singular(&word))
-        .filter(|word| !stop_word(word))
-        .collect();
-    words.extend(phrase_acronyms(text));
+    stream_with(word_stream(text), &phrase_acronyms(text))
+}
+
+/// A [`match_token_stream`] from its [`word_stream`] and its phrase
+/// abbreviations.
+fn stream_with(mut words: Vec<String>, acronyms: &[String]) -> Vec<String> {
+    words.extend_from_slice(acronyms);
     words.sort_unstable();
     words
 }
@@ -10130,8 +10138,8 @@ fn abbreviation_match(text: &str, cue: &str) -> bool {
 /// short form.
 fn recall_query(cue: &str) -> String {
     let have = pack_words(cue);
-    let mut extra = prompt_words(cue);
-    extra.extend(phrase_acronyms(cue));
+    let mut extra = prompt_words(cue).to_vec();
+    extra.extend_from_slice(&phrase_acronyms(cue));
     extra.retain(|token| !have.contains(token));
     extra.sort_unstable();
     extra.dedup();
@@ -10146,11 +10154,15 @@ fn recall_query(cue: &str) -> String {
 /// a token lets [`recall_query`] append only the identifier parts that the
 /// writer would otherwise miss.
 fn pack_words(text: &str) -> std::collections::HashSet<String> {
+    pack_word_seq(text).collect()
+}
+
+/// [`pack_words`] in written order, repeats kept.
+fn pack_word_seq(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
         .map(str::to_lowercase)
         .filter(|word| !is_lesson_filler(word))
         .map(|word| singular(&word))
-        .collect()
 }
 
 /// Whether a claim names the cue's subject, which is the word test the
@@ -10176,7 +10188,7 @@ fn names_the_subject(text: &str, cue: &str) -> bool {
     let mut plain = 0usize;
     let mut alias = false;
     let mut cue_plain = 0usize;
-    for w in &want {
+    for w in want.iter() {
         if w.starts_with("alias:") {
             if have.binary_search(w).is_ok() {
                 alias = true;
@@ -10550,22 +10562,23 @@ fn recall_body(atom: &Value) -> String {
     text
 }
 
-/// How many atoms contain each word, once per atom. Each document is the
-/// sorted token list [`match_token_stream`] gives, so repeated words are
-/// counted once per document by skipping equal neighbours.
-fn document_frequency(docs: &[Vec<String>]) -> std::collections::HashMap<String, usize> {
-    let mut df: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for doc in docs {
-        let mut last: Option<&str> = None;
-        for word in doc {
-            if last == Some(word.as_str()) {
-                continue;
-            }
-            last = Some(word);
-            *df.entry(word.clone()).or_default() += 1;
-        }
-    }
-    df
+/// How many atoms contain each query term, once per atom. Each document is
+/// the sorted token list [`match_token_stream`] gives. BM25 reads no other
+/// word's count, so no other word is counted.
+fn document_frequency(
+    docs: &[Tokens],
+    query: &[(String, f64)],
+) -> std::collections::HashMap<String, usize> {
+    query
+        .iter()
+        .map(|(term, _)| {
+            let with = docs
+                .iter()
+                .filter(|doc| doc.binary_search(term).is_ok())
+                .count();
+            (term.clone(), with)
+        })
+        .collect()
 }
 
 /// BM25 over `query`, with document frequency from this seat's own pack.
@@ -10574,16 +10587,13 @@ fn document_frequency(docs: &[Vec<String>]) -> std::collections::HashMap<String,
 /// Probabilistic Relevance Framework: BM25 and Beyond” (2009). Query
 /// weights let a ticket title count more than its longer body without
 /// changing the corpus statistics.
-fn bm25_scores(
-    docs: &[Vec<String>],
-    df: &std::collections::HashMap<String, usize>,
-    query: &[(String, f64)],
-) -> Vec<f64> {
+fn bm25_scores(docs: &[Tokens], query: &[(String, f64)]) -> Vec<f64> {
     if query.is_empty() || docs.is_empty() {
         return vec![0.0; docs.len()];
     }
+    let df = document_frequency(docs, query);
     let n = docs.len();
-    let avgdl = docs.iter().map(Vec::len).sum::<usize>() as f64 / n as f64;
+    let avgdl = docs.iter().map(|doc| doc.len()).sum::<usize>() as f64 / n as f64;
     let avgdl = avgdl.max(1.0);
     const K1: f64 = 1.2;
     const B: f64 = 0.75;
@@ -10613,16 +10623,12 @@ fn bm25_scores(
 }
 
 /// Unweighted [`bm25_scores`] against `cue`.
-fn bm25_for_cue(
-    docs: &[Vec<String>],
-    df: &std::collections::HashMap<String, usize>,
-    cue: &str,
-) -> Vec<f64> {
+fn bm25_for_cue(docs: &[Tokens], cue: &str) -> Vec<f64> {
     let query: Vec<(String, f64)> = match_tokens(cue)
-        .into_iter()
-        .map(|term| (term, 1.0))
+        .iter()
+        .map(|term| (term.clone(), 1.0))
         .collect();
-    bm25_scores(docs, df, &query)
+    bm25_scores(docs, &query)
 }
 
 /// Rank of each body against `cue` on [`lexical_match_scores`], highest
@@ -10644,8 +10650,8 @@ fn lexical_scores(bodies: &[&str], cue: &str) -> Vec<(usize, f64)> {
 /// shares two of its words, however rare those are.
 fn cue_coverage(text: &str, cue: &str) -> f64 {
     let terms = |t: &str, claim: bool| {
-        let mut words = cue_terms(t, claim);
-        words.extend(phrase_acronyms(t));
+        let mut words = cue_terms(t, claim).to_vec();
+        words.extend_from_slice(&phrase_acronyms(t));
         words.sort_unstable();
         words.dedup();
         words
@@ -10670,9 +10676,8 @@ fn cue_coverage(text: &str, cue: &str) -> f64 {
 /// fused score adds recency on each ballot and then multiplies by
 /// retrievability, so this is the score that does not read the clock.
 fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
-    let docs: Vec<Vec<String>> = texts.iter().map(|text| match_token_stream(text)).collect();
-    let df = document_frequency(&docs);
-    let bm25 = bm25_for_cue(&docs, &df, cue);
+    let docs: Vec<Tokens> = texts.iter().map(|text| match_token_stream(text)).collect();
+    let bm25 = bm25_for_cue(&docs, cue);
     texts
         .iter()
         .enumerate()
@@ -10697,9 +10702,8 @@ pub const POOL_PER_SHOWN: usize = 4;
 /// break an exact tie.
 fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<usize> {
     let texts: Vec<&str> = rows.iter().map(|h| h.borrow().text.as_str()).collect();
-    let docs: Vec<Vec<String>> = texts.iter().map(|text| match_token_stream(text)).collect();
-    let df = document_frequency(&docs);
-    let bm25 = bm25_for_cue(&docs, &df, cue);
+    let docs: Vec<Tokens> = texts.iter().map(|text| match_token_stream(text)).collect();
+    let bm25 = bm25_for_cue(&docs, cue);
     let lexical = lexical_match_scores(&texts, cue);
     let keys: Vec<(f64, f64, f64)> = rows
         .iter()
@@ -13619,12 +13623,7 @@ fn search_auth_habitat(client: &PacksetClient) -> Option<Habitat> {
 /// file cannot be read, or another user holds the pack's port. That is
 /// not an open listener. An open listener has a token and fails the proof.
 fn seat_has_no_token(client: &PacksetClient) -> bool {
-    if packset_client::token().is_none() {
-        return true;
-    }
-    packset_client::authorize(ureq::get(client.base()))
-        .header("Authorization")
-        .is_none()
+    !client.may_carry()
 }
 
 /// Writers whose last search did not carry the token. The next search
@@ -13829,6 +13828,14 @@ fn word_ranked(client: &PacksetClient, cue: &str, limit: usize) -> Vec<(Value, f
     let Ok(atoms) = atoms_read(client, &client.workspace()) else {
         return Vec::new();
     };
+    let memo = WORD_RANKED.lock().ok().filter(|_| atoms_memo_on());
+    if let Some((_, _, _, ranked)) = memo.as_ref().and_then(|last| {
+        last.as_ref().filter(|(held, asked, n, _)| {
+            std::sync::Arc::ptr_eq(held, &atoms) && asked == cue && *n == limit
+        })
+    }) {
+        return ranked.clone();
+    }
     let asked = pack_words(cue);
     let texts: Vec<&str> = atoms
         .iter()
@@ -13836,15 +13843,30 @@ fn word_ranked(client: &PacksetClient, cue: &str, limit: usize) -> Vec<(Value, f
         .collect();
     let scores = lexical_match_scores(&texts, cue);
     let mut order: Vec<usize> = (0..atoms.len())
-        .filter(|&i| scores[i] > 0.0 && !pack_words(texts[i]).is_disjoint(&asked))
+        .filter(|&i| scores[i] > 0.0 && pack_word_seq(texts[i]).any(|w| asked.contains(&w)))
         .collect();
     order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
     order.truncate(limit);
-    order
+    let ranked: Vec<(Value, f64)> = order
         .into_iter()
         .map(|i| (atoms[i].clone(), scores[i]))
-        .collect()
+        .collect();
+    if let Some(mut memo) = memo {
+        *memo = Some((
+            std::sync::Arc::clone(&atoms),
+            cue.to_string(),
+            limit,
+            ranked.clone(),
+        ));
+    }
+    ranked
 }
+
+/// The last [`word_ranked`] answer in a hook process, with the listing it
+/// ranked. A prompt's search and its reranked search each ask it of the
+/// same listing and cue, and the pass reads every stored claim.
+type WordRanked = Option<(SharedAtoms, String, usize, Vec<(Value, f64)>)>;
+static WORD_RANKED: std::sync::Mutex<WordRanked> = std::sync::Mutex::new(None);
 
 /// [`word_ranked`] without the scores.
 fn relevant_atoms(client: &PacksetClient, cue: &str, limit: usize) -> Vec<Value> {
@@ -14259,7 +14281,7 @@ fn due_nudge(call: &HookCall) -> (String, Option<String>) {
     };
     let now = now_utc();
     let week = utc_at(epoch_s().saturating_sub(DUE_WINDOW_DAYS * 86_400));
-    let all = due_of(&atoms, &now);
+    let all: Vec<&Value> = atoms.iter().filter(|a| is_due(a, &now)).collect();
     let due = came_due_since(&all, &week);
     // A backlog only grows, so its size is no task: the nudge counts what
     // came due inside the window, and a seat with nothing new says nothing.
@@ -14291,9 +14313,10 @@ pub const DUE_WINDOW_DAYS: u64 = 7;
 /// date inside the window, or, for a claim never reviewed, a write inside
 /// it. The rest is backlog the nudge does not count.
 #[must_use]
-pub fn came_due_since(due: &[Value], since: &str) -> usize {
+pub fn came_due_since<A: std::borrow::Borrow<Value>>(due: &[A], since: &str) -> usize {
     due.iter()
-        .filter(|a| {
+        .map(std::borrow::Borrow::borrow)
+        .filter(|a: &&Value| {
             let when = a["due_at"]
                 .as_str()
                 .filter(|d| !d.is_empty())
@@ -16618,7 +16641,7 @@ pub(crate) fn atoms_lean_shared(
             return Ok(std::sync::Arc::clone(atoms));
         }
     }
-    let atoms = std::sync::Arc::new(atoms_lean(client, workspace)?);
+    let atoms = atoms_listed(client, workspace, true)?.0;
     *last = Some((
         std::time::Instant::now(),
         key,
@@ -16637,7 +16660,9 @@ pub(crate) fn atoms_lean_shared(
 ///
 /// The pack not answering, or an answer that is not atoms.
 pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
-    Ok(atoms_listed(client, workspace, true)?.0)
+    Ok(std::sync::Arc::unwrap_or_clone(
+        atoms_listed(client, workspace, true)?.0,
+    ))
 }
 
 /// Message, receipt and group atoms.
@@ -16649,7 +16674,7 @@ pub(crate) fn atoms_mail(client: &PacksetClient, workspace: &str) -> Result<Vec<
     let mut out = Vec::new();
     for kind in ["message", "receipt", "group"] {
         let (atoms, _) = atoms_listed_of(client, workspace, true, Some(kind), None, false)?;
-        out.extend(atoms);
+        out.extend(atoms.iter().cloned());
     }
     Ok(out)
 }
@@ -16660,19 +16685,21 @@ pub(crate) fn atoms_lean_recent(
     workspace: &str,
     limit: usize,
 ) -> Result<Vec<Value>> {
-    Ok(atoms_listed_of(client, workspace, true, None, Some(limit), true)?.0)
+    Ok(std::sync::Arc::unwrap_or_clone(
+        atoms_listed_of(client, workspace, true, None, Some(limit), true)?.0,
+    ))
 }
 
 /// The listing for a reader that names the person. The token rides only
 /// when the proof on this connection held; otherwise every atom is an
 /// agent's.
-fn atoms_read(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
+fn atoms_read(client: &PacksetClient, workspace: &str) -> Result<SharedAtoms> {
     Ok(atoms_with_trust(client, workspace)?.0)
 }
 
 /// The listing, and whether this connection carried the token. An
 /// unproven listener's atoms are marked an agent's.
-fn atoms_with_trust(client: &PacksetClient, workspace: &str) -> Result<(Vec<Value>, bool)> {
+fn atoms_with_trust(client: &PacksetClient, workspace: &str) -> Result<(SharedAtoms, bool)> {
     atoms_with_trust_of(client, workspace, None)
 }
 
@@ -16681,12 +16708,16 @@ fn atoms_with_trust_of(
     client: &PacksetClient,
     workspace: &str,
     kind: Option<&str>,
-) -> Result<(Vec<Value>, bool)> {
+) -> Result<(SharedAtoms, bool)> {
     let (atoms, trusted) = atoms_listed_of(client, workspace, true, kind, None, false)?;
     if trusted {
         return Ok((atoms, true));
     }
-    Ok((atoms.into_iter().map(as_agents).collect(), false))
+    let atoms = std::sync::Arc::unwrap_or_clone(atoms);
+    Ok((
+        std::sync::Arc::new(atoms.into_iter().map(as_agents).collect()),
+        false,
+    ))
 }
 
 /// [`atoms_lean`], with this seat's token only when `token` and the
@@ -16695,16 +16726,20 @@ fn atoms_listed(
     client: &PacksetClient,
     workspace: &str,
     token: bool,
-) -> Result<(Vec<Value>, bool)> {
+) -> Result<(SharedAtoms, bool)> {
     atoms_listed_of(client, workspace, token, None, None, false)
 }
+
+/// A listing every reader in one process shares. The whole pack's atoms
+/// copied once per reader was most of a prompt hook at ten thousand.
+type SharedAtoms = std::sync::Arc<Vec<Value>>;
 
 /// Listings this hook process already read, by request. A hook lists the
 /// pack for its rules, its due count and its recall in turn, and one
 /// answer serves them all for [`ATOMS_MEMO`]. Only a hook keeps one: a
 /// server that lives for hours reads the pack each time. A write through
 /// this seat's client drops the memo ([`forget_atom_listings`]).
-type AtomListing = (String, std::time::Instant, Vec<Value>, bool);
+type AtomListing = (String, std::time::Instant, SharedAtoms, bool);
 static ATOM_LISTINGS: std::sync::Mutex<Vec<AtomListing>> = std::sync::Mutex::new(Vec::new());
 /// How long a listing serves later reads in one hook process.
 const ATOMS_MEMO: std::time::Duration = std::time::Duration::from_secs(2);
@@ -16739,7 +16774,7 @@ fn atoms_listed_of(
     kind: Option<&str>,
     limit: Option<usize>,
     newest: bool,
-) -> Result<(Vec<Value>, bool)> {
+) -> Result<(SharedAtoms, bool)> {
     let url = format!("{}/v1/atoms", client.base());
     let mut query = vec![("workspace", workspace), ("embedding", "omit")];
     let limit = limit.map(|limit| limit.to_string());
@@ -16770,7 +16805,7 @@ fn atoms_listed_of(
             .iter()
             .find(|(k, at, _, _)| k == key && at.elapsed() < ATOMS_MEMO)
         {
-            return Ok((atoms.clone(), *trusted));
+            return Ok((std::sync::Arc::clone(atoms), *trusted));
         }
     }
     // The whole listing is a megabyte the writer builds in a fifth of a
@@ -16799,12 +16834,18 @@ fn atoms_listed_of(
             if !seed_tokens(path, stamp, &atoms) {
                 keep_tokens(path, stamp, &atoms);
             }
+            let atoms = std::sync::Arc::new(atoms);
             if let Some(key) = memo_key {
                 let mut kept = ATOM_LISTINGS
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 kept.retain(|(k, _, _, _)| k != &key);
-                kept.push((key, std::time::Instant::now(), atoms.clone(), trusted));
+                kept.push((
+                    key,
+                    std::time::Instant::now(),
+                    std::sync::Arc::clone(&atoms),
+                    trusted,
+                ));
             }
             return Ok((atoms, trusted));
         }
@@ -16863,11 +16904,16 @@ fn atoms_listed_of(
         anyhow::bail!("{url}: status code {}", answered.status);
     }
     let mut body: Value = serde_json::from_str(&answered.body)?;
-    let atoms = body
-        .get_mut("atoms")
-        .map(Value::take)
-        .unwrap_or(Value::Array(Vec::new()));
-    let atoms: Vec<Value> = serde_json::from_value(atoms)?;
+    let atoms = match body.get_mut("atoms").map(Value::take) {
+        None => Vec::new(),
+        Some(Value::Array(atoms)) => atoms,
+        Some(other) => serde_json::from_value(other)?,
+    };
+    if let (Some(path), Some(stamp)) = (cache, stamp) {
+        keep_listing(&path, &stamp, &atoms, answered.trusted);
+        keep_tokens(&path, &stamp, &atoms);
+    }
+    let atoms = std::sync::Arc::new(atoms);
     if let Some(key) = memo_key {
         let mut kept = ATOM_LISTINGS
             .lock()
@@ -16876,13 +16922,9 @@ fn atoms_listed_of(
         kept.push((
             key,
             std::time::Instant::now(),
-            atoms.clone(),
+            std::sync::Arc::clone(&atoms),
             answered.trusted,
         ));
-    }
-    if let (Some(path), Some(stamp)) = (cache, stamp) {
-        keep_listing(&path, &stamp, &atoms, answered.trusted);
-        keep_tokens(&path, &stamp, &atoms);
     }
     Ok((atoms, answered.trusted))
 }
@@ -16910,26 +16952,40 @@ fn cached_listing(path: &Path, stamp: &str) -> Option<(Vec<Value>, bool)> {
         return None;
     }
     let trusted = doc.get("trusted")?.as_bool()?;
-    let atoms = doc.get_mut("atoms")?.take();
-    Some((serde_json::from_value(atoms).ok()?, trusted))
+    let Value::Array(atoms) = doc.get_mut("atoms")?.take() else {
+        return None;
+    };
+    Some((atoms, trusted))
 }
 
 /// Keep `atoms` at `path` under `stamp`, through a temporary file, so a
 /// hook reading at the same time sees the old listing or the new.
 fn keep_listing(path: &Path, stamp: &str, atoms: &[Value], trusted: bool) {
-    let doc = serde_json::json!({ "stamp": stamp, "trusted": trusted, "atoms": atoms });
+    #[derive(serde::Serialize)]
+    struct Kept<'a> {
+        stamp: &'a str,
+        trusted: bool,
+        atoms: &'a [Value],
+    }
+    let Ok(doc) = serde_json::to_string(&Kept {
+        stamp,
+        trusted,
+        atoms,
+    }) else {
+        return;
+    };
     let Some(dir) = path.parent() else { return };
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
     let tmp = dir.join(format!(".listing-{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, doc.to_string()).is_ok() && std::fs::rename(&tmp, path).is_err() {
+    if std::fs::write(&tmp, doc).is_ok() && std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
 }
 
 /// Beside the cached listing, `listing-<workspace>-<who>-tokens.txt`: for
-/// each atom, in listing order, the words of its text, its phrase
+/// each atom, in listing order, its [`word_stream`], its phrase
 /// abbreviations and its claim terms, tab-separated, tokens separated by
 /// spaces, under a first line of the pack stamp and this version. A
 /// hook that reads the listing from disk seeds its memos from it, so the
@@ -16943,10 +16999,12 @@ fn tokens_sidecar_path(listing: &Path) -> PathBuf {
     listing.with_file_name(name)
 }
 
-/// The sidecar's first line: the stamp and the tokeniser's version, so a
-/// release that changes a word list reads none of an older one.
+/// The sidecar's first line: the stamp, the tokeniser's version and the
+/// columns, so a release that changes a word list reads none of an older
+/// one, and a sidecar with other columns is not read as this one.
 fn tokens_header(stamp: &str) -> String {
-    format!("{stamp}\t{}", env!("CARGO_PKG_VERSION"))
+    const COLUMNS: &str = "word-stream acronyms claim-terms";
+    format!("{stamp}\t{}\t{COLUMNS}", env!("CARGO_PKG_VERSION"))
 }
 
 fn atom_text(atom: &Value) -> &str {
@@ -16962,10 +17020,13 @@ fn keep_tokens(listing: &Path, stamp: &str, atoms: &[Value]) {
     out.push('\n');
     for atom in atoms {
         let text = atom_text(atom);
-        out.push_str(&prompt_words(text).join(" "));
+        let words = word_stream(text);
+        let acronyms = phrase_acronyms(text);
+        out.push_str(&words.join(" "));
         out.push('\t');
-        out.push_str(&phrase_acronyms(text).join(" "));
+        out.push_str(&acronyms.join(" "));
         out.push('\t');
+        seed_words(text, words, &acronyms);
         out.push_str(&cue_terms(text, true).join(" "));
         out.push('\n');
     }
@@ -17006,11 +17067,21 @@ fn seed_tokens(listing: &Path, stamp: &str, atoms: &[Value]) -> bool {
             continue;
         };
         let text = atom_text(atom);
-        seed_text_memo(&PROMPT_WORDS_MEMO, text, tokens(words));
-        seed_text_memo(&PHRASE_ACRONYMS_MEMO, text, tokens(acronyms));
+        let acronyms = tokens(acronyms);
+        seed_words(text, tokens(words), &acronyms);
+        seed_text_memo(&PHRASE_ACRONYMS_MEMO, text, acronyms);
         seed_text_memo(&CLAIM_TERMS_MEMO, text, tokens(terms));
     }
     true
+}
+
+/// Seed [`prompt_words`] and [`match_token_stream`] of `text` from its
+/// [`word_stream`] and its phrase abbreviations.
+fn seed_words(text: &str, words: Vec<String>, acronyms: &[String]) {
+    let mut distinct = words.clone();
+    distinct.dedup();
+    seed_text_memo(&PROMPT_WORDS_MEMO, text, distinct);
+    seed_text_memo(&MATCH_STREAM_MEMO, text, stream_with(words, acronyms));
 }
 
 pub fn pack() -> Result<PacksetClient> {
@@ -20315,7 +20386,7 @@ pub fn brief_playbook_blocks(issue: &str) -> String {
 
 /// Words of `text` the pack's matcher keeps.
 fn token_set(text: &str) -> std::collections::BTreeSet<String> {
-    match_tokens(text).into_iter().collect()
+    match_tokens(text).iter().cloned().collect()
 }
 
 /// A content word of the persona's view that the ticket title does not
@@ -21614,7 +21685,7 @@ pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
             if let Some(path) = &kept {
                 keep_rules(path, &rules);
             }
-            let theirs: Vec<Value> = atoms.into_iter().filter(person_stored).collect();
+            let theirs: Vec<Value> = atoms.iter().filter(|a| person_stored(a)).cloned().collect();
             (rules, preferences_of(&theirs))
         }
         Err(_) => (kept.map(|p| kept_rules(&p)).unwrap_or_default(), Vec::new()),
@@ -21695,7 +21766,7 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
     }
     let preferences = read("preference")
         .map(|(atoms, _)| {
-            let theirs: Vec<Value> = atoms.into_iter().filter(person_stored).collect();
+            let theirs: Vec<Value> = atoms.iter().filter(|a| person_stored(a)).cloned().collect();
             preferences_of(&theirs)
         })
         .unwrap_or_default();
@@ -26975,7 +27046,7 @@ pub fn consensus_atoms() -> Result<Vec<Value>> {
     for kind in CONSENSUS_KINDS {
         let (atoms, _) = atoms_listed_of(&client, &workspace, true, Some(kind), None, false)
             .with_context(|| format!("trust: GET /v1/atoms?kind={kind} failed"))?;
-        out.extend(atoms);
+        out.extend(atoms.iter().cloned());
     }
     Ok(out)
 }
@@ -30263,16 +30334,7 @@ fn reviewable(a: &Value) -> bool {
 /// due now, and grading it puts it on the clock. Trust and persona rows are
 /// weighed, not recalled, and never come up.
 pub fn due_of(atoms: &[Value], now: &str) -> Vec<Value> {
-    let mut due: Vec<Value> = atoms
-        .iter()
-        .filter(|a| reviewable(a))
-        .filter(|a| {
-            a.get("due_at")
-                .and_then(Value::as_str)
-                .is_none_or(|d| d.is_empty() || d <= now)
-        })
-        .cloned()
-        .collect();
+    let mut due: Vec<Value> = atoms.iter().filter(|a| is_due(a, now)).cloned().collect();
     due.sort_by(|a, b| {
         a["due_at"]
             .as_str()
@@ -30280,6 +30342,14 @@ pub fn due_of(atoms: &[Value], now: &str) -> Vec<Value> {
             .cmp(b["due_at"].as_str().unwrap_or(""))
     });
     due
+}
+
+/// Whether `a` is one of [`due_of`] at `now`.
+fn is_due(a: &Value, now: &str) -> bool {
+    reviewable(a)
+        && a.get("due_at")
+            .and_then(Value::as_str)
+            .is_none_or(|d| d.is_empty() || d <= now)
 }
 
 /// One line on the state of the review clock: how many are due, how many
@@ -34109,8 +34179,9 @@ fn sitting_ticket_text(issue: &str, title: &str) -> String {
 /// Content words of `ticket` with the project-wide ones taken out.
 fn sitting_terms(ticket: &str) -> Vec<String> {
     prompt_words(ticket)
-        .into_iter()
+        .iter()
         .filter(|word| !sitting_wide(word))
+        .cloned()
         .collect()
 }
 
@@ -34248,17 +34319,14 @@ fn sitting_query(ticket: &str) -> Vec<(String, f64)> {
     const TITLE_WEIGHT: f64 = 2.0;
     let (title, body) = ticket.split_once('\n').unwrap_or((ticket, ""));
     let mut terms = std::collections::HashMap::new();
-    for term in match_tokens(body)
-        .into_iter()
-        .filter(|term| !sitting_wide(term))
-    {
-        terms.insert(term, BODY_WEIGHT);
+    for term in match_tokens(body).iter().filter(|term| !sitting_wide(term)) {
+        terms.insert(term.clone(), BODY_WEIGHT);
     }
     for term in match_tokens(title)
-        .into_iter()
+        .iter()
         .filter(|term| !sitting_wide(term))
     {
-        terms.insert(term, TITLE_WEIGHT);
+        terms.insert(term.clone(), TITLE_WEIGHT);
     }
     let mut terms: Vec<(String, f64)> = terms.into_iter().collect();
     terms.sort_by(|a, b| a.0.cmp(&b.0));
@@ -34281,12 +34349,11 @@ pub(crate) fn rank_sitting_memories(
             sitting_memory_weight(issue, atom, now, seat).map(|weight| (index, weight))
         })
         .collect();
-    let docs: Vec<Vec<String>> = candidates
+    let docs: Vec<Tokens> = candidates
         .iter()
         .map(|(index, _)| match_token_stream(atoms[*index]["text"].as_str().unwrap_or("")))
         .collect();
-    let df = document_frequency(&docs);
-    let scores = bm25_scores(&docs, &df, &sitting_query(ticket));
+    let scores = bm25_scores(&docs, &sitting_query(ticket));
     let mut scored: Vec<(usize, f64, i64)> = candidates
         .into_iter()
         .zip(scores)
@@ -37735,12 +37802,18 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
                 Some(std::time::Instant::now());
         }
     }
+    let wanted: std::collections::HashSet<&str> = ids.iter().copied().collect();
+    let mut held: std::collections::HashMap<&str, &Value> = std::collections::HashMap::new();
+    for atom in atoms.iter() {
+        if let Some(id) = atom.get("id").and_then(Value::as_str) {
+            if wanted.contains(id) {
+                held.entry(id).or_insert(atom);
+            }
+        }
+    }
     for id in ids {
-        match atoms
-            .iter()
-            .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
-        {
-            Some(held) => record_held_at(id, held, &now),
+        match held.get(id) {
+            Some(atom) => record_held_at(id, atom, &now),
             None => record_origin(id, None),
         }
     }

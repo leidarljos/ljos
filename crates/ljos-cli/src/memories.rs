@@ -587,7 +587,7 @@ const RELATION_WORDS: &[&str] = &[
 const ORDER_WORDS: &[&str] = &["before", "after", "until", "then"];
 
 fn content(text: &str) -> BTreeSet<String> {
-    crate::prompt_words(text).into_iter().collect()
+    crate::prompt_words(text).iter().cloned().collect()
 }
 
 fn overlap(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
