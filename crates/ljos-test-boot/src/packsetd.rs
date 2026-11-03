@@ -72,6 +72,7 @@ unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
     fn signal(sig: i32, handler: usize) -> usize;
     fn raise(sig: i32) -> i32;
+    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
 }
 
 /// A packsetd started for one test. Dropping it stops the process.
@@ -559,13 +560,27 @@ fn stop_all() {
     let mut cur = LIVE.load(Ordering::SeqCst);
     while !cur.is_null() {
         // SAFETY: a published node is never freed. This runs in the SIGINT
-        // handler, so it only loads atomics and calls `kill`.
+        // handler, so it only loads atomics and calls `kill` and `waitpid`.
         let node = unsafe { &*cur };
         let pid = node.pid.swap(0, Ordering::SeqCst);
         if pid != 0 {
             stop_pid(pid);
+            reap(pid);
         }
         cur = node.next.load(Ordering::SeqCst);
+    }
+}
+
+/// Wait for a killed writer to exit. A writer this process never reaps is
+/// a zombie once this process dies, until init or launchd collects it, and
+/// `kill(pid, 0)` still finds a zombie.
+fn reap(pid: u32) {
+    let Ok(pid) = i32::try_from(pid) else {
+        return;
+    };
+    #[cfg(unix)]
+    unsafe {
+        waitpid(pid, std::ptr::null_mut(), 0);
     }
 }
 
