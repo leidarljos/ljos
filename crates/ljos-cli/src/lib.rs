@@ -61224,21 +61224,32 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     #[test]
     fn a_static_check_judges_the_dangerous_lines_without_waiting() {
+        // The stand-in policyd sleeps this long, and the guard timeout
+        // is the same span, so a check that reached the binary waits out
+        // the sleep instead of returning on a shorter budget.
+        const SLOW_POLICYD_SLEEP_SECS: u64 = 30;
+        // Half the stand-in sleep. A real call is still inside that
+        // sleep, so it fails this bound. The static check does not sleep.
+        const STATIC_CHECK_BACKSTOP_SECS: u64 = SLOW_POLICYD_SLEEP_SECS / 2;
         let _g = env_guard();
         let home = SeatDir::new("static-guard");
         let marker = home.path().join("policyd-ran");
         let bin = fake_policyd(
             home.path(),
             "slow-policyd",
-            &format!("touch '{}'\nsleep 30", marker.display()),
+            &format!(
+                "touch '{}'\nsleep {SLOW_POLICYD_SLEEP_SECS}",
+                marker.display()
+            ),
         );
         let data = home.path().join("data");
+        let guard_timeout = SLOW_POLICYD_SLEEP_SECS.to_string();
         let _env = HoldEnv::set(&[
             ("HOME", home.path().to_str().unwrap()),
             ("XDG_DATA_HOME", data.to_str().unwrap()),
             ("POLICYD_BIN", bin.to_str().unwrap()),
             ("PACKSET_WORKSPACE", "static-guard"),
-            ("LJOS_GUARD_TIMEOUT", "30"),
+            ("LJOS_GUARD_TIMEOUT", &guard_timeout),
             ("LJOS_OFF", "0"),
         ]);
         let started = std::time::Instant::now();
@@ -61269,12 +61280,15 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             assert!(static_guard(line).is_none(), "{line}");
             assert_eq!(take_guard_note(), None, "{line} names no rule");
         }
+        // The stand-in writes the marker before it sleeps. Absence is
+        // the proof the static check never called it. The clock is only
+        // a backstop for a wait that never reached the binary.
+        assert!(!marker.exists(), "the slow policyd ran");
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
+            started.elapsed() < std::time::Duration::from_secs(STATIC_CHECK_BACKSTOP_SECS),
             "waited {:?}",
             started.elapsed()
         );
-        assert!(!marker.exists(), "the slow policyd ran");
         let repo = evidenced_push_repo();
         assert!(static_guard_in("git push --force origin main", Some(repo.path())).is_none());
         assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID));
