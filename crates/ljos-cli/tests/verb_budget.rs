@@ -138,8 +138,12 @@ fn a_silent_pack_does_not_hold_a_search() {
             "{} waited {took:?}\n{said}",
             args.join(" ")
         );
-        assert_eq!(out.status.code(), Some(75), "{said}");
-        assert!(said.contains("pack busy, try again"), "{said}");
+        assert!(out.status.success(), "{said}");
+        assert!(
+            said.contains("ranked by words; the pack search did not answer in time"),
+            "{said}"
+        );
+        assert!(!said.contains("pack busy"), "{said}");
     }
 }
 

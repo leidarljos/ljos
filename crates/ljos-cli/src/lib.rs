@@ -13767,11 +13767,11 @@ fn refuses_relevance(client: &PacksetClient, with_token: bool) {
 }
 
 /// The stored atoms that best match `cue` on [`lexical_match_scores`],
-/// which reads no clock, at most `limit`. They stand in for the pack's
-/// own search, so each shares a word with the cue as the pack splits
-/// words: `ljos-none` is one word there and does not match `ljos-l9qq`.
-/// Empty when the listing fails.
-fn relevant_atoms(client: &PacksetClient, cue: &str, limit: usize) -> Vec<Value> {
+/// which reads no clock, at most `limit`, with that score. They stand in
+/// for the pack's own search, so each shares a word with the cue as the
+/// pack splits words: `ljos-none` is one word there and does not match
+/// `ljos-l9qq`. Empty when the listing fails.
+fn word_ranked(client: &PacksetClient, cue: &str, limit: usize) -> Vec<(Value, f64)> {
     let Ok(atoms) = atoms_read(client, &client.workspace()) else {
         return Vec::new();
     };
@@ -13786,7 +13786,36 @@ fn relevant_atoms(client: &PacksetClient, cue: &str, limit: usize) -> Vec<Value>
         .collect();
     order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
     order.truncate(limit);
-    order.into_iter().map(|i| atoms[i].clone()).collect()
+    order
+        .into_iter()
+        .map(|i| (atoms[i].clone(), scores[i]))
+        .collect()
+}
+
+/// [`word_ranked`] without the scores.
+fn relevant_atoms(client: &PacksetClient, cue: &str, limit: usize) -> Vec<Value> {
+    word_ranked(client, cue, limit)
+        .into_iter()
+        .map(|(atom, _)| atom)
+        .collect()
+}
+
+/// Hits from the stored snapshot when `/v1/search` does not answer.
+/// The score is the lexical match. Empty when the listing cannot be read.
+#[must_use]
+pub fn search_by_words(query: &str, limit: u32) -> Vec<Hit> {
+    let Ok(client) = pack() else {
+        return Vec::new();
+    };
+    word_ranked(&client, query, limit as usize)
+        .into_iter()
+        .filter_map(|(atom, score)| {
+            let mut hit = atom_as_hit(&atom)?;
+            hit.score = score;
+            hit.ts = written_at(&atom);
+            Some(hit)
+        })
+        .collect()
 }
 
 /// [`packset_search_opts`] without the rerank, chosen by relevance, see
@@ -16703,10 +16732,10 @@ fn atoms_listed_of(
     // drops a deny. Inside a hook the listing stops at 2s so the local
     // gate still runs. Outside a hook the caller's PACKSET_TIMEOUT_MS
     // still bounds it. A writer that answers busy is asked again until
-    // that deadline. A [`PackClock`] is one try, and a timeout is
-    // [`PackBusy`]. The clock is the command's shared budget. A thread
-    // bound, from `with_pack_timeout` or a wall budget, shortens this
-    // one read and does not raise the clock.
+    // that deadline, under a [`PackClock`] too, while time remains. A
+    // timeout is [`PackBusy`]. The clock is the command's shared budget.
+    // A thread bound, from `with_pack_timeout` or a wall budget, shortens
+    // this one read and does not raise the clock.
     let armed = pack_link::clock_armed();
     let slice = if armed {
         pack_call_budget().min(pack_timeout())
@@ -16731,10 +16760,10 @@ fn atoms_listed_of(
         );
         match answer {
             Ok(answer)
-                if !armed
-                    && answer.status == 503
+                if answer.status == 503
                     && tries < BUSY_TRIES
-                    && std::time::Instant::now() + wait < deadline =>
+                    && std::time::Instant::now() + wait < deadline
+                    && pack_link::clock_left().is_none_or(|left| wait < left) =>
             {
                 tries += 1;
                 std::thread::sleep(wait);
@@ -30221,9 +30250,10 @@ pub fn sitting_due_report(issue: &str) -> Result<String> {
 /// memories from the same atoms instead of asking the pack twice.
 fn sitting_due_and_atoms(issue: &str, title: &str) -> Result<(String, Vec<Value>)> {
     let client = pack()?;
-    // The same sweep `ljos due` runs. A sitting is the clock's ordinary
-    // opening; a review left due past twice its interval lapses here.
-    let swept = client.sweep(&client.workspace()).ok();
+    // The review sweep is a write. It used to run here, inside the recall
+    // clock, and a writer that was still going spent that clock before
+    // this list was read. The list is the snapshot as it stands. The
+    // sweep runs after the listing and the recall have been printed.
     let atoms = atoms_lean(&client, &client.workspace()).context("due: GET /v1/atoms failed")?;
     let now = now_utc();
     let ticket = sitting_ticket_text(issue, title);
@@ -30237,8 +30267,24 @@ fn sitting_due_and_atoms(issue: &str, title: &str) -> Result<(String, Vec<Value>
     record_due_shown(&kept);
     let cards = format_due(&kept);
     let count = review_summary(&atoms, &now);
-    let text = format!("{cards}{count}{}\n", format_sweep(swept.as_ref()));
-    Ok((text, atoms))
+    Ok((format!("{cards}{count}\n"), atoms))
+}
+
+/// The review sweep, once the listing and the recall are already printed.
+/// The recall clock is not armed, so this keeps the pack's own budget
+/// and runs until the writer answers or that budget ends. Empty when the
+/// sweep finds nothing or the pack cannot be asked.
+fn sitting_review_sweep() -> String {
+    let Ok(client) = pack() else {
+        return String::new();
+    };
+    let line = format_sweep(client.sweep(&client.workspace()).ok().as_ref());
+    let line = line.trim_start_matches('\n');
+    if line.is_empty() {
+        String::new()
+    } else {
+        format!("{line}\n")
+    }
 }
 
 /// The review clock as `ljos due` prints it: the soonest [`SITTING_DUE`]
@@ -34203,7 +34249,7 @@ fn format_sitting_recall(rows: &[Value]) -> String {
 /// writer that is reloading its encoder.
 const SITTING_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
-const SITTING_WORDS_LINE: &str = "ranked by words; the pack search did not answer in time\n";
+pub const SITTING_WORDS_LINE: &str = "ranked by words; the pack search did not answer in time\n";
 
 /// [`sitting`], and with `anyway` the claim goes through even when the
 /// issue's blockers are open. Without it a blocked issue is refused before
@@ -34390,6 +34436,10 @@ pub fn sitting_stream_started(
     sections.heading(&mut piece, "due");
     let (due, atoms) = match sitting_due_and_atoms(issue, &title) {
         Ok(pair) => pair,
+        Err(e) if is_pack_busy(&e) => {
+            fell_back = true;
+            (SITTING_WORDS_LINE.to_string(), Vec::new())
+        }
         Err(e) => (format!("due: {e:#}\n"), Vec::new()),
     };
     piece.push_str(&due);
@@ -34453,6 +34503,19 @@ pub fn sitting_stream_started(
     }
     piece.push_str(words_line(&mut fell_back));
     emit_piece(&mut out, &mut emit, &piece);
+
+    // The listing and the recall are printed. Drop the recall clock for
+    // the sweep and put back the time it had not spent, so the sweep
+    // cannot eat that budget and the timeline still shares it. The quiet
+    // mark stays across the sweep: a read that already failed does not
+    // start another wait afterwards.
+    let left = pack_link::clock_left().unwrap_or(SITTING_SEARCH_BUDGET);
+    drop(_search_clock);
+    let swept = sitting_review_sweep();
+    if !swept.is_empty() {
+        emit_piece(&mut out, &mut emit, &swept);
+    }
+    let _search_clock = pack_link::PackClock::enter(left);
 
     let mut piece = String::new();
     sections.heading(&mut piece, "timeline");
@@ -63100,6 +63163,35 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let (url, seen) = serve_busy_then(usize::MAX, "{}");
         let err = atoms_lean(&PacksetClient::new(&url), "ws").unwrap_err();
         assert!(err.to_string().contains("503"), "{err}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1 + BUSY_TRIES as usize);
+    }
+
+    /// A recall clock used to take the first 503 as the answer. The listing
+    /// asks again while the clock still has the wait, and a writer that
+    /// stays busy is [`PackBusy`] after those asks, not on the first one.
+    #[test]
+    fn a_clocked_listing_asks_a_busy_writer_again() {
+        let _env = env_guard();
+        let pack_home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::remove_var("PACKSET_TOKEN");
+            std::env::remove_var("PACKSET_TOKEN_FILE");
+            std::env::remove_var("SEATALFA_HOME");
+            std::env::remove_var("SEATALFA_MEMORY_HOME");
+            std::env::set_var("PACKSET_HOME", pack_home.path());
+        }
+        let _clock = pack_link::PackClock::enter(std::time::Duration::from_secs(5));
+        let (url, seen) = serve_busy_then(
+            2,
+            r#"{"atoms":[{"id":"a","kind":"lesson","text":"a lesson about ferrule"}]}"#,
+        );
+        let atoms = atoms_lean(&PacksetClient::new(&url), "ws").unwrap();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0]["text"], "a lesson about ferrule");
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+        let (url, seen) = serve_busy_then(usize::MAX, "{}");
+        let err = atoms_lean(&PacksetClient::new(&url), "ws").unwrap_err();
+        assert!(is_pack_busy(&err), "{err}");
         assert_eq!(seen.load(Ordering::SeqCst), 1 + BUSY_TRIES as usize);
     }
 

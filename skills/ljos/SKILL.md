@@ -711,6 +711,12 @@ is the total inside a hook (default 1500, at most 2000). `PACKSET_TIMEOUT_MS`
 is used when the matching one of those is unset, and it cannot stretch
 these calls past the caps. A call that runs out of time is not tried
 again. An interactive command prints `pack busy, try again` and exits 75.
+`ljos search` and a sitting's recall ask a busy writer again inside
+the same budget; if search still does not answer they rank the stored
+snapshot by words and print `ranked by words; the pack search did not
+answer in time`. A sitting prints that listing and its recall before
+the review sweep. The sweep runs outside the recall clock and finishes
+on the pack's own budget.
 
 A shell seat has no hook. It polls `ljos inbox`, which writes the receipt.
 `ljos read` writes one for a message the seat names.

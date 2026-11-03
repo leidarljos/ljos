@@ -294,22 +294,43 @@ pub fn push_in(dir: &Path, note: Queued) -> Result<bool> {
 ///
 /// The queue file cannot be rewritten.
 pub fn drain_in(dir: &Path, mut send: impl FnMut(&Queued) -> Sent) -> Result<Drained> {
-    let _held = lock(dir);
+    // The queue lock is the file's. Holding it across the pack post is
+    // what made `ljos finish` wait out another seat's lesson. The post
+    // runs outside the lock. The rewrite takes the lock again and drops
+    // only the notes this drain finished, so a note queued during the
+    // post stays.
+    let held = lock(dir);
     let (notes, unread) = read_split(dir);
     let mut done = Drained::default();
-    if notes.is_empty() && unread.is_empty() {
+    if notes.is_empty() {
+        if !unread.is_empty() {
+            done.set_aside.extend(write(dir, &[], &unread)?);
+        }
         return Ok(done);
     }
-    let mut rest = Vec::new();
-    for (at, note) in notes.iter().enumerate() {
+    drop(held);
+    let mut finished = Vec::with_capacity(notes.len());
+    for note in &notes {
         match send(note) {
-            Sent::Kept(id) => done.kept.push((note.issue.clone(), id)),
-            Sent::Refused(why) => done.refused.push((note.issue.clone(), why)),
+            Sent::Kept(id) => {
+                done.kept.push((note.issue.clone(), id));
+                finished.push(note);
+            }
+            Sent::Refused(why) => {
+                done.refused.push((note.issue.clone(), why));
+                finished.push(note);
+            }
             Sent::Wait(why) => {
                 done.waiting_on = Some(why);
-                rest.extend_from_slice(&notes[at..]);
                 break;
             }
+        }
+    }
+    let _held = lock(dir);
+    let (mut rest, unread) = read_split(dir);
+    for note in finished {
+        if let Some(at) = rest.iter().position(|row| row.same(note)) {
+            rest.remove(at);
         }
     }
     done.left = rest.len();
@@ -655,5 +676,23 @@ mod tests {
             drained_lines(&drain_in(&dir, |_| unreachable!()).unwrap()),
             ""
         );
+    }
+
+    /// The queue file stays locked only around its own read and rewrite.
+    /// Another seat can queue a note while this one is asking the pack.
+    #[test]
+    fn a_drain_does_not_hold_the_queue_lock_while_the_pack_is_asked() {
+        let dir = dir("lock-during-send");
+        push_in(&dir, note("p-1", "held")).unwrap();
+        let done = drain_in(&dir, |_| {
+            assert!(
+                busy_in(&dir).is_none(),
+                "the queue lock was held while the pack was asked"
+            );
+            Sent::Kept("id".into())
+        })
+        .unwrap();
+        assert_eq!(done.kept, [("p-1".to_string(), "id".to_string())]);
+        assert!(pending_in(&dir).is_empty());
     }
 }

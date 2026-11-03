@@ -997,26 +997,26 @@ impl PacksetClient {
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<Answer, Error> {
-        // One try. A busy or silent writer is the caller's answer, not
-        // a reason to wait and ask again.
-        if clock_armed() {
-            return self.roundtrip(method, path, query, body, true, timeout);
-        }
+        // A silent socket is one try: this call already waited out
+        // `timeout`. A writer that answers 503 is asked again, on the same
+        // backoff as a listing. The first wait is 50 ms and each later
+        // wait is three times that, three times, which sums to 650 ms and
+        // fits in the 5 s recall budget.
         let started = Instant::now();
-        let mut wait = Duration::from_millis(50);
-        for n in 0..4 {
+        let mut wait = super::BUSY_WAIT;
+        let mut n = 0u32;
+        loop {
             let answer = self.roundtrip(method, path, query, body, true, timeout)?;
-            if answer.status == 503 && n < 3 && started.elapsed() + wait < timeout {
+            let room =
+                started.elapsed() + wait < timeout && wait < clock_left().unwrap_or(Duration::MAX);
+            if answer.status == 503 && n < super::BUSY_TRIES && room {
+                n += 1;
                 std::thread::sleep(wait);
                 wait *= 3;
                 continue;
             }
             return Ok(answer);
         }
-        Err(Error::Bad(format!(
-            "{}{path}: 503: packsetd is busy",
-            self.base
-        )))
     }
 
     fn json_ok<T: DeserializeOwned>(&self, path: &str, answer: Answer) -> Result<T, Error> {

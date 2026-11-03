@@ -1980,7 +1980,19 @@ fn run_command() -> Result<()> {
             } else {
                 limit
             };
-            let mut hits = packset_search_as_of(&join(&query), fetch, as_of.as_deref(), rerank)?;
+            // A dated search is the pack as it stood then. The live
+            // snapshot is not that pack, so a busy writer stays a failure
+            // there. A search of now ranks the snapshot by words instead.
+            let dated = as_of.is_some();
+            let mut hits =
+                match packset_search_as_of(&join(&query), fetch, as_of.as_deref(), rerank) {
+                    Ok(hits) => hits,
+                    Err(err) if !dated && ljos_cli::is_pack_busy(&err) => {
+                        eprintln!("{}", ljos_cli::SITTING_WORDS_LINE.trim_end());
+                        ljos_cli::search_by_words(&join(&query), fetch)
+                    }
+                    Err(err) => return Err(err),
+                };
             if let Some(day) = day {
                 hits.retain(|h| ljos_cli::valid_on(&h.entities, &day));
             }
