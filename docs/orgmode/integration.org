@@ -62,7 +62,7 @@ reason in a herdr pane when herdr is up and fall back to a tmux window
 when it is not (=crates/ljos-cli/src/persona_session.rs=), the runner
 works in the persona's home as its own seat, and the person's watch-and-talk
 window is that same pane. The direction is more of this same
-system: herdr panes as supervised seats, policyd refusing writes
+system: herdr panes as supervised seats, policyd naming writes
 to the seat's own files, approvals flowing through =ljos approve= on any
 runner. The [[file:grok-build.org][Grok Build]] page is the reference
 integration; each runner registers the events its table names.
@@ -155,10 +155,9 @@ every other runner the commands run unchecked.
 When the seat's own hook fails on a permission event, it writes an allow in the runner's JSON, so a
 runner that blocks on a missing answer still runs the command.
 
-Two rules hold on every runner. First, policyd refuses a command
-that writes the seat's own files: its binaries, its hook entries and its policy files.
-An agent cannot rewrite the law it runs under. ljos adds one more refusal, for a command or
-a file tool that writes the tracker's files by hand.
+Two rules hold on every runner.
+First, a command that writes the seat's own files, its binaries, its hook entries and its policy files, runs with the =writes-seat-file= warning, and the bypass log keeps the label.
+ljos refuses a command or a file tool that writes the tracker's files by hand.
 Second, =ljos policy -- COMMAND= prints the answer for one command without running it,
 so every integration is testable without the runner. =scripts/smoke.sh= does exactly that.
 

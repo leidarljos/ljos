@@ -9,4 +9,5 @@ It prints `allow\twarn\tuproots-person-key\tWARNING` and leaves the same `warn` 
 The warning names the tree and the key directory.
 A command runs with `changes-person-key` instead of being refused when it changes the key directory, a file in it or the directory above it, such as `rm -rf ~/.config`.
 A change to the runtime directory where the hook keeps the person's latest prompt runs the same way, with `changes-kept-prompt`.
+So does a write from a command or a file tool to another seat file, with `writes-seat-file`: an ljos binary, a hook or the file that registers one, the ljos config or an approval.
 A `policyd_config` holding `block-on-warning true` denies such a command where policyd warns on it too.

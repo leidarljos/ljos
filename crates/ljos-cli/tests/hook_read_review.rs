@@ -253,8 +253,9 @@ fn a_large_read_leaves_no_broken_pipe_for_the_writer() {
 }
 
 /// A payload whose last `hook_event_name` is preToolUse is a preToolUse to
-/// the parser. The seat guard denies a write to the hooks file. The early
-/// read answer must not allow it because an earlier key said
+/// the parser. The seat guard lets a write to the hooks file run and
+/// keeps a `writes-seat-file` row in the bypass log. The early read
+/// answer must not allow it unjudged because an earlier key said
 /// beforeReadFile, before or after a large field.
 #[test]
 fn a_second_event_key_still_meets_the_seat_guard() {
@@ -275,6 +276,7 @@ fn a_second_event_key_still_meets_the_seat_guard() {
         "x".repeat(300 * 1024),
         &tail[1..]
     );
+    let mut rows = 0;
     for (what, payload) in [("short", short), ("after 300 KB", long)] {
         for queue in [false, true] {
             let label = format!("{what} queue={queue}");
@@ -283,7 +285,16 @@ fn a_second_event_key_still_meets_the_seat_guard() {
                 payload.as_bytes(),
                 Duration::from_secs(10),
             );
-            assert_eq!(permission(&out), "deny", "{label}");
+            assert_eq!(permission(&out), "allow", "{label}");
+            rows += 1;
+            let log = std::fs::read_to_string(hab.home.join(".local/share/ljos/bypass.jsonl"))
+                .unwrap_or_default();
+            let named = log
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|r| r["kind"] == "warn" && r["rule"] == "writes-seat-file")
+                .count();
+            assert_eq!(named, rows, "{label}: {log}");
         }
     }
 }

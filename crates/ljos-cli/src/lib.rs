@@ -24883,9 +24883,9 @@ pub fn cite_roster(cite: &str) -> std::result::Result<std::collections::BTreeSet
     }
 }
 
-/// The files that are the seat's law and its reach into each runner: the
-/// binaries the hooks run and the files that register them. An agent
-/// that may rewrite them can rewrite the law, so only the person does.
+/// The seat's files, and its reach into each runner. These are the
+/// binaries the hooks run, the files that register them, the ljos config
+/// and the approvals the person gave.
 pub const SEAT_PATHS: &[&str] = &[
     "/bin/ljos",
     "/bin/ljos-mcp",
@@ -25208,9 +25208,9 @@ fn sends_text_argument(words: &[String]) -> bool {
 
 /// The seat's own guard, before any rule: a shell command that writes one
 /// of [`SEAT_PATHS`] (anything but a reader, or a redirect into it), or a
-/// file tool aimed at one, is refused. A path is a word of its own: a
-/// quoted sentence that names one is data. `ljos onboard` and `ljos`
-/// itself write them, run by the person.
+/// file tool aimed at one, runs naming `writes-seat-file`. A path is a
+/// word of its own: a quoted sentence that names one is data. `ljos
+/// onboard` and `ljos` itself write them, run by the person.
 #[must_use]
 pub fn seat_guard(line: &str) -> Option<Rule> {
     seat_guard_in(line, None)
@@ -25221,8 +25221,9 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
 /// command that changes the kept prompt names `changes-kept-prompt`, and
 /// one that changes the person's key directory names
 /// `changes-person-key`, or `uproots-person-key` when it deletes or moves
-/// a tree that contains it. None of them is refused: each names its rule
-/// for [`take_guard_note`] and runs.
+/// a tree that contains it. One that writes any other seat file names
+/// `writes-seat-file`. None of them is refused: each names its rule for
+/// [`take_guard_note`] and runs.
 #[must_use]
 pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     refusing(seat_guard_judged(line, cwd))
@@ -25235,16 +25236,6 @@ fn seat_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     let mut cwd = cwd
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
-    let refuse = |what: &str| {
-        Rule {
-        pattern: "seat-guard".into(),
-        verdict: "deny".into(),
-        reason: format!(
-            "{what} is the seat's own law or its hook into a runner, and only the person changes it. \
-             Say what you need changed and stop; do not work around the hook."
-        ),
-    }
-    };
     let is_path_word = |w: &str, dir: Option<&Path>| {
         if w.chars().any(char::is_whitespace) {
             return false;
@@ -25425,7 +25416,7 @@ fn seat_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         }
         // ssh runs its last arguments as a command line on the host: that
         // line is judged as one, so a remote run of a seat binary passes and
-        // a remote write to one is refused.
+        // a remote write to one names its rule.
         if first == "ssh" {
             let refs: Vec<&str> = words.iter().map(String::as_str).collect();
             if let Some(remote) = ssh_remote_command(&refs) {
@@ -25446,22 +25437,31 @@ fn seat_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                 continue;
             }
         }
-        let redirect_target = paths
-            .windows(2)
-            .find(|w| w[0] == ">" && is_path_word(&w[1], cwd.as_deref()))
-            .map(|w| w[1].clone());
-        if let Some(t) = redirect_target.filter(|_| !named) {
-            return Some(refuse(&t));
-        }
-        if path_reads || named {
+        if named {
             continue;
         }
-        if let Some(t) = paths
-            .iter()
-            .skip(1)
-            .find(|w| is_path_word(w, cwd.as_deref()))
-        {
-            return Some(refuse(t));
+        let written = paths
+            .windows(2)
+            .find(|w| w[0] == ">" && is_path_word(&w[1], cwd.as_deref()))
+            .map(|w| &w[1])
+            .or_else(|| {
+                let operand = || {
+                    paths
+                        .iter()
+                        .skip(1)
+                        .find(|w| is_path_word(w, cwd.as_deref()))
+                };
+                (!path_reads).then(operand).flatten()
+            });
+        if let Some(word) = written {
+            label_saying(
+                WRITES_SEAT_FILE,
+                format!(
+                    "the command writes {word}, a file of the seat: an ljos binary, a hook or \
+                     the file that registers one, the ljos config or an approval"
+                ),
+                line,
+            );
         }
     }
     None
@@ -39558,6 +39558,10 @@ const CHANGES_PERSON_KEY: &str = "changes-person-key";
 /// prompt, or runs code that names it. Its warning is
 /// [`kept_prompt::changed`] or [`kept_prompt::named_in_code`].
 const CHANGES_KEPT_PROMPT: &str = "changes-kept-prompt";
+
+/// The rule a command names that writes one of [`SEAT_PATHS`], or a git
+/// hook. Its warning names the word.
+const WRITES_SEAT_FILE: &str = "writes-seat-file";
 
 /// The line a labelled rule prints as its call goes ahead, in the fields
 /// of ljos-policyd's allow-with-warning: `allow`, `warn`, the rule and the
@@ -57212,13 +57216,14 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             r##"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/home/u/.local/bin/ljos","content":"#!/bin/sh"}}"##,
         );
         assert_eq!(edit.cue, "Write /home/u/.local/bin/ljos");
-        assert!(seat_guard(&edit.cue).is_some());
+        assert_runs_naming("writes-seat-file", std::slice::from_ref(&edit.cue));
         let doc = hook_call(
             r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/r/CHANGELOG.md","old_string":"a","new_string":"see ~/.local/bin/ljos"}}"#,
         );
         assert_eq!(doc.cue, "Edit /r/CHANGELOG.md");
-        assert!(
-            seat_guard(&doc.cue).is_none(),
+        assert_eq!(
+            seat_note(&doc.cue).ok().as_deref(),
+            Some(""),
             "a doc naming the path is not the path"
         );
     }
@@ -57910,6 +57915,14 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         format!(
             "allow\twarn\tchanges-kept-prompt\tthe command changes {word}, in or above the \
              runtime directory where the hook keeps the person's latest prompt"
+        )
+    }
+
+    /// The line `writes-seat-file` names when a command writes `word`.
+    fn seat_said(word: &str) -> String {
+        format!(
+            "allow\twarn\twrites-seat-file\tthe command writes {word}, a file of the seat: an \
+             ljos binary, a hook or the file that registers one, the ljos config or an approval"
         )
     }
 
@@ -58747,20 +58760,28 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
     }
 
+    /// A write to one of the seat's files runs naming `writes-seat-file`
+    /// with the word it writes, and reading one names nothing.
     #[test]
-    fn the_seat_guards_its_own_law() {
+    fn a_write_to_a_seat_file_runs_with_its_warning() {
         // The guard stands down when HOME is a temporary directory. Other tests
         // point it there, so this one waits for that lock.
         let _g = env_guard();
-        assert!(seat_guard("cp /tmp/shim ~/.local/bin/ljos").is_some());
-        assert!(seat_guard("printf x > /home/u/.local/bin/ljos").is_some());
-        assert!(seat_guard("cat /tmp/x > ~/.gemini/config/hooks.json").is_some());
-        assert!(seat_guard("sed -i s/a/b/ ~/.codex/hooks.json").is_some());
-        assert!(seat_guard("write_to_file /home/u/.local/bin/ljos").is_some());
-        assert!(
-            seat_guard("cat ~/.gemini/config/hooks.json").is_none(),
-            "reading is fine"
-        );
+        let mut writes = vec![
+            "cp /tmp/shim ~/.local/bin/ljos".to_string(),
+            "printf x > /home/u/.local/bin/ljos".into(),
+            "cat /tmp/x > ~/.gemini/config/hooks.json".into(),
+            "sed -i s/a/b/ ~/.codex/hooks.json".into(),
+            "write_to_file /home/u/.local/bin/ljos".into(),
+            "cp ~/.local/bin/ljos /tmp/copy".into(),
+        ];
+        let mut reads = vec![
+            "cat ~/.gemini/config/hooks.json".to_string(),
+            "sed -i s/a/b/ ~/notes/hooks.json".into(),
+            "sha256sum ~/.local/bin/ljos ~/.local/bin/ljos.bak".into(),
+            "ljos onboard --harness grok".into(),
+            "cargo build --release".into(),
+        ];
         for path in [
             "~/.cursor/hooks.json",
             "~/.codeium/windsurf/hooks.json",
@@ -58779,21 +58800,24 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "~/.openhands/hooks.json",
             "~/.gemini/settings.json",
         ] {
-            assert!(
-                seat_guard(&format!("sed -i s/a/b/ {path}")).is_some(),
-                "{path}"
-            );
-            assert!(
-                seat_guard(&format!("cat {path}")).is_none(),
-                "reading {path}"
-            );
+            writes.push(format!("sed -i s/a/b/ {path}"));
+            reads.push(format!("cat {path}"));
         }
-        assert!(seat_guard("sed -i s/a/b/ ~/notes/hooks.json").is_none());
-        assert!(seat_guard("sha256sum ~/.local/bin/ljos ~/.local/bin/ljos.bak").is_none());
-        assert!(
-            seat_guard("cp ~/.local/bin/ljos /tmp/copy").is_some(),
-            "a writer naming it is refused"
+        assert_runs_naming("writes-seat-file", &writes);
+        for line in &reads {
+            assert_eq!(seat_note(line).ok().as_deref(), Some(""), "{line}");
+        }
+        let data = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
+        assert_eq!(
+            seat_note("cp ~/.local/bin/ljos /tmp/copy"),
+            Ok(seat_said("~/.local/bin/ljos"))
         );
+        let rows = std::fs::read_to_string(data.path().join("ljos/bypass.jsonl")).unwrap();
+        let row: serde_json::Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
+        assert_eq!(row["kind"], "warn", "{row}");
+        assert_eq!(row["rule"], "writes-seat-file", "{row}");
+        assert_eq!(row["command"], "cp ~/.local/bin/ljos /tmp/copy", "{row}");
         assert_runs_naming(
             "changes-kept-prompt",
             &[
@@ -58801,8 +58825,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 "printf x > /run/user/1000/ljos/latest-prompt.bind".into(),
             ],
         );
-        assert!(seat_guard("ljos onboard --harness grok").is_none());
-        assert!(seat_guard("cargo build --release").is_none());
         assert!(!is_seat_path("~/.local/bin/ljos.bak"));
         let edit = hook_call_as(
             r##"{"toolCall":{"name":"write_to_file","args":{"TargetFile":"/home/u/.local/bin/ljos","CodeContent":"#!/bin/sh"}},"conversationId":"c"}"##,
@@ -58831,16 +58853,15 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
         assert_eq!(edit.event, "PreToolUse");
         assert_eq!(edit.cue, "edit_file /h/work/slug.py");
-        // The same call aimed at the seat's own binary is refused.
-        let own = hook_call(
+        // The same call aimed at the seat's own binary names its rule.
+        let write = hook_call(
             r##"{"conversationId":"6839fd1e","toolCall":{"args":{"Content":"#!/bin/sh\n","Overwrite":true,"Path":"/home/u/.local/bin/ljos"},"name":"write_file"},"workspacePaths":["/h/work"]}"##,
         );
-        assert_eq!(own.cue, "write_file /home/u/.local/bin/ljos");
-        assert!(seat_guard(&own.cue).is_some(), "{}", own.cue);
-        let own = hook_call(
+        assert_eq!(write.cue, "write_file /home/u/.local/bin/ljos");
+        let edit = hook_call(
             r##"{"conversationId":"6839fd1e","toolCall":{"args":{"Path":"/home/u/.local/bin/ljos","Replacement":"x","Target":"y"},"name":"edit_file"},"workspacePaths":["/h/work"]}"##,
         );
-        assert!(seat_guard(&own.cue).is_some(), "{}", own.cue);
+        assert_runs_naming("writes-seat-file", &[write.cue, edit.cue]);
         // Reading a file names no write.
         let read = hook_call(
             r##"{"conversationId":"6839fd1e","toolCall":{"args":{"Path":"/home/u/.local/bin/ljos"},"name":"view_file"},"workspacePaths":["/h/work"]}"##,
@@ -61764,7 +61785,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 "echo x 2>>~/.config/ljos/jev.toml".into(),
             ],
         );
-        assert!(seat_guard(r#"cp /tmp/p "/home/u/.config/ljos/plugins.toml""#).is_some());
+        assert_runs_naming(
+            "writes-seat-file",
+            &[r#"cp /tmp/p "/home/u/.config/ljos/plugins.toml""#.into()],
+        );
         assert_eq!(
             shell_words(r#"echo "a > b" 2>>f 'c d'"#),
             vec!["echo", "a > b", ">", "f", "c d"]
@@ -61780,9 +61804,19 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             seat_guard("ssh h 'tar -xzf a.tgz; ~/.local/bin/ljos --version'").is_none(),
             "running is not writing"
         );
-        assert!(seat_guard("ssh -o ConnectTimeout=5 h 'cp /tmp/x ~/.local/bin/ljos'").is_some());
-        assert!(seat_guard("ssh h \"sed -i s/a/b/ ~/.codex/hooks.json\"").is_some());
-        assert!(seat_guard("ssh h 'cat ~/.claude/settings.json'").is_none());
+        assert_runs_naming(
+            "writes-seat-file",
+            &[
+                "ssh -o ConnectTimeout=5 h 'cp /tmp/x ~/.local/bin/ljos'".into(),
+                "ssh h \"sed -i s/a/b/ ~/.codex/hooks.json\"".into(),
+            ],
+        );
+        assert_eq!(
+            seat_note("ssh h 'cat ~/.claude/settings.json'")
+                .ok()
+                .as_deref(),
+            Some("")
+        );
         assert!(seat_guard("ssh h").is_none(), "a login is no command");
         assert_eq!(
             ssh_remote_command(&["ssh", "-p", "22", "host", "'ls", "-la'"]).as_deref(),

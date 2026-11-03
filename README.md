@@ -240,7 +240,7 @@ policyd refuses some of these commands and asks about the others.
 - writes to the hook files, the policy files and the ljos programs.
 - outbound mail whose From is not your own address.
 
-ljos runs a recursive delete outside `/tmp` and a force push all the same.
+ljos runs a recursive delete outside `/tmp`, a force push and a write to the hook files, the policy files or the ljos programs all the same.
 It prints the rule and its warning on one line, `allow\twarn\tRULE\tWARNING`, and keeps the label in `$XDG_DATA_HOME/ljos/bypass.jsonl`.
 
 A lease push to a feature branch is allowed. An ordinary push of a branch is allowed.

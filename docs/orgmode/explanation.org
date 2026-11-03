@@ -79,7 +79,7 @@ The built-in law covers:
 
 An ordinary push of a branch runs.
 A lease push or a force push runs too, with one =allow\twarn\tgit-force-push\t...= line, and the bypass log keeps the label.
-A recursive delete outside =/tmp= runs the same way under =rm-rf-outside-tmp=.
+A recursive delete outside =/tmp= runs the same way under =rm-rf-outside-tmp=, and a write to the hook files, the policy files or the ljos programs under =writes-seat-file=.
 
 ** Pushing with a credential
 

@@ -444,12 +444,12 @@ fn shell_guard_refuses_disarming_the_hook() {
     );
 }
 
-/// Writes inside the git hooks directory are the same refusal as a write
-/// to a runner hook file. Reads of that directory stay allowed. The
-/// directory follows `XDG_DATA_HOME`, `LJOS_GIT_HOOKS`, and a global
-/// `core.hooksPath` that names `ljos/git-hooks`.
+/// Writes inside the git hooks directory run naming `writes-seat-file`,
+/// as a write to a runner hook file does. Reads of that directory name
+/// nothing. The directory follows `XDG_DATA_HOME`, `LJOS_GIT_HOOKS`, and
+/// a global `core.hooksPath` that names `ljos/git-hooks`.
 #[test]
-fn the_git_hooks_directory_is_refused_like_a_runner_hook() {
+fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, _xdg) = seat_env(root.path());
@@ -458,24 +458,29 @@ fn the_git_hooks_directory_is_refused_like_a_runner_hook() {
     let pre = hooks.join("pre-push");
     let inside = hooks.join("x");
 
-    let deny = |line: &str| {
-        let hit = ljos_cli::seat_guard(line).unwrap_or_else(|| panic!("allowed: {line}"));
-        assert_eq!(hit.verdict, "deny", "{line}: {hit:?}");
-        assert_eq!(hit.pattern, "seat-guard", "{line}: {hit:?}");
-        let via = ljos_cli::static_guard(line).unwrap_or_else(|| panic!("static allowed: {line}"));
-        assert_eq!(via.pattern, "seat-guard", "static {line}: {via:?}");
+    // What the seat guard and the static guard each say as `line` runs.
+    let said = |line: &str| {
+        let _ = ljos_cli::take_guard_note();
+        let seat = ljos_cli::seat_guard(line);
+        let seat_said = ljos_cli::take_guard_note().unwrap_or_default();
+        let via = ljos_cli::static_guard(line);
+        let static_said = ljos_cli::take_guard_note().unwrap_or_default();
+        assert!(
+            seat.is_none() && via.is_none(),
+            "refused: {line}: {seat:?} {via:?}"
+        );
+        [seat_said, static_said]
+    };
+    let named = |line: &str| {
+        for note in said(line) {
+            assert!(
+                note.starts_with("allow\twarn\twrites-seat-file\t"),
+                "{line}: {note}"
+            );
+        }
     };
     let allow = |line: &str| {
-        assert!(
-            ljos_cli::seat_guard(line).is_none(),
-            "refused: {line}: {:?}",
-            ljos_cli::seat_guard(line)
-        );
-        assert!(
-            ljos_cli::static_guard(line).is_none(),
-            "static refused: {line}: {:?}",
-            ljos_cli::static_guard(line)
-        );
+        assert_eq!(said(line), ["", ""], "{line}");
     };
 
     for line in [
@@ -498,7 +503,7 @@ fn the_git_hooks_directory_is_refused_like_a_runner_hook() {
         "cd ~/.local/share/ljos && touch git-hooks/pre-push",
         "cd ~/.local/share/ljos/git-hooks && touch pre-push",
     ] {
-        deny(line);
+        named(line);
     }
     for line in [
         "cat ~/.cursor/hooks.json",
@@ -523,21 +528,21 @@ fn the_git_hooks_directory_is_refused_like_a_runner_hook() {
 
     let data = root.path().join("data");
     std::env::set_var("XDG_DATA_HOME", &data);
-    deny("touch $XDG_DATA_HOME/ljos/git-hooks/pre-push");
-    deny("mkdir -p ${XDG_DATA_HOME}/ljos/git-hooks/x");
-    deny(&format!(
+    named("touch $XDG_DATA_HOME/ljos/git-hooks/pre-push");
+    named("mkdir -p ${XDG_DATA_HOME}/ljos/git-hooks/x");
+    named(&format!(
         "touch {}",
         data.join("ljos/git-hooks/pre-push").display()
     ));
     allow("touch $XDG_DATA_HOME/ljos/other");
     allow("touch ~/.local/share/ljos/other");
-    deny("touch ~/.local/share/ljos/git-hooks/pre-push");
+    named("touch ~/.local/share/ljos/git-hooks/pre-push");
     std::env::remove_var("XDG_DATA_HOME");
 
     let custom = root.path().join("custom-hooks");
     std::env::set_var("LJOS_GIT_HOOKS", &custom);
-    deny("touch $LJOS_GIT_HOOKS/pre-push");
-    deny(&format!("mkdir -p {}", custom.join("x").display()));
+    named("touch $LJOS_GIT_HOOKS/pre-push");
+    named(&format!("mkdir -p {}", custom.join("x").display()));
     allow("touch /tmp/other-hooks/pre-push");
     std::env::remove_var("LJOS_GIT_HOOKS");
 
@@ -551,8 +556,8 @@ fn the_git_hooks_directory_is_refused_like_a_runner_hook() {
         format!("[core]\n\thooksPath = {}\n", booked.display()),
     )
     .unwrap();
-    deny(&format!("touch {}", booked.join("pre-push").display()));
-    deny(&format!("mkdir -p {}", booked.join("x").display()));
+    named(&format!("touch {}", booked.join("pre-push").display()));
+    named(&format!("mkdir -p {}", booked.join("x").display()));
     allow("touch /tmp/not-the-ljos-hooks/pre-push");
     fs::write(&cfg, "").unwrap();
 
