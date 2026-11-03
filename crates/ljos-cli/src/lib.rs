@@ -6935,6 +6935,51 @@ lower_ascii() {
   done
   printf '%s' "$out"
 }
+# The file `ljos-policyd check --config` reads, as the hook finds it:
+# `policyd_config` in the user's ljos.toml, then the seat's, the later
+# one winning. A relative path is from that file's directory. Unset or
+# "", conf is empty and check is asked as it always was.
+policyd_conf() {
+  conf=
+  case ${XDG_CONFIG_HOME-} in
+    /*) cbase=$XDG_CONFIG_HOME/ljos ;;
+    *) cbase=${HOME-}/.config/ljos ;;
+  esac
+  case ${LJOS_SEAT-} in
+    ""|*/*|*\\*|*..*) cseat= ;;
+    *) cseat=$cbase/seats/$LJOS_SEAT/ljos.toml ;;
+  esac
+  for cf in "$cbase/ljos.toml" "$cseat"; do
+    [ -f "$cf" ] && [ -r "$cf" ] || continue
+    while IFS= read -r cl || [ -n "$cl" ]; do
+      case "$cl" in
+        *policyd_config*) ;;
+        *) continue ;;
+      esac
+      cl=$(trim_ws "$cl")
+      case "$cl" in
+        policyd_config=*|policyd_config[[:space:]]*) ;;
+        *) continue ;;
+      esac
+      cl=$(trim_ws "${cl#policyd_config}")
+      case "$cl" in
+        =*) cl=$(trim_ws "${cl#=}") ;;
+        *) continue ;;
+      esac
+      case "$cl" in
+        \"*\"*) cl=${cl#?}; cv=${cl%%\"*} ;;
+        \'*\'*) cl=${cl#?}; cv=${cl%%\'*} ;;
+        *) continue ;;
+      esac
+      case "$cv" in
+        ""|/*) ;;
+        "~/"*) cv=${HOME-}/${cv#"~/"} ;;
+        *) cv=${cf%/*}/$cv ;;
+      esac
+      conf=$cv
+    done < "$cf"
+  done
+}
 # The first git of a conversation is the session start this runner never
 # hooks. The brief is held claims, recall and unread mail, on stderr, once.
 # Bound the wait: a slow seat must not hold the command. A failure allows it.
@@ -6946,7 +6991,12 @@ if [ "$me" = git ] && command -v ljos >/dev/null 2>&1; then
   fi
 fi
 if command -v ljos-policyd >/dev/null 2>&1; then
-  verdict=$(ljos-policyd check -- "$me" "$@" 2>/dev/null)
+  policyd_conf
+  if [ -n "$conf" ]; then
+    verdict=$(ljos-policyd check --config "$conf" -- "$me" "$@" 2>/dev/null)
+  else
+    verdict=$(ljos-policyd check -- "$me" "$@" 2>/dev/null)
+  fi
   case $verdict in
     deny*)
       # First line, field after the first tab. Trim and fold in the shell.
@@ -28161,7 +28211,13 @@ fn policy_answered(bin: &Path) -> std::result::Result<String, String> {
             ));
         }
     };
-    match policy_probe(&at, &["check", "--", "true"]) {
+    let config = gates::policyd_config().map(|path| path.display().to_string());
+    let mut check = vec!["check"];
+    if let Some(path) = config.as_deref() {
+        check.extend(["--config", path]);
+    }
+    check.extend(["--", "true"]);
+    match policy_probe(&at, &check) {
         Err(e) if capture_timed_out(&e) => Err(format!("{at} is unresponsive")),
         Err(e) => Err(format!("{at} answered `version` but `check` failed: {e:#}")),
         Ok(_) => policy_state(version.stdout.trim(), &at),
@@ -39489,6 +39545,8 @@ fn tcb_check_in(argv: &[String], cwd: Option<&Path>) -> Option<String> {
 }
 
 /// What `bin check -- argv` says within `deadline`, as a verdict line.
+/// `--config PATH` goes before the `--` when `policyd_config` in the
+/// user's or the seat's `ljos.toml` names a file.
 #[must_use]
 pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) -> String {
     tcb_answer_in(bin, argv, deadline, None)
@@ -39549,10 +39607,16 @@ pub fn tcb_answer_in(
     // moment: another thread's fork still holds the write descriptor until
     // its exec, and the kernel answers ETXTBSY. That is not a guard that
     // failed, so the spawn is tried again for about a second.
+    let config = gates::policyd_config();
     let spawn = || {
         let mut cmd = std::process::Command::new(bin);
-        cmd.arg("check")
-            .arg("--")
+        cmd.arg("check");
+        // policyd reads its own flags only before the `--` that starts
+        // the command.
+        if let Some(path) = &config {
+            cmd.arg("--config").arg(path);
+        }
+        cmd.arg("--")
             .args(argv)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())

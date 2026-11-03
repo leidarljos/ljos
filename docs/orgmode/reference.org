@@ -439,6 +439,16 @@ Each swap also shows a note naming both commands and leaves a row in
 If =ljos-policyd= is missing, slow or crashes, the command runs and ljos logs a warning.
 Nothing in ljos turns a fault into a refusal.
 
+Blocking on a warning is off by default. A warning is =allow=, the rule and one warning, and the
+command runs. =policyd_config = "PATH"= in the user's or the seat's =ljos.toml=, at the top or
+under =[gates]=, makes ljos ask =ljos-policyd check --config PATH -- COMMAND=; the seat's file
+wins, =""= names none, and a relative path is from that file's directory. A repository's
+=ljos.toml=, =.ljos/gates.toml= and =LJOS_CONFIG= do not name it. A config that holds
+=block-on-warning true= has policyd answer a warned command with =deny=, the same rule and
+warning, and exit 2, and ljos reports that deny as it reports any other. A check that fails open
+still allows. A named config that is not there fails open on every command, with no rule or
+warning. [[file:howto.org][How-to]] has the steps.
+
 The tracker write check refuses a command, or a file tool, that writes the tracker's files by hand. Ticket text is data.
 A ticket body that names a path or a command is never read as one.
 

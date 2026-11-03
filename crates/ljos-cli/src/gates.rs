@@ -395,6 +395,42 @@ pub(crate) fn rewrite_key(path: &Path) -> Result<Option<bool>, String> {
     }
 }
 
+/// The file `ljos-policyd check --config` reads: `policyd_config` in the
+/// user's `ljos.toml`, then the seat's, under `[gates]` or at the top of
+/// the file, the later file winning. A relative path is from the directory
+/// of the file that names it. The repository's files and `LJOS_CONFIG` do
+/// not name it, since a runner can write them. A file that does not parse
+/// names nothing. `None` when no file names one, or the last names `""`:
+/// `check` is then asked as it always was.
+#[must_use]
+pub(crate) fn policyd_config() -> Option<PathBuf> {
+    let mut named = None;
+    for path in person_layers() {
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(Some(root)) = read_layer(&path) else {
+            continue;
+        };
+        let raw = root
+            .get("gates")
+            .and_then(|gates| gates.get("policyd_config"))
+            .or_else(|| root.get("policyd_config"))
+            .and_then(toml::Value::as_str);
+        let Some(raw) = raw else {
+            continue;
+        };
+        named = (!raw.is_empty()).then(|| {
+            let found = super::expand(raw);
+            match path.parent() {
+                Some(dir) if found.is_relative() => dir.join(found),
+                _ => found,
+            }
+        });
+    }
+    named
+}
+
 /// Where `call`, a `git push` on `line`, lands that needs a consensus: a
 /// branch in `branches`, in backticks, or why the push cannot be told
 /// from one that does. `None` when each ref it updates is read and none
