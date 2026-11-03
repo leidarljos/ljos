@@ -54,10 +54,16 @@ pub fn push_leftover() -> String {
             crate::clear_push_refusal();
             format!("tracker git: pushed {waiting}\n")
         }
-        Err(why) => {
-            crate::record_push_refusal(&why);
-            format!("tracker git: push refused: {why}\n")
-        }
+        Err(why) => match crate::tracker_push::not_reached(&why) {
+            Some(said) => format!(
+                "tracker git: {}\n",
+                crate::tracker_push::not_reached_clause(said)
+            ),
+            None => {
+                crate::record_push_refusal(&why);
+                format!("tracker git: push refused: {why}\n")
+            }
+        },
     }
 }
 
@@ -121,8 +127,8 @@ fn remote_default_branch(root: &Path, remote: &str) -> Option<String> {
         }
     }
     // Commit mode publishes nothing. The fallback asks the remote which
-    // branch HEAD names. A private remote with no credential then sits
-    // until the sitting reads it as a tracker that does not answer.
+    // branch HEAD names. A private remote with no credential fails at
+    // once: git does not prompt.
     if std::env::var("LJOS_TRACKER_GIT").ok().as_deref() == Some("commit") {
         return None;
     }

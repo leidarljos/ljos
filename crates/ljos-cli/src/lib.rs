@@ -37172,10 +37172,16 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
                     clear_push_refusal();
                     format!("tracker git: committed and pushed {message}\n")
                 }
-                Err(e) => {
-                    record_push_refusal(&e);
-                    format!("tracker git: committed {message}; push queued: {e}\n")
-                }
+                Err(e) => match tracker_push::not_reached(&e) {
+                    Some(why) => format!(
+                        "tracker git: committed {message}; {}\n",
+                        tracker_push::not_reached_clause(why)
+                    ),
+                    None => {
+                        record_push_refusal(&e);
+                        format!("tracker git: committed {message}; push queued: {e}\n")
+                    }
+                },
             },
         );
     }
@@ -37207,6 +37213,7 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
         push.stderr(err);
     }
     git_hooks::hook_child_env(&mut push);
+    no_git_prompt(&mut push);
     let mut child = match push.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -37225,9 +37232,17 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
                 let _ = std::fs::remove_file(push_child_record(&log));
                 return say(format!("tracker git: committed and pushed {message}\n"));
             }
-            Ok(Some(_)) => {
+            Ok(Some(status)) => {
                 let said = std::fs::read(&log).unwrap_or_default();
                 let said = String::from_utf8_lossy(&said);
+                if tracker_push::git_died(status) {
+                    let _ = std::fs::remove_file(&log);
+                    let _ = std::fs::remove_file(push_child_record(&log));
+                    return say(format!(
+                        "tracker git: committed {message}; {}\n",
+                        tracker_push::not_reached_clause(&first_line(said.as_bytes()))
+                    ));
+                }
                 if tracker_push::rejected(&said) {
                     return say(
                         match tracker_push::publish_explicit(
@@ -37236,9 +37251,15 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
                             &destination.branch,
                         ) {
                             Ok(()) => format!("tracker git: committed and pushed {message}\n"),
-                            Err(e) => {
-                                format!("tracker git: committed {message}; push refused: {e}\n")
-                            }
+                            Err(e) => match tracker_push::not_reached(&e) {
+                                Some(why) => format!(
+                                    "tracker git: committed {message}; {}\n",
+                                    tracker_push::not_reached_clause(why)
+                                ),
+                                None => {
+                                    format!("tracker git: committed {message}; push refused: {e}\n")
+                                }
+                            },
                         },
                     );
                 }
@@ -37303,10 +37324,13 @@ pub fn drain_tracker_pushes() -> String {
             clear_push_refusal();
             format!("tracker git: pushed {count} queued\n")
         }
-        Err(e) => {
-            record_push_refusal(&e);
-            format!("tracker git: push queued: {e}\n")
-        }
+        Err(e) => match tracker_push::not_reached(&e) {
+            Some(why) => format!("tracker git: {}\n", tracker_push::not_reached_clause(why)),
+            None => {
+                record_push_refusal(&e);
+                format!("tracker git: push queued: {e}\n")
+            }
+        },
     }
 }
 
@@ -41667,11 +41691,23 @@ pub(crate) fn strip_guard_bin(cmd: &mut std::process::Command) {
     }
 }
 
-/// A git child with the guard directory off its search list.
+/// A git child with the guard directory off its search list, which never
+/// waits on a terminal for a credential.
 pub(crate) fn git_cmd() -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
     strip_guard_bin(&mut cmd);
+    no_git_prompt(&mut cmd);
     cmd
+}
+
+/// No terminal prompt and no askpass program for the git `cmd` runs. A
+/// remote that wants a credential git does not have fails at once. An
+/// empty `GIT_ASKPASS` is what stops git falling back to `core.askPass`
+/// and `SSH_ASKPASS`; unsetting it would not.
+pub(crate) fn no_git_prompt(cmd: &mut std::process::Command) {
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env_remove("SSH_ASKPASS");
 }
 
 /// [`std::process::Command::output`], stopped when a wall budget is armed

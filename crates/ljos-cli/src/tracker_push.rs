@@ -9,9 +9,15 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{ExitStatus, Output};
 
 const ATTEMPTS: usize = 6;
+/// The status git's `die()` exits with (usage.c). A fetch or push that
+/// dies stopped before any ref update was offered: the URL, the transport
+/// or the credentials failed. A refused update exits 1.
+const GIT_DIED: i32 = 128;
+/// What a fetch or push error starts with when the remote was not reached.
+const NOT_REACHED: &str = "remote not reached: ";
 const ATTR_ORG: &str = "*.org merge=ljos-org";
 const ATTR_ATOMS: &str = ".ljos/atoms/* merge=ljos-atoms";
 const DRIVER_KEY: &str = "merge.ljos-atoms.driver";
@@ -48,6 +54,9 @@ pub(crate) fn push_checkout(start: &Path) -> Result<(), String> {
         }
         let said = output_text(&out);
         last = first_line(&said);
+        if git_died(out.status) {
+            return Err(format!("{NOT_REACHED}{last}"));
+        }
         if !rejected(&said) {
             return Err(last);
         }
@@ -80,6 +89,9 @@ pub(crate) fn publish(start: &Path) -> Result<(), String> {
         }
         if let Err(e) = integrate(dir) {
             last = e;
+            if not_reached(&last).is_some() {
+                return Err(last);
+            }
             if last.starts_with("fetch failed") {
                 continue;
             }
@@ -94,6 +106,9 @@ pub(crate) fn publish(start: &Path) -> Result<(), String> {
         }
         let said = output_text(&out);
         last = first_line(&said);
+        if git_died(out.status) {
+            return Err(format!("{NOT_REACHED}{last}"));
+        }
         if rejected(&said) {
             continue;
         }
@@ -123,6 +138,9 @@ pub(crate) fn publish_explicit(start: &Path, remote: &str, branch: &str) -> Resu
         }
         if let Err(e) = integrate_from(dir, remote, &onto) {
             last = e;
+            if not_reached(&last).is_some() {
+                return Err(last);
+            }
             if last.starts_with("fetch failed") {
                 continue;
             }
@@ -142,6 +160,9 @@ pub(crate) fn publish_explicit(start: &Path, remote: &str, branch: &str) -> Resu
         }
         let said = output_text(&out);
         last = first_line(&said);
+        if git_died(out.status) {
+            return Err(format!("{NOT_REACHED}{last}"));
+        }
         if !rejected(&said) {
             break;
         }
@@ -167,6 +188,23 @@ pub(crate) fn rejected(text: &str) -> bool {
         || lower.contains("updates were rejected")
         || lower.contains("fetch first")
         || lower.contains("tip of your current branch is behind")
+}
+
+/// Whether a git fetch or push ended in git's `die()`.
+pub(crate) fn git_died(status: ExitStatus) -> bool {
+    status.code() == Some(GIT_DIED)
+}
+
+/// What git said when a fetch or push error says the remote was not
+/// reached. `None` for any other error.
+pub(crate) fn not_reached(err: &str) -> Option<&str> {
+    err.strip_prefix(NOT_REACHED)
+}
+
+/// The clause a tracker write prints when its push did not reach the
+/// remote. The commit stays in the local tracker until a sync reaches it.
+pub(crate) fn not_reached_clause(why: &str) -> String {
+    format!("the remote was not reached ({why}), so the next sync pushes it")
 }
 
 /// Union of two issue org files. Headings are keyed by `:ID:`. The same id
@@ -389,10 +427,11 @@ fn integrate_from(dir: &Path, remote: &str, onto: &str) -> Result<(), String> {
     let _held = crate::tracker_commit_lock(dir);
     if !fetched.status.success() {
         let _ = abort_rebase(dir);
-        return Err(format!(
-            "fetch failed: {}",
-            first_line(&output_text(&fetched))
-        ));
+        let why = first_line(&output_text(&fetched));
+        if git_died(fetched.status) {
+            return Err(format!("{NOT_REACHED}{why}"));
+        }
+        return Err(format!("fetch failed: {why}"));
     }
     if let Err(e) = rebase_onto(dir, onto) {
         if rebase_in_progress(dir) || has_unmerged(dir) {
@@ -733,7 +772,6 @@ fn git(dir: &Path, args: &[&str]) -> Output {
     use std::os::unix::process::ExitStatusExt;
     let mut cmd = crate::git_at(dir);
     cmd.args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
         .env("GIT_SEQUENCE_EDITOR", "true")
         .stdin(std::process::Stdio::null());

@@ -3936,7 +3936,13 @@ fn report_commit(root: &Path, message: &str, push: bool, made: crate::PathCommit
             landed: true,
         },
         Err(e) => CommitReport {
-            said: format!("sync: committed {message}; push refused: {e}\n"),
+            said: match crate::tracker_push::not_reached(&e) {
+                Some(why) => format!(
+                    "sync: committed {message}; {}\n",
+                    crate::tracker_push::not_reached_clause(why)
+                ),
+                None => format!("sync: committed {message}; push refused: {e}\n"),
+            },
             landed: true,
         },
     }
@@ -4317,7 +4323,10 @@ fn push_pending(root: &Path) -> String {
     }
     match crate::tracker_push::push_checkout(root) {
         Ok(()) => "sync: pushed pending commits\n".into(),
-        Err(e) => format!("sync: push refused: {e}\n"),
+        Err(e) => match crate::tracker_push::not_reached(&e) {
+            Some(why) => format!("sync: {}\n", crate::tracker_push::not_reached_clause(why)),
+            None => format!("sync: push refused: {e}\n"),
+        },
     }
 }
 
@@ -4960,6 +4969,9 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
         if !asked {
             return Ok(String::new());
         }
+        // A note or a sitting whose push did not reach the remote left its
+        // commit here. A sync by hand carries it, scope or none.
+        out.push_str(&push_pending(&root));
         out.push_str(&format!(
             "sync: {} names no scope; write .ljos/sync.toml with name and recipients (`ljos sync --key` prints this machine's)\n",
             root.display()
@@ -5145,7 +5157,6 @@ fn git_within(
     // The login's hooks and ljos's sitting gate run on none of these calls.
     cmd.args(["-c", "core.hooksPath=/dev/null"])
         .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

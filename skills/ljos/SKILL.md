@@ -217,9 +217,11 @@ A repository with no `.ljos/sync.toml` is not synced, and the sitting and
 finish say nothing about it; only `ljos sync` names the missing file.
 The sitting and finish follow `LJOS_TRACKER_GIT`: `push` commits, rebases
 with the per-issue field merge, and pushes; `commit` commits the log and
-neither fetches nor pushes it; `off` leaves the tracker alone. A push that
-fails stays queued for the next write and the end of the session. `ljos sync`
-by hand always pulls and pushes. An
+neither fetches nor pushes it; `off` leaves the tracker alone. Tracker git
+runs with no terminal prompt and no askpass, so a remote that wants a
+credential fails at once. A push that fails stays queued for the next write
+and the end of the session. `ljos sync` by hand always pulls and pushes,
+and pushes waiting commits in a checkout that names no scope. An
 atom goes to the scope its `scope:NAME` entity names. An atom with no
 `scope:` entity stays on the primary log. `default_scope` in
 `~/.config/ljos/sync.toml` may name only that primary scope. A value that
@@ -573,7 +575,10 @@ Each commits the ticket's `issues.org` (that file alone), pushes it, and prints 
 `tracker git:` line. A claim or a closure that stays in one
 working tree does not exist for any other host. `LJOS_TRACKER_GIT=push`
 commits, rebases with the per-issue field merge, and pushes, and never
-forces. A failed push stays queued. `=commit` keeps it local; `=off` skips
+forces. A failed push stays queued. When the clone, fetch or push cannot
+reach the remote or authenticate, the commit stays in the local tracker,
+the line says `the remote was not reached (...), so the next sync pushes
+it`, and the verb exits 0. `=commit` keeps it local; `=off` skips
 it. `ljos doctor` warns while commits are still unpushed, and a leftover
 refused-push log is named on the row.
 

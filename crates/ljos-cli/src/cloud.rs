@@ -2503,8 +2503,6 @@ fn clone_tracker(
         .current_dir(parent)
         .args(crate::tracker_attach::clone_config(url, helper))
         .args(["clone", "--quiet", url, &name])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env_remove("GIT_ASKPASS")
         .stdin(std::process::Stdio::null())
         .output()
         .context("git clone")?;
