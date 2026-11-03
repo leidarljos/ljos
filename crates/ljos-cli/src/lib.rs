@@ -57863,6 +57863,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(under_a_runner());
         assert!(approval::approve("0".repeat(32).as_str()).is_err());
         unsafe { std::env::remove_var("ACMEAGENT_CONVERSATION_ID") };
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
         assert_runs_naming(
             "changes-kept-prompt",
             &["rm -rf /run/user/1000/ljos/approvals".into()],
@@ -57991,7 +57992,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn a_tree_above_the_person_key_runs_with_its_warning() {
         let _g = env_guard();
         let data = tempfile::tempdir().unwrap();
-        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
+        let _env = HoldEnv::set(&[
+            ("XDG_DATA_HOME", data.path().to_str().unwrap()),
+            ("TMPDIR", "/tmp"),
+        ]);
         let dir = person_key::key_dir().expect("a passwd home");
         std::fs::create_dir_all(&dir).unwrap();
         let home = dir.parent().unwrap().parent().unwrap().to_path_buf();
@@ -58238,9 +58242,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// them can name its own rule: `changes-person-key` for a word that
     /// names the config directory itself, and `changes-kept-prompt` for
     /// `/tmp`, which contains the runtime directory a shell without
-    /// `XDG_RUNTIME_DIR` uses, read as moved.
+    /// `XDG_RUNTIME_DIR` uses, read as moved. `TMPDIR` is held at `/tmp`,
+    /// since macOS keeps the temporary directory elsewhere.
     fn assert_uprooted_yet_named(rule: &str, lines: &[String]) {
         let _g = env_guard();
+        let _tmp = HoldEnv::set(&[("TMPDIR", "/tmp")]);
         std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
         for line in lines {
             assert!(
