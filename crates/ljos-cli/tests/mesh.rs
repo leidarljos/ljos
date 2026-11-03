@@ -12,6 +12,18 @@ use std::time::{Duration, Instant};
 const EXAMPLE: &str = include_str!("../../../examples/mesh.toml");
 const KEY: &str = "tskey-auth-kQ7x2NeverShown0123456789abcdef";
 
+/// The bound on one mesh verb, `WAIT_SECS` in src/mesh.rs.
+const WAIT_SECS: u64 = 30;
+/// The step between looks at a process, `POLL` in src/mesh.rs: half the
+/// 0.1 s a person reads as no delay (Nielsen, Usability Engineering,
+/// 1993, §5.5).
+const POLL: Duration = Duration::from_millis(100 / 2);
+/// How long a fake tailscaled, or a fake tailscale that hangs, runs when
+/// nothing stops it. `down` or the bound on `up` stops each one first, so
+/// this only ends a fake that a failed test left behind. Twenty verbs at
+/// `WAIT_SECS` each is more than any test here runs.
+const FAKE_LIFE_SECS: u64 = 20 * WAIT_SECS;
+
 /// Records each start, dumps its environment into its log as a crash
 /// report would, opens its socket, and stays up.
 const TAILSCALED: &str = r#"#!/bin/sh
@@ -21,7 +33,7 @@ env
 echo daemon >> "$FAKE_MESH/daemons"
 echo $$ > "$FAKE_MESH/daemon.pid"
 : > "$sock"
-exec sleep 600
+exec sleep "$FAKE_LIFE"
 "#;
 
 /// The login server's side of a join, kept in `$FAKE_MESH`. `FAKE_ECHO`
@@ -34,7 +46,7 @@ for a in "$@"; do
   case "$a" in status|up|logout) [ -z "$verb" ] && verb="$a";; esac
   prev="$a"
 done
-[ -n "$FAKE_HANG" ] && exec sleep 600
+[ -n "$FAKE_HANG" ] && exec sleep "$FAKE_LIFE"
 case "$verb" in
 status)
   if [ -f "$FAKE_MESH/node" ]; then
@@ -98,6 +110,7 @@ impl World {
             .env("XDG_STATE_HOME", self.path("home/.state"))
             .env("XDG_RUNTIME_DIR", self.path("run"))
             .env("FAKE_MESH", self.path("fake"))
+            .env("FAKE_LIFE", FAKE_LIFE_SECS.to_string())
             .env("LJOS_USER_RULES_SYNC", "off")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -219,15 +232,15 @@ fn running_up_twice_joins_once_and_down_leaves() {
 }
 
 /// A process group that is not tailscaled, as a reused pid would name.
+/// `cat` on a pipe this test holds runs until the test drops it.
 struct Bystander(std::process::Child);
 
 impl Bystander {
     fn start() -> Self {
         use std::os::unix::process::CommandExt;
-        let child = Command::new("sleep")
-            .arg("600")
+        let child = Command::new("cat")
             .process_group(0)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .spawn()
             .unwrap();
         Self(child)
@@ -546,7 +559,7 @@ fn a_write_on_the_mesh_carries_the_node_and_the_seat_it_claims() {
     // nobody has reaped yet as gone, so the wait only keeps /proc tidy.
     let until = Instant::now() + Duration::from_secs(5);
     while !gone(&pid) && Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(POLL);
     }
     let crashed = remember("The release job tags the commit it built.");
     assert!(crashed["source"].get("mesh").is_none(), "{crashed}");
