@@ -67698,11 +67698,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// that its version line is the pin.
     #[test]
     fn a_box_finish_writes_no_bag_and_a_cloud_finish_writes_one() -> Result<(), String> {
-        let bin_dir = deedimport_deedar();
-        // After the env lock. A parallel test replaces PATH while it holds
-        // the lock, and a lookup before it sees that PATH and reports
-        // deedar missing.
         let _g = env_guard();
+        let bin_dir = deedimport_deedar(&_g);
         let _path = super::prepend_path(&bin_dir);
         crate::sibling_bin::require("deedar")?;
         let dir = tempfile::tempdir().unwrap();
@@ -67941,8 +67938,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// binary is a failure. The test does not skip.
     #[test]
     fn a_cloud_finish_bag_imports_with_deedar() -> Result<(), String> {
-        let bin_dir = deedimport_deedar();
         let _g = env_guard();
+        let bin_dir = deedimport_deedar(&_g);
         let _path = super::prepend_path(&bin_dir);
         crate::sibling_bin::require("deedar")?;
         let dir = tempfile::tempdir().unwrap();
@@ -68206,8 +68203,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// `--allow-unsigned-head`.
     #[test]
     fn a_signed_cloud_finish_bag_checks_and_imports() -> Result<(), String> {
-        let bin_dir = deedimport_deedar();
         let _g = env_guard();
+        let bin_dir = deedimport_deedar(&_g);
         let _path = super::prepend_path(&bin_dir);
         crate::sibling_bin::require("deedar")?;
         let dir = tempfile::tempdir().unwrap();
@@ -68514,7 +68511,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// fails the test. One process builds that pin once. The tree is
     /// named by the pin sha, and an existing tree is left in place: two
     /// tests call this, and deleting the shared directory races the build.
-    fn deedimport_deedar() -> std::path::PathBuf {
+    /// The caller holds the env lock: git and cargo read HOME and git
+    /// config from the process environment, which other tests change
+    /// while they hold it.
+    fn deedimport_deedar(_held: &super::EnvLock) -> std::path::PathBuf {
         static BUILT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         BUILT.get_or_init(build_pinned_deedar).clone()
     }
