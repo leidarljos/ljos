@@ -93,12 +93,17 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
     plan.command = server.display().to_string();
     lines.push(ensure_process_path(&bin_dir));
 
-    if agent_id().is_some() && seat_matches_file() {
-        // A seat left in the env file by an earlier boot must not hide this
-        // boot's agent id. An exported seat that differs from the file stays.
-        crate::with_env_mutation(|| std::env::remove_var("LJOS_SEAT"));
-    }
+    // The caller named this seat (`LJOS_SEAT`, plus this boot's run id when
+    // the name does not already end in it). The env file keeps that seat
+    // when it already names it, so a later `cloud up` does not pick another.
+    // A different name is the previous seat: one line says which, and this
+    // boot writes the caller's.
     let seat = default_seat();
+    if let Some(found) = env_file_value("LJOS_SEAT") {
+        if found != seat {
+            lines.push(format!("seat: found {found} in the env file; using {seat}"));
+        }
+    }
     lines.push(format!("seat: {seat}"));
     let key = prepare_seat_key(&seat)?;
     let public = crate::ballot_sig::key_from_file(&key)?.verifying_key();
@@ -3570,13 +3575,6 @@ fn tracker_dir(home: &Path) -> PathBuf {
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local/share/ljos/tracker"))
-}
-
-fn seat_matches_file() -> bool {
-    let Some(file) = env_file_value("LJOS_SEAT") else {
-        return false;
-    };
-    std::env::var("LJOS_SEAT").ok().as_deref() == Some(file.as_str())
 }
 
 fn env_file_value(key: &str) -> Option<String> {

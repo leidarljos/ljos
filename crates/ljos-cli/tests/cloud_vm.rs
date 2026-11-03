@@ -824,7 +824,17 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     fs::write(&host_key, [9u8; 32]).unwrap();
     let first = ljos_cli::cloud::up(false).unwrap();
     assert!(first.contains("checksums match"), "{first}");
-    assert!(first.contains("cursor-abcdef012345"), "{first}");
+    assert!(
+        first.contains("seat: found baked-seat in the env file; using baked-seat-abcdef012345"),
+        "{first}"
+    );
+    assert!(
+        first
+            .lines()
+            .any(|line| line == "seat: baked-seat-abcdef012345"),
+        "{first}"
+    );
+    assert!(!first.contains("cursor-abcdef012345"), "{first}");
     assert!(!first.contains("push queued"), "{first}");
     let server = home.join(".local/bin/ljos-mcp");
     assert!(server.is_file(), "ljos-mcp was not installed");
@@ -838,14 +848,17 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     );
     assert!(mcp.contains("\"LJOS_TRACKER_GIT\": \"push\""), "{mcp}");
     let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
-    assert!(env.contains("LJOS_SEAT=cursor-abcdef012345\n"), "{env}");
-    assert!(env.contains("VISSUE_AGENT=cursor-abcdef012345\n"), "{env}");
+    assert!(env.contains("LJOS_SEAT=baked-seat-abcdef012345\n"), "{env}");
     assert!(
-        env.contains("LJOS_SYNC_HOST=cursor-abcdef012345\n"),
+        env.contains("VISSUE_AGENT=baked-seat-abcdef012345\n"),
+        "{env}"
+    );
+    assert!(
+        env.contains("LJOS_SYNC_HOST=baked-seat-abcdef012345\n"),
         "{env}"
     );
     assert_eq!(
-        doc["mcpServers"]["ljos"]["env"]["LJOS_SYNC_HOST"], "cursor-abcdef012345",
+        doc["mcpServers"]["ljos"]["env"]["LJOS_SYNC_HOST"], "baked-seat-abcdef012345",
         "{mcp}"
     );
     assert!(env.contains("LJOS_TRACKER_GIT=push\n"), "{env}");
@@ -869,6 +882,117 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     );
     let second = ljos_cli::cloud::up(false).unwrap();
     assert!(second.contains("tracker:"), "{second}");
+}
+
+/// What `ljos seat` prints for the `LJOS_SEAT` this process has, in `home`.
+fn ljos_seat(home: &Path) -> String {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    cmd.arg("seat")
+        .env_clear()
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("PATH", "/usr/bin:/bin")
+        .env("PACKSET_URL", "off")
+        .env("DEEDAR_HOST_SIGNING_KEY", "off")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR") {
+        cmd.env("XDG_RUNTIME_DIR", run);
+    }
+    if let Some(cfg) = std::env::var_os("GIT_CONFIG_GLOBAL") {
+        cmd.env("GIT_CONFIG_GLOBAL", cfg);
+    }
+    if let Some(cfg) = std::env::var_os("GIT_CONFIG_SYSTEM") {
+        cmd.env("GIT_CONFIG_SYSTEM", cfg);
+    }
+    if let Ok(seat) = std::env::var("LJOS_SEAT") {
+        cmd.env("LJOS_SEAT", seat);
+    }
+    let out = cmd.output().unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "ljos seat: {said}");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A second `cloud up` sees `LJOS_SEAT` already equal to the seat in the
+/// env file. The file and `ljos seat` stay as the first run left them.
+#[test]
+fn a_matching_seat_leaves_the_env_file_and_ljos_seat_unchanged() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = seat_env(root.path());
+    let runtime = root.path().join("run");
+    fs::create_dir_all(&runtime).unwrap();
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    std::env::set_var("LJOS_SEAT", "kept-seat");
+    std::env::set_var("CURSOR_AGENT_ID", "abcdef012345");
+    ljos_cli::cloud::up(false).unwrap();
+
+    let env_path = home.join(".config/ljos/env");
+    let before_file = fs::read(&env_path).unwrap();
+    let before_seat = ljos_seat(&home);
+    let seat = "kept-seat-abcdef012345";
+    assert!(
+        String::from_utf8_lossy(&before_file).contains(&format!("LJOS_SEAT={seat}\n")),
+        "{}",
+        String::from_utf8_lossy(&before_file)
+    );
+    assert!(
+        before_seat.starts_with(&format!("seat\t{seat}\n")),
+        "{before_seat}"
+    );
+
+    let again = ljos_cli::cloud::up(false).unwrap();
+    assert_eq!(fs::read(&env_path).unwrap(), before_file, "{again}");
+    assert_eq!(ljos_seat(&home), before_seat, "{again}");
+    assert!(
+        !again.lines().any(|line| line.starts_with("seat: found ")),
+        "{again}"
+    );
+    assert!(
+        again.lines().any(|line| line == format!("seat: {seat}")),
+        "{again}"
+    );
+}
+
+/// The env file names a seat other than the caller's. One line says which,
+/// and the caller's seat is the one written and the one `ljos seat` prints.
+#[test]
+fn a_different_seat_in_the_env_file_is_reported_and_the_caller_s_seat_is_used() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = seat_env(root.path());
+    let runtime = root.path().join("run");
+    fs::create_dir_all(&runtime).unwrap();
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    fs::create_dir_all(home.join(".config/ljos")).unwrap();
+    fs::write(home.join(".config/ljos/env"), "LJOS_SEAT=other-seat\n").unwrap();
+    std::env::set_var("LJOS_SEAT", "caller-seat");
+    std::env::set_var("CURSOR_AGENT_ID", "abcdef012345");
+
+    let said = ljos_cli::cloud::up(false).unwrap();
+    let hits: Vec<_> = said
+        .lines()
+        .filter(|line| line.contains("other-seat"))
+        .collect();
+    let seat = "caller-seat-abcdef012345";
+    let want = format!("seat: found other-seat in the env file; using {seat}");
+    assert_eq!(hits, [want.as_str()], "{said}");
+    assert!(
+        said.lines().any(|line| line == format!("seat: {seat}")),
+        "{said}"
+    );
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    assert!(env.contains(&format!("LJOS_SEAT={seat}\n")), "{env}");
+    assert!(!env.contains("other-seat"), "{env}");
+    let printed = ljos_seat(&home);
+    assert!(printed.starts_with(&format!("seat\t{seat}\n")), "{printed}");
+    assert!(!printed.contains("other-seat"), "{printed}");
 }
 
 /// A fresh cloud machine with release binaries, a seeded bare tracker and
