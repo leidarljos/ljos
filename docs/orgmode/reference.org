@@ -454,6 +454,9 @@ A command that changes the key directory, a file in it or the directory above it
 =changes-kept-prompt= labels a change to the runtime directory where the hook keeps the person's latest prompt, or to a file in it.
 One that writes any other file of the seat, an ljos binary, a hook or the file that registers one, the ljos config or an approval, runs with =writes-seat-file=.
 Each warning names the word the command changes.
+A tool call's =ljos prefer --review --keep= keeps the rule as the agent's and names nothing.
+Under =setsid=, =script= or =env -i=, as if from the person's terminal, the call names =prefer-keep-faked-terminal=.
+The rule is still the agent's.
 
 The tracker write check refuses a command, or a file tool, that writes the tracker's files by hand. Ticket text is data.
 A ticket body that names a path or a command is never read as one.

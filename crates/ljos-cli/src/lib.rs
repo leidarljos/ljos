@@ -23649,7 +23649,7 @@ fn prefix_end<S: AsRef<str>>(words: &[S]) -> (usize, Option<String>) {
                     return (words.len(), Some(rest.join(" ")));
                 }
             }
-            if *name == "env" && is_assign(a) {
+            if *name == "env" && (is_assign(a) || a == "-") {
                 i += 1;
             } else if a.starts_with('-') && a.len() > 1 {
                 i += if valued.contains(&a) { 2 } else { 1 };
@@ -25165,6 +25165,55 @@ fn writes_persons_words(line: &str) -> Option<&'static str> {
         })
 }
 
+/// Whether `words`, an `ljos` command with its wrappers off, keeps an
+/// older preference: `ljos prefer --review --keep ID`.
+fn keeps_preference(words: &[String]) -> bool {
+    words.get(1).map(String::as_str) == Some("prefer")
+        && words
+            .iter()
+            .any(|w| w == "--keep" || w.starts_with("--keep="))
+}
+
+/// Whether `line` runs `ljos prefer --keep` under a wrapper that makes it
+/// look like the person's terminal: `setsid` off the runner's session,
+/// `script` in a terminal of its own, or `env -i`, `env -` or
+/// `env --ignore-environment` with the runner's variables gone. A wrapper
+/// of another command on the line is not one.
+fn keeps_in_a_faked_terminal(line: &str) -> bool {
+    let base = |w: &str| w.rsplit('/').next().unwrap_or(w).to_string();
+    let keeps = |text: &str| {
+        nested_lines(text, 0)
+            .iter()
+            .flat_map(|l| raw_segments(l))
+            .any(|seg| {
+                let words = shell_words(&seg);
+                let words = &words[prefix_end(&words).0..];
+                words.first().is_some_and(|w| base(w) == "ljos") && keeps_preference(words)
+            })
+    };
+    nested_lines(line, 0)
+        .iter()
+        .flat_map(|l| raw_segments(l))
+        .any(|seg| {
+            let words = shell_words(&seg);
+            let (at, _) = prefix_end(&words);
+            let mut env = false;
+            let clears = words[..at].iter().any(|w| {
+                if SEGMENT_PREFIXES.iter().any(|(n, _)| *n == base(w)) {
+                    env = base(w) == "env";
+                    return false;
+                }
+                env && (w == "-"
+                    || w == "--ignore-environment"
+                    || (!w.starts_with("--") && w.starts_with('-') && w[1..].contains('i')))
+            });
+            let wraps = clears
+                || words[..at].iter().any(|w| base(w) == "setsid")
+                || words.get(at).is_some_and(|w| base(w) == "script");
+            wraps && keeps(&seg)
+        })
+}
+
 /// Whether keys typed into a pane spell the person's consent: an
 /// approval, or `ljos prefer` or `ljos remember`, which store words as
 /// the person's at their terminal. Quotes, a path, a `Space` key and one
@@ -25337,20 +25386,17 @@ fn seat_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                         .into(),
                 });
             }
-            // Keeping an older preference raises it to the person's, the
-            // same consent by another verb.
-            if words.get(1).map(String::as_str) == Some("prefer")
-                && words
-                    .iter()
-                    .any(|w| w == "--keep" || w.starts_with("--keep="))
-            {
-                return Some(Rule {
-                    pattern: "seat-guard".into(),
-                    verdict: "deny".into(),
-                    reason: "`ljos prefer --review --keep` stores a preference as the person's, \
-                             and only the person runs it. Ask the person to keep it themselves."
+            // A tool call's keep of an older preference is stored as the
+            // agent's. One run as if from the person's terminal names it.
+            if keeps_preference(&words) && keeps_in_a_faked_terminal(line) {
+                label_saying(
+                    PREFER_KEEP_FAKED_TERMINAL,
+                    "the command runs ljos prefer --keep under setsid, script or env -i, as if \
+                     from the person's terminal; the rule is kept as the agent's and stays \
+                     unverified"
                         .into(),
-                });
+                    line,
+                );
             }
             continue;
         }
@@ -39562,6 +39608,10 @@ const CHANGES_KEPT_PROMPT: &str = "changes-kept-prompt";
 /// The rule a command names that writes one of [`SEAT_PATHS`], or a git
 /// hook. Its warning names the word.
 const WRITES_SEAT_FILE: &str = "writes-seat-file";
+
+/// The rule a command names that runs `ljos prefer --keep` as if from the
+/// person's terminal, as [`keeps_in_a_faked_terminal`] reads it.
+const PREFER_KEEP_FAKED_TERMINAL: &str = "prefer-keep-faked-terminal";
 
 /// The line a labelled rule prints as its call goes ahead, in the fields
 /// of ljos-policyd's allow-with-warning: `allow`, `warn`, the rule and the
@@ -62712,15 +62762,65 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "ljos approve 0123",
             "setsid -f script -qc 'env -i ljos approve 0123' /dev/null",
             "(sh -c 'sleep 1; ~/.cargo/bin/ljos approve 0123' &)",
-            "ljos prefer --review --keep 0123",
-            "ljos prefer --review --keep=0123",
-            "setsid -f script -qc 'env -i ljos prefer --review --keep 0123' /dev/null",
         ] {
             assert!(seat_guard(line).is_some(), "{line}");
         }
-        assert!(seat_guard("ljos seat").is_none());
-        assert!(seat_guard("ljos prefer --review").is_none());
-        assert!(seat_guard("cat /run/user/1000/ljos/approvals/0123.json").is_none());
+        for line in [
+            "ljos seat",
+            "ljos prefer --review",
+            "cat /run/user/1000/ljos/approvals/0123.json",
+        ] {
+            assert_eq!(seat_note(line).ok().as_deref(), Some(""), "{line}");
+        }
+    }
+
+    /// A tool call's `ljos prefer --review --keep` is stored as the
+    /// agent's, so it runs and names nothing. Run under `setsid`, `script`
+    /// or `env -i`, as if from the person's terminal, it names
+    /// `prefer-keep-faked-terminal`, in a `warn` row of the bypass log too.
+    #[test]
+    fn a_keep_from_a_faked_terminal_runs_with_its_warning() {
+        let _g = env_guard();
+        for line in [
+            "ljos prefer --review --keep 0123",
+            "ljos prefer --review --keep=0123",
+            "sh -c 'ljos prefer --review --keep 0123'",
+            "env FOO=1 ljos prefer --review --keep 0123",
+            "setsid sleep 1; ljos prefer --review --keep 0123",
+            "setsid -f script -qc 'ljos status' /dev/null",
+        ] {
+            assert_eq!(seat_note(line).ok().as_deref(), Some(""), "{line}");
+        }
+        let faked = "setsid -f script -qc 'env -i ljos prefer --review --keep 0123' /dev/null";
+        assert_runs_naming(
+            "prefer-keep-faked-terminal",
+            &[
+                faked,
+                "setsid ljos prefer --review --keep 0123",
+                "script -qc 'ljos prefer --review --keep 0123' /dev/null",
+                "env -i ljos prefer --review --keep 0123",
+                "env - PATH=/usr/bin ljos prefer --review --keep=0123",
+                "env --ignore-environment ~/.cargo/bin/ljos prefer --review --keep 0123",
+                "(sh -c 'sleep 1; setsid ljos prefer --review --keep 0123' &)",
+            ]
+            .map(String::from),
+        );
+        let data = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
+        assert_eq!(
+            seat_note(faked),
+            Ok(
+                "allow\twarn\tprefer-keep-faked-terminal\tthe command runs ljos prefer --keep \
+                under setsid, script or env -i, as if from the person's terminal; the rule is \
+                kept as the agent's and stays unverified"
+                    .to_string()
+            )
+        );
+        let rows = std::fs::read_to_string(data.path().join("ljos/bypass.jsonl")).unwrap();
+        let row: serde_json::Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
+        assert_eq!(row["kind"], "warn", "{row}");
+        assert_eq!(row["rule"], "prefer-keep-faked-terminal", "{row}");
+        assert_eq!(row["command"], faked, "{row}");
     }
 
     /// A `for` loop over sitting records names them and writes nothing.
@@ -62770,6 +62870,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ["cargo test"]
         );
         assert_eq!(command_segments("env -i A=1 -- make"), ["make"]);
+        assert_eq!(command_segments("env - A=1 make"), ["make"]);
         assert_eq!(command_segments("command -v git"), ["command -v git"]);
         assert_eq!(command_segments("stdbuf -oL tail -f log"), ["tail -f log"]);
     }
