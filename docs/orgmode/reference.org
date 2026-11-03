@@ -70,7 +70,7 @@
 | =complete ID [--status done\vert failed\vert cancelled] [--gen G] [--assignee NAME]= | claim graph | finish the session node; does not close the ticket; =--gen= and =--assignee= as on =finish=; a node another conversation of this seat holds is completed under that name, and another seat's is refused |
 | =cards [--dir DIR]= | cards | print =USER.md= and =MEMORY.md= |
 | =policy [--fail-on-deny] ARGV...= | policy, pack | the line as it would run, the trusted computing base (TCB) answer if =ljos-policyd= gave one (from 0.35.0 that may be a rewritten line), then a matching pack rule as a warning line, then what the pack knows that bears on it; =--fail-on-deny= exits 1 on policyd's deny under the person's =block-on-warning=, and without the flag the exit stays 0 |
-| =hook [--limit N] [--prompt [--text]] [--fail-on-deny] [--runner NAME] [--git-commit] [--git-hook post-commit\vert post-rewrite]= | policy, pack | hook JSON or argv on stdin; =--runner= reads the payload of =copilot=, =gemini=, =windsurf=, =factory=, =kiro=, =cline=, =qwen= or =crush= and answers in that runner's shape; =--prompt= reads stdin as the prompt, and =--text= with it prints what the agent would read as plain text instead of JSON; on =PreToolUse= the TCB and pack rules, a rule is an allow with one warning line and policyd's block under the person's =block-on-warning= is a deny as =permissionDecision=, and from 0.35.0 a rewrite goes back as the updated input for The harnesses' =preToolUse=, and another runner runs its own line with a warning that names the new one; =--fail-on-deny= exits 1 on a deny and without the flag the exit stays 0; on a prompt the hits scoring at least 0.6 of the best that name its subject, or with a pack that sends cosines the encoder's first hit at 0.66 or more and a hit sharing a word within 0.05 of the best cosine, preferences first then lessons oldest first, each with its age, three at most, each once between compactions; on a failed tool, up to three that share at least two content words with the command and its error. =--git-commit= books the commit git just created and reads no stdin; =--git-hook= names =post-commit= or =post-rewrite=. [[*Git hooks][Git hooks]] |
+| =hook [--limit N] [--prompt [--text]] [--fail-on-deny] [--runner NAME] [--git-commit] [--git-hook post-commit\vert post-rewrite]= | policy, pack | hook JSON or argv on stdin; =--runner= reads the payload of =copilot=, =gemini=, =windsurf=, =factory=, =kiro=, =cline=, =qwen= or =crush= and answers in that runner's shape; =--prompt= reads stdin as the prompt, and =--text= with it prints what the agent would read as plain text instead of JSON; on =PreToolUse= the TCB and pack rules, a rule is an allow with one warning line and policyd's block under the person's =block-on-warning= is a deny as =permissionDecision=, and from 0.35.0 a rewrite goes back as the updated input for the harnesses that accept one, including the editor harness's =preToolUse=, and another runner runs its own line with a warning that names the new one; =--fail-on-deny= exits 1 on a deny and without the flag the exit stays 0; on a prompt the hits scoring at least 0.6 of the best that name its subject, or with a pack that sends cosines the encoder's first hit at 0.66 or more and a hit sharing a word within 0.05 of the best cosine, preferences first then lessons oldest first, each with its age, three at most, each once between compactions; on a failed tool, up to three that share at least two content words with the command and its error. =--git-commit= books the commit git just created and reads no stdin; =--git-hook= names =post-commit= or =post-rewrite=. [[*Git hooks][Git hooks]] |
 | =git-hooks install\vert uninstall\vert status= | git | install, remove, or show the global git hooks that book commits. =install= prints =installed= and the directory; =uninstall= prints =uninstalled=; =status= prints where the hooks are and what =core.hooksPath= says. [[*Git hooks][Git hooks]] |
 | =bump-plan BUNDLE --project P --parent I [--generation G] [--dry-run]= | tracker | one child issue per module the bundle's lock builds, under =I=, blocked by the modules built before it along the edges of its software bill of materials; ids are a hash of module and generation, so a rerun keeps what exists and adds what is missing; =--dry-run= prints the rows |
 | =findings STATE [--remember] [--all] [--issue I]= | pack, deed store, tracker | the typed findings of an eb-stack campaign state, one per line: id, status, class/disposition, stage, recipe, the fix or the summary; =--remember= stores one lesson per finding a person or a seat resolved at once (recipe, step, error line, fix), origin =tool-echo= at L0 (=derived=), under the recipe's name, its package and the class; =ljos accept ID= raises it to =explicit=; =--all= takes the ones a later attempt superseded too; =--issue= cites the state file as a deed on the issue |
@@ -211,7 +211,7 @@ The hook books as a seat. The holder is =SEAT@TAG=, the same name =ljos claim= u
 =LJOS_SEAT= wins when it is set and is not =seat=, =you=, =agent=, or a name that slugs to =runner=.
 Otherwise ljos derives the name from the markers the runner leaves in the environment, and a derived name is a seat.
 When nothing named the seat, an =ANTIGRAVITY_CONVERSATION_ID= books as =antigravity= and an =OPENCODE_SESSION_ID= books as =opencode=.
-A terminal harness or the command harness session, named by =the terminal harness mark=, =the command harness thread id= or =the command harness session id=, is not booked.
+A terminal harness or the command harness session, named by =CLAUDECODE=, =CODEX_THREAD_ID= or =CODEX_SESSION_ID=, is not booked.
 An opencode session is booked by this hook, including a commit from its shell or a subprocess.
 An agy session is booked the same way when no seat was named.
 Without these hooks, =Stop= and =SessionEnd= cite each commit HEAD's reflog says the checkout wrote since the sitting began, so a commit from a script, or one chained before a step that failed, still has a deed.
@@ -295,29 +295,29 @@ when one matches.
 
 The pane script resumes a runner that exits non-zero, at most three times
 a minute, and leaves one that exits 0. =agents= names the directory the
-runner reads agent definitions from: =the build harness agents directory=, =the terminal harness agents directory=
-or =the editor harness agents directory=. =headless= is the argv a decision panel's member
+runner reads agent definitions from: =~/.grok/agents=, =~/.claude/agents=
+or =~/.cursor/agents=. =headless= is the argv a decision panel's member
 runs, with ={prompt_file}=, ={prompt}=, ={cwd}= and ={persona}= filled;
-when it is empty, the member runs =the build harness= with the seat's fallback flags.
+when it is empty, the member runs =grok= with the seat's fallback flags.
 
-=hooks_format = "the editor harness"= writes =hooks= in the editor harness's flat shape: =version=
+=hooks_format = "cursor"= writes =hooks= in the editor harness's flat shape: =version=
 1, and one ={command, timeout}= entry an event. The seat registers the
 permission check, the prompt, both tool results, compaction, stop and session end
-there. Events =the terminal harness settings= already runs stay in that file.
+there. Events =~/.claude/settings.json= already runs stay in that file.
 =beforeShellExecution=, =preToolUse=, =beforeMCPExecution=,
 =beforeReadFile= and =postToolUseFailure= are still written here, since
-The editor harness runs that file's hooks too and the terminal harness's file does not name these.
+the editor harness runs that file's hooks too and the terminal harness's file does not name these.
 If one of these hooks fails, the command runs. =ljos doctor= counts the
 hook installed when those five are present and the terminal harness's file carries
 the seat hook, or when the editor harness's file carries every event.
 
-The hook reads an editor harness call off =the editor payload mark= in its stdin and answers
+The hook reads an editor harness call off =cursor_version= in its stdin and answers
 in the editor harness's fields: =permission= on a permission check, with =user_message= and
 =agent_message=; =additional_context= on a tool result; =followup_message=
 on a held stop. It answers =allow= on every permission check, since
-The editor harness blocks the command when the answer to a permission check is not JSON. A rule
+the editor harness blocks the command when the answer to a permission check is not JSON. A rule
 that fires is =allow= with its warning in =user_message= and =agent_message=.
-The IDE and the =agent= CLI read the same =the editor harness MCP config=.
+The IDE and the =agent= CLI read the same =~/.cursor/mcp.json=.
 
 A table with =shell = true= registers no server and no hook.
 =ljos onboard --harness example-host= writes the skill and an env file beside
@@ -435,7 +435,7 @@ and keep the runner where it cannot reach what it must not touch.
 
 On the wire, a rewrite is one line of three tab-separated fields: =allow=, =rewrite= and the new command.
 The new line runs only when the guard has no warning on it. The hook hands it back as the updated input for
-The harnesses' =preToolUse=. A runner without that field runs the old line, with
+the harnesses that accept one, including the editor harness's =preToolUse=. A runner without that field runs the old line, with
 a warning that names the new command. The first rewrite runs the command through =uv run=.
 
 Each swap also shows a note naming both commands and leaves a row in
@@ -576,7 +576,7 @@ voter discounted. Nothing is passed or printed when no pair counts.
 The settle also weighs each model family as one voter. A ballot's family
 is the model its verified slot records, else the model a judge ballot
 (=judge:MODEL=) names, else the runner its persona runs on. A label that
-contains a family name a panel rotates, such as a family name the panel rotates, is
+contains a family name a panel rotates, such as =opus= or =codex=, is
 that family; any other label is its own. Ballots that name none share
 one =unknown= family; they are not one family each. Each of a family's
 /k/ voters keeps =1/k= of its inbound weight, the share =correlation=

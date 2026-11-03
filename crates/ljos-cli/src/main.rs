@@ -1208,7 +1208,7 @@ enum Cmd {
         /// The model the run was launched on.
         #[arg(long)]
         model: String,
-        /// The run id, the run's `the hosted run id` or `GITHUB_RUN_ID`.
+        /// The run id, the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`.
         #[arg(long)]
         run: String,
         /// The run's public seat key, the hex `ljos cloud up` printed on

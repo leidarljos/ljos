@@ -364,7 +364,7 @@ fn a_malformed_rules_file_still_warns_a_forged_seat() {
     }
 }
 
-/// The seat's own `the editor harness MCP config` still answers `mcp__ljos__ljos_note`
+/// The seat's own `~/.cursor/mcp.json` still answers `mcp__ljos__ljos_note`
 /// early. A project file beside it does not change that.
 #[test]
 fn the_home_cursor_file_still_names_the_seat() {

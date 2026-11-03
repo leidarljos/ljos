@@ -26,8 +26,8 @@ Check the programs first.
 4. Tell the person to start a new chat, or reload the window, so the hooks and
    the tool server pick up the programs.
 
-`ljos onboard`, bare or with `--harness NAME`, sees this plugin and leaves
-The editor harness to it. The plugin already registers the hooks and the tool server, so
-onboarding writes nothing to `the editor harness hooks file` and each hook runs once.
+`ljos onboard`, bare or with `--harness cursor`, sees this plugin and leaves
+the editor harness to it. The plugin already registers the hooks and the tool server, so
+onboarding writes nothing to `~/.cursor/hooks.json` and each hook runs once.
 
 The binaries go to `~/.cargo/bin`. The plugin also looks in `~/.local/bin`.

@@ -290,10 +290,10 @@ cloud seat git runs only the hooks the repository and the login name.
   `ljos panel ISSUE --cloud` writes one prompt file per persona in that
   directory. Each file names the seat environment (`LJOS_SEAT`,
   `VISSUE_AGENT`, `LJOS_TRACKER_GIT=push`), the slot
-  (`slot: SEAT model=FAMILY`) and the push rules: a ref under the agent's branch prefix
+  (`slot: SEAT model=FAMILY`) and the push rules: a ref under `cursor/`
   stays unpushed, `gh pr create` and `gh pr merge` stay unrun, and a push
   is not forced. The run starts from that file and `ljos brief NAME ISSUE`,
-  and it does not read ballots before it casts. Families rotate in persona name order, so the first two seats differ.
+  and it does not read ballots before it casts. Families rotate `grok`, `opus`, `codex` in persona name order, so the first two seats differ.
   A panel is refused until a playbook is bound (`ljos playbook ISSUE NAME`
   or `ljos sitting ISSUE --playbook NAME`). Both seat the personas whose
   `--about` domains the issue's title or tags name. A persona the
@@ -312,7 +312,7 @@ cloud seat git runs only the hooks the repository and the login name.
   prompt does not treat as a fact; the seat still reads it. A ballot
   and a design candidate carry the harness session that wrote them (the hook's
   session, the MCP call's session, a `*_SESSION_ID` in the environment, else
-  the run's `the hosted run id` or `GITHUB_RUN_ID`) and a marker, `-`, or
+  the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`) and a marker, `-`, or
   `seat` when only the seat named the session; the signature covers both.
   When the process tree matches an earlier cast, the signature also covers
   that voice and the session the environment claimed. A six-field note

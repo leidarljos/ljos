@@ -67,8 +67,8 @@ Command line
 | ``agents [--harness NAME] [--dry-run]``                                                                                         | pack, runner              | every persona as an agent definition, ``ljos-NAME.md``, in each runner's ``agents`` directory (or one runner's): a subagent the runner spawns by name that briefs, casts one ballot before reading the others, notes why and stops;            |
 |                                                                                                                                 |                           | definitions whose persona left the pack are removed                                                                                                                                                                                            |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``statusline``                                                                                                                  | pack                      | one line for a runner's status bar (hook's ``[ui.status_line]``, one harness's ``statusLine``): the seat, the issue this conversation has claimed, the claims due; reads the runner's status JSON on stdin; each session's line is cached for  |
-|                                                                                                                                 |                           | fifteen seconds                                                                                                                                                                                                                                |
+| ``statusline``                                                                                                                  | pack                      | one line for a runner's status bar (the build harness's ``[ui.status_line]``, the terminal harness's ``statusLine``): the seat, the issue this conversation has claimed, the claims due; reads the runner's status JSON on stdin; each         |
+|                                                                                                                                 |                           | session's line is cached for fifteen seconds                                                                                                                                                                                                   |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``ask NAME TEXT``                                                                                                               | persona session           | hands the persona a question or a task in its own pane, opening it (and resuming its session) when it is closed                                                                                                                                |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -146,9 +146,9 @@ Command line
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``rules [--json]``                                                                                                              | pack                      | the rules the hook and ``policy`` warn by: verdict, pattern and reason, deny first                                                                                                                                                             |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``consensus ID [--compare]``                                                                                                    | consensus, tracker        | first what the seat ballots alone decide for the push check; then the settle under the pack's rows that apply to the issue, with every persona's anchor, as advice; an issue tagged ``broad`` runs bounded confidence; once six issues have    |
-|                                                                                                                                 |                           | an outcome, voters shown to err together are discounted; ``--compare`` adds the tracker's own settle, and so does a missing model crate; an issue with no ballots is refused before a settle runs; ``--json`` prints one JSON document, the    |
-|                                                                                                                                 |                           | seat tally at the top level and each reading under its own key                                                                                                                                                                                 |
+| ``consensus ID [--compare]``                                                                                                    | consensus, tracker        | first what the seat ballots alone decide for the push check; then the settle under the pack's rows that apply to the issue, with every persona's anchor, as advice; an issue tagged ``broad`` runs bounded confidence; once six issues have an |
+|                                                                                                                                 |                           | outcome, voters shown to err together are discounted; ``--compare`` adds the tracker's own settle, and so does a missing model crate; an issue with no ballots is refused before a settle runs; ``--json`` prints one JSON document, the seat  |
+|                                                                                                                                 |                           | tally at the top level and each reading under its own key                                                                                                                                                                                      |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``claim [ID] [--next] [--role ROLE] [--slack N] [--assignee NAME]``                                                             | claim graph               | claim a session node. With ``--next``, or with no id, it claims the first ready node in claimdag's order for the name, the way ``claim ID`` claims one; ``--role`` and ``--slack`` set the affinity and the depth slack. A busy refusal names  |
 |                                                                                                                                 |                           | what the name has still claimed                                                                                                                                                                                                                |
@@ -166,7 +166,7 @@ Command line
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``hook [--limit N] [--prompt [--text]] [--fail-on-deny] [--runner NAME] [--git-commit] [--git-hook post-commit|post-rewrite]``  | policy, pack              | hook JSON or argv on stdin; ``--runner`` reads the payload of ``copilot``, ``gemini``, ``windsurf``, ``factory``, ``kiro``, ``cline``, ``qwen`` or ``crush`` and answers in that runner's shape; ``--prompt`` reads stdin as the prompt, and   |
 |                                                                                                                                 |                           | ``--text`` with it prints what the agent would read as plain text instead of JSON; on ``PreToolUse`` the TCB and pack rules, a rule is an allow with one warning line and policyd's block under the person's ``block-on-warning`` is a deny as |
-|                                                                                                                                 |                           | ``permissionDecision``, and from 0.35.0 a rewrite goes back as the updated input for one harness, shell, build hook and editor's ``preToolUse``, and another runner runs its own line with a warning that names the new one;                   |
+|                                                                                                                                 |                           | ``permissionDecision``, and from 0.35.0 a rewrite goes back as the updated input for the harnesses that accept one, including the editor harness's ``preToolUse``, and another runner runs its own line with a warning that names the new one; |
 |                                                                                                                                 |                           | ``--fail-on-deny`` exits 1 on a deny and without the flag the exit stays 0; on a prompt the hits scoring at least 0.6 of the best that name its subject, or with a pack that sends cosines the encoder's first hit at 0.66 or more and a hit   |
 |                                                                                                                                 |                           | sharing a word within 0.05 of the best cosine, preferences first then lessons oldest first, each with its age, three at most, each once between compactions; on a failed tool, up to three that share at least two content words with the      |
 |                                                                                                                                 |                           | command and its error. ``--git-commit`` books the commit git just created and reads no stdin; ``--git-hook`` names ``post-commit`` or ``post-rewrite``. Git hooks                                                                              |
@@ -194,32 +194,22 @@ Command line
 | ``doctor [--all]``                                                                                                              | all                       | whether ljos is ready, and the rows that need action; exit 1 when a required part does not answer or the note queue is damaged. ``--all`` (alias ``--verbose``) prints every row, the ones that answer included. A ``panes`` row names the     |
 |                                                                                                                                 |                           | tool that opens persona panes; with ``jev.toml`` present, a ``jev`` row carries the month's calls, cached answers and spend                                                                                                                    |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``seat``                                                                                                                        | none                      | who is sitting: the seat this runner votes under, the holder this conversation claims under, and where the names came from. ``seat add NAME`` writes NAME into the tracker's ``vissue.toml``. ``seat grant`` records a quoted close            |
+| ``seat [add NAME | grant SEAT close=own --quote TEXT --at TIME --via SEAT]``                                                    | tracker                   | who is sitting; ``add`` writes NAME into the tracker's ``vissue.toml`` seat list; ``grant`` records a quoted yes that SEAT may close tickets it filed or holds                                                                                 |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``protocol``                                                                                                                    | none                      | print the sitting protocol                                                                                                                                                                                                                     |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]``                                                             | runner                    | alone, print the one ``mcpServers`` entry any runner takes; with a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its skill, and write the personas into its ``agents`` directory;  |
-|                                                                                                                                 |                           | a shell runner writes the skill and an env file; changed runner files and their previous bytes are recorded for ``offboard``                                                                                                                   |
+|                                                                                                                                 |                           | a shell runner (``shell = true``, ``example-host``, or ``shell``) writes the skill and an env file and registers no server and no hook; changed runner files and their previous bytes are recorded for ``offboard``                            |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``offboard [--runner NAME] [--dry-run]``                                                                                        | runner                    | restore runner files changed by ``onboard`` and remove files created only for ljos; ``--runner`` limits removal to one runner; ``--dry-run`` reports without writing; later edits are preserved; older installs are detected by ljos markers   |
+| ``offboard [--runner NAME] [--dry-run]``                                                                                        | runner                    | restore runner files changed by ``onboard`` and remove files created only for ljos; ``--runner`` limits removal to one runner; ``--dry-run`` reports without writing; later edits are preserved; an older installation without a manifest is   |
+|                                                                                                                                 |                           | removed by its ljos markers                                                                                                                                                                                                                    |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``uninstall [--dry-run] [--keep-programs] [--all] [--purge] [--no-stub] [--bin-dir DIR]``                                       | runner, programs          | offboard every runner, put the global git hooks back, stop the hook server, remove the ljos programs and leave a stub named ``ljos`` that answers every hook with an allow, so a                                                               |
-|                                                                                                                                 |                           | session that cached the hook path is not blocked; ``--all`` removes the other seat programs, ``--purge`` the state, data and configuration directories; the release ships the same                                                             |
-|                                                                                                                                 |                           | as ``uninstall.sh`` for a machine the binary was deleted from                                                                                                                                                                                  |
+| ``uninstall [--dry-run] [--keep-programs] [--all] [--purge] [--no-stub] [--bin-dir DIR]``                                       | runner, programs          | offboard every runner, put the global git hooks back, stop the hook server, remove the ljos programs and leave a stub named ``ljos`` that answers every hook with an allow, so a session that cached the hook path is not blocked; ``--all``   |
+|                                                                                                                                 |                           | removes the other seat programs, ``--purge`` the state, data and configuration directories; the release ships the same as ``uninstall.sh`` for a machine the binary was deleted from                                                           |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
-The manifest and backups are under
-``${XDG_STATE_HOME:-~/.local/state}/ljos/onboard``.
+The manifest and backups are under ``${XDG_STATE_HOME:-~/.local/state}/ljos/onboard``.
 They are removed after every recorded runner is offboarded.
-
-``ljos seat add NAME`` adds NAME to the ``seats`` list in the tracker's ``vissue.toml``.
-``ljos seat grant SEAT close=own --quote TEXT --at TIME --via SEAT`` records the owner's yes that SEAT may close tickets it filed or holds.
-The row keeps the quote, the time, the seat that wrote it down, and the tracker commit.
-``ljos finish ID --close`` from that seat closes the ticket and notes the grant.
-With no grant, a person closes the ticket. A grant written into the file by hand is ignored.
-``ljos seat grant SEAT close=ID[,ID...] --quote TEXT --at TIME --via SEAT`` records a quoted yes that SEAT may close those tickets.
-``--ids-file PATH`` reads the ids, one per line, and the row stores them.
-The same checks apply, and a ticket the list does not name is refused.
 
 ``ljos file "TITLE" --options A,B`` writes ``Options: A, B`` as the first body line.
 ``ljos options ISSUE A,B`` appends that line and refuses fewer than two.
@@ -347,7 +337,7 @@ The hook books as a seat. The holder is ``SEAT@TAG``, the same name ``ljos claim
 ``LJOS_SEAT`` wins when it is set and is not ``seat``, ``you``, ``agent``, or a name that slugs to ``runner``.
 Otherwise ljos derives the name from the markers the runner leaves in the environment, and a derived name is a seat.
 When nothing named the seat, an ``ANTIGRAVITY_CONVERSATION_ID`` books as ``antigravity`` and an ``OPENCODE_SESSION_ID`` books as ``opencode``.
-A terminal harness or the command harness session, named by ``the terminal harness mark``, ``the command harness thread id`` or ``the command harness session id``, is not booked.
+A terminal harness or the command harness session, named by ``CLAUDECODE``, ``CODEX_THREAD_ID`` or ``CODEX_SESSION_ID``, is not booked.
 An opencode session is booked by this hook, including a commit from its shell or a subprocess.
 An agy session is booked the same way when no seat was named.
 Without these hooks, ``Stop`` and ``SessionEnd`` cite each commit HEAD's reflog says the checkout wrote since the sitting began, so a commit from a script, or one chained before a step that failed, still has a deed.
@@ -391,9 +381,9 @@ as text, so the model reads it as a tool result.
 Environment
 ===========
 
-=========================================================== =======================================================================================================================================================================================================================================================================================================================================
+=========================================================== =========================================================================================================================================================================================================================================================================================================================
 Variable                                                    Read by
-=========================================================== =======================================================================================================================================================================================================================================================================================================================================
+=========================================================== =========================================================================================================================================================================================================================================================================================================================
 ``PACKSET_URL``                                             the pack client; unset, ``http://127.0.0.1:8761`` (``PACKSET_PORT`` moves the port), or this user's own port when 8761 is another user's; ``off`` means no pack
 ``PACKSET_WORKSPACE``                                       the pack workspace; unset, ``seat``
 ``LJOS_SEAT``                                               override for who is sitting. Unset, the seat is the MCP client that connected, a runner's own seat variable, or the login user. The process tree is not a seat. The holder is that seat tagged with the conversation's session. When ``vissue.toml`` lists seats, a tracker write from a seat it does not list is refused
@@ -416,7 +406,7 @@ Variable                                                    Read by
 ``LJOS_PANEL_RUNNER``                                       the runner a decision panel's members run on, through its ``headless`` argv; unset, the seat's own runner, else the build harness
 ``LJOS_PANEL_CONCURRENCY``                                  how many decision-panel members start at once; unset, the machine's parallelism clamped to 4; ``0`` starts every member; ``LJOS_MAX_PARALLEL`` is the same knob
 ``XDG_STATE_HOME``, ``XDG_CACHE_HOME``, ``XDG_RUNTIME_DIR`` where the Jev state, cache and runtime key live (see Jev settings); ``XDG_RUNTIME_DIR`` also keeps the hud socket and the seat records
-=========================================================== =======================================================================================================================================================================================================================================================================================================================================
+=========================================================== =========================================================================================================================================================================================================================================================================================================================
 
 ``~/.config/ljos/env`` is loaded for the keys above that the shell leaves unset.
 
@@ -436,29 +426,29 @@ when one matches.
 
 The pane script resumes a runner that exits non-zero, at most three times
 a minute, and leaves one that exits 0. ``agents`` names the directory the
-runner reads agent definitions from: ``the build harness agents directory``, ``the terminal harness agents directory``
-or ``the editor harness agents directory``. ``headless`` is the argv a decision panel's member
+runner reads agent definitions from: ``~/.grok/agents``, ``~/.claude/agents``
+or ``~/.cursor/agents``. ``headless`` is the argv a decision panel's member
 runs, with ``{prompt_file}``, ``{prompt}``, ``{cwd}`` and ``{persona}`` filled;
-when it is empty, the member runs ``the build harness`` with the seat's fallback flags.
+when it is empty, the member runs ``grok`` with the seat's fallback flags.
 
-``hooks_format = "the editor harness"`` writes ``hooks`` in the editor harness's flat shape: ``version``
+``hooks_format = "cursor"`` writes ``hooks`` in the editor harness's flat shape: ``version``
 1, and one ``{command, timeout}`` entry an event. The seat registers the
 permission check, the prompt, both tool results, compaction, stop and session end
-there. Events ``the terminal harness settings`` already runs stay in that file.
+there. Events ``~/.claude/settings.json`` already runs stay in that file.
 ``beforeShellExecution``, ``preToolUse``, ``beforeMCPExecution``,
 ``beforeReadFile`` and ``postToolUseFailure`` are still written here, since
-The editor harness runs that file's hooks too and the terminal harness's file does not name these.
+the editor harness runs that file's hooks too and the terminal harness's file does not name these.
 If one of these hooks fails, the command runs. ``ljos doctor`` counts the
 hook installed when those five are present and the terminal harness's file carries
 the seat hook, or when the editor harness's file carries every event.
 
-The hook reads an editor harness call off ``the editor payload mark`` in its stdin and answers
+The hook reads an editor harness call off ``cursor_version`` in its stdin and answers
 in the editor harness's fields: ``permission`` on a permission check, with ``user_message`` and
 ``agent_message``; ``additional_context`` on a tool result; ``followup_message``
 on a held stop. It answers ``allow`` on every permission check, since
-The editor harness blocks the command when the answer to a permission check is not JSON. A rule
+the editor harness blocks the command when the answer to a permission check is not JSON. A rule
 that fires is ``allow`` with its warning in ``user_message`` and ``agent_message``.
-The IDE and the ``agent`` CLI read the same ``the editor harness MCP config``.
+The IDE and the ``agent`` CLI read the same ``~/.cursor/mcp.json``.
 
 A table with ``shell = true`` registers no server and no hook.
 ``ljos onboard --harness example-host`` writes the skill and an env file beside
@@ -517,7 +507,7 @@ stdin is an argv line and answered in plain lines.
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``SessionEnd``         | fires the memories injected during the session together and clears the session's record                                                                                                                                                                                                                                                                                            |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``PostToolUse``        | emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (hook sends this event)                                                                                                                                                                                                                                                   |
+| ``PostToolUse``        | emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (the build harness sends this event)                                                                                                                                                                                                                                      |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``PostToolUseFailure`` | searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share at least two content words with the cue, each once between compactions                                                                                                                                                                    |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -528,7 +518,8 @@ stdin is an argv line and answered in plain lines.
 | ``PreToolUse``         | applies the TCB and pack rules to the command (matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch``); a rule is a warning and the call runs. It keeps the call's ``agent_id`` for each ``ljos`` line, and on a seat MCP tool (``^mcp__.+__ljos_.+$``) only notes a subagent's call, so the ballot binds the session plus that agent. A vissue write tool gets the same   |
 |                        | tracker write check's warning, which names ``ljos finish``                                                                                                                                                                                                                                                                                                                         |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``Stop``               | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then holds one turn for unread interrupt mail (``decision: block``, or ``followup_message`` in editor) and receipts it    |
+| ``Stop``               | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then holds one turn for unread interrupt mail (``decision: block``, or ``followup_message`` in the editor harness) and    |
+|                        | receipts it                                                                                                                                                                                                                                                                                                                                                                        |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``SubagentStop``       | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once                                                                                                                                                                                                                                                   |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -554,7 +545,8 @@ outside quotes, and each piece is read again inside: the bodies of
 ``$(...)``, backticks, ``<(...)``, ``>(...)`` and subshells; the script of
 ``sh -c``, ``eval``, ``env -S``, ``trap``, ``alias``, ``su -c``, ``script -c``,
 ``flock -c`` and ``nix-shell --run``; a here-string or here-document fed to a
-shell, and ``echo`` or ``printf`` piped into one; the commands of ``find -exec``; and the line ``ssh`` runs on its host. Leading ``NAME=value`` words,
+shell, and ``echo`` or ``printf`` piped into one; the commands of ``find
+-exec``; and the line ``ssh`` runs on its host. Leading ``NAME=value`` words,
 wrappers (``sudo``, ``doas``, ``env``, ``time``, ``nohup``, ``exec``, ``command``,
 ``nice``, ``ionice``, ``timeout``, ``setsid``, ``stdbuf``, ``xargs``, ``flock``,
 ``chronic``, ``unbuffer``, ``watch``), ``case`` patterns and function
@@ -592,7 +584,7 @@ and keep the runner where it cannot reach what it must not touch.
 
 On the wire, a rewrite is one line of three tab-separated fields: ``allow``, ``rewrite`` and the new command.
 The new line runs only when the guard has no warning on it. The hook hands it back as the updated input for
-The harnesses' ``preToolUse``. A runner without that field runs the old line, with
+the harnesses that accept one, including the editor harness's ``preToolUse``. A runner without that field runs the old line, with
 a warning that names the new command. The first rewrite runs the command through ``uv run``.
 
 Each swap also shows a note naming both commands and leaves a row in
@@ -601,6 +593,30 @@ Each swap also shows a note naming both commands and leaves a row in
 
 If ``ljos-policyd`` is missing, slow or crashes, the command runs and ljos logs a warning.
 Nothing in ljos turns a fault into a refusal.
+
+By default a warning is ``allow``, the rule and one warning, and the command runs.
+Blocking is opt-in.
+ljos asks ``ljos-policyd check --config PATH -- COMMAND`` when ``policyd_config = "PATH"`` is in the user's or the seat's ``ljos.toml``, at the top or under ``[gates]``; the seat's file wins, ``""`` names none, and a relative path is from that file's directory.
+A repository's ``ljos.toml``, ``.ljos/gates.toml`` and ``LJOS_CONFIG`` do not name it.
+A config with ``block-on-warning true`` has policyd answer a warned command with ``deny``, the same rule and warning, and exit 2.
+ljos reports that deny as policyd's block: the hook denies the tool call, ``ljos policy --fail-on-deny`` exits 1, a guard shim exits 126, ``ljos_guard_check`` is an error and a wake does not run the command.
+Only that deny stops a call; a static, seat, user or pack rule still warns.
+Without a named config, a ``deny`` or ``prompt`` from policyd reads as its warning, and the command runs.
+A check that fails open still allows.
+A named config that is not there fails open on every command, with no rule or warning.
+:doc:`How-to <howto>` has the steps.
+
+A command that deletes or moves a tree holding the person's key directory, such as ``rm -rf /``, ``rm -rf ~`` or ``shutil.rmtree(os.path.expanduser('~'))``, runs with ljos's own label ``uproots-person-key``.
+Its warning names the tree and the key directory, and the bypass log keeps it as a ``warn`` row.
+A config with ``block-on-warning true`` denies such a command where policyd warns on it too.
+The same goes for a recursive delete outside ``/tmp``.
+A command that changes the key directory, a file in it or the directory above it runs with ``changes-person-key``.
+``changes-kept-prompt`` labels a change to the runtime directory where the hook keeps the person's latest prompt, or to a file in it.
+One that writes any other file of the seat, an ljos binary, a hook or the file that registers one or the ljos config, runs with ``writes-seat-file``.
+Each warning names the word the command changes.
+A tool call's ``ljos prefer --review --keep`` keeps the rule as the agent's and names nothing.
+Under ``setsid``, ``script`` or ``env -i``, as if from the person's terminal, the call names ``prefer-keep-faked-terminal``.
+The rule is still the agent's.
 
 The tracker write check warns on a command, or a file tool, that writes the tracker's files by hand. Ticket text is data.
 A ticket body that names a path or a command is never read as one.
@@ -613,15 +629,15 @@ The ``pre-push`` git hook, once installed, still holds that push under a runner.
 
 Every other push rule is policyd's. Each runs the push.
 
-====================================================================================== ==================================
+====================================================================================== ===============================
 Push                                                                                   Answer
-====================================================================================== ==================================
+====================================================================================== ===============================
 an ordinary push of a branch, a tag, or a lease push to a branch that is not protected runs
 a lease push or a force push onto a protected branch                                   runs, named ``git-force-push``
 deleting a remote branch                                                               runs, named ``git-push-delete``
 a push onto a protected branch, with no settled consensus on the sitting's ticket      warns
 rewriting published history                                                            warns, by policyd's table
-====================================================================================== ==================================
+====================================================================================== ===============================
 
 A cloud seat has one push rule. It may push the branches named in its ``ljos.toml`` and ``develop``.
 A cloud seat cannot force push, delete a branch, or push to a branch outside its allowlist.
@@ -717,6 +733,24 @@ miss, and a looser cluster as more than one. A line before the settle
 names the outcomes read, the independent voices the panel has and each
 voter discounted. Nothing is passed or printed when no pair counts.
 
+The settle also weighs each model family as one voter. A ballot's family
+is the model its verified slot records, else the model a judge ballot
+(``judge:MODEL``) names, else the runner its persona runs on. A label that
+contains a family name a panel rotates, such as ``opus`` or ``codex``, is
+that family; any other label is its own. Ballots that name none share
+one ``unknown`` family; they are not one family each. Each of a family's
+*k* voters keeps ``1/k`` of its inbound weight, the share ``correlation``
+gives *k* exact clones, multiplied into any correlation discount. Ten
+unlabelled ballots then weigh as one voter
+beside two ballots from two labelled families. Under one family, or with
+one ballot per family, nothing is passed. When a family holds more than
+one ballot, a line before the settle names the ballots, the families and
+each family's count; ``--json`` carries ``families``, with ``voices`` the
+number of families and ``of`` the voters in each. The tracker's settle
+weighs no family. The push check counts families on its own terms: there
+a seat with no slot is a family of its own, so two standing seats clear
+a protected push.
+
 A row carries the domains it is scoped to. An unscoped row applies to
 every issue; a scoped row applies when one of its domains is a word of the
 issue's title. ``learn`` writes its rows scoped to the entities of the island
@@ -768,7 +802,8 @@ A vissue with ``--file-dissent`` files dissent children only under
 that flag; an older one files them on every run.
 
 A ballot's ``--confidence`` is recorded and weighs no settle and no seat
-tally. ``consensus`` says on how many ballots it was stated. ``learn ID --outcome OPTION`` scores it once the outcome is known: Brier and log score
+tally. ``consensus`` says on how many ballots it was stated. ``learn ID
+--outcome OPTION`` scores it once the outcome is known: Brier and log score
 and calibration per voter.
 
 Without an outcome, ``calibrate`` estimates each voter's accuracy from the
@@ -791,8 +826,6 @@ Crate              Carries
 
 Help text
 =========
-
-.. BEGIN ljos-sample help
 
 .. code:: text
 
@@ -820,5 +853,3 @@ Help text
          --all   Print every row, the ones that answer included [alias: --verbose]
          --fix   Refresh runner skills and runner env files this ljos wrote, and replace a stale cloud guard rule file. A skill edited by hand, an env file ljos did not write, and a cloud guard file that is missing or not a known older version are left in place
      -h, --help  Print help
-
-.. END ljos-sample help

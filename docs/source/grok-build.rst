@@ -21,14 +21,14 @@ Install
 
 .. code:: console
 
-   $ ljos onboard --harness NAME
+   $ ljos onboard --harness grok
 
-That writes ``the build harness hooks file`` once, naming ``ljos`` by the absolute
+That writes ``~/.grok/hooks/ljos.json`` once, naming ``ljos`` by the absolute
 path beside ``ljos-mcp``, so a build harness started outside a login shell still finds
 it. Then
 ``/hooks`` then ``r`` **once**. Later ``cargo binstall ljos`` is live on the
-next event. Name ``ljos-mcp`` on PATH in ``the build harness config``.
-``ljos onboard --harness NAME`` bumps ``LJOS_MCP_GENERATION`` in that table
+next event. Name ``ljos-mcp`` on PATH in ``~/.grok/config.toml``.
+``ljos onboard --harness grok`` bumps ``LJOS_MCP_GENERATION`` in that table
 when the crate version moved, so the build harness's config watcher respawns the
 server; a session restart is not required.
 
@@ -36,7 +36,7 @@ Why these events
 ================
 
 ====================== ================================================================================================================================================= ====================================================
-Event                  What ``ljos hook`` does                                                                                                                           What hook does with stdout
+Event                  What ``ljos hook`` does                                                                                                                           What the build harness does with stdout
 ====================== ================================================================================================================================================= ====================================================
 ``UserPromptSubmit``   searches, keeps the text                                                                                                                          discarded
 ``PostToolUse``        emits the kept text once; with no issue open, the first result says to file and sit                                                               passed to the model after the tool
@@ -52,7 +52,7 @@ added context to the model after the three tool events, ``Stop`` and
 ``SubagentStop``. It drops it after a prompt or at the start of a session.
 
 The frozen file is
-the frozen hook file.
+``crates/ljos-cli/assets/grok/ljos.json``.
 Its ``{ljos}`` is filled in at onboard. ``PreToolUse`` gets 10 seconds, the
 TCB check's budget, as do the two tool-result events; the prompt, ``Stop``
 and ``SubagentStop`` get 15, and ``PreCompact`` and ``SessionEnd`` 5, the build harness's
@@ -67,10 +67,10 @@ A panel member is a supervised child
 ====================================
 
 A child that exits is classified before it is started again.
-``ljos supervise NAME --harness NAME --exit crash --at SECONDS`` prints
+``ljos supervise NAME --harness grok --exit crash --at SECONDS`` prints
 ``restart``, ``stop`` or ``give-up``, and on a restart the herdr line
 ``herdr agent start persona-NAME --no-focus --cwd HOME -- sh SCRIPT``.
-The same command with ``--harness NAME`` or ``--harness NAME`` covers the
+The same command with ``--harness claude`` or ``--harness codex`` covers the
 other runners: the policy is one, and only the runner name changes. ``permanent`` restarts however it exited, ``transient`` only on a
 crash, ``temporary`` never. Three restarts inside sixty seconds give up.
 The command prints the decision. It does not start the pane.
@@ -91,11 +91,11 @@ A TCB rule is a warning too; the call runs.
 Under the person's ``block-on-warning``, policyd's block is a top-level ``decision`` of ``deny`` beside ``hookSpecificOutput``, and the build harness does not run the call.
 
 Personas as the build harness agents
-=======================
+====================================
 
 The build harness spawns a subagent by its agent definition, a Markdown file with YAML
-front matter in ``the build harness agents directory``. ``ljos onboard --harness NAME`` and
-``ljos agents --harness NAME`` write each persona there as ``ljos-NAME.md``.
+front matter in ``~/.grok/agents``. ``ljos onboard --harness grok`` and
+``ljos agents --harness grok`` write each persona there as ``ljos-NAME.md``.
 The build harness's own parser, ``AgentDefinition::parse`` in
 ``the harness agent config``, accepts each file. Its front matter sets
 ``capabilityMode: execute``: it reads and runs commands and has no edit

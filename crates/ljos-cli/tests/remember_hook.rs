@@ -1,6 +1,6 @@
 //! A lesson the person types reaches the next prompt that bears on it.
 //!
-//! A fresh home, the hooks `ljos onboard --harness NAME` writes, packsetd
+//! A fresh home, the hooks `ljos onboard --harness claude` writes, packsetd
 //! on a free port: `ljos remember`, then a matching prompt through the
 //! `UserPromptSubmit` command onboard put in `settings.json`.
 
@@ -105,7 +105,7 @@ fn text(out: &Output) -> String {
 }
 
 /// A fresh home with packsetd on a free port and the hooks `ljos onboard
-/// --harness NAME` wrote: the home, the daemon, and the prompt hook's
+/// --harness claude` wrote: the home, the daemon, and the prompt hook's
 /// command.
 fn seat() -> (Home, ljos_test_boot::Packsetd, String) {
     let Some(packsetd) = on_path("packsetd") else {

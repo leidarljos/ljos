@@ -191,8 +191,8 @@ pub struct Harness {
     /// `--event`, since that runner's payload does not name it.
     #[serde(default)]
     pub hooks_named: Option<String>,
-    /// `the editor harness` for a hooks file in the editor harness's flat shape (`version` 1, one
-    /// entry an event), written by `the editor hook step`.
+    /// `cursor` for a hooks file in the editor harness's flat shape (`version` 1, one
+    /// entry an event), written by `cursor_hook_step`.
     #[serde(default)]
     pub hooks_format: Option<String>,
     /// The events the memory hook fires on. Empty means [`HOOK_EVENTS`],
@@ -6448,7 +6448,7 @@ pub fn onboard_to(harness: &str, dry: bool, skills: Option<&Path>) -> Result<Vec
     onboard_in(&harnesses_path(), harness, dry, skills)
 }
 
-/// Frozen the build harness hook file. Copied to `the build harness hooks file`.
+/// Frozen hook file for the build harness. Copied to `~/.grok/hooks/ljos.json`.
 const FROZEN_HOOKS_JSON: &str = include_str!("../assets/grok/ljos.json");
 
 /// The `ljos` a runner hook or plugin runs: the one beside `ljos-mcp`, by
@@ -6462,7 +6462,7 @@ fn ljos_path() -> Result<PathBuf> {
     which::which("ljos").context("ljos not on PATH")
 }
 
-/// The build harness hooks file with `{ljos}` filled in.
+/// The build harness hooks file `~/.grok/hooks/ljos.json`, with `{ljos}` filled in.
 fn grok_hooks_json(ljos: &Path) -> String {
     FROZEN_HOOKS_JSON.replace("{ljos}", &ljos.display().to_string())
 }
@@ -6496,7 +6496,7 @@ fn claude_seat_events(claude_settings: &Path) -> Vec<String> {
 }
 
 /// The build harness hooks file without the events the build harness already runs from
-/// `the terminal harness settings`: the build harness reads both files, and an event in both
+/// `~/.claude/settings.json`: the build harness reads both files, and an event in both
 /// ran the seat's hook twice.
 fn grok_hooks_json_beside(ljos: &Path, claude_settings: &Path) -> String {
     let skip = claude_seat_events(claude_settings);
@@ -7144,7 +7144,7 @@ fn onboard_in_at_inner(
     // A runner the seat ships a shape for is onboarded from that shape when
     // the file does not name it, and the shape is written into the file so
     // the doctor and persona sessions know the runner too: a first
-    // `ljos onboard --harness NAME` needs no file of its own.
+    // `ljos onboard --harness claude` needs no file of its own.
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
     let names: Vec<String> = all.harness.iter().map(|h| h.name.clone()).collect();
     let named = names.iter().any(|n| n == harness);
@@ -7927,14 +7927,14 @@ const CURSOR_ONLY_EVENTS: &[&str] = &[
 
 /// Merge the seat's hook into the editor harness's hooks file,
 /// `{"version": 1, "hooks": {"<event>": [{"command": ..., "timeout": ...}]}}`.
-/// The entries are flat, not the terminal harness's matcher groups. the editor harness also runs
-/// the hooks in `the terminal harness settings`, and the seat answers both in
-/// the editor harness's shape: it knows the editor harness by the `the editor payload mark` in the
+/// The entries are flat, not the terminal harness's matcher groups. The editor harness also runs
+/// the hooks in `~/.claude/settings.json`, and the seat answers both in
+/// the editor harness's shape: it knows the editor harness by the `cursor_version` in the
 /// payload. When that file already carries the seat's hook, the events
-/// the terminal harness runs are left to it. the editor harness-only events are still written here,
+/// the terminal harness runs are left to it. Events only this harness names are still written here,
 /// because the terminal harness's file does not name them.
-/// the terminal harness's settings carry the seat hook when a matcher group's command
-/// is the seat's. the editor harness runs that file, so those events stay there.
+/// The terminal harness's settings carry the seat hook when a matcher group's command
+/// is the seat's. The editor harness runs that file, so those events stay there.
 fn claude_has_seat_hook(claude_settings: &Path) -> bool {
     std::fs::read_to_string(claude_settings)
         .ok()
@@ -8355,13 +8355,13 @@ pub enum HookShape {
     /// allow` with the warning as its `reason`; context goes in as
     /// `injectSteps`; a `Stop` is held with `decision: continue`.
     Steps,
-    /// the editor harness's `beforeShellExecution`: snake_case stdin carrying
-    /// `the editor payload mark`, the command at the top level. Answers
+    /// The editor harness's `beforeShellExecution`: snake_case stdin carrying
+    /// `cursor_version`, the command at the top level. Answers
     /// `permission: allow` with the warning in `user_message` and
-    /// `agent_message`. the editor harness blocks the command when the answer is not
+    /// `agent_message`. The editor harness blocks the command when the answer is not
     /// JSON.
     CursorShell,
-    /// Every other the editor harness event. Context reaches the model as
+    /// Every other editor harness event. Context reaches the model as
     /// `additional_context` only on `postToolUse`, `postToolUseFailure`
     /// and `sessionStart`. A `stop` is held with `followup_message`.
     /// `preToolUse` answers as `beforeShellExecution` does, which is
@@ -14243,7 +14243,7 @@ pub const CURSOR_GATE_DEADLINE_MS: u64 = 8_000;
 
 /// An editor harness `beforeReadFile` whose allow does not depend on the body.
 /// `false` when the bytes are anything else, including a payload this
-/// scan will not trust. A second `hook_event_name` or `the editor payload mark`
+/// scan will not trust. A second `hook_event_name` or `cursor_version`
 /// at the top level is `false` too, and the caller parses that payload.
 pub(crate) fn cursor_read_allow_bytes(input: &[u8]) -> bool {
     let b = trim_ascii_ws(input);
@@ -59278,7 +59278,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
     }
 
-    /// the editor harness's hooks file is written flat, once. Events the terminal harness's settings
+    /// The editor harness's hooks file is written flat, once. Events the terminal harness's settings
     /// run stay there. The events that file does not name are still written.
     #[test]
     fn cursor_hooks_are_written_flat_and_never_twice() {

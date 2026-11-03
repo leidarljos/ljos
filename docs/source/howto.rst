@@ -61,7 +61,7 @@ from a config file, can be described once in
 
 ``--dry-run`` reports what would be written.
 
-The command harness runs a hook only after you trust it. After ``ljos onboard --harness NAME``,
+The command harness runs a hook only after you trust it. After ``ljos onboard --harness codex``,
 open ``/hooks`` and trust each ljos hook before it runs.
 Trust it again after an upgrade rewrites one. Until then the hook does not run,
 and policyd sees none of the command harness's commands. ``ljos doctor`` reports an untrusted hook when
@@ -71,9 +71,8 @@ The example carries the runners this seat has carried through one piece
 of work, each in the shape it takes the server: a runner with an ``mcp add`` of its own by that command; a runner with a TOML config
 by a table appended to it; ``opencode`` and ``omp`` by a JSON pointer set in
 their MCP file; ``hermes`` by its ``mcp add`` with the tool question
-answered. The same verb takes the editor harness's name from
-``ljos onboard --example`` (the IDE and the ``agent`` CLI share
-``the editor harness MCP config``), and also ``windsurf``, ``zed``, ``vscode``, ``desktop-runner``,
+answered. The same verb takes ``cursor`` (the IDE and the ``agent`` CLI share
+``~/.cursor/mcp.json``), ``windsurf``, ``zed``, ``vscode``, ``claude-desktop``,
 ``gemini``, ``amazonq`` and ``kiro``. Copy the tables for the runners on the
 machine into ``harnesses.toml``, then one verb each:
 
@@ -255,9 +254,9 @@ A warning is the only thing between a runner and a destructive command.
 Keep backups, protect branches on the forge, and keep a runner where it
 cannot reach what it must not touch.
 
-**the build harness.** ``ljos onboard --harness NAME`` writes
-``the build harness hooks file``. The hook searches on the prompt, keeps the
-text, and emits it on ``PostToolUse``. The page :doc:`the build harness <grok-build>`
+**The build harness.** ``ljos onboard --harness grok`` writes
+``~/.grok/hooks/ljos.json``. The hook searches on the prompt, keeps the
+text, and emits it on ``PostToolUse``. The :doc:`build harness <grok-build>` page
 is the install.
 
 A policy daemon does the same with the argv:
@@ -279,7 +278,7 @@ The answer is one line of three tab-separated fields: ``allow``, ``rewrite`` and
 The first rewrite runs a command through ``uv run``.
 
 The new line runs only when the guard has no warning on it. The terminal harness, the command harness, the build harness and
-The editor harness's ``preToolUse`` take it through the hook's updated input. Other runners run the old line,
+the editor harness's ``preToolUse`` take it through the hook's updated input. Other runners run the old line,
 with a warning that names the new command. ``ljos policy -- COMMAND``
 prints the answer without running anything, so you can see a rewrite before an agent meets it.
 
@@ -493,22 +492,21 @@ Wire the seat into the editor harness
 
 .. code:: console
 
-   $ ljos onboard --harness NAME
+   $ ljos onboard --harness cursor
 
-NAME is the editor harness in ``ljos onboard --example``. The command prints
-one ok line for the MCP entry, the hooks, the skill and the agent
+The command prints one ok line for the MCP entry, the hooks, the skill and the agent
 definitions, and each line names the file it wrote.
 
 The editor harness's IDE and its ``agent`` command line take the server from the same
-``the editor harness MCP config`` and the hooks from ``the editor harness hooks file``. The editor harness
+``~/.cursor/mcp.json`` and the hooks from ``~/.cursor/hooks.json``. It
 does not hand a prompt hook's context to the model, so the memories a
-prompt activates arrive with the first tool result instead, as on the build harness
-Build. A shell command that a rule names is allowed, with the rule's
+prompt activates arrive with the first tool result instead, as on the build harness.
+A shell command that a rule names is allowed, with the rule's
 warning in the editor harness's ``user_message``. The editor harness runs the terminal harness hooks itself where
-``ljos onboard --harness NAME`` already ran. The events the terminal harness's file
+``ljos onboard --harness claude`` already ran. The events the terminal harness's file
 names stay there. ``beforeShellExecution``, ``preToolUse``,
 ``beforeMCPExecution``, ``beforeReadFile`` and ``postToolUseFailure`` are
-still written to ``the editor harness hooks file``. If a hook fails, the command runs. The seat answers
+still written to ``~/.cursor/hooks.json``. If a hook fails, the command runs. The seat answers
 both files in the editor harness's shape.
 
 Spawn a persona as a subagent
@@ -516,17 +514,17 @@ Spawn a persona as a subagent
 
 .. code:: console
 
-   $ ljos agents --harness NAME
+   $ ljos agents --harness grok
 
 The ok line names the agents directory it wrote.
 
-Every persona becomes ``the build harness agents directory/ljos-NAME.md``, and the build harness's main agent
+Every persona becomes ``~/.grok/agents/ljos-NAME.md``, and the build harness's main agent
 can spawn it by name on a decision with ``spawn_subagent`` and
 ``subagent_type`` ``ljos-reviewer``. The persona reads ``ljos brief``, casts one
 ballot before reading the others, notes why, and stops. The build harness runs it in
 ``capabilityMode: execute``, with commands and no edit tool. The terminal harness
-reads the same definitions from ``the terminal harness agents directory``, and the editor harness's copies go
-to ``the editor harness agents directory``; both ignore that mode, and the body tells the
+reads the same definitions from ``~/.claude/agents``, and the editor harness's copies go
+to ``~/.cursor/agents``; both ignore that mode, and the body tells the
 persona not to edit. ``onboard`` writes the definitions for a runner whose
 table names ``agents``, and a persona written later refreshes each such
 directory that exists.
@@ -534,7 +532,7 @@ directory that exists.
 Show the seat in the status bar
 ===============================
 
-In ``the build harness config``:
+In ``~/.grok/config.toml``:
 
 .. code:: toml
 
@@ -542,7 +540,7 @@ In ``the build harness config``:
    type = "command"
    command = "ljos statusline"
 
-In ``the terminal harness settings``:
+In ``~/.claude/settings.json``:
 
 .. code:: json
 
