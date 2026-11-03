@@ -18,13 +18,14 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --workspace --no-fail-fast
 ```
 
-The MCP tool list size step in that job installs the tokenizer, then runs:
+The test job's Model Context Protocol (MCP) tool list size step installs the tokenizer.
+Then it runs this command.
 
 ```
 scripts/mcp-size.sh --check
 ```
 
-The Doc samples step runs:
+The Doc samples step runs these two.
 
 ```
 python3 docs/scripts/gen_samples.py
@@ -34,7 +35,7 @@ python3 docs/scripts/gen_samples.py
 git diff --exit-code
 ```
 
-The `deny` job runs:
+The `deny` job runs this one.
 
 ```
 cargo deny check
@@ -44,7 +45,8 @@ cargo deny check
 
 The programs a test run needs are named under [Tests](CONTRIBUTING.md#tests).
 Run the suite from a shell with no `LJOS_OFF` set and outside a runner.
-A pre-push hook that asks for a yes on `/dev/tty` waits for an answer nobody gives, and a test or push run under it hangs with no output.
+Watch for a pre-push hook that asks for a yes on `/dev/tty`.
+Nobody answers it, so a test or push run under it hangs with no output.
 Leave `core.hooksPath` unset, so that hook is not named.
 Run the suite, and every push, from a shell with no terminal attached.
 
@@ -57,7 +59,8 @@ If a run stops printing, check for a hook waiting on `/dev/tty` before you read 
 ## Changelog fragments
 
 Add one fragment per change.
-The name, the types and the draft check are in [Changelog entries](CONTRIBUTING.md#changelog-entries) and [`towncrier.toml`](towncrier.toml).
+[Changelog entries](CONTRIBUTING.md#changelog-entries) gives the name, the types and the draft check.
+So does [`towncrier.toml`](towncrier.toml).
 
 ## Version copies
 
@@ -68,7 +71,7 @@ The Version copies step in [`.github/workflows/ci.yml`](.github/workflows/ci.yml
 
 ## Doc samples
 
-[`docs/scripts/gen_samples.py`](docs/scripts/gen_samples.py) writes the doctor, version and help samples the docs commit.
+[`gen_samples.py`](docs/scripts/gen_samples.py) writes the doctor, version and help samples the docs commit.
 The Doc samples step runs that script and then `git diff --exit-code`, and fails when a committed sample differs.
 
 ## Commit identity
