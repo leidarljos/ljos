@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # leiðarljós suite end-to-end: three seats with their own HOMEs on one scratch
 # tracker, claim graph, deed store and pack workspace. No human steps.
-# REAL=1 lets grok-4.7 (cursor-agent) cast the panel ballots as real seats.
+# With `REAL=1` set, real seats cast the panel ballots.
+# The caller sets $REAL_RUNNER to the runner's one-shot command, which takes `--model` and then the prompt.
+# It sets $REAL_MODEL to the model that runner runs.
 set -uo pipefail
+if [ "${REAL:-0}" = 1 ]; then : "${REAL_RUNNER:?a real-seat run needs REAL_RUNNER}" "${REAL_MODEL:?a real-seat run needs REAL_MODEL}"; fi
 unset LJOS_SEAT VISSUE_AGENT LJOS_PANE_TOOL LJOS_HARNESS_SESSION LJOS_PROCESS_NONCE LJOS_PANEL_CHILD LJOS_MEMBER_BIN LJOS_PANEL_PERSONAS
 # A parent shell that turned the pack off must not hide the writer this
 # suite starts with `packset ensure`.
@@ -19,7 +22,6 @@ git -C "$VISSUE_ROOT" config core.hooksPath /dev/null
 git -C "$root/repo" init -q; git -C "$root/repo" config user.email seat@example.invalid; git -C "$root/repo" config user.name seat
 printf '# demo\n' > "$root/repo/README.md"; git -C "$root/repo" add README.md; git -C "$root/repo" -c core.hooksPath=/dev/null commit -qm init
 SEATS="alice bob carol"
-CA=${CA:-$(command -v cursor-agent || true)}
 for s in $SEATS; do mkdir -p "$root/home-$s"; for rc in .bashrc .profile .zshenv; do printf 'export PATH="%s:/home/box/.cargo/bin:$PATH"\n' "${BIN:-/home/box/.cargo/bin}" > "$root/home-$s/$rc"; done; printf '[url "https://github.com/"]\n\tinsteadOf = git@github.com:\n' > "$root/home-$s/.gitconfig"; done
 for s in $SEATS; do head -c 32 /dev/urandom > "$root/home-$s/seat.key"; done
 as() { local s=$1; shift; HOME="$root/home-$s" DEEDAR_HOST_SIGNING_KEY="$root/home-$s/seat.key" LJOS_SEAT=$s VISSUE_AGENT=$s SEAT_SESSION_ID="sess-$s-0001" "$@"; }
@@ -67,7 +69,7 @@ run as alice ljos inbox; chk "alice did not get bob's private mail" bash -c '! p
 # 4. panel vote reaching consensus (real seats when REAL=1)
 for s in $SEATS; do
   if [ "${REAL:-0}" = 1 ]; then
-    as $s bash -c "cd '$root/repo' && timeout 240 '$CA' -p --model grok-4.7 --force --output-format text \"You are seat $s on a team. The tracker issue $D1 asks: ship v1 now or hold? The repo has one CHANGES line, reviewed and passed, with no open bugs. Decide, then run exactly one shell command: ljos vote $D1 --for ship --used none   (or --for hold). Then reply with one word.\"" >> "$root/real-$s.log" 2>&1
+    as $s bash -c "cd '$root/repo' && timeout 240 $REAL_RUNNER --model '$REAL_MODEL' \"You are seat $s on a team. The tracker issue $D1 asks: ship v1 now or hold? The repo has one CHANGES line, reviewed and passed, with no open bugs. Decide, then run exactly one shell command: ljos vote $D1 --for ship --used none   (or --for hold). Then reply with one word.\"" >> "$root/real-$s.log" 2>&1
   else
     as $s ljos vote "$D1" --for ship --used none >/dev/null 2>&1
   fi
@@ -119,7 +121,7 @@ run as alice vissue create -p demo "Independence: three sessions?" -q; OKI=$(ech
 for s in alice bob carol; do as "$s" ljos vote "$OKI" --for ship --used none >/dev/null; done
 run ljos consensus "$OKI"; rc=$?
 chk "three sessions settle" bash -c 'test "$0" -eq 0 && printf "%s" "$1" | grep -q "decides ship" && ! printf "%s" "$1" | grep -q "refuses to settle"' "$rc" "$LAST"
-run ljos panel run "$OKI" --dry-run --designers 3; chk "panel run names a session per designer and does not spawn" bash -c 'test "$(printf "%s" "$0" | grep -c "designer, brief only")" = 3 && printf "%s" "$0" | grep -q "dry run: nothing spawned" && printf "%s" "$0" | grep -q "Do not read another design" && printf "%s" "$0" | grep -q "argv: cursor-agent -p"' "$LAST"
+run ljos panel run "$OKI" --dry-run --designers 3; chk "panel run names a session per designer and does not spawn" bash -c 'test "$(printf "%s" "$0" | grep -c "designer, brief only")" = 3 && printf "%s" "$0" | grep -q "dry run: nothing spawned" && printf "%s" "$0" | grep -q "Do not read another design" && printf "%s" "$0" | grep -q "  argv: "' "$LAST"
 
 # 5. tie must not settle
 run as alice vissue create -p demo "Tie: rename the crate?" -q; D2=$(echo "$LAST"|tail -1)
