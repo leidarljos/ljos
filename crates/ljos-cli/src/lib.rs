@@ -58156,6 +58156,63 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
     }
 
+    /// A call that code renames keeps what it does: the warning says the
+    /// command moves a tree an aliased move call takes, and deletes one an
+    /// aliased delete call takes, whatever the new name reads as.
+    #[test]
+    fn an_aliased_move_says_it_moves_the_tree_above_the_person_key() {
+        let _g = env_guard();
+        let data = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
+        let dir = person_key::key_dir().expect("a passwd home");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.parent().unwrap().to_path_buf();
+        let cfg = config.display();
+        let lines = [
+            (
+                format!(r#"python3 -c "from shutil import move as m; m('{cfg}', '/tmp/x')""#),
+                true,
+            ),
+            (
+                format!(r#"python3 -c "import shutil; m = shutil.move; m('{cfg}', '/tmp/x')""#),
+                true,
+            ),
+            (
+                format!(r#"python3 -c "import os; rm = os.rename; rm('{cfg}', '/tmp/x')""#),
+                true,
+            ),
+            (
+                format!(
+                    r#"node -e "const {{ renameSync: r }} = require('fs'); r('{cfg}', '/tmp/x')""#
+                ),
+                true,
+            ),
+            (
+                format!(r#"python3 -c "from shutil import rmtree as mv; mv('{cfg}')""#),
+                false,
+            ),
+            (
+                format!(r#"python3 -c "import shutil; move = shutil.rmtree; move('{cfg}')""#),
+                false,
+            ),
+        ];
+        for (line, moves) in &lines {
+            assert_eq!(seat_note(line), Ok(uproots_said(&config, *moves)), "{line}");
+        }
+        let rows = std::fs::read_to_string(data.path().join("ljos").join("bypass.jsonl")).unwrap();
+        let moved = rows
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|r| {
+                r["kind"] == "warn"
+                    && r["rule"] == "uproots-person-key"
+                    && r["reason"].as_str().is_some_and(|w| w.contains(" moves "))
+            })
+            .count();
+        let moves = lines.iter().filter(|(_, moves)| *moves).count();
+        assert_eq!(moved, moves, "{rows}");
+    }
+
     /// What the person key's tree guards alone read on `line`, each
     /// command read as [`seat_guard_in`] reads it, with no directory.
     fn uprooted_by(line: &str) -> Option<person_key::Uprooted> {

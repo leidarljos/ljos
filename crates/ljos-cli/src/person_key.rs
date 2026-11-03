@@ -736,10 +736,8 @@ pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> 
             continue;
         }
         let name: String = chars[start..i].iter().collect();
-        let Some((from, end)) = calls
-            .contains(&name)
-            .then(|| call_arg(&chars, start, i))
-            .flatten()
+        let Some((moves, (from, end))) =
+            call_moves(&calls, &name).and_then(|moves| Some((moves, call_arg(&chars, start, i)?)))
         else {
             continue;
         };
@@ -747,18 +745,32 @@ pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> 
         if let Some(tree) = built(&arg, &vars).map_or_else(named_anywhere, |path| hits(&path)) {
             return Some(Uprooted {
                 tree: tree.display().to_string(),
-                moves: listed(MOVE_CALLS, &name),
+                moves,
             });
         }
     }
     None
 }
 
-/// [`TREE_CALLS`] and the names code gives them:
+/// Whether the call `name` names moves its tree, the latest name code
+/// gives it standing. `None` for a name that is no tree call.
+fn call_moves(calls: &[(String, bool)], name: &str) -> Option<bool> {
+    calls
+        .iter()
+        .rev()
+        .find(|(call, _)| call == name)
+        .map(|&(_, moves)| moves)
+}
+
+/// [`TREE_CALLS`] and the names code gives them, each with whether it
+/// moves the tree, as [`MOVE_CALLS`] says of the call it renames:
 /// `from shutil import rmtree as r`, `const { rmSync: r } = require('fs')`
 /// and `r = shutil.rmtree`.
-fn tree_call_names(code: &str) -> Vec<String> {
-    let mut names: Vec<String> = TREE_CALLS.split_whitespace().map(str::to_string).collect();
+fn tree_call_names(code: &str) -> Vec<(String, bool)> {
+    let mut names: Vec<(String, bool)> = TREE_CALLS
+        .split_whitespace()
+        .map(|call| (call.to_string(), listed(MOVE_CALLS, call)))
+        .collect();
     for stmt in code.split(['\n', ';']) {
         let mut tokens: Vec<String> = Vec::new();
         let mut joins = false;
@@ -771,18 +783,18 @@ fn tree_call_names(code: &str) -> Vec<String> {
             joins = ident(c);
         }
         let is_name = |t: &str| t.chars().all(ident);
-        let mut found: Vec<String> = tokens
+        let mut found: Vec<(String, bool)> = tokens
             .windows(3)
-            .filter(|t| names.contains(&t[0]) && (t[1] == "as" || t[1] == ":") && is_name(&t[2]))
-            .map(|t| t[2].clone())
+            .filter(|t| (t[1] == "as" || t[1] == ":") && is_name(&t[2]))
+            .filter_map(|t| Some((t[2].clone(), call_moves(&names, &t[0])?)))
             .collect();
         let bare = match tokens.first().map(String::as_str) {
             Some("const" | "let" | "var" | "my" | "our") => &tokens[1..],
             _ => &tokens[..],
         };
         if let [alias, eq, .., last] = bare {
-            if eq == "=" && is_name(alias) && names.contains(last) && !stmt.contains('(') {
-                found.push(alias.clone());
+            if eq == "=" && is_name(alias) && !stmt.contains('(') {
+                found.extend(call_moves(&names, last).map(|moves| (alias.clone(), moves)));
             }
         }
         names.extend(found);

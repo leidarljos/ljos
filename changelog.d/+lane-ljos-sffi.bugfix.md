@@ -8,6 +8,7 @@ The seat guard used to refuse a command that deletes or moves a tree holding the
 Such a command now runs too.
 It prints `allow\twarn\tuproots-person-key\tWARNING` and leaves the same `warn` row.
 The warning names the tree and the key directory.
+That warning says `moves` for a move call that code renames, such as `from shutil import move as m`, and `deletes` for a renamed delete call.
 A command runs with `changes-person-key` instead of being refused when it changes the key directory, a file in it or the directory above it, such as `rm -rf ~/.config`.
 A change to the runtime directory where the hook keeps the person's latest prompt runs the same way, with `changes-kept-prompt`.
 So does a write from a command or a file tool to another seat file, with `writes-seat-file`: an ljos binary, a hook or the file that registers one, the ljos config or an approval.
