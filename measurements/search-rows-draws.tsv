@@ -1,0 +1,146 @@
+# The `ljos search` runs of prompt-hook.rows-search-after in hook-latency.txt, one row per run, outside a hook.
+# Machine: Intel Xeon Processor, CPU family 6 model 207, 8 CPUs, 1 socket of 8 cores, 1 thread per core.
+# The machine has an L3 of 320 MiB and 47 GiB of memory, under Kernel-based Virtual Machine (KVM) full virtualization, on Linux 6.12.94+.
+# Pinning: none; no CPU affinity was set, the guest exposes no frequency governor, and nothing else ran during the draws.
+# ljos: 0.37.0 on rustc 1.89.0 (29483883e 2025-08-04), built by `cargo build --release -p ljos --bin ljos`.
+# The workspace sets no [profile.release], so cargo's release defaults hold: opt-level 3, no debug info, no link-time optimization, 16 codegen units.
+# Builds: 4cdaab0 is ljos-m6b6, 97d3ae6 is the develop under the lane, and 57c4bec is the lane before ljos-7yn2.
+# ljos-7yn2 is the tree of the commit that adds this file.
+# packsetd: 0.17.3 (947c4985), packset's default release build, without packset-embed, so the writer ranks by words alone.
+# Writers: one for each pack of hook-scale-draws.tsv, each copied afresh and started once with one home.
+# Every run is `ljos search "Case 17: loneli tula"`.
+# Order: 16 rounds; each round runs every (size, build) once, in an order shuffled by random.SystemRandom.
+# wall_ms: by time.perf_counter in the parent; cpu_ms: the child's user and system time, by getrusage.
+# table_reads: how many times the run opened both /proc/net/tcp and /proc/net/tcp6.
+# An LD_PRELOAD shim over open and openat counted those opens.
+# All four builds printed the same hits in the same order at both sizes.
+# Only a score's fourth decimal moved from run to run, between runs of one build too.
+seq	round	live	build	wall_ms	cpu_ms	table_reads
+0	0	1000	57c4bec	42.8	22.7	2
+1	0	10000	4cdaab0	249.1	105.2	1
+2	0	10000	ljos-7yn2	161.4	40.9	1
+3	0	10000	97d3ae6	275.1	96.6	1
+4	0	1000	97d3ae6	32.2	16.4	1
+5	0	1000	ljos-7yn2	28.9	11.8	1
+6	0	1000	4cdaab0	30.1	16.0	1
+7	0	10000	57c4bec	236.8	102.6	2
+8	1	1000	4cdaab0	32.8	16.4	1
+9	1	10000	ljos-7yn2	179.4	42.8	1
+10	1	10000	57c4bec	238.6	103.7	2
+11	1	1000	ljos-7yn2	28.9	11.8	1
+12	1	1000	97d3ae6	31.1	15.7	1
+13	1	10000	97d3ae6	238.5	101.3	1
+14	1	1000	57c4bec	36.5	21.9	2
+15	1	10000	4cdaab0	239.6	95.9	1
+16	2	1000	97d3ae6	32.1	17.2	1
+17	2	10000	ljos-7yn2	176.7	41.0	1
+18	2	1000	4cdaab0	31.7	16.3	1
+19	2	1000	ljos-7yn2	25.2	11.3	1
+20	2	10000	4cdaab0	236.8	104.4	1
+21	2	10000	97d3ae6	225.5	102.5	1
+22	2	10000	57c4bec	252.1	118.8	2
+23	2	1000	57c4bec	39.8	23.3	2
+24	3	10000	97d3ae6	268.2	98.2	1
+25	3	10000	ljos-7yn2	167.3	41.8	1
+26	3	1000	97d3ae6	32.9	16.6	1
+27	3	1000	57c4bec	34.0	20.4	2
+28	3	1000	4cdaab0	30.4	16.4	1
+29	3	10000	57c4bec	254.9	120.6	2
+30	3	1000	ljos-7yn2	30.6	13.4	1
+31	3	10000	4cdaab0	225.3	104.2	1
+32	4	10000	97d3ae6	245.3	108.0	1
+33	4	1000	97d3ae6	33.3	16.0	1
+34	4	10000	ljos-7yn2	181.9	45.2	1
+35	4	10000	4cdaab0	224.9	94.3	1
+36	4	1000	4cdaab0	33.6	16.4	1
+37	4	10000	57c4bec	227.1	102.9	2
+38	4	1000	ljos-7yn2	26.8	11.5	1
+39	4	1000	57c4bec	35.9	20.8	2
+40	5	10000	97d3ae6	222.1	92.5	1
+41	5	10000	4cdaab0	247.9	105.9	1
+42	5	1000	97d3ae6	32.7	17.1	1
+43	5	1000	ljos-7yn2	26.1	11.6	1
+44	5	1000	4cdaab0	28.0	15.6	1
+45	5	10000	ljos-7yn2	182.3	46.9	1
+46	5	10000	57c4bec	246.9	112.7	2
+47	5	1000	57c4bec	40.0	22.8	2
+48	6	10000	4cdaab0	221.4	94.3	1
+49	6	1000	ljos-7yn2	27.7	11.4	1
+50	6	1000	4cdaab0	30.5	17.3	1
+51	6	1000	57c4bec	39.6	22.3	2
+52	6	10000	57c4bec	252.6	109.8	2
+53	6	10000	97d3ae6	236.9	94.2	1
+54	6	1000	97d3ae6	34.4	17.0	1
+55	6	10000	ljos-7yn2	178.0	44.8	1
+56	7	10000	57c4bec	255.5	119.8	2
+57	7	10000	ljos-7yn2	180.8	44.7	1
+58	7	1000	ljos-7yn2	29.8	11.8	1
+59	7	1000	4cdaab0	32.4	17.5	1
+60	7	10000	4cdaab0	239.9	108.1	1
+61	7	1000	57c4bec	37.1	21.8	2
+62	7	10000	97d3ae6	228.7	92.6	1
+63	7	1000	97d3ae6	33.7	17.6	1
+64	8	1000	57c4bec	36.0	21.1	2
+65	8	1000	ljos-7yn2	26.7	11.5	1
+66	8	10000	97d3ae6	225.1	95.8	1
+67	8	1000	97d3ae6	32.1	16.9	1
+68	8	10000	4cdaab0	224.4	95.1	1
+69	8	10000	57c4bec	223.2	100.5	2
+70	8	10000	ljos-7yn2	188.6	43.3	1
+71	8	1000	4cdaab0	33.1	18.0	1
+72	9	10000	ljos-7yn2	182.2	41.4	1
+73	9	1000	97d3ae6	33.0	17.8	1
+74	9	10000	57c4bec	222.2	101.7	2
+75	9	1000	4cdaab0	34.1	18.2	1
+76	9	10000	97d3ae6	252.5	102.1	1
+77	9	1000	ljos-7yn2	33.2	12.7	1
+78	9	1000	57c4bec	38.4	23.4	2
+79	9	10000	4cdaab0	246.5	98.1	1
+80	10	10000	97d3ae6	237.8	102.5	1
+81	10	1000	ljos-7yn2	29.8	11.7	1
+82	10	10000	ljos-7yn2	173.2	45.3	1
+83	10	1000	4cdaab0	32.6	17.0	1
+84	10	10000	57c4bec	251.4	114.5	2
+85	10	1000	57c4bec	40.2	23.9	2
+86	10	10000	4cdaab0	239.0	95.1	1
+87	10	1000	97d3ae6	33.1	17.7	1
+88	11	10000	97d3ae6	225.3	95.2	1
+89	11	1000	4cdaab0	34.4	18.1	1
+90	11	10000	ljos-7yn2	186.1	43.6	1
+91	11	10000	4cdaab0	220.2	93.1	1
+92	11	10000	57c4bec	247.1	112.1	2
+93	11	1000	ljos-7yn2	29.3	12.4	1
+94	11	1000	57c4bec	38.7	23.1	2
+95	11	1000	97d3ae6	36.4	17.8	1
+96	12	1000	97d3ae6	32.1	15.8	1
+97	12	10000	ljos-7yn2	174.0	40.5	1
+98	12	1000	4cdaab0	31.7	17.6	1
+99	12	10000	97d3ae6	249.8	107.9	1
+100	12	1000	ljos-7yn2	30.3	12.1	1
+101	12	1000	57c4bec	38.6	23.3	2
+102	12	10000	57c4bec	250.1	112.0	2
+103	12	10000	4cdaab0	230.4	92.4	1
+104	13	10000	57c4bec	263.4	121.4	2
+105	13	1000	57c4bec	41.8	23.8	2
+106	13	1000	ljos-7yn2	28.5	12.3	1
+107	13	10000	97d3ae6	236.5	99.1	1
+108	13	1000	97d3ae6	33.9	17.7	1
+109	13	10000	ljos-7yn2	180.8	44.1	1
+110	13	1000	4cdaab0	32.7	16.2	1
+111	13	10000	4cdaab0	225.2	106.6	1
+112	14	1000	ljos-7yn2	27.6	11.9	1
+113	14	10000	57c4bec	227.8	109.6	2
+114	14	10000	4cdaab0	227.8	107.4	1
+115	14	1000	57c4bec	41.2	24.0	2
+116	14	10000	ljos-7yn2	158.8	41.0	1
+117	14	1000	97d3ae6	33.5	17.3	1
+118	14	10000	97d3ae6	248.3	107.5	1
+119	14	1000	4cdaab0	34.0	18.1	1
+120	15	1000	97d3ae6	31.2	16.4	1
+121	15	1000	ljos-7yn2	27.3	11.7	1
+122	15	10000	4cdaab0	232.5	100.9	1
+123	15	1000	4cdaab0	32.2	16.8	1
+124	15	10000	57c4bec	231.8	113.5	2
+125	15	10000	97d3ae6	244.1	101.7	1
+126	15	10000	ljos-7yn2	175.4	45.1	1
+127	15	1000	57c4bec	39.8	22.8	2

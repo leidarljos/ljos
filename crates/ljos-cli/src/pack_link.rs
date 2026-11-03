@@ -258,13 +258,24 @@ pub(crate) fn error_is_timeout(err: &Error) -> bool {
 ///
 /// A hook keeps its first answer for each url. The socket tables are read
 /// in full each time, a hook connects more than once, and it ends within
-/// the runner's cut-off. Any other process reads them on every call. A
-/// writer that stops leaves its port to whoever binds it next. A
-/// long-lived process that kept its first answer would go on carrying
-/// the token to another user's listener, or never to its own.
+/// the runner's cut-off. Elsewhere a search keeps its first answer until
+/// it ends ([`OwnerOnce`]), and any other call reads them again. A writer
+/// that stops leaves its port to whoever binds it next. A long-lived
+/// process that kept its first answer would go on carrying the token to
+/// another user's listener, or never to its own.
 fn foreign(url: &str) -> bool {
     if std::env::var_os("LJOS_IN_HOOK").is_none() {
-        return foreign_read(url);
+        return SEARCH_OWNERS.with(|kept| match kept.borrow_mut().as_mut() {
+            Some(kept) => match kept.iter().find(|(u, _)| u == url) {
+                Some((_, known)) => *known,
+                None => {
+                    let answer = foreign_read(url);
+                    kept.push((url.to_string(), answer));
+                    answer
+                }
+            },
+            None => foreign_read(url),
+        });
     }
     static KNOWN: std::sync::LazyLock<Mutex<Vec<(String, bool)>>> =
         std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
@@ -284,7 +295,53 @@ fn foreign(url: &str) -> bool {
     answer
 }
 
+thread_local! {
+    /// [`foreign`]'s answers for the search on this thread, by url, for
+    /// as long as an [`OwnerOnce`] lasts.
+    static SEARCH_OWNERS: std::cell::RefCell<Option<Vec<(String, bool)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Read the pack port's owner once for the requests of one search on this
+/// thread, until the guard drops. Without it, each request of the search
+/// that carries the token reads both tables. A guard inside another keeps
+/// the outer one's answers.
+pub(crate) struct OwnerOnce {
+    outer: bool,
+}
+
+impl OwnerOnce {
+    #[must_use]
+    pub(crate) fn enter() -> Self {
+        let outer = SEARCH_OWNERS.with(|kept| {
+            let mut kept = kept.borrow_mut();
+            let outer = kept.is_none();
+            if outer {
+                *kept = Some(Vec::new());
+            }
+            outer
+        });
+        Self { outer }
+    }
+}
+
+impl Drop for OwnerOnce {
+    fn drop(&mut self) {
+        if self.outer {
+            SEARCH_OWNERS.with(|kept| *kept.borrow_mut() = None);
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read the socket tables.
+    static TABLE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn foreign_read(url: &str) -> bool {
+    #[cfg(test)]
+    TABLE_READS.with(|reads| reads.set(reads.get() + 1));
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;
@@ -1319,5 +1376,43 @@ fn send_once(
             live.proven = false;
             Err(err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{foreign, OwnerOnce, TABLE_READS};
+
+    fn reads() -> usize {
+        TABLE_READS.with(std::cell::Cell::get)
+    }
+
+    /// The requests of one search share one read of the socket tables for
+    /// each url. A guard inside it keeps that read, and a call after the
+    /// search reads them again.
+    #[test]
+    fn a_search_reads_the_port_owner_once_for_each_url() {
+        let _g = crate::tests::env_guard();
+        // SAFETY: under the lock every environment-reading test takes.
+        unsafe { std::env::remove_var("LJOS_IN_HOOK") };
+        let (url, other) = ("http://127.0.0.1:9", "http://127.0.0.1:10");
+        let start = reads();
+        foreign(url);
+        foreign(url);
+        assert_eq!(reads() - start, 2, "outside a search each call reads");
+        {
+            let _search = OwnerOnce::enter();
+            let first = foreign(url);
+            {
+                let _inner = OwnerOnce::enter();
+                assert_eq!(foreign(url), first);
+            }
+            assert_eq!(foreign(url), first);
+            foreign(other);
+            foreign(other);
+            assert_eq!(reads() - start, 4, "one search reads once a url");
+        }
+        foreign(url);
+        assert_eq!(reads() - start, 5, "a call after the search reads again");
     }
 }

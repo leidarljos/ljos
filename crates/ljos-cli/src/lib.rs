@@ -16798,6 +16798,9 @@ trait Listed: Claim + serde::de::DeserializeOwned + Sized + 'static {
     fn memo() -> &'static std::sync::Mutex<Vec<Held<Self>>>;
     /// The writer's atoms in this form.
     fn of_atoms(atoms: SharedAtoms) -> std::sync::Arc<Vec<Self>>;
+    /// The atoms of the listing body `body` in this form, as
+    /// [`Self::of_atoms`] gives those of [`body_atoms`].
+    fn of_body(body: &str) -> serde_json::Result<Vec<Self>>;
     /// The claim as an atom, for a reader that hands it on as one.
     fn atom(&self) -> Value;
 }
@@ -16808,6 +16811,9 @@ impl Listed for Value {
     }
     fn of_atoms(atoms: SharedAtoms) -> SharedAtoms {
         atoms
+    }
+    fn of_body(body: &str) -> serde_json::Result<Vec<Self>> {
+        body_atoms(body)
     }
     fn atom(&self) -> Value {
         self.clone()
@@ -16820,6 +16826,9 @@ impl Listed for Row {
     }
     fn of_atoms(atoms: SharedAtoms) -> SharedRows {
         std::sync::Arc::new(atoms.iter().map(Row::of).collect())
+    }
+    fn of_body(body: &str) -> serde_json::Result<Vec<Self>> {
+        rows_of_body(body)
     }
     fn atom(&self) -> Value {
         serde_json::to_value(self).unwrap_or_default()
@@ -16885,8 +16894,8 @@ fn memo_keep<T>(
     ));
 }
 
-/// Declares [`Row`] with these fields and [`Row::get`] by their names, so
-/// the two name the same fields.
+/// Declares [`Row`] with these fields, and [`Row::get`] and [`Row::slot`]
+/// by their names, so the three name the same fields.
 macro_rules! row_of {
     ($(#[$doc:meta])* struct $row:ident { $($field:ident),* $(,)? }) => {
         $(#[$doc])*
@@ -16904,6 +16913,14 @@ macro_rules! row_of {
             fn get(&self, key: &str) -> Option<&Value> {
                 match key {
                     $(stringify!($field) => self.$field.as_ref(),)*
+                    _ => None,
+                }
+            }
+
+            /// Field `key` to fill, when a row has that field.
+            fn slot(&mut self, key: &str) -> Option<&mut Option<Value>> {
+                match key {
+                    $(stringify!($field) => Some(&mut self.$field),)*
                     _ => None,
                 }
             }
@@ -16948,6 +16965,202 @@ impl Row {
             source.remove("basis");
         }
         self
+    }
+}
+
+/// The atoms of the listing body `body`. A body without `atoms`, or
+/// one other than an object, has none. An `atoms` that is not an
+/// array is an error.
+fn body_atoms(body: &str) -> serde_json::Result<Vec<Value>> {
+    let mut body: Value = serde_json::from_str(body)?;
+    Ok(match body.get_mut("atoms").map(Value::take) {
+        None => Vec::new(),
+        Some(Value::Array(atoms)) => atoms,
+        Some(other) => serde_json::from_value(other)?,
+    })
+}
+
+/// [`body_atoms`] of `body`, each atom read by [`Row::of`]. A body of the
+/// usual shape is read straight into rows, with no map for each claim
+/// ([`UsualBody`]). Any other body takes the long way, so it reads as it
+/// did.
+fn rows_of_body(body: &str) -> serde_json::Result<Vec<Row>> {
+    match serde_json::from_str::<UsualBody>(body) {
+        Ok(UsualBody(rows)) => Ok(rows),
+        Err(_) => Ok(body_atoms(body)?.iter().map(Row::of).collect()),
+    }
+}
+
+/// A listing body of the usual shape: an object with one `atoms`, an
+/// array of objects naming each row field at most once. Anything else
+/// fails it. So does whatever fails the map parse of [`body_atoms`],
+/// since every value is parsed in full ([`Checked`]).
+struct UsualBody(Vec<Row>);
+
+impl<'de> serde::Deserialize<'de> for UsualBody {
+    fn deserialize<D: serde::Deserializer<'de>>(body: D) -> std::result::Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = UsualBody;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a listing")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<UsualBody, A::Error> {
+                let mut atoms = None;
+                while let Some(Key(key)) = map.next_key()? {
+                    if key != "atoms" {
+                        map.next_value::<Checked>()?;
+                    } else if atoms.is_none() {
+                        atoms = Some(map.next_value::<UsualAtoms>()?.0);
+                    } else {
+                        return Err(serde::de::Error::duplicate_field("atoms"));
+                    }
+                }
+                atoms
+                    .map(UsualBody)
+                    .ok_or_else(|| serde::de::Error::missing_field("atoms"))
+            }
+        }
+        body.deserialize_map(Visit)
+    }
+}
+
+/// The `atoms` of a [`UsualBody`].
+struct UsualAtoms(Vec<Row>);
+
+impl<'de> serde::Deserialize<'de> for UsualAtoms {
+    fn deserialize<D: serde::Deserializer<'de>>(atoms: D) -> std::result::Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = UsualAtoms;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an array of claims")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<UsualAtoms, A::Error> {
+                let mut rows = Vec::new();
+                while let Some(UsualRow(row)) = seq.next_element()? {
+                    rows.push(row);
+                }
+                Ok(UsualAtoms(rows))
+            }
+        }
+        atoms.deserialize_seq(Visit)
+    }
+}
+
+/// One claim of a [`UsualBody`]: its row fields as given, and its other
+/// fields [`Checked`].
+struct UsualRow(Row);
+
+impl<'de> serde::Deserialize<'de> for UsualRow {
+    fn deserialize<D: serde::Deserializer<'de>>(claim: D) -> std::result::Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = UsualRow;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a claim")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<UsualRow, A::Error> {
+                let mut row = Row::default();
+                while let Some(Key(key)) = map.next_key()? {
+                    match row.slot(&key) {
+                        Some(slot) if slot.is_none() => *slot = Some(map.next_value()?),
+                        Some(_) => return Err(serde::de::Error::custom("a row field twice")),
+                        None => {
+                            map.next_value::<Checked>()?;
+                        }
+                    }
+                }
+                Ok(UsualRow(row))
+            }
+        }
+        claim.deserialize_map(Visit)
+    }
+}
+
+/// A map key, borrowed from the body when it has no escape.
+struct Key<'de>(std::borrow::Cow<'de, str>);
+
+impl<'de> serde::Deserialize<'de> for Key<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(key: D) -> std::result::Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = Key<'de>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a key")
+            }
+            fn visit_borrowed_str<E: serde::de::Error>(
+                self,
+                key: &'de str,
+            ) -> std::result::Result<Key<'de>, E> {
+                Ok(Key(std::borrow::Cow::Borrowed(key)))
+            }
+            fn visit_str<E: serde::de::Error>(self, key: &str) -> std::result::Result<Key<'de>, E> {
+                Ok(Key(std::borrow::Cow::Owned(key.to_string())))
+            }
+        }
+        key.deserialize_str(Visit)
+    }
+}
+
+/// Any value, parsed in full and dropped. It fails here too on a
+/// number or string the map parse refuses, or on nesting past its
+/// depth. [`serde::de::IgnoredAny`] would skip those.
+struct Checked;
+
+impl<'de> serde::Deserialize<'de> for Checked {
+    fn deserialize<D: serde::Deserializer<'de>>(value: D) -> std::result::Result<Self, D::Error> {
+        value.deserialize_any(Checked)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for Checked {
+    type Value = Checked;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any value")
+    }
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<Checked, A::Error> {
+        while seq.next_element::<Checked>()?.is_some() {}
+        Ok(Checked)
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Checked, A::Error> {
+        while map.next_key::<Checked>()?.is_some() {
+            map.next_value::<Checked>()?;
+        }
+        Ok(Checked)
     }
 }
 
@@ -17176,12 +17389,14 @@ fn listed_of<T: Listed>(
     if !(200..300).contains(&answered.status) {
         anyhow::bail!("{url}: status code {}", answered.status);
     }
-    let mut body: Value = serde_json::from_str(&answered.body)?;
-    let atoms = match body.get_mut("atoms").map(Value::take) {
-        None => Vec::new(),
-        Some(Value::Array(atoms)) => atoms,
-        Some(other) => serde_json::from_value(other)?,
+    // Outside a hook nothing keeps the whole atoms, so the body is read
+    // straight into the form asked for.
+    let Some(key) = &memo_key else {
+        let listed = T::of_body(&answered.body)?;
+        read_claims(listed.len());
+        return Ok((std::sync::Arc::new(listed), answered.trusted));
     };
+    let atoms = body_atoms(&answered.body)?;
     read_claims(atoms.len());
     if let (Some(path), Some(stamp)) = (cache, stamp) {
         keep_listing(&path, &stamp, &atoms, answered.trusted);
@@ -17189,13 +17404,10 @@ fn listed_of<T: Listed>(
     }
     let atoms = std::sync::Arc::new(atoms);
     let listed = T::of_atoms(std::sync::Arc::clone(&atoms));
-    if let Some(key) = &memo_key {
-        // The whole atoms are kept too: a later reader of them in this
-        // hook takes them. A hook that ends does not spend time dropping
-        // them.
-        memo_keep(&ATOM_LISTINGS, key, &atoms, answered.trusted);
-        memo_keep(T::memo(), key, &listed, answered.trusted);
-    }
+    // The whole atoms are kept too: a later reader of them in this hook
+    // takes them. A hook that ends does not spend time dropping them.
+    memo_keep(&ATOM_LISTINGS, key, &atoms, answered.trusted);
+    memo_keep(T::memo(), key, &listed, answered.trusted);
     Ok((listed, answered.trusted))
 }
 
@@ -31603,6 +31815,7 @@ pub fn packset_search_as_of(
     if q.is_empty() {
         bail!("search: empty query");
     }
+    let _owner = pack_link::OwnerOnce::enter();
     let as_of = as_of.map(str::trim).filter(|s| !s.is_empty());
     let stamp = match as_of {
         Some(at) if days_of_stamp(Some(at)).is_none() => {
@@ -63589,6 +63802,186 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let err = atoms_lean(&PacksetClient::new(&url), "ws").unwrap_err();
         assert!(is_pack_busy(&err), "{err}");
         assert_eq!(seen.load(Ordering::SeqCst), 1 + BUSY_TRIES as usize);
+    }
+
+    /// The rows of `body` as they were read before: its atoms as maps, each
+    /// read as a row. Or the parse's error, when it failed.
+    fn rows_as_before(body: &str) -> std::result::Result<Value, String> {
+        body_atoms(body)
+            .map(|atoms| serde_json::to_value(atoms.iter().map(Row::of).collect::<Vec<_>>()))
+            .map(Result::unwrap)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The rows of `body` as [`rows_of_body`] reads them, checked against
+    /// [`rows_as_before`], and whether it read them the short way.
+    fn rows_now(body: &str) -> (std::result::Result<Value, String>, bool) {
+        let now = rows_of_body(body)
+            .map(serde_json::to_value)
+            .map(Result::unwrap)
+            .map_err(|e| e.to_string());
+        assert_eq!(now, rows_as_before(body), "body: {body}");
+        (now, serde_json::from_str::<UsualBody>(body).is_ok())
+    }
+
+    #[test]
+    fn a_usual_listing_reads_straight_into_the_rows_of_its_atoms() {
+        let body = r#"{"atoms":[
+            {"id":"a","kind":"lesson","text":"one","valid_to":null,
+             "source":{"basis":"said","at":1},"entities":["x"],
+             "review":{"due":"2026-01-01","ease":2.5},"words":3,"links":[{"to":"b"}]},
+            {"id":"b","kind":"rule","text":"two","score":0.75}
+        ],"count":2}"#;
+        let (rows, usual) = rows_now(body);
+        assert!(usual, "a usual body reads straight into rows");
+        let rows = rows.unwrap();
+        assert_eq!(rows[0]["source"]["basis"], "said");
+        assert_eq!(rows[0]["valid_to"], Value::Null);
+        assert!(rows[0].get("valid_to").is_some(), "a null field is kept");
+        assert!(
+            rows[0].get("review").is_none(),
+            "a field no row holds is not"
+        );
+        assert_eq!(rows[1]["score"], 0.75);
+    }
+
+    #[test]
+    fn escaped_keys_read_as_the_keys_they_spell() {
+        let (rows, usual) = rows_now(r#"{"\u0061toms":[{"\u0069d":"a","te\u0078t":"one"}]}"#);
+        assert!(usual);
+        assert_eq!(
+            rows.unwrap(),
+            serde_json::json!([{"id": "a", "text": "one"}])
+        );
+    }
+
+    #[test]
+    fn a_listing_without_atoms_reads_as_no_rows() {
+        for body in ["{}", r#"{"count":0}"#] {
+            let (rows, usual) = rows_now(body);
+            assert!(!usual, "{body}");
+            assert_eq!(rows.unwrap(), serde_json::json!([]), "{body}");
+        }
+    }
+
+    #[test]
+    fn a_body_that_is_not_an_object_reads_as_no_rows() {
+        for body in [r#"[{"id":"a"}]"#, r#""atoms""#, "3", "null", "true"] {
+            let (rows, usual) = rows_now(body);
+            assert!(!usual, "{body}");
+            assert_eq!(rows.unwrap(), serde_json::json!([]), "{body}");
+        }
+    }
+
+    #[test]
+    fn atoms_that_are_not_an_array_are_the_error_they_were() {
+        for body in [
+            r#"{"atoms":null}"#,
+            r#"{"atoms":{"id":"a"}}"#,
+            r#"{"atoms":"a"}"#,
+            r#"{"atoms":3}"#,
+        ] {
+            let (rows, usual) = rows_now(body);
+            assert!(!usual, "{body}");
+            let err = rows.unwrap_err();
+            assert!(err.contains("expected a sequence"), "{body}: {err}");
+        }
+    }
+
+    #[test]
+    fn atoms_twice_read_as_the_last() {
+        let (rows, usual) = rows_now(r#"{"atoms":null,"atoms":[{"id":"b"}]}"#);
+        assert!(!usual);
+        assert_eq!(rows.unwrap(), serde_json::json!([{"id": "b"}]));
+        let (rows, _) = rows_now(r#"{"atoms":[{"id":"a"}],"atoms":[{"id":"b"}]}"#);
+        assert_eq!(rows.unwrap(), serde_json::json!([{"id": "b"}]));
+        let (rows, _) = rows_now(r#"{"atoms":[{"id":"a"}],"atoms":3}"#);
+        assert!(rows.is_err());
+    }
+
+    #[test]
+    fn atoms_that_are_not_objects_read_as_they_did() {
+        let (rows, usual) =
+            rows_now(r#"{"atoms":[{"id":"a"},3,"x",null,true,[],["b","lesson"],{"id":"c"}]}"#);
+        assert!(!usual);
+        let rows = rows.unwrap();
+        assert_eq!(rows.as_array().map(Vec::len), Some(8));
+        assert_eq!(rows[0]["id"], "a");
+        for i in 1..=5 {
+            assert_eq!(rows[i], serde_json::json!({}), "atom {i} has no row fields");
+        }
+        assert_eq!(rows[7]["id"], "c");
+    }
+
+    #[test]
+    fn a_row_field_twice_in_a_claim_reads_as_the_last() {
+        let (rows, usual) = rows_now(r#"{"atoms":[{"id":"a","text":"one","text":"two"}]}"#);
+        assert!(!usual);
+        assert_eq!(rows.unwrap()[0]["text"], "two");
+        let (rows, usual) = rows_now(r#"{"atoms":[{"id":"a","words":1,"words":2}]}"#);
+        assert!(usual, "a field no row holds may come twice");
+        assert_eq!(rows.unwrap(), serde_json::json!([{"id": "a"}]));
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_the_error_it_was() {
+        for body in [
+            "",
+            r#"{"atoms":["#,
+            r#"{"atoms":[]} x"#,
+            r#"{"atoms":[{"id":"a",}]}"#,
+        ] {
+            let (rows, usual) = rows_now(body);
+            assert!(!usual, "{body}");
+            assert!(rows.is_err(), "{body}");
+        }
+    }
+
+    /// A field no row has is still parsed: a value the map parse refused
+    /// is still an error, not skipped.
+    #[test]
+    fn a_value_the_map_parse_refused_is_still_an_error() {
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        for body in [
+            r#"{"atoms":[{"id":"a","review":{"ease":1e400}}]}"#.to_string(),
+            r#"{"n":1e400,"atoms":[]}"#.to_string(),
+            r#"{"atoms":[{"id":"a","note":"\ud800"}]}"#.to_string(),
+            format!(r#"{{"atoms":[{{"id":"a","deep":{deep}}}]}}"#),
+            format!(r#"{{"atoms":[{{"id":"a","entities":{deep}}}]}}"#),
+        ] {
+            let (rows, usual) = rows_now(&body);
+            assert!(!usual, "{body}");
+            assert!(rows.is_err(), "{body}");
+        }
+    }
+
+    /// Outside a hook the listing is read straight from its body into rows.
+    /// A field no row has is left out.
+    #[test]
+    fn a_listing_outside_a_hook_reads_the_rows_of_its_body() {
+        let _env = env_guard();
+        let pack_home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::remove_var("LJOS_IN_HOOK");
+            std::env::remove_var("PACKSET_TOKEN");
+            std::env::remove_var("PACKSET_TOKEN_FILE");
+            std::env::remove_var("SEATALFA_HOME");
+            std::env::remove_var("SEATALFA_MEMORY_HOME");
+            std::env::set_var("PACKSET_HOME", pack_home.path());
+        }
+        let (url, seen) = serve_busy_then(
+            0,
+            r#"{"atoms":[{"id":"a","kind":"lesson","text":"a lesson about ferrule","words":4}]}"#,
+        );
+        let (rows, trusted) = rows_listed(&PacksetClient::new(&url), "ws").unwrap();
+        assert!(!trusted, "no token, so no proof");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].field("text").and_then(Value::as_str),
+            Some("a lesson about ferrule")
+        );
+        assert!(rows[0].field("words").is_none());
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
     }
 
     /// Answers one scratch pack.
