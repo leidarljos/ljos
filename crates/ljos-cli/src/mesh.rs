@@ -54,7 +54,8 @@ const INSTANT_MS: u64 = 100;
 const POLL: Duration = Duration::from_millis(INSTANT_MS / 2);
 /// Random hex digits in a node name. Three bytes give N = 2^24 names, so n
 /// nodes in one swarm share a name with odds near n²/2N (the birthday
-/// bound): under 1 in 1,000 below 183 nodes, under 1 in 100 below 579.
+/// bound): under 1 in 1,000 for at most 183 nodes, under 1 in 100 for at
+/// most 579.
 const NODE_HEX: usize = 6;
 /// The longest swarm id a node name fits: a DNS label is at most 63
 /// octets (RFC 1035 §2.3.4), less `ag-`, a dash and the hex digits.
