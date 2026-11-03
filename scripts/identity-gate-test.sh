@@ -1,6 +1,6 @@
 #!/bin/sh
-# A clean range passes. A wrong author, a wrong committer and a trailer
-# each fail. A foreign commit that sits before the range is not judged,
+# A clean range passes. A wrong author, a wrong committer, a committer
+# date that is not the author date, and a trailer each fail. A foreign commit that sits before the range is not judged,
 # including one that is already on another remote-tracking branch.
 set -eu
 
@@ -60,6 +60,31 @@ GIT_COMMITTER_NAME="Ada Lovelace" \
   GIT_COMMITTER_EMAIL="ada@example.com" \
   git commit --allow-empty -q -m "foreign committer"
 must_fail "wrong committer" "$gate" "$base..HEAD"
+
+authored=2026-11-02T20:17:15-06:00
+committed=2026-11-03T01:03:03-06:00
+git checkout -q -b redated "$base"
+GIT_AUTHOR_DATE=$authored GIT_COMMITTER_DATE=$committed \
+  git commit --allow-empty -q -m "committed later than authored"
+redated=$(git rev-parse HEAD)
+if "$gate" "$base..HEAD" 2>"$tmp/err"; then
+  echo "identity-gate-test: committer date after author date was accepted" >&2
+  exit 1
+fi
+want="identity-gate: committer date differs from author date: $redated author $authored committer $committed"
+if [ "$(cat "$tmp/err")" != "$want" ]; then
+  echo "identity-gate-test: date message was: $(cat "$tmp/err")" >&2
+  exit 1
+fi
+
+# A commit already pushed with unequal dates sits below the range.
+git commit --allow-empty -q -m "after the redated commit"
+"$gate" "$redated..HEAD"
+
+git checkout -q -b old "$base"
+GIT_AUTHOR_DATE=$authored GIT_COMMITTER_DATE=$authored \
+  git commit --allow-empty -q -m "old but equal dates"
+"$gate" "$base..HEAD"
 
 fail_msg() {
   desc=$1
