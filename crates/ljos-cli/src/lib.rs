@@ -10524,6 +10524,20 @@ fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
 /// How many hits a search asks the pack for, per hit it may show, so the
 /// floors choose from more than they show. [`search_relevant`] makes
 /// sure the cut is not by age.
+///
+/// Kept at 4. On the Intel Xeon reported as `Intel(R) Xeon(R) Processor`,
+/// 8 cores, Linux 6.12.94+ x86_64, ljos
+/// 72ac1984f788e290e475167eafbbf84f7513e175 and packsetd 0.17.3
+/// (0fed6640), six round-robin passes of `ljos recall` over
+/// `scripts/fixtures/recall-caps.json` are in
+/// `measurements/recall-caps.txt`. Median F1 was 0.7154471544715447 at
+/// 2, 0.7193675889328064 at 4 and 0.7137254901960784 at 8. A pool of 2
+/// showed 88 of the 99 labelled memories; 4 and 8 showed 91. The pool of
+/// 8 showed 156 lines where 4 showed 154, and its F1 was the lower one.
+/// Wall medians were 962919940.5 ns, 948712885.5 ns and 911699969.5 ns,
+/// each inside the others' quartiles, so the time does not separate them.
+/// Every pass printed the same hits, so the precision and recall
+/// quartiles equal the median.
 pub const POOL_PER_SHOWN: usize = 4;
 
 /// Indices of `rows`, most relevant to `cue` first: the lexical match,
@@ -33455,9 +33469,26 @@ fn fence_inline(nonce: &str, text: &str) -> String {
 /// How many of an issue's own memories a recall lists, newest first,
 /// before it says how many it left out. Past the cap the ones kept are
 /// the most relevant to the issue, newest first among equals.
-pub const ISSUE_MEMORY_CAP: usize = 20;
+///
+/// Set to 10 from the runs named on [`POOL_PER_SHOWN`], recorded in
+/// `measurements/recall-caps.txt`. Median F1 was 0.7864077669902914 at
+/// 10, 0.7193675889328064 at 20 and 0.6006600660066007 at 40. Cap 10
+/// showed 81 of the 99 labelled memories in 107 lines. Cap 20 showed 91
+/// in 154 lines. Cap 40 showed the same 91 in 204 lines, so the lines
+/// past 20 were unlabelled. Own labelled hits were 54 at 10 and 64 at
+/// both 20 and 40. Wall medians were 956291796.0 ns, 948712885.5 ns and
+/// 972780548.5 ns, each inside the others' quartiles.
+pub const ISSUE_MEMORY_CAP: usize = 10;
 
 /// How many text-search hits a recall adds after the issue's own memories.
+///
+/// Kept at 5. The runs named on [`POOL_PER_SHOWN`], in
+/// `measurements/recall-caps.txt`, gave median F1 0.7 at 3,
+/// 0.7193675889328064 at 5 and 0.7101449275362318 at 8. A cap of 3 showed
+/// 84 of the 99 labelled memories, a cap of 5 showed 91, and a cap of 8
+/// showed 98 in 177 lines against 154. The precision fall at 8 took the
+/// F1 under the cap of 5. Wall medians were 952560386.0 ns, 948712885.5
+/// ns and 911271854.5 ns.
 pub const RELATED_MEMORY_CAP: usize = 5;
 
 /// What the seat remembers that bears on an issue, for `ljos recall` and
@@ -43068,10 +43099,10 @@ mod tests {
             text.contains("- [unverified agent note (origin agent-derived), today] note 21\n"),
             "{text}"
         );
-        assert!(text.contains("note 02"), "{text}");
-        assert!(!text.contains("note 01"), "{text}");
+        assert!(text.contains("note 12"), "{text}");
+        assert!(!text.contains("note 11"), "{text}");
         assert!(
-            text.contains("(2 more logbook notes on this issue left out)"),
+            text.contains("(12 more logbook notes on this issue left out)"),
             "{text}"
         );
         assert_eq!(text.matches("note 21").count(), 1, "{text}");
@@ -43177,7 +43208,7 @@ mod tests {
         assert!(text.contains("rotated from 1Password"), "{text}");
         assert!(text.contains("before the old one expires"), "{text}");
         assert!(
-            text.contains("(2 more memories on this issue left out)"),
+            text.contains("(12 more memories on this issue left out)"),
             "{text}"
         );
         assert!(

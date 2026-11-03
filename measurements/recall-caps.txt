@@ -1,0 +1,43 @@
+cpu: Intel(R) Xeon(R) Processor
+cpu_cores_field: 8
+nproc: 8
+uname: Linux 6.12.94+ x86_64
+rustc: rustc 1.89.0 (29483883e 2025-08-04)
+ljos_commit: 72ac1984f788e290e475167eafbbf84f7513e175
+git_status:
+?? scripts/__pycache__/
+?? scripts/fixtures/
+?? scripts/recall-caps-build.sh
+?? scripts/recall-caps.py
+packsetd: packsetd 0.17.3 (0fed6640) 
+ljos_base: ljos 0.37.0 
+packsetd_bin: /tmp/recall-bins/packsetd
+passes: 6
+order: variants round-robin, one pass recalls every issue in fixture order
+quartiles: statistics.quantiles method inclusive (Hyndman-Fan type 7); median is statistics.median
+wall: perf_counter_ns around one ljos recall ISSUE, including process start
+vissue: a stub on PATH answers `vissue recall` with one fixed line; the issue title is read from Software/ufuv/issues.org
+fixture_memories: 250
+labelled: {"ufuv-ink": 5, "ufuv-kiln": 21, "ufuv-loom": 13, "ufuv-reed": 4, "ufuv-salt": 15, "ufuv-valve": 9, "ufuv-wax": 22, "ufuv-yarn": 10}
+commands:
+  scripts/recall-caps-build.sh /tmp/recall-bins
+  scripts/recall-caps.py --fixture scripts/fixtures/recall-caps.json --bins /tmp/recall-bins --packsetd /tmp/recall-bins/packsetd --summary measurements/recall-caps.txt --draws measurements/recall-caps-draws.tsv --stdout measurements/recall-caps-stdout.txt
+factor pool
+  level 2 passes 6 precision median 0.5986394557823129 quartile 0.5986394557823129 0.5986394557823129 recall median 0.8888888888888888 quartile 0.8888888888888888 0.8888888888888888 f1 median 0.7154471544715447 quartile 0.7154471544715447 0.7154471544715447 wall_ns median 962919940.5 quartile 864974683.0 1038033509.0 iqr_ns 173058826.0 pass_relevant 88 pass_shown 147 pass_labelled 99 pass_own_relevant 64 pass_related_relevant 24 wall_ns_passes 806459168,851159274,906420910,1019418971,1044238355,1099052214
+  level 4 passes 6 precision median 0.5909090909090909 quartile 0.5909090909090909 0.5909090909090909 recall median 0.9191919191919192 quartile 0.9191919191919192 0.9191919191919192 f1 median 0.7193675889328064 quartile 0.7193675889328064 0.7193675889328064 wall_ns median 948712885.5 quartile 850818090.25 1014244681.25 iqr_ns 163426591.0 pass_relevant 91 pass_shown 154 pass_labelled 99 pass_own_relevant 64 pass_related_relevant 27 wall_ns_passes 781362798,834300202,900371755,997054016,1019974903,1076983829
+  level 8 passes 6 precision median 0.5833333333333334 quartile 0.5833333333333334 0.5833333333333334 recall median 0.9191919191919192 quartile 0.9191919191919192 0.9191919191919192 f1 median 0.7137254901960784 quartile 0.7137254901960784 0.7137254901960784 wall_ns median 911699969.5 quartile 837522082.0 987217685.5 iqr_ns 149695603.5 pass_relevant 91 pass_shown 156 pass_labelled 99 pass_own_relevant 64 pass_related_relevant 27 wall_ns_passes 759014123,825331725,874093153,949306786,999854652,1052300345
+  decision pool=4 because highest median F1 f1 0.7193675889328064 wall_ns 948712885.5
+factor related
+  level 3 passes 6 precision median 0.5957446808510638 quartile 0.5957446808510638 0.5957446808510638 recall median 0.8484848484848485 quartile 0.8484848484848485 0.8484848484848485 f1 median 0.7 quartile 0.7 0.7 wall_ns median 952560386.0 quartile 885939963.5 1045661515.25 iqr_ns 159721551.75 pass_relevant 84 pass_shown 141 pass_labelled 99 pass_own_relevant 64 pass_related_relevant 20 wall_ns_passes 826540461,878527743,908176625,996944147,1061900638,1118084809
+  level 5 passes 6 precision median 0.5909090909090909 quartile 0.5909090909090909 0.5909090909090909 recall median 0.9191919191919192 quartile 0.9191919191919192 0.9191919191919192 f1 median 0.7193675889328064 quartile 0.7193675889328064 0.7193675889328064 wall_ns median 948712885.5 quartile 850818090.25 1014244681.25 iqr_ns 163426591.0 pass_relevant 91 pass_shown 154 pass_labelled 99 pass_own_relevant 64 pass_related_relevant 27 wall_ns_passes 781362798,834300202,900371755,997054016,1019974903,1076983829
+  level 8 passes 6 precision median 0.5536723163841808 quartile 0.5536723163841808 0.5536723163841808 recall median 0.98989898989899 quartile 0.98989898989899 0.98989898989899 f1 median 0.7101449275362318 quartile 0.7101449275362318 0.7101449275362318 wall_ns median 911271854.5 quartile 853373712.75 992379934.25 iqr_ns 139006221.5 pass_relevant 98 pass_shown 177 pass_labelled 99 pass_own_relevant 64 pass_related_relevant 34 wall_ns_passes 801140595,843387003,883333842,939209867,1010103290,1057706655
+  decision related=5 because highest median F1 f1 0.7193675889328064 wall_ns 948712885.5
+factor issue
+  level 10 passes 6 precision median 0.7570093457943925 quartile 0.7570093457943925 0.7570093457943925 recall median 0.8181818181818182 quartile 0.8181818181818182 0.8181818181818182 f1 median 0.7864077669902914 quartile 0.7864077669902914 0.7864077669902914 wall_ns median 956291796.0 quartile 865744230.0 1026381810.75 iqr_ns 160637580.75 pass_relevant 81 pass_shown 107 pass_labelled 99 pass_own_relevant 54 pass_related_relevant 27 wall_ns_passes 826387560,846147657,924533949,988049643,1039159200,1130046480
+  level 20 passes 6 precision median 0.5909090909090909 quartile 0.5909090909090909 0.5909090909090909 recall median 0.9191919191919192 quartile 0.9191919191919192 0.9191919191919192 f1 median 0.7193675889328064 quartile 0.7193675889328064 0.7193675889328064 wall_ns median 948712885.5 quartile 850818090.25 1014244681.25 iqr_ns 163426591.0 pass_relevant 91 pass_shown 154 pass_labelled 99 pass_own_relevant 64 pass_related_relevant 27 wall_ns_passes 781362798,834300202,900371755,997054016,1019974903,1076983829
+  level 40 passes 6 precision median 0.44607843137254904 quartile 0.44607843137254904 0.44607843137254904 recall median 0.9191919191919192 quartile 0.9191919191919192 0.9191919191919192 f1 median 0.6006600660066007 quartile 0.6006600660066007 0.6006600660066007 wall_ns median 972780548.5 quartile 896352445.5 1043908527.5 iqr_ns 147556082.0 pass_relevant 91 pass_shown 204 pass_labelled 99 pass_own_relevant 64 pass_related_relevant 27 wall_ns_passes 837786803,880452312,944052846,1001508251,1058041953,1129052168
+  decision issue=10 because highest median F1 f1 0.7864077669902914 wall_ns 956291796.0
+decision pool=4 related=5 issue=10
+decision_why pool 4 highest median F1
+decision_why related 5 highest median F1
+decision_why issue 10 highest median F1

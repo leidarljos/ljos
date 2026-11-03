@@ -1,0 +1,2778 @@
+{
+  "seed": 20261103,
+  "label": "A memory is relevant to an issue when its tier is A or B: the sentence states two or three of that issue's title words. Tier C names one title word. Off-topic own memories and the background name none. The mark in the sentence is the id.",
+  "issues": [
+    {
+      "id": "ufuv-kiln",
+      "title": "Kiln damper schedule",
+      "words": [
+        "kiln",
+        "damper",
+        "schedule"
+      ]
+    },
+    {
+      "id": "ufuv-valve",
+      "title": "Valve gasket torque",
+      "words": [
+        "valve",
+        "gasket",
+        "torque"
+      ]
+    },
+    {
+      "id": "ufuv-loom",
+      "title": "Loom shuttle tension",
+      "words": [
+        "loom",
+        "shuttle",
+        "tension"
+      ]
+    },
+    {
+      "id": "ufuv-ink",
+      "title": "Pigment viscosity ledger",
+      "words": [
+        "pigment",
+        "viscosity",
+        "ledger"
+      ]
+    },
+    {
+      "id": "ufuv-salt",
+      "title": "Salt crust thickness",
+      "words": [
+        "salt",
+        "crust",
+        "thickness"
+      ]
+    },
+    {
+      "id": "ufuv-reed",
+      "title": "Reed flutter margin",
+      "words": [
+        "reed",
+        "flutter",
+        "margin"
+      ]
+    },
+    {
+      "id": "ufuv-wax",
+      "title": "Beeswax sealant temperature",
+      "words": [
+        "beeswax",
+        "sealant",
+        "temperature"
+      ]
+    },
+    {
+      "id": "ufuv-yarn",
+      "title": "Yarn twist density",
+      "words": [
+        "yarn",
+        "twist",
+        "density"
+      ]
+    }
+  ],
+  "memories": [
+    {
+      "id": "m0199",
+      "text": "zwwaa zxwaa zywaa holds the morning briefing mark m0199.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 0
+    },
+    {
+      "id": "m0128",
+      "text": "zroaa zsoaa ztoaa holds the morning briefing mark m0128.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 1
+    },
+    {
+      "id": "m0007",
+      "text": "zsaaa ztaaa zuaaa holds the kiln damper note mark m0007.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 2
+    },
+    {
+      "id": "m0120",
+      "text": "ztnaa zunaa zvnaa holds the morning briefing mark m0120.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 3
+    },
+    {
+      "id": "m0061",
+      "text": "zygaa zzgaa zahaa holds the valve gasket note mark m0061.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-valve",
+      "relevant_to": [
+        "ufuv-valve"
+      ],
+      "post": 4
+    },
+    {
+      "id": "m0013",
+      "text": "zkbaa zlbaa zmbaa holds the kiln damper note mark m0013.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 5
+    },
+    {
+      "id": "m0108",
+      "text": "zjmaa zkmaa zlmaa holds the morning briefing mark m0108.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 6
+    },
+    {
+      "id": "m0003",
+      "text": "zgaaa zhaaa ziaaa holds the kiln damper schedule mark m0003.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 7
+    },
+    {
+      "id": "m0194",
+      "text": "zhwaa ziwaa zjwaa holds the morning briefing mark m0194.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 8
+    },
+    {
+      "id": "m0144",
+      "text": "znqaa zoqaa zpqaa holds the pigment viscosity note mark m0144.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-ink",
+      "relevant_to": [
+        "ufuv-ink"
+      ],
+      "post": 9
+    },
+    {
+      "id": "m0234",
+      "text": "zxaba zyaba zzaba holds the birch amber mark m0234.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 10
+    },
+    {
+      "id": "m0147",
+      "text": "zwqaa zxqaa zyqaa holds the workshop ledger mark m0147.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 11
+    },
+    {
+      "id": "m0076",
+      "text": "zriaa zsiaa ztiaa holds the morning briefing mark m0076.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 12
+    },
+    {
+      "id": "m0092",
+      "text": "znkaa zokaa zpkaa holds the loom shuttle tension mark m0092.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 13
+    },
+    {
+      "id": "m0041",
+      "text": "zqeaa zreaa zseaa holds the morning briefing mark m0041.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 14
+    },
+    {
+      "id": "m0171",
+      "text": "zqtaa zrtaa zstaa holds the reed flutter margin mark m0171.",
+      "issue": "ufuv-reed",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-reed",
+      "relevant_to": [
+        "ufuv-reed"
+      ],
+      "post": 15
+    },
+    {
+      "id": "m0113",
+      "text": "zymaa zzmaa zanaa holds the morning briefing mark m0113.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 16
+    },
+    {
+      "id": "m0024",
+      "text": "zrcaa zscaa ztcaa holds the morning briefing mark m0024.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 17
+    },
+    {
+      "id": "m0200",
+      "text": "zzwaa zaxaa zbxaa holds the morning briefing mark m0200.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 18
+    },
+    {
+      "id": "m0161",
+      "text": "zmsaa znsaa zosaa holds the morning briefing mark m0161.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-salt",
+      "relevant_to": [],
+      "post": 19
+    },
+    {
+      "id": "m0182",
+      "text": "zxuaa zyuaa zzuaa holds the beeswax sealant temperature mark m0182.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 20
+    },
+    {
+      "id": "m0189",
+      "text": "zsvaa ztvaa zuvaa holds the beeswax sealant note mark m0189.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 21
+    },
+    {
+      "id": "m0247",
+      "text": "zkcba zlcba zmcba holds the granite linen mark m0247.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 22
+    },
+    {
+      "id": "m0164",
+      "text": "zvsaa zwsaa zxsaa holds the salt crust thickness mark m0164.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 23
+    },
+    {
+      "id": "m0121",
+      "text": "zwnaa zxnaa zynaa holds the morning briefing mark m0121.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 24
+    },
+    {
+      "id": "m0150",
+      "text": "zfraa zgraa zhraa holds the salt crust thickness mark m0150.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 25
+    },
+    {
+      "id": "m0218",
+      "text": "zbzaa zczaa zdzaa holds the workshop density mark m0218.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-yarn",
+      "relevant_to": [],
+      "post": 26
+    },
+    {
+      "id": "m0017",
+      "text": "zwbaa zxbaa zybaa holds the workshop schedule mark m0017.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 27
+    },
+    {
+      "id": "m0139",
+      "text": "zypaa zzpaa zaqaa holds the morning briefing mark m0139.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 28
+    },
+    {
+      "id": "m0236",
+      "text": "zdbba zebba zfbba holds the marble cobalt mark m0236.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 29
+    },
+    {
+      "id": "m0211",
+      "text": "zgyaa zhyaa ziyaa holds the yarn twist density mark m0211.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-yarn",
+      "relevant_to": [
+        "ufuv-yarn"
+      ],
+      "post": 30
+    },
+    {
+      "id": "m0111",
+      "text": "zsmaa ztmaa zumaa holds the morning briefing mark m0111.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 31
+    },
+    {
+      "id": "m0228",
+      "text": "zfaba zgaba zhaba holds the birch amber mark m0228.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 32
+    },
+    {
+      "id": "m0229",
+      "text": "ziaba zjaba zkaba holds the granite linen mark m0229.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 33
+    },
+    {
+      "id": "m0141",
+      "text": "zeqaa zfqaa zgqaa holds the morning briefing mark m0141.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 34
+    },
+    {
+      "id": "m0162",
+      "text": "zpsaa zqsaa zrsaa holds the morning briefing mark m0162.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-salt",
+      "relevant_to": [],
+      "post": 35
+    },
+    {
+      "id": "m0224",
+      "text": "ztzaa zuzaa zvzaa holds the yarn twist density mark m0224.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-yarn",
+      "relevant_to": [
+        "ufuv-yarn"
+      ],
+      "post": 36
+    },
+    {
+      "id": "m0103",
+      "text": "zulaa zvlaa zwlaa holds the pigment viscosity note mark m0103.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-ink",
+      "relevant_to": [
+        "ufuv-ink"
+      ],
+      "post": 37
+    },
+    {
+      "id": "m0040",
+      "text": "zneaa zoeaa zpeaa holds the morning briefing mark m0040.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 38
+    },
+    {
+      "id": "m0205",
+      "text": "zoxaa zpxaa zqxaa holds the beeswax sealant temperature mark m0205.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 39
+    },
+    {
+      "id": "m0204",
+      "text": "zlxaa zmxaa znxaa holds the beeswax sealant temperature mark m0204.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 40
+    },
+    {
+      "id": "m0207",
+      "text": "zuxaa zvxaa zwxaa holds the beeswax sealant note mark m0207.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 41
+    },
+    {
+      "id": "m0039",
+      "text": "zkeaa zleaa zmeaa holds the morning briefing mark m0039.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 42
+    },
+    {
+      "id": "m0114",
+      "text": "zbnaa zcnaa zdnaa holds the morning briefing mark m0114.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 43
+    },
+    {
+      "id": "m0183",
+      "text": "zavaa zbvaa zcvaa holds the beeswax sealant note mark m0183.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 44
+    },
+    {
+      "id": "m0176",
+      "text": "zfuaa zguaa zhuaa holds the beeswax sealant temperature mark m0176.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 45
+    },
+    {
+      "id": "m0249",
+      "text": "zqcba zrcba zscba holds the cedar bronze mark m0249.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 46
+    },
+    {
+      "id": "m0096",
+      "text": "zzkaa zalaa zblaa holds the loom shuttle note mark m0096.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 47
+    },
+    {
+      "id": "m0154",
+      "text": "zrraa zsraa ztraa holds the salt crust note mark m0154.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 48
+    },
+    {
+      "id": "m0055",
+      "text": "zggaa zhgaa zigaa holds the workshop schedule mark m0055.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 49
+    },
+    {
+      "id": "m0048",
+      "text": "zlfaa zmfaa znfaa holds the kiln damper schedule mark m0048.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 50
+    },
+    {
+      "id": "m0002",
+      "text": "zdaaa zeaaa zfaaa holds the kiln damper schedule mark m0002.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 51
+    },
+    {
+      "id": "m0067",
+      "text": "zqhaa zrhaa zshaa holds the morning briefing mark m0067.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 52
+    },
+    {
+      "id": "m0100",
+      "text": "zllaa zmlaa znlaa holds the workshop tension mark m0100.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-loom",
+      "relevant_to": [],
+      "post": 53
+    },
+    {
+      "id": "m0004",
+      "text": "zjaaa zkaaa zlaaa holds the kiln damper schedule mark m0004.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 54
+    },
+    {
+      "id": "m0235",
+      "text": "zabba zbbba zcbba holds the granite linen mark m0235.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 55
+    },
+    {
+      "id": "m0208",
+      "text": "zxxaa zyxaa zzxaa holds the beeswax sealant note mark m0208.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 56
+    },
+    {
+      "id": "m0177",
+      "text": "ziuaa zjuaa zkuaa holds the beeswax sealant temperature mark m0177.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 57
+    },
+    {
+      "id": "m0020",
+      "text": "zfcaa zgcaa zhcaa holds the morning briefing mark m0020.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 58
+    },
+    {
+      "id": "m0212",
+      "text": "zjyaa zkyaa zlyaa holds the yarn twist density mark m0212.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-yarn",
+      "relevant_to": [
+        "ufuv-yarn"
+      ],
+      "post": 59
+    },
+    {
+      "id": "m0029",
+      "text": "zgdaa zhdaa zidaa holds the morning briefing mark m0029.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 60
+    },
+    {
+      "id": "m0191",
+      "text": "zyvaa zzvaa zawaa holds the workshop temperature mark m0191.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 61
+    },
+    {
+      "id": "m0075",
+      "text": "zoiaa zpiaa zqiaa holds the morning briefing mark m0075.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 62
+    },
+    {
+      "id": "m0078",
+      "text": "zxiaa zyiaa zziaa holds the morning briefing mark m0078.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 63
+    },
+    {
+      "id": "m0178",
+      "text": "zluaa zmuaa znuaa holds the beeswax sealant temperature mark m0178.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 64
+    },
+    {
+      "id": "m0074",
+      "text": "zliaa zmiaa zniaa holds the morning briefing mark m0074.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 65
+    },
+    {
+      "id": "m0213",
+      "text": "zmyaa znyaa zoyaa holds the yarn twist density mark m0213.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-yarn",
+      "relevant_to": [
+        "ufuv-yarn"
+      ],
+      "post": 66
+    },
+    {
+      "id": "m0169",
+      "text": "zktaa zltaa zmtaa holds the workshop thickness mark m0169.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-salt",
+      "relevant_to": [],
+      "post": 67
+    },
+    {
+      "id": "m0062",
+      "text": "zbhaa zchaa zdhaa holds the valve gasket note mark m0062.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-valve",
+      "relevant_to": [
+        "ufuv-valve"
+      ],
+      "post": 68
+    },
+    {
+      "id": "m0126",
+      "text": "zloaa zmoaa znoaa holds the morning briefing mark m0126.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 69
+    },
+    {
+      "id": "m0198",
+      "text": "ztwaa zuwaa zvwaa holds the morning briefing mark m0198.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 70
+    },
+    {
+      "id": "m0021",
+      "text": "zicaa zjcaa zkcaa holds the morning briefing mark m0021.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 71
+    },
+    {
+      "id": "m0196",
+      "text": "znwaa zowaa zpwaa holds the morning briefing mark m0196.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 72
+    },
+    {
+      "id": "m0038",
+      "text": "zheaa zieaa zjeaa holds the morning briefing mark m0038.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 73
+    },
+    {
+      "id": "m0016",
+      "text": "ztbaa zubaa zvbaa holds the workshop schedule mark m0016.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 74
+    },
+    {
+      "id": "m0064",
+      "text": "zhhaa zihaa zjhaa holds the workshop torque mark m0064.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 75
+    },
+    {
+      "id": "m0239",
+      "text": "zmbba znbba zobba holds the quartz copper mark m0239.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 76
+    },
+    {
+      "id": "m0009",
+      "text": "zyaaa zzaaa zabaa holds the kiln damper note mark m0009.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 77
+    },
+    {
+      "id": "m0072",
+      "text": "zfiaa zgiaa zhiaa holds the morning briefing mark m0072.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 78
+    },
+    {
+      "id": "m0140",
+      "text": "zbqaa zcqaa zdqaa holds the morning briefing mark m0140.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 79
+    },
+    {
+      "id": "m0119",
+      "text": "zqnaa zrnaa zsnaa holds the morning briefing mark m0119.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 80
+    },
+    {
+      "id": "m0137",
+      "text": "zspaa ztpaa zupaa holds the morning briefing mark m0137.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 81
+    },
+    {
+      "id": "m0143",
+      "text": "zkqaa zlqaa zmqaa holds the morning briefing mark m0143.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 82
+    },
+    {
+      "id": "m0070",
+      "text": "zzhaa zaiaa zbiaa holds the morning briefing mark m0070.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 83
+    },
+    {
+      "id": "m0142",
+      "text": "zhqaa ziqaa zjqaa holds the morning briefing mark m0142.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 84
+    },
+    {
+      "id": "m0230",
+      "text": "zlaba zmaba znaba holds the marble cobalt mark m0230.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 85
+    },
+    {
+      "id": "m0099",
+      "text": "zilaa zjlaa zklaa holds the workshop tension mark m0099.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-loom",
+      "relevant_to": [],
+      "post": 86
+    },
+    {
+      "id": "m0243",
+      "text": "zybba zzbba zacba holds the cedar bronze mark m0243.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 87
+    },
+    {
+      "id": "m0246",
+      "text": "zhcba zicba zjcba holds the birch amber mark m0246.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 88
+    },
+    {
+      "id": "m0105",
+      "text": "zamaa zbmaa zcmaa holds the morning briefing mark m0105.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 89
+    },
+    {
+      "id": "m0052",
+      "text": "zxfaa zyfaa zzfaa holds the kiln damper note mark m0052.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 90
+    },
+    {
+      "id": "m0220",
+      "text": "zhzaa zizaa zjzaa holds the morning briefing mark m0220.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-yarn",
+      "relevant_to": [],
+      "post": 91
+    },
+    {
+      "id": "m0122",
+      "text": "zznaa zaoaa zboaa holds the morning briefing mark m0122.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 92
+    },
+    {
+      "id": "m0010",
+      "text": "zbbaa zcbaa zdbaa holds the kiln damper note mark m0010.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 93
+    },
+    {
+      "id": "m0227",
+      "text": "zcaba zdaba zeaba holds the quartz copper mark m0227.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 94
+    },
+    {
+      "id": "m0206",
+      "text": "zrxaa zsxaa ztxaa holds the beeswax sealant note mark m0206.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 95
+    },
+    {
+      "id": "m0244",
+      "text": "zbcba zccba zdcba holds the ivory slate mark m0244.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 96
+    },
+    {
+      "id": "m0006",
+      "text": "zpaaa zqaaa zraaa holds the kiln damper schedule mark m0006.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 97
+    },
+    {
+      "id": "m0079",
+      "text": "zajaa zbjaa zcjaa holds the morning briefing mark m0079.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 98
+    },
+    {
+      "id": "m0047",
+      "text": "zifaa zjfaa zkfaa holds the kiln damper schedule mark m0047.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 99
+    },
+    {
+      "id": "m0098",
+      "text": "zflaa zglaa zhlaa holds the workshop tension mark m0098.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-loom",
+      "relevant_to": [],
+      "post": 100
+    },
+    {
+      "id": "m0231",
+      "text": "zoaba zpaba zqaba holds the cedar bronze mark m0231.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 101
+    },
+    {
+      "id": "m0057",
+      "text": "zmgaa zngaa zogaa holds the valve gasket torque mark m0057.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-valve",
+      "relevant_to": [
+        "ufuv-valve"
+      ],
+      "post": 102
+    },
+    {
+      "id": "m0245",
+      "text": "zecba zfcba zgcba holds the quartz copper mark m0245.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 103
+    },
+    {
+      "id": "m0026",
+      "text": "zxcaa zycaa zzcaa holds the morning briefing mark m0026.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 104
+    },
+    {
+      "id": "m0221",
+      "text": "zkzaa zlzaa zmzaa holds the morning briefing mark m0221.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-yarn",
+      "relevant_to": [],
+      "post": 105
+    },
+    {
+      "id": "m0226",
+      "text": "zzzaa zaaba zbaba holds the workshop density mark m0226.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-yarn",
+      "relevant_to": [],
+      "post": 106
+    },
+    {
+      "id": "m0145",
+      "text": "zqqaa zrqaa zsqaa holds the pigment viscosity note mark m0145.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-ink",
+      "relevant_to": [
+        "ufuv-ink"
+      ],
+      "post": 107
+    },
+    {
+      "id": "m0088",
+      "text": "zbkaa zckaa zdkaa holds the morning briefing mark m0088.",
+      "issue": "ufuv-loom",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-loom",
+      "relevant_to": [],
+      "post": 108
+    },
+    {
+      "id": "m0187",
+      "text": "zmvaa znvaa zovaa holds the beeswax sealant note mark m0187.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 109
+    },
+    {
+      "id": "m0157",
+      "text": "zasaa zbsaa zcsaa holds the salt crust note mark m0157.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 110
+    },
+    {
+      "id": "m0217",
+      "text": "zyyaa zzyaa zazaa holds the yarn twist note mark m0217.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-yarn",
+      "relevant_to": [
+        "ufuv-yarn"
+      ],
+      "post": 111
+    },
+    {
+      "id": "m0044",
+      "text": "zzeaa zafaa zbfaa holds the morning briefing mark m0044.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 112
+    },
+    {
+      "id": "m0106",
+      "text": "zdmaa zemaa zfmaa holds the morning briefing mark m0106.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 113
+    },
+    {
+      "id": "m0082",
+      "text": "zjjaa zkjaa zljaa holds the workshop torque mark m0082.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 114
+    },
+    {
+      "id": "m0250",
+      "text": "ztcba zucba zvcba holds the ivory slate mark m0250.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 115
+    },
+    {
+      "id": "m0192",
+      "text": "zbwaa zcwaa zdwaa holds the workshop temperature mark m0192.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 116
+    },
+    {
+      "id": "m0036",
+      "text": "zbeaa zceaa zdeaa holds the morning briefing mark m0036.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 117
+    },
+    {
+      "id": "m0202",
+      "text": "zfxaa zgxaa zhxaa holds the beeswax sealant temperature mark m0202.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 118
+    },
+    {
+      "id": "m0118",
+      "text": "znnaa zonaa zpnaa holds the morning briefing mark m0118.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 119
+    },
+    {
+      "id": "m0133",
+      "text": "zgpaa zhpaa zipaa holds the morning briefing mark m0133.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 120
+    },
+    {
+      "id": "m0109",
+      "text": "zmmaa znmaa zomaa holds the morning briefing mark m0109.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 121
+    },
+    {
+      "id": "m0201",
+      "text": "zcxaa zdxaa zexaa holds the morning briefing mark m0201.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 122
+    },
+    {
+      "id": "m0069",
+      "text": "zwhaa zxhaa zyhaa holds the morning briefing mark m0069.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 123
+    },
+    {
+      "id": "m0045",
+      "text": "zcfaa zdfaa zefaa holds the morning briefing mark m0045.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 124
+    },
+    {
+      "id": "m0097",
+      "text": "zclaa zdlaa zelaa holds the loom shuttle note mark m0097.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 125
+    },
+    {
+      "id": "m0089",
+      "text": "zekaa zfkaa zgkaa holds the loom shuttle tension mark m0089.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 126
+    },
+    {
+      "id": "m0173",
+      "text": "zwtaa zxtaa zytaa holds the morning briefing mark m0173.",
+      "issue": "ufuv-reed",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-reed",
+      "relevant_to": [],
+      "post": 127
+    },
+    {
+      "id": "m0001",
+      "text": "zaaaa zbaaa zcaaa holds the kiln damper schedule mark m0001.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 128
+    },
+    {
+      "id": "m0181",
+      "text": "zuuaa zvuaa zwuaa holds the beeswax sealant temperature mark m0181.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 129
+    },
+    {
+      "id": "m0163",
+      "text": "zssaa ztsaa zusaa holds the salt crust thickness mark m0163.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 130
+    },
+    {
+      "id": "m0071",
+      "text": "zciaa zdiaa zeiaa holds the morning briefing mark m0071.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 131
+    },
+    {
+      "id": "m0214",
+      "text": "zpyaa zqyaa zryaa holds the yarn twist note mark m0214.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-yarn",
+      "relevant_to": [
+        "ufuv-yarn"
+      ],
+      "post": 132
+    },
+    {
+      "id": "m0153",
+      "text": "zoraa zpraa zqraa holds the salt crust note mark m0153.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 133
+    },
+    {
+      "id": "m0086",
+      "text": "zvjaa zwjaa zxjaa holds the loom shuttle note mark m0086.",
+      "issue": "ufuv-loom",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 134
+    },
+    {
+      "id": "m0197",
+      "text": "zqwaa zrwaa zswaa holds the morning briefing mark m0197.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 135
+    },
+    {
+      "id": "m0095",
+      "text": "zwkaa zxkaa zykaa holds the loom shuttle note mark m0095.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 136
+    },
+    {
+      "id": "m0093",
+      "text": "zqkaa zrkaa zskaa holds the loom shuttle tension mark m0093.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 137
+    },
+    {
+      "id": "m0156",
+      "text": "zxraa zyraa zzraa holds the salt crust note mark m0156.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 138
+    },
+    {
+      "id": "m0172",
+      "text": "zttaa zutaa zvtaa holds the reed flutter note mark m0172.",
+      "issue": "ufuv-reed",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-reed",
+      "relevant_to": [
+        "ufuv-reed"
+      ],
+      "post": 139
+    },
+    {
+      "id": "m0101",
+      "text": "zolaa zplaa zqlaa holds the pigment viscosity ledger mark m0101.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-ink",
+      "relevant_to": [
+        "ufuv-ink"
+      ],
+      "post": 140
+    },
+    {
+      "id": "m0077",
+      "text": "zuiaa zviaa zwiaa holds the morning briefing mark m0077.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 141
+    },
+    {
+      "id": "m0174",
+      "text": "zztaa zauaa zbuaa holds the reed flutter margin mark m0174.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-reed",
+      "relevant_to": [
+        "ufuv-reed"
+      ],
+      "post": 142
+    },
+    {
+      "id": "m0032",
+      "text": "zpdaa zqdaa zrdaa holds the morning briefing mark m0032.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 143
+    },
+    {
+      "id": "m0025",
+      "text": "zucaa zvcaa zwcaa holds the morning briefing mark m0025.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 144
+    },
+    {
+      "id": "m0138",
+      "text": "zvpaa zwpaa zxpaa holds the morning briefing mark m0138.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 145
+    },
+    {
+      "id": "m0018",
+      "text": "zzbaa zacaa zbcaa holds the workshop schedule mark m0018.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 146
+    },
+    {
+      "id": "m0188",
+      "text": "zpvaa zqvaa zrvaa holds the beeswax sealant note mark m0188.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 147
+    },
+    {
+      "id": "m0216",
+      "text": "zvyaa zwyaa zxyaa holds the yarn twist note mark m0216.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-yarn",
+      "relevant_to": [
+        "ufuv-yarn"
+      ],
+      "post": 148
+    },
+    {
+      "id": "m0107",
+      "text": "zgmaa zhmaa zimaa holds the morning briefing mark m0107.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 149
+    },
+    {
+      "id": "m0160",
+      "text": "zjsaa zksaa zlsaa holds the workshop thickness mark m0160.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-salt",
+      "relevant_to": [],
+      "post": 150
+    },
+    {
+      "id": "m0149",
+      "text": "zcraa zdraa zeraa holds the salt crust thickness mark m0149.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 151
+    },
+    {
+      "id": "m0184",
+      "text": "zdvaa zevaa zfvaa holds the beeswax sealant note mark m0184.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 152
+    },
+    {
+      "id": "m0115",
+      "text": "zenaa zfnaa zgnaa holds the morning briefing mark m0115.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 153
+    },
+    {
+      "id": "m0146",
+      "text": "ztqaa zuqaa zvqaa holds the workshop ledger mark m0146.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 154
+    },
+    {
+      "id": "m0223",
+      "text": "zqzaa zrzaa zszaa holds the yarn twist density mark m0223.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-yarn",
+      "relevant_to": [
+        "ufuv-yarn"
+      ],
+      "post": 155
+    },
+    {
+      "id": "m0058",
+      "text": "zpgaa zqgaa zrgaa holds the valve gasket torque mark m0058.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-valve",
+      "relevant_to": [
+        "ufuv-valve"
+      ],
+      "post": 156
+    },
+    {
+      "id": "m0185",
+      "text": "zgvaa zhvaa zivaa holds the beeswax sealant note mark m0185.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 157
+    },
+    {
+      "id": "m0065",
+      "text": "zkhaa zlhaa zmhaa holds the workshop torque mark m0065.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 158
+    },
+    {
+      "id": "m0091",
+      "text": "zkkaa zlkaa zmkaa holds the loom shuttle tension mark m0091.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 159
+    },
+    {
+      "id": "m0241",
+      "text": "zsbba ztbba zubba holds the granite linen mark m0241.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 160
+    },
+    {
+      "id": "m0110",
+      "text": "zpmaa zqmaa zrmaa holds the morning briefing mark m0110.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 161
+    },
+    {
+      "id": "m0132",
+      "text": "zdpaa zepaa zfpaa holds the morning briefing mark m0132.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 162
+    },
+    {
+      "id": "m0170",
+      "text": "zntaa zotaa zptaa holds the reed flutter margin mark m0170.",
+      "issue": "ufuv-reed",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-reed",
+      "relevant_to": [
+        "ufuv-reed"
+      ],
+      "post": 163
+    },
+    {
+      "id": "m0210",
+      "text": "zdyaa zeyaa zfyaa holds the workshop temperature mark m0210.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 164
+    },
+    {
+      "id": "m0167",
+      "text": "zetaa zftaa zgtaa holds the workshop thickness mark m0167.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-salt",
+      "relevant_to": [],
+      "post": 165
+    },
+    {
+      "id": "m0015",
+      "text": "zqbaa zrbaa zsbaa holds the workshop schedule mark m0015.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 166
+    },
+    {
+      "id": "m0085",
+      "text": "zsjaa ztjaa zujaa holds the loom shuttle note mark m0085.",
+      "issue": "ufuv-loom",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 167
+    },
+    {
+      "id": "m0168",
+      "text": "zhtaa zitaa zjtaa holds the workshop thickness mark m0168.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-salt",
+      "relevant_to": [],
+      "post": 168
+    },
+    {
+      "id": "m0225",
+      "text": "zwzaa zxzaa zyzaa holds the yarn twist note mark m0225.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-yarn",
+      "relevant_to": [
+        "ufuv-yarn"
+      ],
+      "post": 169
+    },
+    {
+      "id": "m0033",
+      "text": "zsdaa ztdaa zudaa holds the morning briefing mark m0033.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 170
+    },
+    {
+      "id": "m0186",
+      "text": "zjvaa zkvaa zlvaa holds the beeswax sealant note mark m0186.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 171
+    },
+    {
+      "id": "m0090",
+      "text": "zhkaa zikaa zjkaa holds the loom shuttle tension mark m0090.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 172
+    },
+    {
+      "id": "m0155",
+      "text": "zuraa zvraa zwraa holds the salt crust note mark m0155.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 173
+    },
+    {
+      "id": "m0027",
+      "text": "zadaa zbdaa zcdaa holds the morning briefing mark m0027.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 174
+    },
+    {
+      "id": "m0135",
+      "text": "zmpaa znpaa zopaa holds the morning briefing mark m0135.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 175
+    },
+    {
+      "id": "m0179",
+      "text": "zouaa zpuaa zquaa holds the beeswax sealant temperature mark m0179.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 176
+    },
+    {
+      "id": "m0104",
+      "text": "zxlaa zylaa zzlaa holds the workshop ledger mark m0104.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 177
+    },
+    {
+      "id": "m0193",
+      "text": "zewaa zfwaa zgwaa holds the morning briefing mark m0193.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 178
+    },
+    {
+      "id": "m0130",
+      "text": "zxoaa zyoaa zzoaa holds the morning briefing mark m0130.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 179
+    },
+    {
+      "id": "m0242",
+      "text": "zvbba zwbba zxbba holds the marble cobalt mark m0242.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 180
+    },
+    {
+      "id": "m0203",
+      "text": "zixaa zjxaa zkxaa holds the beeswax sealant temperature mark m0203.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 181
+    },
+    {
+      "id": "m0043",
+      "text": "zweaa zxeaa zyeaa holds the morning briefing mark m0043.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 182
+    },
+    {
+      "id": "m0127",
+      "text": "zooaa zpoaa zqoaa holds the morning briefing mark m0127.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 183
+    },
+    {
+      "id": "m0152",
+      "text": "zlraa zmraa znraa holds the salt crust thickness mark m0152.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 184
+    },
+    {
+      "id": "m0166",
+      "text": "zbtaa zctaa zdtaa holds the salt crust note mark m0166.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 185
+    },
+    {
+      "id": "m0005",
+      "text": "zmaaa znaaa zoaaa holds the kiln damper schedule mark m0005.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 186
+    },
+    {
+      "id": "m0123",
+      "text": "zcoaa zdoaa zeoaa holds the morning briefing mark m0123.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 187
+    },
+    {
+      "id": "m0060",
+      "text": "zvgaa zwgaa zxgaa holds the valve gasket torque mark m0060.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-valve",
+      "relevant_to": [
+        "ufuv-valve"
+      ],
+      "post": 188
+    },
+    {
+      "id": "m0112",
+      "text": "zvmaa zwmaa zxmaa holds the morning briefing mark m0112.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 189
+    },
+    {
+      "id": "m0054",
+      "text": "zdgaa zegaa zfgaa holds the workshop schedule mark m0054.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 190
+    },
+    {
+      "id": "m0219",
+      "text": "zezaa zfzaa zgzaa holds the workshop density mark m0219.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-yarn",
+      "relevant_to": [],
+      "post": 191
+    },
+    {
+      "id": "m0028",
+      "text": "zddaa zedaa zfdaa holds the morning briefing mark m0028.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 192
+    },
+    {
+      "id": "m0148",
+      "text": "zzqaa zaraa zbraa holds the salt crust thickness mark m0148.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 193
+    },
+    {
+      "id": "m0012",
+      "text": "zhbaa zibaa zjbaa holds the kiln damper note mark m0012.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 194
+    },
+    {
+      "id": "m0068",
+      "text": "zthaa zuhaa zvhaa holds the morning briefing mark m0068.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 195
+    },
+    {
+      "id": "m0073",
+      "text": "ziiaa zjiaa zkiaa holds the morning briefing mark m0073.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 196
+    },
+    {
+      "id": "m0151",
+      "text": "ziraa zjraa zkraa holds the salt crust thickness mark m0151.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 197
+    },
+    {
+      "id": "m0051",
+      "text": "zufaa zvfaa zwfaa holds the kiln damper note mark m0051.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 198
+    },
+    {
+      "id": "m0034",
+      "text": "zvdaa zwdaa zxdaa holds the morning briefing mark m0034.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 199
+    },
+    {
+      "id": "m0125",
+      "text": "zioaa zjoaa zkoaa holds the morning briefing mark m0125.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 200
+    },
+    {
+      "id": "m0022",
+      "text": "zlcaa zmcaa zncaa holds the morning briefing mark m0022.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 201
+    },
+    {
+      "id": "m0011",
+      "text": "zebaa zfbaa zgbaa holds the kiln damper note mark m0011.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 202
+    },
+    {
+      "id": "m0094",
+      "text": "ztkaa zukaa zvkaa holds the loom shuttle note mark m0094.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 203
+    },
+    {
+      "id": "m0102",
+      "text": "zrlaa zslaa ztlaa holds the pigment viscosity ledger mark m0102.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-ink",
+      "relevant_to": [
+        "ufuv-ink"
+      ],
+      "post": 204
+    },
+    {
+      "id": "m0233",
+      "text": "zuaba zvaba zwaba holds the quartz copper mark m0233.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 205
+    },
+    {
+      "id": "m0059",
+      "text": "zsgaa ztgaa zugaa holds the valve gasket torque mark m0059.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-valve",
+      "relevant_to": [
+        "ufuv-valve"
+      ],
+      "post": 206
+    },
+    {
+      "id": "m0124",
+      "text": "zfoaa zgoaa zhoaa holds the morning briefing mark m0124.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 207
+    },
+    {
+      "id": "m0134",
+      "text": "zjpaa zkpaa zlpaa holds the morning briefing mark m0134.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 208
+    },
+    {
+      "id": "m0056",
+      "text": "zjgaa zkgaa zlgaa holds the workshop schedule mark m0056.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 209
+    },
+    {
+      "id": "m0080",
+      "text": "zdjaa zejaa zfjaa holds the valve gasket torque mark m0080.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-valve",
+      "relevant_to": [
+        "ufuv-valve"
+      ],
+      "post": 210
+    },
+    {
+      "id": "m0019",
+      "text": "zccaa zdcaa zecaa holds the morning briefing mark m0019.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 211
+    },
+    {
+      "id": "m0008",
+      "text": "zvaaa zwaaa zxaaa holds the kiln damper note mark m0008.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 212
+    },
+    {
+      "id": "m0031",
+      "text": "zmdaa zndaa zodaa holds the morning briefing mark m0031.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 213
+    },
+    {
+      "id": "m0238",
+      "text": "zjbba zkbba zlbba holds the ivory slate mark m0238.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 214
+    },
+    {
+      "id": "m0063",
+      "text": "zehaa zfhaa zghaa holds the valve gasket note mark m0063.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-valve",
+      "relevant_to": [
+        "ufuv-valve"
+      ],
+      "post": 215
+    },
+    {
+      "id": "m0053",
+      "text": "zagaa zbgaa zcgaa holds the kiln damper note mark m0053.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 216
+    },
+    {
+      "id": "m0222",
+      "text": "znzaa zozaa zpzaa holds the morning briefing mark m0222.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-yarn",
+      "relevant_to": [],
+      "post": 217
+    },
+    {
+      "id": "m0087",
+      "text": "zyjaa zzjaa zakaa holds the workshop tension mark m0087.",
+      "issue": "ufuv-loom",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-loom",
+      "relevant_to": [],
+      "post": 218
+    },
+    {
+      "id": "m0215",
+      "text": "zsyaa ztyaa zuyaa holds the yarn twist note mark m0215.",
+      "issue": "ufuv-yarn",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-yarn",
+      "relevant_to": [
+        "ufuv-yarn"
+      ],
+      "post": 219
+    },
+    {
+      "id": "m0237",
+      "text": "zgbba zhbba zibba holds the cedar bronze mark m0237.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 220
+    },
+    {
+      "id": "m0117",
+      "text": "zknaa zlnaa zmnaa holds the morning briefing mark m0117.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 221
+    },
+    {
+      "id": "m0083",
+      "text": "zmjaa znjaa zojaa holds the loom shuttle tension mark m0083.",
+      "issue": "ufuv-loom",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 222
+    },
+    {
+      "id": "m0081",
+      "text": "zgjaa zhjaa zijaa holds the valve gasket note mark m0081.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-valve",
+      "relevant_to": [
+        "ufuv-valve"
+      ],
+      "post": 223
+    },
+    {
+      "id": "m0232",
+      "text": "zraba zsaba ztaba holds the ivory slate mark m0232.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 224
+    },
+    {
+      "id": "m0129",
+      "text": "zuoaa zvoaa zwoaa holds the morning briefing mark m0129.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 225
+    },
+    {
+      "id": "m0165",
+      "text": "zysaa zzsaa zataa holds the salt crust note mark m0165.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 226
+    },
+    {
+      "id": "m0084",
+      "text": "zpjaa zqjaa zrjaa holds the loom shuttle tension mark m0084.",
+      "issue": "ufuv-loom",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-loom",
+      "relevant_to": [
+        "ufuv-loom"
+      ],
+      "post": 227
+    },
+    {
+      "id": "m0049",
+      "text": "zofaa zpfaa zqfaa holds the kiln damper schedule mark m0049.",
+      "issue": null,
+      "role": "related",
+      "tier": "A",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 228
+    },
+    {
+      "id": "m0195",
+      "text": "zkwaa zlwaa zmwaa holds the morning briefing mark m0195.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 229
+    },
+    {
+      "id": "m0116",
+      "text": "zhnaa zinaa zjnaa holds the morning briefing mark m0116.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 230
+    },
+    {
+      "id": "m0046",
+      "text": "zffaa zgfaa zhfaa holds the morning briefing mark m0046.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 231
+    },
+    {
+      "id": "m0030",
+      "text": "zjdaa zkdaa zldaa holds the morning briefing mark m0030.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 232
+    },
+    {
+      "id": "m0131",
+      "text": "zapaa zbpaa zcpaa holds the morning briefing mark m0131.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 233
+    },
+    {
+      "id": "m0180",
+      "text": "zruaa zsuaa ztuaa holds the beeswax sealant temperature mark m0180.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 234
+    },
+    {
+      "id": "m0175",
+      "text": "zcuaa zduaa zeuaa holds the beeswax sealant temperature mark m0175.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "A",
+      "about": "ufuv-wax",
+      "relevant_to": [
+        "ufuv-wax"
+      ],
+      "post": 235
+    },
+    {
+      "id": "m0190",
+      "text": "zvvaa zwvaa zxvaa holds the workshop temperature mark m0190.",
+      "issue": "ufuv-wax",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 236
+    },
+    {
+      "id": "m0240",
+      "text": "zpbba zqbba zrbba holds the birch amber mark m0240.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 237
+    },
+    {
+      "id": "m0066",
+      "text": "znhaa zohaa zphaa holds the morning briefing mark m0066.",
+      "issue": "ufuv-valve",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-valve",
+      "relevant_to": [],
+      "post": 238
+    },
+    {
+      "id": "m0136",
+      "text": "zppaa zqpaa zrpaa holds the morning briefing mark m0136.",
+      "issue": "ufuv-ink",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-ink",
+      "relevant_to": [],
+      "post": 239
+    },
+    {
+      "id": "m0014",
+      "text": "znbaa zobaa zpbaa holds the kiln damper note mark m0014.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 240
+    },
+    {
+      "id": "m0035",
+      "text": "zydaa zzdaa zaeaa holds the morning briefing mark m0035.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 241
+    },
+    {
+      "id": "m0209",
+      "text": "zayaa zbyaa zcyaa holds the workshop temperature mark m0209.",
+      "issue": null,
+      "role": "related",
+      "tier": "C",
+      "about": "ufuv-wax",
+      "relevant_to": [],
+      "post": 242
+    },
+    {
+      "id": "m0158",
+      "text": "zdsaa zesaa zfsaa holds the salt crust note mark m0158.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "B",
+      "about": "ufuv-salt",
+      "relevant_to": [
+        "ufuv-salt"
+      ],
+      "post": 243
+    },
+    {
+      "id": "m0159",
+      "text": "zgsaa zhsaa zisaa holds the workshop thickness mark m0159.",
+      "issue": "ufuv-salt",
+      "role": "own",
+      "tier": "C",
+      "about": "ufuv-salt",
+      "relevant_to": [],
+      "post": 244
+    },
+    {
+      "id": "m0050",
+      "text": "zrfaa zsfaa ztfaa holds the kiln damper note mark m0050.",
+      "issue": null,
+      "role": "related",
+      "tier": "B",
+      "about": "ufuv-kiln",
+      "relevant_to": [
+        "ufuv-kiln"
+      ],
+      "post": 245
+    },
+    {
+      "id": "m0248",
+      "text": "zncba zocba zpcba holds the marble cobalt mark m0248.",
+      "issue": null,
+      "role": "background",
+      "tier": "background",
+      "about": null,
+      "relevant_to": [],
+      "post": 246
+    },
+    {
+      "id": "m0042",
+      "text": "zteaa zueaa zveaa holds the morning briefing mark m0042.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 247
+    },
+    {
+      "id": "m0037",
+      "text": "zeeaa zfeaa zgeaa holds the morning briefing mark m0037.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 248
+    },
+    {
+      "id": "m0023",
+      "text": "zocaa zpcaa zqcaa holds the morning briefing mark m0023.",
+      "issue": "ufuv-kiln",
+      "role": "own",
+      "tier": "off",
+      "about": "ufuv-kiln",
+      "relevant_to": [],
+      "post": 249
+    }
+  ]
+}
