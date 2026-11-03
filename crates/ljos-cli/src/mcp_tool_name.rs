@@ -33,7 +33,7 @@ fn alan() {
     put(&user_rules::rules_path().unwrap(), ALAN);
 }
 
-/// Cursor names an HTTP MCP tool `MCP:<tool>`
+/// the editor harness names an HTTP MCP tool `MCP:<tool>`
 /// on preToolUse and sends no server field. A GitHub comment that names
 /// @ocaisa is the same write as `mcp__github__add_issue_comment`.
 #[test]

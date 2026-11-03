@@ -1,9 +1,9 @@
-:description: The pack only helps a Grok session if it reaches the model.
+:description: The pack only helps a build harness session if it reaches the model.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-The pack only helps a Grok session if it reaches the model.
+The pack only helps a build harness session if it reaches the model.
 
-Grok discards ``UserPromptSubmit`` stdout. It passes ``PostToolUse``
+The build harness discards ``UserPromptSubmit`` stdout. It passes ``PostToolUse``
 ``additionalContext`` to the model after the first tool. ``ljos hook``
 searches on the prompt, keeps the text, and emits it once on
 ``PostToolUse``. With ``LJOS_TRACK_WORK=on``, a conversation with no issue is
@@ -21,22 +21,22 @@ Install
 
 .. code:: console
 
-   $ ljos onboard --harness grok
+   $ ljos onboard --harness NAME
 
-That writes ``~/.grok/hooks/ljos.json`` once, naming ``ljos`` by the absolute
-path beside ``ljos-mcp``, so a Grok started outside a login shell still finds
+That writes ``the build harness hooks file`` once, naming ``ljos`` by the absolute
+path beside ``ljos-mcp``, so a build harness started outside a login shell still finds
 it. Then
 ``/hooks`` then ``r`` **once**. Later ``cargo binstall ljos`` is live on the
-next event. Name ``ljos-mcp`` on PATH in ``~/.grok/config.toml``.
-``ljos onboard --harness grok`` bumps ``LJOS_MCP_GENERATION`` in that table
-when the crate version moved, so Grok's config watcher respawns the
+next event. Name ``ljos-mcp`` on PATH in ``the build harness config``.
+``ljos onboard --harness NAME`` bumps ``LJOS_MCP_GENERATION`` in that table
+when the crate version moved, so the build harness's config watcher respawns the
 server; a session restart is not required.
 
 Why these events
 ================
 
 ====================== ================================================================================================================================================= ====================================================
-Event                  What ``ljos hook`` does                                                                                                                           What Grok does with stdout
+Event                  What ``ljos hook`` does                                                                                                                           What hook does with stdout
 ====================== ================================================================================================================================================= ====================================================
 ``UserPromptSubmit``   searches, keeps the text                                                                                                                          discarded
 ``PostToolUse``        emits the kept text once; with no issue open, the first result says to file and sit                                                               passed to the model after the tool
@@ -47,30 +47,30 @@ Event                  What ``ljos hook`` does                                  
 ``SessionEnd``         fires injected memories                                                                                                                           ignored
 ====================== ================================================================================================================================================= ====================================================
 
-Grok's hook dispatcher, ``the harness hook dispatcher``, hands a hook's
+The build harness's hook dispatcher, ``the harness hook dispatcher``, hands a hook's
 added context to the model after the three tool events, ``Stop`` and
 ``SubagentStop``. It drops it after a prompt or at the start of a session.
 
 The frozen file is
-`crates/ljos-cli/assets/grok/ljos.json <https://github.com/leidarljos/ljos/blob/main/crates/ljos-cli/assets/grok/ljos.json>`__.
+the frozen hook file.
 Its ``{ljos}`` is filled in at onboard. ``PreToolUse`` gets 10 seconds, the
 TCB check's budget, as do the two tool-result events; the prompt, ``Stop``
-and ``SubagentStop`` get 15, and ``PreCompact`` and ``SessionEnd`` 5, Grok's
+and ``SubagentStop`` get 15, and ``PreCompact`` and ``SessionEnd`` 5, the build harness's
 default.
 
-Grok's stdin is camelCase (``hookEventName``, ``sessionId``, ``toolInput``), and
+The build harness's stdin is camelCase (``hookEventName``, ``sessionId``, ``toolInput``), and
 ``ljos hook`` reads it as the snake\ :sub:`case` fields. A rule that fires is its
 warning in ``hookSpecificOutput`` ``additionalContext``, with no ``decision``, so
-Grok Build runs the call and shows the warning.
+The build harness runs the call and shows the warning.
 
 A panel member is a supervised child
 ====================================
 
 A child that exits is classified before it is started again.
-``ljos supervise NAME --harness grok --exit crash --at SECONDS`` prints
+``ljos supervise NAME --harness NAME --exit crash --at SECONDS`` prints
 ``restart``, ``stop`` or ``give-up``, and on a restart the herdr line
 ``herdr agent start persona-NAME --no-focus --cwd HOME -- sh SCRIPT``.
-The same command with ``--harness claude`` or ``--harness codex`` covers the
+The same command with ``--harness NAME`` or ``--harness NAME`` covers the
 other runners: the policy is one, and only the runner name changes. ``permanent`` restarts however it exited, ``transient`` only on a
 crash, ``temporary`` never. Three restarts inside sixty seconds give up.
 The command prints the decision. It does not start the pane.
@@ -88,15 +88,15 @@ Smoke
 An allow prints nothing unless a prompt has already kept pack text or a rule warned, as the force push does.
 The bypass log keeps that label.
 A TCB rule is a warning too; the call runs.
-Under the person's ``block-on-warning``, policyd's block is a top-level ``decision`` of ``deny`` beside ``hookSpecificOutput``, and Grok Build does not run the call.
+Under the person's ``block-on-warning``, policyd's block is a top-level ``decision`` of ``deny`` beside ``hookSpecificOutput``, and the build harness does not run the call.
 
-Personas as Grok agents
+Personas as the build harness agents
 =======================
 
-Grok spawns a subagent by its agent definition, a Markdown file with YAML
-front matter in ``~/.grok/agents``. ``ljos onboard --harness grok`` and
-``ljos agents --harness grok`` write each persona there as ``ljos-NAME.md``.
-Grok Build's own parser, ``AgentDefinition::parse`` in
+The build harness spawns a subagent by its agent definition, a Markdown file with YAML
+front matter in ``the build harness agents directory``. ``ljos onboard --harness NAME`` and
+``ljos agents --harness NAME`` write each persona there as ``ljos-NAME.md``.
+The build harness's own parser, ``AgentDefinition::parse`` in
 ``the harness agent config``, accepts each file. Its front matter sets
 ``capabilityMode: execute``: it reads and runs commands and has no edit
 tool. The persona runs ``ljos brief NAME ISSUE``, casts one ballot before
@@ -105,8 +105,8 @@ call a persona, with ``subagent_type`` ``ljos-NAME`` and the issue id as its
 prompt; the main agent then runs ``ljos consensus ISSUE``.
 
 On a prompt that asks which answer is right, the seat opens a panel
-itself and starts its members with the table's ``headless`` argv. Grok's is
-``grok --prompt-file ... --yolo --max-turns 6 --effort low --disallowed-tools Agent --cwd ...``.
+itself and starts its members with the table's ``headless`` argv.
+``ljos onboard --example`` prints that argv.
 
 Status line
 ===========
@@ -123,14 +123,7 @@ claims due; each session's row is cached for fifteen seconds.
 The runners file
 ================
 
-.. code:: toml
-
-   [[harness]]
-   name = "grok"
-   config = "~/.grok/config.toml"
-   marker = "[mcp_servers.ljos]"
-   skills = "~/.config/ljos/skills"
-   hooks = "~/.grok/hooks/ljos.json"
-   agents = "~/.grok/agents"
-   headless = ["grok", "--prompt-file", "{prompt_file}", "--yolo", "--max-turns", "6", "--effort", "low", "--disallowed-tools", "Agent", "--cwd", "{cwd}"]
-   resume = ["grok", "--continue"]
+The runners file has one table for this harness. The table names the
+config path, the marker, the skills directory, the hooks file, the agents
+directory, and the argv that starts a headless run and the argv that
+resumes one. ``ljos onboard --example`` prints the table.

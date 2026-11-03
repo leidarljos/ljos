@@ -2,8 +2,8 @@
 //!
 //! Two seats share packsetd on a free port in a fresh home. The recipient
 //! sets a wake command; a send starts it, and the command reads the
-//! recipient's inbox. Interrupt mail holds a stop in the shape Claude Code
-//! and Cursor send, once. A seat the pack has never heard from is refused
+//! recipient's inbox. Interrupt mail holds a stop in the shape the terminal harness
+//! and the editor harness send, once. A seat the pack has never heard from is refused
 //! with the seat it most likely meant. A second test walks the whole
 //! exchange: group, send, inbox, read, reply, interrupt, and the receipt
 //! `ljos hook --prompt` writes.
@@ -469,7 +469,7 @@ fn receipt_for<'a>(pack: &'a Value, msg: &str) -> Vec<&'a Value> {
 
 /// Two seats on one pack: send, inbox, read, reply, an interrupt, a group,
 /// and the receipt a prompt hook writes. A shell prompt writes it before
-/// the command exits. Cursor holds the note and writes it when the next
+/// the command exits. the editor harness holds the note and writes it when the next
 /// tool result delivers the note, or on Stop when the turn ran no tool.
 #[test]
 fn two_seats_exchange_mail_and_the_prompt_writes_a_receipt() {

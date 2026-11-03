@@ -931,7 +931,7 @@ fn account_anywhere(lower: &str) -> bool {
     lower.contains("seat alfa") || lower.contains("seatalfa")
 }
 
-/// `generated with` and `made with cursor` match only at the start of
+/// `generated with` and `made with the editor harness` match only at the start of
 /// the line, after optional blanks.
 fn phrase_refused(lower: &str) -> bool {
     let rest = lower.trim_start_matches([' ', '\t']);
@@ -1251,7 +1251,7 @@ fn booking_off() -> bool {
 
 fn foreign_session() -> bool {
     // OpenCode's shell sets OPENCODE_SESSION_ID and never calls the plugin's
-    // tool.execute.after, so the git hook is the booker. Claude and Codex
+    // tool.execute.after, so the git hook is the booker. the terminal harness and the command harness
     // book from their own hooks.
     ["CLAUDECODE", "CODEX_THREAD_ID", "CODEX_SESSION_ID"]
         .iter()

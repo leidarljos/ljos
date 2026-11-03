@@ -163,7 +163,7 @@ fn a_large_transcript_and_a_quiet_pack_do_not_hold_the_hook() {
 /// With no policyd to answer, a shell call is allowed inside the guard's
 /// wait and never told deny or ask: when the binary is missing, and when
 /// it hangs the way a client does whose daemon is not listening. The
-/// Claude Code, Cursor and relayed Gemini hooks are each checked.
+/// The terminal harness, the editor harness and relayed Gemini hooks are each checked.
 #[cfg(unix)]
 #[test]
 fn a_hook_with_no_policyd_listening_allows_inside_the_guard_wait() {

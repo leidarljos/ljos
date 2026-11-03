@@ -290,11 +290,10 @@ cloud seat git runs only the hooks the repository and the login name.
   `ljos panel ISSUE --cloud` writes one prompt file per persona in that
   directory. Each file names the seat environment (`LJOS_SEAT`,
   `VISSUE_AGENT`, `LJOS_TRACKER_GIT=push`), the slot
-  (`slot: SEAT model=FAMILY`) and the push rules: a ref under `cursor/`
+  (`slot: SEAT model=FAMILY`) and the push rules: a ref under the agent's branch prefix
   stays unpushed, `gh pr create` and `gh pr merge` stay unrun, and a push
   is not forced. The run starts from that file and `ljos brief NAME ISSUE`,
-  and it does not read ballots before it casts. Families rotate grok, opus,
-  codex in persona name order, so the first two seats differ.
+  and it does not read ballots before it casts. Families rotate in persona name order, so the first two seats differ.
   A panel is refused until a playbook is bound (`ljos playbook ISSUE NAME`
   or `ljos sitting ISSUE --playbook NAME`). Both seat the personas whose
   `--about` domains the issue's title or tags name. A persona the
@@ -313,7 +312,7 @@ cloud seat git runs only the hooks the repository and the login name.
   prompt does not treat as a fact; the seat still reads it. A ballot
   and a design candidate carry the harness session that wrote them (the hook's
   session, the MCP call's session, a `*_SESSION_ID` in the environment, else
-  the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`) and a marker, `-`, or
+  the run's `the hosted run id` or `GITHUB_RUN_ID`) and a marker, `-`, or
   `seat` when only the seat named the session; the signature covers both.
   When the process tree matches an earlier cast, the signature also covers
   that voice and the session the environment claimed. A six-field note
@@ -330,7 +329,7 @@ cloud seat git runs only the hooks the repository and the login name.
   `ljos vote ISSUE --for X --confidence C --used DEED --as NAME`. A verdict reported
   in prose is not a ballot.
   A subagent's ballot binds the parent session plus the subagent,
-  `SESSION:AGENT`: the `agent_id` Claude Code's hook sees, or the Codex thread
+  `SESSION:AGENT`: the `agent_id` the terminal harness's hook sees, or the command harness thread
   under its root session. An opencode subagent is a session of its own. A
   seat whose shell names no session, as on a shared box, binds the session
   and the subagent its hook saw run the line, not the seat. That seat is
@@ -357,7 +356,7 @@ cloud seat git runs only the hooks the repository and the login name.
   ballots are advisory. The push check counts seat ballots from another seat. A
   design candidate whose session already read another candidate is flagged.
   `ljos panel run ISSUE` starts each designer and each persona in its own
-  session (`cursor-agent -p` or `claude -p`, `LJOS_PANEL_HARNESS`) and gives a
+  session (the command `LJOS_PANEL_HARNESS` names) and gives a
   designer only the brief. The kind of work sets the dynamics: tag
   the issue `broad` when the panel is a broad audience, and the settle runs
   bounded confidence, so clusters are allowed and reported instead of being
@@ -583,8 +582,8 @@ under equal weights is a count; under calibrated rows it is not.
   warns. A head sha with no CI checks warns, and that warning names the
   sha and a local evidence record
   when one exists for it. A fine-grained token with no Checks permission
-  uses the REST fallback when the rollup read is denied. Every Cursor
-  Bugbot thread wants a resolve or a reply. A commit that carries a
+  uses the REST fallback when the rollup read is denied. Every automated review
+  thread wants a resolve or a reply. A commit that carries a
   machine trailer warns here, and the `pre-push` git hook refuses it. The
   author and committer are checked only when `name` and `email` are set in
   `.ljos/gates.toml` or in the user, repository, or seat `ljos.toml`.

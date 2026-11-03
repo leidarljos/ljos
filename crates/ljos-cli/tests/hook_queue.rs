@@ -65,7 +65,7 @@ else:
     print("{}")
 "#;
 
-/// Whether a Cursor answer is an allow that carries a rule's warning.
+/// Whether an editor harness answer is an allow that carries a rule's warning.
 fn warns(said: &str) -> bool {
     said.contains("\"permission\":\"allow\"") && said.contains("\"user_message\":\"warning: ")
 }
@@ -1038,7 +1038,7 @@ fn a_bad_rules_file_warns_on_the_github_write_from_the_hook() {
     );
 }
 
-/// Cursor names a seat tool `mcp__SERVER__ljos_NAME` on preToolUse.
+/// the editor harness names a seat tool `mcp__SERVER__ljos_NAME` on preToolUse.
 /// An empty answer blocks under a hand-set failClosed, so the hook prints allow.
 #[test]
 fn a_cursor_seat_tool_with_an_mcp_prefix_prints_allow() {

@@ -1,5 +1,5 @@
-//! `ljos hook` hands an `ljos-policyd` 0.6.0 rewrite to Claude Code and
-//! Codex as an updated tool input. The policyd here prints the exact
+//! `ljos hook` hands an `ljos-policyd` 0.6.0 rewrite to the terminal harness and
+//! the command harness as an updated tool input. The policyd here prints the exact
 //! bytes 0.6.0 prints for `python x.py` with a PEP 723 block.
 
 ljos_test_boot::harness!();

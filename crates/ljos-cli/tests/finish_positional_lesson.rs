@@ -1,5 +1,5 @@
 //! Agents write `ljos finish ISSUE "lesson"` without `--lesson`. Real model
-//! runs in Claude Code and the curl harness both did; clap refused it and
+//! runs in the terminal harness and the curl harness both did; clap refused it and
 //! the sitting needed a second try. The positional lesson is now taken.
 
 ljos_test_boot::harness!();

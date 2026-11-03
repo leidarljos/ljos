@@ -39,19 +39,19 @@ the one ``persona_session`` opened.
 Hooks
 =====
 
-Each runner names its own events. Claude registers seven, including
-``PreCompact`` and ``SessionStart``. Codex registers the prompt and
-``PreToolUse``. Grok's frozen file,
-``crates/ljos-cli/assets/grok/ljos.json``, registers eight:
+Each runner names its own events. The terminal harness registers seven, including
+``PreCompact`` and ``SessionStart``. The command harness registers the prompt and
+``PreToolUse``. The build harness's frozen file,
+``the frozen hook file``, registers eight:
 ``UserPromptSubmit``, ``PostToolUse``, ``PostToolUseFailure``, ``PreToolUse``,
-``PreCompact``, ``Stop``, ``SessionEnd`` and ``SubagentStop``. Grok discards
+``PreCompact``, ``Stop``, ``SessionEnd`` and ``SubagentStop``. The build harness discards
 prompt stdout, so the note is held until the first tool result. The
-:doc:`Grok Build <grok-build>` page is that path in full.
+:doc:`the build harness <grok-build>` page is that path in full.
 
 The Model Context Protocol (MCP) server and the Heads-Up Display (HUD)
-use Tokio. ``ljos onboard --harness grok`` bumps
-``LJOS_MCP_GENERATION`` in ``~/.grok/config.toml`` when the crate version
-moved, and Grok respawns the server. The `changelog <https://github.com/leidarljos/ljos/blob/main/CHANGELOG.md>`__ records a prompt
+use Tokio. ``ljos onboard --harness NAME`` bumps
+``LJOS_MCP_GENERATION`` in ``the build harness config`` when the crate version
+moved, and the build harness respawns the server. The `changelog <https://github.com/leidarljos/ljos/blob/main/CHANGELOG.md>`__ records a prompt
 hook median of 38 ms over eight prompts, measured with
 ``scripts/hook-bench.sh``. That is the latency the seat
 has measured.

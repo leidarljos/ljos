@@ -61,24 +61,25 @@ from a config file, can be described once in
 
 ``--dry-run`` reports what would be written.
 
-Codex runs a hook only after you trust it. After ``ljos onboard --harness codex``,
+The command harness runs a hook only after you trust it. After ``ljos onboard --harness NAME``,
 open ``/hooks`` and trust each ljos hook before it runs.
 Trust it again after an upgrade rewrites one. Until then the hook does not run,
-and policyd sees none of Codex's commands. ``ljos doctor`` reports an untrusted hook when
+and policyd sees none of the command harness's commands. ``ljos doctor`` reports an untrusted hook when
 the trust file has no ``trusted_hash``, or is older than the hooks file.
 
 The example carries the runners this seat has carried through one piece
-of work, each in the shape it takes the server: a runner with an ``mcp add`` of its own by that command; ``grok`` and a runner with a TOML config
+of work, each in the shape it takes the server: a runner with an ``mcp add`` of its own by that command; a runner with a TOML config
 by a table appended to it; ``opencode`` and ``omp`` by a JSON pointer set in
 their MCP file; ``hermes`` by its ``mcp add`` with the tool question
-answered. The same verb takes ``cursor`` (the IDE and the ``agent`` CLI share
-``~/.cursor/mcp.json``), ``windsurf``, ``zed``, ``vscode``, ``claude-desktop``,
+answered. The same verb takes the editor harness's name from
+``ljos onboard --example`` (the IDE and the ``agent`` CLI share
+``the editor harness MCP config``), and also ``windsurf``, ``zed``, ``vscode``, ``desktop-runner``,
 ``gemini``, ``amazonq`` and ``kiro``. Copy the tables for the runners on the
 machine into ``harnesses.toml``, then one verb each:
 
 .. code:: console
 
-   $ for h in opencode hermes omp grok; do ljos onboard --harness $h; done
+   $ for h in opencode hermes omp; do ljos onboard --harness $h; done
    $ ljos doctor --all | grep runner
    ok  runner mcp  opencode: ljos registered
    ok  runner skill    opencode: /home/you/.config/opencode/skills/ljos/SKILL.md
@@ -166,7 +167,7 @@ each message it shows. The rest stay unread. The receipt atom's text is
 four lines, ``read ID``, ``by SEAT``, ``at STAMP`` and ``msg ID``. The sender's
 next inbox prints that receipt once, as the message id, the reader and
 the stamp, and a second prompt writes nothing. Shown there is read.
-A shell writes the receipt before the hook exits. Cursor holds the note
+A shell writes the receipt before the hook exits. The editor harness holds the note
 on the prompt and writes the receipt when it is delivered: ``postToolUse``
 puts the note in ``additional_context``, and a turn with no tool puts it
 in ``followup_message`` on ``Stop``.
@@ -182,11 +183,11 @@ The sender does not wait on it and needs to know nothing about the recipient's r
 
 .. code:: console
 
-   $ LJOS_SEAT=claude-review ljos wake --timeout 1800 --command 'cd ~/src/app && flock -n /tmp/claude-review.lock claude -p --resume SESSION "Read your ljos mail and act on it."'
-   $ LJOS_SEAT=codex-ci ljos wake --timeout 1800 --command 'cd ~/src/app && codex exec resume --last "Read your ljos mail and act on it."'
-   $ LJOS_SEAT=cursor-cli ljos wake --timeout 1800 --command 'cd ~/src/app && agent -p --resume=CHAT_ID "Read your ljos mail and act on it."'
-   $ LJOS_SEAT=example-host ljos wake --webhook https://api2.cursor.sh/automations/webhook/ID --key-file ~/.config/ljos/example-host.key
-   $ ljos wake claude-review --fire
+   $ LJOS_SEAT=seat-a ljos wake --timeout 1800 --command 'cd ~/src/app && flock -n /tmp/seat-a.lock runner -p --resume SESSION "Read your ljos mail and act on it."'
+   $ LJOS_SEAT=seat-b ljos wake --timeout 1800 --command 'cd ~/src/app && runner exec resume --last "Read your ljos mail and act on it."'
+   $ LJOS_SEAT=seat-c ljos wake --timeout 1800 --command 'cd ~/src/app && agent -p --resume=CHAT_ID "Read your ljos mail and act on it."'
+   $ LJOS_SEAT=example-host ljos wake --webhook https://example.invalid/webhook/ID --key-file ~/.config/ljos/example-host.key
+   $ ljos wake seat-a --fire
 
 A command runs under ``sh -c`` with ``LJOS_SEAT`` set to the recipient, so ``ljos inbox`` in it reads the right mail.
 With a prefix wake, ``LJOS_SEAT`` is still the run seat that matched the prefix.
@@ -194,7 +195,7 @@ With a prefix wake, ``LJOS_SEAT`` is still the run seat that matched the prefix.
 policyd reads the command when it is set and again on every run.
 A rule that fires is a warning line in the reply and in ``wake.log``, and the command still runs.
 Under the person's ``block-on-warning``, a command policyd blocks does not run, since nobody is there to ask.
-A command is stopped after 30 seconds; ``--timeout S`` changes that, and an agent run such as ``claude -p`` needs a longer one.
+A command is stopped after 30 seconds; ``--timeout S`` changes that, and an agent run such as a resume command needs a longer one.
 Two sends close together start two wakes, so a wake that resumes a session holds a lock (``flock -n``) and leaves a running session to its ``Stop`` hook.
 
 A webhook gets the envelope as JSON: the seat, the sender, the message id, the issue, the interrupt flag, and ``via`` when a prefix matched.
@@ -208,7 +209,7 @@ A wake that fails or runs past its timeout is a line in ``~/.local/state/ljos/ma
 
 A session that is still working needs no wake.
 When it is about to stop, its ``Stop`` hook holds the turn once for unread interrupt mail.
-Claude Code, Codex and Grok Build get ``decision: block`` with the mail as the reason, and Cursor gets a ``followup_message``.
+The terminal, command and build harnesses get ``decision: block`` with the mail as the reason, and the editor harness gets a ``followup_message``.
 Each letter is receipted once it is delivered, so the next stop is not held for it again.
 Plain mail waits for the next prompt or the wake.
 
@@ -254,9 +255,9 @@ A warning is the only thing between a runner and a destructive command.
 Keep backups, protect branches on the forge, and keep a runner where it
 cannot reach what it must not touch.
 
-**Grok Build.** ``ljos onboard --harness grok`` writes
-``~/.grok/hooks/ljos.json``. The hook searches on the prompt, keeps the
-text, and emits it on ``PostToolUse``. The page :doc:`Grok Build <grok-build>`
+**the build harness.** ``ljos onboard --harness NAME`` writes
+``the build harness hooks file``. The hook searches on the prompt, keeps the
+text, and emits it on ``PostToolUse``. The page :doc:`the build harness <grok-build>`
 is the install.
 
 A policy daemon does the same with the argv:
@@ -277,8 +278,8 @@ policyd can answer a command with a fixed one instead of a warning.
 The answer is one line of three tab-separated fields: ``allow``, ``rewrite`` and the new command.
 The first rewrite runs a command through ``uv run``.
 
-The new line runs only when the guard has no warning on it. Claude Code, Codex, Grok Build and
-Cursor's ``preToolUse`` take it through the hook's updated input. Other runners run the old line,
+The new line runs only when the guard has no warning on it. The terminal harness, the command harness, the build harness and
+The editor harness's ``preToolUse`` take it through the hook's updated input. Other runners run the old line,
 with a warning that names the new command. ``ljos policy -- COMMAND``
 prints the answer without running anything, so you can see a rewrite before an agent meets it.
 
@@ -386,7 +387,7 @@ hit it. ``cache_days = 0`` turns it off.
 
 Two or more judges can answer side by side. Each ``[judges.NAME]`` table
 names a judge. ``[route]`` says which judges answer each decision. Here a chat
-model on an OpenAI-compatible endpoint judges the prompt, Jev and that
+model on an compatible endpoint judges the prompt, Jev and that
 model pool their ballots, and the chat model reviews due claims:
 
 .. code:: toml
@@ -424,15 +425,15 @@ runner reasons in a session of its own.
 
 .. code:: console
 
-   $ ljos persona buildengineer --anchor 0.25 --view "Runs production pipelines." --runner grok
+   $ ljos persona buildengineer --anchor 0.25 --view "Runs production pipelines." --runner NAME
    $ ljos vote surf-ab12 --as buildengineer --jev
    buildengineer: Jev leaned A at confidence 0.61, under the 0.80 cut; not cast.
      buildengineer reasons in its own session in herdr pane w1:p2; then `ljos consensus surf-ab12`
 
-The runner is any coding runner the machine runs: Claude Code, Codex, Grok Build, omp, hermes or Antigravity's ``agy``.
-Each runs on whatever model it is set to, and switching one to ``model-b`` on an OpenAI-compatible endpoint changes only the model it reasons with.
+The runner is any coding runner the machine runs: the terminal harness, the command harness, the build harness, omp, hermes or Antigravity's ``agy``.
+Each runs on whatever model it is set to, and switching one to ``model-b`` on an compatible endpoint changes only the model it reasons with.
 It is a ``[[harness]]`` in ``~/.config/ljos/harnesses.toml``.
-Its ``start`` and ``resume`` argv say how it opens a session and how it resumes the latest one in a directory, for example ``resume`` set to ``["grok", "--continue"]``.
+Its ``start`` and ``resume`` argv say how it opens a session and how it resumes the latest one in a directory, for example the ``resume`` argv the harness table names.
 It starts in a pane the person can watch and talk in: a herdr workspace when herdr's server is up, else a window of the tmux session ``ljos-personas``.
 A ``[[tool]]`` the runners file declares is tried before either (see *Open persona panes in another tool*).
 A runner that exits non-zero is resumed in its pane, at most three times a minute.
@@ -487,44 +488,45 @@ terminal multiplexer with a command line takes a table like this:
 A tool that refuses says so in the line ``ljos ask`` prints, with the
 tool's own words, and the next tool is tried.
 
-Wire the seat into Cursor
-=========================
+Wire the seat into the editor harness
+======================================
 
 .. code:: console
 
-   $ ljos onboard --harness cursor
-   ok  cursor mcp  set /mcpServers/ljos in /home/me/.cursor/mcp.json
-   ok  hook    added the seat's hook on beforeShellExecution, preToolUse, beforeMCPExecution, beforeReadFile, beforeSubmitPrompt, postToolUse, postToolUseFailure, preCompact, stop, sessionEnd in /home/me/.cursor/hooks.json
-   ok  skill   wrote /home/me/.cursor/skills/ljos/SKILL.md
-   ok  agents  wrote 5 and removed 0 agent definitions in /home/me/.cursor/agents
+   $ ljos onboard --harness NAME
 
-Cursor's IDE and its ``agent`` command line take the server from the same
-``~/.cursor/mcp.json`` and the hooks from ``~/.cursor/hooks.json``. Cursor
+NAME is the editor harness in ``ljos onboard --example``. The command prints
+one ok line for the MCP entry, the hooks, the skill and the agent
+definitions, and each line names the file it wrote.
+
+The editor harness's IDE and its ``agent`` command line take the server from the same
+``the editor harness MCP config`` and the hooks from ``the editor harness hooks file``. The editor harness
 does not hand a prompt hook's context to the model, so the memories a
-prompt activates arrive with the first tool result instead, as on Grok
+prompt activates arrive with the first tool result instead, as on the build harness
 Build. A shell command that a rule names is allowed, with the rule's
-warning in Cursor's ``user_message``. Cursor runs the Claude hooks itself where
-``ljos onboard --harness claude`` already ran. The events Claude's file
+warning in the editor harness's ``user_message``. The editor harness runs the terminal harness hooks itself where
+``ljos onboard --harness NAME`` already ran. The events the terminal harness's file
 names stay there. ``beforeShellExecution``, ``preToolUse``,
 ``beforeMCPExecution``, ``beforeReadFile`` and ``postToolUseFailure`` are
-still written to ``~/.cursor/hooks.json``. If a hook fails, the command runs. The seat answers
-both files in Cursor's shape.
+still written to ``the editor harness hooks file``. If a hook fails, the command runs. The seat answers
+both files in the editor harness's shape.
 
 Spawn a persona as a subagent
 =============================
 
 .. code:: console
 
-   $ ljos agents --harness grok
-   ok  agents grok wrote 5 and removed 0 agent definitions in /home/me/.grok/agents
+   $ ljos agents --harness NAME
 
-Every persona becomes ``~/.grok/agents/ljos-NAME.md``, and Grok's main agent
+The ok line names the agents directory it wrote.
+
+Every persona becomes ``the build harness agents directory/ljos-NAME.md``, and the build harness's main agent
 can spawn it by name on a decision with ``spawn_subagent`` and
 ``subagent_type`` ``ljos-reviewer``. The persona reads ``ljos brief``, casts one
-ballot before reading the others, notes why, and stops. Grok runs it in
-``capabilityMode: execute``, with commands and no edit tool. Claude Code
-reads the same definitions from ``~/.claude/agents``, and Cursor's copies go
-to ``~/.cursor/agents``; both ignore that mode, and the body tells the
+ballot before reading the others, notes why, and stops. The build harness runs it in
+``capabilityMode: execute``, with commands and no edit tool. The terminal harness
+reads the same definitions from ``the terminal harness agents directory``, and the editor harness's copies go
+to ``the editor harness agents directory``; both ignore that mode, and the body tells the
 persona not to edit. ``onboard`` writes the definitions for a runner whose
 table names ``agents``, and a persona written later refreshes each such
 directory that exists.
@@ -532,7 +534,7 @@ directory that exists.
 Show the seat in the status bar
 ===============================
 
-In ``~/.grok/config.toml``:
+In ``the build harness config``:
 
 .. code:: toml
 
@@ -540,14 +542,14 @@ In ``~/.grok/config.toml``:
    type = "command"
    command = "ljos statusline"
 
-In ``~/.claude/settings.json``:
+In ``the terminal harness settings``:
 
 .. code:: json
 
    {"statusLine": {"type": "command", "command": "ljos statusline"}}
 
-The row reads ``ljos grok · surf-ab12 · 3 due``: the seat, the issue the
-conversation has open, the claims due for review. A session's line is cached
+The row reads the seat, the issue the conversation has open, and the claims due
+for review. A session's line is cached
 for fifteen seconds. A pack that does not answer in 300 ms shows as
 ``pack down``.
 
@@ -844,7 +846,7 @@ Cast a reviewer's ballot from its own run
 =========================================
 
 Each reviewer is its own subagent or run, such as a cloud runner or a CI job, and casts its own ballot rather than reporting a verdict in prose.
-A subagent's ballot binds the parent session plus the subagent, ``SESSION:AGENT``: the ``agent_id`` Claude Code's hook sees, or the Codex thread under its root session.
+A subagent's ballot binds the parent session plus the subagent, ``SESSION:AGENT``: the ``agent_id`` the terminal harness's hook sees, or the command harness thread under its root session.
 An opencode subagent is a session of its own.
 Two subagents of one session count twice, the parent and a subagent count as two, and a subagent that wrote a candidate cannot vote.
 A run on another machine needs ljos and the tracker there.

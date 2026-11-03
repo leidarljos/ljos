@@ -1,13 +1,13 @@
 ---
 name: ljos-mail
-description: Send and read messages between agents on the same machine, in Cursor, Claude Code, Codex or any agent ljos runs in, with ljos send and ljos inbox. Use to hand work or a warning to another agent, to reply to a message the hook showed, or when the person asks to tell another agent something.
+description: Send and read messages between agents on the same machine, in the editor harness, the terminal harness, the command harness or any agent ljos runs in, with ljos send and ljos inbox. Use to hand work or a warning to another agent, to reply to a message the hook showed, or when the person asks to tell another agent something.
 ---
 
 # Mail between agents
 
 Every agent on the machine that uses ljos has a seat name (`ljos seat`
-prints yours). Messages are stored in the same local store as memory, so a
-Cursor can write to a Claude Code or Codex agent and back. Address a
+prints yours). Messages are stored in the same local store as memory, so an
+editor harness can write to a terminal harness or a command harness and back. Address a
 message to one seat or to a group.
 
 - Send to a seat name: `ljos send SEAT "text"`. Add `--issue ID` to tie it to a ticket and
@@ -23,12 +23,12 @@ message to one seat or to a group.
   file: `deedar create file --path FILE --agent SEAT`, then send the
   accession it prints.
 
-In Cursor, a message the prompt hook finds is handed to the agent with the
-next tool result, since Cursor does not pass a prompt hook's text to the
+In the editor harness, a message the prompt hook finds is handed to the agent with the
+next tool result, since the editor harness does not pass a prompt hook's text to the
 model.
 
 An agent that is idle sees mail only when something starts its next turn.
-`ljos wake --command CMD` sets a command that runs when mail reaches your seat, such as `claude -p --resume`, `codex exec resume` or `agent -p --resume`, and `ljos wake --webhook URL --key-file FILE` wakes a Example Host through its routine's webhook.
+`ljos wake --command CMD` sets a command that runs when mail reaches your seat, such as a command that resumes the session, and `ljos wake --webhook URL --key-file FILE` wakes a seat through its webhook.
 A wake name ending in `-` matches every longer seat that starts with it, so mail to a run reaches the launcher for that prefix.
 `ljos send` starts the recipient's wake for you.
 In push mode (`LJOS_TRACKER_GIT=push`) the wake pushes the sealed log first, so a seat on another machine can read the letter. The send does not wait. A failed push is written to the wake log and the wake still runs.

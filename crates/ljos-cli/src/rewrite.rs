@@ -20,8 +20,8 @@ use crate::{HookCall, HookShape, Rule};
 /// one would run the line as written.
 pub const RELAY_VAR: &str = "LJOS_HOOK_RELAY";
 
-/// The tool names a shell call arrives under: Claude Code and Codex
-/// `Bash`, Cursor `Shell`, Grok Build `run_terminal_command`.
+/// The tool names a shell call arrives under: The terminal harness and the command harness
+/// `Bash`, the editor harness `Shell`, the build harness `run_terminal_command`.
 const SHELL_TOOLS: &[&str] = &["Bash", "Shell", "run_terminal_command"];
 
 const POLICYD_REASON: &str = "ljos-policyd rewrote this line";
@@ -272,13 +272,13 @@ fn joined(context: &str, line: &str) -> String {
     }
 }
 
-/// Claude Code, Codex and Grok Build read `hookSpecificOutput.updatedInput`
-/// beside `permissionDecision: allow`; Cursor's `preToolUse` reads
+/// The terminal, command and build harnesses read `hookSpecificOutput.updatedInput`
+/// beside `permissionDecision: allow`; the editor harness's `preToolUse` reads
 /// `updated_input` beside `permission: allow`. Each replaces the whole
 /// input, so every other field the runner sent goes back unchanged.
 fn updated_input(input: &str, call: &HookCall, context: &str, fix: &Rewrite) -> Option<String> {
     let v: Value = serde_json::from_str(input.trim()).ok()?;
-    // Grok Build cut the input short, so it cannot be sent back whole.
+    // the build harness cut the input short, so it cannot be sent back whole.
     if v["toolInputTruncated"].as_bool() == Some(true) {
         return None;
     }
@@ -315,7 +315,7 @@ fn updated_input(input: &str, call: &HookCall, context: &str, fix: &Rewrite) -> 
                 "updatedInput": given,
                 "additionalContext": joined(context, &said),
             });
-            // Codex fails a hook on a field it does not take, and then
+            // the command harness fails a hook on a field it does not take, and then
             // runs the line as written.
             if call.shape != HookShape::DenyOnly {
                 specific["permissionDecisionReason"] = json!(said);
@@ -539,7 +539,7 @@ mod tests {
     }
 
     /// A runner that cannot take a new command runs the original line,
-    /// with a warning that names the new one: Cursor's
+    /// with a warning that names the new one: the editor harness's
     /// `beforeShellExecution`, and every runner behind the relay.
     #[test]
     fn an_accepted_rewrite_is_a_warning_where_input_cannot_change() {

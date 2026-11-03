@@ -720,8 +720,8 @@ fn a_named_call_ignores_ljos_hold_in_the_hook_env() {
 
 /// An unbound `ljos hook` call (a `PreToolUse` payload with no
 /// `conversation_id`, as `force_push_sample` runs) honors `LJOS_HOLD`
-/// even when the hook process inherits `CURSOR_AGENT` or
-/// `CURSOR_CONVERSATION_ID` from an outer shell.
+/// even when the hook process inherits `the runner mark` or
+/// `the conversation id` from an outer shell.
 #[test]
 fn an_unbound_hook_call_with_ljos_hold_honors_the_configured_holder() {
     let home = Box_::new();
@@ -876,7 +876,7 @@ fn a_subagent_writes_under_its_parents_sitting_and_z_does_not() {
     );
 }
 
-/// A Claude Code hook names its conversation by `session_id` and the
+/// A terminal harness hook names its conversation by `session_id` and the
 /// conversation's shells by the stamp in the environment. A subagent's
 /// call carries the parent's `session_id` and an `agent_id`, and passes
 /// on the parent's sitting. A `session_id` that names nobody is refused,
@@ -930,7 +930,7 @@ fn a_claude_subagent_passes_and_a_session_id_that_names_nobody_is_refused() {
         );
     }
 
-    // Claude Task subagent when the shell has no session id stamped:
+    // the terminal harness Task subagent when the shell has no session id stamped:
     // the parent sits under the runner process (comm=python3), and the
     // subagent's merge passes through ancestry.
     let home2 = Box_::new();
@@ -961,7 +961,7 @@ fn a_claude_subagent_passes_and_a_session_id_that_names_nobody_is_refused() {
 
 /// The record a hook keeps of a shell call, for the `ljos` line it runs,
 /// is filed under the session the gate and the ballot read the call as:
-/// a call's `conversation_id`, not its `session_id`, and a Claude
+/// a call's `conversation_id`, not its `session_id`, and a terminal harness
 /// call's `session_id` with its `agent_id`.
 #[test]
 fn a_hooks_call_record_is_filed_under_the_calls_conversation() {
@@ -1098,7 +1098,7 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
     );
 
     // Intermediate Python wrapper under Z's shell that sets
-    // CURSOR_CONVERSATION_ID=X (or removes it, or sets sand-sub) and calls
+    // the conversation id=X (or removes it, or sets sand-sub) and calls
     // ljos git-hook, ljos policy, or git commit (both spawn and os.execve).
     for py_env in [
         format!("e['CURSOR_CONVERSATION_ID'] = '{CONV_X}'"),
@@ -1508,8 +1508,8 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
     let _ = srv2.wait();
 }
 
-/// A shell that carries both `CODEX_THREAD_ID` and
-/// `CURSOR_CONVERSATION_ID` holds under the Codex thread: a Codex thread
+/// A shell that carries both `the command harness thread id` and
+/// `the conversation id` holds under the command harness thread: a command harness thread
 /// names its conversation first. A hook bound to the other id therefore
 /// does not see that sitting.
 #[test]
@@ -2014,7 +2014,7 @@ impl Box_ {
     }
 }
 
-/// A runner that is not stamped (a node daemon, `CURSOR_AGENT` unset)
+/// A runner that is not stamped (a node daemon, `the runner mark` unset)
 /// starts each tool call as `bash -c LINE` with the conversation's id.
 /// Bash execs the last simple command of the line, so `git` is the
 /// runner's child. The sitting conversation's own commit goes through.
@@ -2270,7 +2270,7 @@ fn rv13_a_one_shot_env_prefixed_commit_at_shlvl_2_is_allowed() {
     );
 }
 
-/// A `cursor-agent` runner whose own environment carries `CURSOR_AGENT`
+/// A `the editor command` runner whose own environment carries `the runner mark`
 /// but no conversation id starts `bash -c 'ljos seat'` with X's id. The
 /// seat answers for X, as the payload hook of X's next call does.
 #[test]
@@ -2696,10 +2696,10 @@ fn rv_mcp_call(home: &Box_, pack_url: &str, meta: Option<serde_json::Value>) -> 
     answer
 }
 
-/// RV3. Claude Code's PreToolUse on the MCP tool binds Claude's own call
+/// RV3. the terminal harness's PreToolUse on the MCP tool binds the terminal harness's own call
 /// through `toolUseId`. It must not leave a binding behind that the next
 /// bare call from another client takes, so that client is not seated as
-/// Claude's conversation.
+/// the terminal harness's conversation.
 #[test]
 fn rv3_a_claude_mcp_sitting_leaves_nothing_the_next_bare_call_binds_to() {
     const P: &str = "5c1d6a0e-7b5f-4a43-9d7e-claude000001";
@@ -2725,7 +2725,7 @@ fn rv3_a_claude_mcp_sitting_leaves_nothing_the_next_bare_call_binds_to() {
     );
 }
 
-/// RV4. Two Cursor conversations call `ljos_sitting` on their own
+/// RV4. Two the editor harness conversations call `ljos_sitting` on their own
 /// `ljos-mcp` servers at nearly the same time. A's hook runs, then B's,
 /// then A's call reaches A's server. A's call is not seated as B.
 #[test]
@@ -2749,7 +2749,7 @@ fn rv4_interleaved_bare_mcp_sittings_do_not_swap_conversations() {
     );
 }
 
-/// RV3b. RV3 with the other client's bare call 35 seconds after Claude's,
+/// RV3b. RV3 with the other client's bare call 35 seconds after the terminal harness's,
 /// past the 30-second life the bundle README gives these records.
 #[test]
 fn rv3b_a_claude_mcp_binding_is_gone_after_thirty_seconds() {
@@ -3519,7 +3519,7 @@ fn a_sand_sub_sitting_on_a_ticket_an_ordinary_conversation_holds_files_its_child
     assert_eq!(claims, 2, "{said}");
 }
 
-/// Another process holds `tmux-sock.lock`. A Cursor shell hook on an
+/// Another process holds `tmux-sock.lock`. An editor harness shell hook on an
 /// ordinary line still answers before the runner cuts the hook off.
 #[test]
 fn a_held_tmux_lock_does_not_stall_a_shell_hook() {

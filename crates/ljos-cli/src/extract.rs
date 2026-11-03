@@ -90,8 +90,8 @@ fn texts_of(v: &Value, out: &mut Vec<String>) {
     }
 }
 
-/// The prose of a transcript: JSONL with one message a line (Claude Code,
-/// Codex and most runners), or plain text.
+/// The prose of a transcript: JSONL with one message a line (the terminal harness,
+/// the command harness and most runners), or plain text.
 #[must_use]
 pub fn prose(transcript: &str) -> Vec<String> {
     let mut out = Vec::new();

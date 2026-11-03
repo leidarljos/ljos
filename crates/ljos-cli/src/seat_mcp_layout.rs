@@ -45,7 +45,7 @@ fn the_plugin_launcher_entry_is_a_seat_server() {
     );
 }
 
-/// Claude Code names a tool after the server key with every character
+/// the terminal harness names a tool after the server key with every character
 /// outside `[A-Za-z0-9_-]` replaced by `_`.
 #[test]
 fn a_punctuated_seat_key_matches_its_normalised_tool_name() {
@@ -61,7 +61,7 @@ fn a_punctuated_seat_key_matches_its_normalised_tool_name() {
     );
 }
 
-/// `~/.claude.json` stores per-project history and grows past the read
+/// `the terminal harness config` stores per-project history and grows past the read
 /// cap. The seat key in it still counts.
 #[test]
 fn a_large_claude_json_still_names_the_seat() {
@@ -81,8 +81,8 @@ fn a_large_claude_json_still_names_the_seat() {
     );
 }
 
-/// A Cursor file that does not parse must not hide the seat key in
-/// `~/.claude.json`.
+/// An editor harness file that does not parse must not hide the seat key in
+/// `the terminal harness config`.
 #[test]
 fn a_cursor_file_ljos_cannot_parse_does_not_hide_the_claude_seat() {
     let (_lock, dir) = review_env();
@@ -98,9 +98,9 @@ fn a_cursor_file_ljos_cannot_parse_does_not_hide_the_claude_seat() {
     );
 }
 
-/// Claude Code names a plugin server's tools
+/// the terminal harness names a plugin server's tools
 /// `mcp__plugin_<plugin>_<server>__<tool>`. An install under the home
-/// `.claude` directory is the seat.
+/// `.the terminal harness` directory is the seat.
 #[test]
 fn a_claude_plugin_install_names_the_seat() {
     let (_lock, dir) = review_env();
@@ -128,7 +128,7 @@ fn a_claude_plugin_install_names_the_seat() {
     );
 }
 
-/// `CLAUDE_CONFIG_DIR` is chosen by the process. A `.claude.json` there
+/// The terminal harness config directory is chosen by the process. A config file there
 /// does not name the seat, even when it lists `ljos-mcp`.
 #[test]
 fn claude_config_dir_does_not_name_the_seat() {
@@ -143,7 +143,7 @@ fn claude_config_dir_does_not_name_the_seat() {
     );
 }
 
-/// `CODEX_HOME` is chosen by the process. A `config.toml` there does
+/// The command harness home is chosen by the process. A `config.toml` there does
 /// not name the seat.
 #[test]
 fn codex_home_does_not_name_the_seat() {
@@ -161,7 +161,7 @@ fn codex_home_does_not_name_the_seat() {
     );
 }
 
-/// The home file may name `github` as the seat server. A Cursor payload
+/// The home file may name `github` as the seat server. An editor harness payload
 /// whose `command` is a different binary is still a foreign tool, and
 /// the user rule applies.
 #[test]

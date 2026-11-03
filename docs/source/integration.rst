@@ -79,30 +79,30 @@ when it is not (``crates/ljos-cli/src/persona_session.rs``), the runner
 works in the persona's home as its own seat, and the person's watch-and-talk
 window is that same pane. The direction is more of this same
 system: herdr panes as supervised seats, and policyd warning on writes
-to the seat's own files on any runner. The :doc:`Grok Build <grok-build>` page is the reference
+to the seat's own files on any runner. The :doc:`the build harness <grok-build>` page is the reference
 integration; each runner registers the events its table names.
 
 Deep runner integration
 =======================
 
 ``ljos onboard --harness NAME`` registers the MCP server, the hooks and the
-skill for one runner. ``NAME`` takes ``claude``, ``codex``, ``grok``, ``cursor``,
+skill for one runner. ``NAME`` is a name ``ljos onboard --example`` prints, among them
 ``antigravity``, ``opencode``, ``omp``, ``hermes``, ``copilot``, ``gemini``,
 ``windsurf``, ``factory``, ``kiro``, ``cline``, ``qwen``, ``crush``, ``zed``, ``vscode``,
-``claude-desktop``, ``amazonq``, ``aider`` (conventions file, advisory), ``auggie``, ``amp``, ``goose``, ``openhands``,
+``desktop-runner``, ``amazonq``, ``aider`` (conventions file, advisory), ``auggie``, ``amp``, ``goose``, ``openhands``,
 ``continue``, ``roo``, ``kilo``, ``example-host`` or ``shell``. The contract is the
 same everywhere and the envelope differs:
 
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
 | Runner                   | Memory injection                                                                                     | Shell check                                                                                | Warning shows as                                        | Notes                                                                                                |
 +==========================+======================================================================================================+============================================================================================+=========================================================+======================================================================================================+
-| Claude Code              | ``UserPromptSubmit`` context, skills, ``ljos://protocol``                                            | ``PreToolUse``, a rule warns                                                               | ``additionalContext``                                   | plugin ``ljos@leidarljos``; sitting and finish commands are in the repo                              |
+| one harness              | ``UserPromptSubmit`` context, skills, ``ljos://protocol``                                            | ``PreToolUse``, a rule warns                                                               | ``additionalContext``                                   | plugin ``ljos@leidarljos``; sitting and finish commands are in the repo                              |
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
-| Codex                    | hooks plus MCP server list                                                                           | ``PreToolUse``, a rule warns                                                               | ``additionalContext``                                   | prompt and ``PreToolUse``; ``shell_command`` payloads carry the command and session ``cwd`` only, so |
+| shell                    | hooks plus MCP server list                                                                           | ``PreToolUse``, a rule warns                                                               | ``additionalContext``                                   | prompt and ``PreToolUse``; ``shell_command`` payloads carry the command and session ``cwd`` only, so |
 |                          |                                                                                                      |                                                                                            |                                                         | ljos cannot read a ``workdir`` override                                                              |
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
-| Grok Build               | ``PostToolUse`` ``additionalContext`` after the first tool (``UserPromptSubmit`` stdout is           | ``PreToolUse``, 10 seconds, the Trusted Computing Base (TCB) check's budget                | ``additionalContext``                                   | frozen file ``crates/ljos-cli/assets/grok/ljos.json``; ``LJOS_MCP_GENERATION`` bump respawns the     |
-|                          | discarded, so ``ljos hook`` keeps the text and emits it once)                                        |                                                                                            |                                                         | server; the full page is Grok Build                                                                  |
+| build hook               | ``PostToolUse`` ``additionalContext`` after the first tool (``UserPromptSubmit`` stdout is           | ``PreToolUse``, 10 seconds, the Trusted Computing Base (TCB) check's budget                | ``additionalContext``                                   | frozen file ``the frozen hook file                 ``; ``LJOS_MCP_GENERATION`` bump respawns the     |
+|                          | discarded, so ``ljos hook`` keeps the text and emits it once)                                        |                                                                                            |                                                         | server; the full page is build hook                                                                  |
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
 | Antigravity (``agy``)    | hooks plus skill                                                                                     | ``PreToolUse``, a rule warns                                                               | the ``reason`` of ``decision: allow``                   | pipeline stages arrive separated by a ``\|`` word so a download and the shell it feeds are judged    |
 |                          |                                                                                                      |                                                                                            |                                                         | together                                                                                             |
@@ -113,7 +113,7 @@ same everywhere and the envelope differs:
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
 | hermes                   | MCP server list plus skill                                                                           | advisory: onboard registers no hook                                                        | none: no hook                                           | nothing leaves the machine unless a remote judge is turned on                                        |
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
-| Cursor                   | prompt note on the first tool result; skill; ``~/.cursor/agents``                                    | ``beforeShellExecution`` and ``preToolUse``; a missing policyd allows                      | ``user_message`` and ``agent_message`` beside ``allow`` | the IDE and the ``agent`` CLI share ``~/.cursor/mcp.json`` and ``~/.cursor/hooks.json``              |
+| editor                   | prompt note on the first tool result; skill; ``editor agent dir``                                    | ``beforeShellExecution`` and ``preToolUse``; a missing policyd allows                      | ``user_message`` and ``agent_message`` beside ``allow`` | the IDE and the ``agent`` CLI share ``editor mcp config `` and ``editor hooks file   ``              |
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
 | GitHub Copilot CLI       | skill; no prompt note, since Copilot drops a command hook's prompt output                            | ``PreToolUse`` in ``~/.copilot/hooks/ljos.json``                                           | stderr                                                  | the same file in a repository's ``.github/hooks`` reaches Copilot's cloud runner                     |
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
@@ -146,14 +146,14 @@ same everywhere and the envelope differs:
 | Example Host             | the skill, then ``ljos hook --prompt``                                                               | ``ljos policy`` prints the line                                                            | a ``warning:`` line                                     | no MCP server and no hook file; source the env file ``onboard`` writes                               |
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
 
-Codex runs a hook only after you trust it. After ``ljos onboard --harness codex``,
+The command harness runs a hook only after you trust it. After ``ljos onboard --harness NAME``,
 open ``/hooks`` and trust each ljos hook before it runs.
 Trust it again after an upgrade rewrites one. Until then the hook does not run,
-and policyd sees none of Codex's commands. ``ljos doctor`` reports an untrusted hook when
+and policyd sees none of the command harness's commands. ``ljos doctor`` reports an untrusted hook when
 it can see one.
 
 The runners from Copilot down call ``ljos hook --runner NAME``. That
-command reads the runner's payload as Claude Code's, runs the same hook,
+command reads the runner's payload as the terminal harness's, runs the same hook,
 and writes the answer back in the runner's field names, with exit 0. By default the answer
 never denies, asks or blocks, apart from a cloud seat's push rule; a rule that fires is one
 warning line in the column above. That push rule's refusal, and policyd's block on a tool call
@@ -180,9 +180,9 @@ ahead unchecked.
 ======================== ================================================ ============== ============================================== ========================================================================================================================================================================================================
 Runner                   Hook exits non-zero (not 2) or crashes           Hook times out Answer is not JSON                             Source
 ======================== ================================================ ============== ============================================== ========================================================================================================================================================================================================
-Claude Code              runs; only exit 2 blocks                         runs           runs                                           `hooks reference <https://docs.claude.com/en/docs/claude-code/hooks>`__
-Codex                    runs; only exit 2 with a reason on stderr blocks runs           runs                                           `hooks <https://developers.openai.com/codex/hooks>`__, `pre\ tool\ \_use.rs <https://github.com/openai/codex/blob/de8fab6d7adfcef8b4ce6f02f3b5c8be4092015a/codex-rs/hooks/src/events/pre_tool_use.rs>`__
-Cursor                   runs: the seat does not set ``failClosed``       runs           ``beforeShellExecution`` blocks it             Cursor hooks docs
+one harness              runs; only exit 2 blocks                         runs           runs                                           `hooks reference <the harness notes                                >`__
+shell                    runs; only exit 2 with a reason on stderr blocks runs           runs                                           `hooks <https://developers.vendor.com/shell/hooks>`__, `pre\ tool\ \_use.rs <https://github.com/vendor/shell/blob/de8fab6d7adfcef8b4ce6f02f3b5c8be4092015a/shell-rs/hooks/src/events/pre_tool_use.rs>`__
+editor                   runs: the seat does not set ``failClosed``       runs           ``beforeShellExecution`` blocks it             editor hooks docs
 GitHub Copilot CLI       blocked                                          runs           falls through to Copilot's own permission flow `hooks reference <https://docs.github.com/en/copilot/reference/hooks-reference>`__
 Gemini CLI               runs, with a warning                             not documented runs                                           `hooks reference <https://geminicli.com/docs/hooks/reference/>`__
 Windsurf (Devin Desktop) runs; only exit 2 blocks                         not documented not read; the exit code decides                `Cascade hooks <https://docs.devin.ai/desktop/cascade/hooks>`__
@@ -213,7 +213,7 @@ Second, ``ljos policy -- COMMAND`` prints the answer for one command without run
 so every integration is testable without the runner. ``scripts/smoke.sh`` does exactly that.
 
 policyd can also answer a command with a fixed one. The new line runs only
-when the guard has no warning on it. Claude Code, Codex, Grok Build and Cursor's ``preToolUse`` take it
+when the guard has no warning on it. The harnesses' ``preToolUse`` take it
 through the hook's updated input. Every other runner in the table runs the old line, with a
 warning that names the new command.
 

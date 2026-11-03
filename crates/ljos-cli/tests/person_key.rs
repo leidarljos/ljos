@@ -59,7 +59,7 @@ fn a_runner_in_the_tree_may_not_set_or_clear_the_key() {
     assert_eq!(kept(), before, "a refused verb changed the key");
 }
 
-/// On a terminal of its own, a shell that carries `CURSOR_AGENT` is
+/// On a terminal of its own, a shell that carries `the runner mark` is
 /// refused and never shown the passphrase prompt.
 #[test]
 fn a_mark_on_a_terminal_may_not_set_or_clear_the_key() {

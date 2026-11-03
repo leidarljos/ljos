@@ -181,7 +181,7 @@ pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
     judge(line, cwd).push
 }
 
-/// [`cursor_push`], and whether `line` skips or changes the git hooks or
+/// the push check, and whether `line` skips or changes the git hooks or
 /// writes a file this guard reads. That second answer never refuses.
 pub(crate) fn push_and_hooks(line: &str, cwd: Option<&Path>) -> (Option<String>, bool) {
     let verdict = judge(line, cwd);
@@ -1558,7 +1558,7 @@ impl Push {
             );
         }
         // `--follow-tags` also pushes the branch checked out. Judge that
-        // branch before the tags, so a `cursor/*` checkout still says so
+        // branch before the tags, so a `the editor harness/*` checkout still says so
         // when a tag is present too.
         let follow_tags = self.bulk.iter().any(|f| f == "--follow-tags");
         for flag in &self.bulk {
@@ -1664,7 +1664,7 @@ fn short_cluster_takes_value(word: &str) -> bool {
 
 /// The last `:` that splits a refspec into `src:dst`. Colons inside
 /// `$(...)`, `${...}` and backticks stay inside that side, so
-/// `$(echo HEAD:cursor/x)` is one destination and not `cursor/x)`.
+/// `$(echo HEAD:prefix/x)` is one destination and not `prefix/x)`.
 fn refspec_sides(spec: &str) -> Option<(&str, &str)> {
     let mut paren = 0i32;
     let mut brace = 0i32;
@@ -1945,7 +1945,7 @@ impl Checkout {
         forced.then(|| format!("this push updates {dst}; a cloud seat may not force a ref"))
     }
 
-    /// Why a push with no refspec would update a `cursor/*` ref, read as
+    /// Why a push with no refspec would update a `the editor harness/*` ref, read as
     /// git reads it: the remote's `push` refspecs or `mirror`, else
     /// `push.default` over the branch checked out. `remote` is the one
     /// the words name.

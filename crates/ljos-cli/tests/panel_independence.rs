@@ -1788,7 +1788,7 @@ fn runs_with_their_own_harness_ids_each_count_and_one_run_counts_once() {
 
 #[test]
 fn subagents_of_one_session_each_count_and_one_subagent_counts_once() {
-    // A coordinator in one Claude Code session starts its reviewers as
+    // A coordinator in one the terminal harness session starts its reviewers as
     // subagents. Every reviewer's shell carries the parent's session id;
     // only the hook payload names the agent.
     let world = World::new();
@@ -1868,7 +1868,7 @@ fn subagents_of_one_session_each_count_and_one_subagent_counts_once() {
 #[test]
 fn a_box_seat_with_no_session_counts_each_subagent() {
     // A seat on a shared box: the shell names the seat and no session.
-    // The hook still sees the Claude Code session and each subagent, and
+    // The hook still sees the terminal harness session and each subagent, and
     // a Example Host subagent carries its own conversation id.
     let world = World::new();
     let issue = "demo-box-panel";
@@ -2556,7 +2556,7 @@ fn claude_subagents_voting_over_mcp_each_count() {
 
 #[test]
 fn codex_subagent_threads_each_count_under_their_root_session() {
-    // Codex gives a subagent's shell its own thread id and the root's
+    // the command harness gives a subagent's shell its own thread id and the root's
     // session id. The root thread's id is the session's.
     let world = World::new();
     let issue = "demo-codex-threads";

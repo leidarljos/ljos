@@ -32,7 +32,7 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-/// A home as a seat leaves it: Cursor and Claude hooks beside other
+/// A home as a seat leaves it: the editor harness and the terminal harness hooks beside other
 /// hooks, MCP entries, a skill, the git hooks, and a bin dir where the
 /// `ljos` binary is gone and `ljos-mcp` remains.
 fn hand_deleted_home() -> tempfile::TempDir {

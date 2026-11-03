@@ -211,7 +211,7 @@ impl Seat {
     }
 
     /// `ljos hook` as a runner that runs its hook command in `sh -c`
-    /// spawns it, the way Claude Code does where `sh` is dash.
+    /// spawns it, the way the terminal harness does where `sh` is dash.
     fn hook_via_sh(&self, name: &str) -> Command {
         let mut cmd = Command::new(self.runner(name));
         cmd.args(["-c", "\"$@\"; exit $?", name, "/bin/sh", "-c"])
@@ -706,7 +706,7 @@ fn hook_stdout(seat: &Seat, payload: &str) -> String {
 }
 
 /// `payload` with the runner `name`'s own record of its prompt: the
-/// transcript Claude Code, Codex or Cursor writes under the seat's home
+/// transcript the terminal harness, the command harness or the editor harness writes under the seat's home
 /// before it runs the prompt hook, named as each names it.
 fn recorded(seat: &Seat, name: &str, payload: &str) -> String {
     let mut v: serde_json::Value = serde_json::from_str(payload).unwrap();
@@ -1357,7 +1357,7 @@ fn a_rewritten_prompt_that_matches_its_bind_is_the_persons() {
 }
 
 /// A rewrite that keeps the hook's time is refused by the ctime the
-/// kernel gave the files, even when Claude Code's transcript is rewritten
+/// kernel gave the files, even when the terminal harness's transcript is rewritten
 /// to agree with the plant. The person's real words, unchanged since the
 /// hook, still store.
 #[test]
@@ -1415,7 +1415,7 @@ fn a_prompt_changed_after_the_hooks_time_is_refused() {
     assert!(!start.contains("release key"), "{start}");
 }
 
-/// Cursor without a transcript, and the runners that keep no record ljos
+/// the editor harness without a transcript, and the runners that keep no record ljos
 /// reads, do not attribute a typed prompt. The hook still notes it. A
 /// prefer of those words says the record is unverified, and a stated
 /// choice is not saved.
@@ -1686,7 +1686,7 @@ struct Runner {
     meta: serde_json::Value,
 }
 
-/// The variables the shipped Codex MCP entry forwards from Codex.
+/// The variables the shipped the command harness MCP entry forwards from the command harness.
 fn codex_forwards() -> Vec<String> {
     let table = ljos_cli::HARNESSES_EXAMPLE;
     let at = table.find("name = \"codex\"").expect("codex ships");
@@ -1735,8 +1735,8 @@ fn runners(prompt: &str) -> Vec<Runner> {
             env: vec![("CLAUDE_CODE_SESSION_ID", claude.to_string())],
             meta: serde_json::json!({}),
         },
-        // Cursor's hook names the chat `conversation_id` and its shell
-        // `CURSOR_CONVERSATION_ID`; the payload's `session_id` is another id.
+        // the editor harness's hook names the chat `conversation_id` and its shell
+        // `the conversation id`; the payload's `session_id` is another id.
         Runner {
             name: "cursor-agent",
             hook: serde_json::json!({
@@ -1747,7 +1747,7 @@ fn runners(prompt: &str) -> Vec<Runner> {
             env: vec![("CURSOR_CONVERSATION_ID", cursor.to_string())],
             meta: serde_json::json!({}),
         },
-        // The Codex MCP server sees only what its entry forwards, and each
+        // The command harness MCP server sees only what its entry forwards, and each
         // call names the turn's session in `_meta`.
         Runner {
             name: "codex",
@@ -1866,8 +1866,8 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
             r.meta.clone(),
         );
         let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
-        // Grok keeps no record ljos reads, so the words stay unverified.
-        // Claude Code, Codex and Cursor name one, and `recorded` wrote it.
+        // the build harness keeps no record ljos reads, so the words stay unverified.
+        // the terminal harness, the command harness and the editor harness name one, and `recorded` wrote it.
         assert!(!refused, "{who}: mcp refused the person's words: {answer}");
         assert!(rules_text(&seat).contains("checked fuse"), "{who}");
 
@@ -2183,7 +2183,7 @@ fn a_runners_own_prompt_still_keeps_after_a_tool_call() {
     }
 }
 
-/// Claude Code and Codex still store a sentence the person typed, after
+/// The terminal harness and the command harness still store a sentence the person typed, after
 /// the same runner's tool call, when their transcript agrees.
 #[test]
 fn a_typed_prompt_on_claude_and_codex_still_stores_after_a_tool_call() {

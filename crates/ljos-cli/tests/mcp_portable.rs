@@ -1,6 +1,6 @@
 //! A harness config written under one home has to start under another.
 //!
-//! Cursor syncs `mcp.json` onto a cloud VM. An absolute path from the
+//! the editor harness syncs `mcp.json` onto a cloud VM. An absolute path from the
 //! machine that wrote it (`/home/box/.cargo/bin/ljos-mcp`) is not there,
 //! so the client discovers no tools.
 
@@ -164,7 +164,7 @@ fn a_config_written_under_one_home_runs_under_another() {
     let codex_command = toml_command(&codex);
     assert_eq!(codex_command, command, "{codex}");
 
-    // Claude stores the command it is given. A stub records that argv.
+    // the terminal harness stores the command it is given. A stub records that argv.
     stub_claude(&bin_a.join("claude"));
     let out = onboard(&ljos, &home_a, &["onboard", "--harness", "claude"]);
     assert!(out.status.success(), "{}", said(&out));

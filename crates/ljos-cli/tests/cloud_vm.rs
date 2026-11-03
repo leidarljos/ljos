@@ -1513,7 +1513,7 @@ fn cloud_up_puts_the_install_dir_ahead_of_a_stale_binary() {
     assert!(said.contains("cloud up wrote"), "{said}");
 }
 
-/// The Cursor command `cloud up` writes when it starts with `path` and
+/// The editor harness command `cloud up` writes when it starts with `path` and
 /// installs into `bin`.
 fn cloud_up_command(root: &Path, bin: &Path, path: &str) -> String {
     let home = root.join("home");
@@ -2837,7 +2837,7 @@ fn cloud_guard_judges_ref_writes_by_the_seat_allowlist() {
 }
 
 /// A clone of a local bare remote on `develop`, with `feature-x` and
-/// `cursor/probe` beside it.
+/// a topic branch under the agent's branch prefix beside it.
 fn bare_checkout(root: &Path) -> (PathBuf, PathBuf) {
     let origin = root.join("origin.git");
     git(
@@ -2869,7 +2869,7 @@ fn bare_checkout(root: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// An earlier assignment, `cd` to the checkout top, and `git push --tags`
-/// do not update a `cursor/*` ref. The bare remote is where those commands
+/// do not update a `the editor harness/*` ref. The bare remote is where those commands
 /// actually push.
 #[test]
 fn cloud_guard_allows_resolved_destinations_toplevel_and_tags() {
@@ -3785,7 +3785,7 @@ fn doctor_advises_cloud_up_only_on_a_cloud_vm() {
     assert!(ci.contains("ljos cloud up"), "{ci}");
 }
 
-/// `CURSOR_AGENT=1` is the desktop agent terminal. A CI variable counts
+/// `the runner mark=1` is the desktop agent terminal. A CI variable counts
 /// only when its value says so: `false` is not a job, and Buildkite,
 /// Azure Pipelines, CircleCI, Jenkins, and `CI=true` are.
 #[test]
@@ -4015,8 +4015,8 @@ fn doctor_on_command(path: &Path, command: &str) -> Option<String> {
     ljos_cli::cloud::missing_mcp_line()
 }
 
-/// Cursor substitutes `${env:NAME}` and `${userHome}` and nothing else
-/// (https://cursor.com/docs/context/mcp, "Config interpolation").
+/// the editor harness substitutes `${env:NAME}` and `${userHome}` and nothing else
+/// (https://the editor harness.com/docs/context/mcp, "Config interpolation").
 #[test]
 fn doctor_expands_home_in_cursor_mcp_json_the_way_cursor_does() {
     let _g = Guard::new();
@@ -4045,9 +4045,9 @@ fn doctor_expands_home_in_cursor_mcp_json_the_way_cursor_does() {
     }
 }
 
-/// Claude Code substitutes `${VAR}` and `${VAR:-default}` in the entries
-/// `claude mcp add` stores in ~/.claude.json, and keeps an unset `${VAR}`
-/// as written (https://docs.claude.com/en/docs/claude-code/mcp).
+/// the terminal harness substitutes `${VAR}` and `${VAR:-default}` in the entries
+/// `the terminal harness mcp add` stores in the terminal harness config, and keeps an unset `${VAR}`
+/// as written (https://docs.the terminal harness.com/en/docs/the terminal harness-code/mcp).
 #[test]
 fn doctor_expands_home_in_claude_json_the_way_claude_code_does() {
     let _g = Guard::new();
@@ -4292,11 +4292,11 @@ fn doctor_reads_path_from_the_ljos_entry_only() {
     );
 }
 
-/// env.PATH is read with the client's own syntax: Cursor `${env:PATH}`
-/// (https://cursor.com/docs/context/mcp), Claude Code `${PATH}`
-/// (https://docs.claude.com/en/docs/claude-code/mcp), hermes `${PATH}` or
+/// env.PATH is read with the client's own syntax: the editor harness `${env:PATH}`
+/// (https://the editor harness.com/docs/context/mcp), the terminal harness `${PATH}`
+/// (https://docs.the terminal harness.com/en/docs/the terminal harness-code/mcp), hermes `${PATH}` or
 /// `${env:PATH}` (https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference),
-/// and Codex none.
+/// and the command harness none.
 #[test]
 fn doctor_expands_env_path_the_way_each_client_does() {
     let _g = Guard::new();

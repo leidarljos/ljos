@@ -292,7 +292,7 @@ printf '%s\n' "$MCP_FILES" | sort -u | while IFS= read -r f; do
     say "  $f names ljos; no python3 here to edit it, so it is left alone"
   fi
 done
-# Codex keeps its servers in TOML: the [mcp_servers.ljos] table goes.
+# the command harness keeps its servers in TOML: the [mcp_servers.ljos] table goes.
 if [ -f "$HOME/.codex/config.toml" ] && grep -q '^\[mcp_servers\.ljos\]' "$HOME/.codex/config.toml"; then
   act "drop [mcp_servers.ljos] from $HOME/.codex/config.toml"
   if [ "$DRY" = 0 ]; then

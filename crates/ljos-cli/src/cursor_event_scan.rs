@@ -1,4 +1,4 @@
-//! The byte scan that answers a Cursor `beforeReadFile` early must agree
+//! The byte scan that answers an editor harness `beforeReadFile` early must agree
 //! with the JSON parser on which event a payload is.
 
 use super::*;

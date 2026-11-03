@@ -67,7 +67,7 @@ Command line
 | ``agents [--harness NAME] [--dry-run]``                                                                                         | pack, runner              | every persona as an agent definition, ``ljos-NAME.md``, in each runner's ``agents`` directory (or one runner's): a subagent the runner spawns by name that briefs, casts one ballot before reading the others, notes why and stops;            |
 |                                                                                                                                 |                           | definitions whose persona left the pack are removed                                                                                                                                                                                            |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``statusline``                                                                                                                  | pack                      | one line for a runner's status bar (Grok's ``[ui.status_line]``, Claude Code's ``statusLine``): the seat, the issue this conversation has claimed, the claims due; reads the runner's status JSON on stdin; each session's line is cached for  |
+| ``statusline``                                                                                                                  | pack                      | one line for a runner's status bar (hook's ``[ui.status_line]``, one harness's ``statusLine``): the seat, the issue this conversation has claimed, the claims due; reads the runner's status JSON on stdin; each session's line is cached for  |
 |                                                                                                                                 |                           | fifteen seconds                                                                                                                                                                                                                                |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``ask NAME TEXT``                                                                                                               | persona session           | hands the persona a question or a task in its own pane, opening it (and resuming its session) when it is closed                                                                                                                                |
@@ -166,7 +166,7 @@ Command line
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``hook [--limit N] [--prompt [--text]] [--fail-on-deny] [--runner NAME] [--git-commit] [--git-hook post-commit|post-rewrite]``  | policy, pack              | hook JSON or argv on stdin; ``--runner`` reads the payload of ``copilot``, ``gemini``, ``windsurf``, ``factory``, ``kiro``, ``cline``, ``qwen`` or ``crush`` and answers in that runner's shape; ``--prompt`` reads stdin as the prompt, and   |
 |                                                                                                                                 |                           | ``--text`` with it prints what the agent would read as plain text instead of JSON; on ``PreToolUse`` the TCB and pack rules, a rule is an allow with one warning line and policyd's block under the person's ``block-on-warning`` is a deny as |
-|                                                                                                                                 |                           | ``permissionDecision``, and from 0.35.0 a rewrite goes back as the updated input for Claude Code, Codex, Grok Build and Cursor's ``preToolUse``, and another runner runs its own line with a warning that names the new one;                   |
+|                                                                                                                                 |                           | ``permissionDecision``, and from 0.35.0 a rewrite goes back as the updated input for one harness, shell, build hook and editor's ``preToolUse``, and another runner runs its own line with a warning that names the new one;                   |
 |                                                                                                                                 |                           | ``--fail-on-deny`` exits 1 on a deny and without the flag the exit stays 0; on a prompt the hits scoring at least 0.6 of the best that name its subject, or with a pack that sends cosines the encoder's first hit at 0.66 or more and a hit   |
 |                                                                                                                                 |                           | sharing a word within 0.05 of the best cosine, preferences first then lessons oldest first, each with its age, three at most, each once between compactions; on a failed tool, up to three that share at least two content words with the      |
 |                                                                                                                                 |                           | command and its error. ``--git-commit`` books the commit git just created and reads no stdin; ``--git-hook`` names ``post-commit`` or ``post-rewrite``. Git hooks                                                                              |
@@ -245,7 +245,7 @@ The rest stay unread, and the note says how many remain.
 The receipt is an atom whose text is four lines: ``read ID``, ``by SEAT``,
 ``at STAMP`` and ``msg ID``. The sender's inbox prints that receipt once,
 as the message id, the reader and the stamp. A second prompt writes
-nothing. A shell writes the receipt before the hook exits. Cursor holds
+nothing. A shell writes the receipt before the hook exits. The editor harness holds
 the note: the prompt prints nothing and writes no receipt, and the
 receipt is written when the note is delivered, on ``postToolUse`` as
 ``additional_context``, or on ``Stop`` when the turn ran no tool, as
@@ -347,7 +347,7 @@ The hook books as a seat. The holder is ``SEAT@TAG``, the same name ``ljos claim
 ``LJOS_SEAT`` wins when it is set and is not ``seat``, ``you``, ``agent``, or a name that slugs to ``runner``.
 Otherwise ljos derives the name from the markers the runner leaves in the environment, and a derived name is a seat.
 When nothing named the seat, an ``ANTIGRAVITY_CONVERSATION_ID`` books as ``antigravity`` and an ``OPENCODE_SESSION_ID`` books as ``opencode``.
-A Claude Code or Codex session, named by ``CLAUDECODE``, ``CODEX_THREAD_ID`` or ``CODEX_SESSION_ID``, is not booked.
+A terminal harness or the command harness session, named by ``the terminal harness mark``, ``the command harness thread id`` or ``the command harness session id``, is not booked.
 An opencode session is booked by this hook, including a commit from its shell or a subprocess.
 An agy session is booked the same way when no seat was named.
 Without these hooks, ``Stop`` and ``SessionEnd`` cite each commit HEAD's reflog says the checkout wrote since the sitting began, so a commit from a script, or one chained before a step that failed, still has a deed.
@@ -413,7 +413,7 @@ Variable                                                    Read by
 ``LJOS_TRACK_WORK``                                         ``on`` makes the hooks ask a conversation with no issue to open one and sit; read from the environment, else ``~/.config/ljos/env``; unset, they say nothing until it sits
 ``XDG_CONFIG_HOME``                                         where ``ljos/harnesses.toml`` is read from; ``~/.config`` when unset
 ``LJOS_PANE_TOOL``                                          the one ``[[tool]]`` persona panes open in; unset, the first of the file's tools and the built-in herdr and tmux shapes that answers
-``LJOS_PANEL_RUNNER``                                       the runner a decision panel's members run on, through its ``headless`` argv; unset, the seat's own runner, else Grok
+``LJOS_PANEL_RUNNER``                                       the runner a decision panel's members run on, through its ``headless`` argv; unset, the seat's own runner, else the build harness
 ``LJOS_PANEL_CONCURRENCY``                                  how many decision-panel members start at once; unset, the machine's parallelism clamped to 4; ``0`` starts every member; ``LJOS_MAX_PARALLEL`` is the same knob
 ``XDG_STATE_HOME``, ``XDG_CACHE_HOME``, ``XDG_RUNTIME_DIR`` where the Jev state, cache and runtime key live (see Jev settings); ``XDG_RUNTIME_DIR`` also keeps the hud socket and the seat records
 =========================================================== =======================================================================================================================================================================================================================================================================================================================================
@@ -436,29 +436,29 @@ when one matches.
 
 The pane script resumes a runner that exits non-zero, at most three times
 a minute, and leaves one that exits 0. ``agents`` names the directory the
-runner reads agent definitions from: ``~/.grok/agents``, ``~/.claude/agents``
-or ``~/.cursor/agents``. ``headless`` is the argv a decision panel's member
+runner reads agent definitions from: ``the build harness agents directory``, ``the terminal harness agents directory``
+or ``the editor harness agents directory``. ``headless`` is the argv a decision panel's member
 runs, with ``{prompt_file}``, ``{prompt}``, ``{cwd}`` and ``{persona}`` filled;
-when it is empty, the member runs ``grok`` with the seat's fallback flags.
+when it is empty, the member runs ``the build harness`` with the seat's fallback flags.
 
-``hooks_format = "cursor"`` writes ``hooks`` in Cursor's flat shape: ``version``
+``hooks_format = "the editor harness"`` writes ``hooks`` in the editor harness's flat shape: ``version``
 1, and one ``{command, timeout}`` entry an event. The seat registers the
 permission check, the prompt, both tool results, compaction, stop and session end
-there. Events ``~/.claude/settings.json`` already runs stay in that file.
+there. Events ``the terminal harness settings`` already runs stay in that file.
 ``beforeShellExecution``, ``preToolUse``, ``beforeMCPExecution``,
 ``beforeReadFile`` and ``postToolUseFailure`` are still written here, since
-Cursor runs that file's hooks too and Claude's file does not name these.
+The editor harness runs that file's hooks too and the terminal harness's file does not name these.
 If one of these hooks fails, the command runs. ``ljos doctor`` counts the
-hook installed when those five are present and Claude's file carries
-the seat hook, or when Cursor's file carries every event.
+hook installed when those five are present and the terminal harness's file carries
+the seat hook, or when the editor harness's file carries every event.
 
-The hook reads a Cursor call off ``cursor_version`` in its stdin and answers
-in Cursor's fields: ``permission`` on a permission check, with ``user_message`` and
+The hook reads an editor harness call off ``the editor payload mark`` in its stdin and answers
+in the editor harness's fields: ``permission`` on a permission check, with ``user_message`` and
 ``agent_message``; ``additional_context`` on a tool result; ``followup_message``
 on a held stop. It answers ``allow`` on every permission check, since
-Cursor blocks the command when the answer to a permission check is not JSON. A rule
+The editor harness blocks the command when the answer to a permission check is not JSON. A rule
 that fires is ``allow`` with its warning in ``user_message`` and ``agent_message``.
-The IDE and the ``agent`` CLI read the same ``~/.cursor/mcp.json``.
+The IDE and the ``agent`` CLI read the same ``the editor harness MCP config``.
 
 A table with ``shell = true`` registers no server and no hook.
 ``ljos onboard --harness example-host`` writes the skill and an env file beside
@@ -517,7 +517,7 @@ stdin is an argv line and answered in plain lines.
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``SessionEnd``         | fires the memories injected during the session together and clears the session's record                                                                                                                                                                                                                                                                                            |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``PostToolUse``        | emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (grok sends this event)                                                                                                                                                                                                                                                   |
+| ``PostToolUse``        | emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (hook sends this event)                                                                                                                                                                                                                                                   |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``PostToolUseFailure`` | searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share at least two content words with the cue, each once between compactions                                                                                                                                                                    |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -528,7 +528,7 @@ stdin is an argv line and answered in plain lines.
 | ``PreToolUse``         | applies the TCB and pack rules to the command (matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch``); a rule is a warning and the call runs. It keeps the call's ``agent_id`` for each ``ljos`` line, and on a seat MCP tool (``^mcp__.+__ljos_.+$``) only notes a subagent's call, so the ballot binds the session plus that agent. A vissue write tool gets the same   |
 |                        | tracker write check's warning, which names ``ljos finish``                                                                                                                                                                                                                                                                                                                         |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``Stop``               | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then holds one turn for unread interrupt mail (``decision: block``, or ``followup_message`` in Cursor) and receipts it    |
+| ``Stop``               | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then holds one turn for unread interrupt mail (``decision: block``, or ``followup_message`` in editor) and receipts it    |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``SubagentStop``       | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once                                                                                                                                                                                                                                                   |
 +------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -592,7 +592,7 @@ and keep the runner where it cannot reach what it must not touch.
 
 On the wire, a rewrite is one line of three tab-separated fields: ``allow``, ``rewrite`` and the new command.
 The new line runs only when the guard has no warning on it. The hook hands it back as the updated input for
-Claude Code, Codex, Grok Build and Cursor's ``preToolUse``. A runner without that field runs the old line, with
+The harnesses' ``preToolUse``. A runner without that field runs the old line, with
 a warning that names the new command. The first rewrite runs the command through ``uv run``.
 
 Each swap also shows a note naming both commands and leaves a row in

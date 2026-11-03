@@ -9,7 +9,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-/// Model families a cloud panel rotates, in persona name order. Grok is
+/// Model families a cloud panel rotates, in persona name order. the build harness is
 /// first. A two-seat panel therefore names two families.
 pub const FAMILIES: &[&str] = &["grok", "opus", "codex"];
 

@@ -930,7 +930,7 @@ fn packsetd(hab: &Habitat) -> (ljos_test_boot::Packsetd, Vec<(&'static str, Stri
     (daemon, env)
 }
 
-/// ljos-gfiz: a Claude turn commits and stops, so the lesson cites that
+/// ljos-gfiz: a terminal harness turn commits and stops, so the lesson cites that
 /// commit. The next turn amends it under a new prompt. The lesson written
 /// again cites the commit that landed and closes the first one, so the
 /// next session is not handed the replaced sha.

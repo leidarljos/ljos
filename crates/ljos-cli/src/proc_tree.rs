@@ -670,7 +670,7 @@ pub fn runner(chain: &[Proc]) -> Option<&Proc> {
 }
 
 /// The runners that spawn `ljos hook`, by the name of the program they
-/// are: `claude-code` is Claude Code's npm package.
+/// are: `the terminal harness-code` is the terminal harness's npm package.
 const HOOK_RUNNERS: &[(&str, &str)] = &[
     ("claude", "claude"),
     ("claude-code", "claude"),
@@ -811,7 +811,7 @@ fn nix_entry(path: &Path, store: &Path) -> Option<PathBuf> {
 /// The runner `path` names when it sits below a root ([`root_below`]),
 /// and that root: the nearest component that is not packing layout
 /// ([`layout_component`]), read from the file up to the root's own name,
-/// so `share/claude/versions/2.1.3` is Claude Code.
+/// so `share/the terminal harness/versions/2.1.3` is the terminal harness.
 fn runner_below(path: &Path, roots: &[PathBuf], store: &Path) -> Option<(&'static str, PathBuf)> {
     let root = root_below(path, roots, store)?;
     let parts = root
@@ -1183,9 +1183,9 @@ fn person_keeps(file: Owner, person: &Person) -> bool {
 
 /// The runner a program file is, when the file is an installed copy for
 /// the person whose passwd home is `home` ([`runner_below`]).
-/// `~/.local/share/claude/versions/2.1.3` is Claude Code, and so is
-/// `/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js`. A bundled
-/// runtime (`cursor-agent/versions/V/node`) is the runner it ships in.
+/// `~/.local/share/the terminal harness/versions/2.1.3` is the terminal harness, and so is
+/// `/usr/lib/node_modules/@the model service-ai/the terminal harness-code/cli.js`. A bundled
+/// runtime (`the editor command/versions/V/node`) is the runner it ships in.
 /// The file and the roots are compared as the kernel resolves them, so a
 /// link from `~/.local/bin` into `/tmp` is read in `/tmp`. A copy whose
 /// name is the runner, in a temp directory, a project tree or a `.local`
@@ -1912,8 +1912,8 @@ pub fn hook_runner() -> Result<(Proc, &'static str), String> {
             parent.pid
         ));
     }
-    // The Cursor app also hosts the person's own terminals; its agent's
-    // shells carry `CURSOR_AGENT`, which the stamp above reads.
+    // The editor harness app also hosts the person's own terminals; its agent's
+    // shells carry `the runner mark`, which the stamp above reads.
     let own = chain[1..].iter().take_while(|p| !ends_the_walk(p));
     if let Some((p, other)) = own
         .filter_map(|p| exe_runner(p.pid).map(|r| (p, r)))

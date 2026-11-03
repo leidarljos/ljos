@@ -1,6 +1,6 @@
 # ljos
 
-Claude Code, Codex, Cursor and other coding runners work on one person's repositories. A new session does not keep the last session's lessons. Two agents can claim the same work. Nobody can see who decided what.
+Coding runners work on one person's repositories. A new session does not keep the last session's lessons. Two agents can claim the same work. Nobody can see who decided what.
 
 ljos is the command you install once on a machine. Each agent gets a seat on a tracker. The tracker is a git repository of tickets. A seat files a ticket and opens a sitting on it. A sitting claims that ticket and gathers the checks and memories for the task.
 
@@ -79,7 +79,7 @@ inside a checkout of another project. A later `git add -A` commits a tracker lef
 there. Onboard names the checkout. It asks for a `VISSUE_ROOT` outside the checkout.
 A path the checkout already ignores is fine.
 
-Once the checkout path is fine, Codex runs a hook only after you trust it. Open `/hooks` in Codex and trust each
+Once the checkout path is fine, the command harness runs a hook only after you trust it. Open `/hooks` in the command harness and trust each
 ljos hook after `ljos onboard`, and again after an upgrade.
 
 ## Take it off
@@ -272,8 +272,8 @@ policyd can answer with a fixed command. Its first rewrite runs the command thro
 `uv run`. The answer is one line of text: `allow`, then `rewrite`, then the new
 command, separated by tabs.
 
-The new command runs only when the guard has no warning on it. Claude Code, Codex, Grok Build
-and Cursor's `preToolUse` take it back from the hook and run it. A runner that has no
+The new command runs only when the guard has no warning on it. The terminal harness, the command harness, the build harness
+and the editor harness's `preToolUse` take it back from the hook and run it. A runner that has no
 field for this runs the old line, with a warning that names the new command.
 Each swap also shows a note naming both commands and leaves a row in
 `$XDG_DATA_HOME/ljos/rewrite.jsonl`. Set `rewrite = false` in a repository's

@@ -191,8 +191,8 @@ pub struct Harness {
     /// `--event`, since that runner's payload does not name it.
     #[serde(default)]
     pub hooks_named: Option<String>,
-    /// `cursor` for a hooks file in Cursor's flat shape (`version` 1, one
-    /// entry an event), written by `cursor_hook_step`.
+    /// `the editor harness` for a hooks file in the editor harness's flat shape (`version` 1, one
+    /// entry an event), written by `the editor hook step`.
     #[serde(default)]
     pub hooks_format: Option<String>,
     /// The events the memory hook fires on. Empty means [`HOOK_EVENTS`],
@@ -208,7 +208,7 @@ pub struct Harness {
     #[serde(default)]
     pub hook_fail_closed: Vec<String>,
     /// Where a runner that runs a hook only once a person trusted it keeps
-    /// that trust (Codex: `trusted_hash` rows in `~/.codex/config.toml`,
+    /// that trust (the command harness: `trusted_hash` rows in `the command harness config`,
     /// set from `/hooks`). Onboard and doctor say when the seat's hook is
     /// not trusted yet; the runner skips it until then.
     #[serde(default)]
@@ -252,7 +252,7 @@ pub struct Harness {
     /// `{prompt}` its text, `{cwd}` the panel's directory, `{persona}`
     /// the persona. A panel opens its members on the runner
     /// `LJOS_PANEL_RUNNER` names, else on the seat's own runner. An
-    /// empty template runs `grok` with the seat's fallback flags.
+    /// empty template runs `the build harness` with the seat's fallback flags.
     #[serde(default)]
     pub headless: Vec<String>,
     /// Shell only: no MCP server and no hook file. `onboard` writes the
@@ -303,8 +303,8 @@ fn is_false(value: &bool) -> bool {
 /// runner redraws it every few hundred milliseconds while a turn runs.
 const STATUSLINE_TTL: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The seat's line for a runner's status bar, Grok Build's
-/// `[ui.status_line]` or Claude Code's `statusLine`: the seat, the issue
+/// The seat's line for a runner's status bar, the build harness's
+/// `[ui.status_line]` or the terminal harness's `statusLine`: the seat, the issue
 /// this conversation holds, and how many claims are due for review.
 /// `input` is the runner's status JSON. Only its `session_id` is read,
 /// to keep one cached line a session. A pack that does not answer within
@@ -478,7 +478,7 @@ pub fn session_start_line_from(atoms: Option<&[Value]>, now: &str, guard: bool) 
 
 /// Rewrite the agent definitions after a persona changed, in every agents
 /// directory that harnesses.toml names and that exists on disk. A
-/// directory the file does not name, such as the Grok one a first
+/// directory the file does not name, such as the build harness one a first
 /// `onboard` fills from the shipped shape, is left to `onboard` or
 /// `ljos agents`.
 pub fn refresh_agents() {
@@ -504,7 +504,7 @@ const AGENT_MARK: &str =
     "# ljos agents writes this file from the pack; change the persona, not the file.";
 
 /// A persona as a runner's agent definition: Markdown under YAML front
-/// matter, the shape Claude Code and Grok Build both read. Grok spawns it
+/// matter, the shape the terminal harness and the build harness both read. the build harness spawns it
 /// with `spawn_subagent` and `subagent_type` `ljos-NAME`;
 /// `capabilityMode: execute` lets it read and run commands but gives it no
 /// edit tool. The persona briefs itself, casts one ballot before reading
@@ -1475,13 +1475,13 @@ fn session_actor() -> Option<(String, String)> {
 }
 
 /// One occupancy name from `parts`, in the order [`session_actor`] uses.
-/// `CODEX_THREAD_ID` alone, then `CURSOR_CONVERSATION_ID` alone, then the
+/// `the command harness thread id` alone, then `the conversation id` alone, then the
 /// one remaining variable, else a hash of all of them.
 fn session_choice(mut parts: Vec<(String, String)>) -> Option<(String, String)> {
     if parts.is_empty() {
         return None;
     }
-    // Codex names the conversation on each MCP call by its thread, and a
+    // the command harness names the conversation on each MCP call by its thread, and a
     // hook payload names it by `conversation_id`; the shell keys on the
     // same id alone, whatever else the runner stamps.
     for alone in ["CODEX_THREAD_ID", "CURSOR_CONVERSATION_ID"] {
@@ -1850,7 +1850,7 @@ pub fn usable_session_id(id: &str) -> Option<&str> {
 }
 
 /// Answer as the conversation `call` came from, until the next bind.
-/// A payload's `conversation_id` is the `CURSOR_CONVERSATION_ID` the
+/// A payload's `conversation_id` is the `the conversation id` the
 /// runner stamps on that conversation's shells, so the hook resolves
 /// the holder `ljos sitting` resolved there. The hook's own environment
 /// may belong to another conversation and is not read for a non-empty id.
@@ -1938,7 +1938,7 @@ pub fn blank_conversation_field(raw: &str) -> bool {
 
 /// The conversation a blank payload id resolves to, and the key it came
 /// from. Same order as [`session_actor`], read from [`stamp_env`] rather
-/// than the bound call. `CURSOR_CONVERSATION_ID` keeps the place it has
+/// than the bound call. `the conversation id` keeps the place it has
 /// for the CLI.
 fn blank_resolved() -> Option<(String, String)> {
     session_choice(stamped_env_sessions())
@@ -1981,7 +1981,7 @@ pub fn call_cursor_conversation() -> Option<String> {
 }
 
 /// Whether `LJOS_HOLD` may name the claimant: outside a bound hook call
-/// and when no conversation id or `CURSOR_AGENT` mark is present.
+/// and when no conversation id or `the runner mark` mark is present.
 fn hold_env_allowed() -> bool {
     let is_hook_cli = std::env::args_os().nth(1).is_some_and(|a| a == "hook");
     call_conversation() == CallConversation::Unbound
@@ -2010,7 +2010,7 @@ pub fn call_unattributed() -> bool {
     matches!(call_conversation(), CallConversation::Unattributed)
 }
 
-/// Whether this process is in a `CURSOR_AGENT` shell whose conversation
+/// Whether this process is in a `the runner mark` shell whose conversation
 /// id was stripped or is unusable.
 fn cursor_agent_without_id() -> bool {
     let env = stamp_env();
@@ -2027,7 +2027,7 @@ fn cursor_agent_without_id() -> bool {
 }
 
 /// The conversation this process speaks for: the bound call's,
-/// else `CURSOR_CONVERSATION_ID` from [`stamp_env`]. None for an unusable
+/// else `the conversation id` from [`stamp_env`]. None for an unusable
 /// bound id.
 fn cursor_conversation() -> Option<String> {
     match call_conversation() {
@@ -2107,7 +2107,7 @@ fn clean_shell_environ(env: Vec<(String, String)>, is_self: bool) -> Vec<(String
         return env;
     };
     // A shell whose environment a runner handed down: bash put the inline
-    // assignment at the head for that runner (`ID=x cursor-agent ...`), and
+    // assignment at the head for that runner (`ID=x the editor command ...`), and
     // the runner started this shell with it unchanged. The id is the
     // runner's own, not an override of this shell's.
     if !is_self
@@ -2120,7 +2120,7 @@ fn clean_shell_environ(env: Vec<(String, String)>, is_self: bool) -> Vec<(String
         return env;
     }
     // tmux and screen sort the environment they pass to a pane, placing
-    // `CURSOR_*` before `PWD` without any inline assignment. zsh keeps
+    // editor variables before `PWD` without any inline assignment. zsh keeps
     // the inherited environment before `LOGNAME`, `SHLVL` and `PWD`.
     // Bash's own `export_env` puts inline temporary assignments at the
     // head before `PWD`.
@@ -2716,7 +2716,7 @@ pub fn tmux_spawn_socket_keys(line: &str, cwd: Option<&str>) -> Vec<String> {
 /// The conversation ids this process speaks for, by key, sorted so two
 /// processes with the same variables agree on the first. Every identity
 /// read goes through here, the command line's and the hook's alike. In a
-/// bound hook call that is the payload's id as `CURSOR_CONVERSATION_ID`
+/// bound hook call that is the payload's id as `the conversation id`
 /// and nothing else. Otherwise it is every `*_SESSION_ID` the runner
 /// stamped into the environment but the login's.
 pub(crate) fn stamped_sessions() -> Vec<(String, String)> {
@@ -3267,7 +3267,7 @@ fn runner_names() -> Vec<String> {
 }
 
 /// A cgroup path component names a runner when one of its words is that
-/// runner's name. `cursor-agent` is the word `cursor`. A shell, a
+/// runner's name. `the editor command` is the word `the editor harness`. A shell, a
 /// multiplexer or a terminal is not a runner, and a name shorter than
 /// four letters is too small a word to trust inside a path.
 fn scope_word_counts(name: &str) -> bool {
@@ -4014,7 +4014,7 @@ fn program_seat(program: &str) -> String {
         .to_string()
 }
 
-/// Whether `name` is a harness id (`claude`, `codex`, `agy`) rather than
+/// Whether `name` is a harness id (`the terminal harness`, `the command harness`, `agy`) rather than
 /// a worker a person named. The tool argument a model copies from the
 /// harness is this, and it must not replace `LJOS_SEAT`.
 fn is_harness_name(name: &str) -> bool {
@@ -4334,7 +4334,7 @@ fn collect_claimed_seats(dir: &Path, seats: &mut std::collections::BTreeSet<Stri
 
 /// A `CLAIMED_BY` holder as the seat it holds for. `SEAT@TAG` and the
 /// `SEAT-TAG` of ljos 0.31 and earlier are the seat ([`holder_parts`]),
-/// so `codex-vax0` counts as `codex`. A bare conversation id an older
+/// so `the command harness-vax0` counts as `the command harness`. A bare conversation id an older
 /// ljos wrote as the holder names no seat and is left out.
 fn insert_claimed_seat(seats: &mut std::collections::BTreeSet<String>, raw: &str) {
     let (seat, _) = holder_parts(raw);
@@ -4379,7 +4379,7 @@ fn seat_roster(slug: &str) -> std::collections::BTreeSet<String> {
 /// The seat for one tool call, resolved the way the hooks resolve it.
 /// `LJOS_SEAT` in the process or in `~/.config/ljos/env` is the seat.
 /// `VISSUE_AGENT` is the same name from the tracker. A `seat` argument
-/// that is only the harness id (`claude`, `codex`, `agy`) does not
+/// that is only the harness id (`the terminal harness`, `the command harness`, `agy`) does not
 /// replace that. A different worker named on the call still wins. With
 /// none of those, the call has to pass a seat.
 ///
@@ -4473,7 +4473,7 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
 
 /// The seat each of [`HARNESS_NAMES`] sits as on a tracker that names a
 /// harness's seat after its runner's command, `free-<command>`:
-/// Antigravity's command is `agy`, Claude Code's is `claude`.
+/// Antigravity's command is `agy`, the terminal harness's is `the terminal harness`.
 const HARNESS_SEATS: &[(&str, &str)] = &[
     ("claude", "free-claude"),
     ("claude-code", "free-claude"),
@@ -4488,8 +4488,8 @@ const HARNESS_SEATS: &[(&str, &str)] = &[
 ];
 
 /// The seat in `known` that belongs to `harness`, from [`HARNESS_SEATS`]
-/// alone. A seat a person named after a harness (`claude-reviewer`,
-/// `codex-laptop`) is theirs: a harness id never sits as it, and never
+/// alone. A seat a person named after a harness (`seat-aer`,
+/// `the command harness-laptop`) is theirs: a harness id never sits as it, and never
 /// finishes its claims.
 fn harness_seat(harness: &str, known: &std::collections::BTreeSet<String>) -> Option<String> {
     HARNESS_SEATS
@@ -4526,7 +4526,7 @@ pub fn unknown_seat_error(slug: &str, known: &std::collections::BTreeSet<String>
 }
 
 /// Runners whose shells cannot see the runner's process, named by a
-/// variable each stamps into every shell. Codex runs its commands in a
+/// variable each stamps into every shell. the command harness runs its commands in a
 /// sandbox with its own process namespace, so the tree above the shell
 /// ends at the sandbox and the seat fell back to the login user.
 const RUNNER_ENV: &[(&str, &str)] = &[("CODEX_THREAD_ID", "codex"), ("CODEX_SESSION_ID", "codex")];
@@ -5348,7 +5348,7 @@ const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
 
 /// A holder as its seat and its conversation tag. `SEAT@TAG` is the form
 /// ljos writes. ljos-mcp 0.31 and earlier wrote `SEAT-TAG`, with the tag
-/// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`, `free-claude-8h`,
+/// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`, `free-the terminal harness-8h`,
 /// `free-opencode-1vmow`); a last part of one to six lowercase letters and
 /// digits with at least one of each is read as that tag, so `eessi-bot`
 /// and `disk-saver` stay whole seats, and so does a version or a number
@@ -5548,7 +5548,7 @@ pub fn git_hook_seat() -> Option<String> {
     None
 }
 
-/// Whether `CURSOR_CONVERSATION_ID` names a subagent and no seat was
+/// Whether `the conversation id` names a subagent and no seat was
 /// named. Its commits are not booked; [`git_hook_seat`] callers say so.
 #[must_use]
 pub fn unseated_subagent() -> bool {
@@ -5619,7 +5619,7 @@ fn is_registered(h: &Harness, server: &Path) -> Option<bool> {
 }
 
 /// Whether a runner's `registered` command passes. A pass is kept for an
-/// hour under the command's words: `claude mcp get ljos` starts a Node
+/// hour under the command's words: `the terminal harness mcp get ljos` starts a Node
 /// runtime and was 1.7 s of a 2 s doctor, and a registration does not
 /// move between doctors. A failure is not kept, so a registration made
 /// since is seen at once.
@@ -5689,7 +5689,7 @@ fn set_json_entry(config: &Path, pointer: &str, entry: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Grok watches `[mcp_servers.ljos.env]`. Changing `LJOS_MCP_GENERATION`
+/// the build harness watches `[mcp_servers.ljos.env]`. Changing `LJOS_MCP_GENERATION`
 /// respawns the server; a session restart is not required.
 fn bump_ljos_mcp_generation(config: &Path, version: &str, dry: bool) -> Result<Option<String>> {
     let text = match std::fs::read_to_string(config) {
@@ -6063,7 +6063,7 @@ fn heal_registered(
             notes.push(note);
         }
     }
-    // `claude mcp add` stores the command in this file, which the harness
+    // `the terminal harness mcp add` stores the command in this file, which the harness
     // table does not name.
     if h.name == "claude" {
         if let Ok(home) = home() {
@@ -6448,7 +6448,7 @@ pub fn onboard_to(harness: &str, dry: bool, skills: Option<&Path>) -> Result<Vec
     onboard_in(&harnesses_path(), harness, dry, skills)
 }
 
-/// Frozen Grok hook file. Copied to `~/.grok/hooks/ljos.json`.
+/// Frozen the build harness hook file. Copied to `the build harness hooks file`.
 const FROZEN_HOOKS_JSON: &str = include_str!("../assets/grok/ljos.json");
 
 /// The `ljos` a runner hook or plugin runs: the one beside `ljos-mcp`, by
@@ -6462,12 +6462,12 @@ fn ljos_path() -> Result<PathBuf> {
     which::which("ljos").context("ljos not on PATH")
 }
 
-/// The grok hooks file with `{ljos}` filled in.
+/// The build harness hooks file with `{ljos}` filled in.
 fn grok_hooks_json(ljos: &Path) -> String {
     FROZEN_HOOKS_JSON.replace("{ljos}", &ljos.display().to_string())
 }
 
-/// The events whose matcher groups in a Claude settings file already run
+/// The events whose matcher groups in a terminal harness settings file already run
 /// the seat's hook.
 fn claude_seat_events(claude_settings: &Path) -> Vec<String> {
     let Some(v) = std::fs::read_to_string(claude_settings)
@@ -6495,8 +6495,8 @@ fn claude_seat_events(claude_settings: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The grok hooks file without the events Grok already runs from
-/// `~/.claude/settings.json`: Grok reads both files, and an event in both
+/// The build harness hooks file without the events the build harness already runs from
+/// `the terminal harness settings`: the build harness reads both files, and an event in both
 /// ran the seat's hook twice.
 fn grok_hooks_json_beside(ljos: &Path, claude_settings: &Path) -> String {
     let skip = claude_seat_events(claude_settings);
@@ -7120,8 +7120,8 @@ fn onboard_in_at_inner(
                 steps.push(write_skill(&expand(dir), dry));
             }
         }
-        // The personas go to Grok's agents directory even before the file
-        // names Grok: a definition is a file Grok reads, nothing it runs.
+        // The personas go to the build harness's agents directory even before the file
+        // names the build harness: a definition is a file the build harness reads, nothing it runs.
         let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
         let agents = declared.and_then(|h| h.agents).or_else(|| {
             shipped
@@ -7144,7 +7144,7 @@ fn onboard_in_at_inner(
     // A runner the seat ships a shape for is onboarded from that shape when
     // the file does not name it, and the shape is written into the file so
     // the doctor and persona sessions know the runner too: a first
-    // `ljos onboard --harness claude` needs no file of its own.
+    // `ljos onboard --harness NAME` needs no file of its own.
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
     let names: Vec<String> = all.harness.iter().map(|h| h.name.clone()).collect();
     let named = names.iter().any(|n| n == harness);
@@ -7190,7 +7190,7 @@ fn onboard_in_at_inner(
         host_key_step(dry),
     ];
     let mut steps: Vec<Step> = shipped_step.into_iter().collect();
-    // The Cursor plugin carries the server, the hooks and the skill.
+    // The editor harness plugin carries the server, the hooks and the skill.
     let plugin = (h.hooks_format.as_deref() == Some("cursor"))
         .then(|| cursor_plugin_in(&expand("~/.cursor/plugins")))
         .flatten();
@@ -7493,7 +7493,7 @@ fn hook_matcher(event: &str) -> &'static str {
         .map_or("*", |(_, m)| m)
 }
 
-/// The seat's MCP tools as Claude Code names them. The hook reads which
+/// The seat's MCP tools as the terminal harness names them. The hook reads which
 /// subagent calls one, so the server can bind that ballot to it. A
 /// matcher with a `^` is a regular expression, unanchored unless written
 /// so; joined to the tool list, it would make `Write` match `TodoWrite`.
@@ -7895,12 +7895,12 @@ fn hook_installed(file: &Path, events: &[String]) -> bool {
     })
 }
 
-/// The events the seat's hook takes in Cursor's hooks file, each with its
+/// The events the seat's hook takes in the editor harness's hooks file, each with its
 /// timeout in seconds. They are the session start, whose context the
 /// model hears (the CLI runs it too), the gate before a shell command, the
 /// prompt, the tool results that deliver its note, a failure, a
 /// compaction, the stop, and the end of the session. A prompt's note is
-/// held, since Cursor does not hand a prompt hook's context to the model.
+/// held, since the editor harness does not hand a prompt hook's context to the model.
 pub const CURSOR_HOOK_EVENTS: &[(&str, u64)] = &[
     ("sessionStart", 5),
     ("beforeShellExecution", 10),
@@ -7915,8 +7915,8 @@ pub const CURSOR_HOOK_EVENTS: &[(&str, u64)] = &[
     ("sessionEnd", 5),
 ];
 
-/// Events Claude's settings file does not carry. They are written into
-/// Cursor's hooks file even when Cursor also runs the Claude hooks.
+/// Events the terminal harness's settings file does not carry. They are written into
+/// the editor harness's hooks file even when the editor harness also runs the terminal harness hooks.
 const CURSOR_ONLY_EVENTS: &[&str] = &[
     "beforeShellExecution",
     "preToolUse",
@@ -7925,16 +7925,16 @@ const CURSOR_ONLY_EVENTS: &[&str] = &[
     "postToolUseFailure",
 ];
 
-/// Merge the seat's hook into Cursor's hooks file,
+/// Merge the seat's hook into the editor harness's hooks file,
 /// `{"version": 1, "hooks": {"<event>": [{"command": ..., "timeout": ...}]}}`.
-/// The entries are flat, not Claude's matcher groups. Cursor also runs
-/// the hooks in `~/.claude/settings.json`, and the seat answers both in
-/// Cursor's shape: it knows Cursor by the `cursor_version` in the
+/// The entries are flat, not the terminal harness's matcher groups. the editor harness also runs
+/// the hooks in `the terminal harness settings`, and the seat answers both in
+/// the editor harness's shape: it knows the editor harness by the `the editor payload mark` in the
 /// payload. When that file already carries the seat's hook, the events
-/// Claude runs are left to it. Cursor-only events are still written here,
-/// because Claude's file does not name them.
-/// Claude's settings carry the seat hook when a matcher group's command
-/// is the seat's. Cursor runs that file, so those events stay there.
+/// the terminal harness runs are left to it. the editor harness-only events are still written here,
+/// because the terminal harness's file does not name them.
+/// the terminal harness's settings carry the seat hook when a matcher group's command
+/// is the seat's. the editor harness runs that file, so those events stay there.
 fn claude_has_seat_hook(claude_settings: &Path) -> bool {
     std::fs::read_to_string(claude_settings)
         .ok()
@@ -7955,8 +7955,8 @@ fn claude_has_seat_hook(claude_settings: &Path) -> bool {
         })
 }
 
-/// Whether no seat hook in Cursor's file carries `failClosed`. With it,
-/// Cursor refuses the call when the hook is missing, crashes or times
+/// Whether no seat hook in the editor harness's file carries `failClosed`. With it,
+/// the editor harness refuses the call when the hook is missing, crashes or times
 /// out, and a machine ljos was removed from stops dead until the mark is
 /// gone.
 fn cursor_gates_fail_open(cursor: &Path) -> bool {
@@ -7975,8 +7975,8 @@ fn cursor_gates_fail_open(cursor: &Path) -> bool {
     })
 }
 
-/// Cursor's file is the memory hook when it carries every Cursor event,
-/// or the events Claude's file does not name while Claude's file has the
+/// the editor harness's file is the memory hook when it carries every the editor harness event,
+/// or the events the terminal harness's file does not name while the terminal harness's file has the
 /// seat hook.
 fn cursor_hooks_satisfy(cursor: &Path, claude: &Path) -> bool {
     if !cursor_gates_fail_open(cursor) {
@@ -7996,7 +7996,7 @@ fn cursor_hooks_satisfy(cursor: &Path, claude: &Path) -> bool {
     hook_installed(cursor, &only) && claude_has_seat_hook(claude)
 }
 
-/// The ljos Cursor plugin under Cursor's plugins directory, when installed:
+/// The ljos the editor harness plugin under the editor harness's plugins directory, when installed:
 /// a clone in `local/ljos`, or a marketplace or `/add-plugin` install in
 /// `cache/<marketplace>/ljos/<commit>`.
 #[must_use]
@@ -8031,9 +8031,9 @@ fn file_has_seat_hook(file: &Path) -> bool {
 }
 
 /// The step that stands in for the tool server, the hooks and the skill
-/// when the Cursor plugin carries them. Writing them as well would run every
+/// when the editor harness plugin carries them. Writing them as well would run every
 /// hook twice and list the tool server twice. A hooks file an earlier
-/// onboard wrote is named, since Cursor still runs it.
+/// onboard wrote is named, since the editor harness still runs it.
 fn cursor_plugin_step(plugin: &Path, hooks: &Path) -> Step {
     let mut detail = format!(
         "the ljos Cursor plugin at {} carries the tool server, the hooks and the skill, \
@@ -8102,7 +8102,7 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
             continue;
         };
         if let Some(seat) = entries.iter_mut().find(|e| is_seat_hook(e)) {
-            // A `failClosed` an earlier onboard wrote makes Cursor refuse
+            // A `failClosed` an earlier onboard wrote makes the editor harness refuse
             // the call when the hook is missing or fails.
             if seat
                 .as_object_mut()
@@ -8339,10 +8339,10 @@ pub enum HookShape {
     /// snake_case stdin; the warning goes in `additionalContext`.
     #[default]
     Asks,
-    /// snake_case stdin carrying `turn_id`, Codex `PreToolUse`; the
+    /// snake_case stdin carrying `turn_id`, the command harness `PreToolUse`; the
     /// warning goes in `additionalContext`.
     DenyOnly,
-    /// camelCase stdin (`hookEventName`, `toolInput`), Grok Build; the
+    /// camelCase stdin (`hookEventName`, `toolInput`), the build harness; the
     /// warning goes in `additionalContext`.
     CamelCase,
     /// lower-case event names (`pre_llm_call`, `pre_tool_call`) with the
@@ -8355,17 +8355,17 @@ pub enum HookShape {
     /// allow` with the warning as its `reason`; context goes in as
     /// `injectSteps`; a `Stop` is held with `decision: continue`.
     Steps,
-    /// Cursor's `beforeShellExecution`: snake_case stdin carrying
-    /// `cursor_version`, the command at the top level. Answers
+    /// the editor harness's `beforeShellExecution`: snake_case stdin carrying
+    /// `the editor payload mark`, the command at the top level. Answers
     /// `permission: allow` with the warning in `user_message` and
-    /// `agent_message`. Cursor blocks the command when the answer is not
+    /// `agent_message`. the editor harness blocks the command when the answer is not
     /// JSON.
     CursorShell,
-    /// Every other Cursor event. Context reaches the model as
+    /// Every other the editor harness event. Context reaches the model as
     /// `additional_context` only on `postToolUse`, `postToolUseFailure`
     /// and `sessionStart`. A `stop` is held with `followup_message`.
     /// `preToolUse` answers as `beforeShellExecution` does, which is
-    /// [`HookShape::CursorShell`].
+    /// the shell shape.
     Cursor,
 }
 
@@ -8377,7 +8377,7 @@ impl HookShape {
         matches!(self, Self::CamelCase | Self::Cursor | Self::CursorShell)
     }
 
-    /// Cursor, on either of its event shapes.
+    /// the editor harness, on either of its event shapes.
     #[must_use]
     pub fn is_cursor(self) -> bool {
         matches!(self, Self::Cursor | Self::CursorShell)
@@ -8387,7 +8387,7 @@ impl HookShape {
 /// Read a hook call from the runner's JSON, or from plain text (an argv
 /// under argv law). Fields: `hook_event_name`, `tool_name`, `tool_input`
 /// (a shell tool's `command`, a file tool's path, an MCP tool's name),
-/// `prompt`; grok's camelCase `hookEventName`, `sessionId` and `toolInput`
+/// `prompt`; the build harness's camelCase `hookEventName`, `sessionId` and `toolInput`
 /// read the same.
 #[must_use]
 pub fn hook_call(input: &str) -> HookCall {
@@ -8704,8 +8704,8 @@ fn turn_is_new(dir: &Path, session: &str, prompt: &str) -> bool {
 }
 
 /// Every id a hook payload names its conversation by, the one
-/// [`hook_call_as`] picks first. Cursor sends a `session_id` beside the
-/// `conversation_id` its shell is stamped with; Grok says `sessionId`.
+/// [`hook_call_as`] picks first. the editor harness sends a `session_id` beside the
+/// `conversation_id` its shell is stamped with; the build harness says `sessionId`.
 #[must_use]
 pub fn payload_sessions(input: &str) -> Vec<String> {
     let Ok(v) = serde_json::from_str::<Value>(input.trim()) else {
@@ -8780,7 +8780,7 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
         &v["tool_input"]
     };
     let cursor = matches!(shape, HookShape::Cursor | HookShape::CursorShell);
-    // A Cursor payload is named by `conversation_id` or by nothing: its
+    // An editor harness payload is named by `conversation_id` or by nothing: its
     // `session_id` is not the conversation.
     let session = if cursor {
         v["conversation_id"].as_str().and_then(usable_session_id)
@@ -9159,7 +9159,7 @@ pub fn compaction_note() -> Option<String> {
 }
 
 /// The error a failed tool reported. The first field set wins, in this
-/// order: Grok's `error`, Cursor's `error_message`, `tool_response.error`,
+/// order: the build harness's `error`, the editor harness's `error_message`, `tool_response.error`,
 /// `toolResult.error` and `tool_response.stderr`.
 #[must_use]
 pub fn tool_error(input: &str) -> String {
@@ -10028,7 +10028,7 @@ fn shared_cue_words(text: &str, cue: &str) -> usize {
 
 /// How many content words a lesson must share with a failed command and
 /// its error. A failure cue is long and noisy. One word in common
-/// (`build` in an npm error and in "Grok Build") is a coincidence, not a
+/// (`build` in an npm error and in "the build harness") is a coincidence, not a
 /// match.
 pub const FAILURE_SHARED_WORDS: usize = 2;
 
@@ -11347,7 +11347,7 @@ fn strip_user_request(s: &str) -> String {
     s.to_string()
 }
 
-/// The text of one transcript entry: Claude puts it under `message.content`,
+/// The text of one transcript entry: the terminal harness puts it under `message.content`,
 /// and a runner that records `tool_calls` puts it under `content`.
 fn entry_text(e: &Value) -> String {
     let nested = block_text(&e["message"]["content"]);
@@ -12569,7 +12569,7 @@ pub fn subagent_stop_reason(
 }
 
 /// How long a context hook may take before it answers with nothing. The
-/// shortest runner cut-off seen is grok's 15 s on a prompt; this leaves it
+/// shortest runner cut-off seen is the build harness's 15 s on a prompt; this leaves it
 /// room on a loaded host.
 pub const HOOK_DEADLINE_MS: u64 = 8000;
 
@@ -12963,11 +12963,11 @@ fn running_key(call: &HookCall, input: &str) -> String {
 }
 
 /// Whether a copy of this call gets the first call's answer again rather
-/// than nothing. Codex (the runner whose stdin carries `turn_id`) delivers
+/// than nothing. the command harness (the runner whose stdin carries `turn_id`) delivers
 /// every hook event twice, and how it joins the two answers is not
 /// written down, so its copy of a prompt or a tool result says what the
 /// first said. A runner that joins two registrations' answers, such as
-/// Cursor, would show the memories twice, so its copy stays silent.
+/// the editor harness, would show the memories twice, so its copy stays silent.
 #[must_use]
 pub fn replays_its_copy(call: &HookCall) -> bool {
     call.shape == HookShape::DenyOnly
@@ -13044,11 +13044,11 @@ pub const TWIN_EVENTS: &[&str] = &[
 ];
 
 /// Whether this call is the twin of one that started in the last ten
-/// seconds: the same event with the same payload, byte for byte. A Cursor
+/// seconds: the same event with the same payload, byte for byte. An editor harness
 /// with the plugin and an earlier onboard, or a runner that also loads
-/// Claude's settings, runs the seat's hook twice for one event, and both
+/// the terminal harness's settings, runs the seat's hook twice for one event, and both
 /// copies get the same payload. A later event of the same kind carries a
-/// new generation, loop count or transcript, and is not a twin. Claude's
+/// new generation, loop count or transcript, and is not a twin. the terminal harness's
 /// Stop often repeats the payload; the transcript file is what the next
 /// turn changes, so its length and tail are part of a Stop's key.
 pub fn hook_twin(call: &HookCall, input: &str) -> bool {
@@ -14236,14 +14236,14 @@ static GATE_ANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// The gate call this process is answering: its input and `--event`.
 static GATE_CALL: std::sync::OnceLock<(String, Option<String>)> = std::sync::OnceLock::new();
 
-/// How long a Cursor gate waits on the seat before the seat allows the
+/// How long an editor harness gate waits on the seat before the seat allows the
 /// call itself: under the 10 seconds onboard registers, so the allow is
-/// written before Cursor gives up on the hook.
+/// written before the editor harness gives up on the hook.
 pub const CURSOR_GATE_DEADLINE_MS: u64 = 8_000;
 
-/// A Cursor `beforeReadFile` whose allow does not depend on the body.
+/// An editor harness `beforeReadFile` whose allow does not depend on the body.
 /// `false` when the bytes are anything else, including a payload this
-/// scan will not trust. A second `hook_event_name` or `cursor_version`
+/// scan will not trust. A second `hook_event_name` or `the editor payload mark`
 /// at the top level is `false` too, and the caller parses that payload.
 pub(crate) fn cursor_read_allow_bytes(input: &[u8]) -> bool {
     let b = trim_ascii_ws(input);
@@ -14491,7 +14491,7 @@ fn skip_json_literal(b: &[u8], i: &mut usize) -> bool {
     true
 }
 
-/// Print the allow for a Cursor `beforeReadFile` and return 0.
+/// Print the allow for an editor harness `beforeReadFile` and return 0.
 /// `None` when the bytes are not that call, or the trace marker is on
 /// so the full payload can be recorded.
 pub fn answer_cursor_read_bytes(bytes: &[u8]) -> Option<i32> {
@@ -14545,14 +14545,14 @@ pub fn cursor_side_answer(input: &str, event: Option<&str>) -> Option<(String, i
     Some((hook_output_ruled(&call, "", ruled.as_ref()), 0))
 }
 
-/// Write [`cursor_side_answer`] and return its status. `None` when this
+/// Write the side answer and return its status. `None` when this
 /// call is not one of those events.
 pub fn emit_cursor_side_answer(input: &str, event: Option<&str>) -> Option<i32> {
     let (output, code) = cursor_side_answer(input, event)?;
     Some(emit_side_answer(input, event, &output, code))
 }
 
-/// Write a side answer [`cursor_side_answer`] already computed and return
+/// Write a side answer already computed and return
 /// its status, so a caller that had to look at the answer first does not
 /// compute it twice.
 pub fn emit_side_answer(input: &str, event: Option<&str>, output: &str, code: i32) -> i32 {
@@ -14645,9 +14645,9 @@ pub fn answer_gate(output: &str) {
 
 /// Arm the answers of a gate call: a panic in the hook writes the allow
 /// of [`hook_failure_output`] and exits 0 (a bare panic exits 101 with no
-/// answer), and on Cursor, a hook with no answer by
-/// [`CURSOR_GATE_DEADLINE_MS`] does the same, so the allow and its note
-/// arrive before Cursor times the hook out.
+/// answer), and on the editor harness, a hook with no answer by
+/// the gate deadline does the same, so the allow and its note
+/// arrive before the editor harness times the hook out.
 /// Nothing is armed for an event that is not a gate.
 pub fn arm_gate(input: &str, event: Option<&str>) {
     let call = hook_call_as(input, event);
@@ -14823,17 +14823,17 @@ pub fn shell_exit(fail_on_deny: bool, text: &str) -> i32 {
     }
 }
 
-/// An answer in Cursor's hook contract. A gate always answers, `allow`
+/// An answer in the editor harness's hook contract. A gate always answers, `allow`
 /// or, on `preToolUse`, `deny` for a rule that [blocks](Rule::blocks),
-/// because Cursor blocks the command when a permission hook's answer is
+/// because the editor harness blocks the command when a permission hook's answer is
 /// not JSON. A rule's warning or refusal goes to the person
-/// (`user_message`) and to the agent (`agent_message`). Cursor gives
+/// (`user_message`) and to the agent (`agent_message`). the editor harness gives
 /// context to the model as `additional_context` after a tool result, a
 /// failed one, or at session start. A held stop is a
 /// `followup_message`. `beforeMCPExecution` and `beforeReadFile` are
 /// permission events too, and a hooks file a person marked `failClosed`
 /// by hand refuses a silent one. The seat judges those calls on
-/// `preToolUse`, which Cursor fires for every tool.
+/// `preToolUse`, which the editor harness fires for every tool.
 fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
     let mut out = serde_json::Map::new();
     match call.event.as_str() {
@@ -25062,7 +25062,7 @@ fn shell_words(segment: &str) -> Vec<String> {
 }
 
 /// Whether one of `words` assigns a variable a runner names its session
-/// with: `LJOS_HARNESS_SESSION`, a `CURSOR_*SESSION*`, or any
+/// with: `LJOS_HARNESS_SESSION`, an editor session variable, or any
 /// `*_SESSION_ID`, `*_THREAD_ID` or `*_CONVERSATION_ID`.
 fn assigns_session(words: &[String]) -> bool {
     words.iter().any(|w| {
@@ -40075,9 +40075,9 @@ pub fn tcb_answer_in(
 ) -> String {
     use std::io::Read as _;
     // A missing file is not a fault. CI and a fresh install have no
-    // policyd. A file that is there and still fails is a fault: Claude
-    // Code, Codex and Cursor call this path directly, and an allow there
-    // used to let the tool run with no note on Cursor.
+    // policyd. A file that is there and still fails is a fault: the terminal harness
+    // Code, the command harness and the editor harness call this path directly, and an allow there
+    // used to let the tool run with no note on the editor harness.
     let unhealthy = |why: &str| format!("allow\t{}", unhealthy_note(why));
     let faulted = |why: &str| {
         let line = format!("ljos: the guard could not judge ({why}); the call is allowed");
@@ -46043,7 +46043,7 @@ mod tests {
         );
         assert_eq!(harness_seat("antigravity", &known(&["agy"])), None);
         // A command that is no harness id names no seat: `code` is not
-        // `claude-code`'s.
+        // `the terminal harness-code`'s.
         assert_eq!(harness_seat("vscode", &known(&["claude-code"])), None);
         for harness in HARNESS_NAMES {
             let seat = HARNESS_SEATS.iter().find(|(id, _)| id == harness);
@@ -46854,8 +46854,8 @@ mod tests {
         restore(&saved);
     }
 
-    /// Codex's copy of a prompt event says what the first delivery said,
-    /// once that answer is written, and nothing is run twice. A Cursor
+    /// the command harness's copy of a prompt event says what the first delivery said,
+    /// once that answer is written, and nothing is run twice. An editor harness
     /// copy keeps quiet.
     #[test]
     fn a_codex_copy_replays_the_first_answer() {
@@ -46938,7 +46938,7 @@ mod tests {
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
     }
 
-    /// Claude's Stop payload is the same bytes on the next turn of a
+    /// the terminal harness's Stop payload is the same bytes on the next turn of a
     /// session. The transcript is what grew, so that stop is a new turn
     /// and its deeds and lessons are kept. Two registrations of one stop,
     /// with the transcript unchanged, are still one.
@@ -46978,7 +46978,7 @@ mod tests {
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
     }
 
-    /// Onboarding Cursor finds the plugin in either place Cursor keeps it,
+    /// Onboarding the editor harness finds the plugin in either place the editor harness keeps it,
     /// and says so instead of writing a second server and second hooks. A
     /// hooks file an earlier onboard wrote is named.
     #[test]
@@ -50153,7 +50153,7 @@ mod tests {
             hook_output_ruled(&argv, "", verdict_for(&rules, &argv.cue)),
             "warning: A push is the trust gate. (ljos rule `git push*`)\n"
         );
-        // grok: camelCase in, the warning as context out.
+        // the build harness: camelCase in, the warning as context out.
         let grok = hook_call(
             r#"{"hookEventName":"pre_tool_use","sessionId":"g-1","toolName":"run_terminal_command","toolInput":{"command":"git push --force"}}"#,
         );
@@ -52599,7 +52599,7 @@ mod tests {
         assert!(!step.ok, "an unknown template writes nothing: {step:?}");
     }
 
-    /// Claude Desktop keeps its config under ~/Library/Application Support
+    /// the terminal harness Desktop keeps its config under ~/Library/Application Support
     /// on macOS and under ~/.config on Linux. A runner with one place
     /// keeps it on both.
     #[test]
@@ -52619,7 +52619,7 @@ mod tests {
         assert_eq!(cursor.config_json_on("macos"), Some("~/.cursor/mcp.json"));
     }
 
-    /// Claude Desktop opened from the Dock or Finder starts its servers
+    /// the terminal harness Desktop opened from the Dock or Finder starts its servers
     /// with launchd's PATH, which holds no user bin directory. Onboard
     /// writes this install's path there unless that PATH runs it.
     #[test]
@@ -57628,7 +57628,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "0::/system.slice/pod/cursor-agent/workload\n",
             &runners
         ));
-        // The harness file says `cursor`. The cgroup may say `Cursor`.
+        // The harness file says `the editor harness`. The cgroup may say `the editor harness`.
         assert!(super::cgroup_text_names_runner(
             "0::/system.slice/pod/Cursor-agent/workload\n",
             &runners
@@ -59207,8 +59207,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
     }
 
-    /// Cursor is read off its payload, whichever file registered the hook,
-    /// and answered in its contract ([`cursor_output`]).
+    /// the editor harness is read off its payload, whichever file registered the hook,
+    /// and answered in its contract.
     #[test]
     fn cursor_is_read_off_its_payload_and_answered_in_its_contract() {
         let shell = hook_call(
@@ -59278,7 +59278,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
     }
 
-    /// Cursor's hooks file is written flat, once. Events Claude's settings
+    /// the editor harness's hooks file is written flat, once. Events the terminal harness's settings
     /// run stay there. The events that file does not name are still written.
     #[test]
     fn cursor_hooks_are_written_flat_and_never_twice() {
@@ -59338,7 +59338,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     /// A seat hook an earlier onboard wrote with `failClosed` loses it,
     /// and the file does not satisfy the check until it has: with the
-    /// mark, Cursor refuses every call once ljos is gone.
+    /// mark, the editor harness refuses every call once ljos is gone.
     #[test]
     fn an_old_cursor_gate_is_let_fail_open() {
         let dir = tempfile::tempdir().unwrap();
@@ -59485,7 +59485,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         ));
     }
 
-    /// A persona becomes an agent definition. Grok and Claude Code read the
+    /// A persona becomes an agent definition. the build harness and the terminal harness read the
     /// front matter; the body tells the persona to brief itself, cast one
     /// ballot before it reads the others, note why and stop. A file is
     /// rewritten only when it changes and removed with its persona. Files
@@ -59536,7 +59536,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     /// A panel's members run on the runner it names, through that runner's
-    /// headless argv; the test stand-in and the Grok default still answer.
+    /// headless argv; the test stand-in and the build harness default still answer.
     #[test]
     fn a_panel_member_runs_on_the_runner_named() {
         let _g = env_guard();
@@ -59612,7 +59612,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     /// A failed tool and a compaction reach the seat under snake, Pascal
-    /// and camel case, and the error is read from Grok's `error` and a
+    /// and camel case, and the error is read from the build harness's `error` and a
     /// runner's `tool_response.error`.
     #[test]
     fn a_failure_and_a_compaction_are_named_and_read() {
@@ -60365,7 +60365,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     /// A line whose `cd` the shell undoes, or runs where it leaves the line
     /// alone, still writes the hook file in `project`. `seat` there is a
-    /// link to `~/.cursor`. `lnk/..` is `project` again, as a logical `cd`
+    /// link to `~/.the editor harness`. `lnk/..` is `project` again, as a logical `cd`
     /// takes `..` off by name, and `-P` is folded the same way. `cd -`
     /// leaves the directory unknown, so the write is not that hook file.
     /// ljos-policyd allows each line and names the hook write it sees.
@@ -60445,12 +60445,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             .any(|rule| rule == "seat-guard-path")
     }
 
-    /// `echo x > seat/hooks.json`. `seat` is a link to `~/.cursor` in a
+    /// `echo x > seat/hooks.json`. `seat` is a link to `~/.the editor harness` in a
     /// directory where ljos-policyd names this write, and an ordinary
     /// directory where it names none.
     const SEAT_WRITE: &str = "echo x > seat/hooks.json";
 
-    /// Point `dir/seat` at `home/.cursor`, which holds the hook file.
+    /// Point `dir/seat` at `home/.the editor harness`, which holds the hook file.
     fn risky_seat(dir: &std::path::Path, home: &std::path::Path) {
         let cursor = home.join(".cursor");
         std::fs::create_dir_all(&cursor).unwrap();
@@ -60467,7 +60467,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         std::fs::create_dir_all(dir.join("seat")).unwrap();
     }
 
-    /// A tree whose `project/seat` is a link to the seat's `~/.cursor`,
+    /// A tree whose `project/seat` is a link to the seat's `~/.the editor harness`,
     /// judged by the real ljos-policyd from that HOME. Take [`env_guard`]
     /// first.
     fn policyd_tree(name: &str) -> (tempfile::TempDir, SeatDir, HoldEnv) {
@@ -62322,7 +62322,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let call = seat_for_thread(thread);
         let other = tempfile::tempdir().unwrap();
         unsafe {
-            // The shell carries the thread and a second Codex id, and finds
+            // The shell carries the thread and a second the command harness id, and finds
             // no record.
             std::env::set_var("XDG_RUNTIME_DIR", other.path());
             std::env::set_var("CODEX_THREAD_ID", thread);
@@ -67668,8 +67668,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(reclaim_expired(0).starts_with("off"));
     }
 
-    /// The Claude Code plugin in the repository root is the seat onboard
-    /// already registers: the protocol skill, the Claude hook events, and
+    /// The terminal harness plugin in the repository root is the seat onboard
+    /// already registers: the protocol skill, the terminal harness hook events, and
     /// a leidarljos marketplace that also names the vissue tracker.
     #[test]
     fn the_claude_plugin_ships_the_seat() {
@@ -67785,15 +67785,15 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
     }
 
-    /// The same tree is a Cursor plugin: `.cursor-plugin/plugin.json` names
+    /// The same tree is an editor harness plugin: the plugin manifest names
     /// the seat's version and repository, every path it declares exists and
     /// stays inside the tree, `mcp.json` starts `ljos-mcp` through the
-    /// launcher, and `hooks/cursor.json` takes the seat's Cursor events in
-    /// Cursor's flat shape. `beforeMCPExecution` and `beforeReadFile` are
-    /// left to `preToolUse`, which Cursor fires for every tool, so an older
+    /// launcher, and the editor hooks file takes the seat's editor events in
+    /// the editor harness's flat shape. `beforeMCPExecution` and `beforeReadFile` are
+    /// left to `preToolUse`, which the editor harness fires for every tool, so an older
     /// binary that prints nothing on them cannot block a read. The plugin
     /// adds `sessionStart`, where a missing seat says how to install it.
-    /// Claude's hooks stay in `hooks/hooks.json`, which Cursor does not read
+    /// the terminal harness's hooks stay in `hooks/hooks.json`, which the editor harness does not read
     /// because the manifest names its own file.
     #[test]
     fn the_cursor_plugin_ships_the_seat() {
@@ -68394,7 +68394,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(toml.ends_with("[mcp_servers.ljos]\ncommand = \"x\"\n"));
     }
 
-    /// Codex builds its MCP server's environment from `env_vars` alone, so
+    /// the command harness builds its MCP server's environment from `env_vars` alone, so
     /// the entry must forward the session the prompt hook binds, and an
     /// entry written before it did is brought up to date.
     #[test]

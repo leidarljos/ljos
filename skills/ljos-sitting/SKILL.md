@@ -6,7 +6,7 @@ description: Open and close a piece of work on one ticket with ljos sitting and 
 # A sitting: one ticket, start to finish
 
 A sitting ties the work in this conversation to one ticket, so the next
-agent, in Cursor or any other tool, can see who has it and what it taught.
+agent, in the editor harness or any other tool, can see who has it and what it taught.
 
 ## Start
 

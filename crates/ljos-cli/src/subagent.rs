@@ -1,5 +1,5 @@
 //! The subagent a tool call runs for, so its ballot binds its own session
-//! rather than its parent's. Claude Code hands a hook the subagent's
+//! rather than its parent's. the terminal harness hands a hook the subagent's
 //! `agent_id` and the call's `tool_use_id`, but gives the command it runs
 //! no variable that names the agent. The hook leaves the call under the
 //! runtime directory, and the `ljos` the command runs, or the MCP server
@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// How long a shell call the hook saw waits to be taken: the longest a
-/// Claude Code shell command runs.
+/// the terminal harness shell command runs.
 const CALL_TTL_MS: u64 = 600_000;
 
 /// How long an MCP hook call waits to be taken by `ljos-mcp`.
@@ -170,7 +170,7 @@ pub(crate) fn is_confirmed_seat_call(
     field: Option<&str>,
     command: Option<&str>,
 ) -> bool {
-    // The Cursor payload names the server binary in `command`. When that
+    // The editor harness payload names the server binary in `command`. When that
     // field is present it has to be the seat server. A key in a config
     // file cannot promote a foreign binary.
     if let Some(command) = command.map(str::trim).filter(|text| !text.is_empty()) {
@@ -484,7 +484,7 @@ fn take_newest(found: Vec<(PathBuf, Call)>) -> Option<Call> {
     })
 }
 
-/// The session and subagent of a Claude Code MCP call, by the tool use id
+/// The session and subagent of a terminal harness MCP call, by the tool use id
 /// its `_meta` carries, when its hook saw a subagent make it. Taken once.
 #[must_use]
 pub fn claim_mcp_call(call: &str) -> Option<(String, String)> {

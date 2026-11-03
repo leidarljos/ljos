@@ -140,7 +140,7 @@ impl Seat {
         (out.status.code(), String::from_utf8(out.stdout).unwrap())
     }
 
-    /// What `ljos hook` answers Claude Code's `PreToolUse` on `sudo true`.
+    /// What `ljos hook` answers the terminal harness's `PreToolUse` on `sudo true`.
     fn hook(&self) -> String {
         let work = self.path("work");
         let payload = serde_json::json!({

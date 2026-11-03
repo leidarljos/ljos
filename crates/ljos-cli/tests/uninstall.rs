@@ -17,7 +17,7 @@ fn executable(path: &Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// A home with a copy of this ljos in `bin`, a fake `claude` that answers
+/// A home with a copy of this ljos in `bin`, a fake `the terminal harness` that answers
 /// onboard, and another seat program that must stay.
 fn seat_home() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().unwrap();

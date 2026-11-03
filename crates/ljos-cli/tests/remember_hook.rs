@@ -1,6 +1,6 @@
 //! A lesson the person types reaches the next prompt that bears on it.
 //!
-//! A fresh home, the hooks `ljos onboard --harness claude` writes, packsetd
+//! A fresh home, the hooks `ljos onboard --harness NAME` writes, packsetd
 //! on a free port: `ljos remember`, then a matching prompt through the
 //! `UserPromptSubmit` command onboard put in `settings.json`.
 
@@ -105,7 +105,7 @@ fn text(out: &Output) -> String {
 }
 
 /// A fresh home with packsetd on a free port and the hooks `ljos onboard
-/// --harness claude` wrote: the home, the daemon, and the prompt hook's
+/// --harness NAME` wrote: the home, the daemon, and the prompt hook's
 /// command.
 fn seat() -> (Home, ljos_test_boot::Packsetd, String) {
     let Some(packsetd) = on_path("packsetd") else {
@@ -171,9 +171,9 @@ fn prompt_through(home: &Home, hook: &str, session: &str, prompt: &str) -> Strin
         "prompt": prompt,
     })
     .to_string();
-    // Claude Code runs the command in `sh -c`; the hook keeps the prompt
+    // the terminal harness runs the command in `sh -c`; the hook keeps the prompt
     // only when that runner, a program the kernel runs from a file named
-    // `claude`, opened the shell.
+    // `the terminal harness`, opened the shell.
     let installed = runner::install_dir();
     let runner = installed.path().join("claude");
     runner::runner_at(&runner);

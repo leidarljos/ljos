@@ -106,7 +106,7 @@ fn call(mut cmd: Command, payload: &str, limit: Duration) -> (Duration, Output) 
 
 const ALAN: &str = r#"{"rules":[{"id":"ur-ocaisa","text":"never post or reply to Alan (ocaisa)","author":"rohit","reason":"he asked not to be pinged","deny_mention":{"handles":["ocaisa"],"names":["Alan"]},"deny_reply_to":{"handles":["ocaisa"],"names":["Alan"]},"written_at":"2026-10-25T00:00:00Z","updated_at":"2026-10-25T00:00:00Z","basis":"person"}]}"#;
 
-/// Whether a Cursor answer is an allow that carries the user rule's warning.
+/// Whether an editor harness answer is an allow that carries the user rule's warning.
 fn warns(said: &str) -> bool {
     said.contains("\"permission\":\"allow\"")
         && said.contains("\"user_message\":\"warning: never post")
@@ -116,7 +116,7 @@ fn rules_path(hab: &Hab) -> PathBuf {
     hab.home.join(".config/ljos/user-rules.json")
 }
 
-/// A Cursor cloud runner's GitHub comment
+/// An editor harness cloud runner's GitHub comment
 /// arrives as preToolUse `MCP:add_issue_comment` with no server field.
 /// The rule that warns on `mcp__github__add_issue_comment` applies to it.
 #[test]

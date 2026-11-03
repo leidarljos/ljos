@@ -82,7 +82,7 @@ _PAGE_TITLE = {
     "index": "ljos",
     "getting-started": "Getting started",
     "howto": "How-to",
-    "grok-build": "Grok Build",
+    "grok-build": "Build harness",
     "integration": "Integration",
     "architecture": "Architecture",
     "reference": "Reference",

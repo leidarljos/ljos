@@ -46,7 +46,7 @@ Nothing needs a variable set. ``ljos onboard`` makes a deed store, a tracker and
 config file for ``vissue``, and it starts the pack writer. Git needs an identity, because
 the tracker commits each change.
 
-Codex runs a hook only after you trust it. Open ``/hooks`` in Codex and trust each ljos hook.
+The command harness runs a hook only after you trust it. Open ``/hooks`` in the command harness and trust each ljos hook.
 Trust it again after an upgrade rewrites one.
 
 1. The memory loop

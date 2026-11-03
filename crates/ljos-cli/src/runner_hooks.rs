@@ -1,10 +1,10 @@
-//! Hook setups for runners whose hook contract is not Claude Code's own:
+//! Hook setups for runners whose hook contract is not the terminal harness's own:
 //! GitHub Copilot, Gemini CLI, Windsurf (Devin Desktop), Factory Droid,
 //! Kiro, Cline, Qwen Code, Crush, Auggie, goose and Amp.
 //!
 //! `onboard` writes each runner's hook file with the command
 //! `ljos hook --runner NAME`. That command turns the runner's stdin into
-//! the Claude Code payload the seat reads, runs the ordinary hook, and
+//! the terminal harness payload the seat reads, runs the ordinary hook, and
 //! writes the answer back in the runner's own field names. An answer
 //! allows the call and exits 0. A rule's warning rides in the runner's
 //! context field, or on stderr where the runner reads no context. The
@@ -95,7 +95,7 @@ fn command_of(args: &Value) -> Option<String> {
     })
 }
 
-/// The runner's stdin as the Claude Code payload `ljos hook` reads:
+/// The runner's stdin as the terminal harness payload `ljos hook` reads:
 /// `hook_event_name`, `session_id`, `cwd`, and `tool_name` with
 /// `tool_input`, or `prompt`. A payload that is not JSON, or a runner
 /// that already sends this shape, is returned as it came.
@@ -392,7 +392,7 @@ fn denied(
     rendered
 }
 
-/// The seat's answer (the Claude Code JSON `ljos hook` prints) in the
+/// The seat's answer (the terminal harness JSON `ljos hook` prints) in the
 /// runner's own field names: what to print, what to write to stderr, and
 /// the exit code. A warning is no decision, so each runner goes on with
 /// the call as it would with no hook, and the exit is 0. A [`denial`] is

@@ -326,7 +326,7 @@ pub fn unattended() -> bool {
     })
 }
 
-/// The thread a Codex rollout file is for, from a name such as
+/// The thread a command harness rollout file is for, from a name such as
 /// `rollout-2026-10-11T09-30-00-<uuid>.jsonl`, or `None` for any other
 /// name.
 fn rollout_thread(path: &str) -> Option<String> {
@@ -347,10 +347,10 @@ fn rollout_thread(path: &str) -> Option<String> {
 }
 
 /// Why a prompt event does not carry the person's words, or `None` when
-/// it does. A prompt event is not always typed by a person: Codex fires it
+/// it does. A prompt event is not always typed by a person: the command harness fires it
 /// inside a subagent, with the brief the parent agent wrote as `prompt`.
-/// A spawned agent's payload names it with `agent_id`, as Claude Code's
-/// does inside a subagent, and Codex's own review thread names a rollout
+/// A spawned agent's payload names it with `agent_id`, as the terminal harness's
+/// does inside a subagent, and the command harness's own review thread names a rollout
 /// file for a thread other than the session's. [`unattended`] covers a
 /// session with nobody there at all.
 #[must_use]
@@ -478,8 +478,8 @@ fn now_nanos() -> u128 {
         .map_or(0, |d| d.as_nanos())
 }
 
-/// The transcript a prompt hook payload names, as Claude Code, Codex and
-/// Cursor send it.
+/// The transcript a prompt hook payload names, as the terminal harness, the command harness and
+/// the editor harness send it.
 #[must_use]
 pub fn payload_transcript(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input.trim()).ok()?;
@@ -1219,8 +1219,8 @@ mod tests {
         assert!(full_prompt_hash("full not-a-hash").is_none());
     }
 
-    /// A Codex subagent's brief, Codex's review thread and an unattended
-    /// run are not the person; the root thread's prompt and Claude Code's
+    /// A command harness subagent's brief, the command harness's review thread and an unattended
+    /// run are not the person; the root thread's prompt and the terminal harness's
     /// main thread are.
     #[test]
     fn a_subagent_brief_or_unattended_run_is_not_the_person() {

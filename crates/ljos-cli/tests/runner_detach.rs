@@ -3,7 +3,7 @@
 //! `setsid -f`, a double fork, `script` and `tmux new-session -d` drop the
 //! runner from the process tree and can clear its variables. The cgroup
 //! stays. A keep of a held user rule and a preference from any of those
-//! are the agent's, the same as under a live `claude` parent.
+//! are the agent's, the same as under a live `the terminal harness` parent.
 
 ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
@@ -105,7 +105,7 @@ fn scope_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// Move this process into `dir`. A fresh top-level directory is required
 /// when the cgroup is the namespace root (`0::/`): joining that path with
-/// `claude` selects `/sys/fs/cgroup/claude/cgroup.procs`, and a root that
+/// `the terminal harness` selects `/sys/fs/cgroup/the terminal harness/cgroup.procs`, and a root that
 /// cannot populate a reused child rejects the write.
 fn move_into(dir: &str, before: &str) {
     #[cfg(target_os = "linux")]

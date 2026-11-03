@@ -146,7 +146,7 @@ printf '%s' "$failed" | ljos hook | grep -q 'Remembered about this failure' || f
 other='{"hookEventName":"post_tool_use_failure","sessionId":"smoke-other","toolInput":{"command":"npm run build"},"error":"Module not found: react-dom"}'
 [ -z "$(printf '%s' "$other" | ljos hook)" ] || fail "an unrelated failure recalled a memory"
 
-# The session that resumes from a Claude Code compaction hears the issue
+# The session that resumes from a terminal harness compaction hears the issue
 # the conversation still holds.
 echo '{"hook_event_name":"PreCompact","session_id":"smoke-compact","trigger":"auto"}' | ljos hook >/dev/null
 resumed=$(echo '{"hook_event_name":"SessionStart","session_id":"smoke-compact","source":"compact"}' | ljos hook)

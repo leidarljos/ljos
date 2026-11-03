@@ -1,4 +1,4 @@
-//! A Cursor read answered early must not cost other events, break the
+//! An editor harness read answered early must not cost other events, break the
 //! writer's pipe, or read a call as a different event than the parser.
 #![cfg(target_os = "linux")]
 

@@ -129,8 +129,8 @@ on them costs a round trip, and the agent often runs the same line again.
 So policyd can answer with the fixed command. The answer is one line: ``allow``, then ``rewrite``, then
 the new command, separated by tabs. Its first rewrite runs the command through ``uv run``.
 
-The new command runs only when the guard has no warning on it. Claude Code, Codex, Grok Build and
-Cursor's ``preToolUse`` accept an updated command from the hook, and ljos hands the new line back
+The new command runs only when the guard has no warning on it. The terminal harness, the command harness, the build harness and
+The editor harness's ``preToolUse`` accept an updated command from the hook, and ljos hands the new line back
 through that field. A runner without that field runs the old line, with a warning that names the
 new command. policyd writes a log of what it warns on.
 

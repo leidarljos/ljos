@@ -1,8 +1,8 @@
 //! `ljos_guard_check` answers with its verdict whatever the seat.
 //!
-//! Codex on a laptop passed `seat: codex` to a tracker that listed no seat
+//! the command harness on a laptop passed `seat: the command harness` to a tracker that listed no seat
 //! by that name. The server refused the call before the guard ran, with
-//! "no seat named codex on this tracker" and a list of thread ids, so the
+//! "no seat named the command harness on this tracker" and a list of thread ids, so the
 //! agent could run nothing. The guard acts under no seat, so an unknown or
 //! missing seat must not stop it. A tool that acts under the seat still
 //! refuses a name the call made up, in one short line with named seats.

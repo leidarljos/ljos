@@ -7788,7 +7788,7 @@ mod tests {
         assert!(!tracked.contains("gonehost+cloud"), "{tracked}");
     }
 
-    /// Every cloud VM has the host name `cursor`. Each seat names its own
+    /// Every hosted VM shares one host name. Each seat names its own
     /// log, so a sitting on one VM takes the scope cloud atoms that a seat
     /// on another VM wrote, and leaves the box log closed.
     #[test]

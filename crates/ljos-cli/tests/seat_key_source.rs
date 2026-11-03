@@ -1,5 +1,5 @@
 //! A seat key comes from the seat's own config. A project MCP file,
-//! CLAUDE_CONFIG_DIR, CODEX_HOME, and a parent's --mcp-config do not
+//! A harness config directory, a harness home, and a parent's --mcp-config do not
 //! mark a server as the seat. Runs the built `ljos` binary.
 #![cfg(target_os = "linux")]
 
@@ -287,7 +287,7 @@ const SCENARIOS: &[&str] = &[
     "home ~/.cursor/mcp.json real github + repo .mcp.json fake",
 ];
 
-/// The 27 cursor payloads from a foreign seat layout, plus the control
+/// The 27 the editor harness payloads from a foreign seat layout, plus the control
 /// with no forged file. Each one names @ocaisa and carries the rule's warning.
 #[test]
 fn a_forged_seat_key_does_not_skip_the_user_rule() {
@@ -326,7 +326,7 @@ fn a_foreign_ljos_tool_warns_with_no_seat_file() {
     }
 }
 
-/// A plugin installed under CLAUDE_CONFIG_DIR is that process's choice.
+/// A plugin installed under a directory the process names is that process's choice.
 /// It does not name the seat.
 #[test]
 fn a_plugin_under_claude_config_dir_does_not_name_the_seat() {
@@ -346,7 +346,7 @@ fn a_plugin_under_claude_config_dir_does_not_name_the_seat() {
     warns(&run_case(&h, &launch, &payload), "plugin", ALAN_WARNING);
 }
 
-/// Malformed user rules. The three sources Codex forged still warn on
+/// Malformed user rules. The three sources the command harness forged still warn on
 /// `mcp__github__ljos_note` instead of taking the early allow.
 #[test]
 fn a_malformed_rules_file_still_warns_a_forged_seat() {
@@ -364,7 +364,7 @@ fn a_malformed_rules_file_still_warns_a_forged_seat() {
     }
 }
 
-/// The seat's own `~/.cursor/mcp.json` still answers `mcp__ljos__ljos_note`
+/// The seat's own `the editor harness MCP config` still answers `mcp__ljos__ljos_note`
 /// early. A project file beside it does not change that.
 #[test]
 fn the_home_cursor_file_still_names_the_seat() {

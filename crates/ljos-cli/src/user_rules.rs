@@ -1387,7 +1387,7 @@ fn github_server(name: &str) -> bool {
     name.to_ascii_lowercase().contains("github")
 }
 
-/// Cursor names an HTTP MCP tool `MCP:<tool>` and sends no server field.
+/// the editor harness names an HTTP MCP tool `MCP:<tool>` and sends no server field.
 /// A write verb with `owner` and `repo` is the same GitHub write as
 /// `mcp__github__<tool>`.
 fn cursor_http_mcp_write(tool: &str, input: &Value) -> bool {

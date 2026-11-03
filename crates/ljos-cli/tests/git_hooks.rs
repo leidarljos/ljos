@@ -935,7 +935,7 @@ fn commit_with(
     head(hab, &hab.repo)
 }
 
-/// Claude and Codex book from their own hooks. The git hook stays out.
+/// the terminal harness and the command harness book from their own hooks. The git hook stays out.
 #[test]
 fn a_claude_session_is_not_booked_by_the_git_hook() {
     let hab = Hab::new("repo");

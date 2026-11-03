@@ -37,7 +37,7 @@ const OPTIONAL_BINS: &[&str] = &[
 const INSTALL_URL: &str = "https://github.com/leidarljos/ljos/releases/latest/download/install.sh";
 const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
 /// The one cloud push rule, read from the push's argv by
-/// [`crate::cloud_guard::cursor_push`].
+/// the push check.
 pub(crate) const CURSOR_PUSH: &str = "cloud-cursor-push";
 /// The release workflow's encoder archives, the runtime before the binary
 /// that links it. Each unpacks into the prefix above the binary directory.
@@ -474,8 +474,8 @@ struct McpFile {
 
 /// How a harness substitutes variables in a command and its env.PATH.
 ///
-/// Codex stores `$HOME` as text. OpenCode substitutes `{env:VAR}` only.
-/// Cursor substitutes `${env:VAR}` and `${userHome}`. Claude Code
+/// the command harness stores `$HOME` as text. OpenCode substitutes `{env:VAR}` only.
+/// the editor harness substitutes `${env:VAR}` and `${userHome}`. the terminal harness
 /// substitutes `${VAR}` and `${VAR:-default}` and keeps an unset `${VAR}`
 /// as written. Any other client is read as a shell: `$HOME`, `${HOME}`,
 /// `${env:HOME}`, `${userHome}` and a leading `~/` in a command, and
@@ -560,9 +560,9 @@ fn mcp_problem() -> McpProblem {
     McpProblem::None
 }
 
-/// Cursor's `mcp.json`, `LJOS_MCP_CONFIG`, and every harness file ljos
-/// writes. One path is checked once. Claude's `mcp add` stores the command
-/// in `~/.claude.json`, which the harness table does not name.
+/// the editor harness's `mcp.json`, `LJOS_MCP_CONFIG`, and every harness file ljos
+/// writes. One path is checked once. the terminal harness's `mcp add` stores the command
+/// in `the terminal harness config`, which the harness table does not name.
 fn mcp_files() -> Vec<McpFile> {
     collect_mcp_files(true)
 }
@@ -767,8 +767,8 @@ pub(crate) enum SeatMcpKeys {
 ///
 /// A seat key comes from the seat's own files: the home MCP configs,
 /// the harness files, `LJOS_MCP_CONFIG`, and a plugin installed under
-/// the home `.claude` directory. A project `.mcp.json` or
-/// `.cursor/mcp.json`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and a
+/// the home directory of the terminal harness. A project MCP file,
+/// an editor-harness project MCP file, a directory the process names, and a
 /// parent's `--mcp-config` argument do not add a key.
 pub(crate) fn seat_mcp_keys() -> SeatMcpKeys {
     let mut keys = BTreeSet::new();
@@ -802,7 +802,7 @@ pub(crate) fn seat_mcp_keys() -> SeatMcpKeys {
 }
 
 /// Whether `path` is the seat's own MCP config. Project files and a
-/// config directory named by `CLAUDE_CONFIG_DIR` or `CODEX_HOME` are
+/// config directory the process names for a harness are
 /// left out, unless that path is the home file the harness already reads.
 fn seat_config_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str());
@@ -900,7 +900,7 @@ fn read_seat_keys(file: &McpFile) -> KeyRead {
 fn read_config_text(path: &Path) -> TextRead {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
-    // `~/.claude.json` stores per-project history and grows past the
+    // `the terminal harness config` stores per-project history and grows past the
     // cap. The seat key is the top-level `mcpServers` value. Read that
     // and stop, so the history is not pulled in and the cap does not hide
     // the key.
@@ -1183,7 +1183,7 @@ fn read_json_number(inp: &mut JsonIn<'_>) -> Option<Vec<u8>> {
 fn plugin_seat_keys() -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     // A plugin install under the home directory is the seat's own.
-    // CLAUDE_CONFIG_DIR is not: that directory is chosen by the process.
+    // A directory the process names is not: that directory is chosen by the process.
     if let Ok(home) = crate::home() {
         plugin_keys_from(&home.join(".claude"), &mut out);
     }
@@ -1271,7 +1271,7 @@ fn read_capped(path: &Path) -> Option<String> {
     Some(text)
 }
 
-/// Whether a Cursor payload `command` field launches the seat server.
+/// Whether an editor harness payload `command` field launches the seat server.
 /// The field is one string, so `ljos mcp` and `ljos-plugin ljos-mcp`
 /// are split on whitespace. An empty field is not a command.
 pub(crate) fn payload_command_is_seat(command: &str) -> bool {
@@ -1298,7 +1298,7 @@ fn command_launches_seat(command: &str, args: &[String]) -> bool {
     base == "ljos" && args.first().map(String::as_str) == Some("mcp")
 }
 
-/// Claude Code's tool segment keeps `[A-Za-z0-9_-]` and turns every other
+/// the terminal harness's tool segment keeps `[A-Za-z0-9_-]` and turns every other
 /// character into `_`. `ljos.seat` is the tool `mcp__ljos_seat__...`.
 /// The raw key is kept as well. Case is not folded.
 fn claude_tool_segment(key: &str) -> String {
@@ -1716,7 +1716,7 @@ fn expand_launch(command: &str, expand: Expand) -> String {
     }
 }
 
-/// Cursor's `${env:NAME}` and `${userHome}`. `$HOME`, `${HOME}` and `~/`
+/// the editor harness's `${env:NAME}` and `${userHome}`. `$HOME`, `${HOME}` and `~/`
 /// stay text.
 fn expand_cursor(text: &str) -> String {
     expand_braced(text, |inner| match inner {
@@ -1725,8 +1725,8 @@ fn expand_cursor(text: &str) -> String {
     })
 }
 
-/// Claude Code's `${VAR}` and `${VAR:-default}`. An unset `${VAR}` with no
-/// default stays as written, as do `$HOME`, `~/` and Cursor's forms.
+/// the terminal harness's `${VAR}` and `${VAR:-default}`. An unset `${VAR}` with no
+/// default stays as written, as do `$HOME`, `~/` and the editor harness's forms.
 fn expand_claude(text: &str) -> String {
     expand_braced(text, |inner| {
         let (name, default) = match inner.split_once(":-") {
@@ -3586,8 +3586,8 @@ fn env_file_value(key: &str) -> Option<String> {
     None
 }
 
-/// `ljos cloud up` on a cloud VM, codespace, or CI job. A desktop Cursor
-/// file is onboarded with the cursor harness; the api socket on a cloud
+/// `ljos cloud up` on a cloud VM, codespace, or CI job. A desktop the editor harness
+/// file is onboarded with the editor harness harness; the api socket on a cloud
 /// image is not enough, because doctor is often aimed at another home.
 fn cursor_mcp_advice() -> String {
     if on_cloud_vm() {
@@ -3602,7 +3602,7 @@ fn on_cloud_vm() -> bool {
     if agent_id().is_some() || rt.ci || rt.codespace {
         return true;
     }
-    // A desktop terminal sets CURSOR_AGENT=1 and nothing else. The api
+    // A desktop terminal sets the runner mark=1 and nothing else. The api
     // socket is not enough either: doctor is often aimed at another home.
     if rt.cursor_harness && rt.cloud_agent {
         return true;
@@ -3618,7 +3618,7 @@ fn runtime() -> Runtime {
     let cloud_id =
         nonempty_var("CURSOR_AGENT_ID").is_some() || nonempty_var("CLOUD_AGENT_ID").is_some();
     let api_socket = Path::new("/run/cursor/api.sock").exists();
-    // CURSOR_AGENT=1 is the desktop agent terminal. The socket path and
+    // the runner mark=1 is the desktop agent terminal. The socket path and
     // the conversation id are set on a cloud VM and are not that flag.
     let cloud_agent = cloud_id
         || nonempty_var("CURSOR_AGENT_SOCKET").is_some()
@@ -3667,7 +3667,7 @@ fn env_is_true(key: &str) -> bool {
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
 
-/// `cloud up` records `cursor-ID`, `ci-ID`, or `codespace-ID` in the env
+/// `cloud up` records `the editor harness-ID`, `ci-ID`, or `codespace-ID` in the env
 /// file. A later shell without the agent variables still is that VM.
 fn cloud_env_file_seat() -> bool {
     let Some(seat) = env_file_value("LJOS_SEAT") else {

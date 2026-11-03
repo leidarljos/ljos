@@ -1198,14 +1198,14 @@ fn session_in_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<
         .or_else(|| named_in_meta(meta, "sessionID"))
 }
 
-/// The subagent a call names: a Codex thread that is not the root
+/// The subagent a call names: a command harness thread that is not the root
 /// session it runs under.
 fn agent_in_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
     let session = session_in_meta(meta)?;
     thread_in_meta(meta).filter(|t| *t != session)
 }
 
-/// The session and subagent of a call: Claude Code's tool use id, when
+/// The session and subagent of a call: the terminal harness's tool use id, when
 /// its hook saw a subagent make the call, else what `_meta` names.
 fn call_identity(
     meta: &serde_json::Map<String, serde_json::Value>,
@@ -3997,7 +3997,7 @@ mod tests {
         );
     }
 
-    /// A Codex subagent's call names its thread under the root session;
+    /// A command harness subagent's call names its thread under the root session;
     /// the root's own call names the root twice. An opencode subagent has
     /// a session of its own.
     #[test]

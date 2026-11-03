@@ -147,7 +147,7 @@ impl Seat {
         self.hook_with(line, &[])
     }
 
-    /// A Codex-shaped hook, with the `turn_id` Codex sends.
+    /// A command harness-shaped hook, with the `turn_id` the command harness sends.
     fn hook_turn(&self, line: &str, env: &[(&str, &str)]) -> String {
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
@@ -470,7 +470,7 @@ fn git_ok(repo: &Path, args: &[&str]) {
 /// private to the run. A protected push that is missing only that ballot
 /// warns that the sitting has no settled consensus, in `ljos policy` and
 /// in the hook, and the hook still allows it. A force, a delete and a
-/// cursor ref stay refused, in `ljos policy` and in the hook.
+/// the editor harness ref stay refused, in `ljos policy` and in the hook.
 #[test]
 fn a_cloud_seat_warns_on_a_protected_push_when_no_seat_has_voted() {
     let seat = Seat::new();

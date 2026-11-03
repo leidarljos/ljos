@@ -716,7 +716,7 @@ enum Cmd {
         /// reaches it. The guard judges it now and on every run.
         #[arg(long, conflicts_with_all = ["webhook", "clear", "fire"])]
         command: Option<String>,
-        /// POST the message's envelope (never its body) here, such as a Grok
+        /// POST the message's envelope (never its body) here, such as a build harness
         /// Bot routine's webhook. https, or http on localhost, an IPv4
         /// loopback address, or ::1.
         #[arg(long, conflicts_with_all = ["clear", "fire"])]
@@ -865,7 +865,7 @@ enum Cmd {
         /// for get a brief.
         #[arg(long)]
         jev: bool,
-        /// `cursor-agent` or `claude`. Overrides `LJOS_PANEL_HARNESS`.
+        /// `the editor command` or `the terminal harness`. Overrides `LJOS_PANEL_HARNESS`.
         #[arg(long)]
         harness: Option<String>,
         /// How many designers `run` spawns. Each files one candidate from the brief alone.
@@ -965,7 +965,7 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// One line for a runner's status bar (Grok's [ui.status_line], Claude Code's statusLine): the seat, the issue held, what is due. Reads the runner's status JSON on stdin.
+    /// One line for a runner's status bar (the build harness's [ui.status_line], the terminal harness's statusLine): the seat, the issue held, what is due. Reads the runner's status JSON on stdin.
     Statusline,
     /// Bind a playbook to an issue and copy its recipe into the working set, before personas enter.
     Playbook {
@@ -1208,7 +1208,7 @@ enum Cmd {
         /// The model the run was launched on.
         #[arg(long)]
         model: String,
-        /// The run id, the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`.
+        /// The run id, the run's `the hosted run id` or `GITHUB_RUN_ID`.
         #[arg(long)]
         run: String,
         /// The run's public seat key, the hex `ljos cloud up` printed on
@@ -3044,7 +3044,7 @@ fn run_command() -> Result<()> {
             ljos_cli::adopt_blank_conversation(&input, &mut call);
             ljos_cli::ballot_sig::export_hook_session(call.session.as_deref());
             if ljos_cli::subagent::note_hook_call(&input, &call.event) {
-                // Cursor blocks a permission hook that prints nothing.
+                // the editor harness blocks a permission hook that prints nothing.
                 // A seat tool named mcp__SERVER__ljos_NAME is that hook
                 // when SERVER is a key in the seat's MCP config.
                 if call.shape.is_cursor() {

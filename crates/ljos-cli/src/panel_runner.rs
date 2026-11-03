@@ -607,7 +607,7 @@ pub fn resolve_member_argv(
 
 /// Non-failing argv computation for `panel_member_argv`, using configured
 /// templates or an installed runner CLI when available, and falling back to
-/// the legacy `grok` argv when nothing is installed.
+/// the legacy `the build harness` argv when nothing is installed.
 #[must_use]
 pub fn member_argv_or_fallback(
     prompt_file: &Path,

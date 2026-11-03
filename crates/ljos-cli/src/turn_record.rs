@@ -1,7 +1,7 @@
-//! The runner's own record of the person's turn. Claude Code writes each
-//! conversation to a transcript under `~/.claude/projects`, Codex to a
-//! rollout under `~/.codex/sessions`, and Cursor to an agent transcript
-//! under `~/.cursor`. The kept prompt is the person's only when it agrees
+//! The runner's own record of the person's turn. the terminal harness writes each
+//! conversation to a transcript under `the terminal harness config directory/projects`, the command harness to a
+//! rollout under `the command harness config directory/sessions`, and the editor harness to an agent transcript
+//! under `~/.the editor harness`. The kept prompt is the person's only when it agrees
 //! with that record, so a tool call that rewrites the kept prompt and its
 //! bind has to forge the runner's transcript too.
 
@@ -41,7 +41,7 @@ fn typed_content(content: &Value) -> Option<String> {
 }
 
 fn entry(v: &Value) -> Entry {
-    // Claude Code: `type` user or assistant around a `message`.
+    // the terminal harness: `type` user or assistant around a `message`.
     match v["type"].as_str() {
         Some("user") => {
             let meta = v["isMeta"].as_bool() == Some(true)
@@ -53,7 +53,7 @@ fn entry(v: &Value) -> Entry {
             };
         }
         Some("assistant") => return Entry::Model,
-        // Codex: an event per message the person sent or the agent wrote.
+        // the command harness: an event per message the person sent or the agent wrote.
         Some("event_msg") => {
             return match (
                 v["payload"]["type"].as_str(),
@@ -66,7 +66,7 @@ fn entry(v: &Value) -> Entry {
         }
         _ => {}
     }
-    // Cursor: a `role` beside the `message`.
+    // the editor harness: a `role` beside the `message`.
     match v["role"].as_str() {
         Some("user") => typed_content(&v["message"]["content"])
             .or_else(|| typed_content(&v["content"]))
@@ -105,7 +105,7 @@ fn folded(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// `entry` without the `<user_query>` wrapper Cursor puts round a prompt.
+/// `entry` without the `<user_query>` wrapper the editor harness puts round a prompt.
 fn unwrapped(entry: &str) -> &str {
     entry
         .strip_prefix("<user_query>")
@@ -118,7 +118,7 @@ fn unwrapped(entry: &str) -> &str {
 pub const KEPT_PROMPT_CHARS: usize = 8000;
 
 /// Whether `kept` is, whole, an entry the person typed in the latest turn
-/// of `transcript`, whatever the spacing and with Cursor's wrapper set
+/// of `transcript`, whatever the spacing and with the editor harness's wrapper set
 /// aside. A kept prompt that is only a span of an entry is not that
 /// entry: a tool call could cut the prompt down to the clause it wants.
 #[must_use]
@@ -202,7 +202,7 @@ pub fn within(path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
         .then_some(real)
 }
 
-/// The agent transcript Cursor keeps for a conversation named in
+/// The agent transcript the editor harness keeps for a conversation named in
 /// `sessions`, when one is under `root`.
 #[must_use]
 pub fn cursor_record(root: &Path, sessions: &[String]) -> Option<PathBuf> {

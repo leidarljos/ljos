@@ -910,7 +910,7 @@ pub fn hook_agent(agent: Option<String>) {
 }
 
 /// The subagent this process or MCP call runs for under `parent`, when the
-/// harness named one: the agent a hook saw make this call, else a Codex
+/// harness named one: the agent a hook saw make this call, else a command harness
 /// thread under its root session. The command line takes no agent, so a
 /// parent cannot cast as its subagent.
 fn subagent(parent: &str) -> Option<String> {
@@ -950,8 +950,8 @@ fn hooked_session() -> Option<String> {
         .clone()
 }
 
-/// The thread Codex runs a subagent in, under the root session:
-/// `CODEX_THREAD_ID` when it is not `CODEX_SESSION_ID`, the root's.
+/// The thread the command harness runs a subagent in, under the root session:
+/// `the command harness thread id` when it is not `the command harness session id`, the root's.
 fn codex_thread(parent: &str) -> Option<String> {
     let root = env_token("CODEX_SESSION_ID")?;
     let thread = env_token("CODEX_THREAD_ID")?;
@@ -1031,13 +1031,13 @@ pub fn harness_session() -> String {
     const PREFER: &[&str] = &[
         "CURSOR_SESSION_ID",
         "CLAUDE_SESSION_ID",
-        // A Codex subagent's thread is not its session: [`codex_thread`]
+        // A command harness subagent's thread is not its session: the thread helper
         // names it under the root.
         "CODEX_SESSION_ID",
         "CODEX_THREAD_ID",
         "SEAT_SESSION_ID",
         "LJOS_SESSION_ID",
-        // Claude Code also stamps a remote-control id that comes and goes,
+        // the terminal harness also stamps a remote-control id that comes and goes,
         // and opencode may run under another runner's id. Each names its
         // own session here, so the ballot binds the id its hook reports.
         "CLAUDE_CODE_SESSION_ID",
