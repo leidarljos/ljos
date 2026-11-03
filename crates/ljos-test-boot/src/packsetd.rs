@@ -62,12 +62,27 @@ struct Registry {
 /// Tests of the reuse rule build their own [`Registry`] and never put fake pids in this one.
 static LIVE: Registry = Registry::new();
 
+/// Set on a node's pid while `Drop` stops that writer.
+/// A pid is a positive `pid_t`, so this bit of its `u32` is never set.
+const HELD: u32 = 1 << 31;
+
 /// The node whose pid this guard clears on drop.
 struct Slot(NonNull<AtomicU32>);
 
 // SAFETY: the node is never freed. Moving the pointer does not race: the
 // pid is an atomic, and the signal handler and `Drop` both use that atomic.
 unsafe impl Send for Slot {}
+
+impl Slot {
+    /// Mark this node's pid held, if it still holds `pid`.
+    /// False when the SIGINT handler cleared it first, and so has reaped that writer.
+    fn hold(&self, pid: u32) -> bool {
+        // SAFETY: a published node is never freed.
+        let node = unsafe { self.0.as_ref() };
+        node.compare_exchange(pid, pid | HELD, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+}
 
 thread_local! {
     static MINE: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -165,15 +180,24 @@ impl Drop for Packsetd {
         // The SIGINT handler walks the nodes and kills the pids it still finds, then re-raises SIGINT, which ends this process.
         // Clearing the node first would let that signal skip this writer and leave it running.
         // The wait is last, after the node is clear, so the gap between kill and clear is the only one the handler can still see this pid in.
-        stop_pid(pid);
-        let _ = self.child.kill();
-        if let Some(slot) = self.slot.take() {
+        // Holding the node first keeps the handler from reaping the pid in that gap; it kills a held pid and leaves the reap to this wait.
+        // A node that no longer holds this pid lost it to the handler, which killed and reaped the writer.
+        // After that reap the pid can name another process, so it gets no signal and no wait from here.
+        let slot = self.slot.take();
+        let ours = slot.as_ref().is_none_or(|slot| slot.hold(pid));
+        if ours {
+            stop_pid(pid);
+            let _ = self.child.kill();
+        }
+        if let Some(slot) = slot.filter(|_| ours) {
             // Clearing the pid frees the node for the next writer.
             // The node itself stays allocated.
             LIVE.release(slot);
         }
         untrack(pid);
-        let _ = self.child.wait();
+        if ours {
+            let _ = self.child.wait();
+        }
         if let Some(path) = self.owned_home.take() {
             let _ = std::fs::remove_dir_all(path);
         }
@@ -580,15 +604,35 @@ impl Registry {
     }
 
     fn stop_all(&self) {
+        self.stop_all_with(stop_pid, reap);
+    }
+
+    /// Kill every pid in the list, and clear and reap each one `Drop` does not hold.
+    /// A held pid stays in its node, unreaped, for that `Drop` to wait on and clear.
+    /// Tests pass recorders for `stop` and `reap`, so fake pids get no signal.
+    fn stop_all_with(&self, mut stop: impl FnMut(u32), mut reap: impl FnMut(u32)) {
         let mut cur = self.head.load(Ordering::SeqCst);
         while !cur.is_null() {
             // SAFETY: a published node is never freed. This runs in the SIGINT
             // handler, so it only loads atomics and calls `kill` and `waitpid`.
             let node = unsafe { &*cur };
-            let pid = node.pid.swap(0, Ordering::SeqCst);
-            if pid != 0 {
-                stop_pid(pid);
-                reap(pid);
+            let mut pid = node.pid.load(Ordering::SeqCst);
+            while pid != 0 {
+                if pid & HELD != 0 {
+                    stop(pid & !HELD);
+                    break;
+                }
+                match node
+                    .pid
+                    .compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst)
+                {
+                    Ok(_) => {
+                        stop(pid);
+                        reap(pid);
+                        break;
+                    }
+                    Err(now) => pid = now,
+                }
             }
             cur = node.next.load(Ordering::SeqCst);
         }
@@ -927,6 +971,43 @@ int main(void) {
         for slot in held {
             registry.release(slot);
         }
+    }
+
+    /// The SIGINT handler clears and reaps a writer before its `Drop` runs.
+    /// `Drop` then finds the node no longer holds the pid, and sends that pid nothing.
+    /// The pid is fake and the handler's kill and reap are only recorded, so nothing is signalled.
+    #[test]
+    fn drop_does_not_hold_a_writer_the_handler_reaped() {
+        let registry = Registry::new();
+        // Pid 0 is a free node, so the fake pid is 1.
+        let pid = 1;
+        let slot = registry.claim(pid);
+        let (mut stopped, mut reaped) = (Vec::new(), Vec::new());
+        registry.stop_all_with(|taken| stopped.push(taken), |taken| reaped.push(taken));
+        assert_eq!(stopped, [pid], "the handler did not kill the writer");
+        assert_eq!(reaped, [pid], "the handler did not reap the writer");
+        assert!(!slot.hold(pid), "drop held a pid the handler reaped");
+    }
+
+    /// `Drop` holds its writer's node before it kills.
+    /// The handler, run in that gap, still kills the held pid.
+    /// It leaves the pid in the node, unreaped, for `Drop` to wait on and clear.
+    #[test]
+    fn the_handler_kills_a_held_writer_and_leaves_the_reap_to_drop() {
+        let registry = Registry::new();
+        // Pid 0 is a free node, so the fake pid is 1.
+        let pid = 1;
+        let slot = registry.claim(pid);
+        assert!(slot.hold(pid), "drop could not hold its own writer");
+        let (mut stopped, mut reaped) = (Vec::new(), Vec::new());
+        registry.stop_all_with(|taken| stopped.push(taken), |taken| reaped.push(taken));
+        assert_eq!(stopped, [pid], "the handler skipped a held writer");
+        assert!(reaped.is_empty(), "the handler reaped a held writer");
+        registry.release(slot);
+        let (mut stopped, mut reaped) = (Vec::new(), Vec::new());
+        registry.stop_all_with(|taken| stopped.push(taken), |taken| reaped.push(taken));
+        assert!(stopped.is_empty(), "the handler killed a released pid");
+        assert!(reaped.is_empty(), "the handler reaped a released pid");
     }
 
     #[test]
