@@ -3,10 +3,13 @@
 ## Changelog entries
 
 Do not edit `CHANGELOG.md` in a pull request.
-Add one fragment per change under `changelog.d/` instead, named `<PR number>.<type>.md`.
+Add one fragment per change under `changelog.d/`, named `<PR number>.<type>.md`.
 The type is one of `feature`, `bugfix`, `doc`, `removal` or `misc`.
 A change with no pull request yet can use `+<branch>.<type>.md`.
+A second fragment for the same number and type is `<PR number>.<type>.1.md`, then `.2`, and so on.
 Write the entry as one Markdown bullet body, one sentence per line, with no leading dash.
+CI runs `towncrier build --draft --version` with the version from `[workspace.package]` in `Cargo.toml`.
+A malformed name, an unknown type, or two files for the same number and type fails that draft.
 At release time `towncrier build --version X.Y.Z` collects the fragments into `CHANGELOG.md` and removes them.
 
 ## Tests

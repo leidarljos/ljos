@@ -6,6 +6,10 @@ start_string = "<!-- towncrier release notes start -->\n"
 title_format = "## {version} ({project_date})"
 issue_format = "[#{issue}](https://github.com/leidarljos/ljos/pull/{issue})"
 underlines = ["", "", ""]
+# `towncrier build` skips a fragment name it cannot parse unless `ignore`
+# is set. An empty list turns that failure on. `.gitkeep`, a README and
+# the template are still skipped on their own.
+ignore = []
 
 [[tool.towncrier.type]]
 directory = "feature"

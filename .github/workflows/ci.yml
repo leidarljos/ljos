@@ -33,6 +33,26 @@ jobs:
           set -euo pipefail
           python -m pip install --disable-pip-version-check -q 'cogapp==3.6.0'
           cog -I scripts --check --diff --check-fail-msg='run python3 scripts/ljos_version.py' @cogfiles.txt
+  # Draft the fragments at the workspace version, the only one written
+  # by hand. towncrier 26.9.0 fails an unparsable fragment name when
+  # `ignore` is set, and fails two files that parse as the same issue
+  # and type. Draft writes nothing.
+  changelog:
+    name: changelog fragments
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Draft the changelog
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -q 'towncrier==26.9.0'
+          version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          towncrier build --draft --version "$version"
   # A push is before..sha. A new branch's before is all zeros, so the
   # commits are the ones on no other remote branch. A pull request is
   # base..head. Commits already on the base are outside the range.
