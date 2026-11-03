@@ -311,7 +311,8 @@ and counts as advice. When Jev does not answer, ljos uses the local answer.
 does the same from a checkout. A cloud seat has one push rule. It may push the branches
 named in its `ljos.toml` and `develop`, with no force and no delete. Opening or merging a
 pull request is not refused.
-[docs/cloud-vm.md](docs/cloud-vm.md) has the environment file and the push mode.
+`ljos mesh up` joins the swarm's tailnet on a Headscale login server, and `ljos mesh down` leaves it.
+[docs/cloud-vm.md](docs/cloud-vm.md) has the environment file, the push mode and the mesh.
 
 ## Commands
 

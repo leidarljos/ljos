@@ -225,6 +225,19 @@ enum CloudCmd {
 }
 
 #[derive(Subcommand)]
+enum MeshCmd {
+    /// Join this machine to the swarm `mesh.toml` names. Any failure is one line and exit 0.
+    Up,
+    /// Log out, stop the tailscaled `mesh up` started, and remove its state.
+    Down,
+    /// Print the Headscale ACL policy `mesh.toml` implies.
+    Acl {
+        /// Other swarm ids, each given rules of its own.
+        swarms: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum RecordCmd {
     /// Validate a directory of schema-v1 record entries, or with `--tracker` every ballot on a tracker.
     Check {
@@ -450,6 +463,11 @@ enum Cmd {
     Cloud {
         #[command(subcommand)]
         cmd: CloudCmd,
+    },
+    /// Join or leave the swarm's tailnet on a Headscale login server, or print its ACL policy.
+    Mesh {
+        #[command(subcommand)]
+        cmd: MeshCmd,
     },
     /// What this seat's memory turns on: the claims most linked to, by a weighted PageRank over the pack's links.
     Hubs {
@@ -1913,6 +1931,11 @@ fn run_command() -> Result<()> {
             CloudCmd::Up { force, repoint } => {
                 print!("{}", ljos_cli::cloud::up_at(force, repoint)?)
             }
+        },
+        Cmd::Mesh { cmd } => match cmd {
+            MeshCmd::Up => println!("{}", ljos_cli::mesh::up()),
+            MeshCmd::Down => println!("{}", ljos_cli::mesh::down()),
+            MeshCmd::Acl { swarms } => println!("{}", ljos_cli::mesh::acl(&swarms)?),
         },
         Cmd::Sync {
             key,

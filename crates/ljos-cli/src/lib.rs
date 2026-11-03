@@ -43,6 +43,7 @@ pub mod mail;
 pub mod mailbox;
 mod memlock;
 pub mod memories;
+pub mod mesh;
 pub mod note_queue;
 pub mod note_retire;
 pub mod offboard;
@@ -17193,6 +17194,11 @@ pub fn atom_source() -> Value {
     });
     if let Some(reason) = memories::write_reason() {
         source["reason"] = Value::String(reason);
+    }
+    // A label consensus reads: which mesh node the write came from, and
+    // the seat it claims. Nothing is held back for it.
+    if let Some(node) = mesh::joined_node() {
+        source["mesh"] = serde_json::json!({"node": node, "seat": seat.seat});
     }
     let turn = std::env::vars()
         .filter(|(k, v)| k.ends_with("_TURN_ID") && !v.trim().is_empty())

@@ -107,6 +107,20 @@ A clone that fails does not stop `cloud up`. The line names the remote without i
 
 `cloud up` rewrites the harness MCP command to the absolute path of this install, whatever PATH the client has. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim this seat made on this machine whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays, and so does every claim another machine holds. A hold record with no issue line keeps its seat's claims while its program runs, and releases none of them once it exits. The tracker URL has to be one the machine's git credentials can clone.
 
+## The mesh
+
+`ljos mesh up` joins this machine to its swarm's tailnet on a Headscale login server, where the box's services listen. `ljos mesh down` leaves it. Both read `mesh.toml` in the ljos config directory, `$XDG_CONFIG_HOME/ljos/mesh.toml` or `~/.config/ljos/mesh.toml`. [examples/mesh.toml](../examples/mesh.toml) is a commented copy that names no real host. The file holds the login server URL, the swarm id, the name of the environment variable that holds the join key, and the ports: the ljos API, store-ro, docs-ro and drop on the box, and this machine's SOCKS5 port for userspace mode. Each port is written there once. `ljos mesh acl` reads the same file.
+
+The join key is read from that variable. It is never printed, logged or written to disk, and no child but `tailscale up` sees it. It is on that command's line for the length of the join, where another process of the same user can read it, so use an ephemeral pre-auth key that carries one swarm's tag. The node name is `ag-<swarm>-<6 hex digits>`. ljos makes it once per state directory and never reads the machine's host name for it. With CAP_NET_ADMIN and `/dev/net/tun`, tailscaled uses a kernel TUN. Otherwise it runs in userspace networking mode with a SOCKS5 proxy on `localhost:<socks>`. tailscaled keeps its node key in memory (`--state=mem:`) and uploads no logs. The join passes `--accept-routes=false` and `--accept-dns=false`, so no route outside the mesh and no DNS setting changes.
+
+If this node is already running on the mesh, `mesh up` says so and joins nothing. Otherwise it starts tailscaled if none answers on its socket, then runs `tailscale up`. There is no lock and no step on the server per join, so a whole swarm can join at once. Each failure is one line and exit status 0: no config, no tailscale on PATH, no key, a key the server refuses, or a join still running at the bound. The seat carries on without the mesh. The bound is 30 seconds, the `timeout -k 5 30` a sitting already runs under. `LJOS_MESH_WAIT` sets it in seconds.
+
+`mesh down` logs out, stops the tailscaled `mesh up` started, and removes the state directory, within the same bound. The state directory is `mesh/` under the ljos runtime directory and holds the socket, the node name and tailscaled's log, never anything in a checkout. Neither verb touches git config, hooks, a checkout or `~/.gitconfig`.
+
+While this machine is on the mesh, every write ljos records in the pack, mail included, carries `source.mesh`: the node name and the seat it claims. Consensus reads it like any other provenance. Nothing is refused, held back or slowed for it. The seat is whatever the writer says, so the label records a claim and proves nothing.
+
+`ljos mesh acl` prints the Headscale ACL policy as JSON. Each swarm reaches its own nodes on every port and `tag:box` on the four box ports, and there is no other rule. So no swarm reaches another, and the box reaches no swarm. The join key carries the swarm's tag and no user owns a tag, so a node cannot tag itself into another swarm. `ljos mesh acl SWARM...` adds the same pair of rules for each swarm named.
+
 ## Deeds
 
 A cloud seat's finish exports the deeds that seat cited on the issue into `.ljos/deeds/<seat>/`. The bag carries the deed, the inclusion receipt, the file bytes and any supersedes link. The tracker commit takes the bag, so a fetch brings it to the box. A machine that never ran `ljos cloud up` writes no bag on finish.

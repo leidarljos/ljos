@@ -1,0 +1,31 @@
+# The mesh `ljos mesh up` joins, `ljos mesh down` leaves and `ljos mesh acl`
+# writes the policy for. Copy it to $XDG_CONFIG_HOME/ljos/mesh.toml, or
+# ~/.config/ljos/mesh.toml when XDG_CONFIG_HOME is unset, and put in your
+# own values. Every port the mesh uses is written here and nowhere else.
+
+# The Headscale server `tailscale up` logs in to. example.org is a name
+# reserved for documentation (RFC 2606), so this file reaches no real host.
+login_server = "https://headscale.example.org"
+
+# The environment variable that holds the join key: a pre-auth key that is
+# ephemeral and carries this swarm's tag. The key never goes in this file.
+key_env = "LJOS_MESH_AUTHKEY"
+
+# The swarm this machine joins. Its nodes are named ag-<swarm>-<6 hex> and
+# tagged tag:swarm-<swarm>. Lowercase letters, digits and inner dashes, at
+# most 53 characters, so a node name stays one DNS label.
+swarm = "example"
+
+[ports]
+# The four services on the box, each by the port it listens on. These values
+# are placeholders: set your own. `ljos mesh acl` opens these four ports to
+# each swarm, and no other port on the box.
+api = 8400
+store-ro = 8401
+docs-ro = 8402
+drop = 8403
+
+# This machine's own SOCKS5 proxy in userspace mode, on localhost. It is not
+# a box port and the policy does not name it. 1055 is the port tailscale's
+# userspace networking guide uses.
+socks = 1055
