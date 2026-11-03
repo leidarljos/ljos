@@ -730,6 +730,7 @@ fn a_large_cursor_read_does_not_break_the_writer_pipe() {
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))
+        .env("XDG_RUNTIME_DIR", &hab.run)
         .env("PACKSET_URL", "off")
         .output()
         .unwrap();

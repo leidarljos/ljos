@@ -24,8 +24,14 @@ fn a_consensus_reading_does_not_pick_the_whole_history() {
         std::env::var("PATH").unwrap_or_default()
     );
     let rows = vec![serde_json::json!({"agent": "ada", "choice": "ship"})];
-    let previous = std::env::var_os("PATH");
-    unsafe { std::env::set_var("PATH", &path) };
+    let saved: Vec<_> = ["PATH", "XDG_RUNTIME_DIR"]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect();
+    unsafe {
+        std::env::set_var("PATH", &path);
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
+    }
     let _ = ljos_cli::push_cite_reading(
         "proj-fast",
         &rows,
@@ -33,9 +39,11 @@ fn a_consensus_reading_does_not_pick_the_whole_history() {
         "ada",
     );
     let _ = ljos_cli::protected_push_reading("proj-fast", None);
-    match previous {
-        Some(value) => unsafe { std::env::set_var("PATH", value) },
-        None => unsafe { std::env::remove_var("PATH") },
+    for (key, value) in saved {
+        match value {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
     }
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(

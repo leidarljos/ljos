@@ -60,6 +60,7 @@ fn doctor_runs_packset_ensure_when_no_writer_answers() {
         .arg("doctor")
         .env_clear()
         .env("HOME", home.path())
+        .env("XDG_RUNTIME_DIR", home.path().join("run"))
         .env("PATH", path)
         .env("PACKSET_PORT", port.to_string())
         .env("PACKSET_TIMEOUT_MS", "300")

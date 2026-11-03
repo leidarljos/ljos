@@ -48,6 +48,7 @@ impl Home {
             .env("XDG_STATE_HOME", root.join("state"))
             .env("XDG_DATA_HOME", root.join("data"))
             .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_RUNTIME_DIR", root.join("run"))
             .env("PATH", "/usr/bin:/bin")
             .env("PACKSET_URL", "off")
             .env("LJOS_NO_AUTOSTART", "1")

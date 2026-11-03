@@ -73,6 +73,7 @@ fn recall_of_ufuv_kiln_lists_ten_own_memories_and_says_how_many_remain() {
         .env("VISSUE_ROOT", &root)
         .env("ISSUE_ROOT", &root)
         .env("VISSUE_NO_ROUTE", "1")
+        .env("XDG_RUNTIME_DIR", root.join("run"))
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("LANG", "C")
         .env("LC_ALL", "C")

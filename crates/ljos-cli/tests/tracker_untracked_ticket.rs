@@ -5,6 +5,17 @@
 ljos_test_boot::harness!();
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
+
+static ENV: Mutex<()> = Mutex::new(());
+
+/// Hold the process environment for one test, with its runtime directory
+/// at `run`, so the seat record a tracker commit leaves stays in the test.
+fn own_runtime(run: &Path) -> MutexGuard<'static, ()> {
+    let lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("XDG_RUNTIME_DIR", run);
+    lock
+}
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -27,6 +38,8 @@ const TICKET: &str = "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE 
 #[test]
 fn an_untracked_ticket_is_added_and_committed_alone() {
     let repo = tempfile::tempdir().unwrap();
+    let run = tempfile::tempdir().unwrap();
+    let _env = own_runtime(run.path());
     let dir = repo.path();
     git(dir, &["init", "-q", "."]);
     git(dir, &["config", "user.email", "seat@example.test"]);
@@ -59,6 +72,8 @@ fn an_untracked_ticket_is_added_and_committed_alone() {
 #[test]
 fn a_ticket_reached_through_a_symlinked_checkout_is_committed() {
     let real = tempfile::tempdir().unwrap();
+    let run = tempfile::tempdir().unwrap();
+    let _env = own_runtime(run.path());
     let dir = real.path();
     git(dir, &["init", "-q", "."]);
     git(dir, &["config", "user.email", "seat@example.test"]);
