@@ -4934,9 +4934,9 @@ mod tests {
 
     /// The check asks the real ljos-policyd what the hook asks it: the
     /// line as the shell reads it, and the program a heredoc feeds
-    /// `python3 -`. Both refuse the same lines.
+    /// `python3 -`. Both allow the same lines, and the check's text
+    /// carries the rule ljos-policyd names for the hook write.
     #[tokio::test]
-    #[ignore = "phronesis 0.2.9 allows this write; seat rules only warn and policyd is off"]
     async fn guard_check_asks_policyd_what_the_hook_asks() {
         if !ljos_cli::tool_installed("ljos-policyd") {
             eprintln!("skipped: ljos-policyd is not installed");
@@ -4951,7 +4951,7 @@ mod tests {
             "PHRONESIS_STATE_DIR",
         ]);
         let bin = which::which("ljos-policyd")
-            .expect("ljos-policyd is not on PATH; CI builds it from ljos-policyd develop");
+            .expect("ljos-policyd is not on PATH; CI builds the commit ci.yml pins");
         let root = tempfile::tempdir().expect("tempdir");
         let project = root.path().join("project");
         let home = tempfile::tempdir().expect("home");
@@ -4977,16 +4977,21 @@ mod tests {
             "python3 - <<'PY'\nimport os\nos.system('rm -rf /')\nPY",
             "(cd project; echo x > seat/hooks.json)",
         ] {
-            if let Ok(out) = check(command).await {
-                panic!("allowed {command:?}: {} {}", out.0.verdict, out.0.text);
-            }
+            let out = check(command)
+                .await
+                .unwrap_or_else(|err| panic!("refused {command:?}: {err:?}"));
+            assert_eq!(out.0.verdict, "allow", "{command:?}: {}", out.0.text);
             let hook = ljos_cli::tcb_verdict_in(command, Some(root.path()));
-            assert_eq!(
-                hook.map(|rule| rule.verdict).as_deref(),
-                Some("deny"),
-                "{command:?}"
-            );
+            assert!(hook.is_none(), "{command:?}: {hook:?}");
         }
+        let seat = check("(cd project; echo x > seat/hooks.json)")
+            .await
+            .expect("allow");
+        assert!(
+            seat.0.text.contains("allow\twarn\tseat-guard-path"),
+            "{}",
+            seat.0.text
+        );
         let allowed = check("python3 - <<'PY'\nprint('hi')\nPY")
             .await
             .expect("allow");

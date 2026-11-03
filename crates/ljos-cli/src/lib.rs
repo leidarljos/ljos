@@ -38911,7 +38911,9 @@ fn heredoc_reading(body: &str, quoted: bool, data: bool) -> String {
 
 /// ljos-policyd's answer on `line` run from `cwd`, over each call of
 /// [`tcb_argvs`]: the first deny, or else the first `prompt`, or else an
-/// allow, the fail-open one or one with a note when any was. A later
+/// allow, the fail-open one or one with a note when any was. A warning
+/// that names a rule replaces a bare `allow`, so a heredoc program's
+/// warning is not lost behind its shell line. A later
 /// allow does not replace a prompt. None when no ljos-policyd answered. A
 /// lease push the checkout clears is not a deny: ljos-policyd cannot read
 /// where a bare one goes. Nor is a faulted guard on a [`repair_line`],
@@ -38959,7 +38961,9 @@ fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
         if t.starts_with("allow\trewrite\t") {
             digest::note_policyd_line(&t);
         }
-        if answer.as_deref().is_none_or(|a| weight(&t) > weight(a)) {
+        let names_rule = t.starts_with("allow\twarn\t")
+            && answer.as_deref().is_some_and(|a| a.trim() == "allow");
+        if names_rule || answer.as_deref().is_none_or(|a| weight(&t) > weight(a)) {
             answer = Some(t);
         }
     }
@@ -59512,9 +59516,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// link to `~/.cursor`. `lnk/..` is `project` again, as a logical `cd`
     /// takes `..` off by name, and `-P` is folded the same way. `cd -`
     /// leaves the directory unknown, so the write is not that hook file.
+    /// ljos-policyd allows each line and names the hook write it sees.
     #[test]
-    #[ignore = "phronesis 0.2.9 allows this write; seat rules only warn and policyd is off"]
-    fn shell_lines_that_left_the_start_directory_are_still_denied() {
+    fn shell_lines_that_left_the_start_directory_still_name_the_hook_write() {
         if !crate::tool_installed("ljos-policyd") {
             eprintln!("skipped: ljos-policyd is not installed");
             return;
@@ -59528,7 +59532,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         plain_seat(&project.join("safe"));
         plain_seat(&elsewhere);
         std::os::unix::fs::symlink(elsewhere.join("leaf"), project.join("lnk")).unwrap();
-        let verdict = |line: &str| tcb_verdict_in(line, Some(&project));
+        let named = |line: &str| seat_write_named(line, Some(&project));
         for line in [
             "cd safe | true && echo x > seat/hooks.json",
             "cd safe & echo x > seat/hooks.json",
@@ -59538,28 +59542,60 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "cd lnk && cd .. && echo x > seat/hooks.json",
             "cd -P lnk/.. && echo x > seat/hooks.json",
         ] {
-            let rule = verdict(line).unwrap_or_else(|| panic!("{line:?} was allowed"));
-            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
-            assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
+            assert!(named(line), "{line:?}");
         }
         for line in [
             "cd safe && echo x > seat/hooks.json",
             "cd safe && cd - && echo x > seat/hooks.json",
         ] {
-            assert!(verdict(line).is_none(), "{line:?}: {:?}", verdict(line));
+            assert!(!named(line), "{line:?}");
         }
     }
 
-    /// The `ljos-policyd` on PATH. CI builds it from develop, so a test
-    /// that asks it how a shell line reads fails, not skips, without one.
+    /// The `ljos-policyd` on PATH. CI builds the commit ci.yml pins, so a
+    /// test that asks it how a shell line reads fails, not skips, without one.
     fn real_policyd() -> PathBuf {
         which::which("ljos-policyd")
-            .expect("ljos-policyd is not on PATH; CI builds it from ljos-policyd develop")
+            .expect("ljos-policyd is not on PATH; CI builds the commit ci.yml pins")
+    }
+
+    /// The rule and the warning on an `allow\twarn\tRULE\tWARNING` line
+    /// from ljos-policyd. The rule is its token alone: the path after `:`
+    /// and the ancestry note a terminal or tmux parent adds after a space
+    /// are dropped.
+    fn policyd_warning(said: &str) -> Option<(&str, &str)> {
+        let mut field = said.trim().splitn(4, '\t');
+        match (field.next(), field.next(), field.next(), field.next()) {
+            (Some("allow"), Some("warn"), Some(rule), Some(warning))
+                if !warning.trim().is_empty() =>
+            {
+                Some((rule.split([':', ' ']).next()?, warning))
+            }
+            _ => None,
+        }
+    }
+
+    /// Each rule ljos-policyd names, with a [`policyd_warning`] line, for
+    /// the calls ljos sends it for `line` run from `cwd`.
+    fn policyd_rules(line: &str, cwd: Option<&std::path::Path>) -> Vec<String> {
+        tcb_argvs(line)
+            .iter()
+            .filter_map(|argv| tcb_check_in(argv, cwd))
+            .filter_map(|said| policyd_warning(&said).map(|(rule, _)| rule.to_string()))
+            .collect()
+    }
+
+    /// Whether ljos-policyd names `line`, run from `cwd`, a write of the
+    /// seat's hook file.
+    fn seat_write_named(line: &str, cwd: Option<&std::path::Path>) -> bool {
+        policyd_rules(line, cwd)
+            .iter()
+            .any(|rule| rule == "seat-guard-path")
     }
 
     /// `echo x > seat/hooks.json`. `seat` is a link to `~/.cursor` in a
-    /// directory this write must refuse, and an ordinary directory where
-    /// the same write may run.
+    /// directory where ljos-policyd names this write, and an ordinary
+    /// directory where it names none.
     const SEAT_WRITE: &str = "echo x > seat/hooks.json";
 
     /// Point `dir/seat` at `home/.cursor`, which holds the hook file.
@@ -59606,7 +59642,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// parentheses after `&&`, and a substitution, are judged from the
     /// start directory, where `seat` is an ordinary directory.
     #[test]
-    #[ignore = "phronesis 0.2.9 allows this write; seat rules only warn and policyd is off"]
     fn a_cd_the_shell_reads_is_where_policyd_judges_the_line() {
         if !crate::tool_installed("ljos-policyd") {
             eprintln!("skipped: ljos-policyd is not installed");
@@ -59615,7 +59650,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let _g = env_guard();
         let (root, _home, _env) = policyd_tree("policyd-line");
         plain_seat(root.path());
-        let verdict = |line: &str| tcb_verdict_in(line, Some(root.path()));
+        let named = |line: &str| seat_write_named(line, Some(root.path()));
         let write = SEAT_WRITE;
         for line in [
             format!("(cd project; {write})"),
@@ -59623,9 +59658,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             format!("cd project&&{write}"),
             format!("cd project\n{write}"),
         ] {
-            let rule = verdict(&line).unwrap_or_else(|| panic!("{line:?} was allowed"));
-            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
-            assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
+            assert!(named(&line), "{line:?}");
         }
         for line in [
             write.to_string(),
@@ -59636,7 +59669,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "cd project;echo ok".to_string(),
             "cd project\necho ok".to_string(),
         ] {
-            assert!(verdict(&line).is_none(), "{line:?}: {:?}", verdict(&line));
+            assert!(!named(&line), "{line:?}");
         }
     }
 
@@ -59644,7 +59677,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// hook file where it lands. A `CDPATH` entry is not applied to that
     /// write, so `cd proj` stays at the start.
     #[test]
-    #[ignore = "phronesis 0.2.9 allows this write; seat rules only warn and policyd is off"]
     fn a_cd_through_home_or_cdpath_is_judged_where_it_lands() {
         if !crate::tool_installed("ljos-policyd") {
             eprintln!("skipped: ljos-policyd is not installed");
@@ -59673,7 +59705,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             .unwrap();
         risky_seat(&theirs.path().join("proj"), home.path());
         let below = theirs.path().strip_prefix(&pw_home).unwrap().display();
-        let verdict = |line: &str| tcb_verdict_in(line, Some(root.path()));
+        let named = |line: &str| seat_write_named(line, Some(root.path()));
         let write = SEAT_WRITE;
         for line in [
             format!("cd $HOME/proj && {write}"),
@@ -59681,9 +59713,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             format!("cd ~/proj && {write}"),
             format!("cd ~{login}/{below}/proj && {write}"),
         ] {
-            let rule = verdict(&line).unwrap_or_else(|| panic!("{line:?} was allowed"));
-            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
-            assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
+            assert!(named(&line), "{line:?}");
         }
         for line in [
             format!("CDPATH=lib cd proj && {write}"),
@@ -59691,7 +59721,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             format!("cd ~/plain && {write}"),
             format!("cd lib && {write}"),
         ] {
-            assert!(verdict(&line).is_none(), "{line:?}: {:?}", verdict(&line));
+            assert!(!named(&line), "{line:?}");
         }
     }
 
@@ -59699,7 +59729,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// reads, as the shell drops them, except inside single quotes or
     /// `$'...'`, in a comment, or after an escaped backslash.
     #[test]
-    #[ignore = "phronesis 0.2.9 allows this write; seat rules only warn and policyd is off"]
     fn a_backslash_newline_joins_the_line_policyd_reads() {
         if !crate::tool_installed("ljos-policyd") {
             eprintln!("skipped: ljos-policyd is not installed");
@@ -59734,10 +59763,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
         let _g = env_guard();
         let (root, _home, _env) = policyd_tree("policyd-continued");
-        let rule = tcb_verdict_in(&format!("cd project && \\\n{write}"), Some(root.path()))
-            .expect("a continued line was allowed");
-        assert_eq!(rule.verdict, "deny", "{}", rule.reason);
-        assert_eq!(rule.pattern, "ljos-policyd", "{}", rule.reason);
+        let line = format!("cd project && \\\n{write}");
+        assert!(seat_write_named(&line, Some(root.path())), "{line:?}");
     }
 
     /// A here-document's body is data unless a shell on the line reads it
@@ -59745,7 +59772,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// `<<` in `${...}`, `$((...))`, `$[...]` or `<<<` opens none, so the
     /// lines after it still run.
     #[test]
-    #[ignore = "phronesis 0.2.9 allows this write; seat rules only warn and policyd is off"]
     fn a_heredoc_body_is_judged_only_where_a_shell_runs_it() {
         if !crate::tool_installed("ljos-policyd") {
             eprintln!("skipped: ljos-policyd is not installed");
@@ -59792,10 +59818,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 root.path(),
             ),
         ] {
-            let rule =
-                tcb_verdict_in(&line, Some(at)).unwrap_or_else(|| panic!("{line:?} was allowed"));
-            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
-            assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
+            assert!(seat_write_named(&line, Some(at)), "{line:?}");
         }
         for line in [
             "cat <<'EOF'\nsudo reboot\nEOF".to_string(),
@@ -59803,8 +59826,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "cat <<'EOF'\n$(sudo reboot)\nEOF".to_string(),
             format!("cat <<EOF\nrun $(echo {write}) in project\nEOF"),
         ] {
-            let rule = tcb_verdict_in(&line, Some(root.path()));
-            assert!(rule.is_none(), "{line:?}: {rule:?}");
+            let rules = policyd_rules(&line, Some(root.path()));
+            assert!(rules.is_empty(), "{line:?}: {rules:?}");
         }
     }
 
@@ -59877,9 +59900,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     /// A python body is judged as python, not as shell: `import` there
-    /// is no ImageMagick call. A shell body, the substitutions of an
-    /// unquoted body, and a python body that deletes a tree are still
-    /// refused.
+    /// is no ImageMagick call. The guard allows a python body whose shell
+    /// call deletes a tree, and its reading carries the one-line warning
+    /// ljos-policyd prints for it, which names `rm-rf-outside-tmp`.
     #[test]
     fn a_python_heredoc_is_judged_as_python() {
         if !crate::tool_installed("ljos-policyd") {
@@ -59895,22 +59918,28 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                     with open('run.log', 'a') as f:\n    \
                     f.write(json.dumps({'mode': os.environ.get('MODE')}) + '\\n')\n\
                     EOF";
-        let rule = tcb_verdict_in(line, at);
-        assert!(rule.is_none(), "{rule:?}");
-        for line in [
-            "bash <<'EOF'\necho $(rm -rf /)\nEOF",
-            "python3 - <<EOF\nprint('''$(rm -rf ~)''')\nEOF",
-        ] {
-            let rule = tcb_verdict_in(line, at).unwrap_or_else(|| panic!("{line:?} was allowed"));
-            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
-        }
+        let report = guard_report_in(line, at).unwrap_or_else(|e| panic!("refused: {e:#}"));
+        assert_eq!(report.verdict, "allow", "{}", report.text);
+        let warnings: Vec<_> = report.text.lines().filter_map(policyd_warning).collect();
+        assert!(warnings.is_empty(), "{}", report.text);
         for line in [
             "python3 - <<'EOF'\nimport subprocess\nsubprocess.run('rm -rf /srv/data', shell=True)\nEOF",
-            "python3 - <<'EOF'\nimport os, shutil\nshutil.rmtree(os.path.expanduser('~'))\nEOF",
+            "python3 - <<'EOF'\nimport os\nos.system('rm -rf /srv/data')\nEOF",
         ] {
             assert!(!tcb_argvs(line)[0][2].contains("import"), "{line:?}");
-            let said = tcb_line_in(line, at).unwrap_or_default();
-            assert!(said.starts_with("deny"), "{line:?}: {said:?}");
+            let report =
+                guard_report_in(line, at).unwrap_or_else(|e| panic!("refused {line:?}: {e:#}"));
+            assert_eq!(report.verdict, "allow", "{line:?}: {}", report.text);
+            let warnings: Vec<_> = report.text.lines().filter_map(policyd_warning).collect();
+            assert_eq!(
+                warnings,
+                [(
+                    "rm-rf-outside-tmp",
+                    "a recursive delete reaches outside /tmp and /var/tmp"
+                )],
+                "{line:?}: {}",
+                report.text
+            );
         }
     }
 

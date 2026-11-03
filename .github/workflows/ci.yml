@@ -202,8 +202,11 @@ jobs:
           export PATH="${{ runner.temp }}/bin:${PATH}"
           command -v deedar
       # The guard tests ask the real ljos-policyd about a shell line, so
-      # they run the build a release ships: develop, phronesis linked.
-      - name: Build ljos-policyd from develop with phronesis
+      # they run the build a release ships, phronesis linked, at a pinned
+      # commit: a policyd change reaches these tests with a pin bump and
+      # not before. The pin answers every rule it names with allow, the
+      # rule and a warning, and its own CI run 41564583136 is green.
+      - name: Build ljos-policyd at the pinned commit with phronesis
         run: |
           set -euo pipefail
           sudo apt-get install -y --no-install-recommends meson ninja-build capnproto pkg-config
@@ -220,10 +223,16 @@ jobs:
           meson compile -C build
           meson install -C build
           cd "$GITHUB_WORKSPACE"
-          git clone --depth 1 --branch develop https://github.com/leidarljos/ljos-policyd.git "${{ runner.temp }}/ljos-policyd"
-          PHRONESIS_DIR="${{ runner.temp }}/phronesis-prefix" cargo build --locked --release --manifest-path "${{ runner.temp }}/ljos-policyd/Cargo.toml"
+          sha=367ba3927158716ad613cc2876dd4f90d696839d
+          dir="${{ runner.temp }}/ljos-policyd"
+          git init -q "$dir"
+          git -C "$dir" remote add origin https://github.com/leidarljos/ljos-policyd.git
+          git -C "$dir" fetch --depth 1 origin "$sha"
+          git -C "$dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
+          PHRONESIS_DIR="${{ runner.temp }}/phronesis-prefix" cargo build --locked --release --manifest-path "$dir/Cargo.toml"
           mkdir -p "${{ runner.temp }}/bin"
-          install -m 0755 "${{ runner.temp }}/ljos-policyd/target/release/ljos-policyd" "${{ runner.temp }}/bin/ljos-policyd"
+          install -m 0755 "$dir/target/release/ljos-policyd" "${{ runner.temp }}/bin/ljos-policyd"
           echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
           "${{ runner.temp }}/bin/ljos-policyd" version | grep -q '(phronesis)'
       # A test that runs git in this checkout writes its .git/config, and
