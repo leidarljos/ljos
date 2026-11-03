@@ -160,47 +160,92 @@ jobs:
           command -v age-keygen
           command -v packset
           command -v packsetd
-      # Tracker tests need vissue. The same build as the other tools:
-      # a pinned commit, --locked, the binary on PATH. Absent that binary
-      # the tests say so and return; this step is why CI does not take
-      # that path. The pin prints 0.23.1.
-      - name: Build vissue at the pinned commit
+      # vissue, claimdag and deedar are the sibling tools the tracker
+      # tests run. .github/sibling-pin names each by repository, full
+      # commit and the version `NAME --version` prints. A tag moves, so
+      # the commit is what is built. The binaries depend only on that
+      # file, so a later run with the same pin reuses them. A substring
+      # of the version (`grep 0.20`) matches a different release, so the
+      # check is the whole first line.
+      - name: Cache pinned vissue, claimdag and deedar
+        id: siblings
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/sibling-bin
+          key: sibling-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/sibling-pin') }}
+      - name: Build vissue, claimdag and deedar at the pinned commits
+        if: steps.siblings.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          sha=bbed0146dc479856b638d76102ae307419caa390
-          dir="${{ runner.temp }}/vissue"
-          git init -q "$dir"
-          git -C "$dir" remote add origin https://github.com/leidarljos/vissue.git
-          git -C "$dir" fetch --depth 1 origin "$sha"
-          git -C "$dir" checkout --detach FETCH_HEAD
-          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
-          cargo build --locked -p vissue-cli --bin vissue --manifest-path "$dir/Cargo.toml"
-          mkdir -p "${{ runner.temp }}/bin"
-          install -m 0755 "$dir/target/debug/vissue" "${{ runner.temp }}/bin/vissue"
-          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
-          export PATH="${{ runner.temp }}/bin:${PATH}"
-          vissue --version | grep -q '0.23.1'
-      # deedar on main writes no bytes/ and no sources sidecar, so a
-      # carried deed made from one this bag does not carry cannot be
-      # imported. .github/deedar-pin names the commit that writes both.
-      # The import test reads that same file.
-      - name: Build deedar at the pinned commit
+          dest="${{ runner.temp }}/sibling-bin"
+          mkdir -p "$dest"
+          line_no=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            line_no=$((line_no + 1))
+            trim=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            case "$trim" in
+              ''|\#*) continue ;;
+            esac
+            set -- $trim
+            if [ "$#" -ne 4 ]; then
+              echo "sibling-pin:${line_no}: want name repository commit version" >&2
+              exit 1
+            fi
+            name=$1
+            repo=$2
+            commit=$3
+            case "$repo" in
+              https://github.com/leidarljos/*.git) ;;
+              *) echo "sibling-pin:${line_no}: ${name} repository is not a leidarljos git url" >&2; exit 1 ;;
+            esac
+            # git names these objects with SHA-1: 40 hexadecimal digits.
+            printf '%s' "$commit" | grep -Eq '^[0-9a-f]{40}$' || {
+              echo "sibling-pin:${line_no}: ${name} commit is not a full SHA-1" >&2
+              exit 1
+            }
+            case "$name" in
+              vissue) pkg=vissue-cli ;;
+              claimdag) pkg=claimdag-cli ;;
+              deedar) pkg=deedar-cli ;;
+              *) echo "sibling-pin:${line_no}: no package for ${name}" >&2; exit 1 ;;
+            esac
+            dir="${{ runner.temp }}/src-${name}"
+            rm -rf "$dir"
+            git init -q "$dir"
+            git -C "$dir" remote add origin "$repo"
+            git -C "$dir" fetch --depth 1 origin "$commit"
+            git -C "$dir" checkout --detach FETCH_HEAD
+            test "$(git -C "$dir" rev-parse HEAD)" = "$commit"
+            cargo build --locked --manifest-path "$dir/Cargo.toml" -p "$pkg" --bin "$name"
+            install -m 0755 "$dir/target/debug/$name" "$dest/$name"
+          done < .github/sibling-pin
+      - name: Sibling tools on PATH
         run: |
           set -euo pipefail
-          sha=$(tr -d '[:space:]' < .github/deedar-pin)
-          printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'
-          dir="${{ runner.temp }}/deedar"
-          git init -q "$dir"
-          git -C "$dir" remote add origin https://github.com/leidarljos/deedar.git
-          git -C "$dir" fetch --depth 1 origin "$sha"
-          git -C "$dir" checkout --detach FETCH_HEAD
-          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
-          cargo build --locked --manifest-path "$dir/Cargo.toml" -p deedar-cli --bin deedar
-          mkdir -p "${{ runner.temp }}/bin"
-          install -m 0755 "$dir/target/debug/deedar" "${{ runner.temp }}/bin/deedar"
-          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
-          export PATH="${{ runner.temp }}/bin:${PATH}"
-          command -v deedar
+          dest="${{ runner.temp }}/sibling-bin"
+          echo "$dest" >> "$GITHUB_PATH"
+          export PATH="$dest:${PATH}"
+          line_no=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            line_no=$((line_no + 1))
+            trim=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            case "$trim" in
+              ''|\#*) continue ;;
+            esac
+            set -- $trim
+            name=$1
+            version=$4
+            test -x "$dest/$name"
+            # The first line only. A pipe into `head` can SIGPIPE a tool
+            # that writes more, and `pipefail` would then fail a good pin.
+            got=$("$dest/$name" --version)
+            got=${got%%$'\n'*}
+            want="$name $version"
+            if [ "$got" != "$want" ]; then
+              echo "sibling-pin:${line_no}: ${name} --version printed '${got}', pin says '${want}'" >&2
+              exit 1
+            fi
+          done < .github/sibling-pin
       # The guard tests ask the real ljos-policyd about a shell line, so
       # they run the build a release ships, phronesis linked, at a pinned
       # commit: a policyd change reaches these tests with a pin bump and

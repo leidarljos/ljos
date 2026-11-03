@@ -90,6 +90,9 @@ pub mod wake;
 #[cfg(test)]
 mod cursor_event_scan;
 #[cfg(test)]
+#[path = "../tests/common/sibling.rs"]
+mod sibling_bin;
+#[cfg(test)]
 #[path = "../tests/common/seat_root.rs"]
 mod test_seat_root;
 
@@ -67485,20 +67488,21 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// cited, with the file bytes and the supersedes link, and the finish
     /// commit carries a bag `deedar check` accepts.
     ///
-    /// The deedar this reads is the commit in `.github/deedar-pin`, built
+    /// The deedar this reads is the commit in `.github/sibling-pin`, built
     /// here. A released deedar prints `id=` and no `accession=` line, and
     /// it writes no `bytes/` sidecar. CI puts the pin on `PATH`; a cloud
-    /// image often has the release, and the test then panics with no
-    /// accession.
+    /// image often has the release, and the test then fails with no
+    /// accession. The built binary is put first, and the lookup checks
+    /// that its version line is the pin.
     #[test]
-    fn a_box_finish_writes_no_bag_and_a_cloud_finish_writes_one() {
+    fn a_box_finish_writes_no_bag_and_a_cloud_finish_writes_one() -> Result<(), String> {
         let bin_dir = deedimport_deedar();
         // After the env lock. A parallel test replaces PATH while it holds
         // the lock, and a lookup before it sees that PATH and reports
         // deedar missing.
         let _g = env_guard();
         let _path = super::prepend_path(&bin_dir);
-        which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
+        crate::sibling_bin::require("deedar")?;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
         let project = root.join("Software/probe");
@@ -67724,20 +67728,21 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             );
         }
         assert!(!tree.contains(id3.as_str()), "{tree}");
+        Ok(())
     }
 
-    /// Build the deedar commit in `.github/deedar-pin` and import a bag
+    /// Build the deedar commit in `.github/sibling-pin` and import a bag
     /// `on_finish` wrote. The export is then reduced to what deedar on main leaves:
     /// one-line link files, no `sources`, no `bytes/`. Finish has to put
     /// the digest form back, including a tab-separated `sources` line for
     /// a carried deed made from one this bag does not carry. A missing
     /// binary is a failure. The test does not skip.
     #[test]
-    fn a_cloud_finish_bag_imports_with_deedar() {
+    fn a_cloud_finish_bag_imports_with_deedar() -> Result<(), String> {
         let bin_dir = deedimport_deedar();
         let _g = env_guard();
         let _path = super::prepend_path(&bin_dir);
-        which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
+        crate::sibling_bin::require("deedar")?;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
         let project = root.join("Software/probe");
@@ -67989,6 +67994,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
         let tip = String::from_utf8_lossy(&current.stdout);
         assert!(tip.contains(&id2), "{tip}");
+        Ok(())
     }
 
     /// A cloud finish with a signing key leaves the link sidecars export
@@ -67997,11 +68003,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// then imports into a store that lists the key, with no
     /// `--allow-unsigned-head`.
     #[test]
-    fn a_signed_cloud_finish_bag_checks_and_imports() {
+    fn a_signed_cloud_finish_bag_checks_and_imports() -> Result<(), String> {
         let bin_dir = deedimport_deedar();
         let _g = env_guard();
         let _path = super::prepend_path(&bin_dir);
-        which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
+        crate::sibling_bin::require("deedar")?;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
         let project = root.join("Software/probe");
@@ -68297,9 +68303,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
         let tip = String::from_utf8_lossy(&current.stdout);
         assert!(tip.contains(&id2), "{tip}");
+        Ok(())
     }
 
-    /// deedar at the commit in `.github/deedar-pin`, whose import reads
+    /// deedar at the commit in `.github/sibling-pin`, whose import reads
     /// `bytes/` and digest sidecars. CI builds that same file. The binary
     /// is installed on PATH the way CI installs deedar. A failed build
     /// fails the test. One process builds that pin once. The tree is
@@ -68470,19 +68477,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         bin_dir
     }
 
-    /// The one commit in `.github/deedar-pin`. CI reads the same file.
+    /// The deedar commit in `.github/sibling-pin`. CI builds that same line.
     fn deedar_pin() -> String {
-        let path =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/deedar-pin");
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let sha = text.trim();
-        assert!(
-            sha.len() == 40 && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
-            "{} is not one commit: {text:?}",
-            path.display()
-        );
-        sha.to_string()
+        crate::sibling_bin::pin("deedar")
+            .unwrap_or_else(|line| panic!("{line}"))
+            .commit
     }
 
     fn accession_of(text: &str) -> String {

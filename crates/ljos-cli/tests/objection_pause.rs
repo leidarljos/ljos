@@ -5,33 +5,13 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
+#[path = "common/sibling.rs"]
+mod sibling;
+
 static LOCK: Mutex<()> = Mutex::new(());
 
-fn vissue_bin() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|dir| {
-        let bin = dir.join("vissue");
-        bin.is_file().then_some(bin)
-    })
-}
-
-/// vissue 0.20 has to be on PATH. CI builds it. A tree without it
-/// skips these tests and says why.
-fn vissue_020() -> bool {
-    let Some(bin) = vissue_bin() else {
-        eprintln!("skip: vissue 0.20 is not on PATH");
-        return false;
-    };
-    let Ok(version) = Command::new(bin).arg("--version").output() else {
-        eprintln!("skip: vissue 0.20 is not on PATH");
-        return false;
-    };
-    let text = String::from_utf8_lossy(&version.stdout);
-    if !text.contains("0.20") {
-        eprintln!("skip: vissue 0.20 is not on PATH (found {text})");
-        return false;
-    }
-    true
+fn vissue_bin() -> PathBuf {
+    sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"))
 }
 
 struct Tracker {
@@ -47,13 +27,7 @@ impl Tracker {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(home.join(".config")).unwrap();
         std::fs::create_dir_all(home.join("run")).unwrap();
-        let bin = vissue_bin().expect("vissue 0.20");
-        let version = Command::new(&bin)
-            .arg("--version")
-            .output()
-            .expect("real vissue");
-        let text = String::from_utf8_lossy(&version.stdout);
-        assert!(text.contains("0.20"), "{text}");
+        let _bin = vissue_bin();
         let keys = [
             "PATH",
             "HOME",
@@ -71,12 +45,7 @@ impl Tracker {
         ];
         let saved = keys.into_iter().map(|k| (k, std::env::var_os(k))).collect();
         let path = {
-            let dir = vissue_bin()
-                .expect("vissue 0.20")
-                .parent()
-                .unwrap()
-                .display()
-                .to_string();
+            let dir = vissue_bin().parent().unwrap().display().to_string();
             let rest = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
             format!("{dir}:/usr/bin:/bin:{rest}")
         };
@@ -147,10 +116,8 @@ impl Drop for Tracker {
 }
 
 #[test]
-fn objections_past_the_child_cap_are_not_dropped() {
-    if !vissue_020() {
-        return;
-    }
+fn objections_past_the_child_cap_are_not_dropped() -> Result<(), String> {
+    sibling::require("vissue")?;
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let t = Tracker::new(None);
     let parent = t.vissue(&["q", "-p", "probe", "split reading"]);
@@ -190,13 +157,12 @@ fn objections_past_the_child_cap_are_not_dropped() {
         once,
         "the pause was written again:\n{again}"
     );
+    Ok(())
 }
 
 #[test]
-fn the_descendant_limit_pauses_and_does_not_close() {
-    if !vissue_020() {
-        return;
-    }
+fn the_descendant_limit_pauses_and_does_not_close() -> Result<(), String> {
+    sibling::require("vissue")?;
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let t = Tracker::new(Some("[panel]\nmax_descendants = 1\n"));
     let parent = t.vissue(&["q", "-p", "probe", "wide tree"]);
@@ -229,15 +195,14 @@ fn the_descendant_limit_pauses_and_does_not_close() {
         card.contains("was not filed") && card.contains("one more bug"),
         "the pause is not on the ticket:\n{card}"
     );
+    Ok(())
 }
 
 /// Eight dissent children, then each of those reads eight objections.
 /// The descendant limit is the whole tree.
 #[test]
-fn a_nested_split_pauses_at_the_descendant_limit() {
-    if !vissue_020() {
-        return;
-    }
+fn a_nested_split_pauses_at_the_descendant_limit() -> Result<(), String> {
+    sibling::require("vissue")?;
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let t = Tracker::new(None);
     let limits = ljos_cli::converge::ScopeBudget::panel();
@@ -273,4 +238,5 @@ fn a_nested_split_pauses_at_the_descendant_limit() {
         "the tree holds {total}, limit {}",
         limits.max_descendants
     );
+    Ok(())
 }
