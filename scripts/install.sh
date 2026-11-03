@@ -563,7 +563,7 @@ case "$(cd "$HOME" && pwd -P)/" in
     say "Note: HOME is a temporary directory, so the command guard and memory stay off;"
     say "  \`ljos doctor\` says why. Install into a HOME outside /tmp to try them." ;;
 esac
-say "The guard asks before a force push:"
+say "The guard lets a force push run, with a warning:"
 # A checkout this script was started in may carry a push gate. Ask from
 # the home directory, and ignore a git dir the caller exported.
 (
