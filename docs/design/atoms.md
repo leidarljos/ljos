@@ -2,7 +2,7 @@
 
 Each machine seals its own atoms of a scope into the tracker repository, one log per host and scope under `.ljos/atoms/`: `<host>.jsonl.age` for the primary scope and `<host>+<scope>.jsonl.age` for an extra one. Other machines import those logs. Until this layout, an export that found any atom changed sealed the whole log again and committed it, so every sync added a full copy of the log to tracker history. One box log of 19.9 MB was rewritten 60 times in a day, and the tracker pack reached 9.65 GiB.
 
-A log is now a base and the chunks sealed after it. A sync seals only what changed as one small chunk, and the base stays the same blob until a threshold below is crossed.
+A log is now a base and the chunks sealed after it. A sync seals only what changed as one small chunk, and the base stays the same blob until the chunks would come to half of it.
 
 ## Files
 
@@ -28,20 +28,25 @@ Export builds this machine's atoms of the scope as before. When the digest match
 - the recipients changed;
 - the base is missing, does not open with this machine's key, or its header names another host or scope;
 - the atoms, or the log as read, do not each carry a distinct id;
-- the new chunk would be number 65;
-- the plaintext of the chunks read, with the new chunk, would come to more bytes than the plaintext of the base.
+- the new chunk, folded as the next section says, would land on the base.
 
-Otherwise it diffs the atoms against the log as a reader sees it, base and chunks. An atom added or changed is written whole as an atom line, and an atom that is gone is a drop line. Those lines are sealed as the chunk after the last one read. Chunk files from that number on are removed first, so a chunk a reader left unread is replaced, and what it carried is in the new one. When nothing differs, nothing is sealed: chunk files past the ones read are removed and the digest is written again. The commit stages the base, the digest and the chunk directory.
+Otherwise it diffs the atoms against the log as a reader sees it, base and chunks. An atom added or changed is written whole as an atom line, and an atom that is gone is a drop line. Those lines are sealed as the chunk after the last one read, or folded into a chunk before it. Chunk files from that number on are removed first, so a chunk a reader left unread is replaced, and what it carried is in the new one. When nothing differs, nothing is sealed: chunk files past the ones read are removed and the digest is written again. The commit stages the base, the digest and the chunk directory.
 
 ## Compaction
 
-A whole seal is the only compaction, and it runs on the two thresholds above: 64 chunks, and chunks whose plaintext would pass the base's. Both are counted from the files in the tree and the atoms being written, so every machine that writes the same atoms over the same log compacts on the same sync. A reader opens at most the base and 64 chunks, and those chunks come to no more plaintext than the base. A sync that changes one atom of a large log commits one chunk of about that atom's size, and the base blob is written again only at a whole seal.
+A new chunk folds into the chunk before it, its lines winning, while its plaintext comes to at least half of that chunk's, and so on down. The fold takes that chunk's number, and chunk files from that number on are removed. Folding into the base is a whole seal, so the log is sealed whole once its chunks would come to half the plaintext of the base. A chunk that would be number 65 folds too, as a reader opens at most 64. The rule is counted from the files in the tree and the atoms being written, so every machine that writes the same atoms over the same log folds on the same sync.
+
+Half is the doubling of the logarithmic method. Every chunk kept is under half the one before it, so a base of B plaintext bytes carries fewer than log2(B / h) chunks, h being one chunk header's 126 or so bytes. That is 17 over a 16 MB base, inside the 64 a reader opens. A sealed line is sealed again only when a fold lands on its chunk. A fold of other atoms leaves that chunk at least half again as large, so a line is resealed at most log1.5(B / h) times before the base takes it. A sync that changes one atom of a large log commits about that atom's size, plus the chunks a fold lands on, and the base blob is written again only at a whole seal.
+
+Before folding, an ljos sealed the log whole at the 65th chunk, or once the chunks would pass the plaintext of the base. A 16 MB log then took a fresh 16 MB blob every 65 syncs that changed an atom.
 
 ## Upgrading
 
-The first sync after upgrading rewrites each log once. The digest an older ljos wrote has two fields, so that sync seals the log whole and writes a digest of three. After that the log is append only: each sync that changes an atom appends one chunk, and the base is rewritten only when a threshold above is crossed.
+The first sync after upgrading rewrites each log once. The digest an older ljos wrote has two fields, so that sync seals the log whole and writes a digest of three. After that each sync that changes an atom seals one chunk, after the last or folded into one before it, and the base is rewritten only when the chunks would come to half of it.
 
-An ljos from before chunks still reads the base and nothing else. Until the next whole seal, it misses the atoms the chunks add, change or drop, so every machine that imports a log should run a version that reads chunks.
+An ljos that reads chunks but does not fold them reads a folded log, as a folded chunk is a chunk with more lines. A log it left at 64 chunks folds on the next sync of an ljos that folds.
+
+An ljos from before chunks still reads the base and nothing else. Until the next whole seal, it misses the atoms the chunks add, change or drop, so every machine that imports a log should run a version that reads chunks. Folding seals the base whole less often, so such a reader falls further behind.
 
 ## Conflicts
 

@@ -529,9 +529,9 @@ const CHUNK_HEADER: &str = "ljos_chunk";
 /// that carries the key beside others is an atom.
 const CHUNK_DROP: &str = "ljos_drop";
 
-/// The most chunks a log is read with. Export seals a log whole before
-/// it would write one past this, or once its chunks would come to more
-/// plaintext bytes than its base.
+/// The most chunks a log is read with, as every reader since chunks came
+/// in stops there. [`place_chunk`] keeps a log far below it and folds
+/// chunks before it would write one past it.
 const MAX_CHUNKS: u32 = 64;
 
 fn chunk_header(host: &str, scope_name: &str, base: &str, n: u32) -> String {
@@ -603,21 +603,32 @@ fn chunk_lines(body: &str) -> Option<Vec<ChunkLine>> {
 struct LogView {
     /// The atoms, one line each, in the order [`log_lines`] writes them.
     body: String,
-    /// Chunks 1 through `applied` were read.
-    applied: u32,
-    /// The plaintext bytes of those chunks, headers included.
-    chunk_bytes: usize,
-    /// Why the chunk after `applied` was left unread, when one is there.
+    /// Chunks 1, 2 and on as they were read, in order.
+    chunks: Vec<ReadChunk>,
+    /// Why the chunk after the last one read was left unread, when one is
+    /// there.
     stopped: Option<String>,
 }
 
+/// One chunk as read: its plaintext bytes, header included, and the line
+/// it leaves under each id it names, None for a drop.
+struct ReadChunk {
+    bytes: usize,
+    lines: BTreeMap<String, Option<String>>,
+}
+
 impl LogView {
+    /// The number of the last chunk read.
+    fn applied(&self) -> u32 {
+        u32::try_from(self.chunks.len()).unwrap_or(u32::MAX)
+    }
+
     /// What import and adopt print about a chunk left unread at `label`.
     fn stopped_line(&self, label: &str) -> String {
         let Some(why) = &self.stopped else {
             return String::new();
         };
-        let n = self.applied;
+        let n = self.applied();
         let chunks = if n == 1 { "chunk" } else { "chunks" };
         format!("sync: {label}: {why}, so it reads as its base and {n} {chunks}\n")
     }
@@ -644,10 +655,11 @@ fn read_chunks(
 ) -> LogView {
     let base = blob_digest(base);
     let mut lines: Option<BTreeMap<String, String>> = None;
-    let mut applied = 0;
-    let mut chunk_bytes = 0;
+    let mut chunks = Vec::new();
     let stopped = loop {
-        let n = applied + 1;
+        let n = u32::try_from(chunks.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
         let sealed = match fetch(n) {
             Ok(Some(sealed)) => sealed,
             Ok(None) => break None,
@@ -686,18 +698,23 @@ fn read_chunks(
                 ))
             }
         };
+        let mut read = BTreeMap::new();
         for change in changes {
             match change {
                 ChunkLine::Put(id, line) => {
-                    map.insert(id, line);
+                    map.insert(id.clone(), line.clone());
+                    read.insert(id, Some(line));
                 }
                 ChunkLine::Drop(id) => {
                     map.remove(&id);
+                    read.insert(id, None);
                 }
             }
         }
-        applied = n;
-        chunk_bytes += plain.len();
+        chunks.push(ReadChunk {
+            bytes: plain.len(),
+            lines: read,
+        });
     };
     let body = match lines {
         Some(map) => map.values().map(|line| format!("{line}\n")).collect(),
@@ -705,8 +722,7 @@ fn read_chunks(
     };
     LogView {
         body,
-        applied,
-        chunk_bytes,
+        chunks,
         stopped,
     }
 }
@@ -1445,7 +1461,8 @@ fn export_named_scope(
 enum LogWrite {
     /// Seal the whole log as a new base and remove its chunks.
     Whole,
-    /// Seal `plain`, the atoms that changed, as chunk `n` over the base.
+    /// Seal `plain` as chunk `n` over the base: the atoms that changed,
+    /// with the chunks from `n` on that [`place_chunk`] folded into it.
     /// Chunk files from `n` on are removed first.
     Chunk {
         n: u32,
@@ -1469,12 +1486,10 @@ enum LogWrite {
 /// are diffed against the log as a reader sees it, so a chunk left
 /// unread is carried again in the new one.
 ///
-/// The log is also sealed whole when the new chunk would be number 65,
-/// or when the plaintext of the chunks read and the new one would pass
-/// the plaintext of the base. Both are counted from the files alone, so
-/// any machine that writes the same atoms over the same log compacts on
-/// the same sync. A reader then opens the base and at most 64 chunks
-/// that come to no more bytes than it.
+/// [`place_chunk`] picks the chunk's number and seals the log whole only
+/// once the chunks would come to half the base. It counts from the files
+/// alone, so any machine that writes the same atoms over the same log
+/// folds on the same sync.
 fn plan_log_write(
     root: &Path,
     log_rel: &str,
@@ -1495,31 +1510,79 @@ fn plan_log_write(
     let (Some(had), Some(has)) = (lines_by_id(&view.body), lines_by_id(body)) else {
         return LogWrite::Whole;
     };
-    let mut lines = String::new();
-    let mut changes = 0;
-    for (id, line) in &has {
-        if had.get(id) != Some(line) {
-            lines.push_str(line);
-            lines.push('\n');
-            changes += 1;
+    let mut changes: BTreeMap<String, Option<String>> = had
+        .keys()
+        .filter(|id| !has.contains_key(*id))
+        .map(|id| (id.clone(), None))
+        .collect();
+    for (id, line) in has {
+        if had.get(&id) != Some(&line) {
+            changes.insert(id, Some(line));
         }
     }
-    for id in had.keys().filter(|id| !has.contains_key(*id)) {
-        lines.push_str(&serde_json::json!({ CHUNK_DROP: id }).to_string());
-        lines.push('\n');
-        changes += 1;
-    }
-    if changes == 0 {
+    if changes.is_empty() {
         return LogWrite::Clean {
-            applied: view.applied,
+            applied: view.applied(),
         };
     }
-    let n = view.applied + 1;
-    let plain = chunk_header(host, scope_name, &blob_digest(&base), n) + &lines;
-    if n > MAX_CHUNKS || view.chunk_bytes + plain.len() > base_len {
-        return LogWrite::Whole;
+    let count = changes.len();
+    let over = blob_digest(&base);
+    match place_chunk(&view, base_len, changes, |n| {
+        chunk_header(host, scope_name, &over, n)
+    }) {
+        Some((n, plain)) => LogWrite::Chunk {
+            n,
+            plain,
+            changes: count,
+        },
+        None => LogWrite::Whole,
     }
-    LogWrite::Chunk { n, plain, changes }
+}
+
+/// Where `changes`, the lines by id that differ from `view` with None
+/// for a drop, are sealed over a base of `base_len` plaintext bytes: the
+/// chunk's number and its plaintext under `header`. None when the log is
+/// to be sealed whole.
+///
+/// The new chunk folds into the chunk before it, its lines winning,
+/// while its plaintext comes to at least half of that chunk's, and so on
+/// down. Folding into the base is a whole seal. Half is the doubling of
+/// the logarithmic method: every chunk kept is under half the one before
+/// it, so a base of B plaintext bytes carries fewer than log2(B / h)
+/// chunks, h being one chunk header's 126 or so bytes. That is 17 over a
+/// 16 MB base, inside the [`MAX_CHUNKS`] a reader opens. A sealed line is
+/// sealed again only when a fold lands on its chunk. A fold of other atoms
+/// leaves that chunk at least half again as large, so a line is resealed
+/// at most log1.5(B / h) times before the base takes it.
+fn place_chunk(
+    view: &LogView,
+    base_len: usize,
+    mut changes: BTreeMap<String, Option<String>>,
+    header: impl Fn(u32) -> String,
+) -> Option<(u32, String)> {
+    let mut n = view.applied().saturating_add(1);
+    loop {
+        let mut plain = header(n);
+        for (id, line) in &changes {
+            match line {
+                Some(line) => plain.push_str(line),
+                None => plain.push_str(&serde_json::json!({ CHUNK_DROP: id }).to_string()),
+            }
+            plain.push('\n');
+        }
+        let index = usize::try_from(n).ok()?;
+        let before = match index.checked_sub(2) {
+            Some(at) => view.chunks.get(at)?.bytes,
+            None => base_len,
+        };
+        if n <= MAX_CHUNKS && plain.len().saturating_mul(2) < before {
+            return Some((n, plain));
+        }
+        let mut folded = view.chunks.get(index.checked_sub(2)?)?.lines.clone();
+        folded.append(&mut changes);
+        changes = folded;
+        n -= 1;
+    }
 }
 
 /// This host's log of `scope_name`, as a reader sees it, when a chunk may
@@ -1732,14 +1795,11 @@ fn seal_ticket_scope(
     let Some(mut lines) = lines_by_id(&log.view.body) else {
         return left("this machine's log does not name its atoms by id");
     };
-    let mut chunk = String::new();
-    let mut changes = 0;
+    let mut changes: BTreeMap<String, Option<String>> = BTreeMap::new();
     for (id, line) in &has {
         if lines.get(id) != Some(line) {
-            chunk.push_str(line);
-            chunk.push('\n');
             lines.insert(id.clone(), line.clone());
-            changes += 1;
+            changes.insert(id.clone(), Some(line.clone()));
         }
     }
     let gone: Vec<String> = lines
@@ -1751,12 +1811,10 @@ fn seal_ticket_scope(
         .map(|(id, _)| id.clone())
         .collect();
     for id in gone {
-        chunk.push_str(&serde_json::json!({ CHUNK_DROP: id }).to_string());
-        chunk.push('\n');
         lines.remove(&id);
-        changes += 1;
+        changes.insert(id, None);
     }
-    if changes == 0 {
+    if changes.is_empty() {
         return Ok((
             format!(
                 "sync: the {scope_name} log already holds the {} atoms of {issue}\n",
@@ -1765,11 +1823,13 @@ fn seal_ticket_scope(
             false,
         ));
     }
-    let n = log.view.applied + 1;
-    let plain = chunk_header(&host, scope_name, &blob_digest(&log.base), n) + &chunk;
-    if n > MAX_CHUNKS || log.view.chunk_bytes + plain.len() > log.base_len {
+    let count = changes.len();
+    let over = blob_digest(&log.base);
+    let Some((n, plain)) = place_chunk(&log.view, log.base_len, changes, |n| {
+        chunk_header(&host, scope_name, &over, n)
+    }) else {
         return left("this machine's log is due to be sealed whole");
-    }
+    };
     let Some(sealed) = seal(&plain)? else {
         return Ok((age_missing_line(), false));
     };
@@ -1785,9 +1845,7 @@ fn seal_ticket_scope(
     );
     write_beneath(root, &digest_rel, digest.as_bytes())?;
     Ok((
-        format!(
-            "sync: sealed {changes} {scope_name} atoms of {issue} to {rel}, {recipients_said}\n"
-        ),
+        format!("sync: sealed {count} {scope_name} atoms of {issue} to {rel}, {recipients_said}\n"),
         true,
     ))
 }
@@ -9212,10 +9270,12 @@ mod tests {
         let mut atoms: Vec<Value> = (0..200).map(note).collect();
         fix.sync(&atoms);
         let base = fix.base_blob();
-        atoms.push(note(200));
+        // Three notes, so the one-note chunk after them stays chunk 2
+        // instead of folding into chunk 1.
+        atoms.extend((200..203).map(note));
         fix.sync(&atoms);
         let before = atoms.clone();
-        atoms.push(note(201));
+        atoms.push(note(203));
         fix.sync(&atoms);
         let cut = fix.chunk(2);
         assert!(cut.is_file(), "no chunk was written");
@@ -9241,54 +9301,89 @@ mod tests {
         assert_eq!(fix.base_blob(), base);
     }
 
-    /// Sixty-four syncs that each add a note write chunks 1 to 64 over one
-    /// base. The sync after them seals the log whole: the one new base of
-    /// the run, no chunks beside it, and a peer reads it as the atoms the
-    /// single file would carry.
+    /// Sixty-five syncs that each add a note leave the base blob as it
+    /// was. The chunks fold as they go, so the log never holds more than
+    /// log2 of its base over one chunk header, and after each sync a peer
+    /// reads every atom.
     #[test]
-    fn the_sixty_fifth_chunk_seals_the_log_whole() {
+    fn sixty_five_syncs_fold_chunks_over_one_base() {
         let dir = tempfile::tempdir().unwrap();
         let _env = begin(dir.path());
         let fix = Growth::new(dir.path());
+        let lines = |atoms: &[Value]| log_lines(atoms, "example-host", "example-host", false);
         let mut atoms: Vec<Value> = (0..300).map(note).collect();
         fix.sync(&atoms);
-        let mut bases = vec![fix.base_blob()];
-        for n in 1..=MAX_CHUNKS as usize {
+        let base = fix.base_blob();
+        let base_len = (log_header(&host(), "example-host") + &lines(&atoms)).len();
+        let over = blob_digest(&std::fs::read(fix.root.join(&fix.log_rel)).unwrap());
+        let header_len = chunk_header(&host(), "example-host", &over, 1).len();
+        let most = (base_len / header_len).ilog2() as usize;
+        for n in 1..=MAX_CHUNKS as usize + 1 {
             atoms.push(note(300 + n));
-            fix.sync(&atoms);
-            assert_eq!(fix.base_blob(), bases[0], "sync {n} sealed the log whole");
-            assert!(fix.chunk(n as u32).is_file(), "sync {n} wrote no chunk");
+            let said = fix.sync(&atoms);
+            assert_eq!(
+                fix.base_blob(),
+                base,
+                "sync {n} sealed the log whole: {said}"
+            );
+            let held = chunk_files(&fix.root, &fix.log_rel);
+            assert!(
+                (1..=most).contains(&held.len()),
+                "sync {n} left {} chunks, outside 1 to {most}: {held:?}",
+                held.len()
+            );
+            let (view, out) = fix.peer_view();
+            assert_eq!(view, lines(&atoms), "sync {n}: {out}");
         }
-        let (view, out) = fix.peer_view();
-        assert_eq!(
-            view,
-            log_lines(&atoms, "example-host", "example-host", false),
-            "{out}"
-        );
-
-        atoms.push(note(400));
-        fix.sync(&atoms);
-        bases.push(fix.base_blob());
-        assert_ne!(bases[1], bases[0], "the 65th sync wrote a chunk");
-        assert!(!fix.chunk(1).exists(), "the whole seal left chunks");
-        let (view, out) = fix.peer_view();
-        assert_eq!(
-            view,
-            log_lines(&atoms, "example-host", "example-host", false),
-            "{out}"
-        );
-
-        atoms.push(note(401));
-        fix.sync(&atoms);
-        assert_eq!(fix.base_blob(), bases[1], "the sync after compaction");
-        assert!(fix.chunk(1).is_file());
     }
 
-    /// A change whose chunk would carry more plaintext than the base, with
-    /// the chunks before it, seals the log whole instead. The next small
-    /// change is a chunk over that new base.
+    /// A log an older ljos left at 64 one-note chunks, the most a reader
+    /// opens, takes the next note by folding its chunks rather than by a
+    /// whole seal, and a peer reads every atom.
     #[test]
-    fn chunks_past_the_size_of_the_base_seal_the_log_whole() {
+    fn a_log_at_sixty_four_chunks_folds_instead_of_sealing_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = Growth::new(dir.path());
+        let lines = |atoms: &[Value]| log_lines(atoms, "example-host", "example-host", false);
+        let mut atoms: Vec<Value> = (0..300).map(note).collect();
+        fix.sync(&atoms);
+        let base = fix.base_blob();
+        let over = blob_digest(&std::fs::read(fix.root.join(&fix.log_rel)).unwrap());
+        for n in 1..=MAX_CHUNKS {
+            let added = note(300 + n as usize);
+            let plain = chunk_header(&host(), "example-host", &over, n)
+                + &lines(std::slice::from_ref(&added));
+            let sealed = seal_bytes(&plain, std::slice::from_ref(&fix.public)).unwrap();
+            write_beneath(&fix.root, &chunk_rel(&fix.log_rel, n), &sealed).unwrap();
+            atoms.push(added);
+        }
+        let [_, digest_rel] = host_log_rels_for_scope(&host(), "example-host", "example-host");
+        let digest = export_digest(
+            &fix.root,
+            &fix.log_rel,
+            &(log_header(&host(), "example-host") + &lines(&atoms)),
+            std::slice::from_ref(&fix.public),
+        );
+        write_beneath(&fix.root, &digest_rel, digest.as_bytes()).unwrap();
+        commit_log(&fix.root, "example-host", false);
+        let (view, out) = fix.peer_view();
+        assert_eq!(view, lines(&atoms), "{out}");
+
+        atoms.push(note(400));
+        let said = fix.sync(&atoms);
+        assert_eq!(fix.base_blob(), base, "the 65th chunk sealed the log whole");
+        assert!(said.contains("chunks/1.age"), "{said}");
+        assert!(!fix.chunk(2).exists(), "the chunks did not fold: {said}");
+        let (view, out) = fix.peer_view();
+        assert_eq!(view, lines(&atoms), "{out}");
+    }
+
+    /// A change whose chunk, with the chunks before it folded in, would
+    /// carry half the plaintext of the base or more seals the log whole
+    /// instead. The next small change is a chunk over that new base.
+    #[test]
+    fn chunks_past_half_the_base_seal_the_log_whole() {
         let dir = tempfile::tempdir().unwrap();
         let _env = begin(dir.path());
         let fix = Growth::new(dir.path());

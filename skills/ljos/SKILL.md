@@ -203,14 +203,15 @@ plan and writes nothing. A fetch or merge that failed adopts nothing.
 Another machine retires that host's copies, including each extra
 scope's `sync:HOST+SCOPE` copies, when it imports the adopt commit.
 A log is a base and the chunks sealed after it, `HOST.chunks/N.age`.
-A sync seals only the atoms added, changed or dropped as the next
-chunk and leaves the base alone; a sync that changed no atom seals and
-commits nothing. A reader applies the chunks in order over the base:
-the last line for an id wins, and a drop line removes the id. The log
-is sealed whole again in place of its 65th chunk, or of a chunk that
-would bring its chunks past the base in plaintext bytes, and that seal
-removes the chunks. The first sync after upgrading seals each log whole
-once; after that the log is append only. An ljos from before chunks
+A sync seals only the atoms added, changed or dropped as one chunk and
+leaves the base alone; a sync that changed no atom seals and commits
+nothing. A reader applies the chunks in order over the base: the last
+line for an id wins, and a drop line removes the id. A new chunk folds
+into the chunk before it while it is at least half that chunk's size,
+so each chunk kept is under half the one before it and a 16 MB log
+carries fewer than 17. The log is sealed whole again, and its chunks
+removed, only once they would come to half the base. The first sync
+after upgrading seals each log whole once. An ljos from before chunks
 reads the base alone. `docs/design/atoms.md` has the layout.
 A repository with no `.ljos/sync.toml` is not synced, and the sitting and
 finish say nothing about it; only `ljos sync` names the missing file.
