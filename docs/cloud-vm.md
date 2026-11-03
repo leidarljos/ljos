@@ -157,7 +157,7 @@ Git runs only the hooks the repository and the login already name.
 On a seat an earlier `cloud up` set up, it unsets a global or local `core.hooksPath` that names `~/.config/ljos/hooks`.
 It removes the pre-push script it wrote there, and it puts a booked hook back where its chain stub wrapped one.
 Each of those steps prints one `hooks:` line, and any other hooks path stays as it was.
-The allowlist holds the repository and the branch.
+The allowlist names the repository and the branch.
 This seat may push `develop` and the branches named in its `ljos.toml` on the recorded repository, and any branch of the tracker.
 The seat repository is recorded once, and a later `cloud up` from another clone leaves that record in place.
 The shell guard warns on `--no-verify`, a `-c` or `--config core.hooksPath`, the `GIT_CONFIG_*` variables that set that key, and a write to a gitconfig.
