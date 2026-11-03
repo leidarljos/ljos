@@ -247,10 +247,9 @@ jobs:
             fi
           done < .github/sibling-pin
       # The guard tests ask the real ljos-policyd about a shell line, so
-      # they run the build a release ships, phronesis linked, at a pinned
-      # commit: a policyd change reaches these tests with a pin bump and
-      # not before. The pin answers every rule it names with allow, the
-      # rule and a warning, and its own CI run 41564583136 is green.
+      # they run a released build, phronesis linked. The commit is pinned,
+      # as for the other tools, so a policyd change reaches these tests
+      # only with an ljos commit. The pin is the v0.7.0 tag.
       - name: Build ljos-policyd at the pinned commit with phronesis
         run: |
           set -euo pipefail
@@ -268,7 +267,7 @@ jobs:
           meson compile -C build
           meson install -C build
           cd "$GITHUB_WORKSPACE"
-          sha=367ba3927158716ad613cc2876dd4f90d696839d
+          sha=233639176f497444068e7b92526fe8556528a9a9
           dir="${{ runner.temp }}/ljos-policyd"
           git init -q "$dir"
           git -C "$dir" remote add origin https://github.com/leidarljos/ljos-policyd.git
@@ -282,11 +281,13 @@ jobs:
           "${{ runner.temp }}/bin/ljos-policyd" version | grep -q '(phronesis)'
       # A test that runs git in this checkout writes its .git/config, and
       # the next commit here runs hooks from a temp home that is gone.
+      # Without --no-fail-fast one failing lib test stopped cargo before
+      # any tests/*.rs ran (run 41565021207).
       - name: Workspace tests
         run: |
           set -euo pipefail
           git config --local --list > "${{ runner.temp }}/git-config-before"
-          cargo test --workspace
+          cargo test --workspace --no-fail-fast
           git config --local --list > "${{ runner.temp }}/git-config-after"
           diff -u "${{ runner.temp }}/git-config-before" "${{ runner.temp }}/git-config-after"
       - name: MCP tool list size
@@ -356,7 +357,7 @@ jobs:
           brew install age
           command -v age-keygen
       - name: Unit tests
-        run: cargo test --locked --workspace --lib
+        run: cargo test --locked --workspace --lib --no-fail-fast
 
   # release.yml already builds on macos-latest. This job runs the
   # parent-death and launcher tests there, which is the kqueue path.
@@ -370,7 +371,7 @@ jobs:
         with:
           toolchain: 1.97.1
       - name: MCP lifetime
-        run: cargo test -p ljos --test mcp_lifetime
+        run: cargo test -p ljos --test mcp_lifetime --no-fail-fast
 
   deny:
     name: cargo deny check
