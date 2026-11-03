@@ -351,8 +351,9 @@ fn scrub(text: &str, key_file: Option<&Path>) -> String {
     one_line(&redact(text, key_file))
 }
 
-/// `ljos mesh up`. A joined node prints `tailscale status` and returns.
-/// Any failure is one line; [`MeshOut::write`] sends it to stderr.
+/// `ljos mesh up`. A successful join prints this node's name, its mesh
+/// IPv4 and IPv6, and each peer's name and addresses. Any failure is one
+/// line; [`MeshOut::write`] sends it to stderr.
 pub fn up(args: UpArgs) -> MeshOut {
     let key = known_key(&args);
     match bring_up(&args) {
@@ -375,12 +376,17 @@ fn bring_up(args: &UpArgs) -> Result<String, Fail> {
         .is_some_and(|status| running_as(status, &hostname))
     {
         let _ = std::fs::write(dir.join(JOINED), format!("{hostname}\n"));
-        let status = already_up(&tailscale, &socket, &hostname)?;
-        let old = old_format(
+        let mut notes = Vec::new();
+        if let Some(note) = old_format(
             &dir,
             "writes carry no source.mesh label and mesh down signals nothing",
-        );
-        return Ok(already_line(&status, &hostname, old.as_deref()));
+        ) {
+            notes.push(note);
+        }
+        return Ok(with_notes(
+            mesh_status(&tailscale, &socket, &hostname)?,
+            &notes,
+        ));
     }
     let key = key_file(args).map_err(|e| Fail::step("key file", e))?;
     let kernel = tun_usable();
@@ -393,7 +399,6 @@ fn bring_up(args: &UpArgs) -> Result<String, Fail> {
     // Detach. Dropping `Child` does not stop the daemon.
     drop(started);
     let _ = std::fs::write(dir.join(JOINED), format!("{hostname}\n"));
-    let mode = started_here.then(|| mode_phrase(kernel));
     let mut notes = Vec::new();
     if let Some(note) = stale {
         notes.push(note);
@@ -406,26 +411,94 @@ fn bring_up(args: &UpArgs) -> Result<String, Fail> {
             notes.push(note);
         }
     }
-    Ok(joined_line(&hostname, mode.as_deref(), &notes))
+    Ok(with_notes(
+        mesh_status(&tailscale, &socket, &hostname)?,
+        &notes,
+    ))
 }
 
-fn already_line(status: &str, hostname: &str, old: Option<&str>) -> String {
-    let old = old.map(|note| format!("; {note}")).unwrap_or_default();
-    let status = status.trim();
-    if status.is_empty() {
-        format!("mesh up: {hostname} is already up{old}")
+fn with_notes(line: String, notes: &[String]) -> String {
+    if notes.is_empty() {
+        line
     } else {
-        format!("mesh up: {hostname} is already up: {status}{old}")
+        format!("{line}; {}", notes.join("; "))
     }
 }
 
-fn already_up(tailscale: &Path, socket: &Path, hostname: &str) -> Result<String, Fail> {
-    match status_text(tailscale, socket) {
-        Ok(text) if !text.trim().is_empty() => Ok(text),
-        Ok(_) => Ok(format!("mesh up: {hostname} is already up")),
+/// This node, then each peer, from `tailscale status --json`.
+/// `TailscaleIPs` lists the mesh addresses; a colon marks IPv6.
+fn mesh_status(tailscale: &Path, socket: &Path, hostname: &str) -> Result<String, Fail> {
+    match status_json(tailscale, socket) {
+        Ok(Some(status)) => Ok(status_line(&status, hostname)),
+        Ok(None) => Ok(format!("mesh up: {hostname}")),
         Err(e) if timed_out(&e) => Err(Fail::step("tailscale status", e)),
-        Err(_) => Ok(format!("mesh up: {hostname} is already up")),
+        Err(_) => Ok(format!("mesh up: {hostname}")),
     }
+}
+
+fn status_line(status: &Value, hostname: &str) -> String {
+    let name = status["Self"]["HostName"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(hostname);
+    let (v4, v6) = mesh_addrs(&status["Self"]);
+    let mut parts = vec![name.to_string()];
+    if !v4.is_empty() {
+        parts.push(v4);
+    }
+    if !v6.is_empty() {
+        parts.push(v6);
+    }
+    let mut line = format!("mesh up: {}", parts.join(" "));
+    let peers = peer_list(status);
+    if !peers.is_empty() {
+        line.push_str(" peer ");
+        line.push_str(&peers);
+    }
+    line
+}
+
+fn mesh_addrs(node: &Value) -> (String, String) {
+    let mut v4 = String::new();
+    let mut v6 = String::new();
+    if let Some(ips) = node["TailscaleIPs"].as_array() {
+        for ip in ips.iter().filter_map(Value::as_str) {
+            if ip.contains(':') {
+                if v6.is_empty() {
+                    v6 = ip.to_string();
+                }
+            } else if v4.is_empty() {
+                v4 = ip.to_string();
+            }
+        }
+    }
+    (v4, v6)
+}
+
+fn peer_list(status: &Value) -> String {
+    let Some(peers) = status["Peer"].as_object() else {
+        return String::new();
+    };
+    let mut lines = Vec::new();
+    for peer in peers.values() {
+        let name = peer["HostName"].as_str().unwrap_or("");
+        let (v4, v6) = mesh_addrs(peer);
+        let mut bits = Vec::new();
+        if !name.is_empty() {
+            bits.push(name.to_string());
+        }
+        if !v4.is_empty() {
+            bits.push(v4);
+        }
+        if !v6.is_empty() {
+            bits.push(v6);
+        }
+        if !bits.is_empty() {
+            lines.push(bits.join(" "));
+        }
+    }
+    lines.sort();
+    lines.join(", ")
 }
 
 fn daemon_for(
@@ -449,24 +522,6 @@ fn daemon_for(
         return Err(Fail::step("tailscaled", e));
     }
     Ok((Some(child), stale))
-}
-
-fn mode_phrase(kernel: bool) -> String {
-    if kernel {
-        "on a kernel TUN".to_string()
-    } else {
-        format!("in userspace mode, SOCKS5 on localhost:{SOCKS_PORT}")
-    }
-}
-
-fn joined_line(hostname: &str, mode: Option<&str>, notes: &[String]) -> String {
-    let mode = mode.map(|mode| format!(" {mode}")).unwrap_or_default();
-    let notes = if notes.is_empty() {
-        String::new()
-    } else {
-        format!("; {}", notes.join("; "))
-    };
-    format!("mesh up: {hostname} joined{mode}{notes}")
 }
 
 fn ensure_dir(dir: &Path) -> Result<()> {
@@ -763,17 +818,6 @@ fn status_json(tailscale: &Path, socket: &Path) -> Result<Option<Value>> {
         Err(e) if timed_out(&e) => Err(e),
         Err(_) => Ok(None),
     }
-}
-
-fn status_text(tailscale: &Path, socket: &Path) -> Result<String> {
-    let mut cmd = tailscale_cmd(tailscale, socket);
-    cmd.arg("status");
-    let out = run(cmd)?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !text.is_empty() {
-        return Ok(text);
-    }
-    Ok(String::from_utf8_lossy(&out.stderr).trim().to_string())
 }
 
 /// tailscaled in its own process group, so `mesh down` can stop it and

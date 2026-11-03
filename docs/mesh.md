@@ -35,8 +35,9 @@ Do not pass `--advertise-tags`.
 The key already carries the tag.
 Headscale refuses a client that asks for the tag again, with `requested tags [...] are invalid or not permitted` (seen on the box, 3 November 2026).
 
-When this node is already up under that hostname, `mesh up` prints `tailscale status` and exits 0.
-It does not log in again.
+A successful `mesh up`, including one that finds the node already up, prints one line.
+The line names this node, its mesh IPv4, its mesh IPv6, and each peer's name and addresses.
+It does not log in again when the node is already up.
 
 `tailscale` and `tailscaled` are taken from `PATH` when both are there.
 When either is missing, ljos downloads the pinned static build, tailscale 1.90.6 for amd64, from `https://pkgs.tailscale.com/stable/tailscale_1.90.6_amd64.tgz` into `$XDG_STATE_HOME/ljos/mesh` (`~/.local/state/ljos/mesh` when `XDG_STATE_HOME` is unset).

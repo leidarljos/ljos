@@ -13,6 +13,13 @@ const EXAMPLE: &str = include_str!("../../../examples/mesh.toml");
 const KEY: &str = "tskey-auth-kQ7x2NeverShown0123456789abcdef";
 const HOST: &str = "m6be-test";
 const LOGIN: &str = "https://hs.grund.rgoswami.me";
+/// Mesh addresses the fake `tailscale status --json` reports for this node.
+const SELF_V4: &str = "100.64.0.8";
+const SELF_V6: &str = "fd7a:115c:a1e0::8";
+/// One other node on that status, name then its mesh addresses.
+const PEER: &str = "other-lane";
+const PEER_V4: &str = "100.64.0.9";
+const PEER_V6: &str = "fd7a:115c:a1e0::9";
 
 /// The bound on one mesh verb, `WAIT_SECS` in src/mesh.rs.
 const WAIT_SECS: u64 = 30;
@@ -61,7 +68,7 @@ status)
   if [ -f "$FAKE_MESH/node" ]; then
     name=$(cat "$FAKE_MESH/node")
     case " $* " in
-      *" --json "*) printf '{"BackendState":"Running","Self":{"HostName":"%s"}}\n' "$name";;
+      *" --json "*) printf '{"BackendState":"Running","Self":{"HostName":"%s","TailscaleIPs":["100.64.0.8","fd7a:115c:a1e0::8"]},"Peer":{"peer1":{"HostName":"other-lane","TailscaleIPs":["100.64.0.9","fd7a:115c:a1e0::9"]}}}\n' "$name";;
       *) printf '%s running\n' "$name";;
     esac
   else
@@ -238,6 +245,17 @@ fn files_holding(dir: &Path, needle: &[u8]) -> Vec<PathBuf> {
     found
 }
 
+/// A successful `mesh up` line: the node name, both mesh addresses, and the peer.
+fn status_line_ok(line: &str) -> bool {
+    line.starts_with("mesh up: ")
+        && line.contains(HOST)
+        && line.contains(SELF_V4)
+        && line.contains(SELF_V6)
+        && line.contains(PEER)
+        && line.contains(PEER_V4)
+        && line.contains(PEER_V6)
+}
+
 fn up_invocation(world: &World) -> String {
     world
         .recorded("invocations")
@@ -248,11 +266,27 @@ fn up_invocation(world: &World) -> String {
 }
 
 #[test]
+fn a_successful_join_prints_the_node_its_addresses_and_its_peers() {
+    let world = World::new();
+    let line = one_line(&world.up(), "up");
+    assert!(status_line_ok(&line), "{line}");
+    let peers = line.split(" peer ").nth(1).unwrap_or("");
+    assert!(
+        peers.contains(PEER) && peers.contains(PEER_V4) && peers.contains(PEER_V6),
+        "{line}"
+    );
+    assert!(
+        !peers.contains(SELF_V4),
+        "the node address was listed as a peer: {line}"
+    );
+}
+
+#[test]
 fn second_up_prints_status_and_never_advertises_tags() {
     let world = World::new();
     let first = one_line(&world.up(), "first up");
     assert_eq!(world.joined_node(), HOST);
-    assert!(first.contains(HOST) && first.contains("joined"), "{first}");
+    assert!(status_line_ok(&first), "{first}");
     let up = up_invocation(&world);
     for flag in [
         "--accept-routes=false",
@@ -279,10 +313,7 @@ fn second_up_prints_status_and_never_advertises_tags() {
     );
 
     let second = one_line(&world.up(), "second up");
-    assert!(
-        second.contains(HOST) && second.contains("running"),
-        "{second}"
-    );
+    assert!(status_line_ok(&second), "{second}");
     assert!(!second.contains("joined"), "{second}");
     assert_eq!(world.count("joins"), 1, "the second up joined again");
     assert_eq!(world.count("daemons"), 1, "the second up started a daemon");
@@ -292,7 +323,7 @@ fn second_up_prints_status_and_never_advertises_tags() {
         .output()
         .unwrap();
     let third = one_line(&third, "up with no key once joined");
-    assert!(third.contains("running"), "{third}");
+    assert!(status_line_ok(&third), "{third}");
     assert_eq!(world.count("joins"), 1, "an up with no key joined again");
 
     let pid = world.daemon_pid().expect("the daemon recorded its pid");
@@ -317,8 +348,7 @@ fn userspace_when_tun_is_missing_or_unusable() {
     for tun in [missing.as_path(), unusable.as_path()] {
         let out = world.up_cmd().env("LJOS_MESH_TUN", tun).output().unwrap();
         let line = one_line(&out, "userspace up");
-        assert!(line.contains("userspace"), "{line}");
-        assert!(line.contains("localhost:1055"), "{line}");
+        assert!(status_line_ok(&line), "{line}");
         let args = world.recorded("daemon-args");
         assert!(
             args.contains("--tun=userspace-networking"),
@@ -337,6 +367,7 @@ fn userspace_when_tun_is_missing_or_unusable() {
         .output()
         .unwrap();
     let line = one_line(&openable, "openable tun");
+    assert!(status_line_ok(&line), "{line}");
     let args = world.recorded("daemon-args");
     // CAP_NET_ADMIN is bit 12 of CapEff (linux/capability.h). Without it
     // an open device node still cannot become a tunnel.
@@ -350,13 +381,11 @@ fn userspace_when_tun_is_missing_or_unusable() {
         })
         .is_some_and(|caps| (caps >> 12) & 1 == 1);
     if admin {
-        assert!(line.contains("kernel TUN"), "{line}");
         assert!(
             !args.contains("userspace-networking") && !args.contains("socks5-server"),
             "{args}"
         );
     } else {
-        assert!(line.contains("userspace"), "{line}");
         assert!(args.contains("--tun=userspace-networking"), "{args}");
         assert!(args.contains("--socks5-server=localhost:1055"), "{args}");
     }
@@ -409,7 +438,7 @@ fn a_stale_pid_file_signals_nothing_on_up_or_down() {
     let up = one_line(&world.up(), "up over a stale pid file");
     assert!(other.alive(), "up signalled the group pid {pid} leads");
     let old = format!("tailscaled.pid names pid {pid} with no start time");
-    assert!(up.contains("joined") && up.contains(&old), "{up}");
+    assert!(status_line_ok(&up) && up.contains(&old), "{up}");
     let ours = world.daemon_pid().expect("the daemon recorded its pid");
     assert_ne!(ours, pid);
     one_line(&world.down(), "down");
@@ -429,10 +458,10 @@ fn running_up_twice_joins_once_and_down_leaves() {
     let world = World::new();
     let first = one_line(&world.up(), "first up");
     assert_eq!(world.joined_node(), HOST);
-    assert!(first.contains(HOST) && first.contains("joined"), "{first}");
+    assert!(status_line_ok(&first), "{first}");
 
     let second = one_line(&world.up(), "second up");
-    assert!(second.contains("already up"), "{second}");
+    assert!(status_line_ok(&second), "{second}");
     assert_eq!(world.count("joins"), 1, "the second up joined again");
     assert_eq!(world.count("daemons"), 1, "the second up started a daemon");
 
@@ -460,7 +489,7 @@ fn up_notes_a_pid_file_in_the_old_format_when_already_up() {
     std::fs::write(&file, format!("{pid}\n")).unwrap();
     let again = one_line(&world.up(), "up over an old pid file");
     assert!(
-        again.contains("already up")
+        status_line_ok(&again)
             && again.contains(&format!(
                 "tailscaled.pid names pid {pid} with no start time"
             ))
@@ -749,7 +778,7 @@ fn git_config_is_byte_identical_after_up_and_down() {
     };
     let before = read();
     let up = world.up_cmd().current_dir(&repo).output().unwrap();
-    assert!(one_line(&up, "up").contains("joined"), "{}", text_of(&up));
+    assert!(status_line_ok(&one_line(&up, "up")), "{}", text_of(&up));
     let down = world
         .ljos(&["mesh", "down"])
         .current_dir(&repo)
