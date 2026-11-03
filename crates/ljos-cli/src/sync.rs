@@ -4313,12 +4313,7 @@ fn commit_files(root: &Path, files: &[&str], message: &str, push: bool) -> Strin
 /// to return before this, so a `.gitattributes` commit sat unpushed.
 /// Nothing to send, and a checkout with no remote, stay quiet.
 fn push_pending(root: &Path) -> String {
-    let remotes = git(root, &["remote"])
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    if remotes.is_empty() || !commits_to_push(root) {
+    if !waiting_to_push(root) {
         return String::new();
     }
     match crate::tracker_push::push_checkout(root) {
@@ -4328,6 +4323,16 @@ fn push_pending(root: &Path) -> String {
             None => format!("sync: push refused: {e}\n"),
         },
     }
+}
+
+/// Whether the checkout has a remote and a commit it has not sent there.
+fn waiting_to_push(root: &Path) -> bool {
+    let remotes = git(root, &["remote"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    !remotes.is_empty() && commits_to_push(root)
 }
 
 /// Whether `HEAD` has a commit the upstream does not. No upstream, with a
@@ -4970,8 +4975,17 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
             return Ok(String::new());
         }
         // A note or a sitting whose push did not reach the remote left its
-        // commit here. A sync by hand carries it, scope or none.
-        out.push_str(&push_pending(&root));
+        // commit here. A sync by hand carries it, scope or none, unless
+        // `LJOS_TRACKER_GIT` keeps tracker commits on this machine.
+        let set = std::env::var("LJOS_TRACKER_GIT").ok();
+        if tracker_git_value(set.as_deref()) == TrackerGit::Push {
+            out.push_str(&push_pending(&root));
+        } else if waiting_to_push(&root) {
+            out.push_str(&format!(
+                "sync: waiting commits not pushed (LJOS_TRACKER_GIT={})\n",
+                set.unwrap_or_default()
+            ));
+        }
         out.push_str(&format!(
             "sync: {} names no scope; write .ljos/sync.toml with name and recipients (`ljos sync --key` prints this machine's)\n",
             root.display()

@@ -14,10 +14,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-/// A runner wraps a sitting or a note in a timeout of about ten seconds,
-/// the bound the tracker push wait is set under. A remote that fails at
-/// once leaves both verbs far inside it; a prompt never returns.
-const BUDGET: Duration = Duration::from_secs(10);
+/// The tracker push wait each run is given, ljos's default (`push_wait`):
+/// half the timeout of about ten seconds a runner wraps a sitting in.
+const PUSH_WAIT_SECS: u64 = 5;
+/// That runner timeout, two push waits. A remote that fails at once
+/// leaves both verbs far inside it; a prompt never returns.
+const BUDGET: Duration = Duration::from_secs(2 * PUSH_WAIT_SECS);
+/// How long the 401 server waits for git's request, half a push wait: git
+/// writes it as soon as it connects.
+const REQUEST_WAIT: Duration = Duration::from_secs(PUSH_WAIT_SECS / 2);
+/// What one read of that request takes. git's first request is a GET of
+/// `info/refs` with a few headers, a few hundred bytes; one page holds it.
+const REQUEST_BYTES: usize = 4096;
 
 const NOT_REACHED: &str = "the remote was not reached (";
 const NEXT_SYNC: &str = "), so the next sync pushes it";
@@ -46,8 +54,8 @@ fn private_remote() -> (String, Arc<AtomicUsize>) {
         for stream in listener.incoming() {
             let Ok(mut sock) = stream else { break };
             seen.fetch_add(1, Ordering::SeqCst);
-            let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
-            let mut buf = [0u8; 4096];
+            let _ = sock.set_read_timeout(Some(REQUEST_WAIT));
+            let mut buf = [0u8; REQUEST_BYTES];
             let _ = sock.read(&mut buf);
             let _ = sock.write_all(
                 b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"tracker\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -211,6 +219,7 @@ impl Board {
             .env("LJOS_HOOKD", "off")
             .env("PACKSET_AUTH", "off")
             .env("PACKSET_URL", "http://127.0.0.1:1")
+            .env("LJOS_TRACKER_PUSH_WAIT", PUSH_WAIT_SECS.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -298,6 +307,18 @@ fn saves_and_later_syncs(board: &Board, unreachable: &str) {
         "git ran the askpass program: {}",
         std::fs::read_to_string(&board.asked).unwrap_or_default()
     );
+    let (out, _) = board.ljos(None, &["doctor"]);
+    let said = text(&out);
+    let unpushed = said
+        .split(" unpushed")
+        .next()
+        .and_then(|before| before.rsplit(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse::<u64>().ok());
+    assert!(
+        unpushed.is_some_and(|n| n > 0),
+        "doctor does not count the commits:\n{said}"
+    );
+    assert!(!said.contains("last push refused"), "{said}");
 
     board.git(
         &board.tracker,
@@ -308,6 +329,15 @@ fn saves_and_later_syncs(board: &Board, unreachable: &str) {
             board.reachable.to_str().unwrap(),
         ],
     );
+    let before = board.git(&board.reachable, &["rev-parse", "main"]);
+    let (out, _) = board.ljos(Some("commit"), &["sync"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("sync: waiting commits not pushed (LJOS_TRACKER_GIT=commit)"),
+        "{said}"
+    );
+    assert_eq!(board.git(&board.reachable, &["rev-parse", "main"]), before);
     let (out, _) = board.ljos(Some("push"), &["sync"]);
     let said = text(&out);
     assert!(out.status.success(), "{said}");
@@ -336,10 +366,23 @@ fn saves_and_later_syncs(board: &Board, unreachable: &str) {
     }
 }
 
+/// vissue from PATH. Off CI a missing one skips the test; in CI it fails,
+/// so a sibling build that was dropped does not pass every test here.
+fn vissue() -> Option<PathBuf> {
+    let found = on_path("vissue");
+    assert!(
+        found.is_some() || std::env::var_os("CI").is_none(),
+        "vissue missing in CI"
+    );
+    if found.is_none() {
+        eprintln!("skip: vissue is not on PATH");
+    }
+    found
+}
+
 #[test]
 fn a_remote_that_answers_401_costs_a_note_and_a_sitting_nothing() {
-    let Some(vissue) = on_path("vissue") else {
-        eprintln!("skip: vissue is not on PATH");
+    let Some(vissue) = vissue() else {
         return;
     };
     let board = Board::new(&vissue);
@@ -353,11 +396,72 @@ fn a_remote_that_answers_401_costs_a_note_and_a_sitting_nothing() {
 
 #[test]
 fn a_file_url_that_does_not_exist_costs_a_note_and_a_sitting_nothing() {
-    let Some(vissue) = on_path("vissue") else {
-        eprintln!("skip: vissue is not on PATH");
+    let Some(vissue) = vissue() else {
         return;
     };
     let board = Board::new(&vissue);
     let missing = format!("file://{}", board.root.join("missing.git").display());
     saves_and_later_syncs(&board, &missing);
+}
+
+/// An ssh that writes its arguments to `log`, answers git's `-G` probe as
+/// OpenSSH does, and finds the port closed.
+fn ssh_recorder(path: &Path, log: &Path) {
+    script(
+        path,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *\" -G \"*) exit 0 ;; esac\n\
+             echo 'ssh: connect to host 127.0.0.1 port 1: Connection refused' >&2\nexit 255\n",
+            log.display()
+        ),
+    );
+}
+
+#[test]
+fn ssh_runs_in_batch_mode_and_a_set_ssh_command_still_runs() {
+    let Some(vissue) = vissue() else {
+        return;
+    };
+    let board = Board::new(&vissue);
+    let ssh_log = board.root.join("ssh.log");
+    ssh_recorder(&board.root.join("stubs/ssh"), &ssh_log);
+    let (pushed, waited) = board.tickets("ssh://git@127.0.0.1:1/tracker.git");
+    saved_locally(
+        &board,
+        Some("push"),
+        &["note", &pushed, "the key has a passphrase"],
+    );
+    saved_locally(&board, None, &["sitting", &waited]);
+    let calls = std::fs::read_to_string(&ssh_log).unwrap_or_default();
+    let connects: Vec<&str> = calls
+        .lines()
+        .filter(|l| !l.split(' ').any(|w| w == "-G"))
+        .collect();
+    assert!(!connects.is_empty(), "git never ran ssh:\n{calls}");
+    for call in &connects {
+        assert!(
+            call.starts_with("-o BatchMode=yes "),
+            "ssh ran without batch mode: {call}"
+        );
+    }
+
+    let own_log = board.root.join("own-ssh.log");
+    let own = board.root.join("own-ssh");
+    ssh_recorder(&own, &own_log);
+    std::fs::remove_file(&ssh_log).unwrap();
+    board.git(
+        &board.tracker,
+        &["config", "core.sshCommand", own.to_str().unwrap()],
+    );
+    saved_locally(
+        &board,
+        Some("push"),
+        &["note", &pushed, "the second key signs in"],
+    );
+    let calls = std::fs::read_to_string(&own_log).unwrap_or_default();
+    assert!(
+        calls.lines().any(|l| l.contains("127.0.0.1")),
+        "core.sshCommand did not run:\n{calls}"
+    );
+    assert!(!ssh_log.exists(), "ssh ran over core.sshCommand");
 }

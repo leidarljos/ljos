@@ -131,16 +131,15 @@ carries fewer than 17. The log is sealed whole again, and its chunks
 removed, only once they would come to half the base. The first sync
 after upgrading seals each log whole once. An ljos from before chunks
 reads the base alone. `docs/design/atoms.md` has the layout.
-A repository with no `.ljos/sync.toml` is not synced, and the sitting and
-finish say nothing about it; only `ljos sync` names the missing file.
-The sitting and finish follow `LJOS_TRACKER_GIT`: `push` commits, rebases
-with the per-issue field merge, and pushes; `commit` commits the log and
-neither fetches nor pushes it; `off` leaves the tracker alone. Tracker git
-runs with no terminal prompt and no askpass, so a remote that wants a
-credential fails at once. A push that fails stays queued for the next write
-and the end of the session. `ljos sync` by hand always pulls and pushes,
-and pushes waiting commits in a checkout that names no scope. An
-atom goes to the scope its `scope:NAME` entity names. An atom with no
+A repository with no `.ljos/sync.toml` is not synced, and the sitting and finish say nothing about it; only `ljos sync` names the missing file.
+That `ljos sync` by hand still pushes the tracker commits waiting in such a checkout, unless `LJOS_TRACKER_GIT` is `commit` or `off`, and then it says they were not pushed.
+The sitting and finish follow `LJOS_TRACKER_GIT`: `push` commits, rebases with the per-issue field merge, and pushes; `commit` commits the log and neither fetches nor pushes it; `off` leaves the tracker alone.
+Tracker git runs with no terminal prompt, no askpass and ssh in batch mode, so a remote that wants a credential fails at once.
+A `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH` already set still runs, and it must not prompt either.
+A push that fails stays queued for the next write and the end of the session.
+`ljos sync` by hand always pulls and pushes a checkout that names a scope.
+An atom goes to the scope its `scope:NAME` entity names.
+An atom with no
 `scope:` entity stays on the primary log. `default_scope` in
 `~/.config/ljos/sync.toml` may name only that primary scope. A value that
 names an extra scope is refused, so an unscoped box atom is never sealed
@@ -492,18 +491,16 @@ same four steps are:
    voter's weight once it sets the voter apart from the panel, which a first
    outcome cannot. A persona it refuted weighs less on its next ballot.
 
-Whatever the outcome, the claim and the finish commit the ticket when the
-tracker is a git checkout. `ljos claim` commits that claim, `sitting` commits after its claim and `finish` at the end of the work.
-Each commits the ticket's `issues.org` (that file alone), pushes it, and prints a
-`tracker git:` line. A claim or a closure that stays in one
-working tree does not exist for any other host. `LJOS_TRACKER_GIT=push`
-commits, rebases with the per-issue field merge, and pushes, and never
-forces. A failed push stays queued. When the clone, fetch or push cannot
-reach the remote or authenticate, the commit stays in the local tracker,
-the line says `the remote was not reached (...), so the next sync pushes
-it`, and the verb exits 0. `=commit` keeps it local; `=off` skips
-it. `ljos doctor` warns while commits are still unpushed, and a leftover
-refused-push log is named on the row.
+Whatever the outcome, the claim and the finish commit the ticket when the tracker is a git checkout.
+`ljos claim` commits that claim, `sitting` commits after its claim and `finish` at the end of the work.
+Each commits the ticket's `issues.org` (that file alone), pushes it, and prints a `tracker git:` line.
+A claim or a closure that stays in one working tree does not exist for any other host.
+`LJOS_TRACKER_GIT=push` commits, rebases with the per-issue field merge, and pushes, and never forces.
+A failed push stays queued.
+If git cannot reach or sign in to the remote for the clone, fetch or push, the commit stays in the local tracker and the verb exits 0.
+The line then says `the remote was not reached (GIT_ERROR), so the next sync pushes it`, where `GIT_ERROR` is the first line git printed.
+`=commit` keeps it local; `=off` skips it.
+`ljos doctor` warns while commits are still unpushed, and a leftover refused-push log is named on the row.
 
 `ljos handover --out DIR --issue ISSUE [--to user@host:path]` is a separate
 verb for when another seat takes over. The receiver runs `ljos receive DIR`,

@@ -37528,7 +37528,7 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
             Ok(Some(status)) => {
                 let said = std::fs::read(&log).unwrap_or_default();
                 let said = String::from_utf8_lossy(&said);
-                if tracker_push::git_died(status) {
+                if tracker_push::unreached(status, &said) {
                     let _ = std::fs::remove_file(&log);
                     let _ = std::fs::remove_file(push_child_record(&log));
                     return say(format!(
@@ -42067,12 +42067,25 @@ pub(crate) fn git_cmd() -> std::process::Command {
 /// No terminal prompt and no askpass program for the git `cmd` runs. A
 /// remote that wants a credential git does not have fails at once. An
 /// empty `GIT_ASKPASS` is what stops git falling back to `core.askPass`
-/// and `SSH_ASKPASS`; unsetting it would not.
+/// and `SSH_ASKPASS`; unsetting it would not. ssh reads a passphrase or a
+/// host-key answer from the terminal itself, so it runs with `BatchMode`.
+/// A `core.sshCommand` still runs, without that option, and a set
+/// `GIT_SSH_COMMAND` or `GIT_SSH` is left alone: each must not prompt.
 pub(crate) fn no_git_prompt(cmd: &mut std::process::Command) {
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "")
         .env_remove("SSH_ASKPASS");
+    let set = |key: &str| std::env::var_os(key).is_some_and(|v| !v.is_empty());
+    if !set("GIT_SSH_COMMAND") && !set("GIT_SSH") {
+        cmd.env("GIT_SSH_COMMAND", BATCH_SSH);
+    }
 }
+
+/// The ssh git runs for ljos. git appends `"$@"` and runs it with `sh`.
+/// `GIT_SSH_COMMAND` outranks `core.sshCommand`, so this one runs that
+/// command when it is set.
+const BATCH_SSH: &str =
+    r#"c=$(git config --get core.sshCommand) && eval "exec $c \"\$@\""; exec ssh -o BatchMode=yes"#;
 
 /// [`std::process::Command::output`], stopped when a wall budget is armed
 /// and spent. The child is killed. The caller treats that as no answer.

@@ -12,10 +12,28 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
 
 const ATTEMPTS: usize = 6;
-/// The status git's `die()` exits with (usage.c). A fetch or push that
-/// dies stopped before any ref update was offered: the URL, the transport
-/// or the credentials failed. A refused update exits 1.
+/// The status git's `die()` exits with (usage.c). A failed URL, transport
+/// or sign-in dies, and so do a missing remote ref, a bad remote name and
+/// a locked repository. A refused update exits 1.
 const GIT_DIED: i32 = 128;
+/// What git or ssh prints, in lower case, when a fetch or push died before
+/// the remote took part: the messages of git's http, transport and connect
+/// code and of ssh's connect and auth steps.
+const UNREACHED_SIGNS: &[&str] = &[
+    "authentication failed",
+    "could not read username",
+    "could not read password",
+    "terminal prompts disabled",
+    "unable to access",
+    "could not resolve host",
+    "does not appear to be a git repository",
+    "connection refused",
+    "timed out",
+    "permission denied (publickey",
+    "host key verification failed",
+    "no route to host",
+    "network is unreachable",
+];
 /// What a fetch or push error starts with when the remote was not reached.
 const NOT_REACHED: &str = "remote not reached: ";
 const ATTR_ORG: &str = "*.org merge=ljos-org";
@@ -54,7 +72,7 @@ pub(crate) fn push_checkout(start: &Path) -> Result<(), String> {
         }
         let said = output_text(&out);
         last = first_line(&said);
-        if git_died(out.status) {
+        if unreached(out.status, &said) {
             return Err(format!("{NOT_REACHED}{last}"));
         }
         if !rejected(&said) {
@@ -106,7 +124,7 @@ pub(crate) fn publish(start: &Path) -> Result<(), String> {
         }
         let said = output_text(&out);
         last = first_line(&said);
-        if git_died(out.status) {
+        if unreached(out.status, &said) {
             return Err(format!("{NOT_REACHED}{last}"));
         }
         if rejected(&said) {
@@ -160,7 +178,7 @@ pub(crate) fn publish_explicit(start: &Path, remote: &str, branch: &str) -> Resu
         }
         let said = output_text(&out);
         last = first_line(&said);
-        if git_died(out.status) {
+        if unreached(out.status, &said) {
             return Err(format!("{NOT_REACHED}{last}"));
         }
         if !rejected(&said) {
@@ -190,9 +208,11 @@ pub(crate) fn rejected(text: &str) -> bool {
         || lower.contains("tip of your current branch is behind")
 }
 
-/// Whether a git fetch or push ended in git's `die()`.
-pub(crate) fn git_died(status: ExitStatus) -> bool {
-    status.code() == Some(GIT_DIED)
+/// Whether a git fetch or push died before it reached the remote. Both the
+/// status and what git said must show it.
+pub(crate) fn unreached(status: ExitStatus, said: &str) -> bool {
+    let lower = said.to_ascii_lowercase();
+    status.code() == Some(GIT_DIED) && UNREACHED_SIGNS.iter().any(|s| lower.contains(s))
 }
 
 /// What git said when a fetch or push error says the remote was not
@@ -428,7 +448,7 @@ fn integrate_from(dir: &Path, remote: &str, onto: &str) -> Result<(), String> {
     if !fetched.status.success() {
         let _ = abort_rebase(dir);
         let why = first_line(&output_text(&fetched));
-        if git_died(fetched.status) {
+        if unreached(fetched.status, &output_text(&fetched)) {
             return Err(format!("{NOT_REACHED}{why}"));
         }
         return Err(format!("fetch failed: {why}"));
@@ -1381,6 +1401,18 @@ mod tests {
 
     fn heading(id: &str, title: &str) -> String {
         format!("* TODO [#C] {title}\n:PROPERTIES:\n:ID:         {id}\n:END:\n")
+    }
+
+    #[test]
+    fn only_a_transport_or_sign_in_failure_is_a_remote_not_reached() {
+        use std::os::unix::process::ExitStatusExt;
+        let died = ExitStatus::from_raw(GIT_DIED << 8);
+        let refused = ExitStatus::from_raw(1 << 8);
+        let missing_ref = "fatal: couldn't find remote ref refs/heads/main\n";
+        let no_sign_in = "fatal: Authentication failed for 'https://example.invalid/t.git/'\n";
+        assert!(!unreached(died, missing_ref));
+        assert!(unreached(died, no_sign_in));
+        assert!(!unreached(refused, no_sign_in));
     }
 
     #[test]
