@@ -137,8 +137,8 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
     fs::write(rel.join("SHA256SUMS"), sums).unwrap();
     isolate_git(root);
     std::env::set_var("HOME", &home);
-    // Not under `/.config/ljos/`, so a write to the hook is the cloud
-    // guard's refusal and not the seat-path refusal.
+    // Not under `/.config/ljos/`, so a write to the push allowlist is the
+    // cloud guard's warning and not the seat-path refusal.
     std::env::set_var("XDG_CONFIG_HOME", &xdg);
     std::env::set_var("LJOS_RELEASE_DIR", &rel);
     std::env::remove_var("LJOS_BIN_DIR");
@@ -267,18 +267,45 @@ fn refused(line: &str, cwd: &Path) -> ljos_cli::Rule {
     hit
 }
 
+/// The line the guard leaves for a line that skips or changes the git
+/// hooks on a cloud seat: ljos's allow-with-warning for the cloud rule.
+const CLOUD_LABEL: &str = "allow\twarn\tcloud-cursor-push\ton a cloud seat the line skips or \
+                           changes the git hooks, or writes a file the cloud guard reads";
+
+/// The line runs, and the cloud seat rule is not named.
 fn allowed(line: &str, cwd: &Path) {
+    let _ = ljos_cli::take_guard_note();
     let hit = cloud_refusal(line, cwd);
     assert!(hit.is_none(), "`{line}` was refused: {hit:?}");
+    let note = ljos_cli::take_guard_note().unwrap_or_default();
+    assert!(
+        !note.contains("cloud-cursor-push"),
+        "`{line}` was named: {note}"
+    );
 }
 
-/// `cloud up` in a fresh home sets `core.hooksPath` at no level, and a
-/// later run leaves the value a repository already had.
+/// The line runs, and the guard names the cloud seat rule once, under the
+/// rule name the push refusal uses.
+fn warned(line: &str, cwd: &Path) {
+    let _ = ljos_cli::take_guard_note();
+    let hit = cloud_refusal(line, cwd);
+    assert!(hit.is_none(), "`{line}` was refused: {hit:?}");
+    let note = ljos_cli::take_guard_note().unwrap_or_default();
+    assert_eq!(
+        note.lines().filter(|l| *l == CLOUD_LABEL).count(),
+        1,
+        "`{line}`: {note}"
+    );
+}
+
+/// `cloud up` in a fresh home sets `core.hooksPath` at no level and makes
+/// no hooks directory. A later run leaves the global and local values a
+/// person already had, byte for byte.
 #[test]
 fn cloud_up_sets_no_hooks_path() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
-    let (_home, _xdg) = seat_env(root.path());
+    let (home, xdg) = seat_env(root.path());
     clear_ids();
     std::env::set_var("LJOS_SEAT", "probe");
     // The global level is the home's own `.gitconfig`, as on a fresh machine.
@@ -293,7 +320,11 @@ fn cloud_up_sets_no_hooks_path() {
     for scope in [None, Some("--system"), Some("--global"), Some("--local")] {
         assert_eq!(hooks_paths(&repo, scope), "", "{scope:?}\n{said}");
     }
-    assert!(!said.contains("pre-push"), "{said}");
+    assert!(!xdg.join("ljos/hooks").exists(), "{said}");
+
+    let mine = root.path().join("my-hooks");
+    let gitconfig = format!("[core]\n\thooksPath = {}\n", mine.display());
+    fs::write(home.join(".gitconfig"), &gitconfig).unwrap();
 
     let booked = root.path().join("booked-hooks");
     fs::create_dir_all(&booked).unwrap();
@@ -302,20 +333,207 @@ fn cloud_up_sets_no_hooks_path() {
         &repo,
         &["config", "core.hooksPath", booked.to_str().unwrap()],
     );
+    let local = fs::read(repo.join(".git/config")).unwrap();
     let before = hooks_paths(&repo, None);
     std::env::set_current_dir(&repo).unwrap();
-    ljos_cli::cloud::up(false).unwrap();
+    let said = ljos_cli::cloud::up(false).unwrap();
     std::env::set_current_dir(root.path()).unwrap();
-    assert_eq!(hooks_paths(&repo, None), before);
+    assert_eq!(hooks_paths(&repo, None), before, "{said}");
+    assert_eq!(
+        fs::read_to_string(home.join(".gitconfig")).unwrap(),
+        gitconfig
+    );
+    assert_eq!(fs::read(repo.join(".git/config")).unwrap(), local);
     assert_eq!(
         fs::read_to_string(booked.join("pre-push")).unwrap(),
         "#!/bin/sh\nexit 0\n"
     );
     assert_eq!(fs::read_dir(&booked).unwrap().count(), 1);
+    assert!(!xdg.join("ljos/hooks").exists(), "{said}");
+    assert!(!said.contains("hooks: "), "{said}");
 }
 
+/// The first two lines of the pre-push script an older `cloud up` wrote.
+const OLD_SCRIPT: &str =
+    "#!/bin/sh\n# Destination allowlist a cloud seat's git runs on every push.\nexit 0\n";
+
+/// The stub an older `cloud up` wrote over a booked pre-push after moving
+/// that hook to `pre-push.ljos-previous`.
+fn chain_stub(booked: &Path, ours: &Path) -> String {
+    let canon = ours.join("pre-push");
+    format!(
+        "#!/bin/sh\n# ljos-cloud-chain {canon}\nPATH=/usr/bin:/bin\nexport PATH\nunset IFS\nset -eu\n\
+         prev='{prev}'\ncanon='{canon}'\ntmp=$(/usr/bin/mktemp -p /tmp)\n\
+         trap '/bin/rm -f \"$tmp\"' EXIT\n/bin/cat > \"$tmp\"\n\
+         \"$prev\" \"${{1-}}\" \"${{2-}}\" < \"$tmp\"\n\
+         \"$canon\" \"${{1-}}\" \"${{2-}}\" < \"$tmp\"\n",
+        canon = canon.display(),
+        prev = booked.join("pre-push.ljos-previous").display(),
+    )
+}
+
+/// A seat an older `cloud up` set up. The person's global
+/// `core.hooksPath` names a booked directory, where the chain stub wraps
+/// their own pre-push. The seat's local value names
+/// `$XDG_CONFIG_HOME/ljos/hooks`, which holds the old script. `cloud up`
+/// takes back each of those with one line, and the person's global value
+/// stays byte for byte. A second seat had the global value and a copy of
+/// the script in its local directory. A third run finds the person's own
+/// values at both levels and changes nothing.
 #[test]
-fn shell_guard_refuses_disarming_the_hook() {
+fn cloud_up_takes_back_the_hooks_an_earlier_cloud_up_set() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, xdg) = seat_env(root.path());
+    clear_ids();
+    std::env::set_var("LJOS_SEAT", "probe");
+    let global = root.path().join("gitconfig");
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let ours = xdg.join("ljos/hooks");
+    let ours_s = ours.display().to_string();
+    let script = ours.join("pre-push");
+    let up_in = |dir: &Path| {
+        std::env::set_current_dir(dir).unwrap();
+        let said = ljos_cli::cloud::up(false).unwrap();
+        std::env::set_current_dir(root.path()).unwrap();
+        said
+    };
+    let said_line = |said: &str, want: String| {
+        assert!(said.lines().any(|line| line == want), "{want}\n{said}");
+    };
+
+    let booked = root.path().join("booked-hooks");
+    fs::create_dir_all(&booked).unwrap();
+    fs::create_dir_all(&ours).unwrap();
+    let own_hook = "#!/bin/sh\necho mine\n";
+    executable(&booked.join("pre-push.ljos-previous"), own_hook);
+    executable(&booked.join("pre-push"), &chain_stub(&booked, &ours));
+    executable(&script, OLD_SCRIPT);
+    git(
+        &repo,
+        &[
+            "config",
+            "--global",
+            "core.hooksPath",
+            booked.to_str().unwrap(),
+        ],
+    );
+    git(&repo, &["config", "--local", "core.hooksPath", &ours_s]);
+    let global_bytes = fs::read(&global).unwrap();
+
+    let said = up_in(&repo);
+    assert_eq!(hooks_paths(&repo, Some("--local")), "", "{said}");
+    assert_eq!(fs::read(&global).unwrap(), global_bytes, "{said}");
+    assert_eq!(
+        fs::read_to_string(booked.join("pre-push")).unwrap(),
+        own_hook
+    );
+    assert!(!booked.join("pre-push.ljos-previous").exists(), "{said}");
+    assert!(!ours.exists(), "{said}");
+    said_line(
+        &said,
+        format!("hooks: unset the local core.hooksPath {ours_s} an earlier cloud up set"),
+    );
+    said_line(
+        &said,
+        format!(
+            "hooks: put {} back as {}, the hook an earlier cloud up chained",
+            booked.join("pre-push.ljos-previous").display(),
+            booked.join("pre-push").display()
+        ),
+    );
+    said_line(
+        &said,
+        format!(
+            "hooks: removed {}, which an earlier cloud up installed",
+            script.display()
+        ),
+    );
+
+    let copied = root.path().join("copied-hooks");
+    fs::create_dir_all(&copied).unwrap();
+    fs::create_dir_all(&ours).unwrap();
+    executable(&copied.join("pre-push"), OLD_SCRIPT);
+    executable(&script, OLD_SCRIPT);
+    git(
+        &repo,
+        &[
+            "config",
+            "--global",
+            "--replace-all",
+            "core.hooksPath",
+            &ours_s,
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "config",
+            "--local",
+            "core.hooksPath",
+            copied.to_str().unwrap(),
+        ],
+    );
+    let said = up_in(&repo);
+    assert_eq!(hooks_paths(&repo, Some("--global")), "", "{said}");
+    assert_eq!(
+        hooks_paths(&repo, Some("--local")),
+        format!("file:.git/config\t{}\n", copied.display()),
+        "{said}"
+    );
+    assert!(!copied.join("pre-push").exists(), "{said}");
+    assert!(!ours.exists(), "{said}");
+    said_line(
+        &said,
+        format!("hooks: unset the global core.hooksPath {ours_s} an earlier cloud up set"),
+    );
+    said_line(
+        &said,
+        format!(
+            "hooks: removed {}, the copy an earlier cloud up wrote",
+            copied.join("pre-push").display()
+        ),
+    );
+
+    let mine = root.path().join("my-hooks");
+    fs::create_dir_all(&mine).unwrap();
+    executable(&mine.join("pre-push"), own_hook);
+    git(
+        &repo,
+        &[
+            "config",
+            "--global",
+            "core.hooksPath",
+            mine.to_str().unwrap(),
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "config",
+            "--local",
+            "core.hooksPath",
+            mine.to_str().unwrap(),
+        ],
+    );
+    let global_bytes = fs::read(&global).unwrap();
+    let local_bytes = fs::read(repo.join(".git/config")).unwrap();
+    let said = up_in(&repo);
+    assert_eq!(fs::read(&global).unwrap(), global_bytes, "{said}");
+    assert_eq!(
+        fs::read(repo.join(".git/config")).unwrap(),
+        local_bytes,
+        "{said}"
+    );
+    assert_eq!(fs::read_to_string(mine.join("pre-push")).unwrap(), own_hook);
+    assert!(!said.contains("hooks: "), "{said}");
+}
+
+/// A line that skips the hooks git runs, or writes a gitconfig the guard
+/// reads, runs with one warning. A push outside the allowlist is still
+/// refused by the same rule name.
+#[test]
+fn shell_guard_warns_when_a_line_changes_the_hooks() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, xdg) = seat_env(root.path());
@@ -323,51 +541,23 @@ fn shell_guard_refuses_disarming_the_hook() {
     std::env::set_var("LJOS_SEAT", "probe");
     ljos_cli::cloud::up(false).unwrap();
     let (_origin, repo) = bare_repo(root.path(), "seat");
-    let hook = xdg.join("ljos/hooks/pre-push");
-    let hooks = xdg.join("ljos/hooks");
+    let retired = xdg.join("ljos/hooks/pre-push");
 
-    let no_verify = refused("git push --no-verify origin develop", &repo);
-    assert!(
-        no_verify.reason.contains("pre-push hook"),
-        "{}",
-        no_verify.reason
-    );
-    assert!(
-        no_verify
-            .reason
-            .contains("may push only its named branches"),
-        "{}",
-        no_verify.reason
-    );
-    assert!(
-        !no_verify.reason.contains("never push to cursor"),
-        "{}",
-        no_verify.reason
-    );
+    warned("git push --no-verify origin develop", &repo);
     for line in [
         "git push origin main",
         "git push origin :develop",
         "git push origin v9",
+        "git push --no-verify origin main",
     ] {
         let hit = refused(line, &repo);
         assert!(
-            hit.reason.contains("cloud seat rule"),
+            hit.reason.contains("a cloud seat may"),
             "{line}: {}",
             hit.reason
         );
-        assert!(
-            !hit.reason.contains("never push to cursor"),
-            "{line}: {}",
-            hit.reason
-        );
+        assert!(!hit.reason.contains("hooks"), "{line}: {}", hit.reason);
     }
-    assert!(
-        no_verify
-            .reason
-            .contains("a cloud seat may push only its named branches and develop"),
-        "{}",
-        no_verify.reason
-    );
     for line in [
         "git -c core.hooksPath=/dev/null push origin develop",
         "git -c core.hooksPath=/tmp/keep push origin develop",
@@ -377,36 +567,28 @@ fn shell_guard_refuses_disarming_the_hook() {
         "git config --global core.hooksPath /tmp/x",
         "git config --global --replace-all core.hooksPath /dev/null",
         "git -c core.hooksPath=/tmp/x status",
-        "cp /tmp/x ~/.gitconfig",
-        "printf x > ~/.gitconfig",
         "git config --global include.path /tmp/evil-hooks.cfg",
         "git config --global --remove-section core",
         "export GIT_CONFIG_GLOBAL=/tmp/other-gitconfig",
         "export GIT_CONFIG_SYSTEM=/tmp/other-system",
         "export GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null",
         "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/dev/null'\" git push origin develop",
-        &format!("echo x >> {}", hook.display()),
+    ] {
+        warned(line, &repo);
+    }
+    for line in [
+        "cp /tmp/x ~/.gitconfig",
+        "printf x > ~/.gitconfig",
         &format!("echo x >> {}", home.join(".gitconfig").display()),
         "echo x >> ~/.gitconfig",
         "echo x >> \"$HOME/.gitconfig\"",
-        &format!("rm -f {}", hook.display()),
-        &format!("chmod 644 {}", hook.display()),
-        &format!("cp /etc/hostname {}", hook.display()),
-        &format!("tee {} >/dev/null", hooks.join("pre-push").display()),
         "sed -i 's/a/b/' ~/.gitconfig",
         "perl -pi -e 's/a/b/' ~/.gitconfig",
         "printf '[core]\\nhooksPath = /dev/null\\n' >| ~/.gitconfig",
         "printf '[core]\\nhooksPath = /dev/null\\n' >> .git/config",
         "dd of=.git/config",
     ] {
-        let hit = refused(line, &repo);
-        assert!(
-            hit.reason.contains("pre-push hook")
-                || hit.reason.contains("core.hooksPath")
-                || hit.reason.contains("GIT_CONFIG"),
-            "{line}: {}",
-            hit.reason
-        );
+        warned(line, &repo);
     }
 
     allowed("git config core.hooksPath", &repo);
@@ -422,6 +604,8 @@ fn shell_guard_refuses_disarming_the_hook() {
     allowed("ls ~/.local/share/ljos/git-hooks", &repo);
     allowed("ls ~/.local/share/ljos/git-hooks/pre-push", &repo);
     allowed("echo kept >> /tmp/not-the-hook", &repo);
+    allowed(&format!("rm -f {}", retired.display()), &repo);
+    allowed(&format!("cp /etc/hostname {}", retired.display()), &repo);
     allowed("git fetch origin", &repo);
     allowed("git pull --ff-only", &repo);
     allowed("cargo test --locked", &repo);
@@ -434,13 +618,64 @@ fn shell_guard_refuses_disarming_the_hook() {
     );
     assert!(
         counted.reason.contains("cursor/from-env"),
-        "the refspec was judged as a hooksPath disarm: {}",
+        "the refspec was judged as a hooksPath change: {}",
         counted.reason
     );
     assert!(
         !counted.reason.contains("core.hooksPath"),
         "{}",
         counted.reason
+    );
+}
+
+/// The hook a runner calls before a shell line allows a line that changes
+/// the hooks, and its context carries the cloud seat rule's label.
+#[test]
+fn the_hook_allows_a_hooks_change_and_prints_the_warning() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    std::env::set_var("LJOS_SEAT", "probe");
+    ljos_cli::cloud::up(false).unwrap();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "probe-1",
+        "tool_name": "Bash",
+        "tool_input": { "command": "git config --global core.hooksPath /tmp/x" },
+        "cwd": repo,
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .current_dir(&repo)
+        .arg("hook")
+        .env("XDG_DATA_HOME", root.path().join("data"))
+        .env("PACKSET_URL", "off")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let text = text_of(&out);
+    assert!(out.status.success(), "{text}");
+    let said: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {text}"));
+    let specific = &said["hookSpecificOutput"];
+    assert!(specific.get("permissionDecision").is_none(), "{said}");
+    let context = specific["additionalContext"].as_str().unwrap_or_default();
+    assert!(context.lines().any(|line| line == CLOUD_LABEL), "{said}");
+    let log = fs::read_to_string(root.path().join("data/ljos/bypass.jsonl")).unwrap_or_default();
+    assert!(
+        log.lines()
+            .any(|row| row.contains("\"warn\"") && row.contains("cloud-cursor-push")),
+        "{log}"
     );
 }
 
@@ -563,18 +798,6 @@ fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
 
     std::env::set_var("LJOS_SEAT", "probe");
     ljos_cli::cloud::up(false).unwrap();
-    let cloud_deny = |line: &str| {
-        let hit = ljos_cli::static_guard(line).unwrap_or_else(|| panic!("allowed: {line}"));
-        assert_eq!(hit.verdict, "deny", "{line}: {hit:?}");
-        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
-        assert!(
-            hit.reason.contains("pre-push hook")
-                || hit.reason.contains("core.hooksPath")
-                || hit.reason.contains("GIT_CONFIG"),
-            "{line}: {}",
-            hit.reason
-        );
-    };
     for line in [
         "printf x > ~/.gitconfig",
         "cp /tmp/x ~/.gitconfig",
@@ -583,7 +806,16 @@ fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
         "git -c core.hooksPath=/tmp/x status",
         "git -c core.hooksPath=/dev/null status",
     ] {
-        cloud_deny(line);
+        warned(line, root.path());
+    }
+    // On a cloud seat a write inside the git hooks directory still names
+    // only the seat guard's rule.
+    for note in said("touch ~/.local/share/ljos/git-hooks/pre-push") {
+        assert!(
+            note.starts_with("allow\twarn\twrites-seat-file\t")
+                && !note.contains("cloud-cursor-push"),
+            "{note}"
+        );
     }
     for line in [
         "cat ~/.gitconfig",
@@ -622,7 +854,7 @@ fn doctor_reports_the_push_allowlist() {
 }
 
 #[test]
-fn a_write_to_the_seat_git_config_is_refused() {
+fn a_write_to_the_seat_git_config_warns() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, _xdg) = seat_env(root.path());
@@ -633,9 +865,9 @@ fn a_write_to_the_seat_git_config_is_refused() {
     ljos_cli::cloud::up(false).unwrap();
     std::env::set_current_dir(root.path()).unwrap();
 
-    refused("git config core.hooksPath /dev/null", &repo);
-    refused("git config include.path /tmp/evil-hooks.cfg", &repo);
-    refused("git config --local --remove-section core", &repo);
+    warned("git config core.hooksPath /dev/null", &repo);
+    warned("git config include.path /tmp/evil-hooks.cfg", &repo);
+    warned("git config --local --remove-section core", &repo);
     let other_cfg = format!("git -C {} config core.hooksPath /dev/null", other.display());
     allowed(&other_cfg, &repo);
 }

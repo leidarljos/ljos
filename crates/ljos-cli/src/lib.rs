@@ -39690,6 +39690,7 @@ fn clear_guard_note() {
 /// The rules ljos names and lets run, each with ljos-policyd's sentence
 /// for it: a recursive delete outside a temp directory, a push that
 /// replaces history on the remote, and a push that deletes a remote branch.
+/// The cloud seat rule's sentence is ljos's own: policyd has no such rule.
 const LABELLED: &[(&str, &str)] = &[
     (
         "rm-rf-outside-tmp",
@@ -39701,6 +39702,10 @@ const LABELLED: &[(&str, &str)] = &[
     ),
     ("git-force-push", "a force push rewrites a published branch"),
     ("git-push-delete", "a push deletes a remote branch"),
+    (
+        cloud::CURSOR_PUSH,
+        "on a cloud seat the line skips or changes the git hooks, or writes a file the cloud guard reads",
+    ),
 ];
 
 /// The rule a command names that deletes or moves a tree holding the

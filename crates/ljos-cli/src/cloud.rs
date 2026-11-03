@@ -38,7 +38,7 @@ const INSTALL_URL: &str = "https://github.com/leidarljos/ljos/releases/latest/do
 const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
 /// The one cloud push rule, read from the push's argv by
 /// [`crate::cloud_guard::cursor_push`].
-const CURSOR_PUSH: &str = "cloud-cursor-push";
+pub(crate) const CURSOR_PUSH: &str = "cloud-cursor-push";
 /// The release workflow's encoder archives, the runtime before the binary
 /// that links it. Each unpacks into the prefix above the binary directory.
 const ENCODER_ARCHIVES: &[&str] = &["onnxruntime", "packset-embed"];
@@ -357,13 +357,21 @@ pub fn missing_mcp_line() -> Option<String> {
 /// The one cloud rule: a push from a cloud seat may update only that
 /// seat's named branches and `develop`, and may not force or delete a ref.
 /// There is no refusal file. A machine `ljos cloud up` has not marked is
-/// not a cloud seat, so this says nothing.
+/// not a cloud seat, so this says nothing. A line that skips or changes
+/// the git hooks, or writes a file the guard reads, runs labelled with the
+/// same rule name.
 #[must_use]
 pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> {
     if !cloud_seat() {
         return None;
     }
-    let why = crate::cloud_guard::cursor_push(line, cwd)?;
+    let (push, changes_hooks) = crate::cloud_guard::push_and_hooks(line, cwd);
+    let Some(why) = push else {
+        if changes_hooks {
+            crate::label(CURSOR_PUSH, line);
+        }
+        return None;
+    };
     Some(crate::Rule {
         pattern: CURSOR_PUSH.into(),
         verdict: "deny".into(),

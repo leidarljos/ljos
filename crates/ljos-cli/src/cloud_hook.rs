@@ -6,13 +6,25 @@
 //! `cloud up` records the seat repository once and leaves it there.
 //!
 //! `cloud up` installs no git hook and sets no `core.hooksPath`, so git
-//! runs only the hooks the repository and the login already name.
+//! runs only the hooks the repository and the login already name. It
+//! takes back the hook and the hooks paths an earlier `cloud up` set.
 
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const ALLOW_NAME: &str = "push-allow";
+
+/// The first two lines of the pre-push script an earlier `cloud up` wrote
+/// to [`hooks_dir`], and to a booked hooks directory that had no
+/// pre-push. Every version of that script in this history opens with them.
+const OLD_HOOK_HEAD: &str =
+    "#!/bin/sh\n# Destination allowlist a cloud seat's git runs on every push.\n";
+
+/// The second line of the stub an earlier `cloud up` wrote over a booked
+/// pre-push, and the name it moved that hook to.
+const CHAIN_MARKER: &str = "# ljos-cloud-chain ";
+const CHAIN_PREVIOUS: &str = "pre-push.ljos-previous";
 
 /// Where the allowlist lives: `$XDG_CONFIG_HOME/ljos`, or `~/.config/ljos`.
 fn config_dir() -> Option<PathBuf> {
@@ -72,9 +84,156 @@ pub(crate) fn ensure(repoint: bool) -> Result<String> {
         seat.as_deref(),
     )?;
     let path = allow_path().context("cloud up: no config home for the push allowlist")?;
-    Ok(format!(
+    let mut lines = vec![format!(
         "push allowlist: {}; no git hook is installed",
         path.display()
+    )];
+    let seat_path = seat
+        .as_deref()
+        .filter(|_| !invoked_from_package_under_test())
+        .map(Path::new);
+    lines.extend(retire_old_hooks(seat_path));
+    Ok(lines.join("\n"))
+}
+
+/// Take back what an earlier `cloud up` set: a global or seat-local
+/// `core.hooksPath` that names [`hooks_dir`], the pre-push script there,
+/// and the stub it wrote into a hooks directory a path already named.
+/// Any other value or file stays as it is. One line per step taken.
+fn retire_old_hooks(seat: Option<&Path>) -> Vec<String> {
+    let Some(ours) = hooks_dir() else {
+        return Vec::new();
+    };
+    let mut said = Vec::new();
+    let mut booked = Vec::new();
+    for (scope, at) in [("global", None), ("local", seat)] {
+        if scope == "local" && at.is_none() {
+            continue;
+        }
+        for value in hooks_path_values(scope, at) {
+            let dir = resolve_hooks_value(&value, at);
+            if !paths_same(&dir, &ours) {
+                booked.push(dir);
+            } else if unset_hooks_value(scope, at, &value) {
+                said.push(format!(
+                    "hooks: unset the {scope} core.hooksPath {value} an earlier cloud up set"
+                ));
+            }
+        }
+    }
+    for dir in booked {
+        said.extend(unchain(&dir));
+    }
+    let script = ours.join("pre-push");
+    if old_hook_script(&script) && fs::remove_file(&script).is_ok() {
+        said.push(format!(
+            "hooks: removed {}, which an earlier cloud up installed",
+            script.display()
+        ));
+    }
+    let _ = fs::remove_dir(&ours);
+    said
+}
+
+fn hooks_path_values(scope: &str, seat: Option<&Path>) -> Vec<String> {
+    let mut cmd = crate::git_cmd();
+    if let Some(seat) = seat {
+        cmd.arg("-C").arg(seat);
+    }
+    let Ok(out) = cmd
+        .args([
+            "config",
+            &format!("--{scope}"),
+            "--get-all",
+            "core.hooksPath",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// git reads a relative `core.hooksPath` from the top of the work tree.
+fn resolve_hooks_value(value: &str, seat: Option<&Path>) -> PathBuf {
+    if let Some(rest) = value.strip_prefix("~/") {
+        if let Ok(home) = crate::home() {
+            return home.join(rest);
+        }
+    }
+    match seat {
+        Some(seat) if Path::new(value).is_relative() => seat.join(value),
+        _ => PathBuf::from(value),
+    }
+}
+
+fn unset_hooks_value(scope: &str, seat: Option<&Path>, value: &str) -> bool {
+    let mut cmd = crate::git_cmd();
+    if let Some(seat) = seat {
+        cmd.arg("-C").arg(seat);
+    }
+    cmd.args([
+        "config",
+        &format!("--{scope}"),
+        "--fixed-value",
+        "--unset-all",
+        "core.hooksPath",
+        value,
+    ])
+    .stdin(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .is_ok_and(|status| status.success())
+}
+
+fn old_hook_script(path: &Path) -> bool {
+    if !path.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
+    fs::read_to_string(path).is_ok_and(|text| text.starts_with(OLD_HOOK_HEAD))
+}
+
+/// The stub ran the hook it moved aside, then the old script. Putting
+/// that hook back under its own name is what the directory held before.
+fn unchain(dir: &Path) -> Option<String> {
+    let hook = dir.join("pre-push");
+    if old_hook_script(&hook) {
+        fs::remove_file(&hook).ok()?;
+        return Some(format!(
+            "hooks: removed {}, the copy an earlier cloud up wrote",
+            hook.display()
+        ));
+    }
+    let text = fs::read_to_string(&hook).ok()?;
+    let mut lines = text.lines();
+    let stub = lines.next().is_some_and(|line| line.starts_with("#!"))
+        && lines
+            .next()
+            .is_some_and(|line| line.starts_with(CHAIN_MARKER))
+        && text.lines().last() == Some(r#""$canon" "${1-}" "${2-}" < "$tmp""#);
+    if !stub {
+        return None;
+    }
+    let previous = dir.join(CHAIN_PREVIOUS);
+    if previous.is_file() {
+        fs::rename(&previous, &hook).ok()?;
+        return Some(format!(
+            "hooks: put {} back as {}, the hook an earlier cloud up chained",
+            previous.display(),
+            hook.display()
+        ));
+    }
+    fs::remove_file(&hook).ok()?;
+    Some(format!(
+        "hooks: removed the chain stub {} an earlier cloud up wrote",
+        hook.display()
     ))
 }
 
@@ -310,20 +469,16 @@ fn key_or_empty(url: &str) -> Option<String> {
     (!key.is_empty()).then_some(key)
 }
 
-/// The hook directory, the hook file, the allowlist, the git hooks
-/// directory ljos installs as `core.hooksPath`, and the gitconfig files
-/// that can name that key. A write to one of these disarms the hook. The
-/// recorded seat's `.git/config` is included. Any other `.git/config` or
-/// `.gitconfig` is matched by name in `names_protected`. The curl and wget
-/// configs are included too, with any a curl or wget on the line names: a
-/// write to one changes a file the guard already read.
+/// The allowlist and the gitconfig files that can name `core.hooksPath`.
+/// A write to one of these changes which hooks git runs, and the shell
+/// guard labels it. The recorded seat's `.git/config` is included. Any
+/// other `.git/config` or `.gitconfig` is matched by name in
+/// `names_protected`. The curl and wget configs are included too, with any
+/// a curl or wget on the line names: a write to one changes a file the
+/// guard already read. A write inside a git hooks directory is the seat
+/// guard's `writes-seat-file`, so it is not listed here.
 pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(dir) = hooks_dir() {
-        out.push(dir.join("pre-push"));
-        out.push(dir);
-    }
-    out.extend(git_hooks_dirs());
     if let Some(path) = allow_path() {
         out.push(path);
     }
@@ -625,7 +780,7 @@ fn paths_same(a: &Path, b: &Path) -> bool {
 
 /// A path the line writes, with `~` and `$HOME` filled in. `None` when a
 /// substitution other than those two hides the path: the guard cannot
-/// tell where it lands, and a later push still meets the hook.
+/// tell where it lands, so it says nothing about that write.
 fn expand_target(path: &str) -> Option<String> {
     let path = path.trim().trim_matches(|c| c == '"' || c == '\'');
     if path.is_empty() || path.contains('`') {

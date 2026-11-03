@@ -145,13 +145,26 @@ ljos slot ISSUE ridley-review --model model-a --run "$AGENT_ID" --key "$RUN_KEY"
 
 ## The cloud guard
 
-`ljos cloud up` installs two checks, and they do not see the same things.
+`ljos cloud up` writes the push allowlist the shell guard reads.
 
 The shell guard is a filter on commands as written. It holds one push rule. A `git push` may update `develop` and the branches named in the seat's `ljos.toml`, and it may not force a push or delete a ref. The source side of a refspec, a remote URL, an option's value and the body of a comment are never what is refused. Opening or merging a pull request is not refused. `gh`, `curl`, `wget` and HTTPie are not read, so a ref write through the GitHub API is left to the server. `git push origin develop` is allowed at the shell even when the remote is another repository. The branch name is all that line shows. A `git send-pack` written on the line is judged by its refs. A send-pack started inside a script is not read.
 
-`cloud up` installs no git hook and sets no `core.hooksPath` at any level, so git runs only the hooks the repository and the login already name. The allowlist it writes is the repository and the branch. This seat may push `develop` and the branches named in its `ljos.toml` on the repository `cloud up` recorded, and any branch of the tracker. `cloud up` records the seat repository once, and a later `cloud up` from another clone does not move that record. The shell guard still refuses `--no-verify` on a line it can see, a `-c` or `--config core.hooksPath`, the `GIT_CONFIG_*` variables that set that key, and a write to a gitconfig. The push that shares user rules runs no hook.
+`cloud up` installs no git hook and sets no `core.hooksPath` at any level.
+Git runs only the hooks the repository and the login already name.
+On a seat an earlier `cloud up` set up, it unsets a global or local `core.hooksPath` that names `~/.config/ljos/hooks`.
+It removes the pre-push script it wrote there, and it puts a booked hook back where its chain stub wrapped one.
+Each of those steps prints one `hooks:` line, and any other hooks path stays as it was.
+The allowlist holds the repository and the branch.
+This seat may push `develop` and the branches named in its `ljos.toml` on the recorded repository, and any branch of the tracker.
+The seat repository is recorded once, and a later `cloud up` from another clone leaves that record in place.
+The shell guard warns on `--no-verify`, a `-c` or `--config core.hooksPath`, the `GIT_CONFIG_*` variables that set that key, and a write to a gitconfig.
+Each of those still runs, with one allow-with-warning line that names `cloud-cursor-push` and a `warn` row in the bypass log.
+A write inside the git hooks directory names `writes-seat-file` instead.
+The push that shares user rules runs no hook.
 
-The shell guard reads only the line. A push that `./ship.sh`, `make`, `npm` or dulwich starts, and a program that calls the GitHub API with the token, are out of reach on this machine. Stopping those takes a server-side ruleset.
+The shell guard reads only the line.
+On this machine nothing checks a push that `./ship.sh`, `make`, `npm` or dulwich starts, or a program that calls the GitHub API with the token.
+A server-side ruleset stops those.
 
 ## The sitting gate
 
