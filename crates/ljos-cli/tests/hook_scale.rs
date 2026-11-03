@@ -1,5 +1,6 @@
-//! The prompt hook on a pack of many claims: the lines it shows for a
-//! fixed pack, and how a stage's cost grows with the number of claims.
+//! The prompt hook on a pack of many claims. The tests check the lines
+//! it shows for a fixed pack, and how many claims a stage reads as the
+//! pack grows.
 //!
 //! A fresh home and its own packsetd. The hook shows the writer's owner
 //! token, as a seat does, so it reads the listing as trusted.
@@ -8,7 +9,7 @@ ljos_test_boot::harness!();
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -299,90 +300,45 @@ fn the_prompt_hook_shows_the_same_lines_for_a_fixed_pack() {
 /// adds its own pass over the stored claims.
 const SHARING: usize = 30;
 
-/// The smaller pack the stage is timed on: the sharing lessons and notes.
-const SMALL: usize = 200;
-
-/// The larger pack is this many times the smaller: a stage that reads
-/// every claim takes about this many times as long on it.
+/// The larger pack is this many times the smaller, the sharing lessons
+/// alone, in notes. A stage that reads every claim reads this many times
+/// as many. Ten is the step between the packs of `prompt-hook.scale-*`.
 const GROWTH: usize = 10;
 
-/// Warm prompts timed at each size. The median of five moves by one rank
-/// when one run is slow on a busy runner.
-const RUNS: usize = 5;
-
-/// The most the hook's share of the rerank stage may grow, as a multiple,
-/// from the smaller pack to [`GROWTH`] times it. On an 8-core Intel Xeon
-/// (family 6, model 207) under KVM, with packsetd 0.17.3 at 947c4985 in
-/// debug and release and at CI's 0fed6640 in debug, develop at 33083cf
-/// and 17b7373 grew it 2.22 to 4.45 times over eleven runs, as it ranked
-/// every stored claim again, and the change that added this test 1.05 to
-/// 1.35 times over ten. Two leaves the highest of those about half again
-/// for a busy runner and stays under develop's lowest.
-const BOUND: f64 = 2.0;
-
-/// One stage's milliseconds from the hook's stage clock.
-fn stage_ms(said: &Output, stage: &str) -> f64 {
+/// The stored claims the rerank stage walked, from the hook's stage clock.
+fn rerank_walked(said: &Output) -> usize {
     let stderr = String::from_utf8_lossy(&said.stderr);
-    let head = format!("hook-timing {stage} ");
     stderr
         .lines()
-        .find_map(|line| line.strip_prefix(&head)?.strip_suffix(" ms")?.parse().ok())
-        .unwrap_or_else(|| panic!("no {stage} stage on the hook's stderr: {stderr}"))
+        .find_map(|line| {
+            line.strip_prefix("hook-timing rerank ")?
+                .strip_suffix(" claims walked")?
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("no rerank count on the hook's stderr: {stderr}"))
 }
 
-/// The writer's milliseconds for the reranked search the stage asks of it,
-/// the hook's window of twenty by relevance, timed from here.
-fn writer_ms(seat: &Seat, prompt: &str) -> f64 {
-    let started = Instant::now();
-    let answered = ureq::get(&format!("http://127.0.0.1:{}/v1/search", seat.port))
-        .query("workspace", ljos_cli::SEAT_WORKSPACE)
-        .query("q", prompt)
-        .query("limit", "20")
-        .query("rank", "relevance")
-        .query("rerank", "1")
-        .set("authorization", &format!("Bearer {}", seat.token))
-        .timeout(Duration::from_secs(30))
-        .call()
-        .expect("GET /v1/search")
-        .into_string()
-        .expect("search body");
-    assert!(answered.contains("\"hits\""), "search: {answered}");
-    started.elapsed().as_secs_f64() * 1000.0
-}
-
-fn median(mut ms: Vec<f64>) -> f64 {
-    ms.sort_by(f64::total_cmp);
-    ms[ms.len() / 2]
-}
-
-/// The hook's own share of the rerank stage once the pack holds `n`
-/// claims, notes added after the sharing lessons: the stage's median
-/// over [`RUNS`] warm prompts less the writer's median for the same
-/// search, which grows with the pack whatever the hook does.
-fn rerank_ms(seat: &Seat, n: usize) -> f64 {
+/// The rerank stage's counts for a cold prompt and a warm one, on a pack
+/// of `n` claims with notes added after the sharing lessons.
+fn rerank_walked_at(seat: &Seat, n: usize) -> (usize, usize) {
     for i in seat.live()..n {
         seat.post(i, &note(i), 1, None);
     }
     assert_eq!(seat.live(), n, "a note replaced another");
     let prompt = prompt_for(7);
-    seat.prompt(&format!("cold-{n}"), &prompt);
-    let (mut stage, mut writer) = (Vec::new(), Vec::new());
-    for k in 0..RUNS {
-        let said = seat.prompt(&format!("warm-{n}-{k}"), &prompt);
-        stage.push(stage_ms(&said, "rerank"));
-        writer.push(writer_ms(seat, &prompt));
-    }
-    let (stage, writer) = (median(stage), median(writer));
-    eprintln!("rerank {stage} ms at {n} claims, the writer's search {writer:.1} ms");
-    (stage - writer).max(0.0)
+    let cold = rerank_walked(&seat.prompt(&format!("cold-{n}"), &prompt));
+    let warm = rerank_walked(&seat.prompt(&format!("warm-{n}"), &prompt));
+    eprintln!("rerank walked {cold} claims cold and {warm} warm at {n} claims");
+    (cold, warm)
 }
 
 /// The reranked search reads the hits the writer sent and the pass its
-/// prompt's search already made, not every stored claim again: a pack
-/// ten times larger in claims the prompt shares no word with leaves the
-/// hook's share of the stage well short of ten times.
+/// prompt's search already made, not every stored claim again. The
+/// stage's count stays where it was when the pack grows tenfold in
+/// claims that share no word with the prompt.
 #[test]
-fn the_hooks_share_of_the_rerank_does_not_grow_with_claims_the_prompt_does_not_share() {
+fn the_rerank_walks_no_more_claims_when_the_pack_grows_in_claims_the_prompt_does_not_share() {
     if !ljos_cli::tool_installed("packsetd") {
         eprintln!("skipped: packsetd is not installed");
         return;
@@ -391,15 +347,12 @@ fn the_hooks_share_of_the_rerank_does_not_grow_with_claims_the_prompt_does_not_s
     for i in 0..SHARING {
         seat.post(i, &lesson(i), 1, None);
     }
-    let large_n = SMALL * GROWTH;
-    let small = rerank_ms(&seat, SMALL);
-    let large = rerank_ms(&seat, large_n);
-    // The stage clock prints whole milliseconds, so a share under one is
-    // its rounding, not a time to divide by.
-    let ratio = large / small.max(1.0);
-    assert!(
-        ratio < BOUND,
-        "the hook's share of the rerank took {small:.1} ms at {SMALL} claims and \
-         {large:.1} ms at {large_n}, {ratio:.2} times, past {BOUND}"
+    let small = rerank_walked_at(&seat, SHARING);
+    let large = rerank_walked_at(&seat, SHARING * GROWTH);
+    assert_eq!(
+        small,
+        large,
+        "the rerank stage walked (cold, warm) {small:?} claims at {SHARING} and {large:?} at {}",
+        SHARING * GROWTH
     );
 }

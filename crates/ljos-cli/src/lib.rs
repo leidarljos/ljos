@@ -13325,11 +13325,13 @@ pub const HOOK_RERANK_BUDGET_MS: u64 = 1000;
 /// rerank.
 const RERANK_POOL: u32 = 20;
 
-/// The reranked search, and whether the cross-encoder ordered it, or an
-/// error once `ms` has passed. The request runs on its own thread: the
-/// pack client gives a reranked search at least a minute whatever
+/// Gives the reranked search and whether the cross-encoder ordered it,
+/// or an error once `ms` has passed. The request runs on its own thread.
+/// The pack client gives a reranked search at least a minute whatever
 /// `PACKSET_TIMEOUT_MS` says, and a hook cannot wait that long. A thread
-/// left waiting ends with the hook's process.
+/// left waiting ends with the hook's process. With `LJOS_HOOK_TIMING`
+/// set, the stored claims that thread walked ([`read_claims`]) go to the
+/// stage clock as `rerank N claims walked`.
 ///
 /// # Errors
 ///
@@ -13338,10 +13340,16 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
     let (tx, rx) = std::sync::mpsc::channel();
     let cue = cue.to_string();
     std::thread::spawn(move || {
-        let _ = tx.send(packset_search_reranked(&cue, limit));
+        let found = packset_search_reranked(&cue, limit);
+        let _ = tx.send((found, CLAIMS_READ.with(std::cell::Cell::get)));
     });
-    rx.recv_timeout(std::time::Duration::from_millis(ms))
-        .unwrap_or_else(|_| bail!("search: the reranked search took longer than {ms} ms"))
+    let Ok((found, read)) = rx.recv_timeout(std::time::Duration::from_millis(ms)) else {
+        bail!("search: the reranked search took longer than {ms} ms")
+    };
+    if std::env::var_os("LJOS_HOOK_TIMING").is_some() {
+        eprintln!("hook-timing rerank {read} claims walked");
+    }
+    found
 }
 
 /// Drop origin and basis from search hits. An open listener's body is
@@ -13846,6 +13854,7 @@ fn word_ranked(client: &PacksetClient, cue: &str, limit: usize) -> Vec<(Value, f
     }) {
         return ranked.clone();
     }
+    read_claims(atoms.len());
     let asked = pack_words(cue);
     let texts: Vec<&str> = atoms.iter().map(atom_text).collect();
     let scores = lexical_match_scores(&texts, cue);
@@ -16751,6 +16760,7 @@ fn rows_read(client: &PacksetClient, workspace: &str) -> Result<SharedRows> {
     if trusted {
         return Ok(rows);
     }
+    read_claims(rows.len());
     let rows = std::sync::Arc::unwrap_or_clone(rows);
     Ok(std::sync::Arc::new(
         rows.into_iter().map(Row::into_agents).collect(),
@@ -16974,6 +16984,9 @@ pub(crate) fn forget_atom_listings() {
     *ORIGINS_RECORDED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *HELD_BY_ID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
 /// When this hook process last recorded the origin of every row of the
@@ -16981,6 +16994,50 @@ pub(crate) fn forget_atom_listings() {
 /// once per search, twice a prompt, and between two searches of one hook
 /// the listing is the memo's: a write forgets this with the memo.
 static ORIGINS_RECORDED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// The rows of the listing a hook last looked hits up in, by id, with
+/// that listing. The prompt's search and its reranked search look their
+/// hits up in the same one.
+type HeldById = Option<(SharedRows, std::sync::Arc<RowsById>)>;
+static HELD_BY_ID: std::sync::Mutex<HeldById> = std::sync::Mutex::new(None);
+
+type RowsById = std::collections::HashMap<String, usize>;
+
+/// The index of each row of `rows` by id, the first row of an id.
+fn held_by_id(rows: &SharedRows) -> std::sync::Arc<RowsById> {
+    let mut kept = HELD_BY_ID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((held, by_id)) = kept.as_ref() {
+        if std::sync::Arc::ptr_eq(held, rows) {
+            return std::sync::Arc::clone(by_id);
+        }
+    }
+    read_claims(rows.len());
+    let mut by_id = RowsById::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        if let Some(id) = row.field("id").and_then(Value::as_str) {
+            by_id.entry(id.to_string()).or_insert(i);
+        }
+    }
+    let by_id = std::sync::Arc::new(by_id);
+    if atoms_memo_on() {
+        *kept = Some((std::sync::Arc::clone(rows), std::sync::Arc::clone(&by_id)));
+    }
+    by_id
+}
+
+thread_local! {
+    static CLAIMS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count a pass over `n` stored claims on this thread: a listing parsed,
+/// or walked row by row. A row looked up by id for a search hit is not
+/// one. The search chose it, and the search's limit bounds those whatever
+/// the pack's size.
+fn read_claims(n: usize) {
+    CLAIMS_READ.with(|read| read.set(read.get() + n));
+}
 
 /// [`atoms_listed`] narrowed to one `kind` when given: the writer filters
 /// before it builds the answer, so a gate's read does not copy the pack.
@@ -17052,6 +17109,7 @@ fn listed_of<T: Listed>(
         .and_then(|_| listing_cache_path(workspace, token));
     if let (Some(path), Some(stamp)) = (&cache, &stamp) {
         if let Some((atoms, trusted)) = cached_listing::<T>(path, stamp) {
+            read_claims(atoms.len());
             // A listing kept before the sidecar existed, or by another
             // version, has none that fits: this hook writes it through
             // the memos it fills anyway.
@@ -17124,6 +17182,7 @@ fn listed_of<T: Listed>(
         Some(Value::Array(atoms)) => atoms,
         Some(other) => serde_json::from_value(other)?,
     };
+    read_claims(atoms.len());
     if let (Some(path), Some(stamp)) = (cache, stamp) {
         keep_listing(&path, &stamp, &atoms, answered.trusted);
         keep_tokens(&path, &stamp, &atoms);
@@ -37992,6 +38051,7 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some_and(|at| at.elapsed() < ATOMS_MEMO);
     if !recorded_lately {
+        read_claims(atoms.len());
         atoms.iter().for_each(|atom| keep_origin_at(atom, &now));
         if atoms_memo_on() {
             *ORIGINS_RECORDED
@@ -38000,17 +38060,9 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
                 Some(std::time::Instant::now());
         }
     }
-    let wanted: std::collections::HashSet<&str> = ids.iter().copied().collect();
-    let mut held: std::collections::HashMap<&str, &Row> = std::collections::HashMap::new();
-    for atom in atoms.iter() {
-        if let Some(id) = atom.field("id").and_then(Value::as_str) {
-            if wanted.contains(id) {
-                held.entry(id).or_insert(atom);
-            }
-        }
-    }
+    let held = held_by_id(&atoms);
     for id in ids {
-        match held.get(id) {
+        match held.get(id).map(|&i| &atoms[i]) {
             Some(atom) => record_held_at(id, atom, &now),
             None => record_origin(id, None),
         }
