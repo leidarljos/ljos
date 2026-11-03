@@ -130,7 +130,7 @@ jobs:
           df -h /
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
-          toolchain: 1.97.1
+          toolchain: 1.89.0
           components: clippy, rustfmt
       - name: Format
         run: cargo fmt --all --check
@@ -334,7 +334,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
-          toolchain: 1.97.1
+          toolchain: 1.89.0
           targets: aarch64-apple-darwin, x86_64-apple-darwin
           components: clippy
       # The pin in rust-toolchain.toml is the compiler cargo runs.
@@ -369,7 +369,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
-          toolchain: 1.97.1
+          toolchain: 1.89.0
       - name: MCP lifetime
         run: cargo test -p ljos --test mcp_lifetime --no-fail-fast
 
@@ -377,7 +377,7 @@ jobs:
     name: cargo deny check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: 1.89.0
