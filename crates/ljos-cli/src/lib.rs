@@ -32300,8 +32300,9 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
 ///
 /// # Errors
 ///
-/// Nothing is ready, every ready node was taken first, or the claim graph
-/// refused for some other reason.
+/// Nothing is ready, every ready node was taken first, the claim graph
+/// did not answer within the sitting's claim budget, or it refused for
+/// some other reason.
 pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> Result<String> {
     let assignee = claim_holder(assignee)?;
     let assignee = assignee.as_str();
@@ -32320,7 +32321,20 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
     if let Some(slack) = slack.as_deref() {
         args.extend(["--slack", slack]);
     }
-    let listed = run_captured("claimdag", &args)?.stdout;
+    // Bare `ljos claim` has no sitting wall. This is the bound a sitting
+    // already uses for its claim ([`sitting_claim_wait`]): the first third
+    // of the documented `timeout -k 5 30`. Every claimdag call from here,
+    // and the claim lock, stops at it. `LJOS_SITTING_CLAIM_WAIT` raises it.
+    let _wall = arm_wall_budget_for(sitting_claim_wait());
+    let listed = match run_captured("claimdag", &args) {
+        Ok(said) => said.stdout,
+        Err(err) if claim_budget_spent(&err) => {
+            return Err(claim_graph_slow(
+                "`claimdag ready` did not answer within the claim budget",
+            ));
+        }
+        Err(err) => return Err(err),
+    };
     let rows: Vec<Value> =
         serde_json::from_str(listed.trim()).context("claim --next: claimdag ready --json")?;
     if rows.is_empty() {
@@ -32341,6 +32355,11 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
         match claim(node, assignee) {
             Ok(said) => return Ok(format!("{node}  {said}")),
             Err(e) if taken_first(&e.to_string()) => continue,
+            Err(e) if claim_budget_spent(&e) => {
+                return Err(claim_graph_slow(
+                    "a claimdag call did not answer within the claim budget",
+                ));
+            }
             Err(e) => return Err(e),
         }
     }
@@ -32360,6 +32379,23 @@ fn taken_first(text: &str) -> bool {
     ]
     .iter()
     .any(|said| text.contains(said))
+}
+
+/// The claim graph stopped at the wall armed for this claim: a claimdag
+/// call that did not answer, or the claim lock given up at that deadline.
+fn claim_budget_spent(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}");
+    text.contains("did not answer in time") || text.contains("past the claim budget")
+}
+
+/// One line when the claim budget runs out. `which` names the call that
+/// stopped. There is no second try: the seat claims a named id, or raises
+/// `LJOS_SITTING_CLAIM_WAIT`.
+fn claim_graph_slow(which: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "claim --next: the claim graph is slow ({which}); \
+         claim a named id with `ljos claim ID`, or raise LJOS_SITTING_CLAIM_WAIT"
+    )
 }
 
 /// Hand a session node back before it is terminal: ready again, assignee
