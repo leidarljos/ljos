@@ -11,10 +11,29 @@ static ENV: Mutex<()> = Mutex::new(());
 
 /// Hold the process environment for one test, with its runtime directory
 /// at `run`, so the seat record a tracker commit leaves stays in the test.
-fn own_runtime(run: &Path) -> MutexGuard<'static, ()> {
+/// The previous `XDG_RUNTIME_DIR` is put back when the guard drops.
+fn own_runtime(run: &Path) -> OwnRuntime {
     let lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let previous = std::env::var_os("XDG_RUNTIME_DIR");
     std::env::set_var("XDG_RUNTIME_DIR", run);
-    lock
+    OwnRuntime {
+        previous,
+        _lock: lock,
+    }
+}
+
+struct OwnRuntime {
+    previous: Option<std::ffi::OsString>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for OwnRuntime {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
