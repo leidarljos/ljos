@@ -25217,9 +25217,16 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
 }
 
 /// [`seat_guard`] for a command that starts in `cwd`, absent the process
-/// directory. A `cd` on the line moves it for the commands after.
+/// directory. A `cd` on the line moves it for the commands after. ljos
+/// does not refuse a command that deletes or moves a tree holding the
+/// person's key directory: the command names `uproots-person-key` for
+/// [`take_guard_note`] and runs.
 #[must_use]
 pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
+    refusing(seat_guard_judged(line, cwd))
+}
+
+fn seat_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if bookkeep::guard_suspended() {
         return None;
     }
@@ -25307,10 +25314,13 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         if let Some(t) = kept_prompt::reached(&paths, cwd.as_deref(), path_reads)
             .or_else(|| kept_prompt::code_reaches(&words, line))
             .or_else(|| person_key::reached(&paths, cwd.as_deref(), path_reads))
-            .or_else(|| person_key::uproots(&paths, cwd.as_deref()))
-            .or_else(|| person_key::code_uproots(&words, line, cwd.as_deref()))
         {
             return Some(refuse(&t));
+        }
+        if let Some(tree) = person_key::uproots(&paths, cwd.as_deref())
+            .or_else(|| person_key::code_uproots(&words, line, cwd.as_deref()))
+        {
+            label_saying(UPROOTS_PERSON_KEY, tree.warning(), line);
         }
         if first == "ljos" {
             // `ljos approve` is the person's, typed in a terminal of their
@@ -39494,8 +39504,8 @@ pub fn guard_timeout() -> std::time::Duration {
 thread_local! {
     static GUARD_NOTE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     /// Each labelled rule the guard let run on this thread, with its
-    /// command, until [`take_guard_note`] takes it.
-    static GUARD_LABELS: std::cell::RefCell<Vec<(&'static str, String)>> =
+    /// warning and command, until [`take_guard_note`] takes it.
+    static GUARD_LABELS: std::cell::RefCell<Vec<(&'static str, String, String)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -39522,6 +39532,11 @@ const LABELLED: &[(&str, &str)] = &[
     ("git-force-push", "a force push rewrites a published branch"),
 ];
 
+/// The rule a command names that deletes or moves a tree holding the
+/// person's key directory. Its warning names the tree and the key
+/// directory, as [`person_key::Uprooted::warning`] says them.
+const UPROOTS_PERSON_KEY: &str = "uproots-person-key";
+
 /// The line a labelled rule prints as its call goes ahead, in the fields
 /// of ljos-policyd's allow-with-warning: `allow`, `warn`, the rule and the
 /// warning, split by tabs. `None` for a rule that is not labelled.
@@ -39538,14 +39553,21 @@ pub fn label_line(rule: &str) -> Option<String> {
 /// same line is named once.
 fn label(rule: &str, line: &str) {
     let rule = rule.split(':').next().unwrap_or(rule).trim();
-    let Some(&(rule, _)) = LABELLED.iter().find(|(name, _)| *name == rule) else {
-        return;
-    };
+    if let Some(&(rule, warning)) = LABELLED.iter().find(|(name, _)| *name == rule) {
+        label_saying(rule, warning.to_string(), line);
+    }
+}
+
+/// Name `rule` on `line` with `warning` as the call goes ahead.
+fn label_saying(rule: &'static str, warning: String, line: &str) {
     let line = line.trim().to_string();
     GUARD_LABELS.with(|slot| {
         let mut slot = slot.borrow_mut();
-        if !slot.iter().any(|(r, l)| *r == rule && *l == line) {
-            slot.push((rule, line));
+        if !slot
+            .iter()
+            .any(|(r, w, l)| *r == rule && *w == warning && *l == line)
+        {
+            slot.push((rule, warning, line));
         }
     });
 }
@@ -39561,16 +39583,13 @@ fn drop_labels() {
 fn take_labels() -> Vec<String> {
     let named = GUARD_LABELS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
     let mut lines: Vec<String> = Vec::new();
-    for (rule, command) in named {
-        let Some(said) = label_line(rule) else {
-            continue;
-        };
+    for (rule, warning, command) in named {
+        let said = format!("allow\twarn\t{rule}\t{warning}");
         // One call can name a rule on the line as written and again on
         // its words joined back; it is one row.
         if lines.contains(&said) {
             continue;
         }
-        let warning = said.rsplit('\t').next().unwrap_or("").to_string();
         log_bypass(
             "warn",
             "allow-with-warning",
@@ -39622,8 +39641,9 @@ pub fn unhealthy_note(why: &str) -> String {
 
 /// A seat deny rule, a remote-branch delete, or a commit, push, or merge
 /// the gates refuse, judged in this process. `None` means the slow check
-/// may run. A timeout there allows the line with a warning. A force push
-/// and an `rm -rf` outside a temp directory are not refused: each names
+/// may run. A timeout there allows the line with a warning. None of these
+/// is refused: a force push, an `rm -rf` outside a temp directory and a
+/// delete of a tree that contains the person's key directory. Each names
 /// its rule for [`take_guard_note`] and runs.
 /// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
 /// `None` there too, past the sitting gate ([`sitting_gate::guard_line`]),
@@ -39640,6 +39660,10 @@ pub fn static_guard(line: &str) -> Option<Rule> {
 /// [`static_guard`] for a command whose working directory is `cwd`.
 #[must_use]
 pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
+    refusing(static_guard_judged(line, cwd))
+}
+
+fn static_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     let line = line.trim();
     if line.is_empty() {
         return None;
@@ -57811,12 +57835,60 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
     }
 
+    /// What the seat guard says of `line` as it runs: the lines of
+    /// [`take_guard_note`], or the refusal.
+    fn seat_note(line: &str) -> Result<String, Rule> {
+        let _ = take_guard_note();
+        match seat_guard(line) {
+            Some(rule) => Err(rule),
+            None => Ok(take_guard_note().unwrap_or_default()),
+        }
+    }
+
+    /// The line `uproots-person-key` names when a command deletes, or with
+    /// `moves` moves, `tree`.
+    fn uproots_said(tree: &Path, moves: bool) -> String {
+        let key = person_key::key_dir().expect("a passwd home");
+        let verb = if moves { "moves" } else { "deletes" };
+        format!(
+            "allow\twarn\tuproots-person-key\tthe command {verb} {}, a tree that holds the \
+             person's key directory {}",
+            tree.display(),
+            key.display()
+        )
+    }
+
+    /// Each line runs past the seat guard and names `uproots-person-key`.
+    /// Every line that does not is listed.
+    fn assert_runs_uprooting(lines: &[String]) {
+        let wrong: Vec<String> = lines
+            .iter()
+            .filter_map(|line| match seat_note(line) {
+                Ok(note)
+                    if note
+                        .lines()
+                        .any(|l| l.starts_with("allow\twarn\tuproots-person-key\t")) =>
+                {
+                    None
+                }
+                verdict => Some(format!("{line:?}: {verdict:?}")),
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
     /// Removing or moving a tree that holds the key directory takes the
-    /// key with it, however far above it the tree starts. A recursive
-    /// delete or move elsewhere under the home still passes.
+    /// key with it, however far above it the tree starts. It runs, and
+    /// names `uproots-person-key` with the tree and the key directory, in
+    /// a `warn` row of the bypass log too. A line that names the config
+    /// directory itself, or `/tmp` as `mv -t` does, is still refused by a
+    /// check made before it, as [`assert_uprooted_yet_refused`] says. A
+    /// recursive delete or move elsewhere under the home names nothing.
     #[test]
-    fn a_tree_above_the_person_key_is_not_removed_or_moved() {
+    fn a_tree_above_the_person_key_runs_with_its_warning() {
         let _g = env_guard();
+        let data = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
         let dir = person_key::key_dir().expect("a passwd home");
         std::fs::create_dir_all(&dir).unwrap();
         let home = dir.parent().unwrap().parent().unwrap().to_path_buf();
@@ -57826,12 +57898,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let up = home.parent().unwrap().display().to_string();
         let name = home.file_name().unwrap().to_string_lossy().into_owned();
         let (h, home_s) = (h.display(), home.display());
-        let refused = [
+        assert_runs_uprooting(&[
             "rm -rf ~".to_string(),
             "rm -r ~/".to_string(),
             "rm -rf $HOME".to_string(),
             "rm -rf \"${HOME}\"".to_string(),
-            "rm -r ~/.config".to_string(),
             "rm --recursive --force ~/..".to_string(),
             format!("rm -Rf {home_s}"),
             format!("rm -rf {up}"),
@@ -57841,16 +57912,43 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "find ~ -delete".to_string(),
             "find -L ~ -name person-key -delete".to_string(),
             "find ~ -name 'person-key*' -exec rm {} +".to_string(),
-            "mv ~/.config elsewhere".to_string(),
             "mv ~ /tmp/x".to_string(),
-            "mv -t /tmp ~".to_string(),
             "rsync -a --delete /tmp/empty/ ~/".to_string(),
             "rsync -a --remove-source-files ~ /tmp/backup".to_string(),
-            "trash ~/.config".to_string(),
             "gio trash ~".to_string(),
-        ];
-        for line in &refused {
-            assert!(seat_guard(line).is_some(), "{line:?} was allowed");
+        ]);
+        for (line, tree, moves) in [
+            ("rm -rf ~", home.clone(), false),
+            ("rm -rf /", PathBuf::from("/"), false),
+            ("mv ~ /tmp/x", home.clone(), true),
+            ("find ~ -exec mv {} /tmp/x ;", home.clone(), true),
+        ] {
+            assert_eq!(
+                seat_note(line).map_err(|rule| rule.reason),
+                Ok(uproots_said(&tree, moves)),
+                "{line}"
+            );
+        }
+        let rows = std::fs::read_to_string(data.path().join("ljos").join("bypass.jsonl")).unwrap();
+        let row: serde_json::Value = rows
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|r| r["command"] == "rm -rf /")
+            .expect("a row for rm -rf /");
+        assert_eq!(row["kind"], "warn", "{row}");
+        assert_eq!(row["how"], "allow-with-warning", "{row}");
+        assert_eq!(row["rule"], "uproots-person-key", "{row}");
+        assert_eq!(row["verdict"], "allow", "{row}");
+        let said = uproots_said(Path::new("/"), false);
+        assert_eq!(row["reason"].as_str(), said.rsplit('\t').next(), "{row}");
+        for line in [
+            "rm -r ~/.config",
+            "mv ~/.config elsewhere",
+            "trash ~/.config",
+            "mv -t /tmp ~",
+        ] {
+            let refused = seat_note(line).expect_err(line);
+            assert_eq!(refused.verdict, "deny", "{line}");
         }
         for line in [
             "rm -rf ~/proj/build",
@@ -57865,7 +57963,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "rsync -a ~/proj/ /tmp/backup/",
             "rsync -a --delete /tmp/src/ ~/proj/",
         ] {
-            assert!(seat_guard(line).is_none(), "{line:?} was refused");
+            assert_eq!(seat_note(line).ok().as_deref(), Some(""), "{line}");
         }
         let elsewhere = tempfile::tempdir().unwrap();
         let saved: Vec<_> = ["HOME", "LJOS_GUARD"]
@@ -57877,7 +57975,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             std::env::set_var("HOME", elsewhere.path());
             std::env::set_var("LJOS_GUARD", "1");
         }
-        let moved = ["rm -rf ~", "find $HOME -delete"].map(seat_guard);
+        let moved = ["rm -rf ~", "find $HOME -delete"].map(seat_note);
         unsafe {
             for (k, v) in saved {
                 match v {
@@ -57886,20 +57984,25 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 }
             }
         }
-        assert!(moved.iter().all(Option::is_some), "{moved:?}");
+        let said = uproots_said(&home, false);
+        assert_eq!(moved, [Ok(said.clone()), Ok(said)]);
     }
 
     /// Code an interpreter runs can remove the tree above the key without
     /// a shell word naming it. A call that removes or moves a tree is read
-    /// for the path its first argument builds. A call on a tree elsewhere
-    /// under the home still passes.
+    /// for the path its first argument builds, and runs naming
+    /// `uproots-person-key`. A call on a tree elsewhere under the home
+    /// names nothing.
     #[test]
-    fn code_that_removes_a_tree_above_the_person_key_is_refused() {
+    fn code_that_removes_a_tree_above_the_person_key_runs_with_its_warning() {
         let _g = env_guard();
+        let data = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
         let dir = person_key::key_dir().expect("a passwd home");
         std::fs::create_dir_all(&dir).unwrap();
-        let cfg = dir.parent().unwrap().display().to_string();
-        let refused = [
+        let config = dir.parent().unwrap().to_path_buf();
+        let cfg = config.display().to_string();
+        assert_runs_uprooting(&[
             r#"python3 -c "import shutil,os; shutil.rmtree(os.path.expanduser('~'))""#.to_string(),
             r#"python3 -c "import shutil; from pathlib import Path; shutil.rmtree(Path.home())""#
                 .to_string(),
@@ -57916,10 +58019,18 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             r#"ruby -e 'require "fileutils"; FileUtils.rm_rf(Dir.home)'"#.to_string(),
             r#"node -e "require('fs').rmSync(require('os').homedir(), {recursive: true})""#
                 .to_string(),
-        ];
-        for line in &refused {
-            assert!(seat_guard(line).is_some(), "{line:?} was allowed");
-        }
+        ]);
+        let home = config.parent().unwrap();
+        assert_eq!(
+            seat_note(r#"python3 -c "import shutil,os; shutil.rmtree(os.path.expanduser('~'))""#),
+            Ok(uproots_said(home, false))
+        );
+        assert_eq!(
+            seat_note(&format!(
+                r#"python3 -c "import shutil; shutil.move('{cfg}', '/tmp/x')""#
+            )),
+            Ok(uproots_said(&config, true))
+        );
         for line in [
             r#"python3 -c "import shutil,os; shutil.rmtree(os.path.expanduser('~/proj/build'))""#,
             r#"python3 -c "import shutil,os; shutil.rmtree(os.path.join(os.path.expanduser('~'), 'proj'))""#,
@@ -57928,13 +58039,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             r#"node -e "require('fs').rmSync('build', {recursive: true})""#,
             "perl -e 'use File::Path; rmtree(\"$ENV{HOME}/proj\")'",
         ] {
-            assert!(seat_guard(line).is_none(), "{line:?} was refused");
+            assert_eq!(seat_note(line).ok().as_deref(), Some(""), "{line}");
         }
     }
 
-    /// The word the person key's tree guards alone refuse on `line`, each
+    /// What the person key's tree guards alone read on `line`, each
     /// command read as [`seat_guard_in`] reads it, with no directory.
-    fn uprooted_by(line: &str) -> Option<String> {
+    fn uprooted_by(line: &str) -> Option<person_key::Uprooted> {
         nested_lines(line, 0)
             .iter()
             .flat_map(|l| raw_segments(l))
@@ -57946,9 +58057,27 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             })
     }
 
-    /// Each line is refused by the person key's tree guards and by the
-    /// seat guard.
+    /// Each line is read by the person key's tree guards, and runs past
+    /// the seat guard naming `uproots-person-key`.
     fn assert_uprooted(lines: &[String]) {
+        let _g = env_guard();
+        let data = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
+        std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
+        for line in lines {
+            assert!(
+                uprooted_by(line).is_some(),
+                "{line:?} was not read as uprooting"
+            );
+        }
+        assert_runs_uprooting(lines);
+    }
+
+    /// Each line is read by the person key's tree guards, and is refused
+    /// by a check the seat guard makes before them: a word that names the
+    /// config directory itself, or `/tmp`, which contains the runtime
+    /// directory a shell without `XDG_RUNTIME_DIR` uses, read as moved.
+    fn assert_uprooted_yet_refused(lines: &[String]) {
         let _g = env_guard();
         std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
         for line in lines {
@@ -57956,7 +58085,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 uprooted_by(line).is_some(),
                 "{line:?} was not read as uprooting"
             );
-            assert!(seat_guard(line).is_some(), "{line:?} was allowed");
+            let refused = seat_guard(line).unwrap_or_else(|| panic!("{line:?} ran"));
+            assert_eq!(refused.verdict, "deny", "{line:?}");
         }
     }
 
@@ -57967,6 +58097,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "rm --recur ~".into(),
             "rm --recursive ~".into(),
             "rm --rec -f ~".into(),
+        ]);
+        assert_uprooted_yet_refused(&[
             "rm -f --r ~/.config".into(),
             "mv --target=/tmp ~".into(),
             "mv --targ /tmp ~".into(),
@@ -57980,11 +58112,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn a_grouped_short_option_uproots_above_the_person_key() {
         assert_uprooted(&[
             "mv -t/tmp ~".into(),
-            "mv -ft /tmp ~".into(),
             "mv -ft/tmp ~".into(),
-            "mv -vft /tmp ~".into(),
             "rm -vfR ~".into(),
         ]);
+        assert_uprooted_yet_refused(&["mv -ft /tmp ~".into(), "mv -vft /tmp ~".into()]);
     }
 
     /// The shell makes brace expansions before the tilde and the rest.
@@ -58032,11 +58163,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_uprooted(&[
             format!("rm -rf {l}/d/h*"),
             format!("rm -rf {l}/d/?/"),
-            format!("rm -rf {l}/d/[h]/.config"),
             format!("rm -rf {l}/*/h"),
             format!("mv {l}/d/* /tmp/x"),
             format!("find {l}/d/h* -delete"),
         ]);
+        assert_uprooted_yet_refused(&[format!("rm -rf {l}/d/[h]/.config")]);
     }
 
     /// An inline program can take the tree it removes as a word after its
@@ -58045,16 +58176,18 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn a_word_handed_to_inline_code_uproots_above_the_person_key() {
         assert_uprooted(&[
             "python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' ~".into(),
-            "python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' ~/.config 2>/dev/null"
-                .into(),
             "perl -MFile::Path -e 'rmtree($ARGV[0])' $HOME".into(),
             "ruby -rfileutils -e 'FileUtils.rm_rf(ARGV[0])' ~".into(),
             "node -e \"require('fs').rmSync(process.argv[1], {recursive: true})\" ~".into(),
             "python3 - ~ <<'EOF'\nimport shutil, sys\nshutil.rmtree(sys.argv[1])\nEOF".into(),
             "sh -c 'rm -rf \"$1\"' _ ~".into(),
-            "bash -c 'rm -rf \"${1}\"' bash ~/.config".into(),
             "sh -c 'rm -rf \"$@\"' sh /tmp/x ~".into(),
             "sh -c 'find \"$1\" -delete' _ ~".into(),
+        ]);
+        assert_uprooted_yet_refused(&[
+            "python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' ~/.config 2>/dev/null"
+                .into(),
+            "bash -c 'rm -rf \"${1}\"' bash ~/.config".into(),
         ]);
     }
 
@@ -60293,6 +60426,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// call deletes a tree, a shell body that deletes one, and an unquoted
     /// body whose substitution does. Each reading carries the one-line
     /// warning ljos-policyd prints for it, which names `rm-rf-outside-tmp`.
+    /// A body that deletes the root or the home, by `rm -rf` or by
+    /// `shutil.rmtree`, runs too, and names `uproots-person-key` with the
+    /// tree beside that warning. The bodies are only read, never run.
     #[test]
     fn a_python_heredoc_is_judged_as_python() {
         if !crate::tool_installed("ljos-policyd") {
@@ -60329,6 +60465,39 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                     "rm-rf-outside-tmp",
                     "a recursive delete reaches outside /tmp and /var/tmp"
                 )],
+                "{line:?}: {}",
+                report.text
+            );
+        }
+        let home = person_key::key_dir()
+            .and_then(|d| d.parent()?.parent().map(Path::to_path_buf))
+            .expect("a passwd home");
+        for (line, tree) in [
+            ("bash <<'EOF'\necho $(rm -rf /)\nEOF", Path::new("/")),
+            (
+                "python3 - <<EOF\nprint('''$(rm -rf ~)''')\nEOF",
+                home.as_path(),
+            ),
+            (
+                "python3 - <<'EOF'\nimport os, shutil\nshutil.rmtree(os.path.expanduser('~'))\nEOF",
+                home.as_path(),
+            ),
+        ] {
+            let report =
+                guard_report_in(line, at).unwrap_or_else(|e| panic!("refused {line:?}: {e:#}"));
+            assert_eq!(report.verdict, "allow", "{line:?}: {}", report.text);
+            let mut warnings: Vec<_> = report.text.lines().filter_map(policyd_warning).collect();
+            warnings.sort_unstable();
+            let uprooted = uproots_said(tree, false);
+            assert_eq!(
+                warnings,
+                [
+                    (
+                        "rm-rf-outside-tmp",
+                        "a recursive delete reaches outside /tmp and /var/tmp"
+                    ),
+                    policyd_warning(&uprooted).unwrap(),
+                ],
                 "{line:?}: {}",
                 report.text
             );
@@ -60801,8 +60970,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// directory and a cleanup of regenerable files go inside the tree, as
     /// ljos-policyd does, and names no rule. `.git`, a climb out, a glob,
     /// a variable and a line that can `cd` away first run too, and name
-    /// `rm-rf-outside-tmp` or `find-delete-outside-tmp`. The seat guard
-    /// still refuses a tree above the person key: the root and the home.
+    /// `rm-rf-outside-tmp` or `find-delete-outside-tmp`. A tree above the
+    /// person key, the root and the home, runs too, and names
+    /// `uproots-person-key` before the delete's own rule.
     #[test]
     fn a_stock_seat_lets_a_build_dir_delete_run_inside_the_tree() {
         let _g = env_guard();
@@ -60834,16 +61004,23 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             assert!(static_guard(line).is_none(), "{line}");
             assert_eq!(take_guard_note(), None, "{line} names no rule");
         }
-        for line in [
-            "rm -rf /",
-            "rm -rf ~",
-            "rm -rf $HOME",
-            "find ~ -name '*.pyc' -delete",
-            "cd / && find . -name '*.pyc' -delete",
+        for (line, rule) in [
+            ("rm -rf /", "rm-rf-outside-tmp"),
+            ("rm -rf ~", "rm-rf-outside-tmp"),
+            ("rm -rf $HOME", "rm-rf-outside-tmp"),
+            ("find ~ -name '*.pyc' -delete", "find-delete-outside-tmp"),
+            (
+                "cd / && find . -name '*.pyc' -delete",
+                "find-delete-outside-tmp",
+            ),
         ] {
-            let got = static_guard(line).unwrap_or_else(|| panic!("{line} ran"));
-            assert_eq!(got.verdict, "deny", "{line}");
-            assert_eq!(got.pattern, "seat-guard", "{line}");
+            assert!(static_guard(line).is_none(), "{line} was refused");
+            let note = take_guard_note().unwrap_or_default();
+            let named: Vec<&str> = note
+                .lines()
+                .filter_map(|l| l.strip_prefix("allow\twarn\t")?.split('\t').next())
+                .collect();
+            assert_eq!(named, ["uproots-person-key", rule], "{line}: {note}");
         }
         for (line, rule) in [
             ("rm -rf .", "rm-rf-outside-tmp"),

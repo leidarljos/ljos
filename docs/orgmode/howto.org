@@ -317,6 +317,17 @@ policyd answers a command it warns about with =allow=, the rule and one warning,
 The warning is a label.
 ljos stops nothing on it.
 
+ljos adds a label of its own the same way.
+A command that deletes or moves a tree holding your key directory, such as =rm -rf /=, =rm -rf ~= or =shutil.rmtree(os.path.expanduser('~'))=, runs with =uproots-person-key=.
+Its warning names the tree and the key directory, and the bypass log keeps the label beside policyd's.
+
+#+begin_src console
+$ ljos policy -- rm -rf /
+rm -rf /
+allow	warn	uproots-person-key	the command deletes /, a tree that holds the person's key directory /home/you/.config/ljos
+allow	warn	rm-rf-outside-tmp	a recursive delete reaches outside /tmp and /var/tmp
+#+end_src
+
 To have those warnings refuse instead, name a policyd config in your own =ljos.toml= and put one line in that config:
 
 #+begin_src toml
@@ -333,6 +344,9 @@ ljos then passes that file every time it asks policyd, as =ljos-policyd check --
 With that line, policyd answers a warned command with =deny=, the same rule and the same warning, and exits 2.
 ljos reports it as policyd's deny: the hook blocks the tool call, =ljos policy --fail-on-deny= exits 1, and a guard shim exits 126.
 An =ljos-policyd= that does not read the line, 0.7.0 among them, leaves its warnings as labels.
+The line turns =uproots-person-key= into a deny only where policyd also warns on the same command.
+=rm -rf /= is one such command.
+=mv ~ /tmp/x= gets no warning from policyd, so it still runs with the label.
 
 #+begin_src console
 $ ljos policy -- sudo true

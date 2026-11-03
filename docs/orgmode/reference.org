@@ -446,6 +446,11 @@ A check that fails open still allows.
 A named config that is not there fails open on every command, with no rule or warning.
 [[file:howto.org][How-to]] has the steps.
 
+A command that deletes or moves a tree holding the person's key directory, such as =rm -rf /=, =rm -rf ~= or =shutil.rmtree(os.path.expanduser('~'))=, runs with ljos's own label =uproots-person-key=.
+Its warning names the tree and the key directory, and the bypass log keeps it as a =warn= row.
+A config with =block-on-warning true= denies such a command where policyd warns on it too.
+The same goes for a recursive delete outside =/tmp=.
+
 The tracker write check refuses a command, or a file tool, that writes the tracker's files by hand. Ticket text is data.
 A ticket body that names a path or a command is never read as one.
 

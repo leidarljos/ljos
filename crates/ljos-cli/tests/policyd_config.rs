@@ -379,6 +379,51 @@ fn a_named_config_holding_block_on_warning_reports_policyd_deny() {
     assert_denied(&seat, "the seat's ljos.toml names it under [gates]");
 }
 
+/// Deleting the root runs. It names `uproots-person-key` with the tree and
+/// the person's key directory beside policyd's own warning, and keeps a
+/// `warn` row of each. When the person's `ljos.toml` names a config with
+/// `block-on-warning true`, policyd's warning on the same command becomes
+/// its deny. ljos applies that deny and keeps no row for the label.
+#[test]
+fn a_named_config_holding_block_on_warning_denies_deleting_the_root() {
+    let seat = Seat::new();
+    let key = ljos_cli::person_key::key_dir().expect("a passwd home");
+    let uproots = format!(
+        "allow\twarn\tuproots-person-key\tthe command deletes /, a tree that holds the \
+         person's key directory {}\n",
+        key.display()
+    );
+    let labelled = || {
+        std::fs::read_to_string(seat.path(".local/share/ljos/bypass.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|row| serde_json::from_str::<serde_json::Value>(row).ok())
+            .filter(|row| row["rule"] == "uproots-person-key")
+            .count()
+    };
+    assert_eq!(
+        seat.policy_on(&["rm", "-rf", "/"]),
+        (
+            Some(0),
+            format!("rm -rf /\n{uproots}allow\twarn\trm-rf-outside-tmp\t{RM_WARNING}\n")
+        )
+    );
+    assert_eq!(labelled(), 1);
+    seat.write(".config/ljos/blocks.conf", BLOCKS);
+    seat.write(
+        ".config/ljos/ljos.toml",
+        "policyd_config = \"blocks.conf\"\n",
+    );
+    assert_eq!(
+        seat.policy_on(&["rm", "-rf", "/"]),
+        (
+            Some(1),
+            format!("rm -rf /\ndeny\trm-rf-outside-tmp\t{RM_WARNING}\n")
+        )
+    );
+    assert_eq!(labelled(), 1, "the deny keeps no row for the label");
+}
+
 /// A named config policyd cannot open is a check that fails open: the
 /// command still runs.
 #[test]

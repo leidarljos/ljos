@@ -375,8 +375,9 @@ fn as_run(words: &[String]) -> Vec<String> {
 /// `gio trash`, the destination of `rsync --delete` and the sources of
 /// `rsync --remove-source-files`, and the starting points of a `find`
 /// that deletes or runs one of [`UPROOTERS`]. Options are read as
-/// [`as_run`] spells them.
-fn uprooted(words: &[String]) -> Vec<String> {
+/// [`as_run`] spells them. Each operand says whether it is moved rather
+/// than deleted.
+fn uprooted(words: &[String]) -> Vec<(String, bool)> {
     let words = as_run(words);
     let cmd = words
         .first()
@@ -400,35 +401,45 @@ fn uprooted(words: &[String]) -> Vec<String> {
         }
     }
     let recursive = flags.contains(&"--recursive");
-    let picked: Vec<&str> = match cmd {
-        "rm" if recursive => args,
-        "mv" if target.is_some() => args,
+    fn all<'a>(words: &[&'a str], moves: bool) -> Vec<(&'a str, bool)> {
+        words.iter().map(|w| (*w, moves)).collect()
+    }
+    let picked: Vec<(&str, bool)> = match cmd {
+        "rm" if recursive => all(&args, false),
+        "mv" if target.is_some() => all(&args, true),
         "mv" => args
             .split_last()
-            .map(|(_, s)| s.to_vec())
+            .map(|(_, s)| all(s, true))
             .unwrap_or_default(),
-        "trash" | "trash-put" => args,
-        "gio" if args.first() == Some(&"trash") => args[1..].to_vec(),
+        "trash" | "trash-put" => all(&args, true),
+        "gio" if args.first() == Some(&"trash") => all(&args[1..], true),
         "rsync" => {
             let mut out = Vec::new();
             if let Some((last, sources)) = args.split_last() {
                 if flags.iter().any(|f| f.starts_with("--del")) {
-                    out.push(*last);
+                    out.push((*last, false));
                 }
                 if flags.contains(&"--remove-source-files") {
-                    out.extend(sources);
+                    out.extend(all(sources, true));
                 }
             }
             out
         }
         "find" => {
             let rest: Vec<&str> = words.iter().skip(1).map(String::as_str).collect();
-            let deletes = rest.iter().enumerate().any(|(i, w)| {
-                *w == "-delete"
-                    || (matches!(*w, "-exec" | "-execdir" | "-ok" | "-okdir")
-                        && as_run(&words[i + 2..]).first().is_some_and(|p| {
-                            UPROOTERS.contains(&p.rsplit('/').next().unwrap_or(p))
-                        }))
+            let action = rest.iter().enumerate().find_map(|(i, w)| {
+                if *w == "-delete" {
+                    return Some(false);
+                }
+                if !matches!(*w, "-exec" | "-execdir" | "-ok" | "-okdir") {
+                    return None;
+                }
+                let run = as_run(&words[i + 2..]);
+                let program = run.first()?;
+                let program = program.rsplit('/').next().unwrap_or(program);
+                UPROOTERS
+                    .contains(&program)
+                    .then_some(matches!(program, "mv" | "trash" | "trash-put"))
             });
             let mut starts = Vec::new();
             let mut i = 0;
@@ -442,43 +453,71 @@ fn uprooted(words: &[String]) -> Vec<String> {
                 }
                 i += 1;
             }
-            if deletes {
-                starts
-            } else {
-                Vec::new()
-            }
+            action.map_or_else(Vec::new, |moves| all(&starts, moves))
         }
         _ => Vec::new(),
     };
-    picked.into_iter().map(str::to_string).collect()
+    picked
+        .into_iter()
+        .map(|(w, moves)| (w.to_string(), moves))
+        .collect()
 }
 
-/// The word of one command that removes or moves, with all it holds, the
-/// key directory or a directory above it: `rm -rf ~`, `find ~ -delete`,
+/// A tree one command deletes or moves with the key directory inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Uprooted {
+    /// The tree, resolved where the guard can resolve it, else as written.
+    pub(crate) tree: String,
+    /// The command moves the tree rather than deletes it.
+    pub(crate) moves: bool,
+}
+
+impl Uprooted {
+    /// What the guard says as the command runs. It names the tree and the
+    /// key directory inside it on one line with no tab, the same shape as
+    /// a warning field of ljos-policyd's allow-with-warning.
+    pub(crate) fn warning(&self) -> String {
+        let verb = if self.moves { "moves" } else { "deletes" };
+        let key = key_dir().map_or_else(String::new, |d| d.display().to_string());
+        format!(
+            "the command {verb} {}, a tree that holds the person's key directory {key}",
+            self.tree
+        )
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+    }
+}
+
+/// The tree a command removes or moves whole, when that tree is the key
+/// directory or a directory above it: `rm -rf ~`, `find ~ -delete`,
 /// `mv ~/.config x`. Each word is resolved as [`reached`] resolves it.
 /// A word the guard cannot expand, such as `~user/.config`, counts when
 /// its file name, a leading `~` off, is that of the key directory or a
 /// directory above it.
-pub(crate) fn uproots(words: &[String], cwd: Option<&Path>) -> Option<String> {
+pub(crate) fn uproots(words: &[String], cwd: Option<&Path>) -> Option<Uprooted> {
     let (inside, _) = guarded()?;
     let names: Vec<_> = inside
         .iter()
         .flat_map(|d| d.ancestors())
         .filter_map(Path::file_name)
         .collect();
-    uprooted(words).into_iter().find_map(|word| {
+    uprooted(words).into_iter().find_map(|(word, moves)| {
         let bare = word.trim_matches(|c| c == '"' || c == '\'');
         paths_of(bare, cwd)
             .into_iter()
-            .any(|path| match path {
-                Some(p) => inside.iter().any(|d| crate::kept_prompt::encloses(&p, d)),
+            .find_map(|path| match path {
+                Some(p) => inside
+                    .iter()
+                    .any(|d| crate::kept_prompt::encloses(&p, d))
+                    .then(|| p.display().to_string()),
                 None => {
                     let name = bare.trim_end_matches('/').rsplit('/').next();
                     let name = name.unwrap_or(bare).trim_start_matches('~');
-                    names.iter().any(|n| *n == name)
+                    names.iter().any(|n| *n == name).then(|| bare.to_string())
                 }
             })
-            .then(|| word.clone())
+            .map(|tree| Uprooted { tree, moves })
     })
 }
 
@@ -486,6 +525,9 @@ pub(crate) fn uproots(words: &[String], cwd: Option<&Path>) -> Option<String> {
 /// tree their first argument names.
 const TREE_CALLS: &str = "rmtree removedirs remove_tree rm_rf rm_r rm rmSync rmdir rmdirSync \
                           move mv rename renames renameSync";
+
+/// The [`TREE_CALLS`] that move the tree rather than delete it.
+const MOVE_CALLS: &str = "move mv rename renames renameSync";
 
 /// Calls whose arguments build the path they return.
 const PATH_CALLS: &str = "join expanduser expand_path abspath realpath normpath resolve Path \
@@ -607,16 +649,16 @@ fn built(expr: &str, vars: &std::collections::HashMap<String, String>) -> Option
     Some(out)
 }
 
-/// The call in the code one command runs, as
-/// [`crate::kept_prompt::code_of`] finds it, that removes or moves the
-/// key directory or a directory above it, such as
+/// The tree a call in the code one command runs, as
+/// [`crate::kept_prompt::code_of`] finds it, removes or moves, when that
+/// is the key directory or a directory above it, such as
 /// `shutil.rmtree(os.path.expanduser('~'))`. The first argument of each
 /// of [`TREE_CALLS`] is read as [`built`] reads it, with the variables
 /// earlier statements set. When it cannot be read, a string or home
 /// anywhere in the code that alone names such a directory counts, as
 /// does a word the program is handed, such as the `~` of
 /// `python3 -c 'shutil.rmtree(sys.argv[1])' ~`.
-pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> Option<String> {
+pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> Option<Uprooted> {
     let (inside, _) = guarded()?;
     let (code, fed) = crate::kept_prompt::code_of(words, line)?;
     let handed: Vec<&String> = if fed {
@@ -635,7 +677,7 @@ pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> 
         paths_of(word, cwd)
             .into_iter()
             .flatten()
-            .any(|p| inside.iter().any(|d| crate::kept_prompt::encloses(&p, d)))
+            .find(|p| inside.iter().any(|d| crate::kept_prompt::encloses(p, d)))
     };
     let mut vars = std::collections::HashMap::new();
     for stmt in code.split(['\n', ';']) {
@@ -656,23 +698,23 @@ pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> 
         }
     }
     let named_anywhere = || {
-        if handed.iter().any(|w| hits(w)) {
-            return true;
+        if let Some(path) = handed.iter().find_map(|w| hits(w)) {
+            return Some(path);
         }
         let chars = homes_quoted(code);
         let mut i = 0;
         while i < chars.len() {
             if matches!(chars[i], '\'' | '"') {
                 let (text, end) = quoted(&chars, i);
-                if hits(&text) {
-                    return true;
+                if let Some(path) = hits(&text) {
+                    return Some(path);
                 }
                 i = end;
             } else {
                 i += 1;
             }
         }
-        false
+        None
     };
     let calls = tree_call_names(code);
     let chars: Vec<char> = code.chars().collect();
@@ -695,8 +737,11 @@ pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> 
             continue;
         };
         let arg: String = chars[from..end].iter().collect();
-        if built(&arg, &vars).map_or_else(named_anywhere, |path| hits(&path)) {
-            return Some(format!("{name}({})", arg.trim()));
+        if let Some(tree) = built(&arg, &vars).map_or_else(named_anywhere, |path| hits(&path)) {
+            return Some(Uprooted {
+                tree: tree.display().to_string(),
+                moves: listed(MOVE_CALLS, &name),
+            });
         }
     }
     None
