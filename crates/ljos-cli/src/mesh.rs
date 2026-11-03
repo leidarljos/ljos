@@ -93,11 +93,44 @@ pub fn joined_node() -> Option<String> {
         .ok()
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty())?;
-    if recorded(&dir).is_some_and(|(_, ours)| ours) {
+    if still_up(&dir) {
         return Some(node);
     }
     let _ = std::fs::remove_file(dir.join(JOINED));
     None
+}
+
+/// Whether the pid file still names the tailscaled `start_daemon`
+/// recorded. On Linux that is one read of `/proc`, so every write checks.
+#[cfg(target_os = "linux")]
+fn still_up(dir: &Path) -> bool {
+    recorded(dir).is_some_and(|(_, ours)| ours)
+}
+
+/// The same check with `ps` run once per pid file in this process, so a
+/// pack write does not start a process each time. Later writes ask only
+/// whether the pid is live. A pid reused between two writes of one
+/// process keeps the label until that process ends.
+#[cfg(not(target_os = "linux"))]
+fn still_up(dir: &Path) -> bool {
+    use std::sync::{Mutex, PoisonError};
+    static SEEN: Mutex<Option<String>> = Mutex::new(None);
+    let Ok(text) = std::fs::read_to_string(dir.join(PID)) else {
+        return false;
+    };
+    let mut seen = SEEN.lock().unwrap_or_else(PoisonError::into_inner);
+    let pid = text
+        .lines()
+        .next()
+        .and_then(|l| l.trim().parse::<libc::pid_t>().ok());
+    // SAFETY: signal 0 sends nothing; it only asks whether the pid exists.
+    let live = pid.is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0);
+    if live && seen.as_deref() == Some(text.as_str()) {
+        return true;
+    }
+    let ours = recorded(dir).is_some_and(|(_, ours)| ours);
+    *seen = ours.then_some(text);
+    ours
 }
 
 /// Returns the start time of `pid` in clock ticks since boot. It returns
@@ -117,6 +150,9 @@ fn started(pid: u32) -> Option<String> {
 }
 
 /// When `pid` started, as `ps` prints it, or none when no process has it.
+/// `lstart` counts whole seconds, so a pid reused within the second the
+/// daemon started would match. macOS hands out pids in turn up to 99,999,
+/// so that needs the pids to wrap within that second.
 #[cfg(not(target_os = "linux"))]
 fn started(pid: u32) -> Option<String> {
     let out = Command::new("ps")
