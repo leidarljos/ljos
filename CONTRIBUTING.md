@@ -14,9 +14,14 @@ At release time `towncrier build --version X.Y.Z` collects the fragments into `C
 
 ## Tests
 
-`cargo test --locked --workspace` runs the real programs ljos drives, so put them on `PATH` first, as the `cargo test` job in `.github/workflows/ci.yml` does:
-`age` and `age-keygen` from your package manager, `packset` and `packsetd` built from the `develop` branch of [packset](https://github.com/leidarljos/packset) with `cargo build -p packset --bin packset --bin packsetd`, and `vissue`, `claimdag` and `deedar` built from the commits named in `.github/sibling-pin`.
-The guard tests ask `ljos-policyd` how a shell line reads, so build it as well, from the [ljos-policyd](https://github.com/leidarljos/ljos-policyd) commit the `cargo test` job pins, with `PHRONESIS_DIR` set to an install of [phronesis](https://github.com/leidarljos/phronesis) `v0.2.5`, as CI does.
+`cargo test --locked --workspace` runs the real programs ljos drives, so put them on `PATH` first.
+`scripts/sibling-tools.sh DEST` builds them into DEST, and the `cargo test` job runs that script.
+It reads `.github/sibling-pin` for `vissue`, `claimdag` and `deedar`, and the commits in the script for `packset`, `packsetd`, [phronesis](https://github.com/leidarljos/phronesis) and `ljos-policyd`.
+It installs the binaries into DEST and checks each `--version` against its pin.
+`ljos-policyd version` must contain `(phronesis)`, because the guard tests ask that build how a shell line reads.
+The script needs `git`, the Rust toolchain in `rust-toolchain.toml`, and the packages `g++`, `meson`, `ninja-build`, `capnproto` and `pkg-config`.
+`g++` is the C++ compiler phronesis's c-capnproto wrap needs; without it `meson setup` stops with `Compiler c++ cannot compile programs.`
+`age` and `age-keygen` come from your package manager; the script does not build them.
 A test that finds one missing panics with its name; that run does not count.
 Run the suite from a shell with no `LJOS_OFF` set and outside an agent runner.
 

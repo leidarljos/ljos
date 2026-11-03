@@ -141,144 +141,30 @@ jobs:
       # The hook queue test reads each call's peak RSS from GNU time.
       - name: Install age, tmux, notmuch and time
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh
-      - name: Build packset at the pinned commit
-        run: |
-          set -euo pipefail
-          sha=0fed66408b081a1749befac682304d92e7b29586
-          dir="${{ runner.temp }}/packset"
-          git init -q "$dir"
-          git -C "$dir" remote add origin https://github.com/leidarljos/packset.git
-          git -C "$dir" fetch --depth 1 origin "$sha"
-          git -C "$dir" checkout --detach FETCH_HEAD
-          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
-          cargo build --locked --manifest-path "$dir/Cargo.toml" -p packset --bin packset --bin packsetd
-          mkdir -p "${{ runner.temp }}/bin"
-          install -m 0755 "$dir/target/debug/packset" "${{ runner.temp }}/bin/packset"
-          install -m 0755 "$dir/target/debug/packsetd" "${{ runner.temp }}/bin/packsetd"
-          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
-          export PATH="${{ runner.temp }}/bin:${PATH}"
-          command -v age-keygen
-          command -v packset
-          command -v packsetd
-      # vissue, claimdag and deedar are the sibling tools the tracker
-      # tests run. .github/sibling-pin names each by repository, full
-      # commit and the version `NAME --version` prints. A tag moves, so
-      # the commit is what is built. The binaries depend only on that
-      # file, so a later run with the same pin reuses them. A substring
-      # of the version (`grep 0.20`) matches a different release, so the
-      # check is the whole first line.
-      - name: Cache pinned vissue, claimdag and deedar
-        id: siblings
+      # vissue, claimdag and deedar are named in .github/sibling-pin.
+      # packset, phronesis and ljos-policyd are named in
+      # scripts/sibling-tools.sh. The script builds each pin, checks the
+      # version line and installs into one directory. A local run uses
+      # the same script. The binaries depend only on the pin file and the
+      # script, so a later run with the same two reuses them. A substring
+      # of a version matches a different release, so the script compares
+      # the whole first line.
+      - name: Cache pinned sibling tools
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/sibling-bin
-          key: sibling-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/sibling-pin') }}
-      - name: Build vissue, claimdag and deedar at the pinned commits
-        if: steps.siblings.outputs.cache-hit != 'true'
+          key: sibling-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/sibling-pin', 'scripts/sibling-tools.sh') }}
+      - name: Build pinned sibling tools
         run: |
           set -euo pipefail
-          dest="${{ runner.temp }}/sibling-bin"
-          mkdir -p "$dest"
-          line_no=0
-          while IFS= read -r line || [ -n "$line" ]; do
-            line_no=$((line_no + 1))
-            trim=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            case "$trim" in
-              ''|\#*) continue ;;
-            esac
-            set -- $trim
-            if [ "$#" -ne 4 ]; then
-              echo "sibling-pin:${line_no}: want name repository commit version" >&2
-              exit 1
-            fi
-            name=$1
-            repo=$2
-            commit=$3
-            case "$repo" in
-              https://github.com/leidarljos/*.git) ;;
-              *) echo "sibling-pin:${line_no}: ${name} repository is not a leidarljos git url" >&2; exit 1 ;;
-            esac
-            # git names these objects with SHA-1: 40 hexadecimal digits.
-            printf '%s' "$commit" | grep -Eq '^[0-9a-f]{40}$' || {
-              echo "sibling-pin:${line_no}: ${name} commit is not a full SHA-1" >&2
-              exit 1
-            }
-            case "$name" in
-              vissue) pkg=vissue-cli ;;
-              claimdag) pkg=claimdag-cli ;;
-              deedar) pkg=deedar-cli ;;
-              *) echo "sibling-pin:${line_no}: no package for ${name}" >&2; exit 1 ;;
-            esac
-            dir="${{ runner.temp }}/src-${name}"
-            rm -rf "$dir"
-            git init -q "$dir"
-            git -C "$dir" remote add origin "$repo"
-            git -C "$dir" fetch --depth 1 origin "$commit"
-            git -C "$dir" checkout --detach FETCH_HEAD
-            test "$(git -C "$dir" rev-parse HEAD)" = "$commit"
-            cargo build --locked --manifest-path "$dir/Cargo.toml" -p "$pkg" --bin "$name"
-            install -m 0755 "$dir/target/debug/$name" "$dest/$name"
-          done < .github/sibling-pin
-      - name: Sibling tools on PATH
-        run: |
-          set -euo pipefail
-          dest="${{ runner.temp }}/sibling-bin"
-          echo "$dest" >> "$GITHUB_PATH"
-          export PATH="$dest:${PATH}"
-          line_no=0
-          while IFS= read -r line || [ -n "$line" ]; do
-            line_no=$((line_no + 1))
-            trim=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            case "$trim" in
-              ''|\#*) continue ;;
-            esac
-            set -- $trim
-            name=$1
-            version=$4
-            test -x "$dest/$name"
-            # The first line only. A pipe into `head` can SIGPIPE a tool
-            # that writes more, and `pipefail` would then fail a good pin.
-            got=$("$dest/$name" --version)
-            got=${got%%$'\n'*}
-            want="$name $version"
-            if [ "$got" != "$want" ]; then
-              echo "sibling-pin:${line_no}: ${name} --version printed '${got}', pin says '${want}'" >&2
-              exit 1
-            fi
-          done < .github/sibling-pin
-      # The guard tests ask the real ljos-policyd about a shell line, so
-      # they run a released build, phronesis linked. The commit is pinned,
-      # as for the other tools, so a policyd change reaches these tests
-      # only with an ljos commit. The pin is the v0.7.0 tag.
-      - name: Build ljos-policyd at the pinned commit with phronesis
-        run: |
-          set -euo pipefail
-          sudo apt-get install -y --no-install-recommends meson ninja-build capnproto pkg-config
-          # phronesis keeps no release tags, so the commit is pinned, as
-          # for the other companion tools.
-          sha=7d115de79407a54e0be5050f95107cfa08fe6277
-          git init -q "${{ runner.temp }}/phronesis"
-          cd "${{ runner.temp }}/phronesis"
-          git remote add origin https://github.com/leidarljos/phronesis.git
-          git fetch --depth 1 origin "$sha"
-          git checkout --detach FETCH_HEAD
-          test "$(git rev-parse HEAD)" = "$sha"
-          meson setup build --prefix="${{ runner.temp }}/phronesis-prefix" -Dtests=disabled
-          meson compile -C build
-          meson install -C build
-          cd "$GITHUB_WORKSPACE"
-          sha=233639176f497444068e7b92526fe8556528a9a9
-          dir="${{ runner.temp }}/ljos-policyd"
-          git init -q "$dir"
-          git -C "$dir" remote add origin https://github.com/leidarljos/ljos-policyd.git
-          git -C "$dir" fetch --depth 1 origin "$sha"
-          git -C "$dir" checkout --detach FETCH_HEAD
-          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
-          PHRONESIS_DIR="${{ runner.temp }}/phronesis-prefix" cargo build --locked --release --manifest-path "$dir/Cargo.toml"
-          mkdir -p "${{ runner.temp }}/bin"
-          install -m 0755 "$dir/target/release/ljos-policyd" "${{ runner.temp }}/bin/ljos-policyd"
-          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
-          "${{ runner.temp }}/bin/ljos-policyd" version | grep -q '(phronesis)'
+          # phronesis's c-capnproto wrap is C++. The runner image has g++;
+          # install it with the other packages so this step asks for the
+          # same set CONTRIBUTING names.
+          sudo apt-get install -y --no-install-recommends g++ meson ninja-build capnproto pkg-config
+          scripts/sibling-tools.sh "${{ runner.temp }}/sibling-bin"
+          echo "${{ runner.temp }}/sibling-bin" >> "$GITHUB_PATH"
+          export PATH="${{ runner.temp }}/sibling-bin:${PATH}"
+          command -v age-keygen
       # A test that runs git in this checkout writes its .git/config, and
       # the next commit here runs hooks from a temp home that is gone.
       # Without --no-fail-fast one failing lib test stopped cargo before
