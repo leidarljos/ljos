@@ -31658,6 +31658,30 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                                 assignee,
                             )
                         }
+                        // The holder took the node under a `sand-sub` id as
+                        // well, so that id does not tell this caller from
+                        // the holder: the seat goes on under the hold it
+                        // already has rather than filing a child of its own
+                        // ticket for itself.
+                        Some(h)
+                            if h.seat == seat_name()
+                                && hold_alive(&h)
+                                && cursor_conversation().is_some_and(|c| subagent_id(&c))
+                                && hold_line(&holder, 8).is_some_and(|c| subagent_id(&c)) =>
+                        {
+                            let renewed =
+                                run_captured("claimdag", &["renew", &id, "--actor", &holder])
+                                    .map(|s| s.stdout)
+                                    .unwrap_or_default();
+                            with_tracker(
+                                format!(
+                                    "already held by {}; the sitting resumes\n{renewed}",
+                                    h.assignee
+                                ),
+                                node,
+                                &h.assignee,
+                            )
+                        }
                         Some(h)
                             if h.seat == seat_name()
                                 && hold_alive(&h)
@@ -32050,20 +32074,20 @@ fn same_seat_hold(id: &str, actor: &str) -> Option<(String, Hold)> {
         return None;
     }
     let hold = read_hold(&holder)?;
-    let graph = hold_graph(&holder);
+    let graph = hold_line(&holder, 6);
     (hold.seat == seat_name() && graph.is_none_or(|g| g == claim_graph_scope()))
         .then_some((holder, hold))
 }
 
-/// The claim graph a hold record names on its seventh line; `None` for a
-/// record written before that line existed.
-fn hold_graph(actor: &str) -> Option<String> {
+/// Line `n`, counted from zero, of the hold record `actor` left; `None`
+/// when it is blank or the record was written before that line existed.
+fn hold_line(actor: &str, n: usize) -> Option<String> {
     std::fs::read_to_string(hold_record_path(actor))
         .ok()?
         .lines()
-        .nth(6)
+        .nth(n)
         .map(str::trim)
-        .filter(|g| !g.is_empty())
+        .filter(|l| !l.is_empty())
         .map(str::to_string)
 }
 
@@ -32147,14 +32171,17 @@ fn write_hold(actor: &str, assignee: &str, node: &str) {
     // The seventh names the claim graph, since every graph on the host
     // shares this directory. The eighth names the tracker that holds the
     // issue, so a gate reads one tracker instead of walking every root.
+    // The ninth names the conversation this process spoke for, so a later
+    // sitting learns whether that one carried a `sand-sub` id as well.
     let _ = std::fs::write(
         path,
         format!(
-            "{assignee}\n{}\n{pid}\n{comm}\n{}\n{node}\n{}\n{}\n",
+            "{assignee}\n{}\n{pid}\n{comm}\n{}\n{node}\n{}\n{}\n{}\n",
             seat_name(),
             now_utc(),
             claim_graph_scope(),
-            tracker_line(node)
+            tracker_line(node),
+            cursor_conversation().unwrap_or_default()
         ),
     );
 }

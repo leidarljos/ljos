@@ -3249,13 +3249,16 @@ elif cmd == "get":
         sys.exit(1)
 elif cmd == "claim":
     i, who = a[1], opt("--assignee")
-    cur = s["claims"].get(i)
-    if cur and cur != who:
-        sys.stderr.write(f"claimdag: node {i} status claimed\n"); sys.exit(1)
+    if i in s["claims"]:
+        sys.stderr.write("claim: status claimed\n"); sys.exit(1)
     s["claims"][i] = who
     if i not in s["known"]:
         s["known"].append(i)
     save(); print("gen=2")
+elif cmd == "renew":
+    if s["claims"].get(a[1]) != opt("--actor"):
+        sys.stderr.write("renew: not assignee\n"); sys.exit(1)
+    print("gen=2")
 elif cmd == "release":
     s["claims"].pop(a[1], None); save()
 elif cmd in ("list", "ready"):
@@ -3279,8 +3282,8 @@ elif cmd == "show":
     print(json.dumps(s["cards"].get(i, {"id": i, "title": "the work", "state": "TODO"})))
 elif cmd == "claim":
     i = pos[0]
-    s["cards"][i] = {"id": i, "title": "the work", "state": "STARTED",
-                     "claimed_by": os.environ.get("VISSUE_AGENT", "")}
+    s["cards"][i] = {"id": i, "title": s["cards"].get(i, {}).get("title", "the work"),
+                     "state": "STARTED", "claimed_by": os.environ.get("VISSUE_AGENT", "")}
     save(); print("claimed")
 elif cmd == "create":
     s["n"] += 1
@@ -3292,7 +3295,7 @@ elif cmd == "create":
 elif cmd == "claims":
     print("[]")
 elif cmd == "identity":
-    print("vissue 99.0.0\nroot=\nprefix=Software")
+    print("vissue 99.0.0\nroot=" + os.environ.get("VISSUE_ROOT", "") + "\nprefix=Software")
 else:
     print("{}")
 "###;
@@ -3380,6 +3383,126 @@ fn rv5_a_subagent_is_not_filed_under_whichever_ticket_was_sat_on_last() {
         under_y, 0,
         "X's subagent was filed under Y's ticket proj-two:\n{filed:#}\n{said}"
     );
+}
+
+/// `ljos sitting {ISSUE}` twice, each from a fresh shell the runner starts
+/// under the conversation id the step names, with the issue in a tracker.
+/// Says what the shells said, the titles of the tickets filed, how many
+/// nodes the claim graph holds claimed, and whom the tracker says holds
+/// the issue.
+fn two_sittings(first: &str, second: &str) -> (String, Vec<String>, usize, String) {
+    let home = Box_::new();
+    script(&home.bin.join("claimdag"), RV_STUB_CLAIMDAG);
+    script(&home.bin.join("vissue"), RV_STUB_VISSUE);
+    script(&home.bin.join("deedar"), "#!/bin/sh\necho head\n");
+    let tracker = home.home.join("tracker");
+    let project = tracker.join("Software/proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("issues.org"),
+        format!(
+            "#+VISSUE: 1\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
+             * TODO [#A] the work\n:PROPERTIES:\n:ID:       {ISSUE}\n:END:\n"
+        ),
+    )
+    .unwrap();
+    let state = home.run.join("stub");
+    std::fs::create_dir_all(&state).unwrap();
+    let sit = format!("\"$LJOS\" sitting {ISSUE}");
+    let said = home.under(
+        Path::new("/usr/bin/python3"),
+        &[
+            ("STUB_STATE", state.to_str().unwrap()),
+            ("VISSUE_ROOT", tracker.to_str().unwrap()),
+            ("LJOS_HOOKD", "off"),
+        ],
+        "",
+        &[(Some(first), &sit), (Some(second), &sit)],
+    );
+    let read = |name: &str| -> serde_json::Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(state.join(name)).unwrap_or_else(|_| "{}".into()),
+        )
+        .unwrap()
+    };
+    let (tickets, graph) = (read("vissue.json"), read("claimdag.json"));
+    let filed = tickets["created"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let id = c["id"].as_str().unwrap_or("");
+            tickets["cards"][id]["title"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    let claims = graph["claims"].as_object().map_or(0, serde_json::Map::len);
+    let by = tickets["cards"][ISSUE]["claimed_by"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    (said, filed, claims, by)
+}
+
+/// Every shell call of one conversation is a fresh process. A second
+/// sitting on the ticket the first one took goes on with that hold.
+#[test]
+fn a_second_sitting_from_another_shell_of_one_conversation_resumes() {
+    let (said, filed, claims, by) = two_sittings(CONV_X, CONV_X);
+    assert!(
+        said.contains(&format!(
+            "already held by {}; the sitting resumes",
+            holder(CONV_X)
+        )),
+        "the second sitting did not resume:\n{said}"
+    );
+    assert!(said.ends_with("EXIT 0\n"), "{said}");
+    assert!(filed.is_empty(), "tickets were filed: {filed:?}\n{said}");
+    assert_eq!(claims, 1, "{said}");
+    assert_eq!(by, holder(CONV_X), "{said}");
+}
+
+/// A runner that gives each shell call its own `sand-sub` id, the first
+/// sitting's included. The second id does not tell its sitting from the
+/// one that holds the ticket, so the seat resumes the hold it has instead
+/// of filing `subtask TAG on {ISSUE}` for itself.
+#[test]
+fn a_second_sitting_whose_shell_has_a_new_sand_sub_id_resumes() {
+    let (first, second) = ("sand-sub-0001aaaa", "sand-sub-0002bbbb");
+    let (said, filed, claims, by) = two_sittings(first, second);
+    assert!(
+        said.contains(&format!(
+            "already held by {}; the sitting resumes",
+            holder(first)
+        )),
+        "the second sitting did not resume:\n{said}"
+    );
+    assert!(said.ends_with("EXIT 0\n"), "{said}");
+    assert!(filed.is_empty(), "tickets were filed: {filed:?}\n{said}");
+    assert_eq!(claims, 1, "{said}");
+    assert_eq!(by, holder(first), "{said}");
+}
+
+/// The conversation that holds the ticket has an ordinary id and the
+/// second sitting's shell a `sand-sub` one: a worker it started. That
+/// worker gets a child ticket of its own, as before.
+#[test]
+fn a_sand_sub_sitting_on_a_ticket_an_ordinary_conversation_holds_files_its_child() {
+    let sub = "sand-sub-0001cccc";
+    let (said, filed, claims, _) = two_sittings(CONV_X, sub);
+    assert!(
+        said.contains(&format!(
+            "filed child proj-c001 under {ISSUE} (held by {})",
+            holder(CONV_X)
+        )),
+        "no child was filed:\n{said}"
+    );
+    assert!(said.ends_with("EXIT 0\n"), "{said}");
+    let tag = ljos_cli::session_tag(sub);
+    assert_eq!(filed, [format!("subtask {tag} on {ISSUE}")], "{said}");
+    assert_eq!(claims, 2, "{said}");
 }
 
 /// Another process holds `tmux-sock.lock`. A Cursor shell hook on an
