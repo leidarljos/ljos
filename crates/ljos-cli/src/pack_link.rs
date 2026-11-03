@@ -255,9 +255,17 @@ pub(crate) fn error_is_timeout(err: &Error) -> bool {
 
 /// Whether every socket listening on the loopback port of `url` belongs to
 /// another user. Unknown is not foreign.
+///
+/// A hook keeps its first answer for each url. The socket tables are read
+/// in full each time, a hook connects more than once, and it ends within
+/// the runner's cut-off. Any other process reads them on every call. A
+/// writer that stops leaves its port to whoever binds it next. A
+/// long-lived process that kept its first answer would go on carrying
+/// the token to another user's listener, or never to its own.
 fn foreign(url: &str) -> bool {
-    // Answered once per process for each url: the socket tables are read
-    // in full each time, and a hook connects several times.
+    if std::env::var_os("LJOS_IN_HOOK").is_none() {
+        return foreign_read(url);
+    }
     static KNOWN: std::sync::LazyLock<Mutex<Vec<(String, bool)>>> =
         std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
     if let Some((_, known)) = KNOWN
