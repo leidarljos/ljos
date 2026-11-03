@@ -609,8 +609,9 @@ Push                                                                            
 ====================================================================================== ==================================
 an ordinary push of a branch, a tag, or a lease push to a branch that is not protected runs
 a lease push or a force push onto a protected branch                                   runs, named ``git-force-push``
+deleting a remote branch                                                               runs, named ``git-push-delete``
 a push onto a protected branch, with no settled consensus on the sitting's ticket      asks
-deleting a remote branch, or rewriting published history                               asks or denies, by policyd's table
+rewriting published history                                                            asks or denies, by policyd's table
 ====================================================================================== ==================================
 
 A cloud seat has one push rule. It may push the branches named in its ``ljos.toml`` and ``develop``, with no force

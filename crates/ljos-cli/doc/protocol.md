@@ -574,7 +574,7 @@ under equal weights is a count; under calibrated rows it is not.
   passing `ljos evidence record -- <test command>` run, the push still runs
 and the answer carries a warning.
 A force or mirror push runs too: the answer is one `allow\twarn\tgit-force-push\t...` line, and the bypass log keeps the label.
-A delete push asks.
+A delete push runs the same way, named `git-push-delete`.
 A push onto a protected branch asks only when `owners` is set and the remote's owner is not in it.
 A merge pushed to your own repository runs.
   `gh pr merge` with red or pending checks is refused. A head sha with no

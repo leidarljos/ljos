@@ -137,15 +137,18 @@ pub(crate) fn open_or_name_sitting() -> Option<String> {
     crate::live_held_issue().map(|(issue, _)| issue)
 }
 
-/// A delete push is not this check: the built-in push rule asks about it.
-/// A cloud seat refuses a force or mirror push, so neither is judged here
-/// on a cloud seat. Anywhere else both run with a warning and are judged
-/// here like any other push.
+/// A cloud seat refuses a force, mirror or delete push. So on a cloud seat
+/// none of them is judged here. Anywhere else each runs with a warning and
+/// is judged here like any other push.
 fn plain_protected_push(args: &[String]) -> bool {
-    let forced = |arg: &String| arg.starts_with("--force") || arg == "--mirror";
-    !args.iter().any(|arg| {
-        arg == "--delete" || arg.starts_with(':') || (forced(arg) && crate::cloud::cloud_seat())
-    })
+    let refused = |arg: &String| {
+        arg.starts_with("--force")
+            || arg == "--mirror"
+            || arg == "--delete"
+            || arg == "-d"
+            || arg.starts_with(':')
+    };
+    !(crate::cloud::cloud_seat() && args.iter().any(refused))
 }
 
 /// A push onto a protected branch asks when the sitting has no settled

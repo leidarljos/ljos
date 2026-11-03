@@ -14183,13 +14183,9 @@ fn offers_approval(reason: &str) -> bool {
 /// would contradict it. A bare ask tells the agent to stop and leave the
 /// command. `stuck` is that sentence, with its leading space. A cited
 /// push (`LJOS_CITE=`) says the same line does not pass again unchanged.
-/// A force push's reason says the agent asks first; here no prompt comes,
-/// so it says the push needs the person's approval.
 fn denial_for_unasked(rule: &Rule, stuck: &str) -> String {
-    let reason = rule
-        .reason
-        .replace("the agent asks you first", "it needs the person's approval");
-    if offers_approval(&reason) {
+    let reason = &rule.reason;
+    if offers_approval(reason) {
         return format!("{reason} (ljos rule `{}`)", rule.pattern);
     }
     let (lead, tail) = if reason.contains("LJOS_CITE=") {
@@ -21816,8 +21812,8 @@ pub fn validate_rule(rule: &Rule) -> Result<()> {
         bail!(
             "rule: `{pattern}` matches an ordinary git push. A rule stays as exact as the command \
              it cites; `git push*` and any pattern that covers ordinary branch pushes is refused. \
-             Force (`git push --force*`, `*--force*`), deleting a remote branch \
-             (`git push*--delete*`), and tag pushes (`git push*--tags*`) can still ask"
+             A deny can still name a force push (`git push --force*`, `*--force*`) or deleting \
+             a remote branch (`git push*--delete*`)"
         );
     }
     if under_a_runner() && broader_than_cited(pattern, reason) {
@@ -23959,7 +23955,8 @@ pub enum PushTier {
     /// A push to the person's own repository that is released or shared:
     /// it runs when it cites a settled decision.
     Cite(String),
-    /// A remote-branch or tag delete: the person runs it.
+    /// A remote-branch or tag delete, with what it removes. It runs,
+    /// naming `git-push-delete`.
     Person(String),
 }
 
@@ -23989,7 +23986,7 @@ pub struct PushFacts {
 /// How the gate reads a push from its arguments. A branch, tag, force or
 /// mirror push is free on any remote: an unreadable owner, a foreign
 /// account, a shared repository and a release do not ask or deny. A
-/// remote-branch or tag delete is the person's to run. Pure, so the ladder
+/// remote-branch or tag delete is a tier of its own. Pure, so the ladder
 /// is tested without a repository. `facts` stays so a caller that already
 /// looked the remote up still compiles; it does not change the tier.
 #[must_use]
@@ -24001,13 +23998,13 @@ pub fn push_tier(args: &[String], facts: &PushFacts) -> PushTier {
     PushTier::Free
 }
 
-/// Deleting a remote branch or tag: `--delete`, or a `:branch` refspec.
-/// Every other push, a force push included, is not this. A tag push
-/// (`--tags`, `--follow-tags`, `refs/tags/v1`, `tag v1`) adds refs and
-/// replaces none.
+/// Deleting a remote branch or tag: `--delete`, `-d`, or a `:branch`
+/// refspec. Every other push, a force push included, is not this. A tag
+/// push (`--tags`, `--follow-tags`, `refs/tags/v1`, `tag v1`) adds refs
+/// and replaces none.
 fn dangerous_push_reason(args: &[String]) -> Option<String> {
     args.iter()
-        .any(|a| a == "--delete" || delete_refspec(a))
+        .any(|a| a == "--delete" || a == "-d" || delete_refspec(a))
         .then(|| "deleting a remote branch removes shared work".into())
 }
 
@@ -24223,7 +24220,7 @@ pub fn repo_fact_text(owner: &str, repo: &str, facts: &Value) -> String {
     };
     format!(
         "{owner}/{repo} is {whose} repository; a branch or tag push runs, and a force \
-         push, a remote-branch delete, or a mirror push is the person's to run."
+         push, a remote-branch delete, or a mirror push runs with a warning."
     )
 }
 
@@ -25879,11 +25876,11 @@ fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
 /// ordinary branch push is allowed, including when a seat rule says
 /// `git push*` and when the remote's owner cannot be read. A force push, a
 /// `+refspec` and a mirror push run too, and name `git-force-push` for
-/// [`take_guard_note`]. Deleting a remote branch asks by default. A tag
-/// push is ordinary.
-/// That ask does not wait for a seat rule. A seat rule that denies the
-/// force or the delete still denies it. A rule about some other command on
-/// the same line is left as it is when the push itself is ordinary.
+/// [`take_guard_note`]. Deleting a remote branch runs and names
+/// `git-push-delete`. A tag push is ordinary.
+/// A seat rule that denies the force or the delete still denies it. A rule
+/// about some other command on the same line is left as it is when the
+/// push itself is ordinary.
 #[must_use]
 pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<Rule> {
     // A temporary HOME and LJOS_OFF switch the whole guard off, the push
@@ -25899,32 +25896,22 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
     let about_push = rule.is_some_and(|r| {
         rule_matches(&r.pattern, &segment) || rule_matches(&r.pattern, "git push")
     });
-    let Some(why) = dangerous_push_reason(&call.args) else {
-        let forces = push_forces(&call.args, dir.as_deref());
-        let kept = match rule {
-            Some(r) if about_push && forces && r.verdict == "deny" => Some(r.clone()),
-            _ if about_push => None,
-            _ => rule.cloned(),
-        };
-        if forces && kept.as_ref().is_none_or(|r| r.verdict == "allow") {
+    let deletes = dangerous_push_reason(&call.args).is_some();
+    let forces = push_forces(&call.args, dir.as_deref());
+    let kept = match rule {
+        Some(r) if about_push && (forces || deletes) && r.verdict == "deny" => Some(r.clone()),
+        _ if about_push => None,
+        _ => rule.cloned(),
+    };
+    if kept.as_ref().is_none_or(|r| r.verdict == "allow") {
+        if forces {
             label("git-force-push", line);
         }
-        return refusing(kept);
-    };
-    refusing(Some(match rule {
-        Some(r) if about_push && r.verdict != "ask" => r.clone(),
-        Some(r) if about_push => Rule {
-            pattern: r.pattern.clone(),
-            verdict: "ask".into(),
-            reason: format!("{} ({why}); the agent asks you first", r.reason),
-        },
-        Some(r) if r.verdict == "deny" => r.clone(),
-        _ => Rule {
-            pattern: "built-in push".into(),
-            verdict: "ask".into(),
-            reason: format!("{why}; the agent asks you first"),
-        },
-    }))
+        if deletes {
+            label("git-push-delete", line);
+        }
+    }
+    refusing(kept)
 }
 
 /// `verdict`, with every label dropped when it asks or denies: nothing ran
@@ -39574,8 +39561,8 @@ fn clear_guard_note() {
 }
 
 /// The rules ljos names and lets run, each with ljos-policyd's sentence
-/// for it: a recursive delete outside a temp directory, and a push that
-/// replaces history on the remote.
+/// for it: a recursive delete outside a temp directory, a push that
+/// replaces history on the remote, and a push that deletes a remote branch.
 const LABELLED: &[(&str, &str)] = &[
     (
         "rm-rf-outside-tmp",
@@ -39586,6 +39573,7 @@ const LABELLED: &[(&str, &str)] = &[
         "find -delete reaches outside /tmp and /var/tmp",
     ),
     ("git-force-push", "a force push rewrites a published branch"),
+    ("git-push-delete", "a push deletes a remote branch"),
 ];
 
 /// The rule a command names that deletes or moves a tree holding the
@@ -39721,12 +39709,12 @@ pub fn unhealthy_note(why: &str) -> String {
     )
 }
 
-/// A seat deny rule, a remote-branch delete, or a commit, push, or merge
-/// the gates refuse, judged in this process. `None` means the slow check
-/// may run. A timeout there allows the line with a warning. None of these
-/// is refused: a force push, an `rm -rf` outside a temp directory, and a
-/// change to the kept prompt or the person's key directory. Each names its
-/// rule for [`take_guard_note`] and runs.
+/// A seat deny rule, or a commit, push, or merge the gates refuse, judged
+/// in this process. `None` means the slow check may run. A timeout there
+/// allows the line with a warning. None of these is refused: a force push,
+/// a remote-branch delete, an `rm -rf` outside a temp directory, a change
+/// to the kept prompt or the person's key directory, and a write to a seat
+/// file. Each names its rule for [`take_guard_note`] and runs.
 /// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
 /// `None` there too, past the sitting gate ([`sitting_gate::guard_line`]),
 /// which judges a runner's history writes under any home and with
@@ -54828,10 +54816,11 @@ mod tests {
 
     /// A force push runs under the hook with one `git-force-push` warning
     /// line, even from an ljos-policyd that still refuses it, with test
-    /// evidence or without. A delete push asks, and each runner reads that
-    /// ask in words.
+    /// evidence or without, and a delete push runs with one
+    /// `git-push-delete` line. An ask from a rule the person keeps is read
+    /// in words by each runner.
     #[test]
-    fn the_hook_runs_a_force_push_and_explains_a_delete_push_ask_in_words() {
+    fn the_hook_runs_a_force_or_delete_push_and_explains_an_ask_in_words() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("ljos-policyd");
@@ -54855,18 +54844,16 @@ mod tests {
         let repo = evidenced_push_repo();
         assert!(static_guard_in("git push --force origin main", Some(repo.path())).is_none());
         assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID));
-        let rule =
-            static_guard_in("git push origin --delete old", Some(repo.path())).expect("asks");
-        assert_eq!(rule.verdict, "ask");
-        assert_eq!(rule.pattern, "built-in push");
-        assert!(
-            rule.reason.starts_with("deleting a remote branch"),
-            "{}",
-            rule.reason
-        );
+        assert!(static_guard_in("git push origin --delete old", Some(repo.path())).is_none());
+        assert_eq!(take_guard_note().as_deref(), Some(DELETE_SAID));
+        let rule = Rule {
+            pattern: "git reset --hard*".into(),
+            verdict: "ask".into(),
+            reason: "a hard reset drops work that is not committed".into(),
+        };
         let call = HookCall {
             event: "PreToolUse".into(),
-            cue: "git push origin --delete old".into(),
+            cue: "git reset --hard HEAD~1".into(),
             session: None,
             shape: HookShape::CamelCase,
         };
@@ -54876,15 +54863,14 @@ mod tests {
             answer.contains("\"permissionDecision\":\"ask\""),
             "{answer}"
         );
-        assert!(answer.contains("asks you first"), "{answer}");
-        assert!(!answer.contains("--force-with-lease"), "{answer}");
+        assert!(answer.contains("a hard reset drops work"), "{answer}");
         let codex = HookCall {
             event: "PreToolUse".into(),
-            cue: "git push origin --delete old".into(),
+            cue: "git reset --hard HEAD~1".into(),
             session: Some("codex-1".into()),
             shape: HookShape::DenyOnly,
         };
-        // Codex does not honour `ask`: the same delete push is a deny.
+        // Codex does not honour `ask`: the same reset is a deny.
         // A bare ask, with no grant written yet, says the runner cannot
         // ask. A reason that already offers `ljos approve` keeps that
         // offer and does not tell the agent the refusal never lifts.
@@ -54899,12 +54885,6 @@ mod tests {
         );
         assert!(
             codex_answer.contains("ask the person before running this"),
-            "{codex_answer}"
-        );
-        // Codex shows no prompt, so its reason does not promise one.
-        assert!(!codex_answer.contains("asks you first"), "{codex_answer}");
-        assert!(
-            codex_answer.contains("needs the person's approval"),
             "{codex_answer}"
         );
         let mut offered = rule.clone();
@@ -54925,13 +54905,9 @@ mod tests {
             !offered_answer.contains("leave it for them"),
             "{offered_answer}"
         );
-        assert!(
-            !offered_answer.contains("asks you first"),
-            "{offered_answer}"
-        );
         let cursor = HookCall {
             event: "PreToolUse".into(),
-            cue: "git push origin --delete old".into(),
+            cue: "git reset --hard HEAD~1".into(),
             session: Some("cursor-1".into()),
             shape: HookShape::Cursor,
         };
@@ -57137,14 +57113,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "git push origin --delete old",
             "git push origin :old",
             "git push origin :refs/tags/v1",
+            "git push -d origin old",
         ] {
-            let gated = gate_push(None, line, None);
-            assert!(
-                gated
-                    .as_ref()
-                    .is_some_and(|r| { r.verdict == "ask" && r.pattern == "built-in push" }),
-                "{line} -> {gated:?}"
-            );
+            let _ = take_guard_note();
+            assert_eq!(gate_push(None, line, None), None, "{line} runs");
+            assert_eq!(take_guard_note().as_deref(), Some(DELETE_SAID), "{line}");
         }
         let cited = "LJOS_CITE=gpr_optim-1yg5 git push upstream develop";
         assert!(
@@ -57172,6 +57145,22 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 .as_ref()
                 .map(|r| r.verdict.as_str()),
             Some("deny")
+        );
+        let keep = Rule {
+            pattern: "git push*--delete*".into(),
+            verdict: "deny".into(),
+            reason: "Keep the remote branches.".into(),
+        };
+        let _ = take_guard_note();
+        assert_eq!(
+            gate_push(Some(&keep), "git push origin --delete old", None),
+            Some(keep.clone()),
+            "the person's deny of a delete push stands"
+        );
+        assert_eq!(
+            take_guard_note(),
+            None,
+            "a denied delete push names no rule"
         );
         let trust = Rule {
             pattern: "git push*".into(),
@@ -57235,10 +57224,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(forced.is_none(), "{forced:?}");
         assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID));
         let deleted = gate_push(Some(&trust), "git push origin --delete old", None);
-        assert!(
-            deleted.as_ref().is_some_and(|r| r.verdict == "ask"),
-            "{deleted:?}"
-        );
+        assert!(deleted.is_none(), "{deleted:?}");
+        assert_eq!(take_guard_note().as_deref(), Some(DELETE_SAID));
         assert!(
             validate_rule(&trust).is_err(),
             "git push* is refused at write time"
@@ -60980,10 +60967,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
     }
 
-    /// A checkout whose tip already has a passing `true` evidence record.
     /// The line a force push runs with, as the seat reads it.
     const FORCE_SAID: &str =
         "allow\twarn\tgit-force-push\ta force push rewrites a published branch";
+
+    /// The line a push that deletes a remote branch runs with.
+    const DELETE_SAID: &str = "allow\twarn\tgit-push-delete\ta push deletes a remote branch";
 
     /// The labels the bypass log keeps for `rule`, one per command that
     /// ran under it.
@@ -60999,6 +60988,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             .count()
     }
 
+    /// A checkout whose tip already has a passing `true` evidence record.
     fn evidenced_push_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
@@ -61077,6 +61067,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let _ = take_guard_note();
         for (line, rule) in [
             ("git push --force origin main", "git-force-push"),
+            ("git push origin --delete old", "git-push-delete"),
             ("rm -rf /home/u/proj", "rm-rf-outside-tmp"),
             ("rm -rf /tmp/a /etc", "rm-rf-outside-tmp"),
             (
@@ -61100,15 +61091,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             assert!(static_guard(line).is_none(), "{line}");
             assert_eq!(take_guard_note(), None, "{line} names no rule");
         }
-        let asked = tcb_verdict("git push origin --delete old").expect("ask");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "waited {:?}",
             started.elapsed()
         );
         assert!(!marker.exists(), "the slow policyd ran");
-        assert_eq!(asked.verdict, "ask", "{}", asked.reason);
-        assert_eq!(asked.pattern, "built-in push");
         let repo = evidenced_push_repo();
         assert!(static_guard_in("git push --force origin main", Some(repo.path())).is_none());
         assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID));

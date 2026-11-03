@@ -341,7 +341,11 @@ fn a_runner_pushes_onto_develop_or_main_once_the_seats_clear_it() {
         ("PACKSET_URL", pack.as_str()),
         ("LJOS_UNSIGNED_BALLOTS", "allow"),
     ];
-    for line in ["git push origin topic", "git push -u origin HEAD:topic"] {
+    for line in [
+        "git push origin topic",
+        "git push -u origin HEAD:topic",
+        "git push origin --delete topic",
+    ] {
         not_refused(&seat.policy(line, &env), line);
     }
     let develop = "git push origin develop";
@@ -349,6 +353,8 @@ fn a_runner_pushes_onto_develop_or_main_once_the_seats_clear_it() {
         "git push --force origin develop",
         "git push --force-with-lease origin develop",
         "git push --mirror origin",
+        "git push origin --delete develop",
+        "git push origin :develop",
     ];
     for line in std::iter::once(develop).chain(forced) {
         asks_for_consensus(&seat.policy(line, &env), line);

@@ -1677,17 +1677,20 @@ mod tests {
             std::env::set_var("POLICYD_BIN", dir.join("does-not-run"));
             std::env::set_var("PACKSET_WORKSPACE", "early-guard");
         }
-        let delete = json!({"tool_input": {"command": "git push origin --delete old"}}).to_string();
         let started = std::time::Instant::now();
-        let asked = early_answer(&delete, "PreToolUse").expect("a delete push asks");
         let plain = json!({"tool_input": {"command": "git status"}}).to_string();
         assert!(
             early_answer(&plain, "").is_none(),
             "git status is not dangerous"
         );
-        // A force push and an `rm -rf` run with a warning the inner hook
-        // gives, so nothing answers for them here.
-        for line in ["git push --force origin main", "rm -rf /home/u/proj"] {
+        // The inner hook gives a warning on a force push, a delete push
+        // and an `rm -rf`, and each runs, so nothing answers for them
+        // here.
+        for line in [
+            "git push --force origin main",
+            "git push origin --delete old",
+            "rm -rf /home/u/proj",
+        ] {
             let call = json!({"tool_input": {"command": line}}).to_string();
             assert!(early_answer(&call, "PreToolUse").is_none(), "{line}");
         }
@@ -1697,13 +1700,6 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "the static check waited on the guard"
         );
-        assert_eq!(
-            read_answer(&asked).decision.as_deref(),
-            Some("ask"),
-            "{asked}"
-        );
-        assert!(asked.contains("built-in push"), "{asked}");
-        assert!(!asked.contains("git-push-evidence"), "{asked}");
         assert_eq!(
             read_answer(&denied).decision.as_deref(),
             Some("deny"),

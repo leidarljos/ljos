@@ -382,7 +382,8 @@ Everything else that concerns a push is policyd's. An ordinary push of a branch 
 lease push to a feature branch.
 A lease push or a force push onto a protected branch runs too, with the =git-force-push= warning, and the bypass log keeps the label.
 =main=, =master= and =develop= are always protected, and =protected_branches= adds more.
-Deleting a remote branch asks or denies.
+Deleting a remote branch runs with the =git-push-delete= warning, and the bypass log keeps the label.
+On a protected branch each asks for the same consensus as an ordinary push, and nothing more.
 
 With one active seat in =vissue.toml=, that seat's own vote settles consensus for the check.
 This is solo mode. With two or more seats, the normal quorum applies.

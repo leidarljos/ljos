@@ -1,9 +1,10 @@
 //! `ljos policy` on a push, with no seat rules and the ask pack switched off.
 //! Force, a `+refspec`, a `--force-with-lease` push onto main, master or
 //! develop, and a mirror push run with the `git-force-push` warning, and
-//! the bypass log keeps the label. Deleting a remote branch or tag asks. A
-//! plain branch push, a tag push and a lease push onto a feature branch
-//! stay allowed. A push whose `LJOS_CITE` does not stand is denied.
+//! the bypass log keeps the label. Deleting a remote branch or tag runs
+//! with the `git-push-delete` warning the same way. A plain branch push, a
+//! tag push and a lease push onto a feature branch stay allowed. A push
+//! whose `LJOS_CITE` does not stand is denied.
 
 ljos_test_boot::harness!();
 use std::path::Path;
@@ -54,25 +55,13 @@ fn verdict_heads(text: &str) -> Vec<&str> {
         .collect()
 }
 
-#[test]
-fn a_force_or_mirror_push_runs_with_its_warning_and_label() {
-    for line in [
-        "git push --force origin main",
-        "git push -f origin main",
-        "git push origin +main",
-        "git push --force-with-lease origin main",
-        "git push --force-with-lease=main:abc123 origin main",
-        "git push --force-with-lease origin HEAD:develop",
-        "git push --force-with-lease origin +feature",
-        "git push origin +refs/tags/v1.0.0",
-        "git push --mirror origin",
-    ] {
+/// Each line runs with every verdict an allow, prints `said`, and leaves
+/// a `warn` row naming `rule` and the line in the bypass log.
+fn assert_runs_labelled(rule: &str, said: &str, lines: &[&str]) {
+    for line in lines {
         let home = tempfile::tempdir().unwrap();
         let text = stdout_in(home.path(), line);
-        assert!(
-            text.contains("allow\twarn\tgit-force-push\ta force push rewrites a published branch"),
-            "{line}\n{text}"
-        );
+        assert!(text.contains(said), "{line}\n{text}");
         let heads = verdict_heads(&text);
         assert!(
             heads.iter().all(|head| *head == "allow"),
@@ -83,32 +72,43 @@ fn a_force_or_mirror_push_runs_with_its_warning_and_label() {
         assert!(
             log.lines()
                 .filter_map(|row| serde_json::from_str::<serde_json::Value>(row).ok())
-                .any(|row| row["kind"] == "warn"
-                    && row["rule"] == "git-force-push"
-                    && row["command"] == line),
+                .any(|row| row["kind"] == "warn" && row["rule"] == rule && row["command"] == *line),
             "{line} left no label:\n{log}"
         );
     }
 }
 
 #[test]
-fn a_delete_push_asks_with_no_seat_rule() {
-    for line in [
-        "git push origin --delete old",
-        "git push origin :old",
-        "git push origin :refs/tags/v1.0.0",
-    ] {
-        let text = stdout_of(line);
-        assert!(
-            text.contains("ask: deleting a remote branch removes shared work")
-                && text.contains("(rule: built-in push)"),
-            "{line}\n{text}"
-        );
-        assert!(
-            !verdict_heads(&text).contains(&"allow"),
-            "{line} still allowed\n{text}"
-        );
-    }
+fn a_force_or_mirror_push_runs_with_its_warning_and_label() {
+    assert_runs_labelled(
+        "git-force-push",
+        "allow\twarn\tgit-force-push\ta force push rewrites a published branch",
+        &[
+            "git push --force origin main",
+            "git push -f origin main",
+            "git push origin +main",
+            "git push --force-with-lease origin main",
+            "git push --force-with-lease=main:abc123 origin main",
+            "git push --force-with-lease origin HEAD:develop",
+            "git push --force-with-lease origin +feature",
+            "git push origin +refs/tags/v1.0.0",
+            "git push --mirror origin",
+        ],
+    );
+}
+
+#[test]
+fn a_delete_push_runs_with_its_warning_and_label() {
+    assert_runs_labelled(
+        "git-push-delete",
+        "allow\twarn\tgit-push-delete\ta push deletes a remote branch",
+        &[
+            "git push origin --delete old",
+            "git push -d origin old",
+            "git push origin :old",
+            "git push origin :refs/tags/v1.0.0",
+        ],
+    );
 }
 
 #[test]
