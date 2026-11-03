@@ -423,7 +423,7 @@ fn as_agents(mut atom: Value) -> Value {
     atom
 }
 
-/// The listing the preface and the cold prompt read, via [`atoms_read`].
+/// The listing the preface reads, via [`atoms_read`].
 fn session_atoms(ms: u64) -> Result<SharedAtoms> {
     with_pack_timeout(ms, || {
         let client = pack()?;
@@ -444,7 +444,7 @@ pub fn session_start_line_from(atoms: Option<&[Value]>, now: &str, guard: bool) 
     let Some(atoms) = atoms else {
         return format!("ljos is on, but the memory store does not answer; {guard}.");
     };
-    let kept: Vec<&Value> = atoms.iter().filter(|a| reviewable(a)).collect();
+    let kept: Vec<&Value> = atoms.iter().filter(reviewable).collect();
     if kept.is_empty() {
         return format!(
             "ljos is on: no memories here yet (`ljos remember` or `ljos prefer` adds one); {guard}."
@@ -10502,7 +10502,11 @@ fn with_issue_recall(call: &HookCall, text: String) -> String {
 /// Both are read on [`lexical_match_scores`], the hooks' scale, so the
 /// floor below is theirs. Empty when none of them bear on the prompt.
 fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, Vec<String>)> {
-    let atoms = session_atoms(1_500).ok()?;
+    let atoms = with_pack_timeout(1_500, || {
+        let client = pack()?;
+        rows_read(&client, &client.workspace())
+    })
+    .ok()?;
     record_listed_origins(&atoms);
     let seen = seen_ids(call.session.as_deref());
     let rows: Vec<(Hit, String)> = atoms
@@ -10546,13 +10550,13 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
 /// The text a cold prompt is matched on: the claim, plus the title, rule,
 /// command and citation kept in `source`. The prose gate shortens the
 /// claim; the words a later prompt uses can survive only in `source`.
-fn recall_body(atom: &Value) -> String {
+fn recall_body(atom: &impl Claim) -> String {
     let mut text = atom
-        .get("text")
+        .field("text")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let Some(source) = atom.get("source").and_then(Value::as_object) else {
+    let Some(source) = atom.field("source").and_then(Value::as_object) else {
         return text;
     };
     for key in ["title", "rule", "command", "citation"] {
@@ -10750,13 +10754,13 @@ fn clears_lexical_floor(lexical: &[f64], eligible: &[bool]) -> Vec<bool> {
         .collect()
 }
 
-fn atom_as_hit(atom: &Value) -> Option<Hit> {
-    let text = atom.get("text")?.as_str()?.trim().to_string();
+fn atom_as_hit(atom: &impl Claim) -> Option<Hit> {
+    let text = atom.field("text")?.as_str()?.trim().to_string();
     if text.is_empty() {
         return None;
     }
     let entities = atom
-        .get("entities")
+        .field("entities")
         .and_then(Value::as_array)
         .map(|list| {
             list.iter()
@@ -10765,17 +10769,17 @@ fn atom_as_hit(atom: &Value) -> Option<Hit> {
         })
         .unwrap_or_default();
     Some(Hit {
-        id: atom.get("id").and_then(Value::as_str).map(str::to_string),
+        id: atom.field("id").and_then(Value::as_str).map(str::to_string),
         text,
         score: 1.0,
         kind: atom
-            .get("kind")
+            .field("kind")
             .and_then(Value::as_str)
             .unwrap_or("lesson")
             .to_string(),
         ts: atom
-            .get("ts")
-            .or_else(|| atom.get("created_at"))
+            .field("ts")
+            .or_else(|| atom.field("created_at"))
             .and_then(Value::as_str)
             .map(str::to_string),
         entities,
@@ -13831,7 +13835,7 @@ fn refuses_relevance(client: &PacksetClient, with_token: bool) {
 /// pack splits words: `ljos-none` is one word there and does not match
 /// `ljos-l9qq`. Empty when the listing fails.
 fn word_ranked(client: &PacksetClient, cue: &str, limit: usize) -> Vec<(Value, f64)> {
-    let Ok(atoms) = atoms_read(client, &client.workspace()) else {
+    let Ok(atoms) = rows_read(client, &client.workspace()) else {
         return Vec::new();
     };
     let memo = WORD_RANKED.lock().ok().filter(|_| atoms_memo_on());
@@ -13843,10 +13847,7 @@ fn word_ranked(client: &PacksetClient, cue: &str, limit: usize) -> Vec<(Value, f
         return ranked.clone();
     }
     let asked = pack_words(cue);
-    let texts: Vec<&str> = atoms
-        .iter()
-        .map(|a| a["text"].as_str().unwrap_or(""))
-        .collect();
+    let texts: Vec<&str> = atoms.iter().map(atom_text).collect();
     let scores = lexical_match_scores(&texts, cue);
     let mut order: Vec<usize> = (0..atoms.len())
         .filter(|&i| scores[i] > 0.0 && pack_word_seq(texts[i]).any(|w| asked.contains(&w)))
@@ -13855,7 +13856,7 @@ fn word_ranked(client: &PacksetClient, cue: &str, limit: usize) -> Vec<(Value, f
     order.truncate(limit);
     let ranked: Vec<(Value, f64)> = order
         .into_iter()
-        .map(|i| (atoms[i].clone(), scores[i]))
+        .map(|i| (atoms[i].atom(), scores[i]))
         .collect();
     if let Some(mut memo) = memo {
         *memo = Some((
@@ -13871,7 +13872,7 @@ fn word_ranked(client: &PacksetClient, cue: &str, limit: usize) -> Vec<(Value, f
 /// The last [`word_ranked`] answer in a hook process, with the listing it
 /// ranked. A prompt's search and its reranked search each ask it of the
 /// same listing and cue, and the pass reads every stored claim.
-type WordRanked = Option<(SharedAtoms, String, usize, Vec<(Value, f64)>)>;
+type WordRanked = Option<(SharedRows, String, usize, Vec<(Value, f64)>)>;
 static WORD_RANKED: std::sync::Mutex<WordRanked> = std::sync::Mutex::new(None);
 
 /// [`word_ranked`] without the scores.
@@ -14286,13 +14287,13 @@ fn due_nudge(call: &HookCall) -> (String, Option<String>) {
     let Ok(client) = pack() else {
         return (String::new(), None);
     };
-    let Ok(atoms) = atoms_lean_shared(&client, &client.workspace()) else {
+    let Ok(atoms) = rows_shared(&client, &client.workspace()) else {
         return (String::new(), None);
     };
     let now = now_utc();
     let week = utc_at(epoch_s().saturating_sub(DUE_WINDOW_DAYS * 86_400));
-    let all: Vec<&Value> = atoms.iter().filter(|a| is_due(a, &now)).collect();
-    let due = came_due_since(&all, &week);
+    let all: Vec<&Row> = atoms.iter().filter(|a| is_due(a, &now)).collect();
+    let due = all.iter().filter(|a| came_due(a, &week)).count();
     // A backlog only grows, so its size is no task: the nudge counts what
     // came due inside the window, and a seat with nothing new says nothing.
     // A quiet seat has nothing to show, so it is counted once here. A seat
@@ -14326,15 +14327,19 @@ pub const DUE_WINDOW_DAYS: u64 = 7;
 pub fn came_due_since<A: std::borrow::Borrow<Value>>(due: &[A], since: &str) -> usize {
     due.iter()
         .map(std::borrow::Borrow::borrow)
-        .filter(|a: &&Value| {
-            let when = a["due_at"]
-                .as_str()
-                .filter(|d| !d.is_empty())
-                .or_else(|| a["ts"].as_str())
-                .unwrap_or("");
-            when >= since
-        })
+        .filter(|a: &&Value| came_due(a, since))
         .count()
+}
+
+/// Whether `a` is one [`came_due_since`] counts.
+fn came_due(a: &impl Claim, since: &str) -> bool {
+    let when = a
+        .field("due_at")
+        .and_then(Value::as_str)
+        .filter(|d| !d.is_empty())
+        .or_else(|| a.field("ts").and_then(Value::as_str))
+        .unwrap_or("");
+    when >= since
 }
 
 /// The reason already says how a person grants the command: reply
@@ -16616,48 +16621,41 @@ pub fn atoms_timeout() -> std::time::Duration {
     }
 }
 
-type Listing = Option<(std::time::Instant, String, std::sync::Arc<Vec<Value>>)>;
+type Listing = Option<(std::time::Instant, String, SharedRows)>;
 
-/// The listing [`atoms_lean_shared`] last fetched. A whole pack, so a
+/// The listing [`rows_shared`] last fetched. A whole pack, so a
 /// long-lived server drops it once idle.
 static LAST_LISTING: std::sync::Mutex<Listing> = std::sync::Mutex::new(None);
 
-/// Forget the listing [`atoms_lean_shared`] holds.
+/// Forget the listing that [`rows_shared`] keeps.
 pub fn drop_listing_cache() {
     *LAST_LISTING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
-/// [`atoms_lean`] for the reads one prompt makes side by side (the due line
-/// and the mail): the second takes the listing the first fetched when it is
-/// under two seconds old, so the prompt pays for the listing once. The
-/// listing is shared, not copied: a copy of a few thousand atoms is
-/// milliseconds a reader.
+/// The whole listing as [`Row`]s for the reads one prompt makes side by
+/// side. The second takes the listing the first fetched when it is under
+/// two seconds old, so the prompt pays for the listing once. The listing
+/// is shared, not copied: a copy of a few thousand atoms is milliseconds
+/// a reader.
 ///
 /// # Errors
 ///
 /// The pack not answering, or an answer that is not atoms.
-pub(crate) fn atoms_lean_shared(
-    client: &PacksetClient,
-    workspace: &str,
-) -> Result<std::sync::Arc<Vec<Value>>> {
+fn rows_shared(client: &PacksetClient, workspace: &str) -> Result<SharedRows> {
     let key = format!("{}|{workspace}", client.base());
     let mut last = LAST_LISTING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((at, held, atoms)) = last.as_ref() {
+    if let Some((at, held, rows)) = last.as_ref() {
         if *held == key && at.elapsed() < std::time::Duration::from_secs(2) {
-            return Ok(std::sync::Arc::clone(atoms));
+            return Ok(std::sync::Arc::clone(rows));
         }
     }
-    let atoms = atoms_listed(client, workspace, true)?.0;
-    *last = Some((
-        std::time::Instant::now(),
-        key,
-        std::sync::Arc::clone(&atoms),
-    ));
-    Ok(atoms)
+    let rows = rows_listed(client, workspace)?.0;
+    *last = Some((std::time::Instant::now(), key, std::sync::Arc::clone(&rows)));
+    Ok(rows)
 }
 
 /// The pack's live atoms without their dense vectors. Every reader here
@@ -16740,17 +16738,42 @@ fn atoms_listed(
     atoms_listed_of(client, workspace, token, None, None, false)
 }
 
+/// The whole listing as [`Row`]s, with this seat's token when the
+/// check on the connection passed, and the result of that check.
+fn rows_listed(client: &PacksetClient, workspace: &str) -> Result<(SharedRows, bool)> {
+    listed_of(client, workspace, true, None, None, false)
+}
+
+/// [`rows_listed`] for a reader that names the person: an unproven
+/// listener's rows are an agent's, as [`atoms_read`] marks atoms.
+fn rows_read(client: &PacksetClient, workspace: &str) -> Result<SharedRows> {
+    let (rows, trusted) = rows_listed(client, workspace)?;
+    if trusted {
+        return Ok(rows);
+    }
+    let rows = std::sync::Arc::unwrap_or_clone(rows);
+    Ok(std::sync::Arc::new(
+        rows.into_iter().map(Row::into_agents).collect(),
+    ))
+}
+
 /// A listing every reader in one process shares. The whole pack's atoms
 /// copied once per reader was most of a prompt hook at ten thousand.
 type SharedAtoms = std::sync::Arc<Vec<Value>>;
+
+/// The whole listing as the prompt hook reads it, shared as
+/// [`SharedAtoms`] is.
+type SharedRows = std::sync::Arc<Vec<Row>>;
 
 /// Listings this hook process already read, by request. A hook lists the
 /// pack for its rules, its due count and its recall in turn, and one
 /// answer serves them all for [`ATOMS_MEMO`]. Only a hook keeps one: a
 /// server that lives for hours reads the pack each time. A write through
 /// this seat's client drops the memo ([`forget_atom_listings`]).
-type AtomListing = (String, std::time::Instant, SharedAtoms, bool);
-static ATOM_LISTINGS: std::sync::Mutex<Vec<AtomListing>> = std::sync::Mutex::new(Vec::new());
+type Held<T> = (String, std::time::Instant, std::sync::Arc<Vec<T>>, bool);
+static ATOM_LISTINGS: std::sync::Mutex<Vec<Held<Value>>> = std::sync::Mutex::new(Vec::new());
+/// [`ATOM_LISTINGS`] as [`Row`]s.
+static ROW_LISTINGS: std::sync::Mutex<Vec<Held<Row>>> = std::sync::Mutex::new(Vec::new());
 /// How long a listing serves later reads in one hook process.
 const ATOMS_MEMO: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -16758,9 +16781,193 @@ fn atoms_memo_on() -> bool {
     std::env::var_os("LJOS_IN_HOOK").is_some()
 }
 
+/// What a listing is read into: whole atoms, or the [`Row`]s the prompt
+/// hook reads.
+trait Listed: Claim + serde::de::DeserializeOwned + Sized + 'static {
+    /// The listings of this form this hook process already read.
+    fn memo() -> &'static std::sync::Mutex<Vec<Held<Self>>>;
+    /// The writer's atoms in this form.
+    fn of_atoms(atoms: SharedAtoms) -> std::sync::Arc<Vec<Self>>;
+    /// The claim as an atom, for a reader that hands it on as one.
+    fn atom(&self) -> Value;
+}
+
+impl Listed for Value {
+    fn memo() -> &'static std::sync::Mutex<Vec<Held<Self>>> {
+        &ATOM_LISTINGS
+    }
+    fn of_atoms(atoms: SharedAtoms) -> SharedAtoms {
+        atoms
+    }
+    fn atom(&self) -> Value {
+        self.clone()
+    }
+}
+
+impl Listed for Row {
+    fn memo() -> &'static std::sync::Mutex<Vec<Held<Self>>> {
+        &ROW_LISTINGS
+    }
+    fn of_atoms(atoms: SharedAtoms) -> SharedRows {
+        std::sync::Arc::new(atoms.iter().map(Row::of).collect())
+    }
+    fn atom(&self) -> Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
+
+/// A stored claim as its readers read it: a whole atom, or its [`Row`].
+/// A reader that takes either reads a row as the atom it was read from.
+trait Claim {
+    /// Field `key`, as [`Value::get`] reads it.
+    fn field(&self, key: &str) -> Option<&Value>;
+    /// Whether the claim is held at `now`, as [`live_now`] reads it.
+    fn live(&self, now: &str) -> bool;
+}
+
+impl Claim for Value {
+    fn field(&self, key: &str) -> Option<&Value> {
+        self.get(key)
+    }
+    fn live(&self, now: &str) -> bool {
+        live_now(self, now)
+    }
+}
+
+impl<C: Claim> Claim for &C {
+    fn field(&self, key: &str) -> Option<&Value> {
+        (**self).field(key)
+    }
+    fn live(&self, now: &str) -> bool {
+        (**self).live(now)
+    }
+}
+
+/// The listing kept under `key` in `memo`, for as long as
+/// [`ATOMS_MEMO`] lasts.
+fn memo_listing<T>(
+    memo: &std::sync::Mutex<Vec<Held<T>>>,
+    key: &str,
+) -> Option<(std::sync::Arc<Vec<T>>, bool)> {
+    memo.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(k, at, _, _)| k == key && at.elapsed() < ATOMS_MEMO)
+        .map(|(_, _, listed, trusted)| (std::sync::Arc::clone(listed), *trusted))
+}
+
+/// Keep `listed` under `key` in `memo`, in place of what it held.
+fn memo_keep<T>(
+    memo: &std::sync::Mutex<Vec<Held<T>>>,
+    key: &str,
+    listed: &std::sync::Arc<Vec<T>>,
+    trusted: bool,
+) {
+    let mut kept = memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    kept.retain(|(k, _, _, _)| k != key);
+    kept.push((
+        key.to_string(),
+        std::time::Instant::now(),
+        std::sync::Arc::clone(listed),
+        trusted,
+    ));
+}
+
+/// Declares [`Row`] with these fields and [`Row::get`] by their names, so
+/// the two name the same fields.
+macro_rules! row_of {
+    ($(#[$doc:meta])* struct $row:ident { $($field:ident),* $(,)? }) => {
+        $(#[$doc])*
+        #[derive(Clone, Default, serde::Deserialize, serde::Serialize)]
+        #[serde(default)]
+        struct $row {
+            $(
+                #[serde(deserialize_with = "as_given", skip_serializing_if = "Option::is_none")]
+                $field: Option<Value>,
+            )*
+        }
+
+        impl $row {
+            /// Field `key`, when a row has that field.
+            fn get(&self, key: &str) -> Option<&Value> {
+                match key {
+                    $(stringify!($field) => self.$field.as_ref(),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+row_of! {
+    /// A row has only the fields of one stored claim that the prompt hook
+    /// reads, each as the listing gave it. The listing also carries the
+    /// review clock, the prose counts and the links of every claim.
+    /// Parsing all of them into maps was most of a warm prompt at ten
+    /// thousand claims. The fields are those the hook's readers of the
+    /// listing read. They include those a [`Hit`] and the search merge
+    /// read off a claim the hook hands on as an atom.
+    struct Row {
+        id, kind, text, ts, created_at, due_at, origin, tombstone, valid_to,
+        valid_from, issue, entities, source, score, ballots, of, rerank_score,
+        dense_rank, cosine,
+    }
+}
+
+/// A field as the listing gave it, a null too: `Option` alone reads a
+/// null as absent, and [`Value::get`] finds it.
+fn as_given<'de, D>(field: D) -> std::result::Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Value as serde::Deserialize>::deserialize(field).map(Some)
+}
+
+impl Row {
+    /// `atom` as a row: the fields above, and nothing else.
+    fn of(atom: &Value) -> Self {
+        <Self as serde::Deserialize>::deserialize(atom).unwrap_or_default()
+    }
+
+    /// [`as_agents`] of the atom this row was read from.
+    fn into_agents(mut self) -> Self {
+        self.origin = Some(Value::String(admit::ORIGIN_AGENT.to_string()));
+        if let Some(source) = self.source.as_mut().and_then(Value::as_object_mut) {
+            source.remove("basis");
+        }
+        self
+    }
+}
+
+impl Claim for Row {
+    fn field(&self, key: &str) -> Option<&Value> {
+        self.get(key)
+    }
+    /// `packset_core::record::is_live` on the two fields it reads.
+    fn live(&self, now: &str) -> bool {
+        packset_core::atom::is_live(
+            self.tombstone
+                .as_ref()
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            self.valid_to
+                .as_ref()
+                .and_then(Value::as_str)
+                .filter(|to| !to.is_empty()),
+            now,
+        )
+    }
+}
+
 /// Drop every listing this process kept. Called on any write to the pack.
 pub(crate) fn forget_atom_listings() {
     ATOM_LISTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    ROW_LISTINGS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
@@ -16785,6 +16992,18 @@ fn atoms_listed_of(
     limit: Option<usize>,
     newest: bool,
 ) -> Result<(SharedAtoms, bool)> {
+    listed_of(client, workspace, token, kind, limit, newest)
+}
+
+/// [`atoms_listed_of`] read into `T`.
+fn listed_of<T: Listed>(
+    client: &PacksetClient,
+    workspace: &str,
+    token: bool,
+    kind: Option<&str>,
+    limit: Option<usize>,
+    newest: bool,
+) -> Result<(std::sync::Arc<Vec<T>>, bool)> {
     let url = format!("{}/v1/atoms", client.base());
     let mut query = vec![("workspace", workspace), ("embedding", "omit")];
     let limit = limit.map(|limit| limit.to_string());
@@ -16807,16 +17026,11 @@ fn atoms_listed_of(
         }
         key
     });
-    if let Some(key) = &memo_key {
-        let kept = ATOM_LISTINGS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((_, _, atoms, trusted)) = kept
-            .iter()
-            .find(|(k, at, _, _)| k == key && at.elapsed() < ATOMS_MEMO)
-        {
-            return Ok((std::sync::Arc::clone(atoms), *trusted));
-        }
+    if let Some(kept) = memo_key
+        .as_deref()
+        .and_then(|key| memo_listing(T::memo(), key))
+    {
+        return Ok(kept);
     }
     // The whole listing is a megabyte the writer builds in a fifth of a
     // second. A hook keeps the last one on disk under the pack's own
@@ -16837,7 +17051,7 @@ fn atoms_listed_of(
         .as_ref()
         .and_then(|_| listing_cache_path(workspace, token));
     if let (Some(path), Some(stamp)) = (&cache, &stamp) {
-        if let Some((atoms, trusted)) = cached_listing(path, stamp) {
+        if let Some((atoms, trusted)) = cached_listing::<T>(path, stamp) {
             // A listing kept before the sidecar existed, or by another
             // version, has none that fits: this hook writes it through
             // the memos it fills anyway.
@@ -16845,17 +17059,8 @@ fn atoms_listed_of(
                 keep_tokens(path, stamp, &atoms);
             }
             let atoms = std::sync::Arc::new(atoms);
-            if let Some(key) = memo_key {
-                let mut kept = ATOM_LISTINGS
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                kept.retain(|(k, _, _, _)| k != &key);
-                kept.push((
-                    key,
-                    std::time::Instant::now(),
-                    std::sync::Arc::clone(&atoms),
-                    trusted,
-                ));
+            if let Some(key) = &memo_key {
+                memo_keep(T::memo(), key, &atoms, trusted);
             }
             return Ok((atoms, trusted));
         }
@@ -16924,19 +17129,15 @@ fn atoms_listed_of(
         keep_tokens(&path, &stamp, &atoms);
     }
     let atoms = std::sync::Arc::new(atoms);
-    if let Some(key) = memo_key {
-        let mut kept = ATOM_LISTINGS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        kept.retain(|(k, _, _, _)| k != &key);
-        kept.push((
-            key,
-            std::time::Instant::now(),
-            std::sync::Arc::clone(&atoms),
-            answered.trusted,
-        ));
+    let listed = T::of_atoms(std::sync::Arc::clone(&atoms));
+    if let Some(key) = &memo_key {
+        // The whole atoms are kept too: a later reader of them in this
+        // hook takes them. A hook that ends does not spend time dropping
+        // them.
+        memo_keep(&ATOM_LISTINGS, key, &atoms, answered.trusted);
+        memo_keep(T::memo(), key, &listed, answered.trusted);
     }
-    Ok((atoms, answered.trusted))
+    Ok((listed, answered.trusted))
 }
 
 /// `$XDG_DATA_HOME/ljos/listing-<workspace>-<token>.json`: the last whole
@@ -16955,17 +17156,20 @@ fn listing_cache_path(workspace: &str, token: bool) -> Option<PathBuf> {
 }
 
 /// The cached listing at `path` when it was read under `stamp`.
-fn cached_listing(path: &Path, stamp: &str) -> Option<(Vec<Value>, bool)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut doc: Value = serde_json::from_str(&text).ok()?;
-    if doc.get("stamp")?.as_str()? != stamp {
-        return None;
+fn cached_listing<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    stamp: &str,
+) -> Option<(Vec<T>, bool)> {
+    #[derive(serde::Deserialize)]
+    #[serde(bound = "T: serde::de::DeserializeOwned")]
+    struct Kept<T> {
+        stamp: String,
+        trusted: bool,
+        atoms: Vec<T>,
     }
-    let trusted = doc.get("trusted")?.as_bool()?;
-    let Value::Array(atoms) = doc.get_mut("atoms")?.take() else {
-        return None;
-    };
-    Some((atoms, trusted))
+    let text = std::fs::read_to_string(path).ok()?;
+    let kept: Kept<T> = serde_json::from_str(&text).ok()?;
+    (kept.stamp == stamp).then_some((kept.atoms, kept.trusted))
 }
 
 /// Keep `atoms` at `path` under `stamp`, through a temporary file, so a
@@ -17017,14 +17221,14 @@ fn tokens_header(stamp: &str) -> String {
     format!("{stamp}\t{}\t{COLUMNS}", env!("CARGO_PKG_VERSION"))
 }
 
-fn atom_text(atom: &Value) -> &str {
-    atom.get("text").and_then(Value::as_str).unwrap_or("")
+fn atom_text(atom: &impl Claim) -> &str {
+    atom.field("text").and_then(Value::as_str).unwrap_or("")
 }
 
 /// Write the token sidecar for `atoms`, through a temporary file. The
 /// tokens come through the memos, so the scoring that follows in this
 /// process finds them there.
-fn keep_tokens(listing: &Path, stamp: &str, atoms: &[Value]) {
+fn keep_tokens(listing: &Path, stamp: &str, atoms: &[impl Claim]) {
     let path = tokens_sidecar_path(listing);
     let mut out = tokens_header(stamp);
     out.push('\n');
@@ -17050,7 +17254,7 @@ fn keep_tokens(listing: &Path, stamp: &str, atoms: &[Value]) {
 /// Seed the token memos from the sidecar written under `stamp` for these
 /// `atoms`, when it is there, is this version's, and has a line per atom.
 /// False when there is no such sidecar.
-fn seed_tokens(listing: &Path, stamp: &str, atoms: &[Value]) -> bool {
+fn seed_tokens(listing: &Path, stamp: &str, atoms: &[impl Claim]) -> bool {
     let Ok(text) = std::fs::read_to_string(tokens_sidecar_path(listing)) else {
         return false;
     };
@@ -20472,7 +20676,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
         // lessons are agent-derived.
         let mut own: Vec<Hit> = pool
             .iter()
-            .filter(|a| reviewable(a))
+            .filter(reviewable)
             .filter_map(atom_as_hit)
             .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()) && !unverified_note_hit(h))
             .collect();
@@ -30285,8 +30489,8 @@ const UNREVIEWED_KINDS: &[&str] = &[
 ];
 
 /// Whether an atom is a claim the review clock should hold at all.
-fn reviewable(a: &Value) -> bool {
-    !UNREVIEWED_KINDS.contains(&a.get("kind").and_then(Value::as_str).unwrap_or(""))
+fn reviewable(a: &impl Claim) -> bool {
+    !UNREVIEWED_KINDS.contains(&a.field("kind").and_then(Value::as_str).unwrap_or(""))
 }
 
 /// The live atoms whose review is due at `now` (RFC 3339 UTC), soonest first.
@@ -30305,9 +30509,9 @@ pub fn due_of(atoms: &[Value], now: &str) -> Vec<Value> {
 }
 
 /// Whether `a` is one of [`due_of`] at `now`.
-fn is_due(a: &Value, now: &str) -> bool {
+fn is_due(a: &impl Claim, now: &str) -> bool {
     reviewable(a)
-        && a.get("due_at")
+        && a.field("due_at")
             .and_then(Value::as_str)
             .is_none_or(|d| d.is_empty() || d <= now)
 }
@@ -30320,7 +30524,7 @@ pub fn review_summary(atoms: &[Value], now: &str) -> String {
     let due = due_of(atoms, now).len();
     let mut later: Vec<&str> = atoms
         .iter()
-        .filter(|a| reviewable(a))
+        .filter(reviewable)
         .filter_map(|a| a.get("due_at").and_then(Value::as_str))
         .filter(|d| !d.is_empty() && *d > now)
         .collect();
@@ -31210,7 +31414,7 @@ pub fn format_hubs(body: &Value) -> String {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|a| reviewable(a))
+        .filter(reviewable)
     {
         out.push_str(&format!(
             "{:.4}\t{}\t{}\t{}\n",
@@ -31293,7 +31497,7 @@ pub fn format_island(body: &Value) -> String {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|a| reviewable(a))
+        .filter(reviewable)
     {
         out.push_str(&format!(
             "{:.3}\t{}\t{}\t{}\t[{}] {}\n",
@@ -33229,7 +33433,7 @@ fn most_relevant<'a>(rows: &[&'a Hit], cue: &str, cap: usize) -> Vec<&'a Hit> {
 fn issue_memories(issue: &str) -> Result<Vec<Hit>> {
     let atoms = with_writer(|| {
         let client = pack()?;
-        atoms_read(&client, &client.workspace()).context("recall: GET /v1/atoms failed")
+        rows_read(&client, &client.workspace()).context("recall: GET /v1/atoms failed")
     })?;
     Ok(tagged_with_issue(&atoms, issue))
 }
@@ -33247,22 +33451,24 @@ fn written_at(atom: &Value) -> Option<String> {
 
 /// [`issue_memories`] on a listing already read, ordered by when each
 /// memory was written, newest first.
-fn tagged_with_issue(atoms: &[Value], issue: &str) -> Vec<Hit> {
+fn tagged_with_issue(atoms: &[impl Listed], issue: &str) -> Vec<Hit> {
     let proven = pack().ok().is_some_and(|client| pack_proven(&client));
     let tag = format!("issue:{issue}");
     let mut own: Vec<Hit> = atoms
         .iter()
-        .filter(|atom| atom["tombstone"] != Value::Bool(true))
+        .filter(|atom| atom.field("tombstone") != Some(&Value::Bool(true)))
         .filter(|atom| {
-            atom["issue"].as_str().map(str::trim) == Some(issue)
-                || atom["entities"]
-                    .as_array()
+            atom.field("issue").and_then(Value::as_str).map(str::trim) == Some(issue)
+                || atom
+                    .field("entities")
+                    .and_then(Value::as_array)
                     .is_some_and(|e| e.iter().any(|x| x.as_str() == Some(tag.as_str())))
         })
         .filter_map(|atom| {
+            let atom = atom.atom();
             let mut hit = serde_json::from_value::<Hit>(atom.clone()).ok()?;
-            record_listed(atom, proven);
-            hit.ts = written_at(atom).or(hit.ts);
+            record_listed(&atom, proven);
+            hit.ts = written_at(&atom).or(hit.ts);
             Some(hit)
         })
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
@@ -33424,7 +33630,7 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|a| reviewable(a))
+            .filter(reviewable)
             .filter(|a| sitting_memory_score(issue, &ticket, a, &now, &seat).is_some())
             .take(8)
         {
@@ -37588,8 +37794,9 @@ impl StoredBy {
 
 /// Whether `atom` carries `source.basis` `person`, read trimmed and
 /// without case.
-fn person_basis(atom: &Value) -> bool {
-    atom.pointer("/source/basis")
+fn person_basis(atom: &impl Claim) -> bool {
+    atom.field("source")
+        .and_then(|source| source.get("basis"))
         .and_then(Value::as_str)
         .is_some_and(|b| b.trim().eq_ignore_ascii_case(Basis::Person.as_str()))
 }
@@ -37600,7 +37807,7 @@ fn person_basis(atom: &Value) -> bool {
 /// none, so a body without one is a hit that dropped it, as a milli
 /// document does, or not the pack's record at all. Entities are never
 /// read.
-pub(crate) fn stored_by(atom: &Value) -> StoredBy {
+pub(crate) fn stored_by(atom: &impl Claim) -> StoredBy {
     let Some(origin) = carried_origin(atom) else {
         return StoredBy::Agent;
     };
@@ -37615,8 +37822,8 @@ pub(crate) fn stored_by(atom: &Value) -> StoredBy {
 
 /// The origin `atom` carries, trimmed and lowercased, or `None` when it
 /// carries none or an empty one.
-fn carried_origin(atom: &Value) -> Option<String> {
-    atom.get("origin")
+fn carried_origin(atom: &impl Claim) -> Option<String> {
+    atom.field("origin")
         .and_then(Value::as_str)
         .map(|o| o.trim().to_ascii_lowercase())
         .filter(|o| !o.is_empty())
@@ -37668,13 +37875,19 @@ fn record_held(id: &str, atom: &Value) {
 }
 
 /// [`record_held`] at `now`.
-fn record_held_at(id: &str, atom: &Value, now: &str) {
-    if !live_now(atom, now) {
+fn record_held_at(id: &str, atom: &impl Claim, now: &str) {
+    if !atom.live(now) {
         record_origin(id, None);
         return;
     }
     record_origin(id, Some(stored_by(atom)));
-    let field = |name: &str| atom[name].as_str().unwrap_or("").trim().to_string();
+    let field = |name: &str| {
+        atom.field(name)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     stored_bodies()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -37714,7 +37927,7 @@ fn substituted(h: &Hit) -> bool {
 
 /// Record each listing atom's origin when the listener asks for the
 /// token, and clear the person otherwise. One proof for the whole list.
-fn record_listed_origins(atoms: &[Value]) {
+fn record_listed_origins(atoms: &[impl Claim]) {
     let proven = pack().ok().is_some_and(|client| pack_proven(&client));
     for atom in atoms {
         record_listed(atom, proven);
@@ -37722,8 +37935,8 @@ fn record_listed_origins(atoms: &[Value]) {
 }
 
 /// Record `atom`'s origin when `proven`, or clear the person for its id.
-fn record_listed(atom: &Value, proven: bool) {
-    let Some(id) = atom.get("id").and_then(Value::as_str) else {
+fn record_listed(atom: &impl Claim, proven: bool) {
+    let Some(id) = atom.field("id").and_then(Value::as_str) else {
         return;
     };
     if proven {
@@ -37737,14 +37950,14 @@ fn record_listed(atom: &Value, proven: bool) {
 /// its id. A row with no origin, a null one or an empty one is an
 /// agent's, as [`stored_by`] reads it, and overwrites a person recorded
 /// before: an older packsetd lists a stored row without its origin.
-pub(crate) fn keep_origin(atom: &Value) {
+pub(crate) fn keep_origin(atom: &impl Claim) {
     keep_origin_at(atom, &now_utc());
 }
 
 /// [`keep_origin`] at `now`, for a pass over a listing that reads the
 /// clock once.
-fn keep_origin_at(atom: &Value, now: &str) {
-    if let Some(id) = atom.get("id").and_then(Value::as_str) {
+fn keep_origin_at(atom: &impl Claim, now: &str) {
+    if let Some(id) = atom.field("id").and_then(Value::as_str) {
         record_held_at(id, atom, now);
     }
 }
@@ -37765,7 +37978,7 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
         ids.into_iter().for_each(unrecord_person);
         return;
     }
-    let atoms = match atoms_listed(client, &client.workspace(), true) {
+    let atoms = match rows_listed(client, &client.workspace()) {
         Ok((atoms, true)) => atoms,
         _ => {
             ids.into_iter().for_each(unrecord_person);
@@ -37788,9 +38001,9 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
         }
     }
     let wanted: std::collections::HashSet<&str> = ids.iter().copied().collect();
-    let mut held: std::collections::HashMap<&str, &Value> = std::collections::HashMap::new();
+    let mut held: std::collections::HashMap<&str, &Row> = std::collections::HashMap::new();
     for atom in atoms.iter() {
-        if let Some(id) = atom.get("id").and_then(Value::as_str) {
+        if let Some(id) = atom.field("id").and_then(Value::as_str) {
             if wanted.contains(id) {
                 held.entry(id).or_insert(atom);
             }
