@@ -35200,12 +35200,7 @@ fn finish_lesson(issue: &str, text: &str) -> String {
             return Ok(format!("{line}\n"));
         }
         let posted = admit::store_labelled(&client, atom)?;
-        let id: String = posted["id"]
-            .as_str()
-            .unwrap_or("?")
-            .chars()
-            .take(8)
-            .collect();
+        let id = memories::short_id(posted["id"].as_str().unwrap_or("?"));
         let warned = prose_warning_line(&posted)
             .map(|line| format!("{line}\n"))
             .unwrap_or_default();

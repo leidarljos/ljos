@@ -347,9 +347,12 @@ pub fn store_labelled(client: &PacksetClient, mut atom: Value) -> Result<Value> 
 }
 
 /// How long one hook call spends storing the proposals an older ljos left
-/// open. A quarter of [`crate::HOOK_WALL_BUDGET_MS`]: the call's own reads
-/// keep the rest, and the rows left go on the next call.
-pub const IMPORT_SLICE_MS: u64 = crate::HOOK_WALL_BUDGET_MS / 4;
+/// open. The prompt's search after it must keep its fused pool, which
+/// waits up to [`crate::HOOK_RERANK_BUDGET_MS`], or recall is lost. The
+/// rest of [`crate::HOOK_WALL_BUDGET_MS`] is split evenly with the
+/// cross-encoder stage. Each can be cut without harm: the rows left go
+/// on the next call, and a cut rerank answers with the fused pool.
+pub const IMPORT_SLICE_MS: u64 = (crate::HOOK_WALL_BUDGET_MS - crate::HOOK_RERANK_BUDGET_MS) / 2;
 
 /// What one [`import_open`] did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

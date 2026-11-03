@@ -72,6 +72,12 @@ fn s(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
 }
 
+/// The id as a listing shows it.
+#[must_use]
+pub fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
 impl Memory {
     /// The memory an atom is, when it is a kind a review holds.
     #[must_use]
@@ -123,7 +129,7 @@ impl Memory {
 
     #[must_use]
     pub fn short_id(&self) -> &str {
-        self.id.get(..8).unwrap_or(&self.id)
+        short_id(&self.id)
     }
 
     /// The date part of [`Self::at`].
