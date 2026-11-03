@@ -36,7 +36,7 @@ fails, run `doctor` before drawing any conclusion.
 A harness hook files the claim, the deed and the finish. You do not have to call them.
 At session start and on each prompt the hook injects recall. The first edit
 (Edit, Write, MultiEdit, apply_patch) files a vissue titled from the prompt
-and claims it, when this session holds nothing on this repository. A git commit
+and claims it, when this session has no claim on this repository. A git commit
 the tool hook sees is cited as a deed. Stop and the end of the session finish
 the claim, or extract what the session learned and release it. The same loop runs
 inside ljos-mcp for a client with no hooks: the first tool that writes claims,
@@ -64,7 +64,7 @@ is more than a one-line change, so it is left as it is. Prompt recall reads
 preferences first,
 then the person's words, then other claims, and leaves working notes out of
 the prompt fact block, whether the prompt names the issue or the seat
-already holds it. `ljos recall` lists those working notes apart from the
+already has it. `ljos recall` lists those working notes apart from the
 facts, under an `unverified logbook notes` heading, each labelled by its
 agent-derived origin.
 `finish` takes the lesson, releases the claim, syncs, and pushes the
@@ -107,7 +107,7 @@ sitting that gets that far.
    finish a claim its parent took.
    Another seat's claim is still refused, and the refusal names who
    has it. The claim is taken and this section is printed before the
-   pack or recall is asked. Claims this seat already holds in this
+   pack or recall is asked. Claims this seat already has in this
    project, with no note, deed or finish for a day, are named here,
    the oldest three, then `+N more (ljos claims --mine)` when more
    remain. Nothing is released.
@@ -240,16 +240,17 @@ Every piece of work has an issue before it has a claim.
 
 Under a runner, git checks the sitting. The tool hook warns on `git
 commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `am`, `pull` and
-`push` until this conversation holds a live claim on an open ticket, and
+`push` until this conversation has a live claim on an open ticket, and
 the warning names `ljos sitting ID`; the command runs. A push onto
 `develop` or `main` (the `consensus_branches`) also wants that ticket's
 seats: run
 `ljos consensus ID --no-file`, and push once its `protected push:` line
 says the ticket clears it, with the `quorum` of seats (2) from two model
 families. A push onto your own topic branch needs only the sitting. The
-`pre-commit` and `pre-push` hooks `ljos git-hooks install` writes hold a
-commit and a push, a script's included, until both hold. `ljos doctor` says whether the gate
-is active for this seat. The person at their own terminal is never gated.
+`pre-commit` and `pre-push` hooks `ljos git-hooks install` writes refuse a
+commit or a push a script makes, until the sitting is open and a protected
+push has cleared. `ljos doctor` says whether that check is active for this
+seat. The person at their own terminal is not under it.
 `ljos cloud up` installs no git hook and sets no `core.hooksPath`, so on a
 cloud seat git runs only the hooks the repository and the login name.
 
@@ -425,7 +426,7 @@ cloud seat git runs only the hooks the repository and the login name.
   that parent, that shell or that runner, and the ballots folded into it. A subagent
   that wrote a candidate cannot vote. A voter changes its ballot by withdrawing it,
   `ljos vote ISSUE --withdraw --as NAME`, then casting again; a cast while
-  it still holds one is refused and names those two steps. A run on
+  it still has one is refused and names those two steps. A run on
   another machine has ljos installed there
   (`ljos cloud up`) and the tracker synced through the shared tracker
   repository (`LJOS_TRACKER_REMOTE`, `LJOS_TRACKER_GIT=push`). When nothing
@@ -437,7 +438,7 @@ cloud seat git runs only the hooks the repository and the login name.
   once, including for a protected push, and it
   names the ballots it folded and why.
   Persona ballots and Jev
-  ballots are advisory. The push gate counts seat ballots from another seat. A
+  ballots are advisory. The push check counts seat ballots from another seat. A
   design candidate whose session already read another candidate is flagged.
   `ljos panel run ISSUE` starts each designer and each persona in its own
   session (`cursor-agent -p` or `claude -p`, `LJOS_PANEL_HARNESS`) and gives a
@@ -650,8 +651,8 @@ under equal weights is a count; under calibrated rows it is not.
   `0 due; N scheduled, next at T` is a clock that is running.
 - `ljos policy ARGV` prints the line a command would run under argv law,
   then what the pack knows that bears on it. It is not a check.
-- `ljos guard_check` reads the commit, push, and merge gates, the same
-  reading the hook gives a shell line. The answer is `allow`; a gate
+- `ljos guard_check` reads the commit, push, and merge checks, the same
+  reading the hook gives a shell line. The answer is `allow`; a check
   that fires adds one warning line, which names the command that makes the
   line pass. Under the person's `block-on-warning`, a line policyd blocks
   is an error instead: do not run it. A plain `git push` runs, and so does a commit
@@ -668,7 +669,7 @@ under equal weights is a count; under calibrated rows it is not.
   when one exists for it. A fine-grained token with no Checks permission
   uses the REST fallback when the rollup read is denied. Every Cursor
   Bugbot thread wants a resolve or a reply. A commit that carries a
-  machine trailer warns here, and the `pre-push` git hook holds it. The
+  machine trailer warns here, and the `pre-push` git hook refuses it. The
   author and committer are checked only when `name` and `email` are set in
   `.ljos/gates.toml` or in the user, repository, or seat `ljos.toml`.
 - Under an agent runner the guard warns on a raw `vissue` verb that
@@ -745,10 +746,10 @@ An idle agent has no next prompt, so a seat can name how to wake it.
 `ljos wake --command CMD` runs `CMD` with `LJOS_SEAT` set to the seat, and `ljos wake --webhook URL --key-file FILE` posts the envelope (never the body) to a URL such as a Example Host routine's webhook.
 `ljos send` and `ljos reply` start the recipient's wake after the message is written and do not wait on it.
 When `LJOS_TRACKER_GIT=push`, that wake pushes this machine's sealed log before the command runs or the webhook is posted, so a seat on another machine does not read an empty inbox. The push is in the detached wake, and the send does not wait on it. A push that fails is a line in the wake log; the wake still runs and the send still stands.
-The envelope names the tracker commit that holds that log: a command receives it as `LJOS_WAKE_COMMIT`, and a webhook as `commit` in the JSON. The field is left out when no log commit was made.
+The envelope names the tracker commit that carries that log: a command receives it as `LJOS_WAKE_COMMIT`, and a webhook as `commit` in the JSON. The field is left out when no log commit was made.
 The guard reads a wake command when it is set and on every run, and a rule that fires is a warning line beside it; the command still runs. Under the person's `block-on-warning`, a command policyd blocks does not run, since nobody is there to ask.
 A wake name that ends in `-` matches every longer seat that starts with it. An exact name wins, and the longest prefix wins when several match. Mail to a run whose seat is that prefix plus the run id wakes the launcher, and the envelope still names the run's seat.
-A session still at work needs no wake: its `Stop` hook holds the turn once for unread interrupt mail, so send `--interrupt` when the work cannot wait for the next prompt.
+A session still at work needs no wake: its `Stop` hook reads unread interrupt mail once, so send `--interrupt` when the work cannot wait for the next prompt.
 A seat the pack has never heard from is refused with the seat it most likely meant; `--new-seat` writes to one that has not started yet.
 
 The text of a message carries its id. Two messages with the same words stay
@@ -758,7 +759,7 @@ and for a group membership.
 ## Identity and environment
 
 Nothing here needs a variable set. The pack is found on `127.0.0.1:8761`,
-or on this user's own port when another user's writer holds 8761, and the seat's memory is one workspace, `seat`, whatever directory you
+or on this user's own port when another user's writer has 8761, and the seat's memory is one workspace, `seat`, whatever directory you
 stand in (`PACKSET_WORKSPACE` names another). The deed store and claim
 graph live in the user's state directories, the tracker at the root
 `vissue identity` prints, and the host key at `~/.config/deedar/host.key`
@@ -809,7 +810,7 @@ name is refused, and the line names `vissue.toml`. Reads need no seat.
 when the seat is derived.
 
 `ljos seat grant SEAT close=own --quote TEXT --at TIME --via SEAT`
-records the owner's yes that SEAT may close tickets it filed or holds.
+records the owner's yes that SEAT may close tickets it filed or has.
 The row keeps the quote, the time, the seat that wrote it down, and the
 tracker commit of that write. `ljos finish ID --close` from that seat
 closes the ticket and notes the grant. With no grant, a person closes

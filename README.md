@@ -113,7 +113,7 @@ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/uninstal
 ```
 
 The seat's hooks fail open on every runner: a `ljos` that is missing, crashes or
-times out lets the call run, and a gate whose hook fails answers allow with a note
+times out lets the call run, and a check whose hook fails answers allow with a note
 that says why nothing judged the call.
 `scripts/fresh-install-check.sh` installs into an empty `HOME`. A full
 session runs next. Offboard runs after that session. The last check confirms that `HOME` is clean.
@@ -214,7 +214,10 @@ Before an agent's shell command runs, the runner's hook hands it to `ljos hook`.
 `ljos hook` asks `ljos-policyd` and relays the answer. policyd is the one place
 that says whether a command is dangerous. ljos does not run a second set of
 command checks of its own. By default nothing ljos answers stops a command: it never
-refuses, asks or holds one. A cloud seat's push rule, below, is the one exception.
+refuses, asks, or keeps one waiting. The cloud seat's push rule below refuses a
+force push, a branch delete, and a push outside its allowlist. The installed
+`pre-push` git hook refuses a protected push that has not cleared and a commit
+it will not send.
 
 policyd gives one of three answers.
 
@@ -287,7 +290,7 @@ Only ljos knows the tracker and the sitting, so it keeps two checks.
 - A protected-branch push warns when the current sitting's ticket has no
   settled consensus. The push runs. With one active seat, that seat's own vote
   is the consensus for the push check. With two or more seats, the normal quorum applies.
-  The `pre-push` git hook, once installed, still holds that push under a runner.
+  The `pre-push` git hook, once installed, refuses that push under a runner.
 
 If `ljos-policyd` is missing or slow, the command runs and ljos logs a warning.
 `ljos doctor` shows the policy row. `ljos policy -- COMMAND` prints the answer for

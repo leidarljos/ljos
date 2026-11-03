@@ -25418,7 +25418,7 @@ fn seat_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                 WRITES_SEAT_FILE,
                 format!(
                     "the command writes {word}, a file of the seat: an ljos binary, a hook or \
-                     the file that registers one, the ljos config or an approval"
+                     the file that registers one, or the ljos config"
                 ),
                 line,
             );
@@ -34065,7 +34065,7 @@ complete, finish or release the worker's claim, and the worker can\n   \
 finish a claim its parent took.\n   \
 Another seat's claim is still refused, and the refusal names who\n   \
 has it. The claim is taken and this section is printed before the\n   \
-pack or recall is asked. Claims this seat already holds in this\n   \
+pack or recall is asked. Claims this seat already has in this\n   \
 project, with no note, deed or finish for a day, are named here,\n   \
 the oldest three, then `+N more (ljos claims --mine)` when more\n   \
 remain. Nothing is released.",
@@ -53449,7 +53449,7 @@ mod tests {
             reason: "infra-destroy: this tears down infrastructure".into(),
         };
         log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
-        log_bypass("approval", "grant 0a1b", "terraform destroy", &rule);
+        log_bypass("warn", "grant 0a1b", "terraform destroy", &rule);
         let path = bypass_log_path().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let rows: Vec<Value> = text
@@ -53545,7 +53545,7 @@ mod tests {
         std::fs::write(&outside, "kept\n").unwrap();
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(&outside, &path).unwrap();
-        log_bypass("approval", "grant 0a1b", "terraform destroy", &rule);
+        log_bypass("warn", "grant 0a1b", "terraform destroy", &rule);
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept\n");
         assert!(std::fs::symlink_metadata(&path)
             .unwrap()
@@ -53567,7 +53567,7 @@ mod tests {
             reason: "infra-destroy: this tears down infrastructure".into(),
         };
         log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
-        log_bypass("approval", "grant 0a1b", "terraform destroy", &rule);
+        log_bypass("warn", "grant 0a1b", "terraform destroy", &rule);
         let path = bypass_log_path().unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.extend_from_slice(b"{\"kind\":\"switch\",\"command\":\"caf\xc3");
@@ -53616,7 +53616,7 @@ mod tests {
             verdict: "ask".into(),
             reason: "infra-destroy: this tears down infrastructure".into(),
         };
-        log_bypass("approval", "grant", "second", &rule);
+        log_bypass("warn", "grant", "second", &rule);
         let rows: Vec<Value> = complete_rows(&std::fs::read(&path).unwrap());
         let commands: Vec<&str> = rows.iter().filter_map(|r| r["command"].as_str()).collect();
         assert!(
@@ -57904,7 +57904,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn seat_said(word: &str) -> String {
         format!(
             "allow\twarn\twrites-seat-file\tthe command writes {word}, a file of the seat: an \
-             ljos binary, a hook or the file that registers one, the ljos config or an approval"
+             ljos binary, a hook or the file that registers one, or the ljos config"
         )
     }
 
