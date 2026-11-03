@@ -72,8 +72,9 @@ if "$gate" "$base..HEAD" 2>"$tmp/err"; then
   echo "identity-gate-test: committer date after author date was accepted" >&2
   exit 1
 fi
-authored_s=$(date -u -d "$authored" +%s)
-committed_s=$(date -u -d "$committed" +%s)
+epochs=$(git log -1 --format='%at %ct' "$redated")
+authored_s=${epochs% *}
+committed_s=${epochs#* }
 want="identity-gate: committer date differs from author date: $redated author $authored_s committer $committed_s"
 if [ "$(cat "$tmp/err")" != "$want" ]; then
   echo "identity-gate-test: date message was: $(cat "$tmp/err")" >&2
