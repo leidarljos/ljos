@@ -78,9 +78,15 @@ const TREE_GREP_BATCH: usize = 64;
 
 // Tests stop the lookup after this many tree reads. `None` uses the wall
 // budget alone. `Some(0)` stops before the first read.
+// `FAIL_TREE_READS` makes `git grep` fail, the way a missing tree does.
+// `WALK_START` is the row a walk resumed at. `ROWS_WALKED` counts rows
+// whose introduction was decided on this walk.
 #[cfg(test)]
 std::thread_local! {
     static LOOKUP_READS_LEFT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static FAIL_TREE_READS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static WALK_START: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static ROWS_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Replace the wall budget with a count of tree reads, so a test can stop
@@ -108,6 +114,54 @@ fn take_tree_reads(want: usize) -> usize {
     }
 }
 
+/// Make every tree read fail, so a test can see a git error without
+/// damaging a repository. `false` clears it.
+#[cfg(test)]
+fn fail_tree_reads_for_test(fail: bool) {
+    FAIL_TREE_READS.with(|cell| cell.set(fail));
+}
+
+#[cfg(test)]
+fn tree_reads_fail() -> bool {
+    FAIL_TREE_READS.with(|cell| cell.get())
+}
+
+#[cfg(test)]
+fn reset_walk_counter() {
+    WALK_START.with(|cell| cell.set(None));
+    ROWS_WALKED.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+fn walk_start() -> Option<usize> {
+    WALK_START.with(|cell| cell.get())
+}
+
+#[cfg(test)]
+fn rows_walked() -> usize {
+    ROWS_WALKED.with(|cell| cell.get())
+}
+
+#[cfg(test)]
+fn note_walk_start(next: usize) {
+    WALK_START.with(|cell| {
+        if cell.get().is_none() {
+            cell.set(Some(next));
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn note_walk_start(_next: usize) {}
+
+#[cfg(test)]
+fn note_row_walked() {
+    ROWS_WALKED.with(|cell| cell.set(cell.get() + 1));
+}
+
+#[cfg(not(test))]
+fn note_row_walked() {}
+
 /// Where slots began in this tracker, by commit order: the parents of each
 /// commit that brought a slot note into a tree none of its parents held
 /// one in. Empty when no slot is committed yet. `Ok(None)` when the
@@ -128,18 +182,22 @@ pub fn starts() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
 ///
 /// The note is read from the trees, not by diffing every commit. A
 /// finished answer for an ancestor of `HEAD` is extended by the commits
-/// after that tip. Anything else is a full read, saved as it goes, and the
-/// next vote continues it. The answer lives in the private state directory,
-/// keyed by the canonical tracker path. A shallow checkout's `HEAD` hash
-/// matches the full history, which is why the count is part of an exact
-/// hit. Two seats take one lock for that file. The lock wait shares
-/// [`SLOT_LOOKUP_BUDGET`]. Past it the seat decides nothing and prints
+/// after that tip. A partial answer for an ancestor is continued the same
+/// way: rows already decided stay decided, and the walk reads the rest
+/// plus the commits added since that tip. Anything else is a full read,
+/// saved as it goes, and the next vote continues it. The answer lives in
+/// the private state directory, keyed by the canonical tracker path. A
+/// shallow checkout's `HEAD` hash matches the full history, which is why
+/// the count is part of an exact hit. Two seats take one lock for that
+/// file. The lock wait shares [`SLOT_LOOKUP_BUDGET`]. Past it, or when a
+/// commit tree cannot be read, the seat decides nothing and prints
 /// [`SLOT_HISTORY_PARTIAL`].
 ///
 /// # Errors
 ///
-/// As [`starts`], and when the read stops at the budget or cannot take the
-/// lock in that time. A partial read is not an empty history.
+/// As [`starts`], and when the read stops at the budget, cannot read a
+/// commit tree, or cannot take the lock in that time. A partial read is
+/// not an empty history.
 pub fn starts_in(root: &Path) -> std::result::Result<Option<Vec<Vec<String>>>, String> {
     if ballot_sig::git_in(root, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true")
     {
@@ -165,12 +223,34 @@ pub fn starts_in(root: &Path) -> std::result::Result<Option<Vec<Vec<String>>>, S
         return Ok(Some(starts));
     }
     let cached = read_cache(&index_path);
-    if let Some(Saved::Partial { next, starts, base }) = cached
-        .as_ref()
-        .filter(|cache| cache.count == tip.count && cache.sha == tip.sha)
-        .map(|cache| cache.saved.clone())
+    if let Some(Saved::Partial { next, starts, base }) =
+        cached.as_ref().map(|cache| cache.saved.clone())
     {
-        return finish_scan(root, &index_path, &tip, next, starts, base, deadline);
+        if cache_tip_matches(cached.as_ref(), &tip) {
+            return finish_scan(root, &index_path, &tip, next, starts, base, deadline);
+        }
+        // A vote commits, so HEAD moves before the next read. The saved
+        // index belongs to the previous tip. Keep it and walk what that
+        // tip had not yet covered, then only the commits the new HEAD adds.
+        if let Some(cache) = cached.as_ref() {
+            if cache.sha != tip.sha && is_ancestor(root, &cache.sha, &tip.sha) {
+                return resume_moved_head(
+                    root,
+                    &index_path,
+                    &tip,
+                    MovedPartial {
+                        saved: Tip {
+                            sha: cache.sha.clone(),
+                            count: cache.count.clone(),
+                        },
+                        next,
+                        starts,
+                        base,
+                    },
+                    deadline,
+                );
+            }
+        }
     }
     if let Some(cache) = cached.as_ref().filter(|cache| {
         matches!(cache.saved, Saved::Complete(_))
@@ -205,6 +285,48 @@ fn partial_stopped() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
     Err(partial_message())
 }
 
+fn partial_unreadable() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
+    eprintln!("{SLOT_HISTORY_PARTIAL}");
+    Err(format!(
+        "{SLOT_HISTORY_PARTIAL}: a commit tree could not be read; the next vote continues the read"
+    ))
+}
+
+fn cache_tip_matches(cache: Option<&CacheFile>, tip: &Tip) -> bool {
+    cache.is_some_and(|cache| cache.count == tip.count && cache.sha == tip.sha)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanStop {
+    Finished,
+    Budget,
+    Unreadable,
+}
+
+fn stop_result(
+    index_path: &Path,
+    tip: &Tip,
+    next: usize,
+    starts: Vec<Vec<String>>,
+    base: Option<String>,
+    stop: ScanStop,
+) -> std::result::Result<Option<Vec<Vec<String>>>, String> {
+    match stop {
+        ScanStop::Finished => {
+            write_saved(index_path, tip, &Saved::Complete(starts.clone()));
+            Ok(Some(starts))
+        }
+        ScanStop::Budget => {
+            write_saved(index_path, tip, &Saved::Partial { next, starts, base });
+            partial_stopped()
+        }
+        ScanStop::Unreadable => {
+            write_saved(index_path, tip, &Saved::Partial { next, starts, base });
+            partial_unreadable()
+        }
+    }
+}
+
 fn scan_without_cache(
     root: &Path,
     tip: &Tip,
@@ -212,11 +334,10 @@ fn scan_without_cache(
     let deadline = Instant::now() + SLOT_LOOKUP_BUDGET;
     let mut next = 0;
     let mut starts = Vec::new();
-    let partial = scan_introductions(root, &tip.sha, &mut next, &mut starts, deadline);
-    if partial {
-        partial_stopped()
-    } else {
-        Ok(Some(starts))
+    match scan_introductions(root, &tip.sha, &mut next, &mut starts, deadline) {
+        ScanStop::Finished => Ok(Some(starts)),
+        ScanStop::Unreadable => partial_unreadable(),
+        ScanStop::Budget => partial_stopped(),
     }
 }
 
@@ -238,7 +359,7 @@ fn finish_scan(
     base: Option<String>,
     deadline: Instant,
 ) -> std::result::Result<Option<Vec<Vec<String>>>, String> {
-    let partial = match &base {
+    let stop = match &base {
         Some(base) if is_ancestor(root, base, &tip.sha) => {
             scan_range(root, base, &tip.sha, &mut next, &mut starts, deadline)
         }
@@ -249,12 +370,67 @@ fn finish_scan(
         }
         None => scan_introductions(root, &tip.sha, &mut next, &mut starts, deadline),
     };
-    if partial {
-        write_saved(index_path, tip, &Saved::Partial { next, starts, base });
-        return partial_stopped();
+    stop_result(index_path, tip, next, starts, base, stop)
+}
+
+/// A partial answer whose row index belongs to `saved`, which may no longer
+/// be `HEAD`.
+struct MovedPartial {
+    saved: Tip,
+    next: usize,
+    starts: Vec<Vec<String>>,
+    base: Option<String>,
+}
+
+/// Continue a partial answer saved for `held.saved` after `HEAD` moved to
+/// `tip`. `held.next` indexes the row list of that saved tip, not of `tip`.
+/// Finishing that list, then reading `saved..tip`, walks the commits the
+/// new `HEAD` adds and does not read the rows already decided.
+fn resume_moved_head(
+    root: &Path,
+    index_path: &Path,
+    tip: &Tip,
+    mut held: MovedPartial,
+    deadline: Instant,
+) -> std::result::Result<Option<Vec<Vec<String>>>, String> {
+    let stop = match &held.base {
+        Some(base) if is_ancestor(root, base, &held.saved.sha) => scan_range(
+            root,
+            base,
+            &held.saved.sha,
+            &mut held.next,
+            &mut held.starts,
+            deadline,
+        ),
+        Some(_) => return scan_fresh(root, index_path, tip, deadline),
+        None => scan_introductions(
+            root,
+            &held.saved.sha,
+            &mut held.next,
+            &mut held.starts,
+            deadline,
+        ),
+    };
+    if stop != ScanStop::Finished {
+        return stop_result(
+            index_path,
+            &held.saved,
+            held.next,
+            held.starts,
+            held.base,
+            stop,
+        );
     }
-    write_saved(index_path, tip, &Saved::Complete(starts.clone()));
-    Ok(Some(starts))
+    let saved_sha = held.saved.sha;
+    finish_scan(
+        root,
+        index_path,
+        tip,
+        0,
+        held.starts,
+        Some(saved_sha),
+        deadline,
+    )
 }
 
 struct Tip {
@@ -405,19 +581,29 @@ fn head_holds(root: &Path, commit: &str, deadline: Instant) -> Option<bool> {
         return None;
     }
     let mut has = BTreeMap::new();
+    // A git error is not "the note is absent". Callers treat `None` as
+    // unknown, so an empty finished list is not trusted.
     if !grep_into(root, std::slice::from_ref(&commit.to_string()), &mut has) {
-        return Some(false);
+        return None;
     }
     Some(has.get(commit).copied().unwrap_or(false))
 }
 
-/// `true` when a commit in `commits` was left unread.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holds {
+    Marked,
+    Budget,
+    Unreadable,
+}
+
+/// How far the commits could be read. [`Holds::Unreadable`] is a git error,
+/// not a commit that lacks the note.
 fn mark_holds(
     root: &Path,
     commits: &[String],
     has: &mut BTreeMap<String, bool>,
     deadline: Instant,
-) -> bool {
+) -> Holds {
     let pending: Vec<String> = commits
         .iter()
         .filter(|commit| !has.contains_key(*commit))
@@ -426,11 +612,11 @@ fn mark_holds(
     let mut rest = pending.as_slice();
     while !rest.is_empty() {
         if Instant::now() >= deadline {
-            return true;
+            return Holds::Budget;
         }
         let allow = take_tree_reads(rest.len().min(TREE_GREP_BATCH));
         if allow == 0 {
-            return true;
+            return Holds::Budget;
         }
         let (chunk, tail) = rest.split_at(allow);
         rest = tail;
@@ -439,23 +625,29 @@ fn mark_holds(
         }
         for commit in chunk {
             if Instant::now() >= deadline || take_tree_reads(1) == 0 {
-                return true;
+                return Holds::Budget;
             }
             let mut one = BTreeMap::new();
-            let held = grep_into(root, std::slice::from_ref(commit), &mut one)
-                && one.get(commit).copied().unwrap_or(false);
+            if !grep_into(root, std::slice::from_ref(commit), &mut one) {
+                return Holds::Unreadable;
+            }
+            let held = one.get(commit).copied().unwrap_or(false);
             has.insert(commit.clone(), held);
         }
     }
-    false
+    Holds::Marked
 }
 
 /// Grep `commits` in one process. `false` when git could not answer, so the
-/// caller reads them one by one. No match is an answer: none of them hold
-/// the note.
+/// caller reads them one by one. A one-by-one failure stops the walk as a
+/// partial read. No match is an answer: none of them hold the note.
 fn grep_into(root: &Path, commits: &[String], has: &mut BTreeMap<String, bool>) -> bool {
     if commits.is_empty() {
         return true;
+    }
+    #[cfg(test)]
+    if tree_reads_fail() {
+        return false;
     }
     let out = ballot_sig::git_history(root)
         .args(["--no-pager", "grep", "-l", "-F", "-e", SLOT_LINE])
@@ -523,17 +715,18 @@ fn walk_rows(
     next: &mut usize,
     starts: &mut Vec<Vec<String>>,
     deadline: Instant,
-) -> bool {
+) -> ScanStop {
     if *next > rows.len() {
         *next = 0;
     }
+    note_walk_start(*next);
     let mut has = BTreeMap::new();
     let mut i = *next;
     while i < rows.len() {
         if Instant::now() >= deadline {
             *next = i;
             dedupe_starts(starts);
-            return true;
+            return ScanStop::Budget;
         }
         let end = (i + TREE_GREP_BATCH).min(rows.len());
         let mut need = Vec::new();
@@ -547,21 +740,26 @@ fn walk_rows(
                 }
             }
         }
-        let stopped = mark_holds(root, &need, &mut has, deadline);
+        let read = mark_holds(root, &need, &mut has, deadline);
         while i < end && row_known(&has, &rows[i].0, &rows[i].1) {
             let (commit, parents) = &rows[i];
             push_introduction(&has, commit, parents, starts);
+            note_row_walked();
             i += 1;
         }
-        if stopped || i < end {
+        if read != Holds::Marked || i < end {
             *next = i;
             dedupe_starts(starts);
-            return true;
+            return if read == Holds::Unreadable {
+                ScanStop::Unreadable
+            } else {
+                ScanStop::Budget
+            };
         }
     }
     *next = rows.len();
     dedupe_starts(starts);
-    false
+    ScanStop::Finished
 }
 
 /// Introductions in commit-id order, resuming at `next`. `next` advances
@@ -572,9 +770,9 @@ fn scan_introductions(
     next: &mut usize,
     starts: &mut Vec<Vec<String>>,
     deadline: Instant,
-) -> bool {
+) -> ScanStop {
     let Some(text) = ballot_sig::git_in(root, &["rev-list", "--parents", head]) else {
-        return true;
+        return ScanStop::Budget;
     };
     let parents = parent_rows(&text);
     let rows: Vec<(String, Vec<String>)> = parents
@@ -593,10 +791,10 @@ fn scan_range(
     next: &mut usize,
     starts: &mut Vec<Vec<String>>,
     deadline: Instant,
-) -> bool {
+) -> ScanStop {
     let range = format!("{base}..{head}");
     let Some(text) = ballot_sig::git_in(root, &["rev-list", "--parents", &range]) else {
-        return true;
+        return ScanStop::Budget;
     };
     // rev-list order, not commit-id order: `next` is an index into this range.
     let mut ordered = Vec::new();
@@ -2328,6 +2526,14 @@ mod tests {
         }
     }
 
+    struct FailReset;
+
+    impl Drop for FailReset {
+        fn drop(&mut self) {
+            fail_tree_reads_for_test(false);
+        }
+    }
+
     fn cache_path(state: &std::path::Path, repo: &std::path::Path) -> std::path::PathBuf {
         use sha2::Digest;
         use std::os::unix::ffi::OsStrExt;
@@ -2597,6 +2803,113 @@ mod tests {
         assert!(
             at.iter().any(|parents| parents == &vec![base.clone()]),
             "an empty complete list hid the introduction: {at:?}"
+        );
+    }
+
+    /// A tree git cannot read is not a commit without the note. The lookup
+    /// stays partial, including when an empty finished list would otherwise
+    /// be trusted, and the vote is recorded under the protected label.
+    #[test]
+    fn a_tree_read_failure_yields_partial() {
+        let _lock = crate::test_env_lock();
+        let _budget = BudgetReset;
+        let _fail = FailReset;
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        std::env::set_var("XDG_STATE_HOME", &state);
+        let repo = root.path().join("repo");
+        init_repo(&repo);
+        std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: one\"\n").unwrap();
+        commit_all(&repo, "slot");
+        std::fs::write(repo.join(".ljos-seat-keys"), "postslot kk\n").unwrap();
+        commit_all(&repo, "pin");
+        override_lookup_budget_for_test(None);
+        fail_tree_reads_for_test(true);
+
+        let err = starts_in(&repo).unwrap_err();
+        assert!(err.contains(SLOT_HISTORY_PARTIAL), "{err}");
+        assert!(
+            err.contains("could not be read"),
+            "a tree error was reported as the budget: {err}"
+        );
+
+        let count = git_ok(&repo, &["rev-list", "--count", "HEAD"])
+            .trim()
+            .to_string();
+        let sha = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(
+            cache_path(&state, &repo),
+            format!("v2 complete {count} {sha}\n"),
+        )
+        .unwrap();
+        let err = starts_in(&repo).unwrap_err();
+        assert!(err.contains(SLOT_HISTORY_PARTIAL), "{err}");
+
+        std::env::set_var("VISSUE_ROOT", &repo);
+        std::env::set_var("LJOS_SEAT", "ada");
+        let who = crate::ballot_voter("vote", Some("postslot")).expect("the vote was refused");
+        assert_eq!(who, "persona:ada:postslot", "{who}");
+    }
+
+    /// Two votes, and a commit between them. The second vote's read starts
+    /// at the saved row and walks the rows still unread, including the new
+    /// commit. It does not walk the history from the first row again.
+    #[test]
+    fn a_commit_between_votes_resumes_the_walk() {
+        let _lock = crate::test_env_lock();
+        let _budget = BudgetReset;
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        std::env::set_var("XDG_STATE_HOME", &state);
+        let repo = root.path().join("repo");
+        init_repo(&repo);
+        std::fs::write(repo.join("issues.org"), "board\n").unwrap();
+        commit_all(&repo, "base");
+        let base = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: one\"\n").unwrap();
+        commit_all(&repo, "slot");
+        for n in 0..8 {
+            std::fs::write(repo.join(format!("f{n}")), "x\n").unwrap();
+            commit_all(&repo, "filler");
+        }
+        std::fs::write(repo.join(".ljos-seat-keys"), "newseat kk\n").unwrap();
+        commit_all(&repo, "pin");
+
+        override_lookup_budget_for_test(Some(4));
+        let err = starts_in(&repo).unwrap_err();
+        assert!(err.contains(SLOT_HISTORY_PARTIAL), "{err}");
+        let saved_next = partial_next(&std::fs::read_to_string(cache_path(&state, &repo)).unwrap());
+        assert!(saved_next > 0, "the first vote saved no progress");
+
+        std::fs::write(repo.join("between"), "y\n").unwrap();
+        commit_all(&repo, "between votes");
+        let commits: usize = git_ok(&repo, &["rev-list", "--count", "HEAD"])
+            .trim()
+            .parse()
+            .unwrap();
+
+        override_lookup_budget_for_test(None);
+        reset_walk_counter();
+        let at = starts_in(&repo).unwrap().expect("a git tracker");
+        assert_eq!(
+            walk_start(),
+            Some(saved_next),
+            "the second vote started at row {saved_next:?} and walked {}",
+            rows_walked()
+        );
+        assert_eq!(
+            rows_walked() + saved_next,
+            commits,
+            "walked {} rows after saving {saved_next} in a history of {commits}",
+            rows_walked()
+        );
+        assert!(
+            at.iter().any(|parents| parents == &vec![base.clone()]),
+            "the introduction was dropped on resume: {at:?}"
+        );
+        assert!(
+            !stood_in(&repo, &at, "newseat", "kk").unwrap(),
+            "a pin added after slots began stood: {at:?}"
         );
     }
 }
