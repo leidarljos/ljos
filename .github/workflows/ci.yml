@@ -10,8 +10,12 @@ on:
 permissions:
   contents: read
 
+# A group holds one running and one pending run, and a newer pending run
+# cancels the older one even with cancel-in-progress off. So each develop
+# and main push has a group of its own, keyed by its sha, and runs to the
+# end. Any other branch keeps one group, where a new push cancels the last.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') && github.sha || 'tip' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/develop' && github.ref != 'refs/heads/main' }}
 
 jobs:
