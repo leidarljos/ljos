@@ -116,6 +116,8 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   On a pack of ten thousand claims a search takes about three quarters of the time, and prints the same hits.
 - Test fixtures and doc examples use neutral model names such as `model-a`.
 - The handover scope tests find packsetd and the pinned vissue in separate PATH directories, as CI installs them.
+- The lock takes async-executor 1.14.1 and clipboard-win 5.4.3 in place of the yanked releases.
+  cargo deny no longer ignores `RUSTSEC-2026-0381`, which matches no crate, and no longer allows the unused `Unicode-DFS-2016` licence.
 - The packsetd test helper keeps one node per writer it starts, in place of a fixed 128 slots.
   It reuses a node once its writer stops.
   A Registry owns that list, and a test checks the reuse with fake process ids.
