@@ -588,7 +588,7 @@ fn install_handlers() {
     ONCE.call_once(|| {
         #[cfg(unix)]
         unsafe {
-            signal(SIGINT, on_sigint as usize);
+            signal(SIGINT, on_sigint as SigHandler as usize);
         }
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -602,11 +602,16 @@ fn install_handlers() {
     });
 }
 
+/// The C `sighandler_t`. Casting through it checks the handler's
+/// signature before `signal` takes it as an address.
+#[cfg(unix)]
+type SigHandler = unsafe extern "C" fn(i32);
+
 #[cfg(unix)]
 unsafe extern "C" fn on_sigint(sig: i32) {
     unsafe {
         // Re-arm in case this libc clears the handler when it runs.
-        signal(sig, on_sigint as usize);
+        signal(sig, on_sigint as SigHandler as usize);
         stop_all();
         signal(sig, SIG_DFL);
         raise(sig);
