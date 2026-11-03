@@ -1,10 +1,14 @@
 # A fresh machine
 
-`ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory first on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json`. The command is always the absolute path of `ljos-mcp`. A client that spawns servers with its own PATH never reads the edited profile, and it still starts this install. It clones `LJOS_TRACKER_REMOTE`. Run it again and it refreshes the clone and the MCP command, rewrites env-owned wake entries from `LJOS_WAKE_<SEAT>_URL`, and refreshes the scope `cloud` age identity from the named secret.
+<!-- [[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]] -->
+These notes describe ljos 0.37.0.
+<!-- [[[end]]] -->
+
+`ljos cloud up` installs the release binaries into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory first on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json`. The command is always the absolute path of `ljos-mcp`. A client that spawns servers with its own PATH never reads the edited profile, and it still starts this install. It clones `LJOS_TRACKER_REMOTE`. Run it again and it refreshes the clone and the MCP command, rewrites env-owned wake entries from `LJOS_WAKE_<SEAT>_URL`, and refreshes the scope `cloud` age identity from the named secret.
 
 `sh scripts/install.sh --cloud` is the same bootstrap. When the binaries are already installed and `ljos cloud up` answers, that command is all that runs. `--force` downloads again. From this repository, if the installed `ljos` has no `cloud up`, the script builds this tree's `ljos` and `ljos-mcp` and leaves them in place.
 
-`ljos cloud up` and `install.sh --cloud` ship in v0.33.0. The latest release has both.
+This tree's `ljos` answers `cloud up`, and `scripts/install.sh --cloud` runs that command.
 
 ## Environment
 
@@ -40,9 +44,9 @@ A `STARTED` claim this machine made, whose process is gone and that is older tha
 
 ## The encoder
 
-`packset-embed` gives a VM dense search and bulk encoding. The release workflow builds the Open Neural Network Exchange (ONNX) Runtime 1.28.3 from source with telemetry off and Debian's protoc, links `packset-embed` 0.16.0 to it with the rpath `$ORIGIN/../lib/onnxruntime`, and attaches `onnxruntime-TARGET.tar.gz` and `packset-embed-TARGET.tar.gz`, each with a `.sha256` beside it. Nothing comes from cdn.pyke.io. x86_64 Linux is the one target built.
+On a cloud VM, `cloud up` installs `packset-embed` and the ONNX Runtime that binary finds through its rpath `$ORIGIN/../lib/onnxruntime`. It fetches `onnxruntime-TARGET.tar.gz` and `packset-embed-TARGET.tar.gz` from the release of its own version, each beside its `.sha256`. TARGET is `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin` or `aarch64-apple-darwin`, the triple of this machine. Any other machine leaves search lexical.
 
-`cloud up` fetches both archives from the release of its own version and checks both sums before it unpacks either. A sum that does not match installs nothing and stops `cloud up`. The runtime goes to `~/.local/lib/onnxruntime`, beside the binary directory. A release without the archives leaves search lexical.
+It checks both sums before it unpacks either archive. A sum that does not match unpacks neither and stops `cloud up`; the seat binaries already installed stay. The runtime is `lib/onnxruntime` under the parent of the binary directory, which is `~/.local/lib/onnxruntime` when the binaries are in `~/.local/bin`. A release with no such archives leaves search lexical and does not stop the command.
 
 A cloud VM is a run with `CURSOR_AGENT_ID` or `CLOUD_AGENT_ID` set, or a machine with `/run/cursor/api.sock`. A CI job is not one, including GitHub Actions. Anywhere else `cloud up` downloads no encoder and installs none. `sh scripts/install.sh --cloud` sets `WITH_EMBED=0` and does not build `packset-embed`. Search stays lexical.
 
@@ -65,7 +69,7 @@ A GitHub Actions job, including a self-hosted ephemeral runner, uses the same bo
     ljos note ISSUE "the job result"
 ```
 
-The step fetches the latest release's script. v0.33.0 and later take `--cloud`. On this repository the install line is `sh scripts/install.sh --cloud`. The tracker URL stays in the job environment. The runner's git credentials have to be able to clone it.
+The step fetches the latest release's script, which takes `--cloud`. On this repository the install line is `sh scripts/install.sh --cloud`. The tracker URL stays in the job environment. The runner's git credentials have to be able to clone it.
 
 ## Cloud runner environment
 
@@ -129,7 +133,7 @@ The shell guard is a filter on commands as written. It holds one push rule. A `g
 
 The pre-push hook is the git backstop for a `git push` that does not pass `--no-verify`. Git runs the hook `cloud up` installs for that push, including when a script, `make`, `npm`, or another program starts it, and passes the remote URL after `insteadOf` and the refs. The allowlist is the repository and the branch. This seat may fast-forward `develop` and the branches named in its `ljos.toml` on the repository `cloud up` recorded, and any branch of the tracker. A tag, a delete, a push that is not a fast-forward, and `develop` on any other repository are refused. A commit whose message has a by-trailer, a made-with line, a generated line, or a machine account mark is refused too, and so is a push whose commits cannot be read. A Tests or note paragraph is still allowed. A new branch is checked only for commits the remotes do not already have. The shell guard refuses `--no-verify` on a line it can see, a `-c` or `--config core.hooksPath`, the `GIT_CONFIG_*` variables that set that key, and a write to the hook or to a gitconfig. It does not read `./ship.sh`. `--no-verify` inside that script skips the hook. `git send-pack` does not run the hook. dulwich does not run it either. A server-side ruleset is what stops those.
 
-`cloud up` records the seat repository once. A later `cloud up` from another clone does not move that record. It points `core.hooksPath` at the hook when nothing else is booked. When a hooks directory is already booked, it chains a pre-push that runs the previous hook and then this one. A directory that has a commit-msg or prepare-commit-msg hook this install did not write is not chained. Only that level of the hooks path is unset, a path that names this install's own hooks is left in place, and no file in the directory is rewritten. The repository's hooks path then points at the installed hook directory. A repository whose own `core.hooksPath` names some other directory does not run the global hook. `ljos doctor` fails that row unless the effective hook is the installed script or a chain to it, and it fails a hooks path that has a commit hook this install did not write. The push that shares user rules runs the installed script from that directory and no other hook, whatever `core.hooksPath` names. The hook reads its allowlist from its own path. The pusher's `HOME`, `XDG_CONFIG_HOME`, and `PATH` are not where that file comes from.
+`cloud up` records the seat repository once. A later `cloud up` from another clone does not move that record. `ljos doctor` fails that row unless the effective hook is the installed script or a chain to it, and it fails a hooks path that has a commit hook this install did not write. The push that shares user rules runs the installed script from that directory and no other hook, whatever `core.hooksPath` names. The hook reads its allowlist from its own path. The pusher's `HOME`, `XDG_CONFIG_HOME`, and `PATH` are not where that file comes from.
 
 A program that calls the GitHub API with the token is out of reach of both checks. The shell guard never sees it, and the pre-push hook only runs for git. Stopping that takes a server-side ruleset.
 

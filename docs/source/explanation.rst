@@ -325,7 +325,8 @@ When the seat goes on to use an island, ``ljos island --fire`` says so. The stro
 together, and the weight of each link between them grows. Links nobody walks fade without being
 deleted. That is Hebb's rule with Oja's forgetting term (doi:10.1007/BF00275687).
 
-The island lost as a ranking on LongMemEval. Activation flows to well-connected claims, and a
+The island lost as a ranking on LongMemEval_S. The fused arm on that run
+encodes with e5-large-v2. Activation flows to well-connected claims, and a
 question asks for something else. So the island is what the seat prints beside the hits for
 orientation, and what fires together after use. It is never the order the hits come in.
 

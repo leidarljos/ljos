@@ -1056,18 +1056,23 @@ $ ljos-consensus settle --issue ID --susceptibility 0.8 --trust '[["alice","caro
 
 =ljos doctor= prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer or the note queue is damaged.
 =ljos doctor --all= prints every row.
-The block is the =ljos= row that command printed, taken from ljos 0.32.1.
-=ljos --version= printed =ljos 0.32.1=.
-The row is the shape when the binary on =PATH= is that version: no =behind= and no =ahead of= in front of =crates.io=.
-A day cache that already holds the crates.io answer prints =crates.io (cached)= in that place.
+# [[[cog import ljos_version as v; v.lines("The block is the =ljos= row from that command on a scratch seat, taken from ljos {version}.")]]]
+The block is the =ljos= row from that command on a scratch seat, taken from ljos 0.37.0.
+# [[[end]]]
+# [[[cog import ljos_version as v; v.lines("=ljos --version= printed =ljos {version}=.")]]]
+=ljos --version= printed =ljos 0.37.0=.
+# [[[end]]]
+The scratch seat's day cache already holds that version, so the row says =crates.io (cached)= and neither =behind= nor =ahead of=.
 The path stands in for the binary.
-On this tree the same run also read vissue-cli 0.21.0 and packset 0.15.3 from crates.io.
-Those binaries were not on =PATH=, so the sample does not show them as =ok=.
-
+The scratch =PATH= holds only this =ljos=, so the sample does not show the other seat binaries.
+# BEGIN ljos-sample doctor
 #+begin_src text
+$ ljos --version
+ljos 0.37.0
 $ ljos doctor --all
-ok	ljos	/path/to/ljos  0.32.1  crates.io 0.32.1
+ok	ljos	/path/to/ljos  0.37.0  crates.io (cached) 0.37.0
 #+end_src
+# END ljos-sample doctor
 
 Exit 1 when the tracker, the deed store, or the pack does not answer. The
 tracker row names how many commits origin lacks, and fails when that count

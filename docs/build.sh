@@ -12,6 +12,9 @@ REQ="$ROOT/docs/requirements.txt"
 SRC="$ROOT/docs/source"
 BUILD="$ROOT/docs/build"
 
+echo "==> command samples"
+python3 "$ROOT/docs/scripts/gen_samples.py"
+
 echo "==> 1/3 export org → rst"
 bash "$ROOT/docs/scripts/export_org_to_rst.sh"
 

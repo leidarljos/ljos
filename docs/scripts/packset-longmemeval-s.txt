@@ -1,0 +1,5 @@
+# Encoder for the LongMemEval_S fused run, copied from the public packset
+# docs (leidarljos/packset docs/orgmode/explanation.org and index.org):
+# CombMNZ of BM25+ and this model. The private bench repo is not a source.
+# The default packset-embed model is a different model and is not this run.
+CombMNZ (BM25+ plus e5-large-v2)

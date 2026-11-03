@@ -20,6 +20,11 @@ if [[ "$exporter" == "auto" ]]; then
   fi
 fi
 
+# Refresh the committed command samples when this tree's ljos is already
+# built. docs/build.sh builds it first. With no binary the committed
+# samples stay, and the cargo test job regenerates them and diffs.
+python3 docs/scripts/gen_samples.py --no-build
+
 # Before the export, because both classes this catches produce valid output
 # that renders wrong, so nothing downstream will complain about them.
 python3 docs/scripts/check_org.py

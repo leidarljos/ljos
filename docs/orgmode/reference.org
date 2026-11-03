@@ -608,3 +608,34 @@ falls below 0.01.
 | =ljos-cli= | the library and =ljos= |
 | =ljos-mcp= | the MCP server |
 | =ljos-consensus= | DeGroot and Friedkin-Johnsen settles, Seldon export (separate repository) |
+
+* Help text
+
+# BEGIN ljos-sample help
+#+begin_src text
+$ ljos --version
+ljos 0.37.0
+$ ljos --help
+Memory, a work tracker and a command guard for coding runners
+
+Usage: ljos <COMMAND>
+
+Commands:
+  doctor        Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer or the note queue is damaged
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+Start with `ljos doctor`, `ljos prefer "..."`, `ljos policy -- COMMAND` and `ljos onboard`. `ljos protocol` explains the rest.
+$ ljos doctor --help
+Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer or the note queue is damaged
+
+Usage: ljos doctor [OPTIONS]
+
+Options:
+      --all   Print every row, the ones that answer included [alias: --verbose]
+      --fix   Refresh runner skills and runner env files this ljos wrote, and replace a stale cloud guard rule file. A skill edited by hand, an env file ljos did not write, and a cloud guard file that is missing or not a known older version are left in place
+  -h, --help  Print help
+#+end_src
+# END ljos-sample help
