@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 const EXAMPLE: &str = include_str!("../../../examples/mesh.toml");
 const KEY: &str = "tskey-auth-kQ7x2NeverShown0123456789abcdef";
+const HOST: &str = "m6be-test";
+const LOGIN: &str = "https://hs.grund.rgoswami.me";
 
 /// The bound on one mesh verb, `WAIT_SECS` in src/mesh.rs.
 const WAIT_SECS: u64 = 30;
@@ -29,6 +31,7 @@ const FAKE_LIFE_SECS: u64 = 20 * WAIT_SECS;
 /// SIGTERM.
 const TAILSCALED: &str = r#"#!/bin/sh
 [ -n "$FAKE_STUBBORN" ] && trap '' TERM
+printf '%s\n' "$*" >> "$FAKE_MESH/daemon-args"
 for a in "$@"; do case "$a" in --socket=*) sock="${a#--socket=}";; esac; done
 echo "tailscaled $*"
 env
@@ -39,26 +42,37 @@ exec sleep "$FAKE_LIFE"
 "#;
 
 /// The login server's side of a join, kept in `$FAKE_MESH`. `FAKE_ECHO`
-/// repeats the command line, key included; `FAKE_REJECT` refuses the key;
-/// `FAKE_HANG` never answers.
+/// repeats the key the file holds; `FAKE_REJECT` refuses it; `FAKE_HANG`
+/// never answers.
 const TAILSCALE: &str = r#"#!/bin/sh
-verb=; host=; key=; prev=
+verb=; host=; key=
 for a in "$@"; do
-  case "$prev" in --hostname) host="$a";; --authkey) key="$a";; esac
-  case "$a" in status|up|logout) [ -z "$verb" ] && verb="$a";; esac
-  prev="$a"
+  case "$a" in
+    --auth-key=file:*) key=$(cat "${a#--auth-key=file:}" 2>/dev/null);;
+    --auth-key=*) key=${a#--auth-key=};;
+    --hostname=*) host=${a#--hostname=};;
+    status|up|logout) [ -z "$verb" ] && verb="$a";;
+  esac
 done
+printf '%s\n' "$*" >> "$FAKE_MESH/invocations"
 [ -n "$FAKE_HANG" ] && exec sleep "$FAKE_LIFE"
 case "$verb" in
 status)
   if [ -f "$FAKE_MESH/node" ]; then
-    printf '{"BackendState":"Running","Self":{"HostName":"%s"}}\n' "$(cat "$FAKE_MESH/node")"
+    name=$(cat "$FAKE_MESH/node")
+    case " $* " in
+      *" --json "*) printf '{"BackendState":"Running","Self":{"HostName":"%s"}}\n' "$name";;
+      *) printf '%s running\n' "$name";;
+    esac
   else
-    printf '{"BackendState":"NeedsLogin","Self":{"HostName":""}}\n'
+    case " $* " in
+      *" --json "*) printf '{"BackendState":"NeedsLogin","Self":{"HostName":""}}\n';;
+      *) printf 'Logged out.\n';;
+    esac
   fi ;;
 up)
-  if [ -n "$FAKE_ECHO" ]; then echo "tailscale $*"; echo "tailscale $*" >&2; fi
-  if [ -n "$FAKE_REJECT" ]; then echo "backend error: invalid key: $key" >&2; exit 1; fi
+  if [ -n "$FAKE_ECHO" ]; then printf '%s\n' "$key" >&2; fi
+  if [ -n "$FAKE_REJECT" ]; then printf 'backend error: invalid key: %s\n' "$key" >&2; exit 1; fi
   [ -n "$key" ] || exit 1
   echo up >> "$FAKE_MESH/joins"
   printf '%s' "$host" > "$FAKE_MESH/node" ;;
@@ -91,11 +105,26 @@ impl World {
         write_program(&root.path().join("bin/tailscaled"), TAILSCALED);
         write_program(&root.path().join("bin/tailscale"), TAILSCALE);
         std::fs::write(root.path().join("home/.config/ljos/mesh.toml"), EXAMPLE).unwrap();
+        std::fs::write(root.path().join("home/mesh.key"), KEY).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            root.path().join("home/mesh.key"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
         Self { root }
     }
 
     fn path(&self, rel: &str) -> PathBuf {
         self.root.path().join(rel)
+    }
+
+    fn key(&self) -> PathBuf {
+        self.path("home/mesh.key")
+    }
+
+    fn state(&self) -> PathBuf {
+        self.path("home/.state/ljos/mesh")
     }
 
     fn ljos(&self, args: &[&str]) -> Command {
@@ -120,11 +149,15 @@ impl World {
         cmd
     }
 
+    fn up_cmd(&self) -> Command {
+        let key = self.key();
+        let mut cmd = self.ljos(&["mesh", "up", "--key-file"]);
+        cmd.arg(&key).args(["--hostname", HOST]);
+        cmd
+    }
+
     fn up(&self) -> Output {
-        self.ljos(&["mesh", "up"])
-            .env("LJOS_MESH_AUTHKEY", KEY)
-            .output()
-            .unwrap()
+        self.up_cmd().output().unwrap()
     }
 
     fn down(&self) -> Output {
@@ -143,6 +176,10 @@ impl World {
         std::fs::read_to_string(self.path("fake/daemon.pid"))
             .ok()
             .map(|pid| pid.trim().to_string())
+    }
+
+    fn recorded(&self, name: &str) -> String {
+        std::fs::read_to_string(self.path("fake").join(name)).unwrap_or_default()
     }
 }
 
@@ -201,36 +238,128 @@ fn files_holding(dir: &Path, needle: &[u8]) -> Vec<PathBuf> {
     found
 }
 
+fn up_invocation(world: &World) -> String {
+    world
+        .recorded("invocations")
+        .lines()
+        .find(|line| line.split_whitespace().any(|arg| arg == "up"))
+        .unwrap_or_else(|| panic!("no up invocation\n{}", world.recorded("invocations")))
+        .to_string()
+}
+
 #[test]
-fn running_up_twice_joins_once_and_down_leaves() {
+fn second_up_prints_status_and_never_advertises_tags() {
     let world = World::new();
     let first = one_line(&world.up(), "first up");
-    let node = world.joined_node();
-    let hex = node
-        .strip_prefix("ag-example-")
-        .unwrap_or_else(|| panic!("node {node:?} is not ag-example-<hex>"));
-    assert!(
-        hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
-        "{node}"
+    assert_eq!(world.joined_node(), HOST);
+    assert!(first.contains(HOST) && first.contains("joined"), "{first}");
+    let up = up_invocation(&world);
+    for flag in [
+        "--accept-routes=false",
+        "--accept-dns=false",
+        &format!("--login-server={LOGIN}"),
+        &format!("--auth-key=file:{}", world.key().display()),
+        &format!("--hostname={HOST}"),
+        "--reset",
+    ] {
+        assert!(up.contains(flag), "{flag} missing from {up}");
+    }
+    let argv = format!(
+        "{}{}",
+        world.recorded("invocations"),
+        world.recorded("daemon-args")
     );
-    assert!(first.contains(&node) && first.contains("joined"), "{first}");
+    assert!(
+        !argv.contains("advertise-tags"),
+        "advertise-tags was passed\n{argv}"
+    );
+    assert!(
+        !argv.contains(KEY),
+        "the key was passed on a command line\n{argv}"
+    );
 
     let second = one_line(&world.up(), "second up");
-    assert!(second.contains("already up"), "{second}");
+    assert!(
+        second.contains(HOST) && second.contains("running"),
+        "{second}"
+    );
+    assert!(!second.contains("joined"), "{second}");
     assert_eq!(world.count("joins"), 1, "the second up joined again");
     assert_eq!(world.count("daemons"), 1, "the second up started a daemon");
 
+    let third = world
+        .ljos(&["mesh", "up", "--hostname", HOST])
+        .output()
+        .unwrap();
+    let third = one_line(&third, "up with no key once joined");
+    assert!(third.contains("running"), "{third}");
+    assert_eq!(world.count("joins"), 1, "an up with no key joined again");
+
     let pid = world.daemon_pid().expect("the daemon recorded its pid");
     let left = one_line(&world.down(), "down");
-    assert!(left.contains(&node) && left.contains("left"), "{left}");
+    assert!(left.contains(HOST) && left.contains("left"), "{left}");
     assert_eq!(world.count("logouts"), 1);
     assert!(gone(&pid), "tailscaled {pid} is still running after down");
     assert!(
-        !world.path("run/ljos/mesh").exists(),
-        "down left the state directory"
+        !world.state().exists(),
+        "down left the state directory at {}",
+        world.state().display()
     );
     let again = one_line(&world.down(), "second down");
     assert!(again.contains("not on the mesh"), "{again}");
+}
+
+#[test]
+fn userspace_when_tun_is_missing_or_unusable() {
+    let world = World::new();
+    let missing = world.path("no-such-tun");
+    let unusable = world.path("home");
+    for tun in [missing.as_path(), unusable.as_path()] {
+        let out = world.up_cmd().env("LJOS_MESH_TUN", tun).output().unwrap();
+        let line = one_line(&out, "userspace up");
+        assert!(line.contains("userspace"), "{line}");
+        assert!(line.contains("localhost:1055"), "{line}");
+        let args = world.recorded("daemon-args");
+        assert!(
+            args.contains("--tun=userspace-networking"),
+            "tun {} did not select userspace\n{args}",
+            tun.display()
+        );
+        assert!(args.contains("--socks5-server=localhost:1055"), "{args}");
+        one_line(&world.down(), "down after userspace");
+        let _ = std::fs::remove_file(world.path("fake/daemon-args"));
+        let _ = std::fs::remove_file(world.path("fake/node"));
+    }
+
+    let openable = world
+        .up_cmd()
+        .env("LJOS_MESH_TUN", "/dev/null")
+        .output()
+        .unwrap();
+    let line = one_line(&openable, "openable tun");
+    let args = world.recorded("daemon-args");
+    // CAP_NET_ADMIN is bit 12 of CapEff (linux/capability.h). Without it
+    // an open device node still cannot become a tunnel.
+    let admin = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|l| l.strip_prefix("CapEff:"))
+                .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+        })
+        .is_some_and(|caps| (caps >> 12) & 1 == 1);
+    if admin {
+        assert!(line.contains("kernel TUN"), "{line}");
+        assert!(
+            !args.contains("userspace-networking") && !args.contains("socks5-server"),
+            "{args}"
+        );
+    } else {
+        assert!(line.contains("userspace"), "{line}");
+        assert!(args.contains("--tun=userspace-networking"), "{args}");
+        assert!(args.contains("--socks5-server=localhost:1055"), "{args}");
+    }
 }
 
 /// A process group that is not tailscaled, as a reused pid would name.
@@ -269,7 +398,7 @@ fn a_stale_pid_file_signals_nothing_on_up_or_down() {
     let world = World::new();
     let mut other = Bystander::start();
     let pid = other.pid();
-    let state = world.path("run/ljos/mesh");
+    let state = world.state();
     let stale = |contents: String| {
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(state.join("tailscaled.pid"), contents).unwrap();
@@ -296,10 +425,36 @@ fn a_stale_pid_file_signals_nothing_on_up_or_down() {
 }
 
 #[test]
+fn running_up_twice_joins_once_and_down_leaves() {
+    let world = World::new();
+    let first = one_line(&world.up(), "first up");
+    assert_eq!(world.joined_node(), HOST);
+    assert!(first.contains(HOST) && first.contains("joined"), "{first}");
+
+    let second = one_line(&world.up(), "second up");
+    assert!(second.contains("already up"), "{second}");
+    assert_eq!(world.count("joins"), 1, "the second up joined again");
+    assert_eq!(world.count("daemons"), 1, "the second up started a daemon");
+
+    let pid = world.daemon_pid().expect("the daemon recorded its pid");
+    let left = one_line(&world.down(), "down");
+    assert!(left.contains(HOST) && left.contains("left"), "{left}");
+    assert_eq!(world.count("logouts"), 1);
+    assert!(gone(&pid), "tailscaled {pid} is still running after down");
+    assert!(
+        !world.state().exists(),
+        "down left the state directory at {}",
+        world.state().display()
+    );
+    let again = one_line(&world.down(), "second down");
+    assert!(again.contains("not on the mesh"), "{again}");
+}
+
+#[test]
 fn up_notes_a_pid_file_in_the_old_format_when_already_up() {
     let world = World::new();
     one_line(&world.up(), "up");
-    let file = world.path("run/ljos/mesh/tailscaled.pid");
+    let file = world.state().join("tailscaled.pid");
     let current = std::fs::read_to_string(&file).unwrap();
     let pid = world.daemon_pid().expect("the daemon recorded its pid");
     std::fs::write(&file, format!("{pid}\n")).unwrap();
@@ -318,12 +473,7 @@ fn up_notes_a_pid_file_in_the_old_format_when_already_up() {
 #[test]
 fn down_kills_a_tailscaled_that_ignores_sigterm_after_the_grace() {
     let world = World::new();
-    let up = world
-        .ljos(&["mesh", "up"])
-        .env("LJOS_MESH_AUTHKEY", KEY)
-        .env("FAKE_STUBBORN", "1")
-        .output()
-        .unwrap();
+    let up = world.up_cmd().env("FAKE_STUBBORN", "1").output().unwrap();
     one_line(&up, "up");
     let pid = world.daemon_pid().expect("the daemon recorded its pid");
     let left = one_line(&world.down(), "down");
@@ -343,44 +493,25 @@ fn down_kills_a_tailscaled_that_ignores_sigterm_after_the_grace() {
 #[test]
 fn every_failure_is_one_line_and_exit_0() {
     let world = World::new();
-    let mut lines = Vec::new();
     let no_key = world.ljos(&["mesh", "up"]).output().unwrap();
-    lines.push(one_line(&no_key, "no key"));
-    assert!(lines[0].contains("LJOS_MESH_AUTHKEY is unset"), "{lines:?}");
-
-    let no_tailscale = world
-        .ljos(&["mesh", "up"])
-        .env("PATH", world.path("empty"))
-        .env("LJOS_MESH_AUTHKEY", KEY)
-        .output()
-        .unwrap();
-    lines.push(one_line(&no_tailscale, "no tailscale"));
-    assert!(lines[1].contains("tailscale is not on PATH"), "{lines:?}");
+    let no_key = one_line(&no_key, "no key");
+    assert!(no_key.contains("key file"), "{no_key}");
 
     let wait = 2;
     let started = Instant::now();
     let hung = world
-        .ljos(&["mesh", "up"])
-        .env("LJOS_MESH_AUTHKEY", KEY)
+        .up_cmd()
         .env("LJOS_MESH_WAIT", wait.to_string())
         .env("FAKE_HANG", "1")
         .output()
         .unwrap();
     let took = started.elapsed();
-    lines.push(one_line(&hung, "a tailscale that hangs"));
-    assert!(lines[2].contains("did not finish within 2 s"), "{lines:?}");
+    let line = one_line(&hung, "a tailscale that hangs");
+    assert!(line.contains("did not finish within 2 s"), "{line}");
     // The bound and the kill grace `timeout -k 5` would give it.
     assert!(took < Duration::from_secs(wait + 5), "up took {took:?}");
     let pid = world.daemon_pid().expect("the daemon recorded its pid");
     assert!(gone(&pid), "a failed join left tailscaled {pid} running");
-
-    std::fs::remove_file(world.path("home/.config/ljos/mesh.toml")).unwrap();
-    lines.push(one_line(&world.up(), "no config"));
-    assert!(lines[3].contains("no mesh config"), "{lines:?}");
-
-    for line in &lines {
-        assert!(line.contains("staying off the mesh"), "{line}");
-    }
     assert_eq!(world.count("joins"), 0);
 }
 
@@ -388,20 +519,19 @@ fn every_failure_is_one_line_and_exit_0() {
 fn the_key_never_appears_in_output_or_any_file() {
     let world = World::new();
     let rejected = world
-        .ljos(&["mesh", "up"])
-        .env("LJOS_MESH_AUTHKEY", KEY)
+        .up_cmd()
         .env("FAKE_ECHO", "1")
         .env("FAKE_REJECT", "1")
         .output()
         .unwrap();
     let line = one_line(&rejected, "a rejected key");
     assert!(line.contains("invalid key"), "{line}");
-    let accepted = world
-        .ljos(&["mesh", "up"])
-        .env("LJOS_MESH_AUTHKEY", KEY)
-        .env("FAKE_ECHO", "1")
-        .output()
-        .unwrap();
+    assert!(
+        !text_of(&rejected).contains(KEY),
+        "the key was printed\n{}",
+        text_of(&rejected)
+    );
+    let accepted = world.up_cmd().env("FAKE_ECHO", "1").output().unwrap();
     one_line(&accepted, "an accepted key");
     assert_eq!(world.count("joins"), 1);
     let down = world.down();
@@ -415,7 +545,129 @@ fn the_key_never_appears_in_output_or_any_file() {
         );
     }
     let held = files_holding(world.root.path(), KEY.as_bytes());
-    assert!(held.is_empty(), "files hold the key: {held:?}");
+    let held: Vec<_> = held
+        .into_iter()
+        .filter(|path| path != &world.key())
+        .collect();
+    assert!(
+        held.is_empty(),
+        "files other than the key file hold the key: {held:?}"
+    );
+}
+
+#[test]
+fn a_failing_join_exits_0_and_names_the_step() {
+    let world = World::new();
+    let no_key = world.ljos(&["mesh", "up"]).output().unwrap();
+    let no_key = one_line(&no_key, "no key");
+    assert!(no_key.contains("key file"), "{no_key}");
+    assert_eq!(
+        String::from_utf8_lossy(&world.ljos(&["mesh", "up"]).output().unwrap().stdout).trim(),
+        "",
+        "a failure printed on stdout"
+    );
+
+    let rejected = world.up_cmd().env("FAKE_REJECT", "1").output().unwrap();
+    let line = one_line(&rejected, "a rejected key");
+    assert!(line.contains("tailscale up"), "{line}");
+    assert!(line.contains("invalid key"), "{line}");
+    assert!(
+        !text_of(&rejected).contains(KEY),
+        "the key was printed\n{}",
+        text_of(&rejected)
+    );
+    let pid = world.daemon_pid().expect("the daemon recorded its pid");
+    assert!(gone(&pid), "a failed join left tailscaled {pid} running");
+    assert_eq!(world.count("joins"), 0);
+
+    let wait = 2;
+    let started = Instant::now();
+    let hung = world
+        .up_cmd()
+        .env("LJOS_MESH_WAIT", wait.to_string())
+        .env("FAKE_HANG", "1")
+        .output()
+        .unwrap();
+    let took = started.elapsed();
+    let line = one_line(&hung, "a tailscale that hangs");
+    assert!(line.contains("tailscale up"), "{line}");
+    assert!(line.contains("did not finish within 2 s"), "{line}");
+    assert!(took < Duration::from_secs(wait + 5), "up took {took:?}");
+    let pid = world.daemon_pid().expect("the daemon recorded its pid");
+    assert!(gone(&pid), "a timed out join left tailscaled {pid} running");
+}
+
+#[test]
+fn the_key_never_appears_in_output_or_any_other_file() {
+    let world = World::new();
+    let echoed = world
+        .up_cmd()
+        .env("FAKE_ECHO", "1")
+        .env("FAKE_REJECT", "1")
+        .output()
+        .unwrap();
+    let line = one_line(&echoed, "a rejected key that is echoed");
+    assert!(line.contains("[key]"), "{line}");
+    assert!(
+        !text_of(&echoed).contains(KEY),
+        "the key was printed\n{}",
+        text_of(&echoed)
+    );
+
+    let accepted = world.up_cmd().env("FAKE_ECHO", "1").output().unwrap();
+    one_line(&accepted, "an accepted key");
+    assert!(
+        !text_of(&accepted).contains(KEY),
+        "the key was printed\n{}",
+        text_of(&accepted)
+    );
+    assert_eq!(world.count("joins"), 1);
+    let held = files_holding(world.root.path(), KEY.as_bytes());
+    let held: Vec<_> = held
+        .into_iter()
+        .filter(|path| path != &world.key())
+        .collect();
+    assert!(
+        held.is_empty(),
+        "files other than the key file hold the key: {held:?}"
+    );
+}
+
+#[test]
+fn login_server_and_key_file_come_from_the_environment() {
+    let world = World::new();
+    let server = "https://headscale.example.org";
+    let out = world
+        .ljos(&["mesh", "up", "--hostname", HOST])
+        .env("LJOS_MESH_KEY_FILE", world.key())
+        .env("LJOS_MESH_LOGIN_SERVER", server)
+        .output()
+        .unwrap();
+    one_line(&out, "up from the environment");
+    let up = up_invocation(&world);
+    assert!(up.contains(&format!("--login-server={server}")), "{up}");
+    assert!(
+        up.contains(&format!("--auth-key=file:{}", world.key().display())),
+        "{up}"
+    );
+    assert!(!up.contains("advertise-tags"), "{up}");
+}
+
+#[test]
+fn hostname_defaults_to_the_system_hostname() {
+    let world = World::new();
+    let expected = Command::new("hostname").output().unwrap();
+    let expected = String::from_utf8_lossy(&expected.stdout).trim().to_string();
+    assert!(!expected.is_empty(), "this machine has no hostname");
+    let out = world
+        .ljos(&["mesh", "up", "--key-file"])
+        .arg(world.key())
+        .output()
+        .unwrap();
+    let line = one_line(&out, "up with the system hostname");
+    assert!(line.contains(&expected), "{line}");
+    let up = up_invocation(&world);
+    assert!(up.contains(&format!("--hostname={expected}")), "{up}");
 }
 
 #[test]
@@ -496,12 +748,7 @@ fn git_config_is_byte_identical_after_up_and_down() {
         )
     };
     let before = read();
-    let up = world
-        .ljos(&["mesh", "up"])
-        .current_dir(&repo)
-        .env("LJOS_MESH_AUTHKEY", KEY)
-        .output()
-        .unwrap();
+    let up = world.up_cmd().current_dir(&repo).output().unwrap();
     assert!(one_line(&up, "up").contains("joined"), "{}", text_of(&up));
     let down = world
         .ljos(&["mesh", "down"])
@@ -607,7 +854,7 @@ fn a_write_on_the_mesh_carries_the_node_and_the_seat_it_claims() {
     // nobody has reaped yet as gone, so the wait only keeps /proc tidy.
     let until = Instant::now() + Duration::from_secs(5);
     while !gone(&pid) && Instant::now() < until {
-        std::thread::sleep(POLL);
+        std::thread::sleep(Duration::from_millis(10));
     }
     let crashed = remember("The release job tags the commit it built.");
     assert!(crashed["source"].get("mesh").is_none(), "{crashed}");

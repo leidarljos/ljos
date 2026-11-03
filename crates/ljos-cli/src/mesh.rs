@@ -1,7 +1,7 @@
 //! `ljos mesh up`, `ljos mesh down` and `ljos mesh acl`: join this machine
-//! to its swarm's tailnet on a Headscale login server, leave it, and print
-//! the policy that server enforces. A seat works without the mesh, so `up`
-//! and `down` end every failure with one line and exit 0.
+//! to the Headscale mesh, leave it, and print the policy `mesh.toml`
+//! describes. A seat works without the mesh, so `up` and `down` end every
+//! failure with one line and exit 0.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
@@ -9,13 +9,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-/// `mesh.toml` in the ljos config directory. Every port the mesh uses is
-/// written there once, and `up` and `acl` both read it.
+/// `mesh.toml` in the ljos config directory. `ljos mesh acl` reads it.
+/// `up` and `down` do not: the join comes from flags and the environment.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    #[allow(dead_code)]
     login_server: String,
-    /// The environment variable that holds the join key.
+    /// Kept so a file written for an earlier mesh still parses.
+    #[allow(dead_code)]
     key_env: String,
     swarm: String,
     ports: Ports,
@@ -28,7 +30,8 @@ struct Ports {
     store_ro: u16,
     docs_ro: u16,
     drop: u16,
-    /// This machine's SOCKS5 proxy in userspace mode. Not a box port.
+    /// Not a box port. `up` uses [`SOCKS_PORT`] on its own.
+    #[allow(dead_code)]
     socks: u16,
 }
 
@@ -38,8 +41,13 @@ impl Ports {
     }
 }
 
+/// The leidarljos Headscale server. `--login-server` and
+/// `LJOS_MESH_LOGIN_SERVER` override it.
+const DEFAULT_LOGIN_SERVER: &str = "https://hs.grund.rgoswami.me";
+
 /// The bound on one `up` or `down`, in seconds: the `timeout -k 5 30` the
 /// documented caller wraps a sitting in. `LJOS_MESH_WAIT` sets another.
+/// Each external call in the join uses this same bound.
 const WAIT_SECS: u64 = 30;
 /// How long a stopped tailscaled has to exit before it is killed: the
 /// `-k 5` of that bound.
@@ -60,16 +68,96 @@ const NODE_HEX: usize = 6;
 /// The longest swarm id a node name fits: a DNS label is at most 63
 /// octets (RFC 1035 §2.3.4), less `ag-`, a dash and the hex digits.
 const SWARM_MAX: usize = 63 - "ag-".len() - 1 - NODE_HEX;
-/// CAP_NET_ADMIN's bit in a capability mask (linux/capability.h).
+/// CAP_NET_ADMIN's bit in a capability mask (linux/capability.h). Creating
+/// a TUN interface needs it. Opening `/dev/net/tun` does not.
 const CAP_NET_ADMIN: u32 = 12;
+
+/// SOCKS5 port in userspace mode. Tailscale's userspace networking guide
+/// uses 1055, and `examples/mesh.toml` records the same port. The proxy
+/// listens on localhost only.
+const SOCKS_PORT: u16 = 1055;
+
+/// Static tailscale build used when `tailscale` or `tailscaled` is not on
+/// `PATH`. The archive on pkgs.tailscale.com is
+/// `tailscale_1.90.6_amd64.tgz`.
+const TAILSCALE_VERSION: &str = "1.90.6";
+/// pkgs.tailscale.com names the x86_64 archive `amd64`.
+const TAILSCALE_ARCH: &str = "amd64";
+/// sha256 of that tarball. The published file
+/// `tailscale_1.90.6_amd64.tgz.sha256` is this hex and nothing else
+/// (pkgs.tailscale.com, 2026-11-03).
+const TARBALL_SHA256: &str = "cc51b5b6fe86a25e66b2ef037334e799a61d06dc64fabcadfe6e2a7588a2b2c7";
+/// Bytes in that tarball: Content-Length on pkgs.tailscale.com,
+/// 2026-11-03. The reader stops here so a different body cannot fill the
+/// disk; the sha256 then rejects it.
+const TARBALL_MAX_BYTES: u64 = 33_387_158;
 
 const SOCKET: &str = "tailscaled.sock";
 const PID: &str = "tailscaled.pid";
 const LOG: &str = "tailscaled.log";
-const NODE: &str = "node";
 const JOINED: &str = "joined";
+const RELEASE: &str = "release";
 
-fn wait() -> Duration {
+/// Arguments for `ljos mesh up`. Empty fields fall through to the environment
+/// and then to the defaults in [`up`].
+pub struct UpArgs {
+    pub key_file: Option<PathBuf>,
+    pub login_server: Option<String>,
+    pub hostname: Option<String>,
+}
+
+/// What `up` or `down` prints. `error` goes to stderr. The process still
+/// exits 0: the line names the step and does not stop the caller.
+#[must_use]
+pub struct MeshOut {
+    text: String,
+    error: bool,
+}
+
+impl MeshOut {
+    fn ok(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            error: false,
+        }
+    }
+
+    fn err(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            error: true,
+        }
+    }
+
+    /// Print the line on stdout, or on stderr when it records a failure.
+    pub fn write(&self) {
+        if self.text.is_empty() {
+            return;
+        }
+        if self.error {
+            eprintln!("{}", self.text);
+        } else {
+            println!("{}", self.text);
+        }
+    }
+}
+
+struct Fail {
+    step: &'static str,
+    err: anyhow::Error,
+}
+
+impl Fail {
+    fn step(step: &'static str, err: anyhow::Error) -> Self {
+        Self { step, err }
+    }
+
+    fn line(&self, verb: &str) -> String {
+        one_line(&format!("mesh {verb}: {}: {:#}", self.step, self.err))
+    }
+}
+
+fn call_timeout() -> Duration {
     let secs = std::env::var("LJOS_MESH_WAIT")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
@@ -78,10 +166,14 @@ fn wait() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// The socket, the node name, tailscaled's pid and log: outside any
-/// checkout, and gone after `mesh down`.
+fn timed_out(err: &anyhow::Error) -> bool {
+    err.to_string().starts_with("did not finish")
+}
+
+/// Binaries, the socket, the pid and the log: under the ljos state
+/// directory, outside any checkout.
 fn state_dir() -> PathBuf {
-    crate::runtime_dir_path().join("mesh")
+    crate::state_base_dir().join("mesh")
 }
 
 /// The node `ljos mesh up` joined as, while the tailscaled it started runs.
@@ -221,148 +313,410 @@ fn check_swarm(swarm: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whitespace folded to single spaces, and the key, when one was read,
-/// replaced wherever a child echoed it.
-fn one_line(text: &str, key: Option<&str>) -> String {
-    let text = key.map_or_else(|| text.to_string(), |k| text.replace(k, "[key]"));
+/// Whitespace folded to single spaces.
+fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// `ljos mesh up`: one line, and the caller exits 0 whatever it says.
-#[must_use]
-pub fn up() -> String {
-    let deadline = Instant::now() + wait();
-    let off = |e: anyhow::Error| format!("mesh up: {e:#}; staying off the mesh");
-    match load() {
-        Err(e) => one_line(&off(e), None),
-        Ok(config) => {
-            let key = std::env::var(&config.key_env)
-                .ok()
-                .map(|k| k.trim().to_string())
-                .filter(|k| !k.is_empty());
-            let line = join(&config, key.as_deref(), deadline).unwrap_or_else(off);
-            one_line(&line, key.as_deref())
-        }
+/// The join key, read only so a child that echoes it can be scrubbed.
+/// The file is not copied and the bytes are not written anywhere.
+fn redact(text: &str, key_file: Option<&Path>) -> String {
+    let Some(path) = key_file else {
+        return text.to_string();
+    };
+    let Ok(raw) = std::fs::read(path) else {
+        return text.to_string();
+    };
+    let owned = String::from_utf8_lossy(&raw);
+    let mut needle = owned.trim().to_string();
+    let out = if needle.is_empty() {
+        text.to_string()
+    } else {
+        text.replace(&needle, "[key]")
+    };
+    use zeroize::Zeroize;
+    needle.zeroize();
+    out
+}
+
+fn known_key(args: &UpArgs) -> Option<PathBuf> {
+    let path = args
+        .key_file
+        .clone()
+        .or_else(|| std::env::var_os("LJOS_MESH_KEY_FILE").map(PathBuf::from))?;
+    path.is_file().then_some(path)
+}
+
+fn scrub(text: &str, key_file: Option<&Path>) -> String {
+    one_line(&redact(text, key_file))
+}
+
+/// `ljos mesh up`. A joined node prints `tailscale status` and returns.
+/// Any failure is one line; [`MeshOut::write`] sends it to stderr.
+pub fn up(args: UpArgs) -> MeshOut {
+    let key = known_key(&args);
+    match bring_up(&args) {
+        Ok(text) => MeshOut::ok(redact(&text, key.as_deref())),
+        Err(fail) => MeshOut::err(scrub(&fail.line("up"), key.as_deref())),
     }
 }
 
-fn join(config: &Config, key: Option<&str>, deadline: Instant) -> Result<String> {
-    let tailscale = which::which("tailscale").map_err(|_| anyhow!("tailscale is not on PATH"))?;
-    let tailscaled =
-        which::which("tailscaled").map_err(|_| anyhow!("tailscaled is not on PATH"))?;
+fn bring_up(args: &UpArgs) -> Result<String, Fail> {
     let dir = state_dir();
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&dir)
-            .with_context(|| format!("{} could not be made", dir.display()))?;
-    }
-    let node = node_name(&dir, &config.swarm)?;
-    let swarm = &config.swarm;
+    ensure_dir(&dir).map_err(|e| Fail::step("state", e))?;
+    let hostname = hostname_of(args).map_err(|e| Fail::step("hostname", e))?;
+    let server = login_server_of(args);
+    let (tailscale, tailscaled) = ensure_bins(&dir)?;
     let socket = dir.join(SOCKET);
-    let answered = status(&tailscale, &socket, &config.key_env, deadline)?;
+    let answered =
+        status_json(&tailscale, &socket).map_err(|e| Fail::step("tailscale status", e))?;
     if answered
         .as_ref()
-        .is_some_and(|s| s["BackendState"] == "Running" && s["Self"]["HostName"] == node.as_str())
+        .is_some_and(|status| running_as(status, &hostname))
     {
-        std::fs::write(dir.join(JOINED), &node)?;
+        let _ = std::fs::write(dir.join(JOINED), format!("{hostname}\n"));
+        let status = already_up(&tailscale, &socket, &hostname)?;
         let old = old_format(
             &dir,
             "writes carry no source.mesh label and mesh down signals nothing",
-        )
-        .map(|note| format!("; {note}"))
-        .unwrap_or_default();
-        return Ok(format!(
-            "mesh up: {node} is already up in swarm {swarm}{old}"
-        ));
+        );
+        return Ok(already_line(&status, &hostname, old.as_deref()));
     }
-    let key = key.ok_or_else(|| anyhow!("{} is unset", config.key_env))?;
-    let kernel = kernel_tun();
-    let mut started = None;
-    let mut stale = None;
-    if answered.is_none() {
-        stale = stop_daemon(&dir, deadline);
-        let _ = std::fs::remove_file(&socket);
-        started = Some(start_daemon(&tailscaled, &dir, config, kernel)?);
+    let key = key_file(args).map_err(|e| Fail::step("key file", e))?;
+    let kernel = tun_usable();
+    let (started, stale) = daemon_for(&tailscaled, &dir, &socket, answered.is_none(), kernel)?;
+    let started_here = started.is_some();
+    if let Err(e) = login(&tailscale, &socket, &server, &key, &hostname) {
+        reap(started, &dir);
+        return Err(Fail::step("tailscale up", e));
     }
-    let joined = wait_for_socket(&socket, started.as_mut(), deadline)
-        .and_then(|()| login(&tailscale, &socket, config, key, &node, deadline));
-    if let Err(e) = joined {
-        if let Some(mut child) = started {
-            kill_group(child.id(), libc::SIGKILL);
-            let _ = child.wait();
-            let _ = std::fs::remove_file(dir.join(PID));
-            let _ = std::fs::remove_file(&socket);
-        }
-        return Err(e);
+    // Detach. Dropping `Child` does not stop the daemon.
+    drop(started);
+    let _ = std::fs::write(dir.join(JOINED), format!("{hostname}\n"));
+    let mode = started_here.then(|| mode_phrase(kernel));
+    let mut notes = Vec::new();
+    if let Some(note) = stale {
+        notes.push(note);
     }
-    std::fs::write(dir.join(JOINED), &node)?;
-    let mode = if kernel {
-        "a kernel TUN".to_string()
-    } else {
-        format!("userspace mode, SOCKS5 on localhost:{}", config.ports.socks)
-    };
-    let unrecorded = started.as_ref().and_then(|_| {
-        old_format(
+    if started_here {
+        if let Some(note) = old_format(
             &dir,
             "writes carry no source.mesh label and mesh down signals nothing",
-        )
-    });
-    let notes: String = stale
-        .into_iter()
-        .chain(unrecorded)
-        .map(|note| format!("; {note}"))
-        .collect();
-    Ok(format!(
-        "mesh up: {node} joined swarm {swarm} in {mode}{notes}"
+        ) {
+            notes.push(note);
+        }
+    }
+    Ok(joined_line(&hostname, mode.as_deref(), &notes))
+}
+
+fn already_line(status: &str, hostname: &str, old: Option<&str>) -> String {
+    let old = old.map(|note| format!("; {note}")).unwrap_or_default();
+    let status = status.trim();
+    if status.is_empty() {
+        format!("mesh up: {hostname} is already up{old}")
+    } else {
+        format!("mesh up: {hostname} is already up: {status}{old}")
+    }
+}
+
+fn already_up(tailscale: &Path, socket: &Path, hostname: &str) -> Result<String, Fail> {
+    match status_text(tailscale, socket) {
+        Ok(text) if !text.trim().is_empty() => Ok(text),
+        Ok(_) => Ok(format!("mesh up: {hostname} is already up")),
+        Err(e) if timed_out(&e) => Err(Fail::step("tailscale status", e)),
+        Err(_) => Ok(format!("mesh up: {hostname} is already up")),
+    }
+}
+
+fn daemon_for(
+    tailscaled: &Path,
+    dir: &Path,
+    socket: &Path,
+    start: bool,
+    kernel: bool,
+) -> Result<(Option<Child>, Option<String>), Fail> {
+    if !start {
+        return Ok((None, None));
+    }
+    let stale = stop_daemon(dir, Instant::now() + GRACE);
+    let _ = std::fs::remove_file(socket);
+    let mut child = match start_daemon(tailscaled, dir, kernel) {
+        Ok(child) => child,
+        Err(e) => return Err(Fail::step("tailscaled", e)),
+    };
+    if let Err(e) = wait_for_socket(socket, Some(&mut child), Instant::now() + call_timeout()) {
+        reap(Some(child), dir);
+        return Err(Fail::step("tailscaled", e));
+    }
+    Ok((Some(child), stale))
+}
+
+fn mode_phrase(kernel: bool) -> String {
+    if kernel {
+        "on a kernel TUN".to_string()
+    } else {
+        format!("in userspace mode, SOCKS5 on localhost:{SOCKS_PORT}")
+    }
+}
+
+fn joined_line(hostname: &str, mode: Option<&str>, notes: &[String]) -> String {
+    let mode = mode.map(|mode| format!(" {mode}")).unwrap_or_default();
+    let notes = if notes.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", notes.join("; "))
+    };
+    format!("mesh up: {hostname} joined{mode}{notes}")
+}
+
+fn ensure_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .with_context(|| format!("{} could not be made", dir.display()))?;
+    Ok(())
+}
+
+fn hostname_of(args: &UpArgs) -> Result<String> {
+    if let Some(name) = args
+        .hostname
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(name.to_string());
+    }
+    system_hostname()
+}
+
+fn system_hostname() -> Result<String> {
+    let mut buf = [0u8; 256];
+    // POSIX.1-2008 says the name fits in 255 bytes plus a NUL. Linux
+    // HOST_NAME_MAX is 64. 256 covers both.
+    // SAFETY: gethostname writes at most `buf.len()` bytes into `buf` and
+    // does not retain the pointer.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        bail!("gethostname: {}", std::io::Error::last_os_error());
+    }
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    let name = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+    if name.is_empty() {
+        bail!("the system hostname is empty");
+    }
+    Ok(name)
+}
+
+fn login_server_of(args: &UpArgs) -> String {
+    args.login_server
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("LJOS_MESH_LOGIN_SERVER")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_LOGIN_SERVER.to_string())
+}
+
+fn key_file(args: &UpArgs) -> Result<PathBuf> {
+    let path = args
+        .key_file
+        .clone()
+        .or_else(|| std::env::var_os("LJOS_MESH_KEY_FILE").map(PathBuf::from))
+        .filter(|p| !p.as_os_str().is_empty())
+        .context("set --key-file or LJOS_MESH_KEY_FILE")?;
+    let meta = std::fs::metadata(&path).with_context(|| path.display().to_string())?;
+    if !meta.is_file() {
+        bail!("{} is not a file", path.display());
+    }
+    Ok(path)
+}
+
+fn running_as(status: &Value, hostname: &str) -> bool {
+    status["BackendState"].as_str() == Some("Running")
+        && status["Self"]["HostName"]
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(hostname))
+}
+
+/// `/dev/net/tun`, or `LJOS_MESH_TUN` when that names another node.
+/// Missing, or not openable for read and write, means userspace networking.
+fn tun_path() -> PathBuf {
+    std::env::var_os("LJOS_MESH_TUN")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/dev/net/tun"))
+}
+
+/// Effective capability set includes `CAP_NET_ADMIN`. No `/proc` (not
+/// Linux) is an unusable TUN: userspace networking then.
+fn cap_net_admin() -> bool {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return false;
+    };
+    let Some(hex) = status.lines().find_map(|line| line.strip_prefix("CapEff:")) else {
+        return false;
+    };
+    u64::from_str_radix(hex.trim(), 16).is_ok_and(|caps| (caps >> CAP_NET_ADMIN) & 1 == 1)
+}
+
+fn tun_usable() -> bool {
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(tun_path())
+        .is_ok();
+    opened && cap_net_admin()
+}
+
+fn on_path() -> Option<(PathBuf, PathBuf)> {
+    Some((
+        which::which("tailscale").ok()?,
+        which::which("tailscaled").ok()?,
     ))
 }
 
-/// `ag-<swarm>-<hex>`, made once per state directory. The machine's host
-/// name is never read, so nothing it holds reaches the login server.
-fn node_name(dir: &Path, swarm: &str) -> Result<String> {
-    let path = dir.join(NODE);
-    let prefix = format!("ag-{swarm}-");
-    if let Ok(kept) = std::fs::read_to_string(&path) {
-        let kept = kept.trim();
-        let ours = kept
-            .strip_prefix(&prefix)
-            .is_some_and(|hex| hex.len() == NODE_HEX && hex.bytes().all(|b| b.is_ascii_hexdigit()));
-        if ours {
-            return Ok(kept.to_string());
-        }
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+fn cached(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let release = std::fs::read_to_string(dir.join(RELEASE)).ok()?;
+    if release.trim() != TAILSCALE_VERSION {
+        return None;
     }
-    let mut bytes = [0u8; NODE_HEX / 2];
-    getrandom::fill(&mut bytes).map_err(|e| anyhow!("no random bytes for a node name: {e}"))?;
-    let node = format!("{prefix}{}", hex::encode(bytes));
-    std::fs::write(&path, &node)?;
-    Ok(node)
+    let tailscale = dir.join("tailscale");
+    let tailscaled = dir.join("tailscaled");
+    (executable(&tailscale) && executable(&tailscaled)).then_some((tailscale, tailscaled))
 }
 
-/// Kernel TUN when this process holds CAP_NET_ADMIN and `/dev/net/tun`
-/// exists. Anywhere else, userspace networking.
-fn kernel_tun() -> bool {
-    let caps = std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status
-                .lines()
-                .find_map(|l| l.strip_prefix("CapEff:"))
-                .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
-        });
-    caps.is_some_and(|c| (c >> CAP_NET_ADMIN) & 1 == 1) && Path::new("/dev/net/tun").exists()
+/// Both binaries from one place. A `tailscale` and a `tailscaled` from
+/// different builds disagree on the socket, so a single hit on `PATH`
+/// still downloads the pinned pair.
+fn ensure_bins(dir: &Path) -> Result<(PathBuf, PathBuf), Fail> {
+    if let Some(pair) = on_path() {
+        return Ok(pair);
+    }
+    if let Some(pair) = cached(dir) {
+        return Ok(pair);
+    }
+    fetch(dir)?;
+    cached(dir).ok_or_else(|| {
+        Fail::step(
+            "tailscale",
+            anyhow!("the tarball unpacked no tailscale binaries"),
+        )
+    })
 }
 
-/// A tailscale command on this state's socket. The key's variable is not
-/// passed on, so no child holds the key in its environment.
-fn tailscale_on(tailscale: &Path, socket: &Path, key_env: &str) -> Command {
+fn tarball_name() -> String {
+    format!("tailscale_{TAILSCALE_VERSION}_{TAILSCALE_ARCH}.tgz")
+}
+
+fn fetch(dir: &Path) -> Result<(), Fail> {
+    if std::env::consts::ARCH != "x86_64" {
+        return Err(Fail::step(
+            "tailscale",
+            anyhow!(
+                "the pinned tailscale {TAILSCALE_VERSION} build is {TAILSCALE_ARCH}, and this machine is {}",
+                std::env::consts::ARCH
+            ),
+        ));
+    }
+    let tarball = dir.join(tarball_name());
+    let fetched = download(&tarball).map_err(|e| Fail::step("download", e));
+    if let Err(fail) = fetched {
+        let _ = std::fs::remove_file(&tarball);
+        return Err(fail);
+    }
+    let hashed = match sha256_file(&tarball) {
+        Ok(got) if got == TARBALL_SHA256 => Ok(()),
+        Ok(got) => Err(Fail::step(
+            "checksum",
+            anyhow!("published {TARBALL_SHA256}, file {got}"),
+        )),
+        Err(e) => Err(Fail::step("checksum", e)),
+    };
+    if let Err(fail) = hashed {
+        let _ = std::fs::remove_file(&tarball);
+        return Err(fail);
+    }
+    let unpacked = unpack(&tarball, dir).map_err(|e| Fail::step("tailscale", e));
+    let _ = std::fs::remove_file(&tarball);
+    unpacked
+}
+
+fn download(dest: &Path) -> Result<()> {
+    use std::io::Read as _;
+    let url = format!("https://pkgs.tailscale.com/stable/{}", tarball_name());
+    let agent = ureq::AgentBuilder::new().timeout(call_timeout()).build();
+    let resp = agent.get(&url).call().with_context(|| url.to_string())?;
+    let mut file =
+        std::fs::File::create(dest).with_context(|| format!("write {}", dest.display()))?;
+    let mut reader = resp.into_reader().take(TARBALL_MAX_BYTES);
+    std::io::copy(&mut reader, &mut file).with_context(|| format!("read {url}"))?;
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::Digest as _;
+    let mut file = std::fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn unpack(tarball: &Path, dir: &Path) -> Result<()> {
+    let tree = dir.join("unpack");
+    let _ = std::fs::remove_dir_all(&tree);
+    std::fs::create_dir_all(&tree)?;
+    let prefix = format!("tailscale_{TAILSCALE_VERSION}_{TAILSCALE_ARCH}");
+    let mut cmd = Command::new("tar");
+    cmd.arg("-xzf")
+        .arg(tarball)
+        .arg("-C")
+        .arg(&tree)
+        .arg(format!("{prefix}/tailscale"))
+        .arg(format!("{prefix}/tailscaled"));
+    let out = run(cmd)?;
+    if !out.status.success() {
+        bail!("tar exited {}{}", code(out.status), last_line(&out));
+    }
+    for name in ["tailscale", "tailscaled"] {
+        place_bin(&tree.join(&prefix).join(name), &dir.join(name))?;
+    }
+    let _ = std::fs::remove_dir_all(&tree);
+    std::fs::write(dir.join(RELEASE), format!("{TAILSCALE_VERSION}\n"))?;
+    Ok(())
+}
+
+fn place_bin(src: &Path, dest: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let meta =
+        std::fs::symlink_metadata(src).with_context(|| format!("missing {}", src.display()))?;
+    if !meta.is_file() {
+        bail!("{} is not a regular file", src.display());
+    }
+    let _ = std::fs::remove_file(dest);
+    std::fs::rename(src, dest).with_context(|| format!("install {}", dest.display()))?;
+    std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+fn tailscale_cmd(tailscale: &Path, socket: &Path) -> Command {
     let mut cmd = Command::new(tailscale);
     cmd.arg(format!("--socket={}", socket.display()));
-    if !key_env.is_empty() {
-        cmd.env_remove(key_env);
-    }
+    // The key file path is not a secret. The bytes stay in the file, so
+    // no child receives them through the environment either.
+    cmd.env_remove("LJOS_MESH_KEY_FILE");
     cmd
 }
 
@@ -372,47 +726,60 @@ fn code(status: std::process::ExitStatus) -> String {
         .map_or_else(|| "on a signal".into(), |c| c.to_string())
 }
 
-fn run_within(cmd: Command, deadline: Instant, what: &str) -> Result<Output> {
-    let left = deadline.saturating_duration_since(Instant::now());
-    crate::output_within(cmd, None, left).map_err(|e| {
+fn last_line(out: &Output) -> String {
+    [&out.stderr, &out.stdout]
+        .into_iter()
+        .find_map(|bytes| {
+            String::from_utf8_lossy(bytes)
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| format!(": {line}"))
+        })
+        .unwrap_or_default()
+}
+
+fn run(cmd: Command) -> Result<Output> {
+    let timeout = call_timeout();
+    crate::output_within(cmd, None, timeout).map_err(|e| {
         if e.kind() == std::io::ErrorKind::TimedOut {
-            anyhow!("{what} did not finish within {} s", wait().as_secs())
+            anyhow!("did not finish within {} s", timeout.as_secs())
         } else {
-            anyhow!("{what} could not run: {e}")
+            anyhow!("could not run: {e}")
         }
     })
 }
 
 /// `tailscale status --json`, or none when no daemon answers on `socket`.
-/// A status still running at the deadline leaves no time to join.
-fn status(
-    tailscale: &Path,
-    socket: &Path,
-    key_env: &str,
-    deadline: Instant,
-) -> Result<Option<Value>> {
+fn status_json(tailscale: &Path, socket: &Path) -> Result<Option<Value>> {
     if !socket.exists() {
         return Ok(None);
     }
-    let mut cmd = tailscale_on(tailscale, socket, key_env);
+    let mut cmd = tailscale_cmd(tailscale, socket);
     cmd.args(["status", "--json"]);
-    let left = deadline.saturating_duration_since(Instant::now());
-    match crate::output_within(cmd, None, left) {
-        Ok(out) => Ok(serde_json::from_slice(&out.stdout).ok()),
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            bail!(
-                "tailscale status did not finish within {} s",
-                wait().as_secs()
-            )
-        }
+    match run(cmd) {
+        Ok(out) if out.status.success() => Ok(serde_json::from_slice(&out.stdout).ok()),
+        Ok(_) => Ok(None),
+        Err(e) if timed_out(&e) => Err(e),
         Err(_) => Ok(None),
     }
 }
 
+fn status_text(tailscale: &Path, socket: &Path) -> Result<String> {
+    let mut cmd = tailscale_cmd(tailscale, socket);
+    cmd.arg("status");
+    let out = run(cmd)?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !text.is_empty() {
+        return Ok(text);
+    }
+    Ok(String::from_utf8_lossy(&out.stderr).trim().to_string())
+}
+
 /// tailscaled in its own process group, so `mesh down` can stop it and
-/// what it started. The node key stays in memory, its state and logs stay
-/// in `dir`, and no log leaves for a log server.
-fn start_daemon(tailscaled: &Path, dir: &Path, config: &Config, kernel: bool) -> Result<Child> {
+/// what it started. The node key stays in memory (`--state=mem:`), its
+/// state and logs stay in `dir`, and no log leaves for a log server.
+fn start_daemon(tailscaled: &Path, dir: &Path, kernel: bool) -> Result<Child> {
     use std::os::unix::process::CommandExt as _;
     let log = std::fs::File::create(dir.join(LOG))?;
     let mut cmd = Command::new(tailscaled);
@@ -421,16 +788,16 @@ fn start_daemon(tailscaled: &Path, dir: &Path, config: &Config, kernel: bool) ->
         .arg(format!("--socket={}", dir.join(SOCKET).display()))
         .arg("--no-logs-no-support")
         .env("TS_LOGS_DIR", dir)
-        .env_remove(&config.key_env);
+        .env_remove("LJOS_MESH_KEY_FILE");
     if !kernel {
         cmd.arg("--tun=userspace-networking")
-            .arg(format!("--socks5-server=localhost:{}", config.ports.socks));
+            .arg(format!("--socks5-server=localhost:{SOCKS_PORT}"));
     }
     cmd.stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
         .process_group(0);
-    let child = cmd.spawn().context("tailscaled could not start")?;
+    let child = cmd.spawn().context("could not start")?;
     record(dir, child.id(), started(child.id()))?;
     Ok(child)
 }
@@ -447,44 +814,43 @@ fn record(dir: &Path, pid: u32, at: Option<String>) -> Result<()> {
 fn wait_for_socket(socket: &Path, mut child: Option<&mut Child>, deadline: Instant) -> Result<()> {
     while !socket.exists() {
         if let Some(status) = child.as_mut().and_then(|c| c.try_wait().ok().flatten()) {
-            bail!("tailscaled exited {status} before it opened its socket");
+            bail!("exited {status} before it opened its socket");
         }
         if Instant::now() >= deadline {
-            bail!("tailscaled opened no socket within {} s", wait().as_secs());
+            bail!("opened no socket within {} s", call_timeout().as_secs());
         }
         std::thread::sleep(POLL);
     }
     Ok(())
 }
 
-fn login(
-    tailscale: &Path,
-    socket: &Path,
-    config: &Config,
-    key: &str,
-    node: &str,
-    deadline: Instant,
-) -> Result<()> {
-    let mut cmd = tailscale_on(tailscale, socket, &config.key_env);
-    cmd.args(["up", "--login-server", &config.login_server])
-        .args(["--authkey", key, "--hostname", node])
-        .args(["--accept-routes=false", "--accept-dns=false"]);
-    let out = run_within(cmd, deadline, "tailscale up")?;
+fn login(tailscale: &Path, socket: &Path, server: &str, key: &Path, hostname: &str) -> Result<()> {
+    let mut cmd = tailscale_cmd(tailscale, socket);
+    // The key already carries the tag. Headscale refuses a second request
+    // ("requested tags are invalid or not permitted", seen 2026-11-03),
+    // so `--advertise-tags` is not passed. `--reset` lets a later up
+    // change the flags below without aborting.
+    cmd.arg("up")
+        .arg("--accept-routes=false")
+        .arg("--accept-dns=false")
+        .arg(format!("--login-server={server}"))
+        .arg(format!("--auth-key=file:{}", key.display()))
+        .arg(format!("--hostname={hostname}"))
+        .arg("--reset");
+    let out = run(cmd)?;
     if out.status.success() {
         return Ok(());
     }
-    let said = [&out.stderr, &out.stdout]
-        .into_iter()
-        .find_map(|bytes| {
-            String::from_utf8_lossy(bytes)
-                .lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .map(str::to_string)
-        })
-        .map(|line| format!(": {line}"))
-        .unwrap_or_default();
-    bail!("tailscale up exited {}{said}", code(out.status))
+    bail!("exited {}{}", code(out.status), last_line(&out));
+}
+
+fn reap(child: Option<Child>, dir: &Path) {
+    if let Some(mut child) = child {
+        kill_group(child.id(), libc::SIGKILL);
+        let _ = child.wait();
+    }
+    let _ = std::fs::remove_file(dir.join(PID));
+    let _ = std::fs::remove_file(dir.join(SOCKET));
 }
 
 /// Signal the process group `pid` leads.
@@ -533,49 +899,84 @@ fn stop_daemon(dir: &Path, deadline: Instant) -> Option<String> {
     note
 }
 
-/// `ljos mesh down`: log out, stop tailscaled, remove the state directory.
-/// One line, and the caller exits 0 whatever it says.
-#[must_use]
-pub fn down() -> String {
-    let dir = state_dir();
-    if !dir.exists() {
-        return "mesh down: not on the mesh".into();
+fn clear_run(dir: &Path) {
+    for name in [SOCKET, PID, LOG, JOINED] {
+        let _ = std::fs::remove_file(dir.join(name));
     }
-    let deadline = Instant::now() + wait();
-    let key_env = load().map(|c| c.key_env).unwrap_or_default();
-    let node = std::fs::read_to_string(dir.join(NODE))
-        .map(|n| n.trim().to_string())
-        .unwrap_or_default();
-    let mut notes = Vec::new();
+    if std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none()) {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+/// `ljos mesh down`: log out, then stop the tailscaled this command
+/// started, and only that pid. One line. The caller exits 0.
+pub fn down() -> MeshOut {
+    let key = std::env::var_os("LJOS_MESH_KEY_FILE")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file());
+    let out = down_inner();
+    let text = scrub(&out.text, key.as_deref());
+    if out.error {
+        MeshOut::err(text)
+    } else {
+        MeshOut::ok(text)
+    }
+}
+
+fn down_inner() -> MeshOut {
+    let dir = state_dir();
     let socket = dir.join(SOCKET);
+    let joined = dir.join(JOINED);
+    if !socket.exists() && !dir.join(PID).exists() && !joined.exists() {
+        return MeshOut::ok("mesh down: not on the mesh");
+    }
+    let hostname = std::fs::read_to_string(&joined).unwrap_or_default();
+    let hostname = hostname.trim().to_string();
+    let mut errors = Vec::new();
     if socket.exists() {
-        match which::which("tailscale") {
-            Ok(tailscale) => {
-                let mut cmd = tailscale_on(&tailscale, &socket, &key_env);
+        match logout_bin(&dir) {
+            Some(tailscale) => {
+                let mut cmd = tailscale_cmd(&tailscale, &socket);
                 cmd.arg("logout");
-                match run_within(cmd, deadline, "tailscale logout") {
+                match run(cmd) {
                     Ok(out) if out.status.success() => {}
-                    Ok(out) => notes.push(format!("tailscale logout exited {}", code(out.status))),
-                    Err(e) => notes.push(format!("{e:#}")),
+                    Ok(out) => errors.push(format!(
+                        "tailscale logout: exited {}{}",
+                        code(out.status),
+                        last_line(&out)
+                    )),
+                    Err(e) => errors.push(format!("tailscale logout: {e:#}")),
                 }
             }
-            Err(_) => notes.push("tailscale is not on PATH, so there was no logout".into()),
+            None => errors.push("tailscale logout: tailscale is not available".into()),
         }
     }
-    notes.extend(stop_daemon(&dir, deadline));
-    if let Err(e) = std::fs::remove_dir_all(&dir) {
-        notes.push(format!("{} stays: {e}", dir.display()));
-    }
-    let who = if node.is_empty() {
-        "this machine"
+    let note = stop_daemon(&dir, Instant::now() + GRACE);
+    clear_run(&dir);
+    if errors.is_empty() {
+        let who = if hostname.is_empty() {
+            "this machine"
+        } else {
+            &hostname
+        };
+        let mut line = format!("mesh down: {who} left the mesh");
+        if let Some(note) = note {
+            line = format!("{line}; {note}");
+        }
+        MeshOut::ok(line)
     } else {
-        &node
-    };
-    let mut line = format!("mesh down: {who} left the mesh");
-    if !notes.is_empty() {
-        line = format!("{line}; {}", notes.join("; "));
+        let mut line = errors.join("; ");
+        if let Some(note) = note {
+            line = format!("{line}; {note}");
+        }
+        MeshOut::err(format!("mesh down: {line}"))
     }
-    one_line(&line, None)
+}
+
+fn logout_bin(dir: &Path) -> Option<PathBuf> {
+    on_path()
+        .map(|(tailscale, _)| tailscale)
+        .or_else(|| cached(dir).map(|(tailscale, _)| tailscale))
 }
 
 /// `ljos mesh acl`: the Headscale ACL policy for the config's swarm and

@@ -1,19 +1,20 @@
-# The mesh `ljos mesh up` joins, `ljos mesh down` leaves and `ljos mesh acl`
-# writes the policy for. Copy it to $XDG_CONFIG_HOME/ljos/mesh.toml, or
-# ~/.config/ljos/mesh.toml when XDG_CONFIG_HOME is unset, and put in your
-# own values. Every port the mesh uses is written here and nowhere else.
+# The policy `ljos mesh acl` prints. `ljos mesh up` and `ljos mesh down` do
+# not read this file: the join key, the login server and the hostname come
+# from flags. Copy it to $XDG_CONFIG_HOME/ljos/mesh.toml, or
+# ~/.config/ljos/mesh.toml when XDG_CONFIG_HOME is unset.
+# Every box port the policy names is written here and nowhere else.
 
-# The Headscale server `tailscale up` logs in to. example.org is a name
-# reserved for documentation (RFC 2606), so this file reaches no real host.
+# Not read by `mesh up`. Kept so a file from an earlier mesh still parses.
+# example.org is a name reserved for documentation (RFC 2606).
 login_server = "https://headscale.example.org"
 
-# The environment variable that holds the join key: a pre-auth key that is
-# ephemeral and carries this swarm's tag. The key never goes in this file.
+# Not read by `mesh up`. The join key is `--key-file` or `LJOS_MESH_KEY_FILE`,
+# and it never goes in this file.
 key_env = "LJOS_MESH_AUTHKEY"
 
-# The swarm this machine joins. Its nodes are named ag-<swarm>-<6 hex> and
-# tagged tag:swarm-<swarm>. Lowercase letters, digits and inner dashes, at
-# most 53 characters, so a node name stays one DNS label.
+# The swarm `ljos mesh acl` writes rules for. Its tag is tag:swarm-<swarm>.
+# Lowercase letters, digits and inner dashes, at most 53 characters, so a
+# node name built from it stays one DNS label (RFC 1035).
 swarm = "example"
 
 [ports]
@@ -25,7 +26,7 @@ store-ro = 8401
 docs-ro = 8402
 drop = 8403
 
-# This machine's own SOCKS5 proxy in userspace mode, on localhost. It is not
-# a box port and the policy does not name it. 1055 is the port tailscale's
-# userspace networking guide uses.
+# Not a box port, and the policy does not name it. `mesh up` uses 1055 on
+# its own when it has no TUN device: the port tailscale's userspace
+# networking guide uses. Kept so a file from an earlier mesh still parses.
 socks = 1055

@@ -78,3 +78,13 @@ The Doc samples step runs that script and then `git diff --exit-code`, and fails
 
 [`scripts/identity-gate.sh`](scripts/identity-gate.sh) checks the commits a push or a pull request adds.
 The rule is [Commit identity](CONTRIBUTING.md#commit-identity).
+
+## Cloud briefs
+
+Step 0 is `ljos mesh up`.
+Run it before the rest of the brief.
+Pass the join key with `--key-file` or `LJOS_MESH_KEY_FILE`.
+The key stays in that file.
+A failure prints one line on stderr and exits 0, and the brief continues.
+`ljos mesh down` leaves the mesh when the brief is finished.
+[docs/mesh.md](docs/mesh.md) has the login server, the hostname and the flags.

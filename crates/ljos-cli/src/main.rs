@@ -226,9 +226,20 @@ enum CloudCmd {
 
 #[derive(Subcommand)]
 enum MeshCmd {
-    /// Join this machine to the swarm `mesh.toml` names. Any failure is one line and exit 0.
-    Up,
-    /// Log out, stop the tailscaled `mesh up` started, and remove its state.
+    /// Join the Headscale mesh. A joined node prints its status. Any failure is one line on stderr and exit 0.
+    Up {
+        /// Path of the join key. `LJOS_MESH_KEY_FILE` when omitted.
+        #[arg(long, value_name = "PATH", env = "LJOS_MESH_KEY_FILE")]
+        key_file: Option<PathBuf>,
+        /// Headscale login server. `LJOS_MESH_LOGIN_SERVER` when omitted.
+        /// The default is `https://hs.grund.rgoswami.me`.
+        #[arg(long, value_name = "URL", env = "LJOS_MESH_LOGIN_SERVER")]
+        login_server: Option<String>,
+        /// Name of this node. The system hostname when omitted.
+        #[arg(long, value_name = "NAME")]
+        hostname: Option<String>,
+    },
+    /// Log out and stop the tailscaled `mesh up` started.
     Down,
     /// Print the Headscale ACL policy `mesh.toml` implies.
     Acl {
@@ -467,7 +478,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CloudCmd,
     },
-    /// Join or leave the swarm's tailnet on a Headscale login server, or print its ACL policy.
+    /// Join or leave the Headscale mesh, or print its ACL policy.
     Mesh {
         #[command(subcommand)]
         cmd: MeshCmd,
@@ -1992,8 +2003,17 @@ fn run_command() -> Result<()> {
             }
         },
         Cmd::Mesh { cmd } => match cmd {
-            MeshCmd::Up => println!("{}", ljos_cli::mesh::up()),
-            MeshCmd::Down => println!("{}", ljos_cli::mesh::down()),
+            MeshCmd::Up {
+                key_file,
+                login_server,
+                hostname,
+            } => ljos_cli::mesh::up(ljos_cli::mesh::UpArgs {
+                key_file,
+                login_server,
+                hostname,
+            })
+            .write(),
+            MeshCmd::Down => ljos_cli::mesh::down().write(),
             MeshCmd::Acl { swarms } => println!("{}", ljos_cli::mesh::acl(&swarms)?),
         },
         Cmd::Sync {
