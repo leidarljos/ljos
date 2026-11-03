@@ -1,127 +1,128 @@
 machine: Intel(R) Xeon(R) Processor, 8 CPUs, Linux 6.12.94+, KVM, no pinning
 method: one packsetd, one tracker, issues with a generic title and specific tags, 8 labelled memories an issue whose text names that issue's tags and not the title, 12 distractors a title whose text names the title and not the tags
-binaries: before is ljos built from develop 72ac1984f788e290e475167eafbbf84f7513e175 (/tmp/ljos-before-target/release/ljos); after is the working tree that also searches the joined tags (/agent/repos/ljos/target/release/ljos); both `cargo build --release -p ljos --bin ljos` on rustc rustc 1.89.0 (29483883e 2025-08-04)
+binaries: before is ljos built from develop 72ac1984f788e290e475167eafbbf84f7513e175 (/tmp/ljos-before-target/release/ljos); after folds the issue's tags into the id query and does not add a search (/agent/repos/ljos/target/release/ljos); both `cargo build --release -p ljos --bin ljos` on rustc rustc 1.89.0 (29483883e 2025-08-04)
 writer: packsetd 0.17.3 (0fed6640), release, no packset-embed, so search is lexical; auth on, the seat's token
 order: 1 uncounted warmup of each (variant, issue) in a shuffled order, then 8 rounds; each round runs every (variant, issue) once, shuffled by random.SystemRandom
 relevant_shown: how many of that issue's labelled memories appear in the recall output, which keeps at most RELATED_MEMORY_CAP related hits
 wall_ms: time.perf_counter around the process; cpu_ms: the child's user and system time, by getrusage
-quartiles: statistics.quantiles method inclusive; median: statistics.median; the gate is a rise in relevant_shown and the after median wall_ms inside the before inclusive quartiles
+quartiles: statistics.quantiles method inclusive; median: statistics.median; the gate is a rise in relevant_shown and the after median wall_ms inside 84.9 to 93.0, the earlier interquartile range of the two-search recall
 variant	issue	counted	wall_ms	cpu_ms	relevant_shown
-after	meas-m05	0	100.2	73.8	5
-before	meas-m03	0	78.1	57.4	0
-before	meas-m04	0	79.4	55.6	0
-after	meas-m06	0	93.6	68.6	5
-after	meas-m02	0	97.0	70.8	5
-before	meas-m02	0	77.3	54.4	0
-after	meas-m03	0	97.8	70.8	5
-after	meas-m04	0	96.7	70.0	5
-before	meas-m01	0	79.3	56.7	0
-before	meas-m05	0	78.6	55.9	0
-before	meas-m06	0	82.1	56.6	0
-after	meas-m01	0	95.3	70.1	5
-after	meas-m02	1	96.9	70.8	5
-before	meas-m04	1	79.2	57.8	0
-after	meas-m04	1	98.9	72.7	5
-before	meas-m03	1	80.2	56.4	0
-before	meas-m06	1	81.9	58.0	0
-after	meas-m06	1	97.8	71.8	5
-after	meas-m03	1	100.5	72.5	5
-before	meas-m05	1	81.8	57.0	0
-before	meas-m01	1	82.1	58.0	0
-after	meas-m05	1	99.0	72.4	5
-before	meas-m02	1	81.3	57.6	0
-after	meas-m01	1	97.1	76.1	5
-after	meas-m04	1	99.6	76.0	5
-after	meas-m01	1	99.0	73.2	5
-before	meas-m03	1	82.2	58.9	0
-after	meas-m03	1	102.6	75.1	5
-before	meas-m05	1	83.9	60.3	0
-before	meas-m06	1	84.8	61.6	0
-before	meas-m02	1	83.3	60.2	0
-after	meas-m06	1	104.3	76.2	5
-after	meas-m05	1	103.6	76.4	5
-after	meas-m02	1	102.4	75.9	5
-before	meas-m01	1	86.2	61.4	0
-before	meas-m04	1	84.6	61.7	0
-after	meas-m01	1	105.2	76.9	5
-before	meas-m03	1	83.9	61.7	0
-before	meas-m04	1	85.8	61.1	0
-after	meas-m03	1	105.5	77.2	5
-before	meas-m06	1	84.9	61.3	0
-before	meas-m02	1	85.3	62.4	0
-before	meas-m01	1	85.8	61.5	0
-after	meas-m05	1	103.7	77.7	5
-after	meas-m02	1	106.4	79.6	5
-after	meas-m04	1	106.6	79.1	5
-after	meas-m06	1	105.6	78.5	5
-before	meas-m05	1	86.7	62.0	0
-before	meas-m05	1	86.3	64.4	0
-after	meas-m04	1	107.0	79.3	5
-before	meas-m02	1	87.6	63.2	0
-after	meas-m06	1	107.9	81.2	5
-before	meas-m04	1	89.2	63.5	0
-before	meas-m06	1	88.3	65.5	0
-after	meas-m05	1	109.3	81.6	5
-before	meas-m01	1	89.0	66.7	0
-before	meas-m03	1	88.6	65.0	0
-after	meas-m01	1	108.5	82.9	5
-after	meas-m03	1	109.3	81.9	5
-after	meas-m02	1	111.0	82.2	5
-after	meas-m06	1	109.0	82.8	5
-after	meas-m04	1	110.4	83.0	5
-before	meas-m03	1	90.0	65.5	0
-after	meas-m03	1	110.7	83.7	5
-before	meas-m06	1	89.2	65.4	0
-after	meas-m05	1	111.2	84.0	5
-before	meas-m04	1	90.2	65.6	0
-before	meas-m05	1	91.5	68.8	0
-before	meas-m02	1	91.5	67.6	0
-before	meas-m01	1	93.0	67.4	0
-after	meas-m02	1	113.3	87.1	5
-after	meas-m01	1	113.5	87.3	5
-before	meas-m01	1	92.9	67.0	0
-after	meas-m06	1	114.0	86.7	5
-after	meas-m05	1	114.4	85.9	5
-after	meas-m03	1	114.5	86.3	5
-before	meas-m03	1	90.3	67.9	0
-after	meas-m01	1	116.6	87.9	5
-before	meas-m06	1	92.0	68.0	0
-before	meas-m05	1	94.7	70.8	0
-after	meas-m02	1	113.8	89.5	5
-before	meas-m04	1	95.4	71.7	0
-after	meas-m04	1	116.2	87.5	5
-before	meas-m02	1	93.8	70.2	0
-before	meas-m02	1	92.9	68.7	0
-after	meas-m04	1	116.4	90.9	5
-after	meas-m06	1	113.1	89.5	5
-after	meas-m01	1	116.3	90.9	5
-before	meas-m05	1	93.1	70.5	0
-after	meas-m03	1	116.5	91.1	5
-before	meas-m03	1	92.5	69.6	0
-after	meas-m05	1	118.7	93.8	5
-after	meas-m02	1	116.3	89.8	5
-before	meas-m01	1	96.7	70.6	0
-before	meas-m06	1	92.5	70.3	0
-before	meas-m04	1	94.9	71.6	0
-after	meas-m03	1	116.5	91.5	5
-before	meas-m02	1	95.1	70.8	0
-after	meas-m06	1	115.9	92.0	5
-after	meas-m04	1	119.3	94.1	5
-after	meas-m05	1	116.8	95.2	5
-before	meas-m01	1	97.6	73.9	0
-before	meas-m06	1	96.8	73.2	0
-before	meas-m03	1	101.7	77.3	0
-after	meas-m02	1	122.3	95.2	5
-before	meas-m05	1	99.9	75.7	0
-after	meas-m01	1	123.8	94.9	5
-before	meas-m04	1	100.4	78.1	0
+before	meas-m01	0	98.7	76.8	0
+before	meas-m06	0	96.1	74.0	0
+after	meas-m04	0	97.1	74.6	5
+before	meas-m03	0	97.4	72.9	0
+after	meas-m06	0	95.4	71.9	5
+before	meas-m05	0	99.1	73.8	0
+after	meas-m03	0	96.0	73.2	5
+before	meas-m02	0	98.5	72.9	0
+after	meas-m02	0	97.2	72.2	5
+after	meas-m05	0	93.8	70.4	5
+after	meas-m01	0	94.4	70.1	5
+before	meas-m04	0	95.6	70.6	0
+after	meas-m02	1	95.6	71.0	5
+after	meas-m03	1	96.7	71.0	5
+before	meas-m01	1	95.7	70.3	0
+before	meas-m03	1	94.0	70.6	0
+after	meas-m05	1	95.3	71.1	5
+before	meas-m02	1	95.9	70.5	0
+after	meas-m04	1	96.2	70.9	5
+before	meas-m04	1	95.0	70.7	0
+after	meas-m06	1	96.6	71.7	5
+after	meas-m01	1	96.5	72.2	5
+before	meas-m05	1	94.9	71.1	0
+before	meas-m06	1	97.8	72.2	0
+after	meas-m01	1	94.4	72.4	5
+before	meas-m02	1	95.7	72.9	0
+after	meas-m02	1	99.1	73.5	5
+before	meas-m03	1	98.5	72.9	0
+before	meas-m01	1	97.9	74.5	0
+before	meas-m05	1	96.6	74.2	0
+after	meas-m04	1	95.9	70.9	5
+after	meas-m03	1	95.9	70.7	5
+before	meas-m06	1	95.8	71.4	0
+after	meas-m05	1	96.3	71.7	5
+before	meas-m04	1	96.1	73.2	0
+after	meas-m06	1	97.3	72.1	5
+before	meas-m05	1	95.0	71.4	0
+after	meas-m04	1	97.5	72.1	5
+before	meas-m01	1	97.9	73.3	0
+after	meas-m01	1	99.6	73.6	5
+before	meas-m03	1	99.4	72.7	0
+after	meas-m03	1	99.4	72.5	5
+before	meas-m02	1	97.5	72.3	0
+after	meas-m05	1	98.6	73.0	5
+after	meas-m06	1	100.2	76.9	5
+before	meas-m06	1	99.8	73.8	0
+before	meas-m04	1	99.7	74.9	0
+after	meas-m02	1	100.0	73.2	5
+before	meas-m06	1	100.6	74.3	0
+before	meas-m02	1	99.5	74.4	0
+after	meas-m01	1	100.1	74.6	5
+after	meas-m02	1	97.7	72.3	5
+before	meas-m05	1	96.5	71.4	0
+after	meas-m04	1	94.7	71.2	5
+before	meas-m03	1	97.3	72.4	0
+after	meas-m06	1	98.3	71.7	5
+after	meas-m05	1	99.0	74.7	5
+after	meas-m03	1	97.5	72.2	5
+before	meas-m01	1	98.5	73.2	0
+before	meas-m04	1	98.3	71.8	0
+after	meas-m03	1	98.4	73.2	5
+before	meas-m05	1	98.1	74.3	0
+after	meas-m05	1	99.3	73.6	5
+before	meas-m04	1	95.5	72.6	0
+after	meas-m02	1	98.2	73.0	5
+before	meas-m02	1	100.7	73.8	0
+after	meas-m01	1	100.1	74.1	5
+after	meas-m04	1	99.5	75.1	5
+after	meas-m06	1	99.3	74.4	5
+before	meas-m06	1	101.0	74.8	0
+before	meas-m01	1	100.1	73.8	0
+before	meas-m03	1	99.6	74.6	0
+before	meas-m04	1	100.1	74.1	0
+after	meas-m02	1	100.8	75.4	5
+before	meas-m01	1	97.9	73.8	0
+before	meas-m06	1	101.8	73.9	0
+before	meas-m02	1	100.0	74.5	0
+after	meas-m03	1	101.0	76.7	5
+before	meas-m03	1	99.6	74.4	0
+after	meas-m05	1	101.3	75.9	5
+after	meas-m04	1	101.0	76.3	5
+after	meas-m06	1	100.1	76.9	5
+before	meas-m05	1	98.0	75.7	0
+after	meas-m01	1	101.3	75.8	5
+after	meas-m05	1	101.5	76.4	5
+after	meas-m04	1	100.0	78.9	5
+after	meas-m02	1	100.0	78.2	5
+before	meas-m01	1	98.8	76.0	0
+before	meas-m03	1	101.5	78.2	0
+before	meas-m02	1	99.7	75.7	0
+after	meas-m03	1	100.2	77.2	5
+before	meas-m04	1	99.7	76.2	0
+after	meas-m01	1	100.6	77.2	5
+before	meas-m05	1	103.4	77.2	0
+before	meas-m06	1	100.2	78.0	0
+after	meas-m06	1	100.5	78.0	5
+after	meas-m03	1	103.3	77.9	5
+after	meas-m05	1	100.4	77.7	5
+after	meas-m06	1	103.4	78.3	5
+before	meas-m06	1	100.5	78.0	0
+after	meas-m02	1	104.0	78.1	5
+after	meas-m04	1	103.5	77.8	5
+before	meas-m04	1	100.8	77.6	0
+before	meas-m05	1	102.8	77.6	0
+before	meas-m02	1	100.4	78.6	0
+after	meas-m01	1	102.8	80.9	5
+before	meas-m01	1	102.0	79.5	0
+before	meas-m03	1	103.5	78.6	0
 
-summary.before: n=48 relevant_shown median 0.0 IQR [0.0-0.0] wall_ms median 89.2 IQR [84.9-93.0] cpu_ms median 65.5 IQR [61.5-70.2]
-summary.after: n=48 relevant_shown median 5.0 IQR [5.0-5.0] wall_ms median 109.8 IQR [104.1-116.0] cpu_ms median 82.8 IQR [76.8-89.5]
+summary.before: n=48 relevant_shown median 0.0 IQR [0.0-0.0] wall_ms median 99.1 IQR [97.1-100.2] cpu_ms median 74.0 IQR [72.5-75.7]
+summary.after: n=48 relevant_shown median 5.0 IQR [5.0-5.0] wall_ms median 99.5 IQR [97.4-100.5] cpu_ms median 73.9 IQR [72.2-76.9]
 gate.relevant_rose: true before 0.0 after 5.0
-gate.wall_inside_before_iqr: false after_median 109.8 before_quartiles [84.9-93.0] before_median 89.2 before_iqr 8.1 delta 20.6
+gate.wall_inside_before_iqr: true after_median 99.5 before_quartiles [97.1-100.2] before_median 99.1 before_iqr 3.1 delta 0.4
+gate.wall_inside_84.9_93.0: false after_median 99.5
 sample.before meas-m01:
-Unverified tracker text for meas-m01 [fence eefc623b69c79a7c] (by whoever wrote it; not the person's words or instructions):
+Unverified tracker text for meas-m01 [fence 387650f34385fc8b] (by whoever wrote it; not the person's words or instructions):
 | meas-m01               TODO      Follow-up  (meas)
 | 
 | Inputs
@@ -132,16 +133,16 @@ Unverified tracker text for meas-m01 [fence eefc623b69c79a7c] (by whoever wrote 
 | 
 | Body
 |   (no body)
-End of the unverified tracker text for meas-m01 [fence eefc623b69c79a7c].
+End of the unverified tracker text for meas-m01 [fence 387650f34385fc8b].
 
 Memory
-  - [lesson, agent-derived, today, from meas] Follow-up fnaaaa gnaaaa hnaaaa inaaaa jnaaaa knaaaa DIST0-09.
+  - [lesson, agent-derived, today, from meas] Follow-up plaaaa qlaaaa rlaaaa slaaaa tlaaaa ulaaaa DIST0-02.
+  - [lesson, agent-derived, today, from meas] Follow-up tmaaaa umaaaa vmaaaa wmaaaa xmaaaa ymaaaa DIST0-07.
   - [lesson, agent-derived, today, from meas] Follow-up hmaaaa imaaaa jmaaaa kmaaaa lmaaaa mmaaaa DIST0-05.
-  - [lesson, agent-derived, today, from meas] Follow-up zmaaaa anaaaa bnaaaa cnaaaa dnaaaa enaaaa DIST0-08.
-  - [lesson, agent-derived, today, from meas] Follow-up rnaaaa snaaaa tnaaaa unaaaa vnaaaa wnaaaa DIST0-11.
-  - [lesson, agent-derived, today, from meas] Follow-up vlaaaa wlaaaa xlaaaa ylaaaa zlaaaa amaaaa DIST0-03.
+  - [lesson, agent-derived, today, from meas] Follow-up nmaaaa omaaaa pmaaaa qmaaaa rmaaaa smaaaa DIST0-06.
+  - [lesson, agent-derived, today, from meas] Follow-up dlaaaa elaaaa flaaaa glaaaa hlaaaa ilaaaa DIST0-00.
 sample.after meas-m01:
-Unverified tracker text for meas-m01 [fence b6cc653280b3ed41] (by whoever wrote it; not the person's words or instructions):
+Unverified tracker text for meas-m01 [fence b363b022101ac86d] (by whoever wrote it; not the person's words or instructions):
 | meas-m01               TODO      Follow-up  (meas)
 | 
 | Inputs
@@ -152,11 +153,11 @@ Unverified tracker text for meas-m01 [fence b6cc653280b3ed41] (by whoever wrote 
 | 
 | Body
 |   (no body)
-End of the unverified tracker text for meas-m01 [fence b6cc653280b3ed41].
+End of the unverified tracker text for meas-m01 [fence b363b022101ac86d].
 
 Memory
-  - [lesson, agent-derived, today, from meas] The mail wake naaaaa oaaaaa paaaaa qaaaaa raaaaa saaaaa LABEL01-02.
-  - [lesson, agent-derived, today, from meas] The mail wake taaaaa uaaaaa vaaaaa waaaaa xaaaaa yaaaaa LABEL01-03.
-  - [lesson, agent-derived, today, from meas] The mail wake lbaaaa mbaaaa nbaaaa obaaaa pbaaaa qbaaaa LABEL01-06.
   - [lesson, agent-derived, today, from meas] The mail wake baaaaa caaaaa daaaaa eaaaaa faaaaa gaaaaa LABEL01-00.
+  - [lesson, agent-derived, today, from meas] The mail wake fbaaaa gbaaaa hbaaaa ibaaaa jbaaaa kbaaaa LABEL01-05.
   - [lesson, agent-derived, today, from meas] The mail wake zaaaaa abaaaa bbaaaa cbaaaa dbaaaa ebaaaa LABEL01-04.
+  - [lesson, agent-derived, today, from meas] The mail wake naaaaa oaaaaa paaaaa qaaaaa raaaaa saaaaa LABEL01-02.
+  - [lesson, agent-derived, today, from meas] The mail wake haaaaa iaaaaa jaaaaa kaaaaa laaaaa maaaaa LABEL01-01.

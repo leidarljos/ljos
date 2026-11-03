@@ -33504,19 +33504,20 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     // The title and the tags come off one card. The tags are the words a
     // seat chose to classify the work, and a short title such as
     // "Follow-up" shares none of them with the memories filed under those
-    // tags, so the joined tags are asked after the title. Lower case, so
-    // `Mail` and `mail` ask for the same word; space around a tag is not
-    // part of it. A card the tracker does not return, or one whose
-    // `org_tags` is missing or not a list of words, adds no cue and
-    // prints no line. The same words as the id or the title are not asked
-    // again: a second search cannot add a hit the first one missed.
+    // tags. They ride on the id query, which a recall already asks: a
+    // search of their own is another round trip after the id and the
+    // title, and putting them on the title makes that search come back
+    // full and walk the listing. Lower case, so `Mail` and `mail` ask for
+    // the same word; space around a tag is not part of it. A card the
+    // tracker does not return, or one whose `org_tags` is missing or not
+    // a list of words, adds nothing and prints no line. The title is
+    // still its own cue when it differs from the id.
     if let Ok(card) = tracker_show_json(issue) {
-        if let Some(title) = card.get("title").and_then(Value::as_str) {
-            if title != issue {
-                cues.push(title.to_string());
-            }
-        }
-        let joined = card
+        let title = card
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|title| *title != issue);
+        let tags = card
             .get("org_tags")
             .and_then(Value::as_array)
             .into_iter()
@@ -33527,8 +33528,11 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
             .map(str::to_lowercase)
             .collect::<Vec<_>>()
             .join(" ");
-        if !joined.is_empty() && cues.iter().all(|cue| cue != &joined) {
-            cues.push(joined);
+        if !tags.is_empty() {
+            cues[0] = format!("{issue} {tags}");
+        }
+        if let Some(title) = title {
+            cues.push(title.to_string());
         }
     }
     let pool = u32::try_from(RELATED_MEMORY_CAP * POOL_PER_SHOWN).unwrap_or(u32::MAX);

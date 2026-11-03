@@ -1,9 +1,10 @@
-//! Recall asks the pack for an issue's tags, after its id and its title.
+//! Recall asks the pack for an issue's tags on the same query as its id.
 //!
 //! The pack is a stand-in that records each search query. An issue titled
-//! `Follow-up` and tagged `mail` and `wake` is searched for `mail wake`,
-//! and a memory only that search returns is what `ljos recall` prints.
-//! An issue with no tags is searched twice, for the id and the title.
+//! `Follow-up` and tagged `mail` and `wake` is searched twice. The id
+//! query carries `mail wake`, and a memory only that query returns is
+//! what `ljos recall` prints. An issue with no tags is searched twice,
+//! for the id and the title.
 
 ljos_test_boot::harness!();
 use std::io::{Read, Write};
@@ -13,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-/// The memory the stand-in returns only for the tag search.
+/// The memory the stand-in returns only when a query carries both tags.
 const TAG_MEMORY: &str = "Courier retries a dropped letter before the quay opens.";
 
 /// The token the seat shows. Any non-empty token lets the search be asked.
@@ -58,8 +59,8 @@ fn search_queries(req: &str) -> Vec<String> {
 }
 
 /// A pack that logs every search query and returns [`TAG_MEMORY`] only
-/// when the query is `mail wake`. The listing is empty, so a memory can
-/// reach `ljos recall` only by being a search hit.
+/// when the query carries both `mail` and `wake`. The listing is empty,
+/// so a memory can reach `ljos recall` only by being a search hit.
 fn stand_in(log: Arc<Mutex<Vec<String>>>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("stand-in port");
     let addr = listener.local_addr().expect("stand-in addr");
@@ -83,7 +84,9 @@ fn stand_in(log: Arc<Mutex<Vec<String>>>) -> String {
                     ("401 Unauthorized", r#"{"error":"token"}"#.to_string())
                 } else if asked.starts_with("/v1/search") {
                     let q = search_queries(&req).into_iter().next().unwrap_or_default();
-                    let hits = if q == "mail wake" {
+                    let hits = if q.split_whitespace().any(|w| w == "mail")
+                        && q.split_whitespace().any(|w| w == "wake")
+                    {
                         serde_json::json!([{
                             "id": "tagmem000000000000000000000001",
                             "kind": "lesson",
@@ -218,13 +221,27 @@ fn a_tagged_issue_is_searched_for_its_tags() {
     let seat = Seat::new();
     let text = seat.recall("cue-tag1");
     let queries = seat.queries();
+    assert_eq!(
+        queries.len(),
+        2,
+        "a tagged issue was not searched twice: {queries:?}\n{text}"
+    );
     assert!(
-        queries.iter().any(|q| q == "mail wake"),
-        "the pack was not asked for the tags: {queries:?}\n{text}"
+        queries[0].starts_with("cue-tag1"),
+        "the first search is the id: {queries:?}"
+    );
+    assert!(
+        queries[0].split_whitespace().any(|w| w == "mail")
+            && queries[0].split_whitespace().any(|w| w == "wake"),
+        "the id search does not carry the tags: {queries:?}\n{text}"
+    );
+    assert!(
+        queries[1].starts_with("Follow-up"),
+        "the second search is the title: {queries:?}"
     );
     assert!(
         text.contains(TAG_MEMORY),
-        "the memory only the tag search returns is missing:\n{text}"
+        "the memory only the tagged query returns is missing:\n{text}"
     );
 }
 
