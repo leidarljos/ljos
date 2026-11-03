@@ -21,9 +21,9 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -86,15 +86,6 @@ for line in sys.stdin:
         print(json.dumps({"v": vector(asked.get("text", ""))}), flush=True)
 "#;
 
-struct Daemon(Child);
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 fn on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
@@ -102,14 +93,8 @@ fn on_path(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("free port");
-    listener.local_addr().expect("addr").port()
-}
-
-/// Held from picking a seat's port until packsetd listens on it, and
-/// while a proxy binds, so a proxy in another test cannot take the port
-/// [`free_port`] let go of.
+/// Held from the moment this seat starts its writer until that writer is
+/// listening, and while a proxy binds, so those binds do not interleave.
 static PORTS: Mutex<()> = Mutex::new(());
 
 fn ports() -> MutexGuard<'static, ()> {
@@ -121,7 +106,7 @@ struct Seat {
     port: u16,
     path: String,
     token: String,
-    _daemon: Daemon,
+    _daemon: ljos_test_boot::Packsetd,
 }
 
 impl Seat {
@@ -268,32 +253,15 @@ fn seat(fixture: &Fixture) -> Option<Seat> {
     .into_string()
     .expect("utf-8 PATH");
     let ports = ports();
-    let port = free_port();
     let pack_home = dir.path().join(".local/share/packset");
     std::fs::create_dir_all(&pack_home).expect("pack home");
-    let mut daemon = Command::new(&packsetd);
-    daemon.args([
-        "--port",
-        &port.to_string(),
-        "--home",
-        pack_home.to_str().expect("utf-8"),
-    ]);
-    env_for(&mut daemon, dir.path(), &path, port);
-    let daemon = Daemon(
-        daemon
-            .env("PACKSET_HOME", &pack_home)
-            .env("PACKSET_EMBED", &encoder)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn packsetd"),
-    );
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(Instant::now() < deadline, "packsetd did not listen");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let mut started = ljos_test_boot::Packsetd::build();
+    started.home_at(dir.path());
+    started.pack_at(&pack_home);
+    env_for(started.command(), dir.path(), &path, 0);
+    started.command().env("PACKSET_EMBED", &encoder);
+    let daemon = started.spawn();
+    let port = daemon.port();
     drop(ports);
     let token = std::fs::read_to_string(pack_home.join("token")).expect("packsetd token");
     let token = token.trim().to_string();

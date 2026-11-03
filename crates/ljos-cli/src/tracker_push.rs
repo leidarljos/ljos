@@ -2250,27 +2250,15 @@ body b
         let pack_home = dir.path().join("pack");
         std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
         std::fs::create_dir_all(&pack_home).unwrap();
-        let packsetd = std::env::var_os("PATH")
-            .and_then(|path| {
-                std::env::split_paths(&path)
-                    .map(|dir| dir.join("packsetd"))
-                    .find(|candidate| candidate.is_file())
-            })
-            .expect("packsetd on PATH; CI builds it from packset develop");
-        let mut daemon = std::process::Command::new(packsetd)
-            .args(["--port", "0", "--home"])
-            .arg(&pack_home)
+        let mut started = ljos_test_boot::Packsetd::build();
+        started.home_at(&pack_home).pack_at(&pack_home);
+        started
+            .command()
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
-            .env("HOME", &pack_home)
-            .env("PACKSET_HOME", &pack_home)
-            .env("PACKSET_AUTH", "off")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("packsetd on PATH");
-        let port = crate::sync::wait_for_writer(&mut daemon);
+            .env("PACKSET_AUTH", "off");
+        let daemon = started.spawn();
+        let port = daemon.port();
         let key = home.join(".config/ljos/age.key");
         let made = std::process::Command::new("age-keygen")
             .arg("-o")
@@ -2415,8 +2403,7 @@ body b
                 None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
             }
         }
-        let _ = daemon.kill();
-        let _ = daemon.wait();
+        drop(daemon);
         assert!(
             merged.status.success(),
             "merge: {}\n{}",

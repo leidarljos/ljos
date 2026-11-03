@@ -2323,27 +2323,25 @@ mod tests {
         assert!(!raw.contains("\"origin\""), "{raw}");
     }
 
-    /// packsetd from PATH on a free port with its home under `home`, asking
-    /// for the token this process then shows it; CI builds it from packset
-    /// develop.
-    fn packsetd(home: &std::path::Path) -> (std::process::Child, String) {
+    /// packsetd from PATH on a port it binds, with its store under `home`,
+    /// asking for the token this process then shows it. CI builds it from
+    /// packset develop. Dropping the guard stops the writer.
+    fn packsetd(home: &std::path::Path) -> ljos_test_boot::Packsetd {
         const TOKEN: &str = "7a6b5c4d3e2f10017a6b5c4d3e2f10017a6b5c4d3e2f10017a6b5c4d3e2f1001";
         let dir = home.join("pack");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("token"), format!("{TOKEN}\n")).unwrap();
+        // SAFETY: the caller holds the process env lock for the whole test.
         unsafe { std::env::set_var("PACKSET_TOKEN", TOKEN) };
-        let mut child = std::process::Command::new("packsetd")
-            .args(["--port", "0", "--home"])
-            .arg(&dir)
+        let mut started = ljos_test_boot::Packsetd::build();
+        started.home_at(home);
+        started.pack_at(&dir);
+        started
+            .command()
             .env_remove("PACKSET_AUTH")
-            .env("PACKSET_HOME", &dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("packsetd is not on PATH; CI builds it from packset develop");
-        let port = crate::sync::wait_for_writer(&mut child);
-        (child, format!("http://127.0.0.1:{port}"))
+            .env("PACKSET_TOKEN", TOKEN)
+            .env("PACKSET_HOME", &dir);
+        started.spawn()
     }
 
     /// One process, as the MCP server or a hook daemon is: a rule promoted
@@ -2352,7 +2350,8 @@ mod tests {
     /// down after does not bring it back.
     fn a_dropped_lesson_stays_dropped(why: Option<&str>) {
         let (_lock, dir) = isolated();
-        let (mut daemon, url) = packsetd(dir.path());
+        let daemon = packsetd(dir.path());
+        let url = daemon.url().to_string();
         unsafe {
             std::env::set_var("PACKSET_URL", &url);
             std::env::set_var("PACKSET_WORKSPACE", "seat");
@@ -2384,8 +2383,7 @@ mod tests {
             super::super::Stored::Absent
         );
 
-        daemon.kill().unwrap();
-        daemon.wait().unwrap();
+        drop(daemon);
         let head = preface();
         assert!(
             !head.contains("deploy form checks"),
@@ -2425,7 +2423,8 @@ mod tests {
             return;
         }
         let (_lock, dir) = isolated();
-        let (mut daemon, url) = packsetd(dir.path());
+        let daemon = packsetd(dir.path());
+        let url = daemon.url().to_string();
         unsafe {
             std::env::set_var("PACKSET_URL", &url);
             std::env::set_var("PACKSET_WORKSPACE", "seat");
@@ -2450,8 +2449,7 @@ mod tests {
             Some(super::super::StoredBy::Person)
         );
 
-        daemon.kill().unwrap();
-        daemon.wait().unwrap();
+        drop(daemon);
         let head = preface();
         assert!(
             !head.contains("deploy form checks"),
@@ -2474,7 +2472,8 @@ mod tests {
             return;
         }
         let (_lock, dir) = isolated();
-        let (mut daemon, url) = packsetd(dir.path());
+        let daemon = packsetd(dir.path());
+        let url = daemon.url().to_string();
         let workspace = |name: &str| unsafe { std::env::set_var("PACKSET_WORKSPACE", name) };
         unsafe { std::env::set_var("PACKSET_URL", &url) };
         workspace("seat");
@@ -2501,8 +2500,7 @@ mod tests {
         workspace("seat");
         assert!(preface().contains("deploy form checks"), "{}", preface());
 
-        daemon.kill().unwrap();
-        daemon.wait().unwrap();
+        drop(daemon);
         workspace("other");
         let head = preface();
         assert!(
