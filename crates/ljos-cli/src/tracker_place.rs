@@ -9,40 +9,122 @@
 //! project prefix passed for one, so tickets were filed into the product's
 //! repository instead of the seat's tracker.
 //!
-//! Two rules follow, and this module is both of them. A tracker is never
-//! made inside a checkout of something else: its files are not that
-//! project's files, and the first `git add -A` there would commit them. And
-//! every habitat ljos starts is told which tracker it means, so the
+//! Three rules follow, and this module is all of them. One function,
+//! [`is_tracker`], decides whether a directory is the tracker, from facts a
+//! product checkout does not have by accident. A tracker is never made
+//! inside a checkout of something else: its files are not that project's
+//! files, and the first `git add -A` there would commit them. And every
+//! process and habitat ljos starts is told which tracker it means, so the
 //! directory a command happened to run in cannot stand in for it.
 
 use std::path::{Path, PathBuf};
 
-/// The directory under the tracker root that holds one directory per
-/// project: `VISSUE_PREFIX`, or vissue's `Software`.
+/// Whether `dir` is the tracker. Every check that asks goes through here,
+/// and it reads only facts a product checkout does not have by accident:
+///
+/// - `dir` is a root the seat named: `ISSUE_ROOT`, `VISSUE_ROOT`, the
+///   `root` of its vissue configuration, or a layout that configuration
+///   routes projects to;
+/// - `dir` is a checkout whose origin is the remote `LJOS_TRACKER_REMOTE`
+///   names;
+/// - `dir` holds a `vissue.toml` vissue reads, beside the prefix directory
+///   that file or `VISSUE_PREFIX` names, and that `vissue.toml` is
+///   committed in the checkout `dir` is in. A directory in no checkout is
+///   nobody's files, so there the file alone counts.
+///
+/// An untracked `vissue.toml`, a bare `Software/`, or the boards a clone of
+/// some other project carries do not make a tracker.
 #[must_use]
-pub fn prefix() -> String {
-    std::env::var("VISSUE_PREFIX")
-        .ok()
-        .map(|raw| raw.trim().to_string())
+pub fn is_tracker(dir: &Path) -> bool {
+    let canon = |path: &Path| std::fs::canonicalize(path).ok();
+    let Some(here) = canon(dir) else {
+        return false;
+    };
+    named_roots()
+        .iter()
+        .any(|root| canon(root).as_ref() == Some(&here))
+        || committed_layout(dir)
+        || serves_named_remote(dir)
+}
+
+/// The tracker roots the seat named, in the environment and in its vissue
+/// configuration.
+fn named_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = ["ISSUE_ROOT", "VISSUE_ROOT"]
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
         .filter(|raw| !raw.is_empty())
-        .unwrap_or_else(|| vissue_core::DEFAULT_PREFIX.to_string())
+        .map(|raw| crate::expand(&raw))
+        .collect();
+    roots.extend(configured());
+    // An empty default root is no directory, so every layout after it is
+    // one the configuration routes to.
+    if let Ok(router) = vissue_core::Router::load(vissue_core::Layout::new(PathBuf::new(), "")) {
+        roots.extend(
+            router
+                .unique_layouts()
+                .into_iter()
+                .skip(1)
+                .map(|layout| layout.root().to_path_buf()),
+        );
+    }
+    roots
 }
 
-/// Whether `dir` is the tracker a caller standing in it means: it carries
-/// a `vissue.toml`. This is vissue's own test, and the one case where the
-/// working directory outranks the seat's configured root.
-#[must_use]
-pub fn named_tracker(dir: &Path) -> bool {
-    dir.join("vissue.toml").is_file()
+/// The prefix vissue reads under `dir`: `VISSUE_PREFIX`, else the one
+/// `dir/vissue.toml` names, else `Software`. `None` when that file is
+/// there and does not read.
+fn prefix_at(dir: &Path) -> Option<String> {
+    let layout = vissue_core::config::layout_at(dir).ok()?;
+    Some(
+        std::env::var("VISSUE_PREFIX")
+            .ok()
+            .filter(|raw| !raw.is_empty())
+            .unwrap_or_else(|| layout.prefix().to_string()),
+    )
 }
 
-/// Whether `dir` holds a tracker: a `vissue.toml`, or the prefix directory
-/// vissue would file projects under. A guessed root passes vissue's
-/// `require_tracker` on either, so either is enough to make a directory
-/// pass for a tracker.
-#[must_use]
-pub fn holds_a_tracker(dir: &Path) -> bool {
-    named_tracker(dir) || dir.join(prefix()).is_dir()
+fn committed_layout(dir: &Path) -> bool {
+    if !dir.join("vissue.toml").is_file() {
+        return false;
+    }
+    let Some(prefix) = prefix_at(dir) else {
+        return false;
+    };
+    dir.join(prefix).is_dir()
+        && (work_tree(dir).is_none()
+            || git_in(dir, &["cat-file", "-e", "HEAD:./vissue.toml"]).is_some())
+}
+
+fn serves_named_remote(dir: &Path) -> bool {
+    let Some(named) = std::env::var("LJOS_TRACKER_REMOTE")
+        .ok()
+        .filter(|raw| !raw.trim().is_empty())
+    else {
+        return false;
+    };
+    dir.join(".git").exists()
+        && git_in(dir, &["config", "--get", "remote.origin.url"])
+            .is_some_and(|url| crate::tracker_attach::same_remote(&url, &named))
+}
+
+/// What git prints for `args` run in `dir` alone, when it succeeds. A hook
+/// exports the repository it runs for, and that would answer instead.
+fn git_in(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = crate::git_cmd()
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// The git work tree `dir` stands in, found by walking up for a `.git`
@@ -64,12 +146,12 @@ pub fn work_tree(dir: &Path) -> Option<PathBuf> {
 /// inside, or `None` when it sits in no checkout, or in its own.
 ///
 /// A tracker is a git repository itself, so the work tree whose top is the
-/// root, or one that holds a tracker, is the tracker's own and not a
+/// root, or one that is a tracker, is the tracker's own and not a
 /// product's.
 #[must_use]
 pub fn product_repo(root: &Path) -> Option<PathBuf> {
     let top = work_tree(root)?;
-    (top != root && !holds_a_tracker(&top)).then_some(top)
+    (top != root && !is_tracker(&top)).then_some(top)
 }
 
 /// Whether `repo` already keeps `root` out of itself, by a `.gitignore`
@@ -155,21 +237,83 @@ pub fn named_in_env() -> bool {
 /// command ran in cannot stand in for it.
 ///
 /// Nothing is set when the environment already names a root, since the
-/// child inherits that one, nor when the working directory carries a
-/// `vissue.toml`: standing in a tracker means that tracker, and this keeps
-/// vissue's own rule. Nothing is set either when the seat configured no
-/// root, where there is nothing to name.
+/// child inherits that one, nor when the working directory is a tracker
+/// that carries a `vissue.toml`: standing in a tracker means that tracker,
+/// and this keeps vissue's own rule. Nothing is set either when the seat
+/// configured no root, where there is nothing to name.
 pub fn bind_root(cmd: &mut std::process::Command) {
     if named_in_env() {
         return;
     }
     let here = std::env::current_dir().unwrap_or_default();
-    if named_tracker(&here) {
+    if here.join("vissue.toml").is_file() && is_tracker(&here) {
         return;
     }
     if let Some(root) = configured() {
         cmd.env("VISSUE_ROOT", root);
     }
+}
+
+/// The root [`pin_root`] set on this process, so `ljos onboard` can tell
+/// it from one the person named.
+static PINNED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Name the tracker on this process when vissue's own order would land on
+/// a directory [`is_tracker`] rejects, so every read, write and child after
+/// this means the same tracker. vissue takes the working directory when it
+/// holds a `vissue.toml`, then the seat's configured root, then the working
+/// directory as a guess that a `vissue.toml` or a prefix directory there
+/// lets through. A product checkout with either was taken for the tracker,
+/// and tickets were written and committed into it.
+///
+/// The configured root is named instead. With none, the root `ljos
+/// onboard` makes is named, so a write that finds no tracker there says
+/// that is the one it looked for. Nothing is set when the environment or
+/// the seat's env file already names a root, or when vissue's own choice
+/// is the tracker. `ljos-mcp` pins before it loads that file, and a root
+/// named there is the one it means.
+pub fn pin_root() {
+    if ["ISSUE_ROOT", "VISSUE_ROOT"]
+        .iter()
+        .any(|key| crate::seat_setting(key).is_some_and(|raw| !raw.is_empty()))
+    {
+        return;
+    }
+    let Ok(here) = std::env::current_dir() else {
+        return;
+    };
+    let standing = here.join("vissue.toml").is_file();
+    let configured = configured();
+    // vissue reads a configured root only when it is a directory.
+    let takes_configured = !standing && configured.as_deref().is_some_and(Path::is_dir);
+    let takes_here = standing || prefix_at(&here).is_some_and(|prefix| here.join(prefix).is_dir());
+    if takes_configured || !takes_here || is_tracker(&here) {
+        return;
+    }
+    let Some(root) = configured.or_else(default_root) else {
+        return;
+    };
+    std::env::set_var("VISSUE_ROOT", &root);
+    *PINNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(root);
+}
+
+/// Whether `value` is the root [`pin_root`] named on this process.
+#[must_use]
+pub fn pinned(value: &str) -> bool {
+    PINNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_deref()
+        .is_some_and(|root| root == Path::new(value))
+}
+
+/// The tracker `ljos onboard` makes when nothing names one:
+/// `$XDG_DATA_HOME/vissue/tracker`.
+#[must_use]
+pub fn default_root() -> Option<PathBuf> {
+    crate::data_base().map(|base| base.join("vissue").join("tracker"))
 }
 
 #[cfg(test)]
@@ -178,6 +322,33 @@ mod tests {
 
     fn repo(at: &Path) {
         std::fs::create_dir_all(at.join(".git")).unwrap();
+    }
+
+    fn git(at: &Path, args: &[&str]) {
+        std::fs::create_dir_all(at).unwrap();
+        let out = crate::git_cmd()
+            .arg("-C")
+            .arg(at)
+            .args(["-c", "user.name=seat", "-c", "user.email=seat@example.test"])
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// A checkout with `vissue.toml` committed beside its prefix directory.
+    fn committed_tracker(at: &Path, toml: &str, prefix: &str) {
+        git(at, &["init", "-q"]);
+        std::fs::create_dir_all(at.join(prefix)).unwrap();
+        std::fs::write(at.join("vissue.toml"), toml).unwrap();
+        git(at, &["add", "vissue.toml"]);
+        git(at, &["commit", "-q", "-m", "tracker"]);
     }
 
     /// The complaint: a tracker made under a home directory that was
@@ -206,11 +377,69 @@ mod tests {
         assert_eq!(product_repo(&root), None);
 
         let under = dir.path().join("vault");
-        repo(&under);
+        git(&under, &["init", "-q"]);
         let kept = under.join("tracker");
         std::fs::create_dir_all(kept.join("Software")).unwrap();
         std::fs::create_dir_all(under.join("Software")).unwrap();
-        assert_eq!(product_repo(&kept), None, "the checkout holds a tracker");
+        assert_eq!(
+            product_repo(&kept).as_deref(),
+            Some(under.as_path()),
+            "an empty Software/ is any project's"
+        );
+        committed_tracker(&under, "", "Software");
+        assert_eq!(product_repo(&kept), None, "the checkout is a tracker");
+    }
+
+    /// The accidents that made a product checkout pass for the tracker.
+    #[test]
+    fn a_product_checkout_is_not_the_tracker_by_accident() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::TempDir::new().unwrap();
+        let untracked = dir.path().join("untracked");
+        git(&untracked, &["init", "-q"]);
+        std::fs::create_dir_all(untracked.join("Software")).unwrap();
+        std::fs::write(untracked.join("vissue.toml"), "").unwrap();
+        assert!(!is_tracker(&untracked), "an untracked vissue.toml");
+
+        let bare = dir.path().join("bare");
+        git(&bare, &["init", "-q"]);
+        std::fs::create_dir_all(bare.join("Software")).unwrap();
+        assert!(!is_tracker(&bare), "an empty Software/");
+
+        let boards = dir.path().join("boards");
+        git(&boards, &["init", "-q"]);
+        std::fs::create_dir_all(boards.join("Software/app")).unwrap();
+        std::fs::write(boards.join("Software/app/issues.org"), "* TODO x\n").unwrap();
+        git(&boards, &["add", "."]);
+        git(&boards, &["commit", "-q", "-m", "fixtures"]);
+        assert!(!is_tracker(&boards), "boards a clone carries");
+
+        let real = dir.path().join("real");
+        committed_tracker(&real, "", "Software");
+        assert!(is_tracker(&real));
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(plain.join("Software")).unwrap();
+        std::fs::write(plain.join("vissue.toml"), "").unwrap();
+        assert!(is_tracker(&plain), "a directory in no checkout is nobody's");
+    }
+
+    /// `VISSUE_PREFIX` names the prefix directory the tracker must hold, as
+    /// it does for vissue.
+    #[test]
+    fn a_tracker_under_vissue_prefix_is_the_tracker() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("work");
+        committed_tracker(&root, "", "Work");
+        assert!(!is_tracker(&root), "no Software/ and no VISSUE_PREFIX");
+        let before = std::env::var_os("VISSUE_PREFIX");
+        std::env::set_var("VISSUE_PREFIX", "Work");
+        let taken = is_tracker(&root);
+        match before {
+            Some(v) => std::env::set_var("VISSUE_PREFIX", v),
+            None => std::env::remove_var("VISSUE_PREFIX"),
+        }
+        assert!(taken);
     }
 
     #[test]

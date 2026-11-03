@@ -15511,7 +15511,7 @@ fn tracker_step(dry: bool) -> Step {
         (!tracker_place::kept_out(&repo, root)).then(|| tracker_place::refusal(root, &repo))
     };
     for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
-        if let Some(root) = named_env(key) {
+        if let Some(root) = named_env(key).filter(|root| !tracker_place::pinned(root)) {
             let detail = format!("{key}={root} names the tracker");
             let path = PathBuf::from(&root);
             if let Some(why) = misplaced(&path) {
@@ -15529,7 +15529,7 @@ fn tracker_step(dry: bool) -> Step {
         named_env("VISSUE_CONFIG")
             .map(PathBuf::from)
             .or_else(|| config_base().map(|b| b.join("vissue").join("config.toml"))),
-        data_base().map(|b| b.join("vissue").join("tracker")),
+        tracker_place::default_root(),
     ) else {
         return step(
             "no home directory to keep a tracker in; set HOME, or VISSUE_ROOT=DIR".into(),
@@ -16007,19 +16007,21 @@ pub fn expand_leading_tilde(raw: &str, home: &str) -> Option<String> {
 /// environment.d and MCP `env` blocks pass `~/...` through unexpanded; a
 /// tracker crate that predates the fix then resolves it against the working
 /// directory, and every child `vissue` inherits the same relative root.
+/// Then [`tracker_place::pin_root`] names the tracker when the working
+/// directory would stand in for it.
 pub fn normalize_tracker_env() {
     with_env_mutation(|| {
-        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
-            return;
-        };
-        let home = home.to_string_lossy().to_string();
-        for var in ["ISSUE_ROOT", "VISSUE_ROOT"] {
-            if let Ok(raw) = std::env::var(var) {
-                if let Some(expanded) = expand_leading_tilde(&raw, &home) {
-                    std::env::set_var(var, expanded);
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            let home = home.to_string_lossy().to_string();
+            for var in ["ISSUE_ROOT", "VISSUE_ROOT"] {
+                if let Ok(raw) = std::env::var(var) {
+                    if let Some(expanded) = expand_leading_tilde(&raw, &home) {
+                        std::env::set_var(var, expanded);
+                    }
                 }
             }
         }
+        tracker_place::pin_root();
     });
 }
 

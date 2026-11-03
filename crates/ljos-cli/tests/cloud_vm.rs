@@ -168,6 +168,7 @@ fn seed(root: &Path, origin: &Path, body: &str) {
     );
     identity(&repo);
     write_project(&repo, "probe", body);
+    fs::write(repo.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
     fs::write(
         repo.join(".gitattributes"),
         "*.org merge=ljos-org\n.ljos/atoms/* merge=ljos-atoms\n",

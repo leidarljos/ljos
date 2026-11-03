@@ -2,7 +2,9 @@
 //!
 //! `LJOS_TRACKER_REMOTE` names it. Without that variable, a clone an
 //! earlier boot made names it, and then a tracker checkout in the
-//! workspace does. A workspace checkout of the named remote lends its fetch
+//! workspace does; either one only when [`is_tracker`] takes it, so an
+//! enclosing product checkout or a clone that merely carries boards is not
+//! the tracker. A workspace checkout of the named remote lends its fetch
 //! URL to the clone, so the clone has the credentials the environment gave
 //! that checkout.
 //!
@@ -20,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{bail, Context, Result};
+
+use crate::tracker_place::is_tracker;
 
 /// The variable that holds a token for the tracker remote.
 pub(crate) const TOKEN_VAR: &str = "LJOS_TRACKER_TOKEN";
@@ -82,7 +86,7 @@ pub(crate) fn find(given: Option<&str>, dest: &Path) -> Option<Remote> {
             }
         });
     }
-    if let Some((fetch, secret)) = origin(dest) {
+    if let Some((fetch, secret)) = origin(dest).filter(|_| is_tracker(dest)) {
         return Some(Remote {
             shown: redact(&fetch),
             fetch,
@@ -223,19 +227,6 @@ fn workspace_checkouts() -> Vec<PathBuf> {
         out.extend(kids);
     }
     out
-}
-
-/// A checkout that holds a tracker: `vissue.toml` at its root, or an
-/// `issues.org` under `Software/<project>/`.
-fn is_tracker(dir: &Path) -> bool {
-    if dir.join("vissue.toml").is_file() {
-        return true;
-    }
-    fs::read_dir(dir.join("Software")).is_ok_and(|projects| {
-        projects
-            .filter_map(Result::ok)
-            .any(|p| p.path().join("issues.org").is_file())
-    })
 }
 
 /// The origin `dir` names, with no password, and the password it fetches
@@ -515,5 +506,65 @@ mod tests {
             "Secret(..)",
             "a Debug print shows no password"
         );
+    }
+
+    /// A checkout of `remote` with `files` committed in it.
+    fn checkout(at: &Path, remote: &str, files: &[&str]) {
+        let git = |args: &[&str]| {
+            let out = crate::git_cmd()
+                .arg("-C")
+                .arg(at)
+                .args(["-c", "user.name=seat", "-c", "user.email=seat@example.test"])
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        fs::create_dir_all(at).unwrap();
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", remote]);
+        for file in files {
+            let path = at.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "").unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "files"]);
+    }
+
+    /// ljos-ge74, ljos-lc9c: the product checkout the workspace is, a
+    /// clone of another project that carries boards, and an earlier boot's
+    /// clone of either lend no remote. A committed tracker does.
+    #[test]
+    fn only_the_tracker_lends_its_remote() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace = dir.path().join("workspace");
+        let boards = "Software/app/issues.org";
+        checkout(&workspace, "/elsewhere/product.git", &[boards]);
+        checkout(&workspace.join("fork"), "/elsewhere/fork.git", &[boards]);
+        let dest = dir.path().join("dest");
+        checkout(&dest, "/elsewhere/product.git", &[boards]);
+        let before = std::env::var_os("LJOS_TRACKER_SEARCH");
+        std::env::set_var("LJOS_TRACKER_SEARCH", &workspace);
+        let refused = find(None, &dest);
+        checkout(
+            &workspace.join("tracker"),
+            "/elsewhere/tracker.git",
+            &[boards, "vissue.toml"],
+        );
+        let found = find(None, &dest).map(|remote| remote.shown);
+        match before {
+            Some(v) => std::env::set_var("LJOS_TRACKER_SEARCH", v),
+            None => std::env::remove_var("LJOS_TRACKER_SEARCH"),
+        }
+        assert_eq!(refused, None);
+        assert_eq!(found.as_deref(), Some("/elsewhere/tracker.git"));
     }
 }

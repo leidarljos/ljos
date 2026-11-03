@@ -1047,7 +1047,7 @@ fn gate_runner(name: &str, refs: &str) -> Result<()> {
         .or_else(git_dir);
     if repo
         .as_deref()
-        .is_some_and(|repo| is_store(repo) || holds_tracker(repo))
+        .is_some_and(|repo| is_store(repo) || crate::tracker_place::is_tracker(repo))
     {
         return Ok(());
     }
@@ -1169,20 +1169,6 @@ fn protected_ref(refs: &str, branches: &[String]) -> Option<String> {
     None
 }
 
-/// Whether `repo` is a tracker checkout: it holds `vissue.toml`, or a
-/// `Software/<project>/issues.org` as `vissue` reads a tracker root. A
-/// bare `Software/` directory is any repository's.
-fn holds_tracker(repo: &Path) -> bool {
-    if repo.join("vissue.toml").is_file() {
-        return true;
-    }
-    std::fs::read_dir(repo.join("Software")).is_ok_and(|entries| {
-        entries
-            .flatten()
-            .any(|entry| entry.path().join("issues.org").is_file())
-    })
-}
-
 fn book_commit(hook: &str) -> Result<()> {
     if std::env::var_os("LJOS_GIT_HOOK").is_some() || booking_off() {
         return Ok(());
@@ -1199,7 +1185,7 @@ fn book_commit(hook: &str) -> Result<()> {
     let repo_path = PathBuf::from(&repo);
     // A commit in the tracker's checkout is a tracker write: never booked,
     // but its seat is checked as any other write's is.
-    let tracker = tracker_repo(&repo_path);
+    let tracker = crate::tracker_place::is_tracker(&repo_path);
     if !tracker && (crate::bookkeep::path_is_temp(Some(&repo_path)) || skip_repo(&repo_path)) {
         return Ok(());
     }
@@ -1279,16 +1265,6 @@ fn mid_rewrite() -> bool {
     dir.join("rebase-merge").is_dir()
         || dir.join("rebase-apply").is_dir()
         || dir.join("MERGE_HEAD").is_file()
-}
-
-/// Whether `repo` is the tracker's checkout, `VISSUE_ROOT` or `ISSUE_ROOT`.
-fn tracker_repo(repo: &Path) -> bool {
-    ["VISSUE_ROOT", "ISSUE_ROOT"].iter().any(|key| {
-        std::env::var_os(key)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .is_some_and(|root| useful_root(&root) && covered(repo, &root))
-    })
 }
 
 /// A tracker commit no seat that may write the tracker made. It has landed
