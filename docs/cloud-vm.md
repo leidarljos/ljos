@@ -1,7 +1,7 @@
 # A fresh machine
 
 <!-- [[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]] -->
-These notes describe ljos 0.37.0.
+These notes describe ljos 0.38.0.
 <!-- [[[end]]] -->
 
 `ljos cloud up` installs the release binaries into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory first on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json`. The command is always the absolute path of `ljos-mcp`. A client that spawns servers with its own PATH never reads the edited profile, and it still starts this install. It clones `LJOS_TRACKER_REMOTE`. Run it again and it refreshes the clone and the MCP command, rewrites env-owned wake entries from `LJOS_WAKE_<SEAT>_URL`, and refreshes the scope `cloud` age identity from the named secret.

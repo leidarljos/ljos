@@ -1,9 +1,9 @@
 .. [[[cog import ljos_version as v; v.lines("", ":description: This page takes about ten minutes. It describes ljos {version}.", ":cover: https://leidarljos.github.io/ljos/_static/og.png", "", "This page takes about ten minutes. It describes ljos {version}.", "")]]]
 
-:description: This page takes about ten minutes. It describes ljos 0.37.0.
+:description: This page takes about ten minutes. It describes ljos 0.38.0.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-This page takes about ten minutes. It describes ljos 0.37.0.
+This page takes about ten minutes. It describes ljos 0.38.0.
 
 .. [[[end]]]
 

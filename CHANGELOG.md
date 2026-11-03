@@ -5,6 +5,136 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.38.0 (2026-11-03)
+
+### Features
+
+- `ljos mesh up` and `ljos mesh down` join and leave the swarm's Headscale tailnet.
+  `ljos mesh acl` prints its policy.
+- `policyd_config = "PATH"` in the user's or the seat's `ljos.toml` names a policyd config.
+  The hook, `ljos policy`, `ljos doctor` and the guard shims then ask `ljos-policyd check --config PATH`.
+  With `block-on-warning true` in that config, a warned command becomes policyd's deny.
+  A check that fails open still allows.
+  It is off by default: with nothing named, `check` is asked as before and every warning stays a label.
+
+### Fixes
+
+- A long-running ljos process, such as `ljos-mcp` or `ljos-hud`, checks which user owns the pack's port again on each search or request.
+  When the writer stops and another user's process takes its port, the seat's token no longer goes to that process.
+  It goes to the writer again once the writer is back.
+- A second `ljos sitting` on a ticket the seat already took resumes that hold when both shells carry a `sand-sub` id.
+  It no longer files a `subtask TAG on PARENT` child the seat never asked for.
+- A sitting prints the atom listing and recall before the review sweep.
+  A writer still going can no longer spend the recall budget.
+  `ljos search` and that recall ask a busy writer again on the existing backoff.
+  When the ranked search does not answer they say `ranked by words; the pack search did not answer in time`.
+- CI builds vissue, claimdag and deedar from the commits in `.github/sibling-pin`.
+  A test that needs one fails when that version is not on PATH.
+- Memory verbs store at once from any caller.
+  Each row says whose words it stores.
+- Syncs now fold small atom chunks together.
+  The whole atoms log is resealed only when the chunks would reach half the base.
+- Tests that start packsetd use one helper, with a temporary home and a port the writer binds itself.
+  The writer stops when the test drops it, panics, or is signalled, so a run leaves no packsetd on the default port.
+  A test build does not run packset ensure or packset start, so those commands do not leave a writer on that port.
+- The hook relevance, sync, user rules and tracker push tests start packsetd through the shared helper.
+  The hook relevance seat still uses the writer's token, its stand-in encoder, and the port lock.
+- The packsetd test helper kills a writer before it clears that writer's node.
+  A SIGINT between those two steps can no longer leave the writer running.
+- The packsetd test helper no longer mistakes another test's stub pack for the writer it started.
+- The rm, git and find guard shims read `policyd_config` only at the top of `ljos.toml` or under `[gates]`, as the hook and `ljos policy` do.
+  Under `[identity]` or any other table it no longer names a config for them.
+- Tracker git never prompts: every clone, fetch and push runs with `GIT_TERMINAL_PROMPT=0` and no askpass program.
+  `ljos sitting` and `ljos note` against a remote that wants a credential commit to the local tracker and exit 0.
+  They print `the remote was not reached (...), so the next sync pushes it`.
+  `ljos sync` by hand pushes those commits once the remote answers, also in a checkout that names no scope.
+- `ljos cloud up` keeps the seat from `LJOS_SEAT` instead of naming one from the run id.
+- `ljos consensus` asks for the correlation reading once six issues have a named outcome, not five.
+  At 5% no pair of voters passes the Fisher test in consensus on five shared outcomes or fewer.
+  `ljos learn` says six.
+- `ljos consensus` weighs each model family as one voter in the model crate's settle, and ballots that name no family share one `unknown` family.
+- `ljos digest` reads introduced issues only inside the requested window.
+  A day or `last` no longer diffs the whole tracker history.
+- `ljos doctor` warns when `policyd_config` names a file that is missing.
+- `ljos file`, `ljos note` and `ljos sitting` run in a product checkout no longer write or commit tickets there.
+  An untracked `vissue.toml`, an empty `Software/`, or the boards a cloned project carries no longer make a checkout the tracker; the write goes to the configured tracker, or names the one it looked for.
+  `ljos cloud up` takes a workspace checkout for the tracker only when its `vissue.toml` is committed or its origin is `LJOS_TRACKER_REMOTE`.
+  The git hooks take a repository for the tracker by the same rule, and a tracker whose projects sit under `VISSUE_PREFIX` passes it.
+- `ljos mesh up` and `ljos mesh down` signal tailscaled only when its pid file still matches the running process.
+  The `source.mesh` label ends when tailscaled does.
+- `ljos remember` with no sitting stores a standing lesson, and `--as NAME` puts it in `persona-NAME`.
+  A note needs a ticket, and packsetd refuses one, so a seat could not store a lesson.
+  Each persona's brief lists the memories it activates for the ticket, so two personas read different lists.
+  `ljos vote ISSUE --against REASON --child ID` records a no ballot only when `ID` is an open child of `ISSUE`.
+  `ljos finish ISSUE --close` is refused while a child of `ISSUE` is open.
+  A later ballot for a persona keeps the drawer name already on that issue, so a withdraw replaces it.
+- `ljos_guard_check` now shows the warning ljos-policyd prints for a heredoc program, such as `rm-rf-outside-tmp`.
+  It used to show a bare `allow`.
+- ljos runs `rm -rf` and `find -delete` outside `/tmp`, and a force or mirror push, instead of refusing or asking.
+  Each prints one `allow\twarn\tRULE\tWARNING` line and leaves a `warn` row in `$XDG_DATA_HOME/ljos/bypass.jsonl`, from the hook, `ljos policy`, the guard shim and the gate client alike.
+  An older `ljos-policyd` that still refuses or asks on those rules gets the same line, unless the person names a `policyd_config`, which keeps its deny.
+  The ask pack leaves a forced recursive delete of a home or system tree to the guard.
+  A push that deletes a remote branch runs with `git-push-delete` instead of asking.
+  A protected branch takes a force, mirror or delete push once the sitting's consensus settles, as it takes an ordinary push, and no later.
+  The seat guard used to refuse a command that deletes or moves a tree holding the person's key directory, such as `rm -rf /`, `rm -rf ~` or `shutil.rmtree(os.path.expanduser('~'))`.
+  Such a command now runs too.
+  It prints `allow\twarn\tuproots-person-key\tWARNING` and leaves the same `warn` row.
+  The warning names the tree and the key directory.
+  That warning says `moves` for a move call that code renames, such as `from shutil import move as m`, and `deletes` for a renamed delete call.
+  A command runs with `changes-person-key` instead of being refused when it changes the key directory, a file in it or the directory above it, such as `rm -rf ~/.config`.
+  A change to the runtime directory where the hook keeps the person's latest prompt runs the same way, with `changes-kept-prompt`.
+  So does a write from a command or a file tool to another seat file, with `writes-seat-file`: an ljos binary, a hook or the file that registers one, the ljos config or an approval.
+  A tool call's `ljos prefer --review --keep ID` runs with no warning, since the rule is kept as the agent's.
+  It runs with `prefer-keep-faked-terminal` when run under `setsid`, `script` or `env -i`, as if from the person's terminal.
+  That warning says the rule is kept as the agent's and stays unverified.
+  A `policyd_config` holding `block-on-warning true` reaches only the commands policyd warns on, so each of ljos's own labels turns into a deny only where policyd warns on the same command.
+
+### Documentation
+
+- Version lines and the doctor, version and help samples in the docs are now generated, and CI checks them.
+
+### Removals
+
+- An agent can now accept its own proposal with `ljos accept`, which makes the lesson `explicit`, because the refusal that stopped it is gone.
+- `ljos cloud up` no longer installs a pre-push hook or sets `core.hooksPath` at any level.
+  Commits and pushes on a cloud seat run only the hooks the repository and the login already name.
+  `ljos doctor` reports the push allowlist and no longer checks a hook.
+
+### Miscellaneous
+
+- A test now covers a malformed tool call to ljos-mcp followed by end of input.
+- CI fails on a fragment name that is malformed or has an unknown type.
+- CI runs every test binary after one fails, so a job names every failing test.
+  CI builds ljos-policyd at the v0.7.0 commit instead of develop.
+- Each prompt in the hook relevance tests now has a committed list of the lessons `ljos hook` must print.
+  The tests search packsetd with its token and a stand-in encoder.
+  They fail a hook that drops the dense ballot or replays a cached search.
+  They also fail one that rewrites a lesson or breaks ties against packset's order.
+- Fixtures and doc examples drop the remaining real model names, the consensus test again checks that a judge label folds to its model family, and `scripts/suite-e2e.sh` with `REAL=1` takes its runner and model from `REAL_RUNNER` and `REAL_MODEL`.
+- Outside a hook, `ljos search` reads the pack listing straight into the fields it uses.
+  It checks which user owns the pack's port once per search, not on each of its requests.
+  On a pack of ten thousand claims a search takes about three quarters of the time, and prints the same hits.
+- Test fixtures and doc examples use neutral model names such as `model-a`.
+- The handover scope tests find packsetd and the pinned vissue in separate PATH directories, as CI installs them.
+- The packsetd test helper keeps one node per writer it starts, in place of a fixed 128 slots.
+  It reuses a node once its writer stops.
+  A Registry owns that list, and a test checks the reuse with fake process ids.
+- The prompt hook now reads only the fields it uses from each claim in the pack listing.
+  On a pack of ten thousand claims a warm prompt takes about seven tenths of the time, and prints the same lines.
+- The prompt hook parses the pack listing once and shares it between its readers.
+  It ranks the stored claims once.
+  On a pack of ten thousand claims a warm prompt takes about a third of the time.
+  A cold one takes about half, and both print the same lines.
+- The writer and SIGINT tests in the packsetd test helper pass on macOS.
+  The pinned deedar build in the cloud finish tests runs under the env lock.
+  The sibling pin tests no longer fail with ETXTBSY when another test forks.
+  Clippy on Rust 1.97 accepts the SIGINT handler cast.
+- With `LJOS_HOOK_TIMING` set, the prompt hook prints `hook-timing rerank N claims walked`, how many stored claims its rerank stage walked.
+  The rerank stage finds its hits' rows by id and walks none.
+  The growth test checks that the count does not move when the pack grows tenfold in claims the prompt does not share.
+  Before, it timed the stage against a bound.
+
+
 ## 0.37.0 (2026-11-02)
 
 ### Features

@@ -1,1 +1,0 @@
-Fixtures and doc examples drop the remaining real model names, the consensus test again checks that a judge label folds to its model family, and `scripts/suite-e2e.sh` with `REAL=1` takes its runner and model from `REAL_RUNNER` and `REAL_MODEL`.

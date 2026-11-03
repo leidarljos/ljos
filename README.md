@@ -13,7 +13,7 @@ A person can also record a grant that lets a seat close tickets. The grant store
 `ljos-policyd` checks a shell command against a short list of dangerous actions. It is not a sandbox. A command that runs as you, outside a tool call, is not checked. If policyd is missing, slow, or crashes, the command runs and ljos logs a warning.
 
 <!-- [[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]] -->
-These notes describe ljos 0.37.0.
+These notes describe ljos 0.38.0.
 <!-- [[[end]]] -->
 
 ## Try it
