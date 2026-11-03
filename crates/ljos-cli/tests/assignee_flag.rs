@@ -52,7 +52,7 @@ fn the_seat_named_on_the_command_line_holds_the_claim() {
             .env("XDG_STATE_HOME", home.join(".state"))
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("LJOS_SEAT", "saddle")
-            .env("GROK_SESSION_ID", "0e610c5a-32e0-7dab-eb9b-ab7d13ce6556")
+            .env("LJOS_SESSION_ID", "0e610c5a-32e0-7dab-eb9b-ab7d13ce6556")
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
             .output()

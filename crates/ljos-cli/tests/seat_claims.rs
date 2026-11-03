@@ -1,6 +1,7 @@
-//! A raw holder and a legacy seat name do not hold a claim. The claim is
-//! taken under the seat (`inky-n9o` as `inky`, `disk-saver-t4t` as
-//! `disk-saver`, `ljos-bot` as `ljosbot`). `example-host-sand-sub` is not a seat,
+//! A raw holder and a legacy seat name do not hold a claim. `inky-n9o`
+//! is the seat `inky`, and that claim is held as the session id, which
+//! `LJOS_SESSION_ID` keeps as written. `disk-saver-t4t` is `disk-saver`
+//! and `ljos-bot` is `ljosbot`. `example-host-sand-sub` is not a seat,
 //! and nothing is written.
 
 ljos_test_boot::harness!();
@@ -59,7 +60,7 @@ fn a_raw_or_legacy_name_does_not_hold_the_claim() {
             .env("XDG_STATE_HOME", home.join(".state"))
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("LJOS_SEAT", seat)
-            .env("GROK_SESSION_ID", session)
+            .env("LJOS_SESSION_ID", session)
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
             .output()
@@ -77,9 +78,8 @@ fn a_raw_or_legacy_name_does_not_hold_the_claim() {
         "stderr {}\n{calls}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let holder = format!("inky@{}", ljos_cli::session_tag(session));
     assert!(
-        calls.contains(&format!("vissue claim proj-inky VISSUE_AGENT={holder}")),
+        calls.contains(&format!("vissue claim proj-inky VISSUE_AGENT={session}")),
         "{calls}"
     );
     assert!(!calls.contains("inky-n9o"), "{calls}");

@@ -1035,7 +1035,6 @@ pub fn harness_session() -> String {
         // names it under the root.
         "CODEX_SESSION_ID",
         "CODEX_THREAD_ID",
-        "GROK_SESSION_ID",
         "SEAT_SESSION_ID",
         "LJOS_SESSION_ID",
         // Claude Code also stamps a remote-control id that comes and goes,

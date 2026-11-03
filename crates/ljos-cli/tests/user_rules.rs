@@ -78,7 +78,7 @@ fn runner_var(key: &str) -> bool {
         "CURSOR_",
         "CLAUDE",
         "CODEX_",
-        "GROK_",
+        "SEAT_",
         "GEMINI_CLI",
         "OPENCODE_",
         "AMP_",
@@ -90,6 +90,7 @@ fn runner_var(key: &str) -> bool {
             "AGENT_TOOL_NAME",
             "LJOS_HARNESS_SESSION",
             "LJOS_SESSION_ID",
+            "LJOS_MEM_PORT",
         ]
         .contains(&key)
         || (key != "XDG_SESSION_ID"

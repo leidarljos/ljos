@@ -13,6 +13,28 @@ use std::time::{Duration, Instant};
 const PROMPT: Duration = Duration::from_secs(10);
 /// How long the stand-in claim graph takes over any call.
 const STALL: &str = "30";
+/// Longer than [`STALL`], so a stalled call fails the timing assert
+/// instead of being killed.
+const WATCHDOG: Duration = Duration::from_secs(60);
+
+/// Cancels the watchdog, then stops the server. The cancel runs first so
+/// the watchdog cannot signal a pid the kernel has given to another test.
+struct StopServer {
+    child: Option<std::process::Child>,
+    cancel: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl Drop for StopServer {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -116,21 +138,33 @@ fn an_omitted_id_still_claims_the_next_ready_node() {
 #[test]
 fn the_mcp_claim_tool_answers_a_blank_id_at_once() {
     let hab = Hab::new(STALL, "[]");
-    let mut child = hab
+    let child = hab
         .command(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env("LJOS_MCP_TOOLS", "all")
-        .env("GROK_SESSION_ID", "0e610c5a-32e0-7dab-eb9b-ab7d13ce6556")
+        .env("LJOS_SESSION_ID", "0e610c5a-32e0-7dab-eb9b-ab7d13ce6556")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
     let pid = child.id();
+    let (cancel, cancelled) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(60));
-        let _ = Command::new("kill").arg(pid.to_string()).status();
+        if matches!(
+            cancelled.recv_timeout(WATCHDOG),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
     });
-    let mut stdin = child.stdin.take().unwrap();
+    let mut server = StopServer {
+        child: Some(child),
+        cancel: Some(cancel),
+    };
+    let (mut stdin, stdout) = {
+        let held = server.child.as_mut().unwrap();
+        (held.stdin.take().unwrap(), held.stdout.take().unwrap())
+    };
     for line in [
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-06-18", "capabilities": {},
@@ -139,7 +173,7 @@ fn the_mcp_claim_tool_answers_a_blank_id_at_once() {
     ] {
         writeln!(stdin, "{line}").unwrap();
     }
-    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut lines = BufReader::new(stdout).lines();
     lines.next().unwrap().unwrap();
     let started = Instant::now();
     writeln!(
@@ -155,8 +189,7 @@ fn the_mcp_claim_tool_answers_a_blank_id_at_once() {
         .expect("no answer to the claim");
     let took = started.elapsed();
     drop(stdin);
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(server);
     assert!(took < PROMPT, "ljos_claim took {took:?}: {answer}");
     assert!(answer.contains("the id is empty"), "{answer}");
     assert_eq!(hab.calls(), "", "the claim graph was asked");

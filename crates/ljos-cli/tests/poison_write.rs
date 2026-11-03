@@ -1437,7 +1437,7 @@ fn a_runner_without_a_record_does_not_attribute_the_prompt() {
             })
             .to_string(),
         ),
-        ("grok", "GROK_SESSION_ID", plant_payload(&prompt)),
+        ("grok", "SEAT_SESSION_ID", plant_payload(&prompt)),
         ("opencode", "OPENCODE_SESSION_ID", plant_payload(&prompt)),
         ("gemini", "GEMINI_SESSION_ID", plant_payload(&prompt)),
         ("agy", "AGY_SESSION_ID", plant_payload(&prompt)),
@@ -1766,7 +1766,7 @@ fn runners(prompt: &str) -> Vec<Runner> {
             hook: serde_json::json!({
                 "hookEventName": "user_prompt_submit", "sessionId": grok, "prompt": prompt,
             }),
-            env: vec![("GROK_SESSION_ID", grok.to_string())],
+            env: vec![("SEAT_SESSION_ID", grok.to_string())],
             meta: serde_json::json!({}),
         },
     ]
@@ -1996,7 +1996,7 @@ done
 
 fn session_var(name: &str) -> &'static str {
     match name {
-        "grok" => "GROK_SESSION_ID",
+        "grok" => "SEAT_SESSION_ID",
         "codex" => "CODEX_SESSION_ID",
         "cursor-agent" => "CURSOR_CONVERSATION_ID",
         _ => "CLAUDE_CODE_SESSION_ID",

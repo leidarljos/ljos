@@ -6445,7 +6445,7 @@ pub fn onboard_to(harness: &str, dry: bool, skills: Option<&Path>) -> Result<Vec
 }
 
 /// Frozen Grok hook file. Copied to `~/.grok/hooks/ljos.json`.
-const GROK_HOOKS_JSON: &str = include_str!("../assets/grok/ljos.json");
+const FROZEN_HOOKS_JSON: &str = include_str!("../assets/grok/ljos.json");
 
 /// The `ljos` a runner hook or plugin runs: the one beside `ljos-mcp`, by
 /// absolute path when possible, since a runner started outside a login
@@ -6460,7 +6460,7 @@ fn ljos_path() -> Result<PathBuf> {
 
 /// The grok hooks file with `{ljos}` filled in.
 fn grok_hooks_json(ljos: &Path) -> String {
-    GROK_HOOKS_JSON.replace("{ljos}", &ljos.display().to_string())
+    FROZEN_HOOKS_JSON.replace("{ljos}", &ljos.display().to_string())
 }
 
 /// The events whose matcher groups in a Claude settings file already run
@@ -14004,7 +14004,7 @@ fn file_correction(call: &HookCall, key: &str) {
 }
 
 /// How this runner calls the pack. Its tools are not in the built-in list.
-pub const GROK_PACK_LINE: &str = "\
+pub const PACK_LINE: &str = "\
 The pack is packset, through use_tool, with no search_tool call first: \
 ljos__ljos_search {\"query\": \"...\"}, ljos__ljos_remember {\"text\": \"...\"}, \
 ljos__ljos_prefer {\"text\": \"...\"}. Search it before answering from memory. \
@@ -16035,7 +16035,7 @@ fn scope_pack_port() -> Result<()> {
             return Ok(());
         }
         let named = std::env::var("PACKSET_PORT")
-            .or_else(|_| std::env::var("GROK_MEM_PORT"))
+            .or_else(|_| std::env::var("LJOS_MEM_PORT"))
             .ok()
             .and_then(|raw| raw.trim().parse::<u16>().ok());
         if let Some(port) = pick_pack_port(named, euid(), listener_uid)? {
@@ -42187,7 +42187,7 @@ fn runner_detection_var(key: &str) -> bool {
         "CURSOR_",
         "CLAUDE",
         "CODEX_",
-        "GROK_",
+        "SEAT_",
         "GEMINI_CLI",
         "OPENCODE_",
         "AMP_",
@@ -42197,6 +42197,7 @@ fn runner_detection_var(key: &str) -> bool {
         "AGENT_TOOL_NAME",
         "LJOS_HARNESS_SESSION",
         "LJOS_SESSION_ID",
+        "LJOS_MEM_PORT",
         "LJOS_SHELL_SESSION",
         "LJOS_PANEL_HARNESS",
     ];
@@ -44913,7 +44914,7 @@ mod tests {
         unsafe {
             std::env::remove_var("VISSUE_AGENT");
             std::env::set_var("LJOS_SEAT", "runner-x");
-            std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
+            std::env::set_var("SEAT_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
         let holder = resolve_assignee(None);
         assert_eq!(
@@ -44933,7 +44934,7 @@ mod tests {
         assert_eq!(resolve_assignee(Some("alice")), "alice");
         assert_eq!(seat_name(), "runner-x");
         unsafe {
-            std::env::remove_var("GROK_SESSION_ID");
+            std::env::remove_var("SEAT_SESSION_ID");
             std::env::remove_var("LJOS_SEAT");
         }
     }
@@ -44944,11 +44945,11 @@ mod tests {
         unsafe {
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("VISSUE_AGENT");
-            std::env::set_var("GROK_SESSION_ID", "01a09b25-aaaa-7972-881a-3cee2ea6efd6");
+            std::env::set_var("SEAT_SESSION_ID", "01a09b25-aaaa-7972-881a-3cee2ea6efd6");
         }
         let a = resolve_assignee(None);
         unsafe {
-            std::env::set_var("GROK_SESSION_ID", "01a09b25-bbbb-7972-881a-3cee2ea6efd6");
+            std::env::set_var("SEAT_SESSION_ID", "01a09b25-bbbb-7972-881a-3cee2ea6efd6");
         }
         let b = resolve_assignee(None);
         assert_ne!(
@@ -44964,7 +44965,7 @@ mod tests {
             "{b}"
         );
         unsafe {
-            std::env::remove_var("GROK_SESSION_ID");
+            std::env::remove_var("SEAT_SESSION_ID");
         }
     }
 
@@ -45673,7 +45674,7 @@ mod tests {
             std::env::set_var("XDG_RUNTIME_DIR", &dir);
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("VISSUE_AGENT");
-            std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
+            std::env::set_var("SEAT_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
         let row = format_seat_row();
         assert!(
@@ -45685,12 +45686,12 @@ mod tests {
         );
         assert!(!row.contains("01a09b25-ffe9"), "no bare session id: {row}");
         assert!(
-            row.contains("GROK_SESSION_ID"),
+            row.contains("SEAT_SESSION_ID"),
             "doctor names where the session came from: {row}"
         );
         assert!(!row.contains("the default"), "{row}");
         unsafe {
-            std::env::remove_var("GROK_SESSION_ID");
+            std::env::remove_var("SEAT_SESSION_ID");
             std::env::remove_var("XDG_RUNTIME_DIR");
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -51837,8 +51838,8 @@ mod tests {
             Some("no one ever")
         );
         assert_eq!(correction_cue("fix the parser"), None);
-        assert!(GROK_PACK_LINE.contains("ljos__ljos_search"));
-        assert!(GROK_PACK_LINE.contains("ljos__ljos_prefer"));
+        assert!(PACK_LINE.contains("ljos__ljos_search"));
+        assert!(PACK_LINE.contains("ljos__ljos_prefer"));
     }
 
     #[test]
@@ -58726,7 +58727,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "export CURSOR_CONVERSATION_ID=forged; ljos remember 'a b c d'",
             "env CLAUDE_CODE_SESSION_ID=forged ljos prefer a b c d",
             "CODEX_THREAD_ID=forged && /usr/local/bin/ljos remember a b c d",
-            "declare -x GROK_SESSION_ID=forged; ljos prefer a b c d",
+            "declare -x SEAT_SESSION_ID=forged; ljos prefer a b c d",
             "CURSOR_AGENT_SESSION_ID=forged ljos-mcp",
             "sh -c 'CODEX_SESSION_ID=forged exec ljos prefer a b c d'",
             "export CURSOR_SESSION_ID=forged\nljos prefer --user --why x a b c d",
@@ -61992,7 +61993,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "LJOS_HOLD",
             "CODEX_THREAD_ID",
             "CODEX_SESSION_ID",
-            "GROK_SESSION_ID",
+            "SEAT_SESSION_ID",
             "USER",
             "XDG_RUNTIME_DIR",
         ];
@@ -62004,7 +62005,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             }
             std::env::set_var("XDG_RUNTIME_DIR", dir.path());
             std::env::set_var("USER", "probe-login");
-            std::env::set_var("GROK_SESSION_ID", "2c12969d-0000-4000-8000-000000000000");
+            std::env::set_var("SEAT_SESSION_ID", "2c12969d-0000-4000-8000-000000000000");
         }
         let derived = seat_source_row(&Seat {
             seat: "probe-login".into(),

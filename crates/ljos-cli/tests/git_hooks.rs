@@ -1160,7 +1160,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         &hab.repo,
         &["remote", "add", "origin", bare.to_str().unwrap()],
     );
-    let runner = [("GROK_SESSION_ID", "5b0c2a71-9d1e-4f3a-8c6b-2e7f1a0d9c43")];
+    let runner = [("SEAT_SESSION_ID", "5b0c2a71-9d1e-4f3a-8c6b-2e7f1a0d9c43")];
     let push = |dest: &str| {
         Command::new("/usr/bin/git")
             .arg("-C")

@@ -70,16 +70,6 @@ def get(map_node, key):
     return None
 
 
-def walk_maps(node, acc):
-    if isinstance(node, yaml.MappingNode):
-        acc.append(node)
-        for _, val in node.value:
-            walk_maps(val, acc)
-    elif isinstance(node, yaml.SequenceNode):
-        for item in node.value:
-            walk_maps(item, acc)
-
-
 def run_reads_channel(step):
     text = scalar(get(step, "run"))
     if not isinstance(text, str):
@@ -89,50 +79,67 @@ def run_reads_channel(step):
     return "rust-toolchain.toml" in text and re.search(r"(?m)^channel=", text)
 
 
+def job_steps(job):
+    # Step ids are unique inside one job. A step in another job is a
+    # different step, even when the id text matches.
+    steps = get(job, "steps")
+    if not isinstance(steps, yaml.SequenceNode):
+        return []
+    return [item for item in steps.value if isinstance(item, yaml.MappingNode)]
+
+
 def check_tree(path, root, channel):
     messages = []
-    maps = []
-    walk_maps(root, maps)
-    by_id = {}
-    for step in maps:
-        step_id = scalar(get(step, "id"))
-        if isinstance(step_id, str):
-            by_id.setdefault(step_id, []).append(step)
     checkouts = []
-    for step in maps:
-        uses = get(step, "uses")
-        uses_text = scalar(uses)
-        if not isinstance(uses_text, str):
+    if not isinstance(root, yaml.MappingNode):
+        return messages
+    jobs = get(root, "jobs")
+    if not isinstance(jobs, yaml.MappingNode):
+        return messages
+    for _, job in jobs.value:
+        if not isinstance(job, yaml.MappingNode):
             continue
-        checkout = CHECKOUT_SHA.match(uses_text)
-        if checkout:
-            checkouts.append((checkout.group(1), line_of(uses)))
-        rust = (
-            uses_text == "dtolnay/rust-toolchain"
-            or uses_text.startswith("dtolnay/rust-toolchain@"))
-        if not rust:
-            continue
-        with_node = get(step, "with")
-        if not isinstance(with_node, yaml.MappingNode):
-            continue
-        tool = get(with_node, "toolchain")
-        if tool is None:
-            continue
-        value = scalar(tool)
-        if channel is not None and value == channel:
-            continue
-        expr = CHANNEL_EXPR.match(value) if isinstance(value, str) else None
-        if expr and any(run_reads_channel(s) for s in by_id.get(expr.group(1), [])):
-            continue
-        shown = value if isinstance(value, str) else "not a string"
-        where = line_of(tool)
-        if channel is None:
-            messages.append(
-                f"{path}:{where}: toolchain {shown!r} has no channel to match")
-        else:
-            messages.append(
-                f"{path}:{where}: toolchain {shown!r} "
-                f"is not rust-toolchain.toml channel {channel!r}")
+        steps = job_steps(job)
+        by_id = {}
+        for step in steps:
+            step_id = scalar(get(step, "id"))
+            if isinstance(step_id, str):
+                by_id.setdefault(step_id, []).append(step)
+        for step in steps:
+            uses = get(step, "uses")
+            uses_text = scalar(uses)
+            if not isinstance(uses_text, str):
+                continue
+            checkout = CHECKOUT_SHA.match(uses_text)
+            if checkout:
+                checkouts.append((checkout.group(1), line_of(uses)))
+            rust = (
+                uses_text == "dtolnay/rust-toolchain"
+                or uses_text.startswith("dtolnay/rust-toolchain@"))
+            if not rust:
+                continue
+            with_node = get(step, "with")
+            if not isinstance(with_node, yaml.MappingNode):
+                continue
+            tool = get(with_node, "toolchain")
+            if tool is None:
+                continue
+            value = scalar(tool)
+            if channel is not None and value == channel:
+                continue
+            expr = CHANNEL_EXPR.match(value) if isinstance(value, str) else None
+            if expr and any(
+                    run_reads_channel(s) for s in by_id.get(expr.group(1), [])):
+                continue
+            shown = value if isinstance(value, str) else "not a string"
+            where = line_of(tool)
+            if channel is None:
+                messages.append(
+                    f"{path}:{where}: toolchain {shown!r} has no channel to match")
+            else:
+                messages.append(
+                    f"{path}:{where}: toolchain {shown!r} "
+                    f"is not rust-toolchain.toml channel {channel!r}")
     if len({sha for sha, _ in checkouts}) > 1:
         pin, pin_line = checkouts[0]
         for sha, lineno in checkouts[1:]:
@@ -143,18 +150,26 @@ def check_tree(path, root, channel):
     return messages
 
 
+def load_workflow(text):
+    # One parse. Constructing the node applies the repeated-key check.
+    # A syntax error is raised once, from this parse, not from a second one.
+    loader = Strict(text)
+    root = loader.get_single_node()
+    if root is not None:
+        loader.construct_document(root)
+    return root
+
+
 def main():
     channel = read_channel()
     bad = channel is None
-    for path in sorted(pathlib.Path(".github/workflows").glob("*.yml")):
+    workflow_dir = pathlib.Path(".github/workflows")
+    paths = sorted(
+        list(workflow_dir.glob("*.yml")) + list(workflow_dir.glob("*.yaml")))
+    for path in paths:
         text = path.read_text()
         try:
-            yaml.load(text, Strict)
-        except yaml.YAMLError as err:
-            print(f"{path}: {err}")
-            bad = True
-        try:
-            root = yaml.compose(text, Loader=Strict)
+            root = load_workflow(text)
         except yaml.YAMLError as err:
             print(f"{path}: {err}")
             bad = True

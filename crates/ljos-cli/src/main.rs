@@ -3497,7 +3497,7 @@ fn run_command() -> Result<()> {
                     if call.shape == ljos_cli::HookShape::CamelCase
                         && call.event == "UserPromptSubmit"
                     {
-                        let line = ljos_cli::GROK_PACK_LINE;
+                        let line = ljos_cli::PACK_LINE;
                         ctx = if ctx.is_empty() {
                             line.to_string()
                         } else {

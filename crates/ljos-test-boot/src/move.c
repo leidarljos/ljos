@@ -464,13 +464,13 @@ int ljos_test_enter_cgroup(const char *dir) {
 }
 
 static int key_is_runner_mark(const char *key) {
-    static const char *const prefixes[] = {"CURSOR_", "CLAUDE", "CODEX_", "GROK_",
+    static const char *const prefixes[] = {"CURSOR_", "CLAUDE", "CODEX_", "SEAT_",
                                            "GEMINI_CLI", "OPENCODE_", "AMP_"};
     static const char *const exact[] = {
         "CLOUD_AGENT_ID",     "AGENT_TOOL_NAME",    "LJOS_HARNESS_SESSION",
-        "LJOS_SESSION_ID",    "LJOS_SHELL_SESSION", "LJOS_PANEL_HARNESS",
-        "LJOS_IN_HOOK",       "CLAUDECODE",         "CODEX_SANDBOX",
-        "GEMINI_CLI"};
+        "LJOS_SESSION_ID",    "LJOS_MEM_PORT",      "LJOS_SHELL_SESSION",
+        "LJOS_PANEL_HARNESS", "LJOS_IN_HOOK",       "CLAUDECODE",
+        "CODEX_SANDBOX",      "GEMINI_CLI"};
     size_t i;
     size_t n = strlen(key);
     for (i = 0; i < sizeof prefixes / sizeof prefixes[0]; i++) {

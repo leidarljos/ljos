@@ -121,7 +121,7 @@ impl Seat {
             .env("LJOS_SEAT", "inky")
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
-            .env("GROK_SESSION_ID", SESSION)
+            .env("SEAT_SESSION_ID", SESSION)
             .current_dir(&self.repo)
             .stdin(Stdio::null());
         cmd

@@ -151,7 +151,7 @@ fn the_mcp_release_and_complete_tools_answer_a_blank_id_at_once() {
     let child = hab
         .command(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env("LJOS_MCP_TOOLS", "all")
-        .env("GROK_SESSION_ID", "0e610c5a-32e0-7dab-eb9b-ab7d13ce6556")
+        .env("LJOS_SESSION_ID", "0e610c5a-32e0-7dab-eb9b-ab7d13ce6556")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
