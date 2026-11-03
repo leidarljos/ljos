@@ -1,22 +1,23 @@
 //! `ljos policy` on a push, with no seat rules and the ask pack switched off.
 //! Force, a `+refspec`, a `--force-with-lease` push onto main, master or
-//! develop, deleting a remote branch or tag, and a mirror push ask. A plain
-//! branch push, a tag push and a lease push onto a feature branch stay
-//! allowed. A push whose `LJOS_CITE` does not stand is denied.
+//! develop, and a mirror push run with the `git-force-push` warning, and
+//! the bypass log keeps the label. Deleting a remote branch or tag asks. A
+//! plain branch push, a tag push and a lease push onto a feature branch
+//! stay allowed. A push whose `LJOS_CITE` does not stand is denied.
 
 ljos_test_boot::harness!();
+use std::path::Path;
 use std::process::Command;
 
-fn policy(line: &str) -> std::process::Output {
-    let home = tempfile::tempdir().unwrap();
+fn policy(home: &Path, line: &str) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("policy")
         .arg(line)
-        .env("HOME", home.path())
-        .env("XDG_CONFIG_HOME", home.path().join(".config"))
-        .env("XDG_DATA_HOME", home.path().join(".local/share"))
-        .env("XDG_CACHE_HOME", home.path().join(".cache"))
-        .env("XDG_STATE_HOME", home.path().join(".local/state"))
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
         .env("PACKSET_URL", "off")
         .env("LJOS_ASK_PACK", "off")
         .env("LJOS_GUARD", "on")
@@ -28,7 +29,12 @@ fn policy(line: &str) -> std::process::Output {
 }
 
 fn stdout_of(line: &str) -> String {
-    let out = policy(line);
+    let home = tempfile::tempdir().unwrap();
+    stdout_in(home.path(), line)
+}
+
+fn stdout_in(home: &Path, line: &str) -> String {
+    let out = policy(home, line);
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(
         out.status.success(),
@@ -49,79 +55,53 @@ fn verdict_heads(text: &str) -> Vec<&str> {
 }
 
 #[test]
-fn a_dangerous_push_asks_with_no_seat_rule() {
-    let cases = [
-        (
-            "git push --force origin main",
-            "a force push rewrites shared history",
-        ),
-        (
-            "git push -f origin main",
-            "a force push rewrites shared history",
-        ),
-        (
-            "git push origin +main",
-            "a force push rewrites shared history",
-        ),
-        (
-            "git push --force-with-lease origin main",
-            "a force push rewrites shared history",
-        ),
-        (
-            "git push --force-with-lease=main:abc123 origin main",
-            "a force push rewrites shared history",
-        ),
-        (
-            "git push --force-with-lease origin HEAD:develop",
-            "a force push rewrites shared history",
-        ),
-        (
-            "git push --force-with-lease origin +feature",
-            "a force push rewrites shared history",
-        ),
-        (
-            "git push origin --delete old",
-            "deleting a remote branch removes shared work",
-        ),
-        (
-            "git push origin :old",
-            "deleting a remote branch removes shared work",
-        ),
-        (
-            "git push origin :refs/tags/v1.0.0",
-            "deleting a remote branch removes shared work",
-        ),
-        (
-            "git push origin +refs/tags/v1.0.0",
-            "a force push rewrites shared history",
-        ),
-        (
-            "git push --mirror origin",
-            "a mirror push overwrites and deletes every ref on the remote",
-        ),
-    ];
-    for (line, why) in cases {
-        let text = stdout_of(line);
-        // A force push is the same `git-force-push` ask the hook gives.
-        // A delete or a mirror keeps the push gate's own words.
-        let (needle, rule) = if why.starts_with("a force push") {
-            (
-                "ask: git-force-push: it rewrites shared history",
-                "(rule: git-force-push)",
-            )
-        } else if why.starts_with("a mirror") {
-            (
-                "ask: a mirror push overwrites and deletes every ref on the remote",
-                "(rule: built-in push)",
-            )
-        } else {
-            (
-                "ask: deleting a remote branch removes shared work",
-                "(rule: built-in push)",
-            )
-        };
+fn a_force_or_mirror_push_runs_with_its_warning_and_label() {
+    for line in [
+        "git push --force origin main",
+        "git push -f origin main",
+        "git push origin +main",
+        "git push --force-with-lease origin main",
+        "git push --force-with-lease=main:abc123 origin main",
+        "git push --force-with-lease origin HEAD:develop",
+        "git push --force-with-lease origin +feature",
+        "git push origin +refs/tags/v1.0.0",
+        "git push --mirror origin",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let text = stdout_in(home.path(), line);
         assert!(
-            text.contains(needle) && text.contains(rule),
+            text.contains("allow\twarn\tgit-force-push\ta force push rewrites a published branch"),
+            "{line}\n{text}"
+        );
+        let heads = verdict_heads(&text);
+        assert!(
+            heads.iter().all(|head| *head == "allow"),
+            "{line} -> {heads:?}\n{text}"
+        );
+        let log = std::fs::read_to_string(home.path().join(".local/share/ljos/bypass.jsonl"))
+            .unwrap_or_default();
+        assert!(
+            log.lines()
+                .filter_map(|row| serde_json::from_str::<serde_json::Value>(row).ok())
+                .any(|row| row["kind"] == "warn"
+                    && row["rule"] == "git-force-push"
+                    && row["command"] == line),
+            "{line} left no label:\n{log}"
+        );
+    }
+}
+
+#[test]
+fn a_delete_push_asks_with_no_seat_rule() {
+    for line in [
+        "git push origin --delete old",
+        "git push origin :old",
+        "git push origin :refs/tags/v1.0.0",
+    ] {
+        let text = stdout_of(line);
+        assert!(
+            text.contains("ask: deleting a remote branch removes shared work")
+                && text.contains("(rule: built-in push)"),
             "{line}\n{text}"
         );
         assert!(

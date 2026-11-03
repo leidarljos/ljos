@@ -399,16 +399,12 @@ fn an_ask_is_rendered_for_each_harness() {
     record_evidence(&hab.repo);
     sit(&hab);
     let policyd = hab.bin.join("ljos-policyd");
-    script(
-        &hab.bin,
-        "ljos-policyd",
-        "#!/bin/sh\nprintf 'deny\\tgit-force-push\\n'\nexit 2\n",
-    );
+    script(&hab.bin, "ljos-policyd", "#!/bin/sh\nprintf 'allow\\n'\n");
     let cwd = hab.repo.clone();
     let env = [("POLICYD_BIN", policyd.to_str().unwrap())];
     let command = serde_json::json!({
         "tool_name": "Bash",
-        "tool_input": {"command": "git push --force origin feature"}
+        "tool_input": {"command": "git push origin --delete feature"}
     });
     // Claude Code and opencode stop on permissionDecision ask. opencode's
     // plugin throws before the tool runs; the payload it sends has no
@@ -418,7 +414,7 @@ fn an_ask_is_rendered_for_each_harness() {
             &hab,
             &claude(
                 "PreToolUse",
-                &format!("force-{name}"),
+                &format!("delete-{name}"),
                 &cwd,
                 command.clone(),
             ),
@@ -429,7 +425,7 @@ fn an_ask_is_rendered_for_each_harness() {
             text.contains("\"permissionDecision\":\"ask\""),
             "{name}: {text}"
         );
-        assert!(text.contains("git-force-push"), "{name}: {text}");
+        assert!(text.contains("built-in push"), "{name}: {text}");
         assert!(
             !text.contains("\"permissionDecision\":\"deny\""),
             "{name}: {text}"
@@ -447,7 +443,7 @@ fn an_ask_is_rendered_for_each_harness() {
     codex_body["turn_id"] = serde_json::json!("turn-1");
     let codex = ljos(
         &hab,
-        &claude("PreToolUse", "force-codex", &cwd, codex_body),
+        &claude("PreToolUse", "delete-codex", &cwd, codex_body),
         &env,
     );
     let codex = String::from_utf8_lossy(&codex.stdout);
@@ -455,18 +451,18 @@ fn an_ask_is_rendered_for_each_harness() {
     assert!(!codex.contains("\"permissionDecision\":\"ask\""), "{codex}");
     assert!(codex.contains("ljos approve "), "{codex}");
     assert!(codex.contains("ljos_request_approval"), "{codex}");
-    assert!(codex.contains("git-force-push"), "{codex}");
+    assert!(codex.contains("built-in push"), "{codex}");
     assert!(!codex.contains("leave it for them"), "{codex}");
     // agy asks on decision ask.
     let agy = ljos_cmd(
         &hab,
         &["hook", "--event", "PreToolUse"],
         &serde_json::json!({
-            "conversationId": "force-agy",
+            "conversationId": "delete-agy",
             "cwd": cwd,
             "toolCall": {
                 "name": "run_command",
-                "args": {"CommandLine": "git push --force origin feature"}
+                "args": {"CommandLine": "git push origin --delete feature"}
             }
         })
         .to_string(),
@@ -475,7 +471,7 @@ fn an_ask_is_rendered_for_each_harness() {
     let agy = String::from_utf8_lossy(&agy.stdout);
     assert!(agy.contains("\"decision\":\"ask\""), "{agy}");
     assert!(!agy.contains("\"decision\":\"deny\""), "{agy}");
-    assert!(agy.contains("git-force-push"), "{agy}");
+    assert!(agy.contains("built-in push"), "{agy}");
     // Cursor beforeShellExecution enforces permission ask. The payload
     // names no conversation, so the habitat's `LJOS_HOLD` sits for it.
     let shell = ljos(
@@ -483,7 +479,7 @@ fn an_ask_is_rendered_for_each_harness() {
         &serde_json::json!({
             "cursor_version": "2.4.0",
             "hook_event_name": "beforeShellExecution",
-            "command": "git push --force origin feature",
+            "command": "git push origin --delete feature",
             "cwd": cwd,
         })
         .to_string(),
@@ -492,21 +488,21 @@ fn an_ask_is_rendered_for_each_harness() {
     let shell = String::from_utf8_lossy(&shell.stdout);
     assert!(shell.contains("\"permission\":\"ask\""), "{shell}");
     assert!(!shell.contains("\"permission\":\"deny\""), "{shell}");
-    assert!(shell.contains("git-force-push"), "{shell}");
+    assert!(shell.contains("built-in push"), "{shell}");
     // Cursor preToolUse accepts ask and does not enforce it. The payload
     // names its conversation, which sits under its own holder.
     sit_as(
         &hab,
-        &format!("probe-seat@{}", ljos_cli::session_tag("force-cursor-tool")),
+        &format!("probe-seat@{}", ljos_cli::session_tag("delete-cursor-tool")),
     );
     let tool = ljos(
         &hab,
         &serde_json::json!({
             "cursor_version": "2.4.0",
-            "conversation_id": "force-cursor-tool",
+            "conversation_id": "delete-cursor-tool",
             "hook_event_name": "preToolUse",
             "tool_name": "Shell",
-            "tool_input": {"command": "git push --force origin feature"},
+            "tool_input": {"command": "git push origin --delete feature"},
             "cwd": cwd,
         })
         .to_string(),
@@ -525,10 +521,10 @@ fn an_ask_is_rendered_for_each_harness() {
         &["hook", "--runner", "gemini"],
         &serde_json::json!({
             "hook_event_name": "BeforeTool",
-            "session_id": "force-gemini",
+            "session_id": "delete-gemini",
             "cwd": cwd,
             "tool_name": "run_shell_command",
-            "tool_input": {"command": "git push --force origin feature"}
+            "tool_input": {"command": "git push origin --delete feature"}
         })
         .to_string(),
         &env,
@@ -536,8 +532,102 @@ fn an_ask_is_rendered_for_each_harness() {
     let gemini = String::from_utf8_lossy(&gemini.stdout);
     assert!(gemini.contains("\"decision\":\"deny\""), "{gemini}");
     assert!(!gemini.contains("\"ask\""), "{gemini}");
-    assert!(gemini.contains("git-force-push"), "{gemini}");
+    assert!(gemini.contains("built-in push"), "{gemini}");
     assert!(gemini.contains("cannot ask"), "{gemini}");
+}
+
+/// A force push runs in every harness shape, whether ljos-policyd warns
+/// about it or an older build still denies it. Each answer names
+/// `git-force-push` and none asks or denies, and the bypass log keeps one
+/// label per call.
+#[test]
+fn a_force_push_runs_with_its_warning_for_each_harness() {
+    let (_dir, hab) = habitat();
+    record_evidence(&hab.repo);
+    sit(&hab);
+    let policyd = hab.bin.join("ljos-policyd");
+    script(
+        &hab.bin,
+        "ljos-policyd",
+        "#!/bin/sh\nprintf 'deny\\tgit-force-push\\n'\nexit 2\n",
+    );
+    let cwd = hab.repo.clone();
+    let env = [("POLICYD_BIN", policyd.to_str().unwrap())];
+    let line = "git push --force origin feature";
+    let tool = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": line}});
+    let mut codex = tool.clone();
+    codex["turn_id"] = serde_json::json!("turn-1");
+    let calls = [
+        (
+            "claude",
+            vec!["hook"],
+            claude("PreToolUse", "force-claude", &cwd, tool),
+        ),
+        (
+            "codex",
+            vec!["hook"],
+            claude("PreToolUse", "force-codex", &cwd, codex),
+        ),
+        (
+            "agy",
+            vec!["hook", "--event", "PreToolUse"],
+            serde_json::json!({
+                "conversationId": "force-agy",
+                "cwd": cwd,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": line}}
+            })
+            .to_string(),
+        ),
+        (
+            "cursor shell",
+            vec!["hook"],
+            serde_json::json!({
+                "cursor_version": "2.4.0",
+                "hook_event_name": "beforeShellExecution",
+                "command": line,
+                "cwd": cwd,
+            })
+            .to_string(),
+        ),
+        (
+            "gemini",
+            vec!["hook", "--runner", "gemini"],
+            serde_json::json!({
+                "hook_event_name": "BeforeTool",
+                "session_id": "force-gemini",
+                "cwd": cwd,
+                "tool_name": "run_shell_command",
+                "tool_input": {"command": line}
+            })
+            .to_string(),
+        ),
+    ];
+    for (name, args, payload) in &calls {
+        let out = ljos_cmd(&hab, args, payload, &env);
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{name}: {said}");
+        assert!(
+            said.contains("allow\twarn\tgit-force-push\ta force push rewrites a published branch"),
+            "{name}: {said}"
+        );
+        for refused in ["\"ask\"", "\"deny\"", "ljos approve "] {
+            assert!(!said.contains(refused), "{name}: {said}");
+        }
+    }
+    let log = std::fs::read_to_string(hab.home.join(".local/share/ljos/bypass.jsonl"))
+        .unwrap_or_default();
+    let labels = log
+        .lines()
+        .filter_map(|row| serde_json::from_str::<serde_json::Value>(row).ok())
+        .filter(|row| {
+            row["kind"] == "warn" && row["rule"] == "git-force-push" && row["command"] == line
+        })
+        .count();
+    assert_eq!(labels, calls.len(), "{log}");
 }
 
 #[test]

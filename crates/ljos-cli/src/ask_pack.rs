@@ -721,6 +721,9 @@ fn command_ask(words: &[String], seg: &str, via_xargs: bool) -> Option<&'static 
             .iter()
             .any(|o| off_tmp(o))
             .then_some(&FILE_WIPE),
+        // The guard lets a forced recursive delete run under
+        // `rm-rf-outside-tmp`, so the pack lets it through too.
+        "rm" if super::rm_recursive_force(words) => None,
         "rm" | "unlink" => p(&[])
             .iter()
             .any(|o| home_config(o) || system_file(o))
@@ -1187,5 +1190,17 @@ mod tests {
         ] {
             assert_eq!(token(line), None, "{line}");
         }
+    }
+
+    #[test]
+    fn the_pack_leaves_a_forced_recursive_delete_to_the_guard() {
+        for line in [
+            "rm -rf ~/.ssh",
+            "rm -fr /etc/nginx",
+            "rm -r -f $HOME/.config/x",
+        ] {
+            assert_eq!(token(line), None, "{line}");
+        }
+        assert_eq!(token("rm -r ~/.config/x").as_deref(), Some("config-delete"));
     }
 }

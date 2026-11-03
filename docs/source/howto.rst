@@ -238,11 +238,13 @@ Do not add ``PreToolUse`` as a search event. A turn issues many tool
 calls and one prompt. On a tool call the hook asks ``ljos-policyd``, the
 Trusted Computing Base (TCB), and then applies pack rules. A deny blocks.
 If policyd is missing, slow or crashes, the command runs and ljos logs a warning.
+A force push or a recursive delete outside ``/tmp`` runs, and the answer carries its rule and warning.
+The bypass log keeps the label.
 
 .. code:: console
 
    $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
-   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `git-force-push`)"}}
+   {"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"allow\twarn\tgit-force-push\ta force push rewrites a published branch"}}
 
 An ``ask`` rule uses the caller's approval UI when that UI is supported.
 Otherwise the hook stops the command and prints a request id. Calling
@@ -327,9 +329,10 @@ The repository's ``ljos.toml``, ``LJOS_CONFIG`` and ``.ljos/gates.toml`` only ad
    consensus_branches = ["main", "release"]
 
 Everything else that concerns a push is policyd's. An ordinary push of a branch runs, and so does a
-lease push to a feature branch. A lease push or a force push onto a protected branch asks.
-For that ask, ``main``, ``master`` and ``develop`` are always protected, and ``protected_branches`` adds more.
-Deleting a remote branch and rewriting published history ask or deny.
+lease push to a feature branch.
+A lease push or a force push onto a protected branch runs too, with the ``git-force-push`` warning, and the bypass log keeps the label.
+``main``, ``master`` and ``develop`` are always protected, and ``protected_branches`` adds more.
+Deleting a remote branch asks or denies.
 
 With one active seat in ``vissue.toml``, that seat's own vote settles consensus for the check.
 This is solo mode. With two or more seats, the normal quorum applies.

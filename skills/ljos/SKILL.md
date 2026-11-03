@@ -656,9 +656,11 @@ under equal weights is a count; under calibrated rows it is not.
   that makes the line pass. A plain `git push` runs, and so does a commit
   and a push on one line. When the checkout sets `test` and the tip has no
   passing `ljos evidence record -- <test command>` run, the push still runs
-  and the answer carries a warning. A force, mirror or delete push asks. A
-  push onto a protected branch asks only when `owners` is set and the
-  remote's owner is not in it. A merge pushed to your own repository runs.
+and the answer carries a warning.
+A force or mirror push runs too: the answer is one `allow\twarn\tgit-force-push\t...` line, and the bypass log keeps the label.
+A delete push asks.
+A push onto a protected branch asks only when `owners` is set and the remote's owner is not in it.
+A merge pushed to your own repository runs.
   `gh pr merge` with red or pending checks is refused. A head sha with no
   CI checks asks, and that ask names the sha and a local evidence record
   when one exists for it. A fine-grained token with no Checks permission

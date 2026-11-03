@@ -137,16 +137,14 @@ pub(crate) fn open_or_name_sitting() -> Option<String> {
     crate::live_held_issue().map(|(issue, _)| issue)
 }
 
-/// A force, a delete, or a mirror push is not this check. Later rules
-/// still judge those.
+/// A delete push is not this check: the built-in push rule asks about it.
+/// A cloud seat refuses a force or mirror push, so neither is judged here
+/// on a cloud seat. Anywhere else both run with a warning and are judged
+/// here like any other push.
 fn plain_protected_push(args: &[String]) -> bool {
+    let forced = |arg: &String| arg.starts_with("--force") || arg == "--mirror";
     !args.iter().any(|arg| {
-        arg == "--force"
-            || arg == "--force-with-lease"
-            || arg.starts_with("--force")
-            || arg == "--delete"
-            || arg == "--mirror"
-            || arg.starts_with(':')
+        arg == "--delete" || arg.starts_with(':') || (forced(arg) && crate::cloud::cloud_seat())
     })
 }
 

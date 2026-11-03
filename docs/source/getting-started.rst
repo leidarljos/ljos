@@ -229,7 +229,7 @@ answer for one command and runs nothing.
    allow
    $ ljos policy -- rm -rf /usr/share/foo
    rm -rf /usr/share/foo
-   deny: rm-rf-outside-tmp: a recursive delete outside /tmp cannot be undone. ...
+   allow	warn	rm-rf-outside-tmp	a recursive delete reaches outside /tmp and /var/tmp
 
 There are four answers. ``allow`` runs the command. ``ask`` shows the runner's permission
 prompt, and you answer it. ``deny`` stops the command and names the rule. ``rewrite`` replaces
@@ -237,10 +237,13 @@ the command with a fixed one and lets that one run.
 The answer is ``allow``, ``rewrite`` and the new command, separated by tabs.
 Each rewrite leaves a note and a row in ``$XDG_DATA_HOME/ljos/rewrite.jsonl``. A repository's
 ``rewrite = false`` turns rewriting off there.
+An ``allow`` can carry a warning: ``allow``, ``warn``, the rule and the warning, separated by tabs.
+The command runs, and ljos keeps the label in ``$XDG_DATA_HOME/ljos/bypass.jsonl``.
 
-A force push to ``main``, ``master``, ``develop`` or a protected branch asks. An ordinary push of a
-branch runs. A push onto a protected branch also asks when the ticket of your sitting has no
-settled consensus. With one active seat, its own vote settles it.
+A force push runs with the ``git-force-push`` warning.
+An ordinary push of a branch runs.
+ljos answers ``ask`` for a push onto a protected branch when your sitting's ticket has no settled consensus.
+With one active seat, its own vote settles it.
 
 If ``ljos-policyd`` is missing or slow, the command runs and ljos logs a warning.
 ``ljos doctor`` shows the policy row.

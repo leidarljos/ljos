@@ -77,8 +77,9 @@ The built-in law covers:
 - its own rules: writes to the hook files, the policy files and the ljos programs
 - mail: outbound mail whose From is not the person's own address
 
-An ordinary push of a branch runs. A lease push to a feature branch runs. A lease push onto a
-protected branch asks.
+An ordinary push of a branch runs.
+A lease push or a force push runs too, with one =allow\twarn\tgit-force-push\t...= line, and the bypass log keeps the label.
+A recursive delete outside =/tmp= runs the same way under =rm-rf-outside-tmp=.
 
 ** Pushing with a credential
 

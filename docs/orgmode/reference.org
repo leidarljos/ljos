@@ -459,7 +459,7 @@ Every other push rule is policyd's.
 | Push | Answer |
 |---+---|
 | an ordinary push of a branch, a tag, or a lease push to a branch that is not protected | runs |
-| a lease push or a force push onto a protected branch | asks |
+| a lease push or a force push onto a protected branch | runs, named =git-force-push= |
 | a push onto a protected branch, with no settled consensus on the sitting's ticket | asks |
 | deleting a remote branch, or rewriting published history | asks or denies, by policyd's table |
 

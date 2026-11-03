@@ -1677,16 +1677,22 @@ mod tests {
             std::env::set_var("POLICYD_BIN", dir.join("does-not-run"));
             std::env::set_var("PACKSET_WORKSPACE", "early-guard");
         }
-        let force = json!({"tool_input": {"command": "git push --force origin main"}}).to_string();
+        let delete = json!({"tool_input": {"command": "git push origin --delete old"}}).to_string();
         let started = std::time::Instant::now();
-        let asked = early_answer(&force, "PreToolUse").expect("a force push asks");
+        let asked = early_answer(&delete, "PreToolUse").expect("a delete push asks");
         let plain = json!({"tool_input": {"command": "git status"}}).to_string();
         assert!(
             early_answer(&plain, "").is_none(),
             "git status is not dangerous"
         );
-        let rm = json!({"tool_input": {"command": "rm -rf /home/u/proj"}}).to_string();
-        let denied = early_answer(&rm, "PreToolUse").expect("rm -rf denies");
+        // A force push and an `rm -rf` run with a warning the inner hook
+        // gives, so nothing answers for them here.
+        for line in ["git push --force origin main", "rm -rf /home/u/proj"] {
+            let call = json!({"tool_input": {"command": line}}).to_string();
+            assert!(early_answer(&call, "PreToolUse").is_none(), "{line}");
+        }
+        let approve = json!({"tool_input": {"command": "ljos approve req-1"}}).to_string();
+        let denied = early_answer(&approve, "PreToolUse").expect("ljos approve denies");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "the static check waited on the guard"
@@ -1696,18 +1702,18 @@ mod tests {
             Some("ask"),
             "{asked}"
         );
-        assert!(asked.contains("git-force-push"), "{asked}");
+        assert!(asked.contains("built-in push"), "{asked}");
         assert!(!asked.contains("git-push-evidence"), "{asked}");
         assert_eq!(
             read_answer(&denied).decision.as_deref(),
             Some("deny"),
             "{denied}"
         );
-        assert!(denied.contains("rm-rf-outside-tmp"), "{denied}");
+        assert!(denied.contains("seat-guard"), "{denied}");
         // Gemini names the gate BeforeTool. A verdict rendered under that
         // name used to omit the decision, and Gemini allows an object
         // that has none.
-        let before = early_answer(&rm, "BeforeTool").expect("BeforeTool is still a gate");
+        let before = early_answer(&approve, "BeforeTool").expect("BeforeTool is still a gate");
         assert_eq!(
             read_answer(&before).decision.as_deref(),
             Some("deny"),
@@ -1717,7 +1723,8 @@ mod tests {
         assert_eq!(code, 0);
         assert!(out.contains("\"deny\""), "{out}");
         assert!(!out.contains("\"ask\""), "{out}");
-        let wind = early_answer(&rm, "pre_run_command").expect("pre_run_command is still a gate");
+        let wind =
+            early_answer(&approve, "pre_run_command").expect("pre_run_command is still a gate");
         assert_eq!(
             read_answer(&wind).decision.as_deref(),
             Some("deny"),

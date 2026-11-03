@@ -71,7 +71,25 @@ fn the_connected_seat_reaches_policy_without_borrowing_a_historical_holder() {
         "{allowed}"
     );
 
-    let denied = guard("connected-runner", "rm -rf /home/owner/project");
+    let deleted = guard("connected-runner", "rm -rf /home/owner/project");
+    assert_ne!(deleted["result"]["isError"], true, "{deleted}");
+    let content = &deleted["result"]["structuredContent"];
+    assert_eq!(content["verdict"], "allow", "{deleted}");
+    assert!(
+        content["text"].as_str().is_some_and(|text| text.lines().any(|line| line
+            == "allow\twarn\trm-rf-outside-tmp\ta recursive delete reaches outside /tmp and /var/tmp")),
+        "{deleted}"
+    );
+    let log =
+        std::fs::read_to_string(root.path().join("data/ljos/bypass.jsonl")).unwrap_or_default();
+    assert!(
+        log.lines()
+            .any(|row| row.contains("\"rule\":\"rm-rf-outside-tmp\"")
+                && row.contains("rm -rf /home/owner/project")),
+        "the bypass log has no label:\n{log}"
+    );
+
+    let denied = guard("connected-runner", "ljos approve req-1");
     assert_eq!(denied["result"]["isError"], true, "{denied}");
     assert!(denied.to_string().contains("deny"), "{denied}");
     assert!(!denied.to_string().contains("no seat named"), "{denied}");

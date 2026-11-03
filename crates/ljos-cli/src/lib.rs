@@ -6653,8 +6653,10 @@ pub fn guard_bin_dir() -> PathBuf {
 
 /// The shim each guarded command is: ask ljos-policyd about the argv, refuse
 /// a deny with the rule and what to do instead, else exec the next binary of
-/// that name on PATH. Without ljos-policyd it runs the command (fail open),
-/// so a box without the guard still works.
+/// that name on PATH. A recursive delete or a force push runs with its
+/// [`label_line`] on stderr, whether ljos-policyd warned about it or an
+/// older build denied it. Without ljos-policyd it runs the command (fail
+/// open), so a box without the guard still works.
 pub const GUARD_SHIM: &str = r#"#!/bin/sh
 # ljos command guard shim (written by `ljos onboard`). It stands in front of
 # rm, git and find for runners that have no pre-command hook.
@@ -6694,197 +6696,6 @@ case ",1,true,TRUE,yes,YES,on,ON," in
   *,"${LJOS_GUARD:-}",*) ;;
   *) if under_temp "$(cd -- "$HOME" 2>/dev/null && pwd -P)"; then exec "$real" "$@"; fi ;;
 esac
-# The branches a --force-with-lease push may not replace without asking:
-# main, master, develop, and `protected_branches` in the checkout's
-# `.ljos/gates.toml` or `ljos.toml`. A list the shim cannot read on one
-# line is `?`, which matches no branch name, so the push asks.
-# The list is read in the shell. grep, sed and tr are not on every PATH.
-# A comma splits names with or without a space. A trailing comma adds
-# none, and single quotes count. Anything else is unreadable.
-list_names() {
-  s=$1
-  out=
-  while :; do
-    while [ -n "$s" ]; do
-      c=${s%"${s#?}"}
-      case $c in
-        [[:space:]]) s=${s#?} ;;
-        *) break ;;
-      esac
-    done
-    [ -n "$s" ] || break
-    c=${s%"${s#?}"}
-    case $c in
-      \"|\') ;;
-      *) return 1 ;;
-    esac
-    q=$c
-    s=${s#?}
-    name=
-    closed=
-    while [ -n "$s" ]; do
-      c=${s%"${s#?}"}
-      s=${s#?}
-      if [ "$c" = "$q" ]; then
-        closed=1
-        break
-      fi
-      if [ "$q" = '"' ] && [ "$c" = '\' ]; then
-        return 1
-      fi
-      name=$name$c
-    done
-    [ "$closed" = 1 ] || return 1
-    [ -n "$name" ] && out=$out' '$name
-    while [ -n "$s" ]; do
-      c=${s%"${s#?}"}
-      case $c in
-        [[:space:]]) s=${s#?} ;;
-        *) break ;;
-      esac
-    done
-    [ -n "$s" ] || break
-    c=${s%"${s#?}"}
-    case $c in
-      ,) s=${s#?} ;;
-      *) return 1 ;;
-    esac
-  done
-  printf '%s' "$out"
-}
-guarded_branches() {
-  printf 'main master develop'
-  top=$("$real" -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 0
-  for f in "$top/.ljos/gates.toml" "$top/ljos.toml"; do
-    [ -f "$f" ] && [ -r "$f" ] || continue
-    saw=0
-    matched=0
-    names=
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        *protected_branches*) saw=1 ;;
-        *) continue ;;
-      esac
-      rest=$line
-      while :; do
-        case "$rest" in
-          [[:space:]]*) rest=${rest#?} ;;
-          *) break ;;
-        esac
-      done
-      case "$rest" in
-        protected_branches[[:space:]]*|protected_branches=*) ;;
-        *) continue ;;
-      esac
-      body=${rest#protected_branches}
-      while :; do
-        case "$body" in
-          [[:space:]]*) body=${body#?} ;;
-          *) break ;;
-        esac
-      done
-      case "$body" in
-        =*) ;;
-        *) continue ;;
-      esac
-      body=${body#=}
-      while :; do
-        case "$body" in
-          [[:space:]]*) body=${body#?} ;;
-          *) break ;;
-        esac
-      done
-      case "$body" in
-        '['*']'*) ;;
-        *) continue ;;
-      esac
-      inner=${body#*[}
-      inner=${inner%]*}
-      if got=$(list_names "$inner"); then
-        matched=1
-        names=$names$got
-      else
-        matched=0
-        break
-      fi
-    done < "$f"
-    [ "$saw" -eq 1 ] || continue
-    if [ "$matched" -eq 1 ]; then printf ' %s' "$names"; else printf ' ?'; fi
-  done
-}
-# Whether this git call is a --force-with-lease push the hook would let
-# run: no plain force, no +refspec, no delete or mirror, and every branch
-# it replaces outside guarded_branches. The current branch is
-# `git rev-parse --abbrev-ref HEAD`. A bare push also replaces
-# branch.<name>.merge, the upstream the hook reads.
-lease_free() {
-  [ "$me" = git ] || return 1
-  set -f
-  dir=.; sub=; lease=; remote=; names=; skip=; open=; specs=
-  for a in "$@"; do
-    if [ -n "$skip" ]; then
-      [ "$skip" = C ] && case $a in /*) dir=$a ;; *) dir=$dir/$a ;; esac
-      skip=; continue
-    fi
-    if [ -z "$sub" ]; then
-      case $a in
-        -C) skip=C ;;
-        -c|--git-dir|--work-tree|--namespace) skip=1 ;;
-        -*) ;;
-        *) sub=$a ;;
-      esac
-      continue
-    fi
-    case $a in
-      --force-with-lease) lease=1 ;;
-      --force-with-lease=*)
-        lease=1
-        n=${a#--force-with-lease=}; n=${n%%:*}; n=${n#refs/heads/}
-        case $n in "") ;; HEAD) names="$names HEAD" ;; *) names="$names $n" ;; esac ;;
-      --force|--mirror|--delete|--all|--branches) set +f; return 1 ;;
-      -o|--push-option|--receive-pack|--exec|--repo) skip=1 ;;
-      --*) ;;
-      -*f*) set +f; return 1 ;;
-      -d) set +f; return 1 ;;
-      -*) ;;
-      +*|:*) set +f; return 1 ;;
-      *)
-        if [ -z "$remote" ]; then remote=$a; continue; fi
-        specs=1
-        case $a in *:*) n=${a#*:} ;; *) n=$a ;; esac
-        n=${n#refs/heads/}
-        case $n in ""|*[\*\?\[\$\`]*) open=1 ;; *) names="$names $n" ;; esac
-        ;;
-    esac
-  done
-  set +f
-  [ "$sub" = push ] && [ -n "$lease" ] && [ -z "$open" ] || return 1
-  cur=$("$real" -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
-  [ -n "$cur" ] && [ "$cur" != HEAD ] || return 1
-  # No refspec: the hook reads branch.<name>.merge and the current
-  # branch. A remote-tracking ref is missing until the first fetch.
-  if [ -z "$specs" ]; then
-    up=$("$real" -C "$dir" config --get "branch.${cur}.merge" 2>/dev/null) || return 1
-    up=${up#refs/heads/}
-    [ -n "$up" ] || return 1
-    names="$names $up $cur"
-  fi
-  case " $names " in
-    *" HEAD "*) names="$names $cur" ;;
-  esac
-  guarded=$(guarded_branches "$dir")
-  (
-    set -f
-    for b in $names; do
-      [ "$b" = HEAD ] && continue
-      for g in $guarded; do
-        [ "$g" = '?' ] && exit 1
-        [ "$b" = "$g" ] && exit 1
-      done
-    done
-    exit 0
-  )
-}
 # Drop leading and trailing whitespace. The same characters sed's
 # [[:space:]] class drops, and no other process.
 trim_ws() {
@@ -7003,15 +6814,24 @@ if command -v ljos-policyd >/dev/null 2>&1; then
   else
     verdict=$(ljos-policyd check -- "$me" "$@" 2>/dev/null)
   fi
+  nl='
+'
+  tab=$(printf '\t')
   case $verdict in
+    "allow${tab}warn${tab}"*)
+      # A recursive delete or a force push says ljos-policyd's own
+      # warning line for it, then runs.
+      line=${verdict%%"$nl"*}
+      rest=${line#"allow${tab}warn${tab}"}
+      case ${rest%%"$tab"*} in
+        rm-rf-outside-tmp|find-delete|find-delete-outside-tmp|git-force-push)
+          printf '%s\n' "$line" >&2 ;;
+      esac ;;
     deny*)
       # First line, field after the first tab. Trim and fold in the shell.
       # head, cut, sed and tr are missing when PATH is only the guard and
       # git's directory, and an empty read allows a named denial.
-      nl='
-'
       line=${verdict%%"$nl"*}
-      tab=$(printf '\t')
       case "$line" in
         *"$tab"*)
           rest=${line#*"$tab"}
@@ -7038,22 +6858,21 @@ if command -v ljos-policyd >/dev/null 2>&1; then
           printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call, so it is allowed. No ljos rule would refuse it. Run \`ljos doctor\`." >&2
           exec "$real" "$@" ;;
       esac
-      # A force push asks, as the hook does: a lease push onto a branch
-      # outside main, master, develop and the protected ones runs, and
-      # any other force push goes to the person. This shim cannot ask.
-      case "$rule" in
-        git-force-push|git-force-push:*)
-          if lease_free "$@"; then exec "$real" "$@"; fi
-          echo "ljos guard: asks ($rule): $me $*" >&2
-          echo "ljos guard: this rewrites history on the remote, so it is the person's to approve. Tell them the exact command; they can run it, or approve it in a runner whose hook can ask." >&2
-          exit 126 ;;
+      # A recursive delete and a force push run, with the line
+      # ljos-policyd's allow-with-warning prints for that rule.
+      code=$(trim_ws "${rule%%:*}")
+      case "$code" in
+        rm-rf-outside-tmp) warning="a recursive delete reaches outside /tmp and /var/tmp" ;;
+        find-delete-outside-tmp) warning="find -delete reaches outside /tmp and /var/tmp" ;;
+        git-force-push) warning="a force push rewrites a published branch" ;;
+        *) warning= ;;
       esac
-      case "$rule" in
-        rm-rf-*|find-delete-*) hint="Leave it, or move it to the trash (trash-put or gio trash). Moving it under /tmp to delete it there is the same delete." ;;
-        *) hint="This rewrites or discards history or work. Ask the person first; they can run it themselves." ;;
-      esac
+      if [ -n "$warning" ]; then
+        printf 'allow\twarn\t%s\t%s\n' "$code" "$warning" >&2
+        exec "$real" "$@"
+      fi
       echo "ljos guard: denied ($rule): $me $*" >&2
-      echo "ljos guard: $hint" >&2
+      echo "ljos guard: This rewrites or discards history or work. Ask the person first; they can run it themselves." >&2
       exit 126 ;;
   esac
 fi
@@ -24139,7 +23958,7 @@ pub enum PushTier {
     /// A push to the person's own repository that is released or shared:
     /// it runs when it cites a settled decision.
     Cite(String),
-    /// Somebody else's remote, tags, a mirror or a force: the person runs it.
+    /// A remote-branch or tag delete: the person runs it.
     Person(String),
 }
 
@@ -24166,65 +23985,53 @@ pub struct PushFacts {
     pub released: bool,
 }
 
-/// What the gate makes of a push, from its arguments. A branch or tag push
-/// is free on any remote: an unreadable owner, a foreign account, a shared
-/// repository and a release do not ask or deny. Force, a remote-branch or
-/// tag delete and a mirror push are the person's to run. Pure, so the ladder is
-/// tested without a repository. `facts` stays so a caller that already
+/// How the gate reads a push from its arguments. A branch, tag, force or
+/// mirror push is free on any remote: an unreadable owner, a foreign
+/// account, a shared repository and a release do not ask or deny. A
+/// remote-branch or tag delete is the person's to run. Pure, so the ladder
+/// is tested without a repository. `facts` stays so a caller that already
 /// looked the remote up still compiles; it does not change the tier.
 #[must_use]
 pub fn push_tier(args: &[String], facts: &PushFacts) -> PushTier {
-    push_tier_in(args, facts, None)
-}
-
-/// [`push_tier`] for a push run in `dir`, so a bare `--force-with-lease`
-/// push is judged by the branch the checkout would push to.
-#[must_use]
-pub fn push_tier_in(args: &[String], facts: &PushFacts, dir: Option<&str>) -> PushTier {
     let _facts = (&facts.slug, facts.access, facts.released);
-    if let Some(why) = dangerous_push_reason(args, dir) {
+    if let Some(why) = dangerous_push_reason(args) {
         return PushTier::Person(why);
     }
     PushTier::Free
 }
 
-/// Force, deleting a remote branch, or a mirror push. A
-/// `--force-with-lease` push is force when [`lease_asks`] says so: onto
-/// main, master, develop or a protected branch, or onto a branch nobody can
-/// read. Anything else, including `-u`, a plain refspec, a lease push onto
-/// a feature branch and `--force-if-includes` alone, is an ordinary branch
-/// push. A tag push (`--tags`, `--follow-tags`, `refs/tags/v1`, `tag v1`)
-/// is ordinary too: it adds refs and replaces none, and a moved tag needs
-/// a force the first check already asks for. `--mirror` overwrites and
-/// deletes every ref on the remote, so it asks. `dir` is the checkout the
-/// push runs in, when it is known.
-fn dangerous_push_reason(args: &[String], dir: Option<&str>) -> Option<String> {
-    if push_forces(args, dir) {
-        return Some("a force push rewrites shared history".into());
-    }
-    if args.iter().any(|a| a == "--delete" || delete_refspec(a)) {
-        return Some("deleting a remote branch removes shared work".into());
-    }
-    if args.iter().any(|a| a == "--mirror") {
-        return Some("a mirror push overwrites and deletes every ref on the remote".into());
-    }
-    None
+/// Deleting a remote branch or tag: `--delete`, or a `:branch` refspec.
+/// Every other push, a force push included, is not this. A tag push
+/// (`--tags`, `--follow-tags`, `refs/tags/v1`, `tag v1`) adds refs and
+/// replaces none.
+fn dangerous_push_reason(args: &[String]) -> Option<String> {
+    args.iter()
+        .any(|a| a == "--delete" || delete_refspec(a))
+        .then(|| "deleting a remote branch removes shared work".into())
 }
 
-/// `--force`, a short cluster containing `f` (`-f`, `-fu`), or a refspec
-/// that starts with `+`. `--force-with-lease` and `--force-if-includes`
-/// are not this; [`push_forces`] judges a lease push by where it goes. The
-/// same line in ljos-policyd is `force_push`.
+/// `--force`, a short cluster containing `f` (`-f`, `-fu`), `--mirror`,
+/// which overwrites every ref on the remote, or a refspec that starts with
+/// `+`. `--force-with-lease` and `--force-if-includes` are not this;
+/// [`push_forces`] judges a lease push by where it goes. The same line in
+/// ljos-policyd is `force_push`.
 pub(crate) fn push_rewrites(arg: &str) -> bool {
-    arg == "--force" || short_force(arg) || (arg.starts_with('+') && arg.len() > 1)
+    arg == "--force"
+        || arg == "--mirror"
+        || short_force(arg)
+        || (arg.starts_with('+') && arg.len() > 1)
 }
 
-/// A push that replaces history on the remote and so asks: a word
-/// [`push_rewrites`] names, or a `--force-with-lease` push that
-/// [`lease_asks`] holds. `args` are the words after `push`.
+/// A push that replaces history on the remote, which runs with the
+/// `git-force-push` warning: a word [`push_rewrites`] names, or a
+/// `--force-with-lease` push [`lease_forces`] names. Anything else is an
+/// ordinary branch push, including `-u`, a plain refspec, a lease push
+/// onto a feature branch and `--force-if-includes` alone. `args` are the
+/// words after `push`; `dir` is the checkout the push runs in, when it is
+/// known.
 pub(crate) fn push_forces(args: &[String], dir: Option<&str>) -> bool {
     args.iter().any(|a| push_rewrites(a))
-        || lease_push(args).is_some_and(|lease| lease_asks(&lease, dir))
+        || lease_push(args).is_some_and(|lease| lease_forces(&lease, dir))
 }
 
 /// `git push` options that take the next word as their value.
@@ -24316,15 +24123,15 @@ fn lease_push(args: &[String]) -> Option<LeasePush> {
     Some(out)
 }
 
-/// Whether a lease push asks. Rohit's rule of 2026-10-20: it asks onto
-/// `main`, `master`, `develop` or a branch the checkout protects
+/// Whether a lease push is a force push. Rohit's rule of 2026-10-20: it
+/// is onto `main`, `master`, `develop` or a branch the checkout protects
 /// (`protected_branches` in `ljos.toml` or `.ljos/gates.toml`), and when
-/// its branch cannot be read; onto any other branch it runs. A bare push
-/// goes to the current branch's upstream, and `HEAD` is the current
+/// its branch cannot be read; onto any other branch it is ordinary. A bare
+/// push goes to the current branch's upstream, and `HEAD` is the current
 /// branch, both read in `dir`. With no `dir`, no current branch, no
-/// upstream for a bare push, or a config file that does not parse, it
-/// asks.
-fn lease_asks(lease: &LeasePush, dir: Option<&str>) -> bool {
+/// upstream for a bare push, or a config file that does not parse, it is
+/// a force push.
+fn lease_forces(lease: &LeasePush, dir: Option<&str>) -> bool {
     if lease.open {
         return true;
     }
@@ -24349,43 +24156,6 @@ fn lease_asks(lease: &LeasePush, dir: Option<&str>) -> bool {
         return true;
     };
     branches.iter().any(|b| guarded.contains(b))
-}
-
-/// A push ljos-policyd refused as `git-force-push` that this checkout
-/// clears: one `git push` with no other command on its words, no plain
-/// force, and a lease push [`lease_asks`] lets run. ljos-policyd reads the
-/// words alone, so it refuses a bare `git push --force-with-lease`; ljos
-/// reads the upstream that push goes to. `git -C DIR` moves the checkout.
-fn lease_cleared(argv: &[String], cwd: Option<&Path>) -> bool {
-    let Some(at) = argv.iter().position(|a| a == "push") else {
-        return false;
-    };
-    let git = argv[..at]
-        .iter()
-        .any(|w| w.rsplit('/').next() == Some("git"));
-    let args = &argv[at + 1..];
-    let alone = argv.iter().filter(|w| *w == "push").count() == 1
-        && !argv
-            .iter()
-            .any(|w| matches!(w.as_str(), "|" | ";" | "&&" | "||" | "&"));
-    if !git || !alone || args.iter().any(|a| push_rewrites(a) || a == "--mirror") {
-        return false;
-    }
-    let here = cwd.map(|p| p.display().to_string()).or_else(|| {
-        std::env::current_dir()
-            .ok()
-            .map(|d| d.display().to_string())
-    });
-    let moved = argv[..at]
-        .windows(2)
-        .find(|w| w[0] == "-C")
-        .map(|w| w[1].clone());
-    let dir = match (moved, here) {
-        (Some(d), Some(h)) if !d.starts_with('/') => Some(format!("{h}/{d}")),
-        (Some(d), _) => Some(d),
-        (None, h) => h,
-    };
-    lease_push(args).is_some_and(|lease| !lease_asks(&lease, dir.as_deref()))
 }
 
 /// `-fu` and `-uf`: git's short cluster that includes force. `-u` alone
@@ -24597,7 +24367,7 @@ pub fn push_tier_at(p: &PushCall, cwd: Option<&str>) -> PushTier {
         .unwrap_or_else(|| "origin".into());
     let url = git_out(dir, &["remote", "get-url", &remote]).unwrap_or(remote);
     let tagged = git_out(dir, &["tag", "--list"]).is_some_and(|t| t.lines().any(is_version_tag));
-    push_tier_in(&p.args, &push_facts(&url, tagged), dir)
+    push_tier(&p.args, &push_facts(&url, tagged))
 }
 
 /// The checkout a push runs in: its `cd DIR` or `git -C DIR` taken
@@ -26040,12 +25810,13 @@ fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
 
 /// The verdict the push gate makes of a line: `None` lets it run. An
 /// ordinary branch push is allowed, including when a seat rule says
-/// `git push*` and when the remote's owner cannot be read. Force, a
-/// `+refspec`, deleting a remote branch, and a mirror push ask by default.
-/// A tag push is ordinary.
+/// `git push*` and when the remote's owner cannot be read. A force push, a
+/// `+refspec` and a mirror push run too, and name `git-force-push` for
+/// [`take_guard_note`]. Deleting a remote branch asks by default. A tag
+/// push is ordinary.
 /// That ask does not wait for a seat rule. A seat rule that denies the
-/// dangerous push still denies it. A rule about some other command on the
-/// same line is left as it is when the push itself is ordinary.
+/// force or the delete still denies it. A rule about some other command on
+/// the same line is left as it is when the push itself is ordinary.
 #[must_use]
 pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<Rule> {
     // A temporary HOME and LJOS_OFF switch the whole guard off, the push
@@ -26054,39 +25825,48 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
         return None;
     }
     let Some(call) = push_call(line) else {
-        return rule.cloned();
+        return refusing(rule.cloned());
     };
     let dir = push_dir(&call, cwd);
     let segment = push_segment(&call);
     let about_push = rule.is_some_and(|r| {
         rule_matches(&r.pattern, &segment) || rule_matches(&r.pattern, "git push")
     });
-    let Some(why) = dangerous_push_reason(&call.args, dir.as_deref()) else {
-        if about_push {
-            return None;
+    let Some(why) = dangerous_push_reason(&call.args) else {
+        let forces = push_forces(&call.args, dir.as_deref());
+        let kept = match rule {
+            Some(r) if about_push && forces && r.verdict == "deny" => Some(r.clone()),
+            _ if about_push => None,
+            _ => rule.cloned(),
+        };
+        if forces && kept.as_ref().is_none_or(|r| r.verdict == "allow") {
+            label("git-force-push", line);
         }
-        return rule.cloned();
+        return refusing(kept);
     };
-    if let Some(r) = rule {
-        if about_push && r.verdict != "ask" {
-            return Some(r.clone());
-        }
-        if about_push {
-            return Some(Rule {
-                pattern: r.pattern.clone(),
-                verdict: "ask".into(),
-                reason: format!("{} ({why}); the agent asks you first", r.reason),
-            });
-        }
-        if r.verdict == "deny" {
-            return Some(r.clone());
-        }
+    refusing(Some(match rule {
+        Some(r) if about_push && r.verdict != "ask" => r.clone(),
+        Some(r) if about_push => Rule {
+            pattern: r.pattern.clone(),
+            verdict: "ask".into(),
+            reason: format!("{} ({why}); the agent asks you first", r.reason),
+        },
+        Some(r) if r.verdict == "deny" => r.clone(),
+        _ => Rule {
+            pattern: "built-in push".into(),
+            verdict: "ask".into(),
+            reason: format!("{why}; the agent asks you first"),
+        },
+    }))
+}
+
+/// `verdict`, with every label dropped when it asks or denies: nothing ran
+/// past them.
+fn refusing(verdict: Option<Rule>) -> Option<Rule> {
+    if verdict.as_ref().is_some_and(|rule| rule.verdict != "allow") {
+        drop_labels();
     }
-    Some(Rule {
-        pattern: "built-in push".into(),
-        verdict: "ask".into(),
-        reason: format!("{why}; the agent asks you first"),
-    })
+    verdict
 }
 
 /// `git push` plus the arguments [`push_call`] kept, so a rule is tried on
@@ -38806,15 +38586,13 @@ fn policy_reading_known(
         bookkeep::log_line(&format!("person allow: policyd not asked for `{line}`"));
     }
     // A TCB `allow` is not the verdict once this seat asks or denies. The
-    // line the person reads is the ask, including a force push on a box
-    // with no seat rule.
+    // line the person reads is the ask.
     let tcb = if judged || off || person_allowed {
         None
     } else {
         match hook_timed("tcb", tcb) {
-            // `git-force-push` asks, the same way the push gate does. The raw
-            // `deny` line would read as a refusal beside that ask.
-            Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
+            // A labelled rule's line is said once, below.
+            Some(tcb) if relabelled(&tcb, &line).is_some() => None,
             Some(tcb) if !(tcb.is_empty() || tcb_is_allow(&tcb) && gated.is_some()) => Some(tcb),
             None if policyd_bin().is_none() => {
                 let why = "ljos-policyd is not installed";
@@ -38824,9 +38602,23 @@ fn policy_reading_known(
             _ => None,
         }
     };
+    let refused = gated.as_ref().is_some_and(|rule| rule.verdict != "allow")
+        || tcb.as_deref().is_some_and(|t| !tcb_is_allow(t));
+    if refused {
+        drop_labels();
+    }
+    let labels = take_labels();
+    // ljos-policyd's own warning for a rule already named here is that
+    // line, under policyd's name for the rule (`find-delete`).
+    let warning = |said: &str| said.trim().rsplit('\t').next().unwrap_or("").to_string();
+    let tcb = tcb.filter(|t| {
+        !(t.trim().starts_with("allow\twarn\t")
+            && labels.iter().any(|said| warning(said) == warning(t)))
+    });
+    let labels: String = labels.iter().map(|said| format!("{said}\n")).collect();
     match tcb {
-        Some(tcb) => Ok(format!("{line}\n{tcb}\n{ruled}")),
-        None => Ok(format!("{line}\n{ruled}")),
+        Some(tcb) => Ok(format!("{line}\n{tcb}\n{labels}{ruled}")),
+        None => Ok(format!("{line}\n{labels}{ruled}")),
     }
 }
 
@@ -39042,9 +38834,8 @@ pub fn guard_command(line: &str) -> Result<String> {
     Ok(report.text)
 }
 
-/// `allow`, `ask`, or `deny` from a policy reading. A force push that
-/// still carries the policyd deny token is an ask. A `prompt` line is
-/// the same ask: policyd asked, and the command waits for the person.
+/// `allow`, `ask`, or `deny` from a policy reading. A `prompt` line is an
+/// ask: policyd asked, and the command waits for the person.
 fn policy_verdict(text: &str) -> &'static str {
     let mut ask = false;
     let mut deny = false;
@@ -39057,9 +38848,6 @@ fn policy_verdict(text: &str) -> &'static str {
         if head == "deny" || line.contains("\tdeny") {
             deny = true;
         }
-    }
-    if ask && text.contains("git-force-push") {
-        return "ask";
     }
     if deny {
         return "deny";
@@ -39197,11 +38985,12 @@ pub fn tcb_after_static(line: &str, cwd: Option<&Path>, static_clear: bool) -> O
         }
         return None;
     };
-    // `prompt\t<token>` is an ask, the same card a force push uses. A
-    // prompt with no token never reaches here: that line is a fault.
+    // `prompt\t<token>` is an ask. A prompt with no token never reaches
+    // here: that line is a fault.
     if tcb_is_prompt(&t) {
         let token = policyd_token(&t);
         if !token.is_empty() {
+            drop_labels();
             let code = token.split(':').next().unwrap_or(token).trim();
             return Some(Rule {
                 pattern: code.to_string(),
@@ -39247,17 +39036,10 @@ pub fn tcb_after_static(line: &str, cwd: Option<&Path>, static_clear: bool) -> O
     }
     let token = policyd_token(&t);
     let token = if token.is_empty() { "tcb" } else { token };
-    // A force push asks, whether the table or the phronesis law
-    // (`git-force-push: ...`) refused it. The other checks still deny.
-    let code = token.split(':').next().unwrap_or(token).trim();
-    let ask = code == "git-force-push";
+    drop_labels();
     Some(Rule {
-        pattern: if ask {
-            code.to_string()
-        } else {
-            "ljos-policyd".into()
-        },
-        verdict: if ask { "ask" } else { "deny" }.into(),
+        pattern: "ljos-policyd".into(),
+        verdict: "deny".into(),
         reason: policyd_reason(token),
     })
 }
@@ -39535,9 +39317,9 @@ fn heredoc_reading(body: &str, quoted: bool, data: bool) -> String {
 /// that names a rule replaces a bare `allow`, so a heredoc program's
 /// warning is not lost behind its shell line. A later
 /// allow does not replace a prompt. None when no ljos-policyd answered. A
-/// lease push the checkout clears is not a deny: ljos-policyd cannot read
-/// where a bare one goes. Nor is a faulted guard on a [`repair_line`],
-/// which is let through with the fault as its note.
+/// deny or a prompt on a labelled rule is not one: it is that rule's
+/// [`label_line`], and the call runs. Nor is a faulted guard on a
+/// [`repair_line`], which is let through with the fault as its note.
 fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
     let weight = |t: &str| {
         if t.trim().starts_with("allow\tfail-open\t") {
@@ -39548,17 +39330,17 @@ fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
     };
     let mut answer: Option<String> = None;
     let mut prompt: Option<String> = None;
-    for (i, argv) in tcb_argvs(line).into_iter().enumerate() {
+    for argv in tcb_argvs(line) {
         let Some(mut t) = tcb_check_in(&argv, cwd) else {
             continue;
         };
+        if let Some(said) = relabelled(&t, line) {
+            t = said;
+        }
         if t.starts_with("deny") {
             let token = policyd_token(&t);
             let code = token.split(':').next().unwrap_or(token).trim();
-            let words = if i == 0 { shell_words(&argv[2]) } else { argv };
-            if code == "git-force-push" && lease_cleared(&words, cwd) {
-                t = "allow".to_string();
-            } else if code == "guard-fault" && repair_line(line) {
+            if code == "guard-fault" && repair_line(line) {
                 // A faulted guard still lets the repair through: `ljos
                 // doctor` and `ljos onboard`, and nothing else on the line.
                 let why = token
@@ -39588,6 +39370,18 @@ fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
         }
     }
     prompt.or(answer)
+}
+
+/// Reads a `deny` or `prompt` from ljos-policyd on a labelled rule as that
+/// rule's [`label_line`]. An older build still printed one. The rule is
+/// named on `line` and the call runs. `None` for any other answer.
+fn relabelled(answer: &str, line: &str) -> Option<String> {
+    if !(answer.starts_with("deny") || tcb_is_prompt(answer)) {
+        return None;
+    }
+    let said = label_line(policyd_token(answer))?;
+    label(policyd_token(answer), line);
+    Some(said)
 }
 
 /// A line whose every pipeline is `ljos doctor` or `ljos onboard`,
@@ -39692,6 +39486,10 @@ pub fn guard_timeout() -> std::time::Duration {
 
 thread_local! {
     static GUARD_NOTE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// Each labelled rule the guard let run on this thread, with its
+    /// command, until [`take_guard_note`] takes it.
+    static GUARD_LABELS: std::cell::RefCell<Vec<(&'static str, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn set_guard_note(note: String) {
@@ -39702,11 +39500,98 @@ fn clear_guard_note() {
     GUARD_NOTE.with(|slot| *slot.borrow_mut() = None);
 }
 
-/// The note a timed-out or crashed guard left, once. Empty when the last
-/// check judged the line.
+/// The rules ljos names and lets run, each with ljos-policyd's sentence
+/// for it: a recursive delete outside a temp directory, and a push that
+/// replaces history on the remote.
+const LABELLED: &[(&str, &str)] = &[
+    (
+        "rm-rf-outside-tmp",
+        "a recursive delete reaches outside /tmp and /var/tmp",
+    ),
+    (
+        "find-delete-outside-tmp",
+        "find -delete reaches outside /tmp and /var/tmp",
+    ),
+    ("git-force-push", "a force push rewrites a published branch"),
+];
+
+/// The line a labelled rule prints as its call goes ahead, in the fields
+/// of ljos-policyd's allow-with-warning: `allow`, `warn`, the rule and the
+/// warning, split by tabs. `None` for a rule that is not labelled.
+#[must_use]
+pub fn label_line(rule: &str) -> Option<String> {
+    let rule = rule.split(':').next().unwrap_or(rule).trim();
+    LABELLED
+        .iter()
+        .find(|(name, _)| *name == rule)
+        .map(|(name, warning)| format!("allow\twarn\t{name}\t{warning}"))
+}
+
+/// Name `rule` on `line` as the call goes ahead. The same rule on the
+/// same line is named once.
+fn label(rule: &str, line: &str) {
+    let rule = rule.split(':').next().unwrap_or(rule).trim();
+    let Some(&(rule, _)) = LABELLED.iter().find(|(name, _)| *name == rule) else {
+        return;
+    };
+    let line = line.trim().to_string();
+    GUARD_LABELS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if !slot.iter().any(|(r, l)| *r == rule && *l == line) {
+            slot.push((rule, line));
+        }
+    });
+}
+
+/// A later rule refused the line, so nothing ran past a label.
+fn drop_labels() {
+    GUARD_LABELS.with(|slot| slot.borrow_mut().clear());
+}
+
+/// The warning line of each rule the guard named since the last take, one
+/// line a rule. Each is written to the bypass log as a `warn` row, the
+/// command beside its rule, as ljos-policyd logs its own.
+fn take_labels() -> Vec<String> {
+    let named = GUARD_LABELS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+    let mut lines: Vec<String> = Vec::new();
+    for (rule, command) in named {
+        let Some(said) = label_line(rule) else {
+            continue;
+        };
+        // One call can name a rule on the line as written and again on
+        // its words joined back; it is one row.
+        if lines.contains(&said) {
+            continue;
+        }
+        let warning = said.rsplit('\t').next().unwrap_or("").to_string();
+        log_bypass(
+            "warn",
+            "allow-with-warning",
+            &command,
+            &Rule {
+                pattern: rule.into(),
+                verdict: "allow".into(),
+                reason: warning,
+            },
+        );
+        lines.push(said);
+    }
+    lines
+}
+
+/// What the guard left for this call, once: the warning line of each
+/// labelled rule it let run, then the note a timed-out or crashed guard
+/// left. Empty when the last check judged the line and named nothing.
+/// Each warning line goes to stderr too, as a guard that could not judge
+/// says its note, for a runner whose allow carries no context.
 #[must_use]
 pub fn take_guard_note() -> Option<String> {
-    GUARD_NOTE.with(|slot| slot.borrow_mut().take())
+    let mut lines = take_labels();
+    for said in &lines {
+        eprintln!("{said}");
+    }
+    lines.extend(GUARD_NOTE.with(|slot| slot.borrow_mut().take()));
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 fn guard_note_of(text: &str) -> Option<String> {
@@ -39728,10 +39613,11 @@ pub fn unhealthy_note(why: &str) -> String {
     )
 }
 
-/// A force push, a seat deny rule, an `rm -rf` outside a temp directory,
-/// or a commit, push, or merge the gates refuse, judged in this process.
-/// `None` means the slow check may run. A timeout there allows the line
-/// with a warning.
+/// A seat deny rule, a remote-branch delete, or a commit, push, or merge
+/// the gates refuse, judged in this process. `None` means the slow check
+/// may run. A timeout there allows the line with a warning. A force push
+/// and an `rm -rf` outside a temp directory are not refused: each names
+/// its rule for [`take_guard_note`] and runs.
 /// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
 /// `None` there too, past the sitting gate ([`sitting_gate::guard_line`]),
 /// which judges a runner's history writes under any home and with
@@ -39774,9 +39660,6 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if let Some(rule) = org_tool_write(line) {
         return Some(rule);
     }
-    if let Some(rule) = destructive_delete(line) {
-        return Some(rule);
-    }
     if let Some(rule) = cloud::guard_line(line, cwd) {
         return Some(rule);
     }
@@ -39801,18 +39684,24 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     let here = cwd
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
-    gate_push(None, line, here.as_deref().and_then(Path::to_str))
+    if let Some(rule) = gate_push(None, line, here.as_deref().and_then(Path::to_str))
         .filter(|rule| matches!(rule.verdict.as_str(), "ask" | "deny"))
-        .map(as_static_rule)
+    {
+        return Some(rule);
+    }
+    if let Some(rule) = destructive_delete(line) {
+        label(rule, line);
+    }
+    None
 }
 
-/// `rm -rf` or `find -delete` aimed outside a temp directory. A build
-/// output directory, a scratch directory at the top of the tree, or a
-/// `find` cleanup of regenerable files, each named as a plain relative
-/// path, is inside the working tree and loses no work, so it runs
-/// ([`tree_cleanup`]). A line that can `cd` out of the tree first leaves
-/// only temp paths free.
-fn destructive_delete(line: &str) -> Option<Rule> {
+/// The rule an `rm -rf` or a `find -delete` aimed outside a temp directory
+/// names. A delete names none when it stays inside the working tree and
+/// loses no work ([`tree_cleanup`]): a build output directory, a scratch
+/// directory at the top of the tree, or a `find` cleanup of regenerable
+/// files, each named as a plain relative path. A line that can `cd` out of
+/// the tree first leaves only temp paths free.
+fn destructive_delete(line: &str) -> Option<&'static str> {
     let commands: Vec<Vec<String>> = nested_lines(line, 0)
         .iter()
         .flat_map(|part| raw_segments(part))
@@ -39832,21 +39721,13 @@ fn destructive_delete(line: &str) -> Option<Rule> {
         };
         let name = first.rsplit('/').next().unwrap_or(first);
         if name == "rm" && rm_recursive_force(words) && targets_outside_temp(words, moved) {
-            return Some(Rule {
-                pattern: "rm-rf-outside-tmp".into(),
-                verdict: "deny".into(),
-                reason: policyd_reason("rm-rf-outside-tmp"),
-            });
+            return Some("rm-rf-outside-tmp");
         }
         if name == "find"
             && words.iter().any(|word| word == "-delete")
             && find_targets_outside(words, moved)
         {
-            return Some(Rule {
-                pattern: "find-delete-outside-tmp".into(),
-                verdict: "deny".into(),
-                reason: policyd_reason("find-delete-outside-tmp"),
-            });
+            return Some("find-delete-outside-tmp");
         }
     }
     None
@@ -39934,19 +39815,6 @@ fn find_targets_outside(words: &[String], moved: bool) -> bool {
     moved || !tree_cleanup::regenerable_cleanup(&paths, &expr)
 }
 
-/// A force push from the push gate, in the words policyd uses for it.
-fn as_static_rule(rule: Rule) -> Rule {
-    if rule.verdict == "ask" && rule.reason.starts_with("a force push") {
-        Rule {
-            pattern: "git-force-push".into(),
-            verdict: "ask".into(),
-            reason: policyd_reason("git-force-push"),
-        }
-    } else {
-        rule
-    }
-}
-
 /// A refusal from `ljos-policyd` in words a person and an agent can act
 /// on: the check's token first, so logs and scripts still find it, then
 /// what the command would have done and what to run instead. A token this
@@ -39961,7 +39829,6 @@ pub fn policyd_reason(token: &str) -> String {
         None => (token, ""),
     };
     let said = match code {
-        "git-force-push" => "it rewrites shared history, so the agent asks you first",
         "git-reset-hard" => {
             "git reset --hard throws away every uncommitted change in the tree. Commit or \
              `git stash` the work first, or reset one file with `git restore --source REF FILE`"
@@ -39978,11 +39845,6 @@ pub fn policyd_reason(token: &str) -> String {
         "git-discard-worktree" => {
             "this discards uncommitted changes across the whole tree. Restore the files you \
              mean by name, or `git stash` first so the work can come back"
-        }
-        "rm-rf-outside-tmp" | "find-delete-outside-tmp" => {
-            "a recursive delete outside /tmp cannot be undone. Leave it, or move it to the \
-             trash (`trash-put` or `gio trash`) so the person can restore it, or ask the person \
-             to delete it. Moving it under /tmp to delete it there is the same delete"
         }
         "curl-pipe-shell" => {
             "this runs a script from the network without anyone reading it. Download it to a \
@@ -42408,12 +42270,14 @@ mod tests {
                 .output()
                 .unwrap()
         };
-        let denied = run(&format!("-rf '{}'", victim.display()));
-        assert_eq!(denied.status.code(), Some(126));
-        let err = String::from_utf8_lossy(&denied.stderr);
-        assert!(err.contains("denied (rm-rf-outside-tmp)"), "{err}");
-        assert!(err.contains("trash"), "{err}");
-        assert!(victim.exists());
+        let deleted = run(&format!("-rf '{}'", victim.display()));
+        assert_eq!(deleted.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&deleted.stderr).trim(),
+            "allow\twarn\trm-rf-outside-tmp\ta recursive delete reaches outside /tmp and /var/tmp"
+        );
+        assert!(!victim.exists(), "an older policyd's rm -rf refusal runs");
+        std::fs::create_dir_all(&victim).unwrap();
         let file = victim.join("f");
         std::fs::write(&file, "x").unwrap();
         assert!(run(&format!("'{}'", file.display())).status.success());
@@ -42680,208 +42544,145 @@ mod tests {
         assert!(marker.exists(), "policyd was not asked");
     }
 
-    /// The shim asks about a force push, as the hook does: a lease push
-    /// onto a feature branch runs, read with `git rev-parse`, and a lease
-    /// push onto main or a plain force push goes to the person.
-    #[cfg(unix)]
-    #[test]
-    fn a_guard_shim_lets_a_feature_lease_push_run_and_asks_about_main() {
-        // The shim inherits this process. Another test's GIT_DIR would
-        // make rev-parse leave the fixture, and a protected branch would
-        // be pushed instead of asked about.
-        let _g = env_guard();
-        // A temp home with the explicit guard-on setting, not a directory
-        // moved out of /tmp.
-        let root = tempfile::tempdir().unwrap();
-        let guard = root.path().join("guard-bin");
-        let fake = root.path().join("fake");
-        let home = root.path().join("home");
-        let repo = root.path().join("repo");
-        for d in [&guard, &fake, &home, &repo] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        publish_exe(&guard.join("git"), super::GUARD_SHIM);
-        publish_exe(
-            &fake.join("ljos-policyd"),
-            "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
-        );
-        let real_git = which::which("git").expect("git on PATH");
-        // git's own directory is /usr/bin on Linux, which also has head,
-        // cut, sed and tr, and another prefix on macOS, which does not.
-        // A directory that holds only git is that PATH on either system.
-        let git_bin = root.path().join("git-bin");
-        std::fs::create_dir_all(&git_bin).unwrap();
-        std::os::unix::fs::symlink(&real_git, git_bin.join("git")).unwrap();
-        // A parallel test may set GIT_DIR on this process. These git
-        // commands have to see this checkout, not that one.
-        let scrub = |cmd: &mut std::process::Command| {
-            cmd.env_remove("GIT_DIR");
-            cmd.env_remove("GIT_WORK_TREE");
-        };
-        let plain = |args: &[&str]| {
-            let mut cmd = std::process::Command::new(&real_git);
-            cmd.arg("-C")
-                .arg(&repo)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Rohit Goswami")
-                .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
-                .env("GIT_COMMITTER_NAME", "Rohit Goswami")
-                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org");
-            scrub(&mut cmd);
-            let out = cmd.output().unwrap();
-            assert!(
-                out.status.success(),
-                "{args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-        plain(&["init", "-q", "-b", "main"]);
-        plain(&["config", "commit.gpgsign", "false"]);
-        plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
-        plain(&["checkout", "-q", "-b", "feature"]);
-        let shim = |args: &[&str]| {
-            let mut cmd = std::process::Command::new(guard.join("git"));
-            cmd.args(args)
-                .current_dir(&repo)
-                .env("HOME", &home)
-                .env(
-                    "PATH",
-                    format!(
-                        "{}:{}:{}",
-                        guard.display(),
-                        fake.display(),
-                        git_bin.display()
-                    ),
-                )
-                .env_remove("LJOS_OFF")
-                .env("LJOS_GUARD", "on");
-            scrub(&mut cmd);
-            cmd.output().unwrap()
-        };
-        // There is no remote, so git itself fails once the shim lets the
-        // push through; the shim's own refusal is exit 126.
-        let feature = shim(&["push", "--force-with-lease", "nowhere", "feature"]);
-        assert_ne!(
-            feature.status.code(),
-            Some(126),
-            "{}",
-            String::from_utf8_lossy(&feature.stderr)
-        );
-        let head = shim(&["push", "--force-with-lease", "nowhere", "HEAD"]);
-        assert_ne!(
-            head.status.code(),
-            Some(126),
-            "{}",
-            String::from_utf8_lossy(&head.stderr)
-        );
-        let main = shim(&["push", "--force-with-lease", "nowhere", "HEAD:main"]);
-        let said = String::from_utf8_lossy(&main.stderr);
-        assert_eq!(main.status.code(), Some(126), "{said}");
-        assert!(said.contains("asks (git-force-push)"), "{said}");
-        let forced = shim(&["push", "--force", "nowhere", "feature"]);
-        assert_eq!(forced.status.code(), Some(126));
-        let said = String::from_utf8_lossy(&forced.stderr);
-        assert!(said.contains("asks (git-force-push)"), "{said}");
-        plain(&["config", "branch.feature.remote", "origin"]);
-        plain(&["config", "branch.feature.merge", "refs/heads/feature"]);
-        let bare = shim(&["push", "--force-with-lease"]);
-        assert_ne!(
-            bare.status.code(),
-            Some(126),
-            "a bare lease push whose upstream is the feature branch runs: {}",
-            String::from_utf8_lossy(&bare.stderr)
-        );
-        plain(&["config", "branch.feature.merge", "refs/heads/main"]);
-        let upstream_main = shim(&["push", "--force-with-lease"]);
-        assert_eq!(
-            upstream_main.status.code(),
-            Some(126),
-            "a bare lease push whose upstream is main asks"
-        );
-        std::fs::create_dir_all(repo.join(".ljos")).unwrap();
-        std::fs::write(
-            repo.join(".ljos/gates.toml"),
-            "protected_branches = [\"feature\"]\n",
-        )
-        .unwrap();
-        let protected = shim(&["push", "--force-with-lease", "nowhere", "feature"]);
-        assert_eq!(
-            protected.status.code(),
-            Some(126),
-            "a protected branch asks"
-        );
+    /// A shim for `git` and its push, against a bare remote beside `repo`,
+    /// with a fake ljos-policyd that refuses a `--force` push the way one
+    /// before 0.5 did and warns about a `+refspec` the way a current one
+    /// does. Hold [`env_guard`].
+    struct ShimPush {
+        root: tempfile::TempDir,
+        real_git: std::path::PathBuf,
     }
 
-    /// A protected list keeps each name when the comma has no space after
-    /// it. A lease push to `feat` or `y` asks, and one to any other branch
-    /// runs. Spaces, single quotes, a trailing comma and CRLF are the same
-    /// two names. A value that is not a list asks.
-    #[cfg(unix)]
-    #[test]
-    fn a_guard_shim_asks_for_each_branch_in_a_tight_list() {
-        let _g = env_guard();
-        let root = tempfile::tempdir().unwrap();
-        let guard = root.path().join("guard-bin");
-        let fake = root.path().join("fake");
-        let home = root.path().join("home");
-        let repo = root.path().join("repo");
-        for d in [&guard, &fake, &home, &repo] {
-            std::fs::create_dir_all(d).unwrap();
+    impl ShimPush {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            for d in ["guard-bin", "fake", "home", "repo", "git-bin"] {
+                std::fs::create_dir_all(root.path().join(d)).unwrap();
+            }
+            publish_exe(&root.path().join("guard-bin/git"), super::GUARD_SHIM);
+            publish_exe(
+                &root.path().join("fake/ljos-policyd"),
+                "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*push*+*) printf 'allow\\twarn\\tgit-force-push\\ta force push rewrites a published branch\\n';;\n*) printf 'allow\\n';;\nesac\n",
+            );
+            let real_git = which::which("git").expect("git on PATH");
+            // git's own directory is /usr/bin on Linux, which also has head,
+            // cut, sed and tr, and another prefix on macOS, which does not.
+            // A directory with only git in it is that PATH on either
+            // system.
+            std::os::unix::fs::symlink(&real_git, root.path().join("git-bin/git")).unwrap();
+            let push = Self { root, real_git };
+            let remote = push.root.path().join("remote.git");
+            push.plain(&["init", "-q", "-b", "main"]);
+            push.plain(&["init", "-q", "--bare", remote.to_str().unwrap()]);
+            push.plain(&["config", "commit.gpgsign", "false"]);
+            push.plain(&["remote", "add", "origin", remote.to_str().unwrap()]);
+            push.plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
+            push.plain(&["push", "-q", "origin", "main"]);
+            push
         }
-        publish_exe(&guard.join("git"), super::GUARD_SHIM);
-        publish_exe(
-            &fake.join("ljos-policyd"),
-            "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
-        );
-        let real_git = which::which("git").expect("git on PATH");
-        let git_bin = root.path().join("git-bin");
-        std::fs::create_dir_all(&git_bin).unwrap();
-        std::os::unix::fs::symlink(&real_git, git_bin.join("git")).unwrap();
-        let scrub = |cmd: &mut std::process::Command| {
-            cmd.env_remove("GIT_DIR");
-            cmd.env_remove("GIT_WORK_TREE");
-        };
-        let plain = |args: &[&str]| {
-            let mut cmd = std::process::Command::new(&real_git);
-            cmd.arg("-C")
-                .arg(&repo)
+
+        fn repo(&self) -> std::path::PathBuf {
+            self.root.path().join("repo")
+        }
+
+        // A parallel test may set GIT_DIR on this process. These git
+        // commands have to see this checkout, not that one.
+        fn plain(&self, args: &[&str]) {
+            let out = std::process::Command::new(&self.real_git)
+                .arg("-C")
+                .arg(self.repo())
                 .args(args)
                 .env("GIT_AUTHOR_NAME", "Rohit Goswami")
                 .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
                 .env("GIT_COMMITTER_NAME", "Rohit Goswami")
-                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org");
-            scrub(&mut cmd);
-            let out = cmd.output().unwrap();
+                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .output()
+                .unwrap();
             assert!(
                 out.status.success(),
                 "{args:?}: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
-        };
-        plain(&["init", "-q", "-b", "main"]);
-        plain(&["config", "commit.gpgsign", "false"]);
-        plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
-        let shim = |args: &[&str]| {
-            let mut cmd = std::process::Command::new(guard.join("git"));
-            cmd.args(args)
-                .current_dir(&repo)
-                .env("HOME", &home)
+        }
+
+        /// Run `git ARGS` through the shim and check it went ahead with
+        /// exit 0 and said the `git-force-push` line once.
+        fn runs_with_the_line(&self, args: &[&str]) {
+            let root = self.root.path();
+            let out = std::process::Command::new(root.join("guard-bin/git"))
+                .args(args)
+                .current_dir(self.repo())
+                .env("HOME", root.join("home"))
                 .env(
                     "PATH",
                     format!(
                         "{}:{}:{}",
-                        guard.display(),
-                        fake.display(),
-                        git_bin.display()
+                        root.join("guard-bin").display(),
+                        root.join("fake").display(),
+                        root.join("git-bin").display()
                     ),
                 )
                 .env_remove("LJOS_OFF")
-                .env("LJOS_GUARD", "on");
-            scrub(&mut cmd);
-            cmd.output().unwrap()
-        };
-        std::fs::create_dir_all(repo.join(".ljos")).unwrap();
-        let gates = repo.join(".ljos/gates.toml");
+                .env("LJOS_GUARD", "on")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(0), "{args:?}: {said}");
+            assert_eq!(
+                said.matches("git-force-push").count(),
+                1,
+                "{args:?}: {said}"
+            );
+            assert!(
+                said.lines().any(|line| line == FORCE_SAID),
+                "{args:?}: {said}"
+            );
+        }
+    }
+
+    /// The shim runs a force push as the hook does: a lease push onto a
+    /// feature branch or main, a bare one onto its upstream, a plain force
+    /// push and a `+refspec` each go ahead and say `git-force-push` once.
+    #[cfg(unix)]
+    #[test]
+    fn a_guard_shim_runs_each_force_push_with_its_warning_line() {
+        let _g = env_guard();
+        let push = ShimPush::new();
+        push.plain(&["checkout", "-q", "-b", "feature"]);
+        push.plain(&["push", "-q", "-u", "origin", "feature"]);
+        push.plain(&["commit", "-q", "--allow-empty", "-m", "next"]);
+        for args in [
+            &["push", "--force-with-lease", "origin", "feature"][..],
+            &["push", "--force-with-lease", "origin", "HEAD:main"],
+            &["push", "--force", "origin", "feature"],
+            &["push", "--force-with-lease"],
+            &["push", "origin", "+feature:main"],
+        ] {
+            push.runs_with_the_line(args);
+        }
+        push.plain(&["config", "branch.feature.merge", "refs/heads/main"]);
+        push.plain(&["config", "push.default", "upstream"]);
+        push.runs_with_the_line(&["push", "--force-with-lease"]);
+    }
+
+    /// The shim reads no protected list. Whatever `protected_branches`
+    /// contains (tight, spaced, quoted, a trailing comma, carriage return
+    /// line feed (CRLF) endings, or not a list), a lease push onto a
+    /// listed branch or another one runs with the line.
+    #[cfg(unix)]
+    #[test]
+    fn a_guard_shim_runs_a_lease_push_whatever_the_list_holds() {
+        let _g = env_guard();
+        let push = ShimPush::new();
+        for branch in ["feat", "y", "other"] {
+            push.plain(&["branch", branch]);
+        }
+        std::fs::create_dir_all(push.repo().join(".ljos")).unwrap();
+        let gates = push.repo().join(".ljos/gates.toml");
         for body in [
             "protected_branches = [\"feat\",\"y\"]\n",
             "protected_branches = [\"feat\", \"y\"]\n",
@@ -42889,38 +42690,13 @@ mod tests {
             "protected_branches = ['feat','y']\n",
             "protected_branches = [\"feat\",\"y\",]\n",
             "protected_branches = [\"feat\",\"y\"]\r\n",
+            "protected_branches = \"release\"\n",
         ] {
             std::fs::write(&gates, body).unwrap();
-            for branch in ["feat", "y"] {
-                let pushed = shim(&["push", "--force-with-lease", "nowhere", branch]);
-                let said = String::from_utf8_lossy(&pushed.stderr);
-                assert_eq!(pushed.status.code(), Some(126), "{body:?} {branch}: {said}");
-                assert!(
-                    said.contains("asks (git-force-push)"),
-                    "{body:?} {branch}: {said}"
-                );
+            for branch in ["feat", "y", "other"] {
+                push.runs_with_the_line(&["push", "--force-with-lease", "origin", branch]);
             }
-            let other = shim(&["push", "--force-with-lease", "nowhere", "other"]);
-            let said = String::from_utf8_lossy(&other.stderr);
-            assert_ne!(
-                other.status.code(),
-                Some(126),
-                "{body:?} an unlisted branch runs: {said}"
-            );
-            assert!(
-                !said.contains("asks (git-force-push)"),
-                "{body:?} an unlisted branch runs: {said}"
-            );
         }
-        std::fs::write(&gates, "protected_branches = \"release\"\n").unwrap();
-        let unreadable = shim(&["push", "--force-with-lease", "nowhere", "other"]);
-        let said = String::from_utf8_lossy(&unreadable.stderr);
-        assert_eq!(
-            unreadable.status.code(),
-            Some(126),
-            "a value that is not a list asks: {said}"
-        );
-        assert!(said.contains("asks (git-force-push)"), "{said}");
     }
 
     /// The in-process guard matches the shim: a temp home and LJOS_OFF do
@@ -42959,6 +42735,7 @@ mod tests {
             "POLICYD_BIN",
             "PACKSET_URL",
             "PACKSET_PORT",
+            "XDG_DATA_HOME",
         ];
         let saved: Vec<_> = keys
             .iter()
@@ -42971,17 +42748,20 @@ mod tests {
             std::env::remove_var("LJOS_OFF");
             std::env::remove_var("LJOS_GUARD");
             std::env::set_var("HOME", "/home/ubuntu");
+            std::env::set_var("XDG_DATA_HOME", dir.path().join("data"));
         }
-        let judged = super::static_guard_in("rm -rf ~/proj", Some(std::path::Path::new("/tmp")))
-            .expect("a temp working directory does not switch the guard off");
-        assert_eq!(judged.verdict, "deny");
-        assert_eq!(judged.pattern, "rm-rf-outside-tmp");
-        let chained = super::static_guard_in(
-            "cd /tmp && rm -rf ~/proj",
-            Some(std::path::Path::new("/tmp")),
-        )
-        .expect("cd /tmp && rm -rf ~/proj");
-        assert_eq!(chained.pattern, "rm-rf-outside-tmp");
+        let _ = super::take_guard_note();
+        for line in ["rm -rf ~/proj", "cd /tmp && rm -rf ~/proj"] {
+            assert!(
+                super::static_guard_in(line, Some(std::path::Path::new("/tmp"))).is_none(),
+                "{line} runs"
+            );
+            let note = super::take_guard_note().unwrap_or_default();
+            assert!(
+                note.starts_with("allow\twarn\trm-rf-outside-tmp\t"),
+                "a temp working directory does not switch the guard off: {line}: {note}"
+            );
+        }
         assert!(
             super::tcb_verdict("git branch -D gone").is_some(),
             "outside a sandbox the branch delete is denied"
@@ -42994,6 +42774,7 @@ mod tests {
             super::gate_push(None, "git push --force origin main", None).is_none(),
             "LJOS_OFF skips a force push"
         );
+        assert_eq!(super::take_guard_note(), None, "LJOS_OFF names no rule");
         assert!(
             super::seat_guard("sed -i s/a/b/ ~/.codex/hooks.json").is_none(),
             "LJOS_OFF skips the seat guard"
@@ -43011,8 +42792,9 @@ mod tests {
         );
         assert!(
             super::gate_push(None, "git push --force origin main", None).is_none(),
-            "a temp HOME does not ask about a force push"
+            "a temp HOME does not judge a force push"
         );
+        assert_eq!(super::take_guard_note(), None, "a temp HOME names no rule");
         let refused = super::ensure_writer().expect_err("a temp HOME names its refusal");
         assert!(
             refused.to_string().contains("temporary HOME")
@@ -43487,14 +43269,46 @@ mod tests {
         assert!(super::recall_note("Example-0000000000", "").is_empty());
     }
 
-    /// Real models given the old denial moved the directory to /tmp and
-    /// deleted it there. The denial no longer offers /tmp as a way around.
+    /// An ljos-policyd before 0.5 refuses a recursive delete and a
+    /// `find -delete` outside a temp directory and asks about a force
+    /// push. The hook runs each with exit 0, hands the agent the one
+    /// warning line in place of a refusal, and the bypass log keeps one
+    /// label per call.
     #[test]
-    fn the_rm_rf_denial_offers_no_way_around_through_tmp() {
-        let said = super::policyd_reason("rm-rf-outside-tmp");
-        assert!(!said.contains("under /tmp instead"), "{said}");
-        assert!(said.contains("trash"), "{said}");
-        assert!(said.contains("same delete"), "{said}");
+    fn an_older_policyd_refusal_of_a_delete_or_force_push_runs_with_its_line() {
+        let _g = env_guard();
+        let home = SeatDir::new("older-policyd");
+        let bin = fake_policyd(
+            home.path(),
+            "policyd",
+            "case \"$*\" in\n*-rf*) printf 'deny\\trm-rf-outside-tmp\\n'; exit 2;;\n*-delete*) printf 'deny\\tfind-delete-outside-tmp\\n'; exit 2;;\n*--force*) printf 'prompt\\tgit-force-push\\n';;\n*) printf 'allow\\n';;\nesac",
+        );
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+        ]);
+        for (line, rule, said) in [
+            (
+                "rm -rf /srv/data",
+                "rm-rf-outside-tmp",
+                "allow\twarn\trm-rf-outside-tmp\ta recursive delete reaches outside /tmp and /var/tmp",
+            ),
+            (
+                "find /srv/data -delete",
+                "find-delete-outside-tmp",
+                "allow\twarn\tfind-delete-outside-tmp\tfind -delete reaches outside /tmp and /var/tmp",
+            ),
+            ("git push --force origin main", "git-force-push", FORCE_SAID),
+        ] {
+            let _ = take_guard_note();
+            assert!(tcb_verdict(line).is_none(), "{line} runs");
+            assert_eq!(take_guard_note().as_deref(), Some(said), "{line}");
+            assert_eq!(labels_logged(rule), 1, "{line}");
+        }
     }
 
     /// The tests that set or read the process environment take this lock:
@@ -54662,17 +54476,16 @@ mod tests {
     }
 
     /// A refusal from the command check says what the command would do
-    /// and what to run instead, and keeps the check's token first.
+    /// and what to run instead, and keeps the check's token first. A force
+    /// push and a recursive delete are not refusals: they run with a
+    /// warning line instead.
     #[test]
     fn a_policyd_refusal_reads_as_words_with_its_token_first() {
         for token in [
-            "git-force-push",
             "git-reset-hard",
             "git-clean-force",
             "git-stash-clear",
             "git-discard-worktree",
-            "rm-rf-outside-tmp",
-            "find-delete-outside-tmp",
             "curl-pipe-shell",
             "raw-disk",
             "chmod-setuid",
@@ -54688,12 +54501,6 @@ mod tests {
             assert!(said.starts_with(&format!("{token}: ")), "{said}");
             assert!(said.len() > token.len() + 40, "{said}");
         }
-        // One short sentence that fits a terminal line and recommends no
-        // other push: a lease push asks too onto main, master or develop.
-        let force = policyd_reason("git-force-push");
-        assert!(force.len() < 100, "{} columns: {force}", force.len());
-        assert!(!force.contains("--force-with-lease"), "{force}");
-        assert_eq!(force.matches(". ").count(), 0, "{force}");
         assert!(policyd_reason("git-reset-hard").contains("git stash"));
         let secret = policyd_reason("shell-secret-in-argv: token on the command line");
         assert!(secret.starts_with("shell-secret-in-argv: "), "{secret}");
@@ -54881,37 +54688,24 @@ mod tests {
                     "recommended `{line}` (from `{template}`) is refused: {ruled:?}"
                 );
             }
-            let lease = guard_line("git push --force-with-lease origin HEAD:main", repo.path())
-                .expect("a lease push asks");
-            assert_eq!(lease.verdict, "ask");
-            assert_eq!(lease.pattern, "git-force-push");
-            let includes = guard_line("git push --force-if-includes origin HEAD:main", repo.path());
-            assert!(includes.is_none(), "{includes:?}");
-            let leased = guard_line(
+            let _ = take_guard_note();
+            for line in [
+                "git push --force-with-lease origin HEAD:main",
                 "git push --force-with-lease=refs/heads/main origin main",
-                repo.path(),
-            )
-            .expect("a lease push with a ref asks");
-            assert_eq!(leased.verdict, "ask");
-            let upstream = guard_line("git push -u origin feature", repo.path());
-            assert!(upstream.is_none(), "{upstream:?}");
-            let forced = guard_line("git push --force origin HEAD:main", repo.path())
-                .expect("a force push still asks");
-            assert_eq!(forced.verdict, "ask");
-            assert_eq!(forced.pattern, "git-force-push");
-            assert!(
-                forced.reason.contains("asks you first"),
-                "{}",
-                forced.reason
-            );
-            let both = guard_line(
+                "git push --force origin HEAD:main",
                 "git push --force-with-lease --force origin HEAD:main",
-                repo.path(),
-            )
-            .expect("lease plus --force still asks");
-            assert_eq!(both.verdict, "ask");
-            let plus = guard_line("git push origin +main", repo.path()).expect("+refspec asks");
-            assert_eq!(plus.verdict, "ask");
+                "git push origin +main",
+            ] {
+                assert!(guard_line(line, repo.path()).is_none(), "{line} runs");
+                assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID), "{line}");
+            }
+            for line in [
+                "git push --force-if-includes origin HEAD:main",
+                "git push -u origin feature",
+            ] {
+                assert!(guard_line(line, repo.path()).is_none(), "{line} runs");
+                assert_eq!(take_guard_note(), None, "{line} is an ordinary push");
+            }
         });
     }
 
@@ -54919,9 +54713,12 @@ mod tests {
         gates::guard_verdict(line, Some(cwd), &[])
     }
 
-    /// The hook's verdict carries those words, and the runner is asked.
+    /// A force push runs under the hook with one `git-force-push` warning
+    /// line, even from an ljos-policyd that still refuses it, with test
+    /// evidence or without. A delete push asks, and each runner reads that
+    /// ask in words.
     #[test]
-    fn the_hook_explains_a_force_push_refusal_in_words() {
+    fn the_hook_runs_a_force_push_and_explains_a_delete_push_ask_in_words() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("ljos-policyd");
@@ -54936,28 +54733,27 @@ mod tests {
         let _env = HoldEnv::set(&[
             ("POLICYD_BIN", bin.to_str().unwrap()),
             ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
         ]);
         assert!(tcb_verdict("git status").is_none());
-        let unrecorded = tcb_verdict("git push --force origin main").expect("a force push asks");
-        assert_eq!(unrecorded.verdict, "ask");
-        assert!(
-            !unrecorded.reason.contains("git-push-evidence"),
-            "{}",
-            unrecorded.reason
-        );
+        let _ = take_guard_note();
+        assert!(tcb_verdict("git push --force origin main").is_none());
+        assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID));
         let repo = evidenced_push_repo();
+        assert!(static_guard_in("git push --force origin main", Some(repo.path())).is_none());
+        assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID));
         let rule =
-            static_guard_in("git push --force origin main", Some(repo.path())).expect("asks");
+            static_guard_in("git push origin --delete old", Some(repo.path())).expect("asks");
         assert_eq!(rule.verdict, "ask");
-        assert_eq!(rule.pattern, "git-force-push");
+        assert_eq!(rule.pattern, "built-in push");
         assert!(
-            rule.reason.starts_with("git-force-push: "),
+            rule.reason.starts_with("deleting a remote branch"),
             "{}",
             rule.reason
         );
         let call = HookCall {
             event: "PreToolUse".into(),
-            cue: "git push --force origin main".into(),
+            cue: "git push origin --delete old".into(),
             session: None,
             shape: HookShape::CamelCase,
         };
@@ -54971,11 +54767,11 @@ mod tests {
         assert!(!answer.contains("--force-with-lease"), "{answer}");
         let codex = HookCall {
             event: "PreToolUse".into(),
-            cue: "git push --force origin main".into(),
+            cue: "git push origin --delete old".into(),
             session: Some("codex-1".into()),
             shape: HookShape::DenyOnly,
         };
-        // Codex does not honour `ask`: the same force push is a deny.
+        // Codex does not honour `ask`: the same delete push is a deny.
         // A bare ask, with no grant written yet, says the runner cannot
         // ask. A reason that already offers `ljos approve` keeps that
         // offer and does not tell the agent the refusal never lifts.
@@ -55022,7 +54818,7 @@ mod tests {
         );
         let cursor = HookCall {
             event: "PreToolUse".into(),
-            cue: "git push --force origin main".into(),
+            cue: "git push origin --delete old".into(),
             session: Some("cursor-1".into()),
             shape: HookShape::Cursor,
         };
@@ -55047,11 +54843,12 @@ mod tests {
         assert!(bare_cursor.contains("cannot ask here"), "{bare_cursor}");
     }
 
-    /// `ljos_guard_check` asks about a force push, with or without test
-    /// evidence. `guard_command` reports the ask as an error. `git status`
-    /// stays allowed.
+    /// `ljos_guard_check` lets a force push run, with or without test
+    /// evidence, even when an older ljos-policyd refuses it. The report is
+    /// an allow with one `git-force-push` warning line. `guard_command`
+    /// passes it, and each check leaves one label in the bypass log.
     #[test]
-    fn a_force_push_asks_whether_or_not_it_has_evidence() {
+    fn a_force_push_runs_with_a_warning_whether_or_not_it_has_evidence() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("ljos-policyd");
@@ -55066,25 +54863,32 @@ mod tests {
         let _env = HoldEnv::set(&[
             ("POLICYD_BIN", bin.to_str().unwrap()),
             ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
         ]);
-        let report = guard_report("git push --force origin main").expect("an ask is a report");
-        assert_eq!(report.verdict, "ask", "{}", report.text);
+        let report = guard_report("git push --force origin main").expect("a force push runs");
+        assert_eq!(report.verdict, "allow", "{}", report.text);
+        assert_eq!(
+            report.text.matches(FORCE_SAID).count(),
+            1,
+            "{}",
+            report.text
+        );
         assert!(
             !report.text.contains("git-push-evidence"),
             "{}",
             report.text
         );
-        let err = guard_command("git push --force origin main")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("git-force-push"), "{err}");
+        let text = guard_command("git push --force origin main").expect("a force push runs");
+        assert!(text.contains(FORCE_SAID), "{text}");
         let allowed = guard_report("git status").expect("status is allowed");
         assert_eq!(allowed.verdict, "allow");
+        assert!(!allowed.text.contains("git-force-push"), "{}", allowed.text);
         let repo = evidenced_push_repo();
-        let asked =
-            static_guard_in("git push --force origin main", Some(repo.path())).expect("ask");
-        assert_eq!(asked.verdict, "ask");
-        assert!(asked.reason.contains("git-force-push"), "{}", asked.reason);
+        let cited = guard_report_in("git push --force origin main", Some(repo.path()))
+            .expect("a force push with evidence runs");
+        assert_eq!(cited.verdict, "allow", "{}", cited.text);
+        assert!(cited.text.contains(FORCE_SAID), "{}", cited.text);
+        assert_eq!(labels_logged("git-force-push"), 3);
     }
 
     fn habitat_row(name: &'static str, state: &str, ok: bool) -> Habitat {
@@ -57079,6 +56883,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         // The guard stands down when HOME is a temporary directory. Other tests
         // point it there, so this one waits for that lock.
         let _g = env_guard();
+        let data = tempfile::tempdir().unwrap();
+        let _data = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
         let p = push_call("cd ~/Git/x && LJOS_CITE=surf-ab12 git -C sub push origin main").unwrap();
         assert_eq!(p.dir.as_deref(), Some("sub"));
         assert_eq!(p.args, ["origin", "main"]);
@@ -57137,71 +56943,40 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             push_tier(&args(&["--follow-tags", "origin", "main"]), &unread),
             PushTier::Free
         );
-        assert!(matches!(
-            push_tier(&args(&["--mirror", "origin"]), &unread),
-            PushTier::Person(_)
-        ));
-        assert!(matches!(
-            push_tier(&args(&["--force-with-lease"]), &unread),
-            PushTier::Person(_)
-        ));
-        assert!(matches!(
-            push_tier(
-                &args(&["--force-with-lease=main:abc123", "origin", "main"]),
-                &unread
-            ),
-            PushTier::Person(_)
-        ));
+        // These run with the `git-force-push` warning: a lease force push,
+        // a plain force push and a mirror push. Only a delete is the
+        // person's.
+        for words in [
+            &["--mirror", "origin"][..],
+            &["--force-with-lease"],
+            &["--force-with-lease=main:abc123", "origin", "main"],
+            &["-u", "origin", "feature"],
+            &["--force-with-lease", "origin", "feature"],
+            &["--force-with-lease", "origin", "+feature"],
+            &["--force-with-lease", "origin", "HEAD:develop"],
+            &["--force-if-includes"],
+            &["--force-with-lease", "--force"],
+            &["-f"],
+        ] {
+            assert_eq!(
+                push_tier(&args(words), &unread),
+                PushTier::Free,
+                "{words:?}"
+            );
+        }
         assert_eq!(
-            push_tier(&args(&["-u", "origin", "feature"]), &unread),
-            PushTier::Free
-        );
-        assert_eq!(
-            push_tier(&args(&["--force-with-lease", "origin", "feature"]), &unread),
-            PushTier::Free,
-            "a lease push onto a feature branch runs"
-        );
-        assert!(matches!(
-            push_tier(
-                &args(&["--force-with-lease", "origin", "+feature"]),
-                &unread
-            ),
-            PushTier::Person(_)
-        ));
-        assert!(matches!(
-            push_tier(
-                &args(&["--force-with-lease", "origin", "HEAD:develop"]),
-                &unread
-            ),
-            PushTier::Person(_)
-        ));
-        assert_eq!(
-            push_tier(&args(&["--force-if-includes"]), &unread),
-            PushTier::Free
-        );
-        assert!(matches!(
-            push_tier(&args(&["--force-with-lease", "--force"]), &unread),
-            PushTier::Person(_)
-        ));
-        assert!(matches!(
-            push_tier(&args(&["-f"]), &unread),
-            PushTier::Person(_)
-        ));
-        assert!(matches!(
-            push_tier(&args(&["origin", "--delete", "old"]), &unread),
-            PushTier::Person(_)
-        ));
-        assert!(matches!(
-            push_tier(&args(&["origin", ":old"]), &unread),
-            PushTier::Person(_)
-        ));
-        assert!(matches!(
             push_tier(
                 &args(&["origin", "+main"]),
                 &facts(Access::Exclusive, false)
             ),
-            PushTier::Person(_)
-        ));
+            PushTier::Free
+        );
+        for words in [&["origin", "--delete", "old"][..], &["origin", ":old"]] {
+            assert!(
+                matches!(push_tier(&args(words), &unread), PushTier::Person(_)),
+                "{words:?}"
+            );
+        }
         let alone = serde_json::json!({"push": true, "mine": true, "alone": true});
         assert_eq!(access_of(&alone), Access::Exclusive);
         let org = serde_json::json!({"push": true, "mine": false, "alone": true});
@@ -57239,9 +57014,15 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "git push --force origin main",
             "git push -f origin main",
             "git push origin +main",
+            "git push --mirror origin",
+        ] {
+            let _ = take_guard_note();
+            assert_eq!(gate_push(None, line, None), None, "{line} runs");
+            assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID), "{line}");
+        }
+        for line in [
             "git push origin --delete old",
             "git push origin :old",
-            "git push --mirror origin",
             "git push origin :refs/tags/v1",
         ] {
             let gated = gate_push(None, line, None);
@@ -57336,10 +57117,14 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 "{line} under git push* -> {with_rule:?}"
             );
         }
+        let _ = take_guard_note();
         let forced = gate_push(Some(&trust), "git push --force origin main", None);
+        assert!(forced.is_none(), "{forced:?}");
+        assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID));
+        let deleted = gate_push(Some(&trust), "git push origin --delete old", None);
         assert!(
-            forced.as_ref().is_some_and(|r| r.verdict == "ask"),
-            "{forced:?}"
+            deleted.as_ref().is_some_and(|r| r.verdict == "ask"),
+            "{deleted:?}"
         );
         assert!(
             validate_rule(&trust).is_err(),
@@ -59805,14 +59590,14 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     /// Rohit's rule of 2026-10-20 for `git push --force-with-lease`, with
-    /// or without `=REF:SHA` and `--force-if-includes`: it asks onto main,
-    /// master, develop or a branch the checkout protects, and when its
-    /// branch cannot be read; onto any other branch it runs. A bare lease
-    /// push goes to the current branch's upstream. ljos-policyd refuses a
-    /// bare one, since it reads only the words; the hook clears it when the
-    /// checkout says where it goes.
+    /// or without `=REF:SHA` and `--force-if-includes`: it is a force push
+    /// onto main, master, develop or a branch the checkout protects, and
+    /// when its branch cannot be read; onto any other branch it is
+    /// ordinary. A bare lease push goes to the current branch's upstream.
+    /// Each runs: the gate names `git-force-push` on a force push, and an
+    /// older ljos-policyd's refusal of any of them reads as that line.
     #[test]
-    fn a_lease_push_asks_only_onto_a_guarded_or_unread_branch() {
+    fn a_lease_push_runs_and_is_named_a_force_push_onto_a_guarded_or_unread_branch() {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let named = lease_push(&args(&[
             "--force-with-lease=main:abc123",
@@ -59871,6 +59656,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let _env = HoldEnv::set(&[
             ("POLICYD_BIN", bin.to_str().unwrap()),
             ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
             ("LJOS_CONFIG", ""),
             ("LJOS_OFF", "0"),
         ]);
@@ -59997,59 +59783,59 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             );
             std::fs::write(&gates, "").unwrap();
 
-            // The hook: policyd refuses every lease push here, and ljos
-            // clears the ones whose branch the checkout says is free.
+            // The hook: an older policyd refuses every lease push here, and
+            // each runs with the `git-force-push` line. The gate alone names
+            // the rule only where the push replaces a guarded branch.
             let cwd = Some(repo.path());
-            for line in [
-                "git push --force-with-lease",
-                "git push --force-with-lease origin",
-                "git push --force-with-lease origin feature",
-                "git push --force-with-lease --force-if-includes origin HEAD:feature",
+            let _ = take_guard_note();
+            for (line, guarded) in [
+                ("git push --force-with-lease", false),
+                ("git push --force-with-lease origin", false),
+                ("git push --force-with-lease origin feature", false),
+                (
+                    "git push --force-with-lease --force-if-includes origin HEAD:feature",
+                    false,
+                ),
+                ("git push --force-with-lease origin main", true),
+                ("git push --force-with-lease=main:abc123 origin main", true),
+                ("git push --force-with-lease origin HEAD:develop", true),
+                ("git push --force-with-lease origin +feature", true),
+                ("git push --force-with-lease -f origin feature", true),
+                ("git push --force-with-lease origin feature | cat", false),
             ] {
                 assert!(tcb_verdict_in(line, cwd).is_none(), "{line}");
+                assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID), "{line}");
                 assert!(gates::guard_verdict(line, cwd, &[]).is_none(), "{line}");
-            }
-            for line in [
-                "git push --force-with-lease origin main",
-                "git push --force-with-lease=main:abc123 origin main",
-                "git push --force-with-lease origin +feature",
-                "git push --force-with-lease -f origin feature",
-                "git push --force-with-lease origin feature | cat",
-            ] {
-                let rule = tcb_verdict_in(line, cwd).expect(line);
-                assert_eq!(rule.verdict, "ask", "{line}");
-                assert_eq!(rule.pattern, "git-force-push", "{line}");
-            }
-            for line in [
-                "git push --force-with-lease origin main",
-                "git push --force-with-lease origin HEAD:develop",
-                "git push --force-with-lease origin +feature",
-            ] {
-                let rule = gates::guard_verdict(line, cwd, &[]).expect(line);
-                assert_eq!(rule.verdict, "ask", "{line}");
+                let named = take_guard_note();
+                assert_eq!(named.is_some(), guarded, "{line}: {named:?}");
             }
             on("feature", Some("main"));
-            let rule = tcb_verdict_in("git push --force-with-lease", cwd).expect("upstream main");
-            assert_eq!(rule.verdict, "ask");
-            let rule = gates::guard_verdict("git push --force-with-lease", cwd, &[])
-                .expect("upstream main");
-            assert_eq!(rule.verdict, "ask");
+            assert!(gates::guard_verdict("git push --force-with-lease", cwd, &[]).is_none());
+            assert_eq!(
+                take_guard_note().as_deref(),
+                Some(FORCE_SAID),
+                "upstream main"
+            );
             let outside = tempfile::tempdir().unwrap();
             assert!(
-                tcb_verdict_in("git push --force-with-lease", Some(outside.path())).is_some(),
+                gates::guard_verdict("git push --force-with-lease", Some(outside.path()), &[])
+                    .is_none()
+            );
+            assert_eq!(
+                take_guard_note().as_deref(),
+                Some(FORCE_SAID),
                 "no checkout: cannot tell"
             );
 
-            // The phronesis law words its refusal, and it still asks.
+            // The phronesis law words its refusal, and it runs with the line.
             let worded = fake_policyd(
                 pd.path(),
                 "worded",
                 "printf 'deny\\tgit-force-push: force push denied\\n'; exit 2",
             );
             let _worded = HoldEnv::set(&[("POLICYD_BIN", worded.to_str().unwrap())]);
-            let rule = tcb_verdict_in("ls", cwd).expect("a worded refusal");
-            assert_eq!(rule.verdict, "ask");
-            assert_eq!(rule.pattern, "git-force-push");
+            assert!(tcb_verdict_in("git push --force origin main", cwd).is_none());
+            assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID));
         });
     }
 
@@ -60839,6 +60625,24 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     /// A checkout whose tip already has a passing `true` evidence record.
+    /// The line a force push runs with, as the seat reads it.
+    const FORCE_SAID: &str =
+        "allow\twarn\tgit-force-push\ta force push rewrites a published branch";
+
+    /// The labels the bypass log keeps for `rule`, one per command that
+    /// ran under it.
+    fn labels_logged(rule: &str) -> usize {
+        let text = bypass_log_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_default();
+        text.lines()
+            .filter_map(|row| serde_json::from_str::<serde_json::Value>(row).ok())
+            .filter(|row| {
+                row["kind"] == "warn" && row["how"] == "allow-with-warning" && row["rule"] == rule
+            })
+            .count()
+    }
+
     fn evidenced_push_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
@@ -60914,52 +60718,45 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ("LJOS_OFF", "0"),
         ]);
         let started = std::time::Instant::now();
-        let push = static_guard("git push --force origin main").expect("ask");
-        let rm = static_guard("rm -rf /home/u/proj").expect("deny");
-        let both = static_guard("rm -rf /tmp/a /etc").expect("deny");
-        let find = static_guard("find /home/u/proj -name x -delete").expect("deny");
-        assert!(static_guard("rm -rf /tmp/scratch").is_none());
-        assert!(static_guard("rm -rf /tmp/a /tmp/b").is_none());
-        assert!(static_guard("git status").is_none());
-        assert!(static_guard("find /tmp/scratch -name x -delete").is_none());
-        let asked = tcb_verdict("git push --force origin main").expect("ask");
-        let denied = tcb_verdict("rm -rf /home/u/proj").expect("deny");
+        let _ = take_guard_note();
+        for (line, rule) in [
+            ("git push --force origin main", "git-force-push"),
+            ("rm -rf /home/u/proj", "rm-rf-outside-tmp"),
+            ("rm -rf /tmp/a /etc", "rm-rf-outside-tmp"),
+            (
+                "find /home/u/proj -name x -delete",
+                "find-delete-outside-tmp",
+            ),
+        ] {
+            assert!(static_guard(line).is_none(), "{line} runs");
+            let note = take_guard_note().unwrap_or_default();
+            assert!(
+                note.starts_with(&format!("allow\twarn\t{rule}\t")),
+                "{line}: {note}"
+            );
+        }
+        for line in [
+            "rm -rf /tmp/scratch",
+            "rm -rf /tmp/a /tmp/b",
+            "git status",
+            "find /tmp/scratch -name x -delete",
+        ] {
+            assert!(static_guard(line).is_none(), "{line}");
+            assert_eq!(take_guard_note(), None, "{line} names no rule");
+        }
+        let asked = tcb_verdict("git push origin --delete old").expect("ask");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "waited {:?}",
             started.elapsed()
         );
         assert!(!marker.exists(), "the slow policyd ran");
-        assert_eq!(push.verdict, "ask", "{}", push.reason);
-        assert_eq!(push.pattern, "git-force-push");
-        assert!(
-            !push.reason.contains("git-push-evidence"),
-            "{}",
-            push.reason
-        );
         assert_eq!(asked.verdict, "ask", "{}", asked.reason);
-        assert_eq!(asked.pattern, "git-force-push");
+        assert_eq!(asked.pattern, "built-in push");
         let repo = evidenced_push_repo();
-        let forced =
-            static_guard_in("git push --force origin main", Some(repo.path())).expect("ask");
-        assert_eq!(forced.verdict, "ask", "{}", forced.reason);
-        assert_eq!(forced.pattern, "git-force-push");
-        assert!(
-            forced.reason.contains("asks you first"),
-            "{}",
-            forced.reason
-        );
-        assert!(
-            !forced.reason.contains("--force-with-lease"),
-            "{}",
-            forced.reason
-        );
+        assert!(static_guard_in("git push --force origin main", Some(repo.path())).is_none());
+        assert_eq!(take_guard_note().as_deref(), Some(FORCE_SAID));
         assert!(static_guard_in("git push origin main", Some(repo.path())).is_none());
-        assert_eq!(rm.pattern, "rm-rf-outside-tmp");
-        assert_eq!(rm.verdict, "deny");
-        assert_eq!(both.pattern, "rm-rf-outside-tmp");
-        assert_eq!(find.pattern, "find-delete-outside-tmp");
-        assert_eq!(denied.pattern, "rm-rf-outside-tmp");
         let path = rules_cache_path().unwrap();
         keep_rules(
             &path,
@@ -60987,13 +60784,15 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "{}",
             denied_push.reason
         );
+        assert_eq!(take_guard_note(), None, "a refused push names no rule");
     }
 
     /// A stock seat, with no rule of its own, lets a build or scratch
     /// directory and a cleanup of regenerable files go inside the tree, as
-    /// ljos-policyd does. The home, the root, `.git`, a climb out, a glob,
-    /// a variable and a line that can `cd` away first are still refused.
-    /// The seat guard refuses a tree above the person key first.
+    /// ljos-policyd does, and names no rule. `.git`, a climb out, a glob,
+    /// a variable and a line that can `cd` away first run too, and name
+    /// `rm-rf-outside-tmp` or `find-delete-outside-tmp`. The seat guard
+    /// still refuses a tree above the person key: the root and the home.
     #[test]
     fn a_stock_seat_lets_a_build_dir_delete_run_inside_the_tree() {
         let _g = env_guard();
@@ -61023,11 +60822,20 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "find -name '*.pyc' -delete",
         ] {
             assert!(static_guard(line).is_none(), "{line}");
+            assert_eq!(take_guard_note(), None, "{line} names no rule");
+        }
+        for line in [
+            "rm -rf /",
+            "rm -rf ~",
+            "rm -rf $HOME",
+            "find ~ -name '*.pyc' -delete",
+            "cd / && find . -name '*.pyc' -delete",
+        ] {
+            let got = static_guard(line).unwrap_or_else(|| panic!("{line} ran"));
+            assert_eq!(got.verdict, "deny", "{line}");
+            assert_eq!(got.pattern, "seat-guard", "{line}");
         }
         for (line, rule) in [
-            ("rm -rf /", "seat-guard"),
-            ("rm -rf ~", "seat-guard"),
-            ("rm -rf $HOME", "seat-guard"),
             ("rm -rf .", "rm-rf-outside-tmp"),
             ("rm -rf ./", "rm-rf-outside-tmp"),
             ("rm -rf .git", "rm-rf-outside-tmp"),
@@ -61047,7 +60855,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ("find . -delete", "find-delete-outside-tmp"),
             ("find . -name '*.rs' -delete", "find-delete-outside-tmp"),
             ("find . -name '*' -delete", "find-delete-outside-tmp"),
-            ("find ~ -name '*.pyc' -delete", "seat-guard"),
             ("find .. -name '*.pyc' -delete", "find-delete-outside-tmp"),
             (
                 "find .git -name '*.orig' -delete",
@@ -61055,11 +60862,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ),
             ("find . ! -name '*.pyc' -delete", "find-delete-outside-tmp"),
             ("find . -name '*.pyc' -o -delete", "find-delete-outside-tmp"),
-            ("cd / && find . -name '*.pyc' -delete", "seat-guard"),
         ] {
-            let got = static_guard(line).unwrap_or_else(|| panic!("{line} ran"));
-            assert_eq!(got.verdict, "deny", "{line}");
-            assert_eq!(got.pattern, rule, "{line}");
+            assert!(static_guard(line).is_none(), "{line} runs");
+            let note = take_guard_note().unwrap_or_default();
+            assert!(
+                note.starts_with(&format!("allow\twarn\t{rule}\t")),
+                "{line}: {note}"
+            );
         }
     }
 
@@ -61085,9 +60894,17 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let note = take_guard_note().expect("the allow warns");
         assert!(note.contains("unhealthy"), "{note}");
         assert!(note.contains("allowed"), "{note}");
-        let kept = tcb_verdict("rm -rf /home/u/proj").expect("a static rule still denies");
+        let _ = take_guard_note();
+        assert!(tcb_verdict("rm -rf /home/u/proj").is_none(), "rm -rf runs");
+        let note = take_guard_note().expect("the delete warns");
+        assert!(
+            note.starts_with("allow\twarn\trm-rf-outside-tmp\t"),
+            "{note}"
+        );
+        assert!(note.contains("unhealthy"), "{note}");
+        let kept = tcb_verdict("ljos approve req-1").expect("a static rule still denies");
         assert_eq!(kept.verdict, "deny");
-        assert_eq!(kept.pattern, "rm-rf-outside-tmp");
+        assert_eq!(kept.pattern, "seat-guard");
     }
 
     /// A missing policyd allows the line and says so. CI and a fresh
@@ -61164,10 +60981,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             let note = take_guard_note().expect(line);
             assert!(note.contains("unhealthy"), "{line}: {note}");
         }
-        let wiped =
-            tcb_verdict("ljos doctor && rm -rf /home/u/proj").expect("a static rule still denies");
-        assert_eq!(wiped.verdict, "deny");
-        assert_eq!(wiped.pattern, "rm-rf-outside-tmp");
+        let approved =
+            tcb_verdict("ljos doctor && ljos approve req-1").expect("a static rule still denies");
+        assert_eq!(approved.verdict, "deny");
+        assert_eq!(approved.pattern, "seat-guard");
     }
 
     /// A fault allows, warns, and writes one log row. The old switch is

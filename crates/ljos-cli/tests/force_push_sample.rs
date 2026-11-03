@@ -1,7 +1,8 @@
 //! The force-push samples in the README and the guides are the line
 //! `ljos hook` prints for the payload each page pipes in, with no seat
-//! rules, no `ljos-policyd` and the ask pack switched off. The hook is a
-//! runner's, so it runs in a sitting, from a checkout on a topic branch.
+//! rules, the ask pack switched off, and an `ljos-policyd` that answers a
+//! force push as 0.6 does. The hook is a runner's, so it runs in a
+//! sitting, from a checkout on a topic branch.
 
 ljos_test_boot::harness!();
 use std::io::Write;
@@ -49,6 +50,16 @@ fn hook(payload: &str) -> String {
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "topic"]);
     sit(&tracker, &run);
+    let policyd = home.path().join("ljos-policyd");
+    std::fs::write(
+        &policyd,
+        "#!/bin/sh\nprintf 'allow\\twarn\\tgit-force-push\\ta force push rewrites a published branch\\n'\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&policyd, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("hook")
         .current_dir(&repo)
@@ -65,7 +76,7 @@ fn hook(payload: &str) -> String {
         .env("PACKSET_URL", "off")
         .env("LJOS_ASK_PACK", "off")
         .env("LJOS_GUARD", "on")
-        .env_remove("POLICYD_BIN")
+        .env("POLICYD_BIN", &policyd)
         .env_remove("POLICYD_REQUIRED")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -103,7 +114,7 @@ fn each_force_push_sample_is_what_the_hook_prints() {
         ),
         (
             r#"{"hookEventName":"pre_tool_use","toolInput":{"command":"git push --force"}}"#,
-            r#"{"decision""#,
+            r#"{"hookSpecificOutput""#,
             &["docs/source/grok-build.rst", "docs/orgmode/grok-build.org"][..],
         ),
     ];

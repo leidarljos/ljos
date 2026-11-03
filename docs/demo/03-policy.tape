@@ -1,11 +1,13 @@
 # The command check, with no model in the loop. A recursive delete
-# outside /tmp is refused with the reason the guard prints. The check
-# runs nothing.
+# outside /tmp is let through with the rule and warning the guard prints.
+# The check runs nothing.
 #
 # Prepare the HOME the same way as 02-memory.tape, and
 # `mkdir -p "$HOME/notes"`. PATH must already contain ljos.
 # Put docs/demo/bin first on PATH so bash breaks a long line on a
-# space. The frame is 1280x720, about 101 columns. The refusal
+# space.
+# The frame is 1280x720, about 101 columns.
+# The warning
 # stays under the command that asked.
 
 Output docs/demo/03-policy.gif

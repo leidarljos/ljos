@@ -240,12 +240,16 @@ policyd refuses some of these commands and asks about the others.
 - writes to the hook files, the policy files and the ljos programs.
 - outbound mail whose From is not your own address.
 
+ljos runs a recursive delete outside `/tmp` and a force push all the same.
+It prints the rule and its warning on one line, `allow\twarn\tRULE\tWARNING`, and keeps the label in `$XDG_DATA_HOME/ljos/bypass.jsonl`.
+
 A lease push to a feature branch is allowed. An ordinary push of a branch is allowed.
 
-The hook hands the runner this answer for `git push --force origin main`. The runner asks you:
+The hook hands the runner this answer for `git push --force` on a topic branch.
+The push runs:
 
 ```
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `git-force-push`)"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"allow\twarn\tgit-force-push\ta force push rewrites a published branch"}}
 ```
 
 ### The rewrite
@@ -281,7 +285,7 @@ one command without running it:
 ```
 $ ljos policy -- rm -rf /usr/share/foo
 rm -rf /usr/share/foo
-deny: rm-rf-outside-tmp: a recursive delete outside /tmp cannot be undone. ...
+allow	warn	rm-rf-outside-tmp	a recursive delete reaches outside /tmp and /var/tmp
 ```
 
 The command check is separate from the git hook. A git hook books the work. `ljos git-hooks install` adds a post-commit hook. On the

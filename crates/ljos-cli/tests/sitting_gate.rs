@@ -345,11 +345,21 @@ fn a_runner_pushes_onto_develop_or_main_once_the_seats_clear_it() {
         not_refused(&seat.policy(line, &env), line);
     }
     let develop = "git push origin develop";
-    asks_for_consensus(&seat.policy(develop, &env), develop);
+    let forced = [
+        "git push --force origin develop",
+        "git push --force-with-lease origin develop",
+        "git push --mirror origin",
+    ];
+    for line in std::iter::once(develop).chain(forced) {
+        asks_for_consensus(&seat.policy(line, &env), line);
+    }
     seat.vote(&[("flint", "approve")]);
     asks_for_consensus(&seat.policy(develop, &env), develop);
     seat.vote(&[("inky", "approve"), ("flint", "approve")]);
     for line in [develop, "git push origin HEAD:main"] {
+        not_refused(&seat.policy(line, &env), line);
+    }
+    for line in forced {
         not_refused(&seat.policy(line, &env), line);
     }
     not_refused(&seat.hook_with(develop, &env), "the hook's push");

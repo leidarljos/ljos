@@ -580,7 +580,8 @@ fn a_blank_conversation_id_reads_the_env_and_touches_the_book() {
 /// A commit is allowed and the book log records the call, and so is a push
 /// onto a topic branch; a push onto `develop` is refused, since no ticket's
 /// seats can clear a call that sits on none. An `rm -rf` outside a temp
-/// directory is still refused. A payload that names a conversation, and a
+/// directory runs with the `rm-rf-outside-tmp` warning line, and the bypass
+/// log keeps the label. A payload that names a conversation, and a
 /// non-empty id that names nobody, are refused.
 #[test]
 fn a_payload_with_no_conversation_id_skips_the_sitting_check() {
@@ -642,11 +643,24 @@ fn a_payload_with_no_conversation_id_skips_the_sitting_check() {
         omitted_said.contains("sitting-gate") && omitted_said.contains("settled consensus"),
         "a develop push whose payload omits every id:\n{omitted_said}"
     );
-    let rm = home.hook_with(&blank("preToolUse", "rm -rf /home/x", None), &on);
-    assert!(
-        rm.contains("rm-rf-outside-tmp") && rm.contains("\"permission\":\"deny\""),
-        "rm -rf was not denied:\n{rm}"
-    );
+    for line in ["rm -rf /home/x", "rm -rf ~/.ssh"] {
+        let rm = home.hook_with(&blank("preToolUse", line, None), &on);
+        assert!(
+            rm.contains("\"permission\":\"allow\"")
+                && rm.contains(
+                    "allow\twarn\trm-rf-outside-tmp\ta recursive delete reaches outside /tmp and /var/tmp"
+                ),
+            "{line} did not run with its warning:\n{rm}"
+        );
+        let bypass = std::fs::read_to_string(home.home.join(".local/share/ljos/bypass.jsonl"))
+            .unwrap_or_default();
+        assert!(
+            bypass.lines().any(|row| row.contains("\"kind\":\"warn\"")
+                && row.contains("\"rule\":\"rm-rf-outside-tmp\"")
+                && row.contains(line)),
+            "the bypass log has no label for {line}:\n{bypass}"
+        );
+    }
     refused(
         &home.hook_with(&blank("preToolUse", push, Some(CONV_Z)), &on),
         "a push whose conversation_id is Z and no sitting is open",
