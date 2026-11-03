@@ -13,7 +13,8 @@ the model speaks. The opener files or reuses the decision and starts
 one headless member per brief. The model is told not to pick and not
 to ssh. ``Stop`` still blocks the turn once if it picks with no ballot.
 ``PreToolUse`` runs the Trusted Computing Base (TCB) check and the pack
-rules; a deny blocks. Nothing needs a ``sync.sh``.
+rules; a rule that fires is one warning line, and the call runs. Nothing
+needs a ``sync.sh``.
 
 Install
 =======
@@ -40,7 +41,7 @@ Event                  What ``ljos hook`` does                                  
 ``UserPromptSubmit``   searches, keeps the text                                                                                                                          discarded
 ``PostToolUse``        emits the kept text once; with no issue open, the first result says to file and sit                                                               passed to the model after the tool
 ``PostToolUseFailure`` searches the pack on the failed command and its error; up to three standing claims that share at least two content words with them                passed with the failed result
-``PreToolUse``         TCB and pack rules; a deny blocks                                                                                                                 a turn has many tool calls
+``PreToolUse``         TCB and pack rules; a rule is a warning in ``additionalContext``, and the call runs                                                               a turn has many tool calls
 ``PreCompact``         fires up to eight memories injected so far and lets a later prompt bring them back; keeps a note naming the issue the conversation still has open ignored; the next ``PostToolUse`` passes the note on
 ``Stop``               with no issue open, blocks one turn that used tools and never touched the seat                                                                    ``decision`` ``block`` continues the turn once
 ``SessionEnd``         fires injected memories                                                                                                                           ignored
@@ -58,11 +59,9 @@ and ``SubagentStop`` get 15, and ``PreCompact`` and ``SessionEnd`` 5, Grok's
 default.
 
 Grok's stdin is camelCase (``hookEventName``, ``sessionId``, ``toolInput``), and
-``ljos hook`` reads it as the snake\ :sub:`case` fields. A deny blocks on a top-level
-``decision`` of ``deny`` beside ``hookSpecificOutput``. An ask rule is the same
-pair with ``ask``: Grok shows that as the in-chat permission prompt. A runner
-that cannot ask (stdin carrying ``turn_id``) still gets the ask rewritten to
-a deny.
+``ljos hook`` reads it as the snake\ :sub:`case` fields. A rule that fires is its
+warning in ``hookSpecificOutput`` ``additionalContext``, with no ``decision``, so
+Grok Build runs the call and shows the warning.
 
 A panel member is a supervised child
 ====================================
@@ -88,7 +87,8 @@ Smoke
 
 An allow prints nothing unless a prompt has already kept pack text or a rule warned, as the force push does.
 The bypass log keeps that label.
-A TCB deny still blocks.
+A TCB rule is a warning too; the call runs.
+Under the person's ``block-on-warning``, policyd's block is a top-level ``decision`` of ``deny`` beside ``hookSpecificOutput``, and Grok Build does not run the call.
 
 Personas as Grok agents
 =======================

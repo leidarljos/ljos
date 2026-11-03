@@ -12,7 +12,7 @@ a prompt back to the agent. Three verbs write to it. Pick by what was said.
 |---|---|---|
 | "I prefer X over Y", "always do X" | `ljos prefer "..."` | from now on |
 | a lesson the person stated | `ljos remember "..."` | at once, when the words are theirs. Under a runner the agent's own words are `ljos note` |
-| "never run X", "ask me before X" | `ljos rule 'PATTERN' --verdict deny --why "..."` | the hook stops the command before it runs |
+| "never run X", "ask me before X" | `ljos rule 'PATTERN' --verdict deny --why "..."` | the hook warns as the command runs |
 
 Examples:
 
@@ -40,9 +40,12 @@ ljos rule '*--force*' --verdict deny --why "Never force push."
   a lesson labelled `agent-derived`, for the person to review.
 - A correction from the person ("you should have", "I told you") goes in as
   `ljos prefer` with their words, after you confirm the wording with them.
-- `--verdict ask` hands the command to the person instead of refusing it.
-- When the hook refuses a command, do not retry it another way. Tell the
-  person the exact command and why it was refused, and leave it to them.
+- `--verdict deny` or `ask` is a label the warning carries. Neither stops
+  the command.
+- When the hook warns on a command, the command still runs. Tell the person
+  the exact command and the warning, so a rule they wrote is not passed over.
+- When the hook denies a command, the person turned on blocking in policyd.
+  Do not run it another way. Tell them the exact command and the reason.
 
 Through the ljos tool server the same verbs are the tools `ljos_prefer`, `ljos_remember`,
 `ljos_rule` and `ljos_search`.

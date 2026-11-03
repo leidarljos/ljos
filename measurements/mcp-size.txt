@@ -1,15 +1,15 @@
 tokenizer: o200k_base
 text: initialize instructions, and the tools/list result object as the server sent it
 total: the two token counts added
-core.tools: 21
-core.tokens: 8111
+core.tools: 20
+core.tokens: 7872
 core.instructions_tokens: 215
-core.tools_tokens: 7896
-core.sha256: b592895765745132ebc40bc5d30fb425ce4c4915ba8702cb01ce857c86610543
-core.names: ljos_rule ljos_request_approval ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor
-all.tools: 53
-all.tokens: 18028
+core.tools_tokens: 7657
+core.sha256: e5839353e26820e6efe7a52fb93cd85f225f158d7dd5a2d4decb987bb369dfa2
+core.names: ljos_rule ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor
+all.tools: 52
+all.tokens: 17788
 all.instructions_tokens: 215
-all.tools_tokens: 17813
-all.sha256: ffa0809c45d2679fe173064f284de243b59e1709578685c4b59f9bae16ca8c0c
-all.names: ljos_rule ljos_request_approval ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor ljos_bump_plan ljos_calibrate ljos_cards ljos_complete ljos_conflicts ljos_consolidate ljos_current ljos_deed ljos_digest ljos_due ljos_evidence ljos_findings ljos_forget ljos_graded ljos_group ljos_habit ljos_handover ljos_island ljos_learn ljos_mail_search ljos_mail_show ljos_policy ljos_predict ljos_read ljos_receive ljos_timeline ljos_trust ljos_brief ljos_persona ljos_personas ljos_playbook ljos_playbooks
+all.tools_tokens: 17573
+all.sha256: acf7d1fb12dbf254b3ce480a704eec44700c95bc058ad4699b6e5014c3dd5e47
+all.names: ljos_rule ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor ljos_bump_plan ljos_calibrate ljos_cards ljos_complete ljos_conflicts ljos_consolidate ljos_current ljos_deed ljos_digest ljos_due ljos_evidence ljos_findings ljos_forget ljos_graded ljos_group ljos_habit ljos_handover ljos_island ljos_learn ljos_mail_search ljos_mail_show ljos_policy ljos_predict ljos_read ljos_receive ljos_timeline ljos_trust ljos_brief ljos_persona ljos_personas ljos_playbook ljos_playbooks

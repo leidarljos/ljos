@@ -280,14 +280,11 @@ fn prefer_user_is_read_by_a_second_seat_and_promote_copies_a_fixture_lesson() {
 }
 
 fn policy(home: &Home, line: &str) -> std::process::Output {
-    home.ljos()
-        .args(["policy", "--fail-on-deny", line])
-        .output()
-        .unwrap()
+    home.ljos().args(["policy", line]).output().unwrap()
 }
 
 #[test]
-fn the_guard_denies_a_mention_and_a_reply_and_allows_another_comment() {
+fn the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment() {
     let home = Home::new();
     let wrote = home
         .ljos()
@@ -310,21 +307,28 @@ fn the_guard_denies_a_mention_and_a_reply_and_allows_another_comment() {
 
     let mention = policy(&home, "gh pr comment 12 --body 'please ask @ocaisa'");
     let mention_text = output_text(&mention);
-    assert!(!mention.status.success(), "{mention_text}");
-    assert!(mention_text.contains("deny:"), "{mention_text}");
+    assert!(mention.status.success(), "{mention_text}");
+    assert!(
+        mention_text.contains("\nwarning: ")
+            && mention_text.contains("never post or reply to Alan"),
+        "{mention_text}"
+    );
 
     let reply = policy(
         &home,
         "gh api --method POST repos/org/repo/issues/comments/7/replies -f body=seen -F in_reply_to_user=ocaisa",
     );
     let reply_text = output_text(&reply);
-    assert!(!reply.status.success(), "{reply_text}");
-    assert!(reply_text.contains("deny:"), "{reply_text}");
+    assert!(reply.status.success(), "{reply_text}");
+    assert!(
+        reply_text.contains("\nwarning: ") && reply_text.contains("never post or reply to Alan"),
+        "{reply_text}"
+    );
 
     let allowed = policy(&home, "gh pr comment 12 --body 'tests passed'");
     let allowed_text = output_text(&allowed);
     assert!(allowed.status.success(), "{allowed_text}");
-    assert!(!allowed_text.contains("deny:"), "{allowed_text}");
+    assert!(!allowed_text.contains("warning: "), "{allowed_text}");
 }
 
 /// The variables an agent runner stamps on the shell that runs the suite.
@@ -352,7 +356,7 @@ fn rerun(test: &str, env: &[(&str, &str)]) -> std::process::Output {
 fn the_user_rule_tests_pass_under_a_runner_environment() {
     for test in [
         "prefer_user_is_read_by_a_second_seat_and_promote_copies_a_fixture_lesson",
-        "the_guard_denies_a_mention_and_a_reply_and_allows_another_comment",
+        "the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment",
     ] {
         for env in [RUNNER_ENV, &[("CURSOR_CONVERSATION_ID", "x")]] {
             let out = rerun(test, env);

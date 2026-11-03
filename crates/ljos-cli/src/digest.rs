@@ -132,8 +132,8 @@ pub fn digest_cli(since: Option<&str>, json: bool, mark: bool) -> Result<String>
     show(since, json, mark || !json, true)
 }
 
-/// The MCP tool. It never moves the marker, and a refused command is not
-/// repeated: the row says that a command was refused.
+/// The MCP tool. It never moves the marker, and a command the guard named
+/// is not repeated: the row says what the guard did to a command.
 ///
 /// # Errors
 ///
@@ -894,7 +894,7 @@ fn collect_guard(window: &Window, rows: &mut Vec<Row>, commands: bool) {
             continue;
         };
         let recorded = value["kind"].as_str().unwrap_or("");
-        if recorded != "refusal" && recorded != "rewrite" {
+        if !GUARD_KINDS.contains(&recorded) {
             continue;
         }
         let Some(at) = value["ts"].as_str().and_then(stamp_unix) else {
@@ -910,16 +910,13 @@ fn collect_guard(window: &Window, rows: &mut Vec<Row>, commands: bool) {
         if body.is_empty() {
             continue;
         }
-        let text = if !commands {
-            if recorded == "rewrite" {
-                "rewrote a command".to_string()
-            } else {
-                "refused a command".to_string()
-            }
-        } else if recorded == "rewrite" {
-            format!("rewrote {body}")
-        } else {
-            format!("refused {body}")
+        let text = match (commands, recorded) {
+            (false, "rewrite") => "rewrote a command".to_string(),
+            (false, "warning") => "warned on a command".to_string(),
+            (false, _) => "refused a command".to_string(),
+            (true, "rewrite") => format!("rewrote {body}"),
+            (true, "warning") => format!("warned: {body}"),
+            (true, _) => format!("refused {body}"),
         };
         push(rows, window, Row::new(at, seat, "guard", text, "", false));
     }
@@ -1244,10 +1241,14 @@ fn one_line(text: &str) -> String {
     cut
 }
 
+/// The guard rows a digest shows. `refusal` is a call policyd blocked
+/// under the person's `block-on-warning`, or a row an older build wrote.
+const GUARD_KINDS: [&str; 3] = ["warning", "rewrite", "refusal"];
+
 /// Append one guard row. A row that cannot be written is skipped.
 #[inline(never)]
 pub fn note_guard(kind: &str, seat: &str, text: &str) {
-    if kind != "refusal" && kind != "rewrite" {
+    if !GUARD_KINDS.contains(&kind) {
         return;
     }
     let Some(path) = guard_path() else {

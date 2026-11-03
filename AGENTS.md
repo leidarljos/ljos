@@ -88,3 +88,12 @@ The key stays in that file.
 A failure prints one line on stderr and exits 0, and the brief continues.
 `ljos mesh down` leaves the mesh when the brief is finished.
 [docs/mesh.md](docs/mesh.md) has the login server, the hostname and the flags.
+
+## Shell guard rules
+
+By default each guard rule prints one warning line and the command runs.
+Blocking is the person's choice, through the `block-on-warning` setting.
+Do not add a rule that refuses or stalls a command by default.
+On a cloud seat, three push checks stay refusals: a push to a branch outside the allowlist, a force push, and a branch delete.
+Keep those three as they are.
+A rule may name a risk in its warning line, and docs may carry security notes, but code stays runnable.

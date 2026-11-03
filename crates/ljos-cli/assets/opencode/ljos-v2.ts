@@ -7,8 +7,10 @@
 // on each edit and each git commit, and the session id in every shell the
 // agent opens. The first prompt of a session also carries the start line.
 //
-// A gate that cannot answer refuses: a missing binary, a timeout, a
-// non-zero exit or bad JSON stops the bash call rather than letting it run.
+// A bash call stops only on the hook's deny, which comes when the person's
+// policyd config sets block-on-warning. A warning, or the note that the gate
+// did not answer, joins the context the turn's next model request reads,
+// and the command runs.
 import { Plugin } from "@opencode/plugin"
 
 const LJOS = process.env.LJOS_BIN ?? "{ljos}"
@@ -146,7 +148,7 @@ export default Plugin.define({
     })
 
     // A throw here reaches the model as the tool's error and the command
-    // does not run. An ask stops the command and tells the agent to ask.
+    // does not run, so only the hook's deny throws.
     await ctx.tool.hook("execute.before", async (event: any) => {
       const seat = seatTool(event.tool)
       if (!seat) return
@@ -171,18 +173,16 @@ export default Plugin.define({
         cwd,
       })
       if (!seat.bash) return
-      if (!a.ok) {
+      if (a.ok && a.out?.permissionDecision === "deny") {
         blocked.set(key, "deny")
-        throw new Error(`ljos: refused, the gate did not answer: ${a.why}`)
+        throw new Error(`ljos: denied: ${a.out.permissionDecisionReason}`)
       }
-      const verdict = a.out?.permissionDecision
-      if (verdict === "deny" || verdict === "ask") blocked.set(key, verdict)
-      if (verdict === "deny") throw new Error(`ljos: denied: ${a.out.permissionDecisionReason}`)
-      if (verdict === "ask")
-        throw new Error(
-          `ljos: needs the person's approval: ${a.out.permissionDecisionReason}. ` +
-            `Ask them; do not retry until they say yes.`,
-        )
+      const id = event.sessionID ?? event.session?.id
+      const said = a.ok
+        ? a.out?.additionalContext
+        : `ljos: the gate did not answer (${a.why}); the command ran unjudged`
+      const prior = id ? held.get(id) : undefined
+      if (id && said) held.set(id, prior ? `${prior}\n${said}` : said)
     })
 
     // The commit is cited here, after it exits. A zero exit still cites it

@@ -4,7 +4,8 @@
  *
  * Shells to `ljos hook` with the snake_case JSON it parses:
  *   before_agent_start -> UserPromptSubmit: the seat's memories as a hidden custom message
- *   tool_call (bash)   -> PreToolUse: a seat rule's deny blocks, an ask asks the person
+ *   tool_call (bash)   -> PreToolUse: a seat rule's warning is shown, and the command runs;
+ *                         the hook's deny, under the person's block-on-warning, blocks it
  *   session_shutdown   -> SessionEnd: the memories used in the session fire together
  *
  * The runner owns its conversation id. Ids inherited from a runner that
@@ -12,10 +13,9 @@
  * spawns MCP servers or shells, and one OMP_SESSION_ID is minted for this
  * process, so its claims are its own.
  *
- * Fails open: a missing binary, a timeout or bad JSON is no opinion. A JSON
- * answer counts on any exit, and exit 2 without one is a deny with stderr
- * as its reason, so the deny a failed seat hook writes still blocks. A
- * throw in a tool_call handler blocks the tool, so every path here catches.
+ * Fails open: a missing binary, a timeout or bad JSON is no opinion, and a
+ * JSON answer counts on any exit. A throw in a tool_call handler blocks
+ * the tool, so every path here catches.
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
@@ -48,25 +48,17 @@ async function hook(payload: Record<string, unknown>): Promise<HookOut | undefin
 			stderr: "pipe",
 		});
 		const timer = setTimeout(() => proc.kill(), TIMEOUT_MS);
-		const [text, err] = await Promise.all([
+		const [text] = await Promise.all([
 			new Response(proc.stdout).text(),
 			new Response(proc.stderr).text(),
 		]);
-		const code = await proc.exited;
+		await proc.exited;
 		clearTimeout(timer);
-		let out: HookOut | undefined;
 		try {
-			out = text.trim() ? (JSON.parse(text) as HookOut) : undefined;
+			return text.trim() ? (JSON.parse(text) as HookOut) : undefined;
 		} catch {
-			out = undefined;
+			return undefined;
 		}
-		if (code !== 2 || out?.hookSpecificOutput?.permissionDecision) return out;
-		return {
-			hookSpecificOutput: {
-				permissionDecision: "deny",
-				permissionDecisionReason: err.trim() || "ljos hook exited 2",
-			},
-		};
 	} catch {
 		return undefined;
 	}
@@ -90,17 +82,15 @@ export default function ljosHook(pi: ExtensionAPI) {
 			tool_input: { command },
 		});
 		const spec = out?.hookSpecificOutput;
-		const reason = spec?.permissionDecisionReason ?? "ljos rule";
-		if (spec?.permissionDecision === "deny") return { block: true, reason };
-		if (spec?.permissionDecision === "ask") {
-			// A print-mode run has nobody to ask.
-			if (!ctx.hasUI) return { block: true, reason: `${reason}; needs a person to approve` };
-			try {
-				if (await ctx.ui.confirm("ljos guard", `${reason}\n\n${command}`)) return;
-			} catch {
-				// no dialog: fall through to block
-			}
-			return { block: true, reason };
+		if (spec?.permissionDecision === "deny") {
+			return { block: true, reason: spec.permissionDecisionReason ?? "ljos rule" };
+		}
+		const warning = spec?.additionalContext;
+		if (!warning || !ctx.hasUI) return;
+		try {
+			ctx.ui.notify(warning, "warning");
+		} catch {
+			// no dialog: the command runs all the same
 		}
 	});
 

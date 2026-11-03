@@ -1237,9 +1237,8 @@ fn fired(rule: &UserRule) -> Rule {
 
 /// `law`, fired by `rule`, as a guard reports it. A promoted rule the pack
 /// does not confirm still fires, with a reason that says it is unverified
-/// rather than the person's: a deny or an ask only takes a command away,
-/// so honouring an unconfirmed one never widens what the agent may run,
-/// while dropping it would let a slow, down or forged pack lift a deny.
+/// rather than the person's, so a slow, down or forged pack does not
+/// silence its warning.
 fn reported(rule: &UserRule, mut law: Rule) -> Rule {
     if let Some(why) = unconfirmed(rule) {
         law.reason = format!(
@@ -1248,15 +1247,6 @@ fn reported(rule: &UserRule, mut law: Rule) -> Rule {
         );
     }
     law
-}
-
-/// Whether `rule` is an outbound-post denial, the only verdict
-/// `beforeMCPExecution` enforces.
-#[must_use]
-pub fn mcp_event_denies(event: &str, rule: &Rule) -> bool {
-    event == "beforeMCPExecution"
-        && rule.verdict == "deny"
-        && rule.pattern.starts_with("user-rule:")
 }
 
 struct Post {
@@ -1275,20 +1265,22 @@ fn note_rules_read_error(err: &anyhow::Error) {
     eprintln!("ljos: {err:#}");
 }
 
-/// A GitHub write the rules cover, refused because the file could not be
-/// used. The reason names the file. The pattern keeps the MCP deny.
-fn github_write_blocked(err: &anyhow::Error) -> Rule {
+/// A GitHub write the rules cover, warned on because the file could not
+/// be used. The reason names the file.
+fn github_write_unchecked(err: &anyhow::Error) -> Rule {
     note_rules_read_error(err);
     Rule {
         pattern: "user-rule:file".into(),
         verdict: "deny".into(),
-        reason: format!("user rules could not be read ({err:#}), so this GitHub write is refused"),
+        reason: format!(
+            "user rules could not be read ({err:#}), so this GitHub write was not checked against them"
+        ),
     }
 }
 
 /// The person's allow that covers `line`, if any: a user rule with the
 /// verdict `allow` and the person's basis whose pattern matches a command
-/// of the line. It clears the seat's own asks and denies for that line.
+/// of the line. It clears the seat's own warnings for that line.
 /// The law in policyd is not read here and still judges the line.
 #[must_use]
 pub fn allows(line: &str) -> Option<UserRule> {
@@ -1320,7 +1312,7 @@ pub fn guard_line(line: &str) -> Option<Rule> {
             if posts_of(line).is_empty() {
                 return None;
             }
-            return Some(github_write_blocked(&err));
+            return Some(github_write_unchecked(&err));
         }
     };
     if rules.is_empty() {
@@ -1385,7 +1377,7 @@ fn guard_mcp(
     }
     let rules = match load() {
         Ok(rules) => rules,
-        Err(err) => return Some(github_write_blocked(&err)),
+        Err(err) => return Some(github_write_unchecked(&err)),
     };
     let post = mcp_fields(input, tool);
     rules.iter().find(|rule| post_hits(rule, &post)).map(fired)
@@ -1848,7 +1840,7 @@ mod tests {
         ];
         for test in [
             "a_user_rule_is_surfaced_in_a_second_seat",
-            "the_guard_denies_a_mention_and_a_reply_and_allows_another_comment",
+            "the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment",
             "two_homes_with_different_rules_converge",
         ] {
             let test = format!("user_rules::tests::{test}");
@@ -1989,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn the_guard_denies_a_mention_and_a_reply_and_allows_another_comment() {
+    fn the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment() {
         let (_lock, _dir) = isolated();
         write_preference(
             "never post or reply to Alan (ocaisa)",
@@ -2047,11 +2039,13 @@ mod tests {
         )
         .unwrap();
         let out = super::super::hook_output_ruled(&cursor, "", Some(&verdict));
-        assert!(out.contains("\"permission\":\"deny\""), "{out}");
+        assert!(out.contains("\"permission\":\"allow\""), "{out}");
+        assert!(out.contains(&verdict.warning()), "{out}");
         let payload = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa"}}"#;
         let (out, code) = super::super::cursor_side_answer(payload, None).unwrap();
         assert_eq!(code, 0, "{out}");
-        assert!(out.contains("\"permission\":\"deny\""), "{out}");
+        assert!(out.contains("\"permission\":\"allow\""), "{out}");
+        assert!(out.contains("warning:"), "{out}");
         assert!(out.contains("ocaisa") || out.contains("Alan"), "{out}");
     }
 
@@ -2105,10 +2099,10 @@ mod tests {
     }
 
     /// A zero-byte file, a blank file, and a dangling symlink are not an
-    /// empty rule list. A covered GitHub write is refused and the reason
-    /// names the path. A missing file and a real empty list do not.
+    /// empty rule list. A covered GitHub write is warned on and the reason
+    /// names the path. A missing file and a real empty list are not.
     #[test]
-    fn an_empty_rules_file_and_a_dangling_link_deny_a_github_write() {
+    fn an_empty_rules_file_and_a_dangling_link_warn_on_a_github_write() {
         let (_lock, _dir) = isolated();
         let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
         let read_tool = r#"{"tool_name":"list_issues","mcp_server_name":"github","tool_input":{"owner":"org"}}"#;
@@ -2164,7 +2158,7 @@ mod tests {
     }
 
     /// A file that has parsed, then is emptied or cut off, is still the
-    /// last whole copy. A benign GitHub write is not refused.
+    /// last whole copy. A benign GitHub write is not warned on.
     #[test]
     fn a_rules_file_caught_empty_keeps_the_last_good_copy() {
         let (_lock, _dir) = isolated();
@@ -2192,10 +2186,10 @@ mod tests {
         );
     }
 
-    /// A file that is present and cannot be used denies the GitHub writes
+    /// A file that is present and cannot be used warns on the GitHub writes
     /// the rules cover, and leaves reads and other MCP calls alone.
     #[test]
-    fn a_bad_rules_file_denies_github_writes_and_allows_other_calls() {
+    fn a_bad_rules_file_warns_on_github_writes_and_allows_other_calls() {
         let (_lock, _dir) = isolated();
         let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
         let note = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"ljos_note","mcp_server_name":"ljos","command":"ljos-mcp","tool_input":{"text":"x"}}"#;
@@ -2227,7 +2221,8 @@ mod tests {
             assert!(guard_payload(other).is_none(), "{name}: other MCP denied");
             let (out, code) = super::super::cursor_side_answer(benign, None).unwrap();
             assert_eq!(code, 0, "{name}: {out}");
-            assert!(out.contains("\"permission\":\"deny\""), "{name}: {out}");
+            assert!(out.contains("\"permission\":\"allow\""), "{name}: {out}");
+            assert!(out.contains("was not checked"), "{name}: {out}");
             let (out, code) = super::super::cursor_side_answer(note, None).unwrap();
             assert_eq!(code, 0, "{name}: {out}");
             assert_eq!(out, "{\"permission\":\"allow\"}\n", "{name}: {out}");

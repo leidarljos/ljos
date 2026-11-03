@@ -4,7 +4,7 @@
 //! the bypass log keeps the label. Deleting a remote branch or tag runs
 //! with the `git-push-delete` warning the same way. A plain branch push, a
 //! tag push and a lease push onto a feature branch stay allowed. A push
-//! whose `LJOS_CITE` does not stand is denied.
+//! whose `LJOS_CITE` does not stand is not refused here.
 
 ljos_test_boot::harness!();
 use std::path::Path;

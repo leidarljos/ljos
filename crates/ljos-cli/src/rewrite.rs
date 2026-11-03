@@ -1,13 +1,13 @@
-//! A guard that fixes a command instead of only refusing it.
+//! A guard that fixes a command instead of only warning about it.
 //!
 //! ljos-policyd answers `allow\trewrite\tLINE` when the line should run as
-//! LINE. The guard judges LINE again. A runner whose `PreToolUse` hook can
+//! LINE. The guard reads LINE again. A runner whose `PreToolUse` hook can
 //! replace the tool input gets LINE back as that input. A runner without
-//! that field is refused with LINE named. A LINE the guard does not accept
-//! as it stands refuses the call. The original line never runs.
+//! that field, or a LINE the guard does not take as it stands, runs the
+//! original line with a warning that names LINE.
 //!
-//! The local table names a fix in a policyd refusal it knows. That call
-//! stays a deny, so a runner that drops an updated input still refuses it.
+//! The local table names a fix in a policyd warning it knows. That call
+//! runs as written, and the warning names the fix.
 
 use std::cell::RefCell;
 
@@ -27,7 +27,7 @@ const SHELL_TOOLS: &[&str] = &["Bash", "Shell", "run_terminal_command"];
 const POLICYD_REASON: &str = "ljos-policyd rewrote this line";
 
 /// Characters that make a line more than one simple command. The local
-/// table leaves such a line to the refusal.
+/// table leaves such a line to the warning as it came.
 const SHELL_META: &[char] = &[
     ';', '&', '|', '<', '>', '$', '`', '\\', '(', ')', '{', '}', '\n', '\r',
 ];
@@ -44,8 +44,8 @@ pub enum Outcome {
     /// Run this line, which the guard judged and accepted, in place of
     /// the call's line.
     Run(Rewrite),
-    /// Refuse the call. The original line does not run.
-    Refuse(Rule),
+    /// Run the call's own line, with this rule's warning.
+    Warn(Rule),
 }
 
 /// The new line in a policyd rewrite answer, `allow\trewrite\tLINE`.
@@ -70,8 +70,8 @@ pub fn from_policyd(text: &str) -> Option<String> {
 
 /// Hold policyd's rewrite of `line`, which it judged as `script`. The
 /// script can differ from the line: a here-document body is taken out, or
-/// a continuation is joined. Then the rewrite is inexact, so the call is
-/// refused and neither line runs.
+/// a continuation is joined. Then the rewrite is inexact, so the line
+/// runs as written with a warning that names the rewrite.
 pub(crate) fn hold_exact(line: &str, script: &str, command: String) -> Option<Rule> {
     if script.trim() == line.trim() {
         hold(line, command);
@@ -79,10 +79,10 @@ pub(crate) fn hold_exact(line: &str, script: &str, command: String) -> Option<Ru
     }
     Some(Rule {
         pattern: "ljos-policyd".into(),
-        verdict: "deny".into(),
+        verdict: "warn".into(),
         reason: format!(
             "{POLICYD_REASON} to `{command}`, but it judged a copy with its here-documents \
-             or continuations changed, so the new line is not exact. Neither line runs"
+             or continuations changed, so the new line is not exact. The line runs as written"
         ),
     })
 }
@@ -103,7 +103,7 @@ fn take_held(line: &str) -> Option<String> {
 }
 
 struct Fix {
-    /// The refusal codes this row answers.
+    /// The policyd codes this row answers.
     codes: &'static [&'static str],
     /// The interpreter, with or without a version suffix or a directory.
     program: &'static str,
@@ -128,7 +128,7 @@ fn is_program(word: &str, program: &str) -> bool {
         .is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.'))
 }
 
-/// The local table's fix for `line`, refused with `code`: `python x.py
+/// The local table's fix for `line`, warned on with `code`: `python x.py
 /// ARGS` becomes `uv run x.py ARGS`, the arguments kept as written.
 #[must_use]
 pub fn local(code: &str, line: &str) -> Option<Rewrite> {
@@ -155,13 +155,13 @@ pub fn local(code: &str, line: &str) -> Option<Rewrite> {
         })
 }
 
-/// Why the guard does not accept `line` as it stands, or None when it
+/// Why the guard does not take `line` as it stands, or None when it
 /// does. `judge` reads a line as the guard would and holds a rewrite as
-/// [`crate::tcb_verdict_in`] does, so a line rewritten again is refused.
-fn refusal_of(line: &str, judge: impl Fn(&str) -> Option<Rule>) -> Option<String> {
+/// [`crate::tcb_verdict_in`] does, so a line rewritten again is not taken.
+fn doubt_on(line: &str, judge: impl Fn(&str) -> Option<Rule>) -> Option<String> {
     let _ = take_held(line);
     if let Some(rule) = judge(line) {
-        return Some(format!("the guard refuses it: {}", rule.reason));
+        return Some(format!("the guard warns on it: {}", rule.reason));
     }
     take_held(line).map(|again| format!("the guard rewrites it again, to `{again}`"))
 }
@@ -169,10 +169,9 @@ fn refusal_of(line: &str, judge: impl Fn(&str) -> Option<Rule>) -> Option<String
 /// What the hook does with a tool call that has a rewrite, or None when
 /// it has none and the usual answer stands.
 ///
-/// A policyd rewrite runs only when the guard accepts the new line as it
-/// stands. Otherwise the call is refused. A local fix names the new line
-/// in the policyd refusal when the guard accepts that line, and the call
-/// stays refused either way.
+/// A policyd rewrite runs only when the guard takes the new line as it
+/// stands. Otherwise the call's own line runs with a warning. A local fix
+/// is named in the policyd warning when the guard takes that line.
 pub fn pick(
     call: &HookCall,
     verdict: Option<&Rule>,
@@ -186,30 +185,30 @@ pub fn pick(
     match verdict {
         None => {
             let command = held.filter(|command| command != line)?;
-            Some(match refusal_of(&command, judge) {
+            Some(match doubt_on(&command, judge) {
                 None => Outcome::Run(Rewrite {
                     command,
                     reason: POLICYD_REASON.to_string(),
                 }),
-                Some(why) => Outcome::Refuse(Rule {
+                Some(why) => Outcome::Warn(Rule {
                     pattern: "ljos-policyd".into(),
-                    verdict: "deny".into(),
+                    verdict: "warn".into(),
                     reason: format!(
-                        "{POLICYD_REASON} to `{command}`, and {why}. Neither line runs"
+                        "{POLICYD_REASON} to `{command}`, and {why}. The line runs as written"
                     ),
                 }),
             })
         }
-        Some(rule) if rule.verdict == "deny" && rule.pattern == "ljos-policyd" => {
+        Some(rule) if rule.pattern == "ljos-policyd" => {
             let code = rule.reason.split(':').next().unwrap_or("").trim();
             let fix = local(code, line).filter(|fix| fix.command != line)?;
-            refusal_of(&fix.command, judge).is_none().then(|| {
-                let mut refused = rule.clone();
-                refused.reason = format!(
+            doubt_on(&fix.command, judge).is_none().then(|| {
+                let mut warned = rule.clone();
+                warned.reason = format!(
                     "{}. Run `{}` instead: {}",
                     rule.reason, fix.command, fix.reason
                 );
-                Outcome::Refuse(refused)
+                Outcome::Warn(warned)
             })
         }
         Some(_) => None,
@@ -230,10 +229,10 @@ pub fn answer(
     Some(answer_with(input, call, context, &outcome, relayed))
 }
 
-/// [`answer`] for a known outcome. A refusal is the runner's deny. A line
-/// to run is the updated input where the runner takes one. A runner that
-/// cannot take one is refused with the new line named, so the original
-/// line never runs.
+/// [`answer`] for a known outcome. A warning is the usual allow with that
+/// line. A line to run is the updated input where the runner takes one. A
+/// runner that cannot take one runs the original line, with a warning
+/// that names the new one.
 #[must_use]
 pub fn answer_with(
     input: &str,
@@ -242,24 +241,24 @@ pub fn answer_with(
     outcome: &Outcome,
     relayed: bool,
 ) -> String {
-    let refuse = |rule: &Rule| crate::approval::hook_output(input, call, context, Some(rule));
+    let warn = |rule: &Rule| crate::hook_output_ruled(call, context, Some(rule));
     match outcome {
-        Outcome::Refuse(rule) => refuse(rule),
+        Outcome::Warn(rule) => warn(rule),
         Outcome::Run(fix) => (!relayed)
             .then(|| updated_input(input, call, context, fix))
             .flatten()
-            .unwrap_or_else(|| refuse(&unchangeable(fix))),
+            .unwrap_or_else(|| warn(&unchangeable(fix))),
     }
 }
 
-/// The deny for a runner whose hook cannot replace the command.
+/// The warning for a runner whose hook cannot replace the command.
 fn unchangeable(fix: &Rewrite) -> Rule {
     Rule {
         pattern: "ljos-policyd".into(),
-        verdict: "deny".into(),
+        verdict: "warn".into(),
         reason: format!(
             "{}. Run `{}` instead. This runner cannot take a new command, so the original \
-             line does not run",
+             line runs as written",
             fix.reason, fix.command
         ),
     }
@@ -337,10 +336,10 @@ mod tests {
     use super::*;
     use crate::hook_call;
 
-    fn uv_refusal() -> Rule {
+    fn uv_warning() -> Rule {
         Rule {
             pattern: "ljos-policyd".into(),
-            verdict: "deny".into(),
+            verdict: "warn".into(),
             reason: crate::policyd_reason("python-requires-uv"),
         }
     }
@@ -364,21 +363,22 @@ mod tests {
         answer_json(input, &outcome, relayed)
     }
 
-    /// The answer when policyd refused the call for want of uv.
-    fn local_refusal(input: &str) -> Value {
+    /// The answer when policyd warned on the call for want of uv.
+    fn local_warning(input: &str) -> Value {
         let call = hook_call(input);
-        let outcome = pick(&call, Some(&uv_refusal()), allow_all).expect("a fix");
-        assert!(matches!(outcome, Outcome::Refuse(_)), "{outcome:?}");
+        let outcome = pick(&call, Some(&uv_warning()), allow_all).expect("a fix");
+        assert!(matches!(outcome, Outcome::Warn(_)), "{outcome:?}");
         answer_json(input, &outcome, false)
     }
 
-    /// The decision a runner reads, whichever field carries it.
-    fn decision(v: &Value) -> &str {
-        v["hookSpecificOutput"]["permissionDecision"]
+    /// Whether a runner reads the answer as holding the call, whichever
+    /// field carries the decision.
+    fn holds(v: &Value) -> bool {
+        let decision = v["hookSpecificOutput"]["permissionDecision"]
             .as_str()
             .or_else(|| v["permission"].as_str())
-            .or_else(|| v["decision"].as_str())
-            .unwrap_or("")
+            .or_else(|| v["decision"].as_str());
+        matches!(decision, Some("deny" | "ask" | "block"))
     }
 
     const CLAUDE: &str = r#"{"session_id":"s-1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"python x.py --n 3","description":"run it","timeout":60000},"cwd":"/w"}"#;
@@ -530,7 +530,7 @@ mod tests {
             r#""toolInputTruncated":true"#,
         );
         let v = policyd_run(&cut, false);
-        assert_eq!(decision(&v), "deny", "{v}");
+        assert!(!holds(&v), "{v}");
         assert!(v["hookSpecificOutput"].get("updatedInput").is_none());
         assert!(
             v.to_string().contains("Run `uv run x.py --n 3` instead"),
@@ -538,11 +538,11 @@ mod tests {
         );
     }
 
-    /// A runner that cannot take a new command is refused with the new
-    /// line named, so the original line never runs: Cursor's
+    /// A runner that cannot take a new command runs the original line,
+    /// with a warning that names the new one: Cursor's
     /// `beforeShellExecution`, and every runner behind the relay.
     #[test]
-    fn an_accepted_rewrite_is_a_deny_where_input_cannot_change() {
+    fn an_accepted_rewrite_is_a_warning_where_input_cannot_change() {
         let cases = [
             (CURSOR_SHELL, false),
             (CLAUDE, true),
@@ -552,76 +552,73 @@ mod tests {
         ];
         for (input, relayed) in cases {
             let v = policyd_run(input, relayed);
-            assert_eq!(decision(&v), "deny", "{input} relayed={relayed}\n{v}");
+            assert!(!holds(&v), "{input} relayed={relayed}\n{v}");
             assert!(v["hookSpecificOutput"].get("updatedInput").is_none(), "{v}");
             assert!(v.get("updated_input").is_none(), "{v}");
             let said = v.to_string();
             assert!(said.contains("Run `uv run x.py --n 3` instead"), "{said}");
-            assert!(said.contains("the original line does not run"), "{said}");
+            assert!(said.contains("line runs as written"), "{said}");
         }
     }
 
     /// A rewrite of a copy that is not the line cannot be applied exactly,
-    /// so the call is refused and nothing is held.
+    /// so the line runs as written with a warning and nothing is held.
     #[test]
-    fn a_rewrite_of_a_changed_copy_refuses_the_call() {
+    fn a_rewrite_of_a_changed_copy_warns_and_runs_the_line() {
         let line = "python x.py <<EOF\nbody\nEOF";
         let rule = hold_exact(line, "python x.py <<EOF\nEOF", "uv run x.py".into())
-            .expect("a changed copy refuses");
-        assert_eq!(rule.verdict, "deny");
-        assert!(rule.reason.contains("Neither line runs"), "{}", rule.reason);
+            .expect("a changed copy warns");
+        assert!(
+            rule.reason.contains("The line runs as written"),
+            "{}",
+            rule.reason
+        );
         assert!(take_held(line).is_none());
         assert!(hold_exact("python x.py", "python x.py", "uv run x.py".into()).is_none());
         assert_eq!(take_held("python x.py").as_deref(), Some("uv run x.py"));
     }
 
-    /// Review repro: a denial sent as allow plus updatedInput runs the
-    /// refused line on a runner that drops updatedInput. Each runner gets
-    /// a deny with no updated input, and the deny names the fix.
+    /// A local fix is named in the warning, and the line runs as written:
+    /// no runner gets an updated input it might drop.
     #[test]
-    fn a_local_fix_is_a_deny_on_every_runner() {
+    fn a_local_fix_is_a_warning_on_every_runner() {
         for input in RUNNERS {
-            let mut v = local_refusal(input);
-            assert_eq!(decision(&v), "deny", "{input}\n{v}");
+            let v = local_warning(input);
+            assert!(!holds(&v), "{input}\n{v}");
             assert!(v["hookSpecificOutput"].get("updatedInput").is_none(), "{v}");
             assert!(v.get("updated_input").is_none(), "{v}");
             let said = v.to_string();
             assert!(said.contains("Run `uv run x.py --n 3` instead"), "{said}");
             assert!(said.contains("python-requires-uv: "), "{said}");
-            if let Some(specific) = v["hookSpecificOutput"].as_object_mut() {
-                specific.remove("updatedInput");
-            }
-            v.as_object_mut().unwrap().remove("updated_input");
-            assert_eq!(decision(&v), "deny", "dropping the input still refuses");
         }
-        let v = local_refusal(CODEX);
+        let v = local_warning(CODEX);
         let specific = &v["hookSpecificOutput"];
-        assert_eq!(specific["permissionDecision"], "deny");
-        assert!(specific["permissionDecisionReason"]
+        assert!(specific.get("permissionDecision").is_none(), "{v}");
+        assert!(specific["additionalContext"]
             .as_str()
             .unwrap()
             .contains("Run `uv run x.py --n 3` instead"));
     }
 
-    /// A local fix the guard would refuse is not named. The policyd
-    /// refusal stands as it came.
+    /// A local fix the guard would warn on is not named. The policyd
+    /// warning stands as it came.
     #[test]
-    fn a_refused_local_fix_leaves_the_refusal_as_it_came() {
+    fn a_local_fix_the_guard_warns_on_leaves_the_warning_as_it_came() {
         let call = hook_call(CLAUDE);
-        let refuse = |_: &str| Some(uv_refusal());
-        assert_eq!(pick(&call, Some(&uv_refusal()), refuse), None);
+        let warns = |_: &str| Some(uv_warning());
+        assert_eq!(pick(&call, Some(&uv_warning()), warns), None);
         let again = |line: &str| {
             hold(line, "echo again".into());
             None
         };
-        assert_eq!(pick(&call, Some(&uv_refusal()), again), None);
+        assert_eq!(pick(&call, Some(&uv_warning()), again), None);
     }
 
     /// Review repro 1: the recheck of policyd's new line rewrites it
     /// again. The guard's last word was another line, so the new line
-    /// does not run, and neither does the original.
+    /// does not run; the original runs with a warning that names both.
     #[test]
-    fn a_rewrite_the_recheck_rewrites_again_refuses_the_call() {
+    fn a_rewrite_the_recheck_rewrites_again_runs_the_line_with_a_warning() {
         let call = hook_call(CLAUDE);
         hold(&call.cue, "python evil.py".into());
         let judge = |line: &str| {
@@ -630,10 +627,9 @@ mod tests {
             }
             None
         };
-        let Some(Outcome::Refuse(rule)) = pick(&call, None, judge) else {
-            panic!("a rewrite rewritten again must refuse");
+        let Some(Outcome::Warn(rule)) = pick(&call, None, judge) else {
+            panic!("a rewrite rewritten again must warn");
         };
-        assert_eq!(rule.verdict, "deny");
         assert!(rule.reason.contains("`python evil.py`"), "{}", rule.reason);
         assert!(rule.reason.contains("`echo safe`"), "{}", rule.reason);
         for input in RUNNERS {
@@ -641,22 +637,22 @@ mod tests {
             hold(&call.cue, "python evil.py".into());
             let outcome = pick(&call, None, judge).unwrap();
             let v = answer_json(input, &outcome, false);
-            assert_eq!(decision(&v), "deny", "{input}\n{v}");
+            assert!(!holds(&v), "{input}\n{v}");
             assert!(!v.to_string().contains("updatedInput"), "{v}");
             assert!(!v.to_string().contains("updated_input"), "{v}");
         }
     }
 
-    /// Review repro 2: the recheck denies policyd's new line. The hook
-    /// used to fall back to the original verdict and allow the original.
+    /// Review repro 2: the recheck warns on policyd's new line. The
+    /// original runs, and its warning names the new line and the rule.
     #[test]
-    fn a_rewrite_the_recheck_denies_refuses_the_call() {
-        let refuse = |_: &str| Some(uv_refusal());
+    fn a_rewrite_the_recheck_warns_on_runs_the_line_with_a_warning() {
+        let warns = |_: &str| Some(uv_warning());
         for input in RUNNERS {
             let call = hook_call(input);
             hold(&call.cue, "uv run evil.py".into());
-            let outcome = pick(&call, None, refuse).expect("a refusal, not the original");
-            let Outcome::Refuse(rule) = &outcome else {
+            let outcome = pick(&call, None, warns).expect("a warning, not a silent allow");
+            let Outcome::Warn(rule) = &outcome else {
                 panic!("{outcome:?}");
             };
             assert!(rule.reason.contains("`uv run evil.py`"), "{}", rule.reason);
@@ -666,14 +662,15 @@ mod tests {
                 rule.reason
             );
             let v = answer_json(input, &outcome, false);
-            assert_eq!(decision(&v), "deny", "{input}\n{v}");
+            assert!(!holds(&v), "{input}\n{v}");
+            assert!(v.to_string().contains("`uv run evil.py`"), "{v}");
             let v = answer_json(input, &outcome, true);
-            assert_eq!(decision(&v), "deny", "relayed {input}\n{v}");
+            assert!(!holds(&v), "relayed {input}\n{v}");
         }
     }
 
     #[test]
-    fn no_rewrite_without_a_held_line_or_a_known_refusal() {
+    fn no_rewrite_without_a_held_line_or_a_known_warning() {
         let call = hook_call(CLAUDE);
         assert!(pick(&call, None, allow_all).is_none(), "nothing held");
         hold("some other line", "uv run x.py".into());
@@ -692,10 +689,10 @@ mod tests {
         assert!(pick(&call, Some(&ask), allow_all).is_none());
         assert!(
             take_held(&call.cue).is_none(),
-            "a refusal drops the held line"
+            "a warning drops the held line"
         );
         let prompt = hook_call(r#"{"hook_event_name":"UserPromptSubmit","prompt":"python x.py"}"#);
-        assert!(pick(&prompt, Some(&uv_refusal()), allow_all).is_none());
+        assert!(pick(&prompt, Some(&uv_warning()), allow_all).is_none());
     }
 
     /// A Read call is not a shell call, so an accepted rewrite of its cue
@@ -709,25 +706,25 @@ mod tests {
         assert!(matches!(outcome, Outcome::Run(_)), "{outcome:?}");
         let v = answer_json(READ, &outcome, false);
         assert!(v["hookSpecificOutput"].get("updatedInput").is_none(), "{v}");
-        assert_eq!(decision(&v), "deny", "{v}");
+        assert!(!holds(&v), "{v}");
     }
 
     /// The fake policyd, answering in 0.6.0's `bash -c` form: `python a.py`
-    /// is rewritten to an accepted line, `python b.py` to a refused one,
-    /// and `python c.py` to one that is rewritten again.
+    /// is rewritten to an accepted line, `python b.py` to one a rule warns
+    /// on, and `python c.py` to one that is rewritten again.
     const FAKE_POLICYD: &str = r#"#!/bin/sh
 case "$5" in
   "python a.py") printf "allow\trewrite\tbash -c 'uv run a.py'\n" ;;
   "python b.py") printf "allow\trewrite\tbash -c 'uv run b.py'\n" ;;
   "python c.py") printf "allow\trewrite\tbash -c 'uv run c.py'\n" ;;
-  "uv run b.py") printf 'deny\tpython-requires-uv\n'; exit 2 ;;
+  "uv run b.py") printf 'allow\twarn\tpython-requires-uv\tuse uv\n' ;;
   "uv run c.py") printf "allow\trewrite\tbash -c 'echo c'\n" ;;
   *) echo allow ;;
 esac
 "#;
 
     /// The guard holds a policyd rewrite for the hook, and the real guard
-    /// as the recheck lets only an accepted line run.
+    /// as the recheck swaps in only an accepted line.
     #[test]
     fn the_real_guard_lets_only_an_accepted_rewrite_run() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -765,7 +762,7 @@ esac
             pick(&call, verdict.as_ref(), judge)
         };
         let accepted = outcome("a.py");
-        let refused = outcome("b.py");
+        let warned = outcome("b.py");
         let again = outcome("c.py");
         unsafe {
             for (k, v) in saved {
@@ -782,16 +779,16 @@ esac
                 reason: POLICYD_REASON.into(),
             }))
         );
-        let Some(Outcome::Refuse(rule)) = refused else {
-            panic!("a refused substitute must refuse the call: {refused:?}");
+        let Some(Outcome::Warn(rule)) = warned else {
+            panic!("a substitute a rule warns on must warn: {warned:?}");
         };
         assert!(
             rule.reason.contains("python-requires-uv"),
             "{}",
             rule.reason
         );
-        let Some(Outcome::Refuse(rule)) = again else {
-            panic!("a substitute rewritten again must refuse the call: {again:?}");
+        let Some(Outcome::Warn(rule)) = again else {
+            panic!("a substitute rewritten again must warn: {again:?}");
         };
         assert!(rule.reason.contains("`echo c`"), "{}", rule.reason);
     }

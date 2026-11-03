@@ -779,12 +779,12 @@ fn ljos_rules_lists_an_unconfirmed_promoted_rule_as_unverified() {
 }
 
 /// The review's repro for the guards: a promoted rule with the deny
-/// pattern `git status*` denies `git status` in the PreToolUse hook
-/// whether or not the pack confirms its lesson, as a deny only takes a
-/// command away. Once a by-id read answers 404 the reason says the rule
-/// is unverified rather than reading as the person's.
+/// pattern `git status*` warns on `git status` in the PreToolUse hook
+/// whether or not the pack confirms its lesson, and the command runs.
+/// Once a by-id read answers 404 the warning says the rule is
+/// unverified rather than reading as the person's.
 #[test]
-fn an_unconfirmed_promoted_deny_still_denies_as_unverified() {
+fn an_unconfirmed_promoted_deny_still_warns_as_unverified() {
     const ID: &str = "lessonid0000000000000000000008";
     let lesson = persons_lesson(ID, RELEASE_KEY);
     for held in [true, false] {
@@ -812,14 +812,22 @@ fn an_unconfirmed_promoted_deny_still_denies_as_unverified() {
             .next_back()
             .unwrap_or_else(|| panic!("no hook answer: {out}"));
         let decision = &said["hookSpecificOutput"];
-        assert_eq!(decision["permissionDecision"], "deny", "{out}");
-        let reason = decision["permissionDecisionReason"].as_str().unwrap_or("");
+        assert_eq!(
+            decision["permissionDecision"],
+            serde_json::Value::Null,
+            "{out}"
+        );
+        let context = decision["additionalContext"].as_str().unwrap_or("");
+        let reason = context.lines().next().unwrap_or("");
         if held {
-            assert_eq!(reason, "fixture (ljos rule `git status*`)", "{out}");
+            assert_eq!(
+                reason, "warning: fixture (ljos rule `git status*`)",
+                "{out}"
+            );
         } else {
             assert!(
-                reason.starts_with("unverified") && reason.contains(ID),
-                "an unconfirmed rule's deny read as the person's: {out}"
+                reason.starts_with("warning: unverified") && reason.contains(ID),
+                "an unconfirmed rule's warning read as the person's: {out}"
             );
         }
     }

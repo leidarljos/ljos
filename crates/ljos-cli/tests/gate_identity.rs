@@ -578,7 +578,7 @@ fn a_blank_conversation_id_reads_the_env_and_touches_the_book() {
 /// The box's hook payload names no conversation: every id is empty, the
 /// transcript path is null, and the hook process has no session variable.
 /// A commit is allowed and the book log records the call, and so is a push
-/// onto a topic branch; a push onto `develop` is refused, since no ticket's
+/// onto a topic branch; a push onto `develop` warns, since no ticket's
 /// seats can clear a call that sits on none. An `rm -rf` outside a temp
 /// directory runs with the `rm-rf-outside-tmp` warning line, and the bypass
 /// log keeps the label. A payload that names a conversation, and a
@@ -1181,7 +1181,7 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
 /// A `hold-*` record forged with another conversation's tag does not pass
 /// when the tracker row carries the real conversation's tag, and a shell
 /// command that redirects into a `hold-*` file in the runtime directory is
-/// refused by the command check.
+/// warned on by the command check, and runs.
 #[test]
 fn a_forged_sitting_record_with_another_conversations_tag_is_refused() {
     let home = Box_::new();
@@ -1200,8 +1200,8 @@ fn a_forged_sitting_record_with_another_conversations_tag_is_refused() {
     .to_string();
     let said = home.hook_with(&shell_payload, &[]);
     assert!(
-        said.contains("sitting-gate") && said.contains("\"permission\":\"deny\""),
-        "a shell write to a hold-* record under XDG_RUNTIME_DIR/ljos was not refused:\n{said}"
+        said.contains("sitting-gate") && said.contains("\"permission\":\"allow\""),
+        "a shell write to a hold-* record under XDG_RUNTIME_DIR/ljos was not warned on:\n{said}"
     );
 
     let real = std::fs::read_dir(home.run.join("ljos"))
@@ -1528,13 +1528,13 @@ fn a_shell_with_a_codex_thread_holds_under_the_thread() {
     );
 }
 
-/// A tool command under a runner may not write a sitting record. The
-/// records that bind a conversation for the paths that have no payload,
-/// `session-bare-SEAT`, `tmux-hook-conv` and `first-hook-conv`, decide
-/// whose sitting a call is judged by, so a shell line that writes one is
-/// refused like a line that writes `hold-*`.
+/// A tool command under a runner that writes a sitting record is warned
+/// on. The records that bind a conversation for the paths that have no
+/// payload, `session-bare-SEAT`, `tmux-hook-conv` and `first-hook-conv`,
+/// decide whose sitting a call is judged by, so a shell line that writes
+/// one warns like a line that writes `hold-*`.
 #[test]
-fn a_tool_command_may_not_write_the_records_that_bind_a_conversation() {
+fn a_tool_command_that_writes_the_records_that_bind_a_conversation_warns() {
     let home = Box_::new();
     for name in [
         "session-bare-inky",
@@ -1558,8 +1558,8 @@ fn a_tool_command_may_not_write_the_records_that_bind_a_conversation() {
         .to_string();
         let said = home.hook_with(&payload, &[]);
         assert!(
-            said.contains("\"permission\":\"deny\""),
-            "a shell write to {name} was not refused:\n{said}"
+            said.contains("sitting-gate") && said.contains("\"permission\":\"allow\""),
+            "a shell write to {name} was not warned on:\n{said}"
         );
     }
 }

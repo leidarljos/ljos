@@ -88,11 +88,7 @@ fn the_connected_seat_reaches_policy_without_borrowing_a_historical_holder() {
                 && row.contains("rm -rf /home/owner/project")),
         "the bypass log has no label:\n{log}"
     );
-
-    let denied = guard("connected-runner", "ljos approve req-1");
-    assert_eq!(denied["result"]["isError"], true, "{denied}");
-    assert!(denied.to_string().contains("deny"), "{denied}");
-    assert!(!denied.to_string().contains("no seat named"), "{denied}");
+    assert!(!deleted.to_string().contains("no seat named"), "{deleted}");
 
     // A misspelled seat does not change the guard's verdict.
     let misspelled = guard("connected-runer", "printf harmless");

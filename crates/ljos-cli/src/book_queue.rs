@@ -42,8 +42,6 @@ struct Job {
     session: String,
     #[serde(default)]
     payload_session: Option<String>,
-    #[serde(default)]
-    ask: Option<String>,
     owner: (u32, u64),
     ancestry: Vec<(u32, String)>,
     head: Option<String>,
@@ -67,19 +65,14 @@ pub fn book_later(raw: &str, call: &crate::HookCall) -> String {
     crate::bookkeep::recall_for(raw, call)
 }
 
-/// Queue the ask the guard put to this call.
-pub fn enqueue_ask(raw: &str, call: &crate::HookCall, reason: &str) {
-    write_job(raw, call, Some(reason));
-}
-
 /// Queue the book for this call, and start a drainer when none runs.
 pub fn enqueue(raw: &str, call: &crate::HookCall) {
     if crate::bookkeep::books(&call.event) {
-        write_job(raw, call, None);
+        write_job(raw, call);
     }
 }
 
-fn write_job(raw: &str, call: &crate::HookCall, ask: Option<&str>) {
+fn write_job(raw: &str, call: &crate::HookCall) {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
@@ -95,7 +88,6 @@ fn write_job(raw: &str, call: &crate::HookCall, ask: Option<&str>) {
         cue: call.cue.clone(),
         session: crate::bookkeep::session_key(call),
         payload_session: call.session.clone(),
-        ask: ask.map(str::to_string),
         owner: crate::bookkeep::hook_owner(),
         ancestry: crate::ancestry(),
         head: head_now(&place),
@@ -499,11 +491,7 @@ pub fn apply(files: &[PathBuf]) -> i32 {
             session: Some(job.session.clone()),
             shape: crate::HookShape::default(),
         };
-        let done = match job.ask.as_deref() {
-            Some(reason) => crate::bookkeep::note_ask_within(&job.raw, &call, reason),
-            None => crate::bookkeep::observe_queued(&job.raw, &call),
-        };
-        if !done {
+        if !crate::bookkeep::observe_queued(&job.raw, &call) {
             break;
         }
         let _ = std::fs::remove_file(path);

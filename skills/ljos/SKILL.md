@@ -239,16 +239,17 @@ That tag is explicit. `cloud up` does not set `default_scope`.
 No issue yet? `ljos file "TITLE" --top -p PROJECT` files one and prints its id. `ljos file -q` prints only that id, and the status line goes to stderr, so a shell can pass it to `ljos sitting`.
 Every piece of work has an issue before it has a claim.
 
-Under a runner, git waits for the sitting. `git commit`, `merge`,
-`rebase`, `cherry-pick`, `revert`, `am`, `pull` and `push` are refused
-until this conversation holds a live claim on an open ticket, and the
-refusal names `ljos sitting ID`. A push onto `develop` or `main` (the
-`consensus_branches`) also waits for that ticket's seats: run
+Under a runner, git checks the sitting. The tool hook warns on `git
+commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `am`, `pull` and
+`push` until this conversation holds a live claim on an open ticket, and
+the warning names `ljos sitting ID`; the command runs. A push onto
+`develop` or `main` (the `consensus_branches`) also wants that ticket's
+seats: run
 `ljos consensus ID --no-file`, and push once its `protected push:` line
 says the ticket clears it, with the `quorum` of seats (2) from two model
 families. A push onto your own topic branch needs only the sitting. The
 `pre-commit` and `pre-push` hooks `ljos git-hooks install` writes hold a
-script's commit and push the same way. `ljos doctor` says whether the gate
+commit and a push, a script's included, until both hold. `ljos doctor` says whether the gate
 is active for this seat. The person at their own terminal is never gated.
 `ljos cloud up` installs no git hook and sets no `core.hooksPath`, so on a
 cloud seat git runs only the hooks the repository and the login name.
@@ -342,14 +343,15 @@ cloud seat git runs only the hooks the repository and the login name.
   none of the options (a tie broken with a third answer), add
   `--new-option`: every voter is scored a miss on it. Without the flag an
   outcome on no ballot is refused, since a typo would score the same.
-- When the work has shown that a kind of command must never run, or must
-  be asked about first, write the law: `ljos rule 'PATTERN' --verdict
-  deny|ask --why "..."`. The hook stops or asks before the command runs, and
-  `ljos policy` says the same; the rule is memory and travels in handovers.
+- When the work has shown that a kind of command needs a warning before
+  it runs, write the law: `ljos rule 'PATTERN' --verdict deny|ask --why
+  "..."`. The hook shows the rule's warning before the command runs, and
+  the command still runs; `ljos policy` says the same, and the verdict is
+  a label. The rule is memory and travels in handovers.
   A preference that forbids a command ("never run terraform destroy") is
   written with the rule it needs: `ljos prefer "..." --deny 'PATTERN'`.
-  A preference alone is only recalled, never enforced. `ljos rules` lists
-  what the hook enforces.
+  A preference alone is only recalled, never warned by. `ljos rules` lists
+  what the hook warns by.
   A preference that names the command it forbids, such as "use pnpm
   instead of npm", prints the `ljos rule` command for its ask: pass it on
   to the person rather than running it yourself.
@@ -651,27 +653,30 @@ under equal weights is a count; under calibrated rows it is not.
   `0 due; N scheduled, next at T` is a clock that is running.
 - `ljos policy ARGV` prints the line a command would run under argv law,
   then what the pack knows that bears on it. It is not a check.
-- `ljos guard_check` is the commit, push, and merge gate, the same verdict
-  the hook gives a shell line. `allow` lets it run. `deny` names the command
-  that makes the line pass. A plain `git push` runs, and so does a commit
+- `ljos guard_check` reads the commit, push, and merge gates, the same
+  reading the hook gives a shell line. The answer is `allow`; a gate
+  that fires adds one warning line, which names the command that makes the
+  line pass. Under the person's `block-on-warning`, a line policyd blocks
+  is an error instead: do not run it. A plain `git push` runs, and so does a commit
   and a push on one line. When the checkout sets `test` and the tip has no
   passing `ljos evidence record -- <test command>` run, the push still runs
-and the answer carries a warning.
-A force or mirror push runs too: the answer is one `allow\twarn\tgit-force-push\t...` line, and the bypass log keeps the label.
-A delete push runs the same way, named `git-push-delete`.
-A push onto a protected branch asks only when `owners` is set and the remote's owner is not in it.
-A merge pushed to your own repository runs.
-  `gh pr merge` with red or pending checks is refused. A head sha with no
-  CI checks asks, and that ask names the sha and a local evidence record
+  and the answer carries a warning. A force or mirror push runs too: the
+  answer is one `allow\twarn\tgit-force-push\t...` line, and the bypass
+  log keeps the label. A delete push runs the same way, named
+  `git-push-delete`. A push onto a protected branch warns only when
+  `owners` is set and the remote's owner is not in it. A merge pushed to
+  your own repository runs. `gh pr merge` with red or pending checks
+  warns. A head sha with no CI checks warns, and that warning names the
+  sha and a local evidence record
   when one exists for it. A fine-grained token with no Checks permission
   uses the REST fallback when the rollup read is denied. Every Cursor
-  Bugbot thread must be resolved or replied to. A commit that carries a
-  machine trailer is refused. The author and committer are checked only
-  when `name` and `email` are set in `.ljos/gates.toml` or in the user,
-  repository, or seat `ljos.toml`.
-- Under an agent runner the guard refuses a raw `vissue` verb that
+  Bugbot thread wants a resolve or a reply. A commit that carries a
+  machine trailer warns here, and the `pre-push` git hook holds it. The
+  author and committer are checked only when `name` and `email` are set in
+  `.ljos/gates.toml` or in the user, repository, or seat `ljos.toml`.
+- Under an agent runner the guard warns on a raw `vissue` verb that
   writes: `create`, `q`, `refile`, `note`, `append`, `vote` with a
-  ballot, `claim`, `release`, `close`, `cancel` and `update`. The deny
+  ballot, `claim`, `release`, `close`, `cancel` and `update`, and runs it. The warning
   names the ljos verb to run instead, which checks the seat, files in
   the parent's project and commits the tracker. Reads run, the tally
   included, and the person at a terminal runs any verb. The `vissue`
@@ -744,7 +749,7 @@ An idle agent has no next prompt, so a seat can name how to wake it.
 `ljos send` and `ljos reply` start the recipient's wake after the message is written and do not wait on it.
 When `LJOS_TRACKER_GIT=push`, that wake pushes this machine's sealed log before the command runs or the webhook is posted, so a seat on another machine does not read an empty inbox. The push is in the detached wake, and the send does not wait on it. A push that fails is a line in the wake log; the wake still runs and the send still stands.
 The envelope names the tracker commit that holds that log: a command receives it as `LJOS_WAKE_COMMIT`, and a webhook as `commit` in the JSON. The field is left out when no log commit was made.
-The guard judges a wake command when it is set and on every run, and a `deny` or an `ask` keeps it from running.
+The guard reads a wake command when it is set and on every run, and a rule that fires is a warning line beside it; the command still runs. Under the person's `block-on-warning`, a command policyd blocks does not run, since nobody is there to ask.
 A wake name that ends in `-` matches every longer seat that starts with it. An exact name wins, and the longest prefix wins when several match. Mail to a run whose seat is that prefix plus the run id wakes the launcher, and the envelope still names the run's seat.
 A session still at work needs no wake: its `Stop` hook holds the turn once for unread interrupt mail, so send `--interrupt` when the work cannot wait for the next prompt.
 A seat the pack has never heard from is refused with the seat it most likely meant; `--new-seat` writes to one that has not started yet.
@@ -820,8 +825,3 @@ records a quoted yes that SEAT may close those tickets and no others.
 The same commit, quote, time and recording seat checks apply, so a row
 written by hand still does not count. `ljos finish ID --close` from that
 seat closes a named ticket and notes the grant the same way.
-
-## One-command consent
-
-The `request_approval` verb is served as the MCP tool `ljos_request_approval`.
-For an ask verdict that names a pending request, call that tool with its id. The MCP client displays a consent form to the person. Only an accepted form with explicit consent grants one retry in the named directory and conversation within the request lifetime. An unsupported client leaves the command blocked. The person can reply `approve ID` in the same conversation, which the prompt hook records, or run `ljos approve ID` in their own terminal. Tool arguments cannot grant consent, and chat text that does not name the id grants nothing.
