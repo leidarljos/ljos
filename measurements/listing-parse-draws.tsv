@@ -1,0 +1,38 @@
+# The listing parses of prompt-hook.rows-cause in hook-latency.txt, one fresh process per row.
+# Machine: Intel Xeon Processor, CPU family 6 model 207, 8 CPUs, 1 socket of 8 cores, 1 thread per core.
+# The machine has an L3 of 320 MiB and 47 GiB of memory, under Kernel-based Virtual Machine (KVM) full virtualization, on Linux 6.12.94+.
+# Pinning: none; no CPU affinity was set, the guest exposes no frequency governor, and nothing else ran during the draws.
+# Parser: a scratch binary on serde_json 1.0.151 (preserve_order, raw_value) and serde 1, built in release with line tables only.
+# rustc: 1.89.0 (29483883e 2025-08-04).
+# Listing: the 6859107-byte listing of 10000 claims that a warm prompt hook kept on disk.
+# That listing is the one of the 10000-claim pack of hook-scale-draws.tsv.
+# Form map parses the whole document into serde_json::Value.
+# Form row parses the claims into the 19 fields of the hook's Row (crates/ljos-cli/src/lib.rs), each kept as the listing gave it.
+# Order: 12 of each form, shuffled by random.SystemRandom.
+# read_ms: reading the file into a string; parse_ms: the parse alone; both by std::time::Instant.
+# claims: the claims parsed.
+seq	form	read_ms	parse_ms	claims
+0	row	4.9	15.7	10000
+1	row	4.6	15.6	10000
+2	map	4.3	54.0	10000
+3	map	3.4	52.2	10000
+4	map	3.5	51.8	10000
+5	row	3.0	14.1	10000
+6	map	2.9	48.7	10000
+7	map	2.6	47.6	10000
+8	row	2.3	13.2	10000
+9	row	3.8	15.4	10000
+10	row	2.3	12.6	10000
+11	row	3.8	15.4	10000
+12	map	2.3	44.5	10000
+13	row	2.8	13.8	10000
+14	map	2.3	44.4	10000
+15	map	2.8	52.4	10000
+16	row	2.3	12.6	10000
+17	row	2.5	13.2	10000
+18	map	2.9	48.5	10000
+19	row	2.4	12.7	10000
+20	row	2.4	13.0	10000
+21	map	2.3	44.8	10000
+22	map	2.4	46.1	10000
+23	map	2.5	45.0	10000
