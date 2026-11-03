@@ -189,7 +189,7 @@ fn old_format(dir: &Path, then: &str) -> Option<String> {
         return None;
     };
     Some(format!(
-        "{PID} names pid {pid} with no start time, as an older ljos wrote it, so {then}"
+        "{PID} names pid {pid} with no start time, so {then}"
     ))
 }
 
@@ -304,9 +304,19 @@ fn join(config: &Config, key: Option<&str>, deadline: Instant) -> Result<String>
     } else {
         format!("userspace mode, SOCKS5 on localhost:{}", config.ports.socks)
     };
-    let stale = stale.map(|note| format!("; {note}")).unwrap_or_default();
+    let unrecorded = started.as_ref().and_then(|_| {
+        old_format(
+            &dir,
+            "writes carry no source.mesh label and mesh down signals nothing",
+        )
+    });
+    let notes: String = stale
+        .into_iter()
+        .chain(unrecorded)
+        .map(|note| format!("; {note}"))
+        .collect();
     Ok(format!(
-        "mesh up: {node} joined swarm {swarm} in {mode}{stale}"
+        "mesh up: {node} joined swarm {swarm} in {mode}{notes}"
     ))
 }
 
@@ -421,9 +431,17 @@ fn start_daemon(tailscaled: &Path, dir: &Path, config: &Config, kernel: bool) ->
         .stderr(log)
         .process_group(0);
     let child = cmd.spawn().context("tailscaled could not start")?;
-    let at = started(child.id()).unwrap_or_default();
-    std::fs::write(dir.join(PID), format!("{}\n{at}\n", child.id()))?;
+    record(dir, child.id(), started(child.id()))?;
     Ok(child)
+}
+
+/// Write the pid file: the daemon's pid and its start time `at`. With no
+/// start time the file has the pid alone, as an older ljos wrote it, and
+/// the daemon runs on unlabelled: `down` cannot tell it from a reused pid.
+fn record(dir: &Path, pid: u32, at: Option<String>) -> Result<()> {
+    let at = at.map(|at| format!("{at}\n")).unwrap_or_default();
+    std::fs::write(dir.join(PID), format!("{pid}\n{at}"))?;
+    Ok(())
 }
 
 fn wait_for_socket(socket: &Path, mut child: Option<&mut Child>, deadline: Instant) -> Result<()> {
@@ -591,4 +609,42 @@ pub fn acl(more: &[String]) -> Result<String> {
     Ok(serde_json::to_string_pretty(
         &json!({"tagOwners": owners, "acls": acls}),
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_daemon_whose_start_time_cannot_be_read_runs_on_and_down_signals_nothing() {
+        use std::os::unix::process::CommandExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        // `cat` on a pipe this test holds runs until it is killed.
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        record(dir.path(), pid, None).unwrap();
+        let named = format!("{PID} names pid {pid} with no start time");
+        let up = old_format(
+            dir.path(),
+            "writes carry no source.mesh label and mesh down signals nothing",
+        )
+        .expect("up says the pid file has no start time");
+        assert!(up.starts_with(&named), "{up}");
+        let down = stop_daemon(dir.path(), Instant::now() + GRACE)
+            .expect("down says why it signalled nothing");
+        assert!(
+            down.starts_with(&named) && down.ends_with("nothing was signalled"),
+            "{down}"
+        );
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "down signalled pid {pid}"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }

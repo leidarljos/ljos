@@ -156,10 +156,11 @@ The state directory is `mesh/` under the ljos runtime directory.
 It keeps the socket, the node name, the pid file and tailscaled's log.
 Nothing of it lives in a checkout.
 The pid file records tailscaled's start time next to its pid.
+When that start time cannot be read, `mesh up` keeps tailscaled running, writes the pid alone and says so.
 Before either verb signals tailscaled, it checks that the pid still started at that time.
 A pid that no longer names that tailscaled gets no signal.
 The verb then drops the pid file and says so in its line.
-A pid file an older ljos wrote holds no start time.
+A pid file an older ljos wrote holds no start time either.
 `mesh up` says so, even when tailscaled already answers, because that tailscaled gets no signal and its writes get no label.
 Neither verb touches git config, hooks, a checkout or `~/.gitconfig`.
 
