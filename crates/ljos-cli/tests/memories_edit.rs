@@ -1,8 +1,9 @@
 //! `ljos memories review --edit` and `--merge` must not grant a person basis.
 //!
 //! `packset prefer` stores a user-declared preference with no basis. An edit
-//! under a runner is refused. An edit from outside a runner keeps that
-//! missing basis, and an edit of a memory that already has a basis keeps it.
+//! from outside a runner keeps that missing basis, and an edit of a memory
+//! that already has a basis keeps it. An edit under a runner is stored as
+//! the agent's.
 
 ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
@@ -22,6 +23,7 @@ const PERSON_EDIT: &str = "Store the signing key outside the repository.";
 const AGENT: &str = "The staging database resets every Sunday night.";
 const AGENT_TOO: &str = "The lint job must pass before a merge.";
 const AGENT_MERGE: &str = "Sunday resets and the lint job both stand.";
+const RUNNER_EDIT: &str = "Write the weekly notes before the Monday standup.";
 
 struct Seat {
     home: tempfile::TempDir,
@@ -124,7 +126,8 @@ fn id_of(atom: &Value) -> String {
     atom["id"].as_str().unwrap().to_string()
 }
 
-/// A runner cannot edit or merge, and an edit does not invent a person basis.
+/// An edit does not invent a person basis, and a runner's edit is the
+/// agent's.
 #[test]
 fn review_edit_keeps_the_basis_the_memory_already_had() {
     if !ljos_cli::tool_installed("packsetd") {
@@ -154,51 +157,6 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
     assert!(basis(held).is_none(), "{held}");
     let held_id = id_of(held);
     let held_too_id = id_of(by_text(&stored, "Monday morning"));
-    let before = stored.len();
-
-    let under = seat
-        .command(
-            ljos,
-            &[
-                "memories", "review", "--edit", &held_id, "--text", HELD_EDIT,
-            ],
-        )
-        .env("CLAUDECODE", "1")
-        .output()
-        .unwrap();
-    assert!(!under.status.success(), "{}", text_of(&under));
-    assert!(
-        String::from_utf8_lossy(&under.stderr).contains("a runner cannot edit"),
-        "{}",
-        text_of(&under)
-    );
-    let under_merge = seat
-        .command(
-            ljos,
-            &[
-                "memories",
-                "review",
-                "--merge",
-                &held_id,
-                "--merge",
-                &held_too_id,
-                "--text",
-                MERGED,
-            ],
-        )
-        .env("CLAUDECODE", "1")
-        .output()
-        .unwrap();
-    assert!(!under_merge.status.success(), "{}", text_of(&under_merge));
-    assert!(
-        String::from_utf8_lossy(&under_merge.stderr).contains("a runner cannot merge"),
-        "{}",
-        text_of(&under_merge)
-    );
-    let still = atoms(daemon.url());
-    assert_eq!(still.len(), before);
-    assert!(basis(by_text(&still, "when CI is red")).is_none());
-    assert!(still.iter().all(|a| basis(a) != Some("person")));
 
     let edited = succeeded(
         &seat.output(
@@ -239,6 +197,27 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
     let joined = by_text(&after_merge, "notes on Monday");
     assert_eq!(joined["origin"], "user-declared", "{joined}");
     assert!(basis(joined).is_none(), "merge invented a basis: {joined}");
+
+    let under = seat
+        .command(
+            ljos,
+            &[
+                "memories",
+                "review",
+                "--edit",
+                &id_of(joined),
+                "--text",
+                RUNNER_EDIT,
+            ],
+        )
+        .env("CLAUDECODE", "1")
+        .output()
+        .unwrap();
+    assert!(succeeded(&under, "edit under a runner").contains("edited"));
+    let after_runner = atoms(daemon.url());
+    let agents = by_text(&after_runner, "Monday standup");
+    assert_eq!(agents["origin"], "agent-derived", "{agents}");
+    assert_eq!(basis(agents), Some("agent"), "{agents}");
 
     let typed = terminal::shape("terminal", ljos, &["prefer", PERSON]);
     let person = succeeded(&seat.output(terminal::PYTHON, &typed), "person prefer");

@@ -1,15 +1,14 @@
 //! An agent's memories, written first and reviewed afterwards.
 //!
-//! An agent's `ljos remember` with no sitting stores a standing lesson.
-//! With a sitting open, the same words are an unreviewed note on that
-//! ticket, origin `agent-derived`, with a `source` naming the seat, the
+//! An agent's `ljos remember`, sitting or not, stores a standing lesson at
+//! once, origin `agent-derived`, with a `source` naming the seat, the
 //! harness, the session, the time and, when there is one, the reason.
-//! The prompt does not treat that note as a fact. `ljos finish --lesson`,
-//! `ljos findings --remember` and the prompt hook's correction file a
-//! proposal instead, and `ljos accept` is what writes that claim. A person,
-//! or a seat they ask, reviews afterwards: `ljos memories review` lists the
-//! unreviewed ones newest first and keeps, edits, merges or drops each, and
-//! `ljos memories tui` browses and prunes them in the terminal.
+//! `ljos finish --lesson`, `ljos findings --remember` and the prompt
+//! hook's correction store theirs at once too, labelled the same way, and
+//! `ljos accept` raises one to `explicit`. A person, or a seat they ask,
+//! reviews afterwards: `ljos memories review` lists the unreviewed ones
+//! newest first and keeps, edits, merges or drops each, and `ljos memories
+//! tui` browses and prunes them in the terminal.
 //!
 //! A verdict is a line in `$XDG_STATE_HOME/ljos/memory-reviews.jsonl`. A
 //! drop, an edit and a merge also retire the claim in the pack, which
@@ -348,7 +347,8 @@ pub fn drop_memory(id: &str, all: &[Memory]) -> Result<String> {
 ///
 /// The new claim keeps the origin and the basis the memory already had.
 /// A missing basis is left missing: origin `user-declared` is not a
-/// person basis, and this does not stamp one.
+/// person basis, and this does not stamp one. Under a runner the new text
+/// is the agent's, so it is written as `agent-derived`.
 fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
     let text = text.trim();
     if text.is_empty() {
@@ -368,7 +368,7 @@ fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
         atom["source"]["reason"] = Value::String(reason.clone());
     }
     crate::add_entities(&mut atom, ["horizon:standing".to_string()]);
-    let posted = if first.is_agents() {
+    let posted = if first.is_agents() || crate::under_a_runner() {
         crate::admit::write_agent(&client, atom)?
     } else {
         atom["origin"] = Value::String(first.origin.clone());
@@ -400,33 +400,25 @@ fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
     ))
 }
 
-/// Rewrite one memory's text.
-///
-/// A runner is refused. The replacement keeps the basis the memory
-/// already had.
+/// Rewrite one memory's text. The replacement keeps the basis the memory
+/// already had, or is the agent's under a runner.
 ///
 /// # Errors
 ///
-/// This process is under a runner, an id that names no memory, an empty
-/// text, or the pack refusing.
+/// An id that names no memory, an empty text, or the pack refusing.
 pub fn edit(id: &str, text: &str, all: &[Memory]) -> Result<String> {
-    refuse_runner("edit")?;
     let m = find(id, all)?;
     replace(&[m], text, "edited")
 }
 
 /// Merge memories into one. Without `text` the merged text is theirs,
-/// joined in the order given.
-///
-/// A runner is refused. The replacement keeps the basis the first
-/// memory already had.
+/// joined in the order given. The replacement keeps the basis the first
+/// memory already had, or is the agent's under a runner.
 ///
 /// # Errors
 ///
-/// This process is under a runner, fewer than two ids, an id that names
-/// no memory, or the pack refusing.
+/// Fewer than two ids, an id that names no memory, or the pack refusing.
 pub fn merge(ids: &[String], text: Option<&str>, all: &[Memory]) -> Result<String> {
-    refuse_runner("merge")?;
     if ids.len() < 2 {
         bail!("memories: merge takes two ids or more");
     }
@@ -443,16 +435,6 @@ pub fn merge(ids: &[String], text: Option<&str>, all: &[Memory]) -> Result<Strin
         &joined
     };
     replace(&olds, text, "merged")
-}
-
-fn refuse_runner(verb: &str) -> Result<()> {
-    if crate::under_a_runner() {
-        bail!(
-            "memories: a runner cannot {verb} a memory. \
-             Run `ljos memories review` from a terminal of your own"
-        );
-    }
-    Ok(())
 }
 
 /// The memory as the review prints it: id, kind, text, then provenance.

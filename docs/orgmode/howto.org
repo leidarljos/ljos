@@ -379,8 +379,8 @@ all three in one call, and a fourth route, =review=, weighs a due claim.
 It stays off unless the machine turns it on, because the call sends the
 prompt and up to ten candidate claims off the machine. When the judge
 does not answer, the hook reranks with the local cross-encoder. A
-correction the hook files is a proposal, and a pasted or quoted prompt
-files none. A standing choice the person states ("from now on",
+correction the hook stores is labelled with whose prompt said it, and a
+pasted or quoted prompt stores none. A standing choice the person states ("from now on",
 "always", "never") is saved in their words, outside code and quotes.
 
 The same call asks two more questions, since a call costs its input
@@ -718,14 +718,13 @@ ljos findings out/campaign.json
 ljos findings out/campaign.json --remember --issue demo-319z
 #+end_src
 
-The first prints one line per finding. The second files one lesson per
-finding a person or a seat resolved, under the recipe's name, the
+The first prints one line per finding. The second stores one lesson per
+finding a person or a seat resolved, at once, under the recipe's name, the
 package and the failure class, with origin =tool-echo= at L0 (=derived=).
-It does not write the atom. =ljos accept ID= promotes it to =explicit=
-and writes it as a standing lesson, and the command cites the
+=ljos accept ID= raises it to =explicit=, and the command cites the
 state file on the issue as a deed. A finding a later attempt merely got
-past is skipped; =--all= takes it too. Once someone accepts the
-proposal, the recipe's next bump recalls this lesson from its island.
+past is skipped; =--all= takes it too. The recipe's next bump recalls
+this lesson from its island.
 
 #+begin_example
 GCCcore-15.2.0 on terra: compile failed in the build step with fatal error: linux/scc,h. Fix: applied the GCC 14 libsanitizer kernel headers patch in GCCcore-15.2.0.

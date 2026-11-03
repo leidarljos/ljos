@@ -2,8 +2,8 @@
 //!
 //! `setsid -f`, a double fork, `script` and `tmux new-session -d` drop the
 //! runner from the process tree and can clear its variables. The cgroup
-//! stays. Keeping a preference and stamping a person basis from any of
-//! those must fail the same way a live `claude` parent fails.
+//! stays. A keep of a held user rule and a preference from any of those
+//! are the agent's, the same as under a live `claude` parent.
 
 ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
@@ -148,13 +148,33 @@ fn cgroup_names_runner(text: &str) -> bool {
         .any(|word| word.len() >= 4 && runners.contains(&word))
 }
 
-fn keep_refused(out: &std::process::Output, how: &str) {
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("a runner cannot keep"),
-        "{how} was not refused as a runner\n{}",
+/// One user rule held from before a basis was kept, under the id the
+/// keeps below name.
+fn hold_rule(seat: &Seat) {
+    let dir = seat.home.path().join(".config/ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rules = json!({"rules": [{
+        "id": "deadbeef5e1d0c4b3a29180716f5e4d3",
+        "text": "Never post or reply to Alan.",
+        "author": "person",
+        "reason": "he asked us to stop",
+        "written_at": "2020-01-01T00:00:00.000Z",
+    }]});
+    std::fs::write(dir.join("user-rules.json"), format!("{rules:#}\n")).unwrap();
+}
+
+/// The keep was recorded as the agent's review, not the person's. The
+/// rule is held again for the next keep.
+fn keep_as_agent(seat: &Seat, out: &std::process::Output, how: &str) {
+    let path = seat.home.path().join(".config/ljos/user-rules.json");
+    let rules: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        rules["rules"][0]["basis"],
+        "agent",
+        "{how}: {rules}\n{}",
         text_of(out)
     );
+    hold_rule(seat);
 }
 
 fn prefer_as_agent(seat: &Seat, out: &std::process::Output, needle: &str, how: &str) {
@@ -289,6 +309,7 @@ os.setsid()
 if os.fork() > 0:
     os._exit(0)
 fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+os.dup2(fd, 1)
 os.dup2(fd, 2)
 os.close(fd)
 os.execv(sys.argv[1], [sys.argv[1], "prefer", "--review", "--keep", "deadbeef"])
@@ -402,16 +423,13 @@ fn detaching_does_not_make_this_process_the_person() {
     let daemon = ljos_test_boot::Packsetd::open();
     let seat = Seat::on(daemon.url().to_string());
 
+    hold_rule(&seat);
     let direct = seat
         .command(ljos(), &["prefer", "--review", "--keep", "deadbeef"])
         .output()
         .unwrap();
-    let direct_err = String::from_utf8_lossy(&direct.stderr);
-    assert!(
-        direct_err.contains("a runner cannot keep"),
-        "the runner cgroup did not count without a detach\n{}",
-        text_of(&direct)
-    );
+    assert!(direct.status.success(), "{}", text_of(&direct));
+    keep_as_agent(&seat, &direct, "the runner cgroup without a detach");
 
     // python holds the pty. It is not a wrapper, and the cgroup still names
     // the runner, so the typed command is the runner's.
@@ -428,11 +446,11 @@ fn detaching_does_not_make_this_process_the_person() {
         "terminal inside the runner cgroup",
     );
 
-    keep_refused(&setsid_keep(&seat), "setsid");
-    keep_refused(&env_i_keep(&seat), "setsid env -i");
-    keep_refused(&script_keep(&seat), "script");
-    keep_refused(&double_fork_keep(&seat), "double fork");
-    keep_refused(&tmux_keep(&seat), "tmux");
+    keep_as_agent(&seat, &setsid_keep(&seat), "setsid");
+    keep_as_agent(&seat, &env_i_keep(&seat), "setsid env -i");
+    keep_as_agent(&seat, &script_keep(&seat), "script");
+    keep_as_agent(&seat, &double_fork_keep(&seat), "double fork");
+    keep_as_agent(&seat, &tmux_keep(&seat), "tmux");
 
     let detached = setsid_prefer(&seat, "Name release branches after the month.");
     prefer_as_agent(&seat, &detached, "release branches", "setsid prefer");
@@ -452,12 +470,16 @@ fn detaching_does_not_make_this_process_the_person() {
         text_of(&hook)
     );
     let saved = atoms(&seat.url);
-    let saved = saved.iter().find(|atom| {
-        atom.get("text")
-            .and_then(Value::as_str)
-            .is_some_and(|text| text.contains("use bun"))
-    });
-    assert!(saved.is_none(), "forged hook stored {saved:?}");
+    let saved = saved
+        .iter()
+        .find(|atom| {
+            atom.get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains("use bun"))
+        })
+        .unwrap_or_else(|| panic!("the forged hook's choice was not stored\n{saved:?}"));
+    assert_eq!(saved["origin"], "agent-derived", "{saved}");
+    assert_eq!(saved["source"]["basis"], "agent", "{saved}");
 }
 
 /// `tmux send-keys` into a session that already exists types into a real

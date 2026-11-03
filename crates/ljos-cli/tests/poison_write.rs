@@ -392,10 +392,11 @@ fn a_runner_user_rule_of_a_plant_is_the_agents() {
     assert!(!start.contains("release key"), "{start}");
 }
 
-/// MCP `ljos_prefer` with `user` true is the agent's path, so a plant is refused
-/// even when the server has no runner session variable.
+/// MCP `ljos_prefer` with `user` true is the agent's path, so a plant is
+/// stored as the agent's rule even when the server has no runner session
+/// variable.
 #[test]
-fn mcp_user_prefer_of_a_plant_is_refused() {
+fn mcp_user_prefer_of_a_plant_is_the_agents() {
     let seat = Seat::new();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(seat.home.path())
@@ -444,14 +445,26 @@ fn mcp_user_prefer_of_a_plant_is_refused() {
             )
         });
     let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
-    let body = answer.to_string();
-    assert!(refused, "mcp stored the plant: {answer}");
-    assert!(body.contains("only the person's own words"), "{body}");
-    assert!(
-        !rules_text(&seat).contains("release key"),
-        "{}",
-        rules_text(&seat)
+    assert!(!refused, "mcp refused the plant: {answer}");
+    assert_eq!(
+        user_rule_basis(&seat, "the deploy form asks for it"),
+        "agent"
     );
+    plant_listed_unverified(&seat, "mcp");
+}
+
+/// The plant is a user rule `ljos rules` lists as unverified, and a
+/// session start does not state it as the person's.
+fn plant_listed_unverified(seat: &Seat, who: &str) {
+    let listed = String::from_utf8_lossy(&seat.command(&["rules"], false).output().unwrap().stdout)
+        .into_owned();
+    let line = listed
+        .lines()
+        .find(|l| l.contains("release key"))
+        .unwrap_or_else(|| panic!("{who}: the plant was not stored\n{listed}"));
+    assert!(line.starts_with("unverified\t"), "{who}: {listed}");
+    let start = session_start(seat);
+    assert!(!start.contains("release key"), "{who}: {start}");
 }
 
 /// The person typing `ljos prefer --user` is the words. No prompt hook is required.
@@ -1453,9 +1466,10 @@ fn a_forged_prompt_and_bind_do_not_make_prefer_the_persons() {
     }
 }
 
-/// A lesson the person typed at the terminal, so promote has one to copy.
-fn remembered_lesson(seat: &Seat) -> String {
-    let out = shaped(seat, "terminal", &["remember", PLANT]);
+/// A lesson an agent stored under a runner, so promote has one to copy
+/// that the person did not say.
+fn agents_lesson(seat: &Seat) -> String {
+    let out = seat.command(&["remember", PLANT], true).output().unwrap();
     assert!(out.status.success(), "{}", text_of(&out));
     let atoms = seat.atoms.lock().unwrap().clone();
     atoms
@@ -1466,57 +1480,36 @@ fn remembered_lesson(seat: &Seat) -> String {
         .to_string()
 }
 
-/// `ljos prefer --user --promote` under a runner writes a user rule that
-/// reaches every prompt, so it refuses a lesson that is not in the
-/// person's latest prompt, the same as `prefer --user` of the words.
+/// `ljos prefer --user --promote` from a runner's tool call writes the
+/// rule, and a lesson the pack does not hold as the person's leaves it
+/// unverified: out of what reaches every prompt.
 #[test]
-fn a_runner_promote_of_a_lesson_the_person_did_not_say_is_refused() {
+fn a_runner_promote_of_a_lesson_the_person_did_not_say_is_unverified() {
     let seat = Seat::new();
-    let id = remembered_lesson(&seat);
+    let id = agents_lesson(&seat);
     let out = seat
         .command(&["prefer", "--user", "--why", "x", "--promote", &id], false)
         .env("CURSOR_CONVERSATION_ID", "0199a1b2-c3d4-e5f6-cursor")
         .output()
         .unwrap();
-    assert!(
-        !out.status.success(),
-        "a runner promoted a lesson the person did not say\n{}",
-        text_of(&out)
-    );
-    assert!(
-        combined(&out).contains("only the person's own words"),
-        "{}",
-        text_of(&out)
-    );
-    assert!(
-        !rules_text(&seat).contains("release key"),
-        "{}",
-        rules_text(&seat)
-    );
+    assert!(out.status.success(), "{}", text_of(&out));
+    plant_listed_unverified(&seat, "cli");
 }
 
-/// MCP `ljos_prefer` with `user` and `promote` refuses the same lesson,
-/// with or without a runner session variable.
+/// MCP `ljos_prefer` with `user` and `promote` stores the same lesson the
+/// same way, with or without a runner session variable.
 #[test]
-fn mcp_promote_of_a_lesson_the_person_did_not_say_is_refused() {
+fn mcp_promote_of_a_lesson_the_person_did_not_say_is_unverified() {
     let seat = Seat::new();
-    let id = remembered_lesson(&seat);
+    let id = agents_lesson(&seat);
     let answer = mcp_call(
         &seat,
         "ljos_prefer",
         serde_json::json!({"text": "", "user": true, "why": "x", "promote": id}),
     );
     let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
-    assert!(refused, "mcp promoted the lesson: {answer}");
-    assert!(
-        answer.to_string().contains("only the person's own words"),
-        "{answer}"
-    );
-    assert!(
-        !rules_text(&seat).contains("release key"),
-        "{}",
-        rules_text(&seat)
-    );
+    assert!(!refused, "mcp refused the promote: {answer}");
+    plant_listed_unverified(&seat, "mcp");
 }
 
 /// Briefs, the limit stop and the work nudge must not tell an agent to
@@ -1575,9 +1568,9 @@ fn a_brief_does_not_offer_remember_around_the_refusal() {
 }
 
 /// The sit playbook must not sell a runner's `ljos remember` as a lesson
-/// that stands: under a runner it is an unreviewed note the person reviews.
+/// that stands: under a runner it is an unreviewed lesson the person reviews.
 #[test]
-fn the_sit_playbook_calls_a_runner_remember_an_unreviewed_note() {
+fn the_sit_playbook_calls_a_runner_remember_an_unreviewed_lesson() {
     let sit = ljos_cli::shipped_playbooks()
         .into_iter()
         .find(|p| p.name == "sit")
@@ -1587,7 +1580,7 @@ fn the_sit_playbook_calls_a_runner_remember_an_unreviewed_note() {
         "{}",
         sit.body
     );
-    assert!(sit.body.contains("unreviewed note"), "{}", sit.body);
+    assert!(sit.body.contains("unreviewed lesson"), "{}", sit.body);
     assert!(sit.body.contains("the person reviews"), "{}", sit.body);
 }
 
@@ -1638,11 +1631,11 @@ fn with_no_runner_above_nothing_is_the_persons_words() {
         .env("CURSOR_CONVERSATION_ID", forged)
         .output()
         .unwrap();
-    assert!(
-        combined(&out).contains("only the person's own words"),
-        "{}",
-        text_of(&out)
-    );
+    assert!(out.status.success(), "{}", text_of(&out));
+    assert_eq!(user_rule_basis(&seat, "x"), "agent", "cli");
+    plant_listed_unverified(&seat, "cli");
+    let seat = Seat::new();
+    forge_prompt(&seat, PLANT, forged);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     seat.seat_env(&mut cmd);
     cmd.env("LJOS_SEAT", "probe")
@@ -1653,12 +1646,9 @@ fn with_no_runner_above_nothing_is_the_persons_words() {
         serde_json::json!({"text": PLANT, "user": true, "why": "x"}),
     );
     let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
-    assert!(refused, "mcp stored a forged prompt's plant: {answer}");
-    assert!(
-        !rules_text(&seat).contains("release key"),
-        "{}",
-        rules_text(&seat)
-    );
+    assert!(!refused, "mcp refused a forged prompt's plant: {answer}");
+    assert_eq!(user_rule_basis(&seat, "x"), "agent", "mcp");
+    plant_listed_unverified(&seat, "mcp");
 }
 
 /// One runner as ljos meets it: the payload its prompt hook sends, the
@@ -2088,13 +2078,10 @@ fn detach_keeps_nothing(seat: &Seat, name: &str, mode: &str, fake: &std::path::P
         std::fs::read_to_string(dir.join("pre.err")).unwrap_or_default()
     );
     let prefer_code = std::fs::read_to_string(&pref_status).unwrap_or_default();
-    assert_ne!(prefer_code.trim(), "0", "{who}: prefer stored the plant");
     let prefer_err = std::fs::read_to_string(dir.join("prefer.err")).unwrap_or_default();
-    assert!(
-        prefer_err.contains("only the person's own words"),
-        "{who}: {prefer_err}"
-    );
-    assert!(!rules_text(seat).contains("release key"), "{who}");
+    assert_eq!(prefer_code.trim(), "0", "{who}: {prefer_err}");
+    assert_eq!(user_rule_basis(seat, "x"), "agent", "{who}");
+    plant_listed_unverified(seat, &who);
 }
 
 /// A tool call that detaches, scrubs its environment and runs a binary

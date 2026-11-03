@@ -4891,14 +4891,6 @@ pub(crate) fn seat_git_child(cmd: &mut std::process::Command) {
     }
 }
 
-/// Whether a conversation under a runner may accept a proposal: only one
-/// another conversation filed, such as a worker it started. `proposer` is
-/// the holder the proposal's atom names, `holder` this conversation's.
-#[must_use]
-pub fn accepts_another_conversation(proposer: Option<&str>, holder: &str) -> bool {
-    proposer.is_some_and(|p| !p.trim().is_empty() && p.trim() != holder.trim())
-}
-
 /// The name this conversation's claims are held under.
 /// A git hook that resolved a seat passes that name, not the process tree.
 #[must_use]
@@ -14092,10 +14084,10 @@ fn correction_nudge_as(call: &HookCall, verdict: Option<bool>) -> Option<(String
     }
     Some((
         key,
-        "This prompt reads as a correction. The hook filed a proposal and did not write it. \
+        "This prompt reads as a correction. The hook stored it as written. \
          Before the work: write what it corrects as one \
          `ljos prefer \"...\"` (a standing choice) or `ljos remember \"...\"` (a lesson), \
-         or run `ljos accept` on the proposal, so the pack holds it and the hook can raise it next time."
+         so the pack holds the point in a sentence the hook can raise next time."
             .to_string(),
     ))
 }
@@ -14107,9 +14099,10 @@ pub fn correction_cue(text: &str) -> Option<&'static str> {
     CORRECTION_CUES.iter().find(|c| lower.contains(*c)).copied()
 }
 
-/// File a correction as a proposal in the person's words. The hook does not
-/// write the preference. Once per session per cue. A pack that does not
-/// answer is left for the note.
+/// Store a correction as a preference in the words of the prompt, labelled
+/// as the hook's write and as the person's or an agent's
+/// ([`capture::persons_prompt`]). Once per session per cue. A pack that
+/// does not answer is left for the note.
 pub fn store_correction(call: &HookCall) {
     let Some(hit) = correction_cue(&call.cue) else {
         return;
@@ -14137,6 +14130,7 @@ fn file_correction(call: &HookCall, key: &str) {
         return;
     }
     let key = key.to_string();
+    let persons = capture::persons_prompt();
     let wrote = with_pack_timeout(1500, || {
         let Ok(client) = pack() else {
             return false;
@@ -14144,13 +14138,15 @@ fn file_correction(call: &HookCall, key: &str) {
         let workspace = client.workspace();
         let mut atom = atom_body("preference", &text, &workspace);
         stamp_horizon(&mut atom, "preference", &text, Some(false));
-        // The words are the person's. The hook files them; it does not store
-        // them. Accept is what writes the preference.
-        admit::stamp_person(&mut atom);
+        if persons {
+            admit::stamp_person(&mut atom);
+        } else {
+            admit::stamp_origin(&mut atom, admit::ORIGIN_AGENT);
+        }
         if let Some(map) = atom.as_object_mut() {
             map.insert("hook".into(), Value::Bool(true));
         }
-        admit::propose_admission(&client, atom).is_ok()
+        admit::store_labelled(&client, atom).is_ok()
     });
     if wrote {
         mark_seen(call.session.as_deref(), &[key]);
@@ -17476,9 +17472,9 @@ fn post_or_reinforce(client: &PacksetClient, atom: &Value, prefix: &str) -> Resu
 /// Write a claim an agent made, at once. No person approves it first: it
 /// carries origin `agent-derived` and its provenance in `source`, and
 /// `ljos memories review` keeps, edits, merges or drops it afterwards.
-/// The pack still refuses a secret, the size cap and a third sentence, and
-/// holds an agent's claim to its word limit, grade and adverb ratio: a
-/// sentence it would keep from the person with a warning is refused here.
+/// The pack still refuses a secret. A claim past its sentence, word,
+/// grade or adverb limits is stored as shorter copies, with the pack's
+/// reason as a warning ([`admit::write_agent`]).
 ///
 /// # Errors
 ///
@@ -17633,11 +17629,11 @@ pub fn mcp_claim_atom(
     Ok(atom)
 }
 
-/// Write an MCP `remember` or `prefer` only when it is the person's own
-/// words from their latest prompt.
+/// Write an MCP `remember` or `prefer` at once, labelled with its basis.
 ///
-/// A claim read in a file, a tool's output or a web page is not the
-/// person's words and is refused here.
+/// Words from the person's latest prompt are theirs. A claim read in a
+/// file, a tool's output or a web page is not, and is stored as the
+/// agent's ([`store_agent_atom`]).
 ///
 /// # Errors
 ///
@@ -17653,7 +17649,14 @@ pub fn packset_write_mcp(
     let _ = atom_kind(label)?;
     let client = pack()?;
     let atom = mcp_claim_atom(label, text, &client.workspace(), persona, transient, basis)?;
-    let posted = post_or_reinforce(&client, &atom, &format!("{label}: POST /v1/atoms failed"))?;
+    let prefix = format!("{label}: POST /v1/atoms failed");
+    let posted = match basis {
+        Basis::Person => post_or_reinforce(&client, &atom, &prefix)?,
+        Basis::Agent => match memories::reinforce_held(&client, &atom) {
+            Some(held) => held,
+            None => store_agent_atom(&client, atom, &prefix)?,
+        },
+    };
     admit::satisfy_text(text.trim());
     Ok(posted)
 }
@@ -18207,8 +18210,7 @@ pub(crate) fn stamp_issue(atom: &mut Value, issue: &str) {
 /// A preference is a rule. A lesson is an episode until a recalled review
 /// or a consolidation promotes it, unless the caller said which it is.
 /// `ljos remember` typed by the person says standing; see
-/// [`remember_horizon`]. An agent's own remember is a note and carries
-/// no horizon tag.
+/// [`remember_horizon`].
 fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>) {
     let transient = match (kind, force) {
         ("preference", _) => false,
@@ -18225,10 +18227,10 @@ fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>)
 
 /// The horizon `ljos remember` writes for the person: standing, unless
 /// `--transient`. Under a runner the result is transient. The remember
-/// command stores the agent's own words as a note instead of calling
-/// this, and the transient result keeps a leftover caller from stamping
-/// `horizon:standing` on text the person did not say. `--standing` does
-/// not override that.
+/// command stores the agent's own words through [`packset_write_agent`]
+/// instead of calling this, and the transient result keeps a leftover
+/// caller from stamping `horizon:standing` on text the person did not say.
+/// `--standing` does not override that.
 #[must_use]
 pub fn remember_horizon(transient: bool, standing: bool, under_runner: bool) -> Option<bool> {
     let _ = standing;
@@ -18264,103 +18266,16 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
     packset_write_as(label, text, None, None)
 }
 
-/// The preference `ljos prefer` writes.
+/// The preference `ljos prefer` writes, stored at once from any caller.
 ///
 /// Typed by the person, it is theirs. Under a runner the same person-words
 /// check as an MCP prefer applies: words from the latest prompt are stored
-/// as theirs, and any other text is agent-derived. The seat guard does not
-/// stop the verb, so the check is what keeps a planted sentence from
-/// becoming the person's words.
+/// as theirs, and any other text is stored as agent-derived. The check is
+/// what keeps a planted sentence from being labelled the person's words.
 ///
 /// # Errors
 ///
 /// An empty text, or the pack refusing the claim.
-/// An agent's `ljos remember` of words that are not the person's.
-///
-/// Stored as an unreviewed note: kind `note`, origin `agent-derived`,
-/// no horizon tag and no [`SAID_ENTITY`], so the prompt does not treat it
-/// as a fact. A pack that does not know kind `note` takes the same text as
-/// a `summary`, still agent-derived and untagged. Posted as a note, not
-/// through the agent writer, which files a lesson the pack holds to the
-/// atom prose gate.
-///
-/// # Errors
-///
-/// An empty text, or the pack refusing the note. A pack that keeps a note
-/// only on a ticket, while this conversation holds no sitting, is refused
-/// with [`REMEMBER_NOTE_WITHOUT_TICKET`], which says what to do instead.
-pub fn packset_write_remember_note(text: &str, persona: Option<&str>) -> Result<Value> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        bail!("Remember: empty text is not a claim");
-    }
-    let client = pack()?;
-    let issue = live_held_issue().map(|(issue, _)| issue);
-    let mut atom = remember_note_atom(trimmed, persona, &client.workspace(), issue.as_deref());
-    let prefix = "Remember: POST /v1/atoms failed";
-    let posted = match with_writer(|| {
-        admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
-    }) {
-        Err(e) if note_kind_unknown(&e) => {
-            atom["kind"] = Value::String("summary".into());
-            with_writer(|| {
-                admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
-            })
-        }
-        other => other,
-    };
-    posted.map_err(|e| match issue {
-        None if note_needs_ticket(&e) => e.context(REMEMBER_NOTE_WITHOUT_TICKET),
-        _ => e,
-    })
-}
-
-/// Why an agent's `ljos remember` was not kept when the pack wants a
-/// ticket for a note and this conversation holds no sitting, and what to
-/// do instead.
-pub const REMEMBER_NOTE_WITHOUT_TICKET: &str = "remember: these words are not in the person's \
-     latest prompt, so they are kept as an agent's note, and the pack keeps a note only on a \
-     ticket while this conversation holds no sitting. Open one with `ljos sitting ISSUE` and \
-     run this again, or write it with `ljos note ISSUE \"...\"`. To keep the person's own words \
-     as theirs, pass them exactly as their latest prompt has them, or ask them to run `ljos \
-     remember` in their terminal";
-
-/// Whether the pack refused a note for naming no ticket.
-fn note_needs_ticket(err: &anyhow::Error) -> bool {
-    format!("{err:#}").contains("note atom needs issue")
-}
-
-/// The atom an agent's `ljos remember` posts for `text`: kind `note`,
-/// basis and origin agent, tagged with its source, the persona's set when
-/// one is named, and the held `issue` when there is one, since the pack
-/// keeps a note on the ticket whose logbook it copies.
-fn remember_note_atom(
-    text: &str,
-    persona: Option<&str>,
-    workspace: &str,
-    issue: Option<&str>,
-) -> Value {
-    let mut atom = atom_body(packset_core::record::NOTE_KIND, text, workspace);
-    atom["source"]["basis"] = Value::String(Basis::Agent.as_str().into());
-    let mut tags = vec![
-        format!("{NOTE_BASIS_ENTITY}agent"),
-        format!("{NOTE_SOURCE_ENTITY}ljos-remember"),
-    ];
-    if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
-        tags.push(persona_entity(name));
-        atom["set"] = Value::String(persona_set(name));
-    }
-    if let Some(issue) = issue.map(str::trim).filter(|i| !i.is_empty()) {
-        tags.push(format!("issue:{issue}"));
-    }
-    add_entities(&mut atom, tags);
-    if let Some(issue) = issue {
-        stamp_issue(&mut atom, issue);
-    }
-    admit::stamp_origin(&mut atom, admit::ORIGIN_AGENT);
-    atom
-}
-
 pub fn packset_prefer(text: &str, persona: Option<&str>) -> Result<Value> {
     if person_present() {
         return packset_write_as("Prefer", text, persona, Some(false));
@@ -19051,7 +18966,7 @@ A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook
 
 1. Open with `ljos sitting ISSUE --playbook sit`. The claim is taken and printed first. Then doctor, cards, due, island, this recipe, recall and timeline.
 2. Grade due claims (`ljos graded ID`).
-3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Under a runner `ljos remember` is an unreviewed note that the person reviews; keep it to two sentences.
+3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Under a runner `ljos remember` is stored at once as an unreviewed lesson that the person reviews; keep it to two sentences.
 4. One playbook step is the whole sitting. A subagent takes this recipe and this issue; it does not resume a later phase.
 5. Close with `ljos finish ISSUE --lesson \"...\"`. Completing the node does not close the ticket. A person closes it when the work is accepted.
 ";
@@ -27148,14 +27063,22 @@ pub fn format_write_ack_plain(body: &Value, when: &dyn Fn(&str) -> String) -> St
     format!("{head}\n  id {short}{due}")
 }
 
-/// The line a write prints when the pack stored the person's words over a
-/// prose warning: what the gate said, and that shorter sentences are
+/// The line a write prints when it was stored over a prose warning: as
+/// written, or as the shorter copies an agent's claim was cut into
+/// (`copies`), what the gate said, and that shorter sentences are
 /// recalled better. `None` when the pack gave no warning.
 #[must_use]
 pub fn prose_warning_line(body: &Value) -> Option<String> {
     let warning = body["prose"]["warning"].as_str()?.trim();
+    let how = match body["copies"].as_u64() {
+        Some(1) => "stored as a shorter copy".to_string(),
+        Some(n) => format!("stored as {n} shorter copies"),
+        None => "stored as written".to_string(),
+    };
     (!warning.is_empty()).then(|| {
-        format!("stored as written; the pack's prose check said: {warning}. Shorter sentences are recalled better.")
+        format!(
+            "{how}; the pack's prose check said: {warning}. Shorter sentences are recalled better."
+        )
     })
 }
 
@@ -35149,20 +35072,20 @@ pub fn not_assignee_message(
 }
 
 /// Whether a lesson given to `ljos finish` is the person's own: no agent
-/// runner above the process and [`person_present`]. Such a lesson is
-/// written at once; one an agent gives waits for `ljos accept`.
+/// runner above the process and [`person_present`]. Any other lesson is
+/// stored at once all the same, labelled `agent-derived`.
 #[must_use]
 pub fn lesson_is_the_persons(under_runner: bool, terminal: bool) -> bool {
     !under_runner && terminal
 }
 
-/// File the lesson of a finished sitting. A lesson learned on an issue
-/// belongs to the scope of the repository that holds the issue, wherever
-/// it was written. One the person typed in a terminal of their own is
-/// `user-declared`; any other is a proposal at L0 (`derived`) with origin
-/// `agent-derived`. Called after the node completed, so
-/// a refusal is a line that names the pack's reason and the command that
-/// keeps the lesson, never an error.
+/// Store the lesson of a finished sitting at once. A lesson learned on an
+/// issue belongs to the scope of the repository that holds the issue,
+/// wherever it was written. One the person typed in a terminal of their
+/// own is `user-declared`; any other is `agent-derived` at L0 (`derived`),
+/// unreviewed until `ljos accept` or `ljos memories review`. Called after
+/// the node completed, so a refusal is a line that names the pack's reason
+/// and the command that keeps the lesson, never an error.
 /// A lesson cut into claims the pack takes: at most two sentences each.
 /// The pack refuses an atom of three or more sentences, so a longer
 /// lesson is kept as several, in order, instead of being turned away.
@@ -35229,8 +35152,6 @@ fn finish_lesson(issue: &str, text: &str) -> String {
         }
         add_entities(&mut atom, tags);
         stamp_issue(&mut atom, issue);
-        // Standing once accepted. Until then the proposal holds it and no
-        // search returns it. An agent's lesson starts at L0.
         stamp_horizon(&mut atom, "lesson", text, Some(false));
         if persons {
             // Typed by the person in a terminal of their own: no
@@ -35258,10 +35179,18 @@ fn finish_lesson(issue: &str, text: &str) -> String {
         {
             return Ok(format!("{line}\n"));
         }
-        let filed = admit::propose_admission(&client, atom)?;
+        let posted = admit::store_labelled(&client, atom)?;
+        let id: String = posted["id"]
+            .as_str()
+            .unwrap_or("?")
+            .chars()
+            .take(8)
+            .collect();
+        let warned = prose_warning_line(&posted)
+            .map(|line| format!("{line}\n"))
+            .unwrap_or_default();
         Ok(format!(
-            "proposed {} as agent-derived; `ljos accept {}` writes it\n",
-            filed.id, filed.id
+            "remembered the lesson as agent-derived, unreviewed (id {id}); search finds it now, and `ljos accept {id}` marks it reviewed\n{warned}"
         ))
     })();
     match filed {
@@ -41185,8 +41114,8 @@ pub fn format_findings(campaign: &Campaign) -> String {
 pub struct Remembered {
     pub id: String,
     pub lesson: String,
-    /// The pack's answer: `proposed ID` for a lesson filed and not yet
-    /// written, `skipped` for a retry supersession, else the refusal.
+    /// The pack's answer: `stored ID` for a lesson written, `skipped` for
+    /// a retry supersession, else the refusal.
     pub result: String,
 }
 
@@ -41227,12 +41156,12 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
         if let Some(id) = issue_id {
             stamp_issue(&mut atom, id);
         }
-        // A campaign file is tool output. It stays a proposal at L0 until
-        // a person accepts it.
+        // A campaign file is tool output. It is stored at L0, labelled so,
+        // until a person accepts it.
         stamp_horizon(&mut atom, "lesson", &lesson, Some(false));
         admit::stamp_origin(&mut atom, admit::ORIGIN_TOOL);
-        let result = match admit::propose_admission(&client, atom) {
-            Ok(filed) => format!("proposed {}", filed.id),
+        let result = match admit::store_labelled(&client, atom) {
+            Ok(posted) => format!("stored {}", posted["id"].as_str().unwrap_or("?")),
             Err(e) => format!("refused: {e}"),
         };
         out.push(Remembered {
@@ -51239,22 +51168,33 @@ mod tests {
         assert!(!hook_uses_rerank(true));
     }
 
-    #[test]
-    fn a_pasted_or_quoted_correction_is_not_filed() {
-        let _g = env_guard();
-        let state = tempfile::tempdir().unwrap();
-        let runtime = tempfile::tempdir().unwrap();
-        let posts = Arc::new(AtomicUsize::new(0));
-        let count = Arc::clone(&posts);
+    /// A pack that stores every atom posted and answers it with an id.
+    fn serve_store() -> (String, Arc<Mutex<Vec<Value>>>) {
+        let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&stored);
         let (url, _) = serve_http(move |req| {
-            if req.contains("POST /v1/atoms") || req.contains("POST /v1/proposals") {
-                count.fetch_add(1, Ordering::SeqCst);
-            }
-            if req.contains("POST /v1/proposals") {
-                return (403, r#"{"error":"extract is not allowed"}"#.into());
+            let path = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if path.starts_with("POST /v1/atoms ") {
+                let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let mut all = slot.lock().unwrap();
+                atom["id"] = Value::String(format!("atom-{}", all.len()));
+                all.push(atom.clone());
+                return (200, atom.to_string());
             }
             (404, r#"{"error":"missing"}"#.into())
         });
+        (url, stored)
+    }
+
+    /// A correction is stored at once in the prompt's words, labelled with
+    /// whose prompt it was. A pasted or quoted one is not a correction.
+    #[test]
+    fn a_correction_is_stored_labelled_and_a_pasted_one_is_not() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let (url, stored) = serve_store();
         let _env = HoldEnv::set(&[
             ("XDG_STATE_HOME", state.path().to_str().unwrap()),
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
@@ -51276,93 +51216,85 @@ mod tests {
         };
         store_correction(&fenced);
         assert!(
-            !state.path().join("ljos/proposals.jsonl").exists(),
-            "pasted and quoted prompts file nothing"
+            stored.lock().unwrap().is_empty(),
+            "pasted and quoted prompts store nothing"
         );
-        assert_eq!(posts.load(Ordering::SeqCst), 0);
+
+        capture::set_persons_prompt(true);
         store_correction(&HookCall {
             event: "UserPromptSubmit".into(),
             cue: "you should have used the cluster for this fuse run".into(),
             session: Some("plain".into()),
             shape: HookShape::Asks,
         });
-        let proposals = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
-        let rec: Value = serde_json::from_str(proposals.lines().next().unwrap()).unwrap();
-        assert_eq!(rec["status"], "open", "{rec}");
-        assert_eq!(rec["origin"], "user-declared", "{rec}");
-        assert_eq!(rec["atom"]["level"], "explicit", "{rec}");
-        assert_eq!(rec["atom"]["hook"], true, "{rec}");
+        capture::set_persons_prompt(false);
+        store_correction(&HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "you should have run the tests before the push".into(),
+            session: Some("brief".into()),
+            shape: HookShape::Asks,
+        });
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 2, "{live:?}");
+        let (persons, agents) = (&live[0], &live[1]);
         assert!(
-            rec["text"]
+            persons["text"]
                 .as_str()
                 .unwrap()
                 .contains("you should have used the cluster"),
-            "{rec}"
+            "{persons}"
         );
-        assert_eq!(
-            posts.load(Ordering::SeqCst),
-            0,
-            "a correction is a proposal, not a write"
+        assert_eq!(persons["origin"], admit::ORIGIN_USER, "{persons}");
+        assert_eq!(persons["source"]["basis"], "person", "{persons}");
+        assert_eq!(persons["level"], admit::LEVEL_EXPLICIT, "{persons}");
+        assert_eq!(persons["hook"], true, "{persons}");
+        assert_eq!(agents["origin"], admit::ORIGIN_AGENT, "{agents}");
+        assert_eq!(agents["source"]["basis"], "agent", "{agents}");
+        assert_eq!(agents["level"], admit::LEVEL_L0, "{agents}");
+        assert_eq!(agents["hook"], true, "{agents}");
+        assert!(
+            !state.path().join("ljos/proposals.jsonl").exists(),
+            "nothing waits as a proposal"
         );
     }
 
-    /// `finish --lesson` under an agent files one proposal. The origin is
-    /// this seat's own agent and the level is packset's L0. Nothing is posted.
+    /// `finish --lesson` under an agent stores the lesson at once, as this
+    /// seat's own agent's, at packset's L0.
     #[test]
-    fn finish_lesson_files_the_agents_proposal_at_l0() {
+    fn finish_lesson_stores_the_agents_lesson_at_l0() {
         let _g = env_guard();
         let state = tempfile::tempdir().unwrap();
-        let posts = Arc::new(AtomicUsize::new(0));
-        let count = Arc::clone(&posts);
-        let (url, _) = serve_http(move |req| {
-            if req.contains("POST /v1/") {
-                count.fetch_add(1, Ordering::SeqCst);
-            }
-            (500, r#"{"error":"down"}"#.into())
-        });
+        let (url, stored) = serve_store();
         let _env = HoldEnv::set(&[
             ("XDG_STATE_HOME", state.path().to_str().unwrap()),
             ("CLAUDECODE", "1"),
         ]);
         let _url = PackUrl::set(&url);
         let line = finish_lesson("fuse-3z37", "Build the lesson on the cluster fuse.");
-        assert!(line.contains("proposed "), "{line}");
-        assert!(line.contains(" as agent-derived;"), "{line}");
-        assert!(line.contains("ljos accept "), "{line}");
-        assert_eq!(
-            posts.load(Ordering::SeqCst),
-            0,
-            "the lesson was not written"
-        );
-        let rec = proposal_on(&state);
-        assert_eq!(rec["status"], "open", "{rec}");
-        assert_eq!(rec["origin"], admit::ORIGIN_AGENT, "{rec}");
-        assert_eq!(rec["atom"]["origin"], admit::ORIGIN_AGENT, "{rec}");
-        assert_eq!(rec["atom"]["level"], admit::LEVEL_L0, "{rec}");
-        assert_eq!(rec["atom"]["kind"], "lesson", "{rec}");
         assert!(
-            rec["atom"]["text"]
-                .as_str()
-                .unwrap()
-                .contains("cluster fuse"),
-            "{rec}"
+            line.contains("remembered the lesson as agent-derived, unreviewed (id atom-0)"),
+            "{line}"
+        );
+        assert!(line.contains("`ljos accept atom-0`"), "{line}");
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(live[0]["origin"], admit::ORIGIN_AGENT, "{live:?}");
+        assert_eq!(live[0]["source"]["basis"], "agent", "{live:?}");
+        assert_eq!(live[0]["level"], admit::LEVEL_L0, "{live:?}");
+        assert_eq!(live[0]["kind"], "lesson", "{live:?}");
+        assert!(
+            live[0]["text"].as_str().unwrap().contains("cluster fuse"),
+            "{live:?}"
         );
     }
 
-    /// A resolved campaign finding is tool output. The proposal carries
-    /// `tool-echo` and cannot start above L0.
+    /// A resolved campaign finding is tool output. It is stored at once
+    /// as `tool-echo` at L0.
     #[test]
-    fn findings_remember_files_a_tool_proposal_at_l0() {
+    fn findings_remember_stores_a_tool_lesson_at_l0() {
         let _g = env_guard();
         let state = tempfile::tempdir().unwrap();
-        let posts = Arc::new(AtomicUsize::new(0));
-        let count = Arc::clone(&posts);
-        let (url, _) = serve_http(move |req| {
-            if req.contains("POST /v1/") {
-                count.fetch_add(1, Ordering::SeqCst);
-            }
-            (500, r#"{"error":"down"}"#.into())
-        });
+        let (url, stored) = serve_store();
         let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
         let _url = PackUrl::set(&url);
         let path = state.path().join("campaign.json");
@@ -51376,64 +51308,36 @@ mod tests {
         .unwrap();
         let rows = remember_findings(&path, None, false).unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
-        assert!(rows[0].result.starts_with("proposed "), "{rows:?}");
+        assert_eq!(rows[0].result, "stored atom-0", "{rows:?}");
         assert!(!rows[0].lesson.is_empty(), "{rows:?}");
-        assert_eq!(
-            posts.load(Ordering::SeqCst),
-            0,
-            "the finding was not written"
-        );
-        let rec = proposal_on(&state);
-        assert_eq!(rec["status"], "open", "{rec}");
-        assert_eq!(rec["origin"], admit::ORIGIN_TOOL, "{rec}");
-        assert_eq!(rec["atom"]["origin"], admit::ORIGIN_TOOL, "{rec}");
-        assert_eq!(rec["atom"]["level"], admit::LEVEL_L0, "{rec}");
-        assert_eq!(rec["kind"], "lesson", "{rec}");
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(live[0]["origin"], admit::ORIGIN_TOOL, "{live:?}");
+        assert_eq!(live[0]["level"], admit::LEVEL_L0, "{live:?}");
+        assert_eq!(live[0]["kind"], "lesson", "{live:?}");
     }
 
-    /// Accept is the promotion. A tool proposal filed at L0 is stored at
-    /// packset's `explicit` level, and the origin stays `tool-echo`.
+    /// Accept is the promotion. A tool lesson an older ljos left as an open
+    /// row is stored at packset's `explicit` level, and the origin stays
+    /// `tool-echo`.
     #[test]
-    fn accept_promotes_a_tool_proposal_above_l0() {
+    fn accept_promotes_an_open_tool_row_above_l0() {
         let _g = env_guard();
         let state = tempfile::tempdir().unwrap();
-        let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-        let slot = Arc::clone(&stored);
-        let (url, _) = serve_http(move |req| {
-            let path = req.lines().next().unwrap_or("");
-            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-            if path.contains("POST /v1/atoms") {
-                let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                atom["id"] = Value::String("atom-promoted".into());
-                slot.lock().unwrap().push(atom.clone());
-                return (200, atom.to_string());
-            }
-            (404, r#"{"error":"missing"}"#.into())
-        });
+        let (url, stored) = serve_store();
         let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
         let _url = PackUrl::set(&url);
-        let path = state.path().join("campaign.json");
-        std::fs::write(
-            &path,
-            r#"{"package":"gcc","version":"15.2.0","target":"terra","status":"done","attempts":1,
-            "findings":[{"id":"f1","status":"resolved","class":"compile","disposition":"fixed",
-            "stage":"build","recipe":"GCCcore-15.2.0.eb","summary":"header missing",
-            "evidence":"fatal error: linux/scc.h","resolution":{"action":"applied the headers patch","changes":[]}}]}"#,
-        )
-        .unwrap();
-        let rows = remember_findings(&path, None, false).unwrap();
-        let id = rows[0].result.trim_start_matches("proposed ").trim();
-        let before = proposal_on(&state);
-        assert_eq!(before["atom"]["level"], admit::LEVEL_L0, "{before}");
-        assert!(
-            stored.lock().unwrap().is_empty(),
-            "not stored before accept"
+        let client = pack().unwrap();
+        let mut atom = atom_body(
+            "lesson",
+            "GCCcore-15.2.0 needs the headers patch.",
+            &client.workspace(),
         );
-        let said = admit::accept(id).unwrap();
-        assert!(
-            said.contains("explicit") || said.contains("tool-echo"),
-            "{said}"
-        );
+        atom["origin"] = Value::from(admit::ORIGIN_TOOL);
+        atom["level"] = Value::from(admit::LEVEL_L0);
+        legacy_row(state.path(), "row-tool", &atom, None);
+        let said = admit::accept("row-tool").unwrap();
+        assert!(said.contains("origin tool-echo"), "{said}");
         let live = stored.lock().unwrap().clone();
         assert_eq!(live.len(), 1, "{live:?}");
         assert_eq!(live[0]["level"], admit::LEVEL_EXPLICIT, "{live:?}");
@@ -51441,11 +51345,6 @@ mod tests {
         assert_eq!(live[0]["kind"], "lesson");
         let after = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
         assert!(after.contains("\"status\":\"accepted\""), "{after}");
-    }
-
-    fn proposal_on(state: &tempfile::TempDir) -> Value {
-        let text = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
-        serde_json::from_str(text.lines().next().unwrap()).unwrap()
     }
 
     #[test]
@@ -54204,7 +54103,7 @@ mod tests {
     }
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -55399,20 +55298,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             join(&["the default fuse".into(), "is CombMNZ".into()]),
             "the default fuse is CombMNZ"
         );
-    }
-
-    #[test]
-    fn a_conversation_accepts_only_another_s_proposal() {
-        assert!(accepts_another_conversation(
-            Some("claude-worker-2"),
-            "claude-parent-1"
-        ));
-        assert!(!accepts_another_conversation(
-            Some("claude-parent-1"),
-            "claude-parent-1"
-        ));
-        assert!(!accepts_another_conversation(Some(" "), "claude-parent-1"));
-        assert!(!accepts_another_conversation(None, "claude-parent-1"));
     }
 
     #[test]
@@ -62192,36 +62077,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(seat_guard("cat /run/user/1000/ljos/approvals/0123.json").is_none());
     }
 
-    /// An agent's `ljos remember` note carries the held ticket, which the
-    /// pack needs to keep a note. With no sitting it names none, and the
-    /// pack's refusal is answered with what to pass instead. The note is
-    /// still the agent's, never the person's.
-    #[test]
-    fn an_agent_remember_note_carries_the_held_ticket() {
-        let held = remember_note_atom("Use eb-stack for every step.", None, "w", Some("ljos-5b5i"));
-        assert_eq!(held["issue"], "ljos-5b5i", "{held}");
-        let tags = held["entities"].to_string();
-        assert!(tags.contains("issue:ljos-5b5i"), "{held}");
-        assert!(tags.contains("note-source:ljos-remember"), "{held}");
-        assert!(!tags.contains("via:prompt"), "{held}");
-        assert_eq!(held["kind"], packset_core::record::NOTE_KIND, "{held}");
-        assert_eq!(held["source"]["basis"], "agent", "{held}");
-        let bare = remember_note_atom("Use eb-stack for every step.", None, "w", None);
-        assert!(bare.get("issue").is_none(), "{bare}");
-        assert!(!bare["entities"].to_string().contains("issue:"), "{bare}");
-        let refused = anyhow::anyhow!(
-            "bad response: http://127.0.0.1:8761/v1/atoms: 400: note atom needs issue, the ticket whose logbook it copies"
-        )
-        .context("Remember: POST /v1/atoms failed");
-        assert!(note_needs_ticket(&refused));
-        let told = format!("{:#}", refused.context(REMEMBER_NOTE_WITHOUT_TICKET));
-        assert!(told.contains("ljos sitting ISSUE"), "{told}");
-        assert!(told.contains("ljos note ISSUE"), "{told}");
-        assert!(!note_needs_ticket(&anyhow::anyhow!(
-            "400: atom sentence too long"
-        )));
-    }
-
     /// A `for` loop over sitting records names them and writes nothing.
     /// The loop body is judged with the loop variable as the path, so a
     /// body that reads passes and one that removes or redirects into a
@@ -63996,6 +63851,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             session: Some("chat-one".into()),
             shape: HookShape::default(),
         };
+        capture::set_persons_prompt(true);
         let (line, _) = capture::capture_stated(&said).expect("the choice is saved");
         assert!(line.contains("ljos forget"), "{line}");
         let live = stored.lock().unwrap().clone();
@@ -64023,10 +63879,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         };
         let (note, _) = hook_note(&next, 5);
         assert!(note.contains("always use bun, never yarn"), "{note}");
+        capture::set_persons_prompt(false);
     }
 
-    /// An MCP `remember` or `prefer` writes only the person's words from the
-    /// latest prompt. Any other text is refused and should be a note.
+    /// An MCP `remember` or `prefer` labels only the person's words from the
+    /// latest prompt as theirs. Any other text is stored as the agent's.
     #[test]
     fn an_mcp_write_keeps_only_the_persons_words() {
         let _env = env_guard();
@@ -64552,21 +64409,42 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         (url, stored)
     }
 
-    /// Length and grade are stored as written, with the pack's warning, for
-    /// the person's prefer. The agent writer files the same text as the
-    /// agent's, and the pack refuses it rather than keep it as the
-    /// person's. A third sentence is still more than one atom.
+    /// Length and grade are a warning, not a refusal. The person's prefer is
+    /// stored as written; the agent's, which the pack holds to its gate, as
+    /// shorter copies with the agent's labels and every word kept in order.
+    /// A third sentence is still more than one atom.
     #[test]
-    fn a_long_agent_claim_is_refused_and_the_persons_kept_with_a_warning() {
+    fn a_long_agent_claim_is_stored_in_copies_and_the_persons_as_written() {
         let _g = env_guard();
         let (url, stored) = serve_validating();
         let _url = PackUrl::set(&url);
         let grade = "The payments service retries webhooks three times with exponential backoff starting at two seconds.";
         let words = format!("{}end.", "word ".repeat(29));
+        let bare = |text: &str| -> Vec<String> {
+            text.split_whitespace()
+                .map(|word| word.trim_end_matches('.').to_string())
+                .collect()
+        };
         for text in [grade, words.as_str()] {
-            let refused = packset_write_agent("Remember", text, None, Some(false))
-                .expect_err("the agent's soft prose was kept");
-            assert!(format!("{refused:#}").contains("400"), "{refused:#}");
+            stored.lock().unwrap().clear();
+            let kept = packset_write_agent("Remember", text, None, Some(false))
+                .unwrap_or_else(|why| panic!("the agent's {text:?} was refused: {why:#}"));
+            assert!(
+                kept["prose"]["warning"]
+                    .as_str()
+                    .is_some_and(|warning| !warning.is_empty()),
+                "{kept}"
+            );
+            let copies: Vec<Value> = stored.lock().unwrap().clone();
+            assert!(
+                copies.iter().all(|atom| atom["origin"] == "agent-derived"),
+                "{copies:?}"
+            );
+            let joined: Vec<String> = copies
+                .iter()
+                .flat_map(|atom| bare(atom["text"].as_str().unwrap_or("")))
+                .collect();
+            assert_eq!(joined, bare(text), "{copies:?}");
             let preferred = packset_write_as("Prefer", text, None, Some(false))
                 .unwrap_or_else(|why| panic!("prefer refused {text:?}: {why:#}"));
             assert_eq!(preferred["text"], text);
@@ -64577,6 +64455,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 "{preferred}"
             );
         }
+        stored.lock().unwrap().clear();
         let three = "The parser kept the hyphen. The test pins it. The release ships it.";
         packset_write_agent("Remember", three, None, Some(false))
             .unwrap_or_else(|why| panic!("three sentences refused: {why:#}"));
@@ -64585,7 +64464,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             .unwrap()
             .iter()
             .filter_map(|atom| atom["text"].as_str().map(str::to_string))
-            .filter(|text| text != grade && text != &words)
             .collect();
         assert!(copies.len() > 1, "{copies:?}");
         assert!(copies.iter().all(|text| text != three), "{copies:?}");
@@ -64695,135 +64573,21 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
     }
 
-    /// An agent lesson stays a proposal. Accept writes a lesson with origin
-    /// `agent-derived`, not a user preference. The person's own prefer of
-    /// the same words is the path that writes `user-declared`.
-    #[test]
-    fn an_agent_lesson_is_not_a_user_preference_without_accept() {
-        let _g = env_guard();
-        let state = tempfile::tempdir().unwrap();
-        let runtime = tempfile::tempdir().unwrap();
-        let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-        let slot = Arc::clone(&stored);
-        let held: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
-        let held_slot = Arc::clone(&held);
-        let (url, _) = serve_http(move |req| {
-            let path = req.lines().next().unwrap_or("");
-            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-            if path.contains("POST /v1/proposals/accept") {
-                let asked: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                let id = asked["id"].as_str().unwrap_or("").to_string();
-                let mut held = held_slot.lock().unwrap();
-                let Some(pos) = held.iter().position(|(held_id, _)| held_id == &id) else {
-                    return (400, format!(r#"{{"error":"no open proposal {id}"}}"#));
-                };
-                let mut atom = held.remove(pos).1;
-                atom["origin"] = Value::String("user-declared".into());
-                let stored = slot.lock().unwrap();
-                if let Some(existing) = stored
-                    .iter()
-                    .find(|row| row["text"] == atom["text"] && row["kind"] == atom["kind"])
-                {
-                    return (200, existing.to_string());
-                }
-                drop(stored);
-                let n = slot.lock().unwrap().len();
-                atom["id"] = Value::String(format!("atom-{n}"));
-                slot.lock().unwrap().push(atom.clone());
-                return (200, atom.to_string());
-            }
-            if path.contains("POST /v1/atoms") {
-                let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                if atom["origin"].as_str() == Some("agent-derived") {
-                    let text = atom["text"].as_str().unwrap_or("").to_string();
-                    let mut held = held_slot.lock().unwrap();
-                    let id = held
-                        .iter()
-                        .find(|(_, row)| row["text"].as_str() == Some(text.as_str()))
-                        .map(|(id, _)| id.clone())
-                        .unwrap_or_else(|| format!("{:032x}", held.len() + 1));
-                    if held.iter().all(|(held_id, _)| held_id != &id) {
-                        held.push((id.clone(), atom));
-                    }
-                    return (
-                        400,
-                        format!(r#"{{"error":"held as proposal {id}: agent-derived"}}"#),
-                    );
-                }
-                let n = slot.lock().unwrap().len();
-                atom["id"] = Value::String(format!("atom-{n}"));
-                slot.lock().unwrap().push(atom.clone());
-                return (200, atom.to_string());
-            }
-            (404, r#"{"error":"missing"}"#.into())
+    /// A proposal row as an older ljos wrote it to `proposals.jsonl`.
+    fn legacy_row(state: &std::path::Path, id: &str, atom: &Value, remote: Option<&str>) {
+        let row = serde_json::json!({
+            "id": id,
+            "status": "open",
+            "remote": remote.is_some(),
+            "remote_id": remote,
+            "text": atom["text"],
+            "kind": atom["kind"],
+            "origin": atom["origin"].as_str().unwrap_or("agent-derived"),
+            "atom": atom,
         });
-        let _env = HoldEnv::set(&[
-            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
-            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
-        ]);
-        let _url = PackUrl::set(&url);
-
-        let user = packset_write_as("Remember", "the default fuse is CombMNZ", None, None).unwrap();
-        assert_eq!(user["origin"], "user-declared");
-        assert_eq!(user["kind"], "lesson");
-
-        let client = pack().unwrap();
-        let lesson = "always build on the cluster fuse";
-        let mut atom = atom_body("lesson", lesson, &client.workspace());
-        stamp_horizon(&mut atom, "lesson", lesson, None);
-        let filed = admit::propose_atom(&client, atom).unwrap();
-        assert!(filed.remote);
-
-        let live = stored.lock().unwrap().clone();
-        assert_eq!(live.len(), 1, "the proposal wrote no atom: {live:?}");
-        assert!(live.iter().all(|a| a["text"] != lesson));
-        assert!(live.iter().all(|a| a["kind"] != "preference"));
-        let proposals = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
-        assert!(proposals.contains("\"status\":\"open\""), "{proposals}");
-        assert!(proposals.contains("agent-derived"), "{proposals}");
-        assert!(proposals.contains(lesson), "{proposals}");
-
-        let said = admit::accept(&filed.id).unwrap();
-        assert!(said.contains("user-declared"), "{said}");
-        let live = stored.lock().unwrap().clone();
-        let admitted: Vec<_> = live.iter().filter(|a| a["text"] == lesson).collect();
-        assert_eq!(admitted.len(), 1, "{live:?}");
-        assert_eq!(admitted[0]["kind"], "lesson");
-        assert_eq!(admitted[0]["origin"], "user-declared");
-        assert!(
-            held.lock()
-                .unwrap()
-                .iter()
-                .all(|(_, atom)| atom["text"] != lesson),
-            "accept left the lesson held"
-        );
-        assert!(live.iter().all(|a| a["kind"] != "preference"), "{live:?}");
-
-        let choice = "use uv for every script";
-        let mut pref = atom_body("preference", choice, &client.workspace());
-        stamp_horizon(&mut pref, "preference", choice, Some(false));
-        let open = admit::propose_atom(&client, pref).unwrap();
-        let wrote = packset_write_as("Prefer", choice, None, Some(false)).unwrap();
-        assert_eq!(wrote["origin"], "user-declared");
-        assert_eq!(wrote["kind"], "preference");
-        let again = admit::accept(&open.id).unwrap();
-        assert!(
-            again.contains("already written by remember or prefer"),
-            "{again}"
-        );
-        let prefs: Vec<_> = stored
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|a| a["text"] == choice)
-            .cloned()
-            .collect();
-        assert_eq!(
-            prefs.len(),
-            1,
-            "accept did not post a second atom: {prefs:?}"
-        );
-        assert_eq!(prefs[0]["origin"], "user-declared");
+        let path = state.join("ljos/proposals.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("{row}\n")).unwrap();
     }
 
     #[test]
@@ -64857,25 +64621,28 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(!posts[1].contains("origin"), "{posts:?}");
     }
 
+    /// A row whose atom the writer holds is accepted there once and given
+    /// back its agent labels; nothing is posted a second time.
     #[test]
-    fn a_held_proposal_is_accepted_on_the_writer() {
+    fn a_held_row_an_older_ljos_filed_is_imported_once() {
         let _g = env_guard();
         let state = tempfile::tempdir().unwrap();
-        let (url, log) = serve_http(|req| {
+        let fields: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let asked_slot = Arc::clone(&fields);
+        let (url, log) = serve_http(move |req| {
             let path = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
             if path.contains("POST /v1/proposals/accept") {
                 (
                     200,
                     r#"{"id":"atom-9","kind":"lesson","origin":"user-declared"}"#.into(),
                 )
-            } else if path.contains("POST /v1/atoms") {
-                (
-                    400,
-                    r#"{"error":"held as proposal 6517088a3fd44661d78a9ce8b8764433: agent-derived"}"#
-                        .into(),
-                )
+            } else if path.contains("POST /v1/atoms/update") {
+                let asked: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                asked_slot.lock().unwrap().push(asked["fields"].clone());
+                (200, r#"{"id":"atom-9","kind":"lesson"}"#.into())
             } else {
-                (500, r#"{"error":"live atom"}"#.into())
+                (500, r#"{"error":"unexpected"}"#.into())
             }
         });
         let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
@@ -64886,36 +64653,30 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "remote lesson stays a proposal",
             &client.workspace(),
         );
-        let filed = admit::propose_atom(&client, atom).unwrap();
-        assert!(filed.remote);
-        let said = admit::accept(&filed.id).unwrap();
-        assert!(said.contains("user-declared"), "{said}");
+        legacy_row(
+            state.path(),
+            "row-1",
+            &atom,
+            Some("6517088a3fd44661d78a9ce8b8764433"),
+        );
+        let first = admit::import_open(60_000);
+        assert_eq!(first, admit::Imported { stored: 1, left: 0 });
         let lines = log.lock().unwrap().clone();
-        assert!(
-            lines.iter().any(|l| l.contains("/v1/proposals/accept")),
+        let accepts = lines
+            .iter()
+            .filter(|l| l.contains("/v1/proposals/accept"))
+            .count();
+        assert_eq!(accepts, 1, "{lines:?}");
+        assert_eq!(
+            *fields.lock().unwrap(),
+            [serde_json::json!({"origin": "agent-derived", "level": "derived"})],
             "{lines:?}"
         );
-        assert_eq!(
-            lines
-                .iter()
-                .filter(|l| l.contains("POST /v1/atoms"))
-                .count(),
-            1,
-            "filing is the only atom post: {lines:?}"
-        );
-        let again = admit::accept(&filed.id).unwrap();
-        assert!(again.contains("already in the pack"), "{again}");
-        let lines = log.lock().unwrap().clone();
-        assert_eq!(
-            lines
-                .iter()
-                .filter(|l| l.contains("POST /v1/atoms"))
-                .count(),
-            1,
-            "a second accept does not file another proposal: {lines:?}"
-        );
+        assert_eq!(admit::import_open(60_000), admit::Imported::default());
+        assert_eq!(log.lock().unwrap().len(), lines.len(), "imported once");
     }
 
+    /// An open row an older ljos left, accepted before it was imported.
     #[test]
     fn a_writer_that_does_not_hold_stores_the_atom_on_accept() {
         let _g = env_guard();
@@ -64941,10 +64702,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let client = pack().unwrap();
         let lesson = "a local writer takes the lesson on accept";
         let atom = atom_body("lesson", lesson, &client.workspace());
-        let filed = admit::propose_atom(&client, atom).unwrap();
-        assert!(!filed.remote);
-        assert!(stored.lock().unwrap().is_empty());
-        let said = admit::accept(&filed.id).unwrap();
+        legacy_row(state.path(), "row-local", &atom, None);
+        let said = admit::accept("row-local").unwrap();
         assert!(
             said.contains("atom-local") || said.contains("lesson"),
             "{said}"
@@ -64955,8 +64714,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(live[0].get("origin").is_none(), "{live:?}");
     }
 
-    /// A proposal kept locally, the way a miner refusal used to leave it,
-    /// is still one held proposal on accept, and that proposal is closed.
+    /// A row an older ljos kept locally is still one held proposal on
+    /// accept, and that proposal is closed.
     #[test]
     fn a_local_proposal_is_closed_when_the_writer_holds_it() {
         let _g = env_guard();
@@ -64965,8 +64724,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let held_slot = Arc::clone(&held);
         let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let slot = Arc::clone(&stored);
-        let filing = Arc::new(AtomicBool::new(true));
-        let filing_flag = Arc::clone(&filing);
         let (url, _) = serve_http(move |req| {
             let path = req.lines().next().unwrap_or("");
             let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
@@ -64984,9 +64741,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 return (200, atom.to_string());
             }
             if path.contains("POST /v1/atoms") {
-                if filing_flag.load(Ordering::SeqCst) {
-                    return (404, r#"{"error":"missing"}"#.into());
-                }
                 let atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
                 let id = "6517088a3fd44661d78a9ce8b8764433".to_string();
                 held_slot.lock().unwrap().push((id.clone(), atom));
@@ -65002,11 +64756,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let client = pack().unwrap();
         let lesson = "a local row becomes the held lesson";
         let atom = atom_body("lesson", lesson, &client.workspace());
-        let filed = admit::propose_atom(&client, atom).unwrap();
-        assert!(!filed.remote, "a writer without proposals stays local");
-        assert!(stored.lock().unwrap().is_empty());
-        filing.store(false, Ordering::SeqCst);
-        let said = admit::accept(&filed.id).unwrap();
+        legacy_row(state.path(), "row-local", &atom, None);
+        let said = admit::accept("row-local").unwrap();
         assert!(said.contains("user-declared"), "{said}");
         assert!(
             held.lock().unwrap().is_empty(),
@@ -66327,7 +66078,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     /// A lesson another sitting already left, in other words, is
-    /// reinforced: nothing new is proposed or written.
+    /// reinforced: nothing new is written.
     #[test]
     fn a_finish_lesson_said_before_reinforces_the_held_one() {
         let held = r#"{"atoms":[{"id":"abcd1234ffff","kind":"lesson","text":"Run the database migrations before the server starts.","issue":"probe-othr","entities":["issue:probe-othr","horizon:standing"]}]}"#;
@@ -66413,36 +66164,22 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             said.contains("completed the session node for probe-f1n5 as done"),
             "{said}"
         );
-        let persons = lesson_is_the_persons(under_a_runner(), person_present());
-        if persons {
-            assert!(said.contains("the lesson was not kept"), "{said}");
-            assert!(
-                said.contains("readability grade 14.72 exceeds 14"),
-                "{said}"
-            );
-            assert!(
-                said.contains(&format!("ljos remember {}", tools::sh_quote(lesson))),
-                "{said}"
-            );
-            assert!(
-                seen.lock()
-                    .unwrap()
-                    .iter()
-                    .any(|l| l.starts_with("POST /v1/atoms")),
-                "the lesson never reached the pack"
-            );
-        } else {
-            assert!(said.contains("proposed "), "{said}");
-            assert!(said.contains(" as agent-derived;"), "{said}");
-            assert!(
-                !seen
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|l| l.starts_with("POST /v1/atoms")),
-                "an agent's lesson is a proposal and is not posted"
-            );
-        }
+        assert!(said.contains("the lesson was not kept"), "{said}");
+        assert!(
+            said.contains("readability grade 14.72 exceeds 14"),
+            "{said}"
+        );
+        assert!(
+            said.contains(&format!("ljos remember {}", tools::sh_quote(lesson))),
+            "{said}"
+        );
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.starts_with("POST /v1/atoms")),
+            "the lesson never reached the pack"
+        );
     }
 
     /// Finish under `LJOS_TRACKER_GIT=commit` commits the tracker and the

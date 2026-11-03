@@ -296,8 +296,8 @@ that carry a cue word, from the person's and the agent's prose. It writes each a
 on that sitting's ticket. With no sitting, it writes nothing. The prompt hook never injects those
 notes. The read is off unless ``LJOS_EXTRACT=on`` is set.
 
-A lesson an agent proposes at ``finish`` is a proposal. ``ljos accept`` writes it as a standing lesson,
-and the person runs ``accept`` in a terminal of their own. A standing choice the person states in a
+A lesson an agent writes at ``finish`` is stored at once, labelled agent-derived at L0, and
+``ljos accept`` marks it reviewed. A standing choice the person states in a
 prompt is saved as a preference in their words. "From now on use bun, never yarn" is one.
 
 When the seat speaks
@@ -393,8 +393,8 @@ extracts facts, and decides what to add, update or delete. ljos does not. What i
 is what someone said with ``remember`` or ``prefer``, stored as written.
 
 That choice has a cost. A model that reads a transcript finds facts nobody said to remember, and on
-chat-log benchmarks that coverage is most of the score. The pack has a proposals path for it, and a
-proposal becomes a claim only on an explicit accept.
+chat-log benchmarks that coverage is most of the score. What an agent writes is stored with its
+label, agent-derived and unreviewed, so a reader can tell it from what the person said.
 
 Forgetting here is by review, not by age. Time is data, as in Zep. Retrieval is a panel of scorers
 fused together, and every hit says how many scorers named it. Above the pack, the seat adds what a

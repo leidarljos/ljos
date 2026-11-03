@@ -62,8 +62,8 @@ Trust it again after an upgrade rewrites one.
 
 A claim is two sentences at most, and it is stored as written. A lesson or a preference
 you type takes effect at once. The hook shows both from the next prompt they bear on.
-Run ``ljos remember`` from a terminal of your own. An agent that runs it writes an
-unreviewed note, which the prompt does not treat as a fact.
+Run ``ljos remember`` from a terminal of your own. An agent that runs it stores the lesson
+at once, labelled agent-derived and unreviewed, until a review keeps it.
 
 Tomorrow, ``ljos due`` lists both claims. Read each one and grade it:
 
@@ -178,12 +178,12 @@ Finish
    $ ljos finish demo-fhy7 --assignee alice --lesson "The codec is one file." --outcome keep
    completed the session node for demo-fhy7 as done
    tracker: demo-fhy7 no longer claimed by alice; back to TODO
-   proposed 081ce739... as agent-derived; `ljos accept 081ce739...` writes it
+   remembered the lesson as agent-derived, unreviewed (id 081ce739...); search finds it now, and `ljos accept 081ce739...` marks it reviewed
    the ticket demo-fhy7 stays open and nobody holds it; a person closes it when the work is accepted
 
-``ljos finish`` hands the claim back and proposes the lesson. The lesson stays out of the
-pack until you run ``ljos accept ID`` in your own terminal. Completing a claim node does not
-close the ticket. A person does, when the work is accepted.
+``ljos finish`` hands the claim back and stores the lesson, labelled agent-derived and
+unreviewed. Search finds it at once, and ``ljos accept ID`` marks it reviewed. Completing a
+claim node does not close the ticket. A person does, when the work is accepted.
 
 3. Seats and grants
 ===================

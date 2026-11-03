@@ -1,26 +1,25 @@
 //! Origin-bound admission.
 //!
-//! An agent lesson is filed by posting the atom. A writer that admits by
-//! origin answers 400 `held as proposal <id>` and keeps that proposal,
-//! including the atom. `POST /v1/proposals/accept` with `{"workspace","id"}`
-//! writes the atom and records the acceptance. The same text held again is
-//! that proposal, so a retry does not leave another one.
-//!
-//! `POST /v1/proposals` is the miner. This path does not call it.
-//!
-//! A 400 that names `origin` as unknown, or a 404, means this writer does
-//! not hold. The proposal stays in `$XDG_STATE_HOME/ljos/proposals.jsonl`
-//! and `ljos accept` posts the atom. A writer that does not answer keeps
-//! the proposal local for this call.
-//!
-//! `origin` on a live atom is `user-declared` (a person), `agent-derived`
-//! (this seat's own agent), `tool-echo` (tool output), `external` or `peer`
-//! (another seat). A 400 that names `origin` as unknown is retried once
-//! without the field.
+//! Every memory a seat writes is stored at once and labelled with whose it
+//! is. `origin` on a live atom is `user-declared` (a person),
+//! `agent-derived` (this seat's own agent), `tool-echo` (tool output),
+//! `external` or `peer` (another seat), and `source.basis` is `person` or
+//! `agent`. A 400 that names `origin` as unknown is retried once without
+//! the field.
 //!
 //! Packset's memory levels are `explicit` and `derived`. `derived` is L0.
-//! An agent's own lesson starts there. Tool output and another seat cannot
-//! be stored above it until [`accept`] promotes the proposal to `explicit`.
+//! An agent's lesson from `ljos finish`, tool output and another seat are
+//! stored there, and [`accept`] raises one to `explicit` and records the
+//! review. Search reads neither label, so it finds the claim at once.
+//!
+//! A writer that holds agent writes answers 400 `held as proposal <id>`.
+//! `POST /v1/proposals/accept` with `{"workspace","id"}` stores it there
+//! and then, so nothing waits for a person.
+//!
+//! An older ljos kept such lessons as proposals in
+//! `$XDG_STATE_HOME/ljos/proposals.jsonl` and stored one only on `ljos
+//! accept`. [`import_open`] stores each open one once, labelled as it was
+//! filed.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -42,10 +41,10 @@ pub const LEVEL_L0: &str = "derived";
 /// Packset's level for a claim a person stood behind.
 pub const LEVEL_EXPLICIT: &str = "explicit";
 
-/// The level an origin may be filed at.
+/// The level an origin is stored at.
 ///
-/// A person's words are `explicit`. An agent's own lesson starts at L0.
-/// Tool output and another seat are capped there until [`accept`].
+/// A person's words are `explicit`. An agent's lesson, tool output and
+/// another seat start at L0 until [`accept`].
 #[must_use]
 pub fn admission_level(origin: &str) -> &'static str {
     match origin {
@@ -54,19 +53,17 @@ pub fn admission_level(origin: &str) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Filed {
-    pub id: String,
-    pub remote: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Record {
     id: String,
+    /// `open`, `stored`, `refused`, `accepted` or `satisfied`.
     status: String,
     remote: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_id: Option<String>,
+    /// The live atom this row was stored as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stored: Option<String>,
     text: String,
     kind: String,
     /// `user-declared`, `agent-derived`, `tool-echo` or `peer`.
@@ -89,11 +86,6 @@ fn origin_cache() -> &'static Mutex<BTreeMap<String, bool>> {
     KEPT.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-fn proposal_cache() -> &'static Mutex<BTreeMap<String, bool>> {
-    static MODE: std::sync::OnceLock<Mutex<BTreeMap<String, bool>>> = std::sync::OnceLock::new();
-    MODE.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
 fn proposals_path() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -101,6 +93,11 @@ fn proposals_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos")
         .join("proposals.jsonl")
+}
+
+/// The marker that says no proposal is left open to import.
+fn imported_path() -> PathBuf {
+    proposals_path().with_file_name("proposals-imported")
 }
 
 fn http_timeout() -> std::time::Duration {
@@ -200,22 +197,6 @@ fn append(rec: &Record) -> Result<()> {
         .with_context(|| format!("admit: cannot write {}", path.display()))
 }
 
-fn proposal_is_local(base: &str) -> bool {
-    proposal_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(base)
-        .copied()
-        == Some(false)
-}
-
-fn remember_proposal_mode(base: &str, remote: bool) {
-    proposal_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(base.to_string(), remote);
-}
-
 /// The id in `held as proposal <id>`.
 fn held_proposal_id(text: &str) -> Option<String> {
     let marker = "held as proposal ";
@@ -224,101 +205,70 @@ fn held_proposal_id(text: &str) -> Option<String> {
     (id.len() == 32).then_some(id)
 }
 
-/// A writer that will not hold the atom, and did not store it.
-fn filing_is_local(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    origin_rejected(text)
-        || lower.contains(": 404:")
-        || lower.contains("status code 404")
-        || (lower.contains("403") && lower.contains("not allowed"))
-}
-
-/// `Ok(None)` is a writer that does not hold. `Ok(Some(id))` is its proposal id.
-fn post_direct(client: &PacksetClient, atom: &Value) -> Result<Option<String>> {
-    let base = client.base();
-    if proposal_is_local(base) {
-        return Ok(None);
-    }
-    match client.post_atom(atom) {
-        Ok(_) => {
-            // This writer stored the atom. It does not hold proposals.
-            remember_proposal_mode(base, false);
-            Ok(None)
-        }
-        Err(e) => {
-            let text = e.to_string();
-            if let Some(id) = held_proposal_id(&text) {
-                remember_proposal_mode(base, true);
-                return Ok(Some(id));
-            }
-            if filing_is_local(&text) {
-                remember_proposal_mode(base, false);
-                return Ok(None);
-            }
-            // A writer that did not answer keeps this proposal local. The
-            // next filing tries the writer again.
-            if !text.contains("bad response") {
-                return Ok(None);
-            }
-            bail!("propose: POST /v1/atoms failed: {text}");
-        }
-    }
-}
-
-/// Write `atom` as an agent's own memory, live at once.
-///
-/// It carries origin `agent-derived`. A writer from before agent writes
-/// were live answers `held as proposal ID`; that proposal is accepted on
-/// the spot, so the memory is live there too. Nothing waits for a person.
-/// A lesson past the two-sentence cap or the character cap is posted as the
-/// shorter copies [`crate::pack_copy::pack_copies`] cuts. A preference is
-/// posted as written.
+/// Write `atom` as an agent's own memory, live at once, with origin
+/// `agent-derived`. Nothing waits for a person. A text the pack's prose
+/// gate would turn away is stored as shorter copies ([`write_fitted`]).
 ///
 /// # Errors
 ///
-/// An empty text, or the pack refusing the claim for a reason other than
-/// holding it (a secret, the size cap, a third sentence, or the word
-/// limit, grade or adverb ratio the pack holds an agent's claim to).
+/// An empty text, or the pack refusing the claim for a reason shorter
+/// copies do not answer: a secret, an instruction to the model, an unknown
+/// kind.
 pub fn write_agent(client: &PacksetClient, atom: Value) -> Result<Value> {
+    write_fitted(client, atom, true, write_agent_one)
+}
+
+/// Post `atom` with `post`: as written when the pack's prose gate takes it,
+/// else as the copies [`crate::pack_copy::pack_copies`] cuts, each with the
+/// same labels. The pack holds an agent's and a hook's claim (`held`) to
+/// its sentence, grade and adverb limits and keeps any other with a
+/// warning; here a limit is a warning, not a refusal. The answer is the
+/// last copy's, with the gate's reason as `prose.warning` and the number
+/// of copies as `copies`, so the caller says it in one line. A `note` is
+/// not held to the gate.
+fn write_fitted(
+    client: &PacksetClient,
+    atom: Value,
+    held: bool,
+    post: fn(&PacksetClient, Value) -> Result<Value>,
+) -> Result<Value> {
     let text = atom["text"].as_str().unwrap_or("").trim().to_string();
     if text.is_empty() {
         bail!("remember: empty text is not a claim");
     }
-    if atom["kind"].as_str() == Some("lesson") && past_hard_cap(&text) {
-        let copies = crate::pack_copy::pack_copies(&text);
-        let unchanged = copies.is_empty() || (copies.len() == 1 && copies[0] == text);
-        if !unchanged {
-            let mut last = None;
-            let mut first_err = None;
-            for copy in &copies {
-                let mut one = atom.clone();
-                one["text"] = Value::String(copy.clone());
-                match write_agent_one(client, one) {
-                    Ok(posted) => last = Some(posted),
-                    Err(e) if crate::note_can_wait(&e) => return Err(e),
-                    Err(e) => {
-                        if first_err.is_none() {
-                            first_err = Some(e);
-                        }
-                    }
-                }
+    let refused = (held && atom["kind"].as_str() != Some(packset_core::record::NOTE_KIND))
+        .then(|| crate::pack_copy::gate_refusal(&text))
+        .flatten();
+    let Some(why) = refused else {
+        return post(client, atom);
+    };
+    let copies = crate::pack_copy::pack_copies(&text);
+    if copies.is_empty() {
+        return post(client, atom);
+    }
+    let mut last = None;
+    let mut first_err = None;
+    for copy in &copies {
+        let mut one = atom.clone();
+        one["text"] = Value::String(copy.clone());
+        match post(client, one) {
+            Ok(posted) => last = Some(posted),
+            Err(e) if crate::note_can_wait(&e) => return Err(e),
+            Err(e) => {
+                first_err.get_or_insert(e);
             }
-            if let Some(posted) = last {
-                return Ok(posted);
-            }
-            return Err(
-                first_err.unwrap_or_else(|| anyhow::anyhow!("remember: empty text is not a claim"))
-            );
         }
     }
-    write_agent_one(client, atom)
-}
-
-/// The two-sentence cap and the character cap. Word count, grade and
-/// adverb ratio are the checks `prefer` stores with a warning.
-fn past_hard_cap(text: &str) -> bool {
-    packset_core::prose::sentences(text).len() > packset_core::prose::MAX_ATOM_SENTENCES
-        || text.chars().count() > packset_core::record::TEXT_SOFT_CAP
+    let Some(mut posted) = last else {
+        return Err(
+            first_err.unwrap_or_else(|| anyhow::anyhow!("remember: empty text is not a claim"))
+        );
+    };
+    if posted.is_object() {
+        posted["prose"]["warning"] = Value::String(why);
+        posted["copies"] = Value::from(copies.len());
+    }
+    Ok(posted)
 }
 
 /// One agent atom, with no further split.
@@ -334,6 +284,13 @@ pub(crate) fn write_agent_one(client: &PacksetClient, mut atom: Value) -> Result
     }
     stamp_origin(&mut atom, ORIGIN_AGENT);
     atom["source"]["basis"] = Value::String(crate::Basis::Agent.as_str().into());
+    post_live(client, atom)
+}
+
+/// Post `atom` as it is labelled. A writer that holds the write answers
+/// `held as proposal ID`; that proposal is accepted on the spot, so the
+/// claim is live there too, and the origin `atom` carries is put back.
+fn post_live(client: &PacksetClient, atom: Value) -> Result<Value> {
     match post_kept(client, &atom) {
         Ok(posted) => Ok(posted),
         Err(e) => {
@@ -347,40 +304,25 @@ pub(crate) fn write_agent_one(client: &PacksetClient, mut atom: Value) -> Result
                 .filter(|w| !w.is_empty())
                 .map_or_else(|| client.workspace(), str::to_string);
             let accepted = accept_on_writer(client, &workspace, &id)?;
-            // Accept stores the atom as user-declared, and `ljos memories
-            // list` then hides it. Put the origin back so the review list
-            // the CLI reads is the store this write just landed in.
-            relabel_agent(client, &workspace, accepted)
+            let origin = atom["origin"].as_str().unwrap_or(ORIGIN_AGENT);
+            relabel(client, &workspace, accepted, origin)
         }
     }
 }
 
-/// File `atom` as an agent proposal by posting it.
+/// Store `atom` at once, as its labels say: a known origin is kept, any
+/// other is `agent-derived`, a claim that is not the person's has
+/// `source.basis` `agent`, and the level is [`admission_level`]. `ljos
+/// finish --lesson`, `ljos findings --remember` and the correction hook
+/// write this way. Search finds the claim at once; [`accept`] raises it.
 ///
-/// A held answer is the proposal. The id is stable for one kind and one
-/// text, so the same lesson is one open proposal. An open, accepted or
-/// satisfied row is returned as it stands. Origin is `agent-derived`.
-pub fn propose_atom(client: &PacksetClient, atom: Value) -> Result<Filed> {
-    file_proposal(client, atom, true)
-}
-
-/// File `atom` as a proposal and do not post it.
+/// # Errors
 ///
-/// `ljos finish --lesson`, `ljos findings --remember` and the correction
-/// hook use this. The claim stays out of the pack until [`accept`] promotes
-/// it. A known origin on the atom is kept. The level is [`admission_level`]:
-/// L0 (`derived`) for an agent, a tool echo and another seat, `explicit`
-/// for the person's own words.
-pub fn propose_admission(client: &PacksetClient, atom: Value) -> Result<Filed> {
-    file_proposal(client, atom, false)
-}
-
-fn file_proposal(client: &PacksetClient, mut atom: Value, post: bool) -> Result<Filed> {
-    let _g = gate();
-    let text = atom["text"].as_str().unwrap_or("").trim().to_string();
-    let kind = atom["kind"].as_str().unwrap_or("lesson").to_string();
-    if text.is_empty() {
-        bail!("propose: empty text is not a proposal");
+/// An empty text, or the pack refusing the claim for a reason shorter
+/// copies do not answer.
+pub fn store_labelled(client: &PacksetClient, mut atom: Value) -> Result<Value> {
+    if atom["text"].as_str().unwrap_or("").trim().is_empty() {
+        bail!("store: empty text is not a claim");
     }
     if atom
         .get("workspace")
@@ -388,54 +330,116 @@ fn file_proposal(client: &PacksetClient, mut atom: Value, post: bool) -> Result<
         .unwrap_or("")
         .is_empty()
     {
-        if let Some(map) = atom.as_object_mut() {
-            map.insert("workspace".into(), Value::String(client.workspace()));
-        }
+        atom["workspace"] = Value::String(client.workspace());
     }
-    if post {
+    if !packset_core::atom::known_origin(atom["origin"].as_str().unwrap_or("")) {
         stamp_origin(&mut atom, ORIGIN_AGENT);
-    } else {
-        let named = atom["origin"].as_str().unwrap_or("");
-        if !packset_core::atom::known_origin(named) {
-            stamp_origin(&mut atom, ORIGIN_AGENT);
-        }
-        let origin = atom["origin"].as_str().unwrap_or(ORIGIN_AGENT).to_string();
-        if let Some(map) = atom.as_object_mut() {
-            map.insert(
-                "level".into(),
-                Value::String(admission_level(&origin).to_string()),
-            );
-        }
     }
     let origin = atom["origin"].as_str().unwrap_or(ORIGIN_AGENT).to_string();
-    let id = crate::work_id(&format!("{kind}\n{text}"));
-    if let Some(existing) = read_latest().get(&id) {
-        if matches!(existing.status.as_str(), "open" | "accepted" | "satisfied") {
-            return Ok(Filed {
-                id,
-                remote: existing.remote,
-            });
+    if origin != ORIGIN_USER && atom["source"]["basis"].as_str().is_none() {
+        atom["source"]["basis"] = Value::String(crate::Basis::Agent.as_str().into());
+    }
+    atom["level"] = Value::String(admission_level(&origin).to_string());
+    // The pack's `validate` asks with the hold on: its prose gate is for
+    // what an agent or a hook writes, whether the writer holds or not.
+    let held = packset_core::atom::needs_accept(&origin, atom["hook"] == Value::Bool(true), true);
+    write_fitted(client, atom, held, post_live)
+}
+
+/// How long one hook call spends storing the proposals an older ljos left
+/// open. A quarter of [`crate::HOOK_WALL_BUDGET_MS`]: the call's own reads
+/// keep the rest, and the rows left go on the next call.
+pub const IMPORT_SLICE_MS: u64 = crate::HOOK_WALL_BUDGET_MS / 4;
+
+/// What one [`import_open`] did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Imported {
+    /// Rows stored as live memories.
+    pub stored: usize,
+    /// Rows still open for a later call.
+    pub left: usize,
+}
+
+/// Store each proposal an older ljos left open, once, as the labelled
+/// memory its row holds ([`store_labelled`]), and mark the row `stored`
+/// with the atom's id. A row the pack turns away is marked `refused` and
+/// keeps its atom, so `ljos accept` can try it again; no row is dropped.
+/// No post starts once `budget_ms` is spent, and a pack that does not
+/// answer ends the call; the rows left stay open for the next one. Once
+/// none is left, a marker beside the file spares later calls the read.
+pub fn import_open(budget_ms: u64) -> Imported {
+    let marker = imported_path();
+    if marker.exists() || !proposals_path().exists() {
+        return Imported::default();
+    }
+    let _g = gate();
+    let open: Vec<Record> = read_latest()
+        .into_values()
+        .filter(|rec| rec.status == "open")
+        .collect();
+    let started = std::time::Instant::now();
+    let budget = std::time::Duration::from_millis(budget_ms);
+    let mut client = crate::pack().ok();
+    let mut out = Imported::default();
+    for mut rec in open {
+        let Some(live) = client.as_ref().filter(|_| started.elapsed() < budget) else {
+            out.left += 1;
+            continue;
+        };
+        let stored = if rec.remote {
+            import_held(live, &rec)
+        } else {
+            store_labelled(live, rec.atom.clone())
+        };
+        match stored {
+            Ok(posted) => {
+                rec.status = "stored".into();
+                rec.stored = posted["id"].as_str().map(str::to_string);
+            }
+            Err(e) if crate::note_can_wait(&e) => {
+                client = None;
+                out.left += 1;
+                continue;
+            }
+            Err(_) => rec.status = "refused".into(),
+        }
+        match append(&rec) {
+            Ok(()) if rec.status == "stored" => out.stored += 1,
+            Ok(()) => {}
+            Err(_) => out.left += 1,
         }
     }
-    let remote_id = if post {
-        post_direct(client, &atom)?
+    if out.left == 0 {
+        let _ = std::fs::write(&marker, format!("{}\n", crate::now_utc()));
+    }
+    out
+}
+
+/// A row whose atom a writer holds is accepted there, then given back the
+/// origin and level it was filed under. A writer that no longer holds it
+/// is posted the row's atom.
+fn import_held(client: &PacksetClient, rec: &Record) -> Result<Value> {
+    let workspace = workspace_of(client, rec);
+    let remote_id = rec.remote_id.as_deref().unwrap_or(&rec.id);
+    let accepted = match accept_on_writer(client, &workspace, remote_id) {
+        Ok(accepted) => accepted,
+        Err(e) if crate::note_can_wait(&e) => return Err(e),
+        Err(_) => return store_labelled(client, rec.atom.clone()),
+    };
+    let origin = if rec.origin.is_empty() {
+        ORIGIN_AGENT
     } else {
-        None
+        rec.origin.as_str()
     };
-    let rec = Record {
-        id: id.clone(),
-        status: "open".into(),
-        remote: remote_id.is_some(),
-        remote_id,
-        text,
-        kind,
-        origin,
-        grant: None,
-        atom,
+    let Some(id) = accepted["id"].as_str().filter(|id| !id.is_empty()) else {
+        bail!("import: the writer stored {remote_id} without an id");
     };
-    let remote = rec.remote;
-    append(&rec)?;
-    Ok(Filed { id, remote })
+    update_fields(
+        client,
+        &workspace,
+        id,
+        serde_json::json!({"origin": origin, "level": admission_level(origin)}),
+    )
 }
 
 /// Raise a proposal's memory level from L0 to `explicit`.
@@ -516,12 +520,18 @@ fn accepted_line(rec: &Record, posted: &Value) -> String {
     )
 }
 
-/// Accept rises the origin to `user-declared`. An agent write is reviewed
-/// afterwards, so the live atom has to stay `agent-derived` or the default
-/// memory list never shows it. One update, on an atom just stored.
-fn relabel_agent(client: &PacksetClient, workspace: &str, accepted: Value) -> Result<Value> {
-    let origin = accepted.get("origin").and_then(Value::as_str).unwrap_or("");
-    if origin == ORIGIN_AGENT {
+/// Accept on a writer that held the write stores it as `user-declared`.
+/// Put back the origin it was written with, or the memory list and every
+/// reader that goes by origin would take it for the person's. One update,
+/// on an atom just stored.
+fn relabel(
+    client: &PacksetClient,
+    workspace: &str,
+    accepted: Value,
+    origin: &str,
+) -> Result<Value> {
+    let stored = accepted.get("origin").and_then(Value::as_str).unwrap_or("");
+    if stored == origin {
         return Ok(accepted);
     }
     let Some(id) = accepted
@@ -529,15 +539,21 @@ fn relabel_agent(client: &PacksetClient, workspace: &str, accepted: Value) -> Re
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
     else {
-        bail!(
-            "accept stored the lesson without an id, so its origin could not be put back to agent-derived"
-        );
+        bail!("accept stored the claim without an id, so its origin could not be put back to {origin}");
     };
-    let body = serde_json::json!({
-        "workspace": workspace,
-        "id": id,
-        "fields": {"origin": ORIGIN_AGENT},
-    });
+    update_fields(client, workspace, id, serde_json::json!({"origin": origin})).with_context(|| {
+        format!("the claim {id} was stored as {stored}; putting the origin back to {origin} failed")
+    })
+}
+
+/// `POST /v1/atoms/update` of `fields` on atom `id`. The pack's answer.
+fn update_fields(
+    client: &PacksetClient,
+    workspace: &str,
+    id: &str,
+    fields: Value,
+) -> Result<Value> {
+    let body = serde_json::json!({"workspace": workspace, "id": id, "fields": fields});
     let bytes = serde_json::to_vec(&body).unwrap_or_default();
     match client.roundtrip(
         "POST",
@@ -547,16 +563,11 @@ fn relabel_agent(client: &PacksetClient, workspace: &str, accepted: Value) -> Re
         true,
         http_timeout(),
     ) {
-        Ok(answer) if (200..300).contains(&answer.status) => serde_json::from_str(&answer.body)
-            .context("update: the pack's answer was not json"),
-        Ok(answer) => bail!(
-            "the lesson {id} was stored as {origin}; putting the origin back to agent-derived failed: {}: {}",
-            answer.status,
-            answer.body
-        ),
-        Err(e) => bail!(
-            "the lesson {id} was stored as {origin}; putting the origin back to agent-derived failed: {e}"
-        ),
+        Ok(answer) if (200..300).contains(&answer.status) => {
+            serde_json::from_str(&answer.body).context("update: the pack's answer was not json")
+        }
+        Ok(answer) => bail!("update: {}: {}", answer.status, answer.body),
+        Err(e) => bail!("update: {e}"),
     }
 }
 
@@ -585,21 +596,6 @@ fn accept_on_writer(client: &PacksetClient, workspace: &str, id: &str) -> Result
     }
 }
 
-/// The full id of an open proposal a short id names; see
-/// [`crate::resolve_short_id`].
-///
-/// # Errors
-///
-/// The short id starts more than one open proposal.
-pub fn resolve_id(id: &str) -> Result<String> {
-    let open: Vec<String> = read_latest()
-        .into_values()
-        .filter(|r| r.status == "open")
-        .map(|r| r.id)
-        .collect();
-    crate::resolve_short_id("accept", id, &open)
-}
-
 /// Every acceptance that rests on a person's words a seat carried, by
 /// proposal id. An audit reads these to see which lessons went in on a
 /// quoted yes rather than from a terminal of the person's own.
@@ -614,38 +610,43 @@ pub fn granted() -> Vec<(String, Yes)> {
     out
 }
 
-/// The conversation that filed an open proposal: the holder its atom's
-/// source names. `None` when the id is not on file or the atom names none.
-#[must_use]
-pub fn proposed_by(id: &str) -> Option<String> {
-    let rec = read_latest().get(id.trim()).cloned()?;
-    rec.atom["source"]["session"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-/// Write one open proposal into the pack. A satisfied proposal was already
-/// written by `remember` or `prefer`. An accepted one is already there.
+/// Accept a stored memory, or a proposal an older ljos filed. See
+/// [`accept_on`].
 pub fn accept(id: &str) -> Result<String> {
     accept_on(id, None)
 }
 
 /// [`accept`], recording the person's words the acceptance rests on.
 ///
+/// `id` names a live memory, or a proposal row: an open one is stored
+/// now at `explicit`, a stored one is accepted as the memory it became.
+/// A satisfied or accepted row is already in the pack.
+///
 /// `yes` is a yes a seat carried from chat, see [`crate::quoted_yes`]. It
-/// is kept on the proposal's accepted row, beside the acceptance it
-/// stands for, and said back on the line the caller prints. `None` is the
-/// terminal path, where the person ran the accept themselves.
+/// is kept on the accepted row, beside the acceptance it stands for, and
+/// said back on the line the caller prints. `None` is the terminal path,
+/// where the person ran the accept themselves.
+///
+/// # Errors
+///
+/// No proposal or memory has that id, a short id starts several, or the
+/// pack or the state directory refuses the write.
 pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<String> {
     let _g = gate();
     let id = id.trim();
     if id.is_empty() {
-        bail!("accept: a proposal id is required");
+        bail!("accept: an id is required");
     }
-    let Some(mut rec) = read_latest().get(id).cloned() else {
-        bail!("accept: no open proposal {id}");
+    let rows = read_latest();
+    let pending: Vec<String> = rows
+        .values()
+        .filter(|r| matches!(r.status.as_str(), "open" | "stored" | "refused"))
+        .map(|r| r.id.clone())
+        .collect();
+    let id = crate::resolve_short_id("accept", id, &pending)?;
+    let id = id.as_str();
+    let Some(mut rec) = rows.get(id).cloned() else {
+        return accept_memory(id, None, yes);
     };
     rec.grant = yes.cloned();
     match rec.status.as_str() {
@@ -654,7 +655,11 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
             return Ok(format!("{id} was already written by remember or prefer\n"));
         }
         "accepted" => return Ok(format!("{id} is already in the pack\n")),
-        "open" => {}
+        "stored" => {
+            let stored = rec.stored.clone().unwrap_or_default();
+            return accept_memory(&stored, Some(rec), yes);
+        }
+        "open" | "refused" => {}
         _ => bail!("accept: no open proposal {id}"),
     }
     let client = crate::pack()?;
@@ -666,13 +671,13 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
         append(&rec)?;
         return Ok(accepted_line(&rec, &posted));
     }
-    // A person accepting the proposal is the promotion off L0. Tool output
-    // and another seat stay at `derived` until this line. The origin stays,
-    // so a reader can still see where the claim came from.
+    // A person accepting the proposal is the promotion off L0. The origin
+    // stays, so a reader can still see where the claim came from.
     promote_level(&mut rec.atom);
     match post_kept(&client, &rec.atom) {
         Ok(posted) => {
             rec.status = "accepted".into();
+            rec.stored = posted["id"].as_str().map(str::to_string);
             append(&rec)?;
             Ok(accepted_line(&rec, &posted))
         }
@@ -694,6 +699,55 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
     }
 }
 
+/// Accept live memory `id`, a whole id or the start of one: raise its level
+/// to `explicit`, record a `keep` verdict for `ljos memories review`, and
+/// keep the acceptance and the yes it rests on as a row. `rec` is the
+/// proposal row an import stored it from.
+fn accept_memory(id: &str, rec: Option<Record>, yes: Option<&Yes>) -> Result<String> {
+    let client = crate::pack()?;
+    let workspace = client.workspace();
+    let atoms = crate::atoms_lean(&client, &workspace).context("accept: GET /v1/atoms failed")?;
+    let all: Vec<crate::memories::Memory> = atoms
+        .iter()
+        .filter_map(crate::memories::Memory::of)
+        .collect();
+    let full = crate::memories::resolve(id, &all)
+        .with_context(|| format!("accept: no open proposal or memory {id}"))?;
+    let atom = atoms
+        .iter()
+        .find(|a| a["id"].as_str() == Some(full.as_str()))
+        .cloned()
+        .unwrap_or_default();
+    let posted = if atom["level"].as_str() == Some(LEVEL_L0) {
+        update_fields(
+            &client,
+            &workspace,
+            &full,
+            serde_json::json!({"level": LEVEL_EXPLICIT}),
+        )?
+    } else {
+        atom.clone()
+    };
+    crate::memories::record(&full, "keep", None)?;
+    let mut rec = rec.unwrap_or_else(|| Record {
+        id: full.clone(),
+        status: String::new(),
+        remote: false,
+        remote_id: None,
+        stored: None,
+        text: atom["text"].as_str().unwrap_or("").to_string(),
+        kind: atom["kind"].as_str().unwrap_or("lesson").to_string(),
+        origin: atom["origin"].as_str().unwrap_or("").to_string(),
+        grant: None,
+        atom,
+    });
+    rec.status = "accepted".into();
+    rec.stored = Some(full);
+    rec.grant = yes.cloned();
+    append(&rec)?;
+    Ok(accepted_line(&rec, &posted))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,6 +759,7 @@ mod tests {
             status: "proposed".into(),
             remote: false,
             remote_id: None,
+            stored: None,
             text: "use uv for python envs".into(),
             kind: "lesson".into(),
             origin: ORIGIN_AGENT.into(),

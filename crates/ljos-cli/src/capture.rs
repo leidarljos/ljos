@@ -3,12 +3,13 @@
 //! "From now on always use bun, never yarn" is the person telling the seat
 //! something to keep. The prompt hook saves that sentence, in the person's
 //! words, as a standing preference, and says so in one line with the id
-//! that takes it back. It stands at once only when the runner's own
-//! program spawned this hook. A payload piped into `ljos hook` from a
-//! shell, including one that detached from the runner, is not saved.
+//! that takes it back. It is labelled the person's only when the runner's
+//! own program spawned this hook ([`persons_prompt`]). A payload piped into
+//! `ljos hook` from a shell, including one that detached from the runner,
+//! is saved too, labelled `agent-derived` for `ljos memories review`.
 //!
 //! An agent's `ljos remember` of words the person typed in their latest
-//! prompt is the same case, so [`said_in_latest_prompt`] lets it stand.
+//! prompt is the same case, so [`said_in_latest_prompt`] labels it theirs.
 //!
 //! `LJOS_CAPTURE` picks what happens: `save` (the default), `nudge` (one
 //! line asking the agent to write it), or `off`.
@@ -899,16 +900,37 @@ fn capture_key(text: &str) -> String {
 /// its own share.
 pub const CAPTURE_BUDGET_MS: u64 = 3000;
 
-/// Write a stated choice as the person's own claim: origin user, standing,
-/// tagged `via:prompt`. The atom the pack answered with.
+thread_local! {
+    /// Whether the prompt this hook call carries is the person's own.
+    static PERSONS_PROMPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Say whose prompt this hook call carries: the person's when the runner's
+/// own program spawned the hook and the payload is not a subagent's brief
+/// or another thread's. What the hook writes from the prompt is labelled so.
+pub fn set_persons_prompt(persons: bool) {
+    PERSONS_PROMPT.with(|cell| cell.set(persons));
+}
+
+/// Whether this hook call's prompt is the person's ([`set_persons_prompt`]).
+#[must_use]
+pub fn persons_prompt() -> bool {
+    PERSONS_PROMPT.with(std::cell::Cell::get)
+}
+
+/// Write a stated choice, standing: the person's own claim, origin user
+/// and tagged `via:prompt`, when the prompt is theirs ([`persons_prompt`]),
+/// else an `agent-derived` one. The atom the pack answered with.
 fn save(stated: &Stated) -> Option<Value> {
+    let persons = persons_prompt();
     with_pack_timeout(CAPTURE_BUDGET_MS, || {
         let client = pack().ok()?;
         let workspace = client.workspace();
         let mut atom = atom_body(stated.kind, &stated.text, &workspace);
         stamp_horizon(&mut atom, stated.kind, &stated.text, Some(false));
-        // The caller already required the runner's own program as parent.
-        // A shell in between, or a detached process, never reaches here.
+        if !persons {
+            return admit::write_agent(&client, atom).ok();
+        }
         add_entities(&mut atom, [super::SAID_ENTITY.to_string()]);
         admit::stamp_person(&mut atom);
         let posted = admit::post_kept(&client, &atom).ok()?;
@@ -944,7 +966,8 @@ fn full_prompt_hash(line: &str) -> Option<String> {
 /// [`capture_mode`]) and return the one line the note carries and the
 /// keys to mark seen when the note is delivered. The saved atom's id is
 /// marked seen at once, so the same prompt's note does not repeat it.
-/// A runner with no positive record of the prompt saves nothing.
+/// A prompt that is not the person's ([`persons_prompt`]) is saved as an
+/// agent's.
 #[must_use]
 pub fn capture_stated(call: &HookCall) -> Option<(String, Vec<String>)> {
     if call.event != "UserPromptSubmit" {
@@ -988,8 +1011,8 @@ pub fn capture_stated(call: &HookCall) -> Option<(String, Vec<String>)> {
     if !id.is_empty() {
         now.push(id.clone());
     }
-    // The correction hook would file the same words as a proposal and say
-    // so; the person's words are already saved.
+    // The correction hook would store the same words again and say so;
+    // they are already saved.
     if let Some(cue) = super::correction_cue(&call.cue) {
         now.push(format!("correction:{cue}"));
         now.push(format!("correction-stored:{cue}"));
@@ -1013,8 +1036,8 @@ pub fn capture_stated(call: &HookCall) -> Option<(String, Vec<String>)> {
         )
     } else {
         format!(
-            "Held that sentence for review, not as the person's {what}: \"{}\". \
-             `ljos memories review` keeps it.",
+            "Stored that sentence as an agent-derived {what}, not as the person's: \"{}\". \
+             `ljos memories review` keeps or drops it.{undo}",
             stated.text
         )
     };

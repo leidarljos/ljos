@@ -133,10 +133,10 @@ Remembered, oldest first (`ljos search` for more):
 - [preference, today] Push a tag with git push origin TAG; --follow-tags skips lightweight tags.
 ```
 
-The hook uses a preference you type, and that preference takes effect at once. A lesson an agent proposes at `ljos finish`
-stays out until you run `ljos accept ID` in your own terminal. A yes you said in chat
-counts too. The seat that heard it runs `ljos accept ID --quote "..." --at TIME --via SEAT`,
-and the acceptance keeps those words.
+The hook uses a preference you type, and that preference takes effect at once. A lesson an agent writes at `ljos finish`
+is stored at once too, labelled agent-derived and unreviewed, and `ljos accept ID` marks it
+reviewed. A yes you said in chat is kept with the acceptance. The seat that heard it runs
+`ljos accept ID --quote "..." --at TIME --via SEAT`, and the acceptance keeps those words.
 
 ## Two seats on one ticket
 
@@ -363,7 +363,7 @@ tools, guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. Every listed tool costs its description and
-schema on every session: 8,090 tokens for the core set against 18,011 for all
+schema on every session: 8,111 tokens for the core set against 18,028 for all
 fifty-three (o200k_base count of `initialize` instructions and the `tools/list`
 result). `LJOS_MCP_TOOLS=all` lists every tool. Cards are the resources
 `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, and the protocol is `ljos://protocol`.

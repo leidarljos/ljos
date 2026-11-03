@@ -1,25 +1,27 @@
-//! Accept of an agent lesson against packsetd built from develop.
+//! An agent lesson against packsetd built from develop.
 //!
-//! Filing posts the atom. The writer holds it. Accept stores that atom,
-//! records the acceptance, and a second filing is the same open proposal.
-//! `remember` of the same text leaves one live atom and no open proposal.
+//! The lesson is live at once, labelled agent-derived at L0, on a writer
+//! that holds agent writes too. Accept raises it to explicit and records
+//! the review. A proposal an older ljos left open is stored once.
 
 ljos_test_boot::harness!();
-use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
 
-/// packsetd from PATH, auth off, in a temp home.
+/// packsetd from PATH, auth off, in a temp home, with `env` added.
 ///
 /// Real token support in ljos's client comes with the coordinated packset 0.14 release.
-fn writer() -> ljos_test_boot::Packsetd {
+fn writer(env: &[(&str, &str)]) -> ljos_test_boot::Packsetd {
     let mut started = ljos_test_boot::Packsetd::build();
     started.bin(packsetd_bin());
-    started.command().env("PACKSET_AUTH", "off");
+    started
+        .command()
+        .env("PACKSET_AUTH", "off")
+        .envs(env.iter().copied());
     started.spawn()
 }
 
@@ -86,37 +88,6 @@ fn live_atoms(base: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn latest_proposals(home: &Path) -> BTreeMap<String, Value> {
-    let mut latest = BTreeMap::new();
-    let mut dirs = vec![home.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
-        let Ok(read) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in read.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                dirs.push(path);
-                continue;
-            }
-            if path.file_name().and_then(|name| name.to_str()) != Some("proposals.jsonl") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
-            for line in text.lines() {
-                let Ok(value) = serde_json::from_str::<Value>(line) else {
-                    continue;
-                };
-                let Some(id) = value["id"].as_str() else {
-                    continue;
-                };
-                latest.insert(id.to_string(), value);
-            }
-        }
-    }
-    latest
-}
-
 fn lesson(text: &str) -> Value {
     let mut atom = ljos_cli::atom_body("lesson", text, ljos_cli::SEAT_WORKSPACE);
     ljos_cli::add_entities(&mut atom, ["issue:Software-kzdk".to_string()]);
@@ -170,158 +141,152 @@ impl Drop for SeatEnv {
     }
 }
 
-#[test]
-fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
-    if !ljos_cli::tool_installed("packsetd") {
-        eprintln!("skipped: packsetd is not installed");
-        return;
-    }
-    let _lock = env_lock();
-    let daemon = writer();
+/// The pack and the seat one test talks to, with the seat's env put back
+/// when it ends.
+struct Seat {
+    daemon: ljos_test_boot::Packsetd,
+    state: tempfile::TempDir,
+    _home: tempfile::TempDir,
+    _env: SeatEnv,
+}
+
+fn seat(daemon_env: &[(&str, &str)]) -> Seat {
+    let daemon = writer(daemon_env);
     let state = tempfile::tempdir().expect("state");
     let home = tempfile::tempdir().expect("home");
     // The child packsetd is given its env on the command. The seat in this
-    // process reads these, and they are put back when the test ends.
-    let _env = SeatEnv::set(&[
+    // process reads these.
+    let env = SeatEnv::set(&[
         ("HOME", home.path().to_str().expect("home")),
         ("XDG_STATE_HOME", state.path().to_str().expect("state")),
         ("PACKSET_URL", daemon.url()),
         ("PACKSET_WORKSPACE", ljos_cli::SEAT_WORKSPACE),
         ("LJOS_SEAT", "smoke"),
     ]);
-
-    let client = ljos_cli::pack().unwrap_or_else(|err| panic!("{err:#}"));
-    let text = "Build the lesson on the cluster fuse.";
-    let filed = ljos_cli::admit::propose_atom(&client, lesson(text))
-        .unwrap_or_else(|err| panic!("{err:#}\n{}", daemon.log()));
-    if !filed.remote {
-        // A writer from packset 3aec57f on stores an agent's write live, with
-        // no proposal to accept: the lesson is in the pack as agent-derived.
-        let live: Vec<_> = live_atoms(daemon.url())
-            .into_iter()
-            .filter(|atom| atom["text"] == text)
-            .collect();
-        assert_eq!(live.len(), 1, "the writer stored the lesson once: {live:?}");
-        assert_eq!(live[0]["origin"], "agent-derived", "{live:?}");
-        let entities = live[0]["entities"].to_string();
-        assert!(entities.contains("issue:Software-kzdk"), "{entities}");
-        assert!(open_proposals(daemon.url()).is_empty(), "nothing is held");
-        return;
+    Seat {
+        daemon,
+        state,
+        _home: home,
+        _env: env,
     }
+}
 
-    let open = open_proposals(daemon.url());
-    assert_eq!(open.len(), 1, "one filing is one proposal: {open:?}");
-    if open[0].get("atom").is_none() {
-        // A writer built before packset kept the held atom on the proposal
-        // (7730739, released in 0.13.0) has nothing for accept to store.
-        // That is the writer on PATH, not this crate; CI builds develop.
-        eprintln!(
-            "skipped: {} predates proposals that keep their atom; \
-             install a released packset, 0.13.0 or later, to run this test",
-            packsetd_bin().display()
-        );
-        return;
-    }
-    assert_eq!(open[0]["origin"], "agent-derived");
-    assert_eq!(open[0]["status"], "open");
-    assert_eq!(open[0]["atom"]["text"], text);
-    assert_eq!(open[0]["atom"]["kind"], "lesson");
-    assert_eq!(open[0]["atom"]["level"], "explicit");
-    let entities = open[0]["atom"]["entities"].to_string();
-    assert!(entities.contains("issue:Software-kzdk"), "{entities}");
-    assert!(open[0]["atom"]["source"].is_object(), "{open:?}");
-    let remote_id = open[0]["id"].as_str().expect("proposal id").to_string();
-    assert!(
-        live_atoms(daemon.url())
-            .iter()
-            .all(|atom| atom["text"] != text),
-        "a held lesson is not live"
-    );
-
-    let local = state.path().join("ljos/proposals.jsonl");
-    std::fs::remove_file(&local).expect("local proposals");
-    let again = ljos_cli::admit::propose_atom(&client, lesson(text)).expect("refile");
-    assert!(again.remote);
-    assert_eq!(again.id, filed.id);
-    let open = open_proposals(daemon.url());
-    assert_eq!(
-        open.len(),
-        1,
-        "a second filing is the open proposal already on file: {open:?}"
-    );
-    assert_eq!(open[0]["id"], remote_id);
-
-    let said = ljos_cli::admit::accept(&filed.id)
-        .unwrap_or_else(|err| panic!("{err:#}\n{}", daemon.log()));
-    assert!(said.contains("user-declared"), "{said}");
-    let live: Vec<_> = live_atoms(daemon.url())
+fn live_with(base: &str, text: &str) -> Vec<Value> {
+    live_atoms(base)
         .into_iter()
         .filter(|atom| atom["text"] == text)
-        .collect();
-    assert_eq!(live.len(), 1, "accept writes one lesson: {live:?}");
-    assert_eq!(live[0]["kind"], "lesson");
-    assert_eq!(live[0]["level"], "explicit");
-    assert_eq!(live[0]["origin"], "user-declared");
+        .collect()
+}
+
+#[test]
+fn an_agent_lesson_is_live_at_once_and_accept_raises_it() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
+    let _lock = env_lock();
+    let seat = seat(&[]);
+    let url = seat.daemon.url();
+    let client = ljos_cli::pack().unwrap_or_else(|err| panic!("{err:#}"));
+    let text = "Build the lesson on the cluster fuse.";
+    let stored = ljos_cli::admit::store_labelled(&client, lesson(text))
+        .unwrap_or_else(|err| panic!("{err:#}\n{}", seat.daemon.log()));
+    let id = stored["id"].as_str().expect("atom id").to_string();
+
+    let live = live_with(url, text);
+    assert_eq!(live.len(), 1, "stored once: {live:?}");
+    assert_eq!(live[0]["id"], id.as_str());
+    assert_eq!(live[0]["origin"], "agent-derived", "{live:?}");
+    assert_eq!(live[0]["source"]["basis"], "agent", "{live:?}");
+    assert_eq!(live[0]["level"], "derived", "{live:?}");
     let entities = live[0]["entities"].to_string();
     assert!(entities.contains("issue:Software-kzdk"), "{entities}");
-    assert!(live[0]["source"].is_object(), "{live:?}");
-    let atom_id = live[0]["id"].as_str().expect("atom id").to_string();
+    assert!(open_proposals(url).is_empty(), "nothing is held");
+
+    let said = ljos_cli::admit::accept(&id[..8])
+        .unwrap_or_else(|err| panic!("{err:#}\n{}", seat.daemon.log()));
+    assert!(said.contains("origin agent-derived"), "{said}");
+    let live = live_with(url, text);
+    assert_eq!(live.len(), 1, "accept adds no second atom: {live:?}");
+    assert_eq!(live[0]["level"], "explicit", "{live:?}");
+    assert_eq!(live[0]["origin"], "agent-derived", "{live:?}");
+    let review = ljos_cli::memories::reviews();
+    assert_eq!(review.get(&id).map(|r| r.verdict.as_str()), Some("keep"));
+}
+
+#[test]
+fn a_writer_that_holds_agent_writes_still_stores_the_lesson_as_the_agents() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
+    let _lock = env_lock();
+    let seat = seat(&[("PACKSET_HOLD_AGENT_WRITES", "1")]);
+    let url = seat.daemon.url();
+    let client = ljos_cli::pack().unwrap_or_else(|err| panic!("{err:#}"));
+    let text = "Pin the fuse lesson before the rebuild.";
+    ljos_cli::admit::store_labelled(&client, lesson(text))
+        .unwrap_or_else(|err| panic!("{err:#}\n{}", seat.daemon.log()));
+    let live = live_with(url, text);
+    assert_eq!(live.len(), 1, "the held write is live: {live:?}");
+    assert_eq!(live[0]["origin"], "agent-derived", "{live:?}");
     assert!(
-        open_proposals(daemon.url()).is_empty(),
-        "accept left a held proposal: {:?}",
-        open_proposals(daemon.url())
+        open_proposals(url).is_empty(),
+        "the hold was accepted on the spot: {:?}",
+        open_proposals(url)
     );
-    let recorded = latest_proposals(daemon.pack_home());
-    let row = recorded.get(&remote_id).expect("proposal log");
-    assert_eq!(row["status"], "accepted", "{row}");
-    assert_eq!(row["atom_id"], atom_id);
+}
 
-    let second = ljos_cli::admit::accept(&filed.id).expect("second accept");
-    assert!(second.contains("already in the pack"), "{second}");
+#[test]
+fn a_proposal_an_older_ljos_left_open_is_stored_once() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
+    let _lock = env_lock();
+    let seat = seat(&[]);
+    let url = seat.daemon.url();
+    let text = "Drain the fuse queue before a rebuild.";
+    let rows = seat.state.path().join("ljos/proposals.jsonl");
+    std::fs::create_dir_all(rows.parent().expect("state dir")).expect("state dir");
+    let mut atom = lesson(text);
+    atom["origin"] = Value::from("agent-derived");
+    atom["level"] = Value::from("derived");
+    let row = serde_json::json!({
+        "id": "7f3e9a1c2b4d",
+        "status": "open",
+        "remote": false,
+        "text": text,
+        "kind": "lesson",
+        "origin": "agent-derived",
+        "atom": atom,
+    });
+    std::fs::write(&rows, format!("{row}\n")).expect("proposals");
+
+    let first = ljos_cli::admit::import_open(60_000);
     assert_eq!(
-        live_atoms(daemon.url())
-            .iter()
-            .filter(|atom| atom["text"] == text)
-            .count(),
-        1
+        first,
+        ljos_cli::admit::Imported { stored: 1, left: 0 },
+        "{}",
+        seat.daemon.log()
     );
-    assert!(open_proposals(daemon.url()).is_empty());
-
-    let typed = "Type the same words to close the hold.";
-    let open_id = ljos_cli::admit::propose_atom(&client, lesson(typed))
-        .expect("typed filing")
-        .id;
-    assert_eq!(open_proposals(daemon.url()).len(), 1);
-    let wrote = ljos_cli::packset_write("Remember", typed)
-        .unwrap_or_else(|err| panic!("{err:#}\n{}", daemon.log()));
-    assert_eq!(wrote["origin"], "user-declared");
-    assert_eq!(wrote["kind"], "lesson");
-    let live: Vec<_> = live_atoms(daemon.url())
-        .into_iter()
-        .filter(|atom| atom["text"] == typed)
-        .collect();
+    let live = live_with(url, text);
+    assert_eq!(live.len(), 1, "imported once: {live:?}");
+    assert_eq!(live[0]["origin"], "agent-derived", "{live:?}");
+    assert_eq!(live[0]["level"], "derived", "{live:?}");
     assert_eq!(
-        live.len(),
+        ljos_cli::admit::import_open(60_000),
+        ljos_cli::admit::Imported::default()
+    );
+    assert_eq!(
+        live_with(url, text).len(),
         1,
-        "remember does not add a second atom: {live:?}"
+        "a second call stores nothing"
     );
-    assert_eq!(live[0]["origin"], "user-declared");
-    assert!(
-        open_proposals(daemon.url()).is_empty(),
-        "remember left the hold open: {:?}",
-        open_proposals(daemon.url())
-    );
-    let said = ljos_cli::admit::accept(&open_id).expect("accept after remember");
-    assert!(
-        said.contains("already written by remember or prefer"),
-        "{said}"
-    );
-    assert_eq!(
-        live_atoms(daemon.url())
-            .iter()
-            .filter(|atom| atom["text"] == typed)
-            .count(),
-        1
-    );
-    assert!(open_proposals(daemon.url()).is_empty());
+
+    let said = ljos_cli::admit::accept("7f3e9a1c").expect("accept the old id");
+    assert!(said.contains("accepted"), "{said}");
+    let live = live_with(url, text);
+    assert_eq!(live.len(), 1, "{live:?}");
+    assert_eq!(live[0]["level"], "explicit", "{live:?}");
 }

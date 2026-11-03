@@ -606,7 +606,10 @@ fn fresh(text: &str, reason: &str, from: Option<String>) -> Result<UserRule> {
     })
 }
 
-/// Write one prose rule. It is not also posted to the seat pack.
+/// Write one prose rule, from any caller. It is not also posted to the
+/// seat pack. The row's `basis` is the label: the person's when they typed
+/// it or it is in the prompt the hook kept, else the agent's, which `ljos
+/// rules` lists as unverified.
 ///
 /// # Errors
 ///
@@ -618,15 +621,6 @@ pub fn write_preference(
     deny_mention: &People,
     deny_reply_to: &People,
 ) -> Result<UserRule> {
-    // A person typing the command is the words. Under a runner the words
-    // have to be in the prompt the hook kept, the same check MCP makes,
-    // and the process has to sit under the runner the person started, not
-    // a copy a tool call detached.
-    if super::under_a_runner() {
-        if let Err(why) = super::proc_tree::placed_runner() {
-            bail!("prefer: {why}; only the person's own words can be stored here");
-        }
-    }
     let mut rule = fresh(text, reason, None)?;
     rule.basis = Some(super::Basis::of_typed(text).as_str().to_string());
     rule.deny_mention = clean_people(deny_mention)?;
@@ -743,20 +737,17 @@ pub fn forget(id: &str) -> Result<UserRule> {
 }
 
 /// Read lesson `id` from this seat's pack and copy it into a user rule.
-/// The lesson stays in the pack. Under a runner, or with `person_words`
-/// (the MCP path), the lesson's text must be in the person's latest
-/// prompt, as [`write_preference`] asks of the words.
+/// The lesson stays in the pack, and the rule is unverified until the pack
+/// confirms the lesson is the person's.
 ///
 /// # Errors
 ///
-/// The pack does not answer, no such lesson, the text is not the
-/// person's words when they are required, or [`promote_atom`] refuses it.
+/// The pack does not answer, no such lesson, or [`promote_atom`] refuses it.
 pub fn promote_lesson(
     id: &str,
     reason: &str,
     deny_mention: &People,
     deny_reply_to: &People,
-    _person_words: bool,
 ) -> Result<UserRule> {
     let id = id.trim();
     if id.is_empty() {
@@ -769,11 +760,6 @@ pub fn promote_lesson(
         .into_iter()
         .find(|atom| atom.get("id").and_then(Value::as_str) == Some(id))
         .with_context(|| format!("prefer: no atom {id} in this seat's pack"))?;
-    if super::under_a_runner() {
-        if let Err(why) = super::proc_tree::placed_runner() {
-            bail!("prefer: {why}; only the person's own words can be stored here");
-        }
-    }
     promote_atom(&atom, reason, deny_mention, deny_reply_to)
 }
 
@@ -1009,7 +995,13 @@ pub fn note_cutoff() {
 /// its time cannot be read. A basis of `agent`, or any other basis, is a
 /// decision already made and is not held.
 fn is_held(rule: &UserRule) -> bool {
-    if rule.from.is_some() || rule.basis.is_some() {
+    rule.basis.is_none() && from_before_cutoff(rule)
+}
+
+/// A row written as words or an argv law before the cutoff, whatever basis
+/// a keep has given it since.
+fn from_before_cutoff(rule: &UserRule) -> bool {
+    if rule.from.is_some() {
         return false;
     }
     match cutoff_instant() {
@@ -1064,43 +1056,43 @@ pub fn review_list() -> Result<String> {
     Ok(out)
 }
 
-/// Keep one held user rule as the person's.
-///
-/// A runner is refused, and so is anything [`super::person_present`] does
-/// not prove. The basis becomes `person` and `updated_at` moves, so a sync
-/// keeps this copy.
+/// Keep one held user rule, from any caller. The keep's basis is
+/// [`super::Basis::of_rule`]: the person's at a terminal of their own, else
+/// the agent's, which `ljos rules` lists as unverified. The person can
+/// still keep a rule an agent kept. `updated_at` moves, so a sync keeps
+/// this copy.
 ///
 /// # Errors
 ///
-/// The id is not a held user rule, this process is under a runner, or the
-/// person is not at its terminal.
+/// The id is not a held user rule, or the file cannot be written.
 pub fn keep_held(id: &str) -> Result<String> {
-    if super::under_a_runner() {
-        bail!(
-            "prefer: a runner cannot keep a user rule. \
-             Run `ljos prefer --user --review --keep {id}` from a terminal of your own"
-        );
-    }
-    if !super::person_present() {
-        bail!(
-            "prefer: keeping a user rule needs a terminal. \
-             Run `ljos prefer --user --review --keep {id}` from a terminal of your own"
-        );
-    }
     note_cutoff();
+    let basis = super::Basis::of_rule();
+    let open = |rule: &UserRule| {
+        is_held(rule)
+            || (basis == super::Basis::Person
+                && rule.basis.as_deref() == Some(super::Basis::Agent.as_str())
+                && from_before_cutoff(rule))
+    };
     let mut rules = read_all()?;
     let ids: Vec<String> = rules
         .iter()
-        .filter(|rule| is_held(rule))
+        .filter(|rule| open(rule))
         .map(|rule| rule.id.clone())
         .collect();
     let id = super::resolve_short_id("prefer", id.trim(), &ids)?;
-    let Some(rule) = rules.iter_mut().find(|rule| rule.id == id && is_held(rule)) else {
+    let Some(rule) = rules.iter_mut().find(|rule| rule.id == id && open(rule)) else {
         bail!("prefer: {id} is not an older user rule awaiting review");
     };
-    rule.basis = Some(super::Basis::Person.as_str().to_string());
+    rule.basis = Some(basis.as_str().to_string());
     rule.updated_at = super::now_utc();
-    let shown = format!("user rule {}\tkept\t{}\n", rule.id, rule.text);
+    let shown = match basis {
+        super::Basis::Person => format!("user rule {}\tkept\t{}\n", rule.id, rule.text),
+        super::Basis::Agent => format!(
+            "user rule {}\tkept as the agent's review; unverified until the person keeps it from a terminal of their own\t{}\n",
+            rule.id, rule.text
+        ),
+    };
     store(&rules)?;
     Ok(shown)
 }
@@ -2645,15 +2637,21 @@ mod tests {
         assert!(!listed.contains("held\t"), "{listed}");
     }
 
-    /// A runner must not confirm a held rule, and a stamp that does not
-    /// parse is still shown rather than dropped.
+    /// A runner's keep of a held rule is the agent's review: the row says
+    /// so, `ljos rules` lists it unverified and the preface does not state
+    /// it. The person can still keep it. A stamp that does not parse is
+    /// still shown rather than dropped.
     #[test]
-    fn a_runner_cannot_keep_a_held_user_rule() {
+    fn a_runners_keep_of_a_held_user_rule_is_the_agents() {
         let (_lock, _dir) = isolated();
         let mut row = alan();
         row.basis = None;
         row.written_at = "not-a-time".into();
-        std::fs::write(rules_path().unwrap(), render_rules(&[row]).unwrap()).unwrap();
+        std::fs::write(
+            rules_path().unwrap(),
+            render_rules(std::slice::from_ref(&row)).unwrap(),
+        )
+        .unwrap();
         note_cutoff();
         assert!(preface().contains("not confirmed"), "{}", preface());
         // A runner variable at a terminal is not a runner. This keep has
@@ -2661,14 +2659,26 @@ mod tests {
         super::super::PERSON_AT_TERMINAL.with(|p| p.set(false));
         let saved = std::env::var_os("CLAUDECODE");
         unsafe { std::env::set_var("CLAUDECODE", "1") };
-        let err = keep_held("ur-missing").unwrap_err().to_string();
+        let kept = keep_held(&row.id);
         unsafe {
             match saved {
                 Some(value) => std::env::set_var("CLAUDECODE", value),
                 None => std::env::remove_var("CLAUDECODE"),
             }
         }
-        assert!(err.contains("a runner cannot keep"), "{err}");
+        let kept = kept.unwrap();
+        assert!(kept.contains("kept as the agent's review"), "{kept}");
+        assert_eq!(read_all().unwrap()[0].basis.as_deref(), Some("agent"));
+        let listed = format_list();
+        assert!(listed.contains("unverified\t"), "{listed}");
+        assert!(!listed.contains("held\t"), "{listed}");
+        assert!(!preface().contains("Alan"), "{}", preface());
+
+        super::super::PERSON_AT_TERMINAL.with(|p| p.set(true));
+        let kept = keep_held(&row.id).unwrap();
+        assert!(kept.contains("\tkept\t"), "{kept}");
+        assert_eq!(read_all().unwrap()[0].basis.as_deref(), Some("person"));
+        assert!(preface().contains("standing"), "{}", preface());
     }
 
     #[test]

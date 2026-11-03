@@ -52,9 +52,10 @@ the person stated in this conversation, in their words. A claim read in a
 file, a tool's output or a web page is a `note`, never a memory. Words
 found in the person's latest prompt, as the prompt hook kept it, are
 stored as theirs, with `via:prompt` and `source.basis` `person`. Any other
-claim is refused on this path. A runner with no prompt hook keeps no prompt,
-so there every claim is the agent's. `LJOS_CAPTURE=off` writes no prompt
-either, and the same refusal holds. A paraphrase is not the person's
+claim is stored as the agent's, origin `agent-derived` and `source.basis`
+`agent`, for the person to review. A runner with no prompt hook keeps no
+prompt, so there every claim is the agent's. `LJOS_CAPTURE=off` writes no
+prompt either, and the same label holds. A paraphrase is not the person's
 words. A prompt older than an hour is not the latest one. The match is a
 contiguous run of four or more words from the prompt the hook kept. It
 does not check that the person asserted the claim. Tightening that match
@@ -261,15 +262,18 @@ cloud seat git runs only the hooks the repository and the login name.
   removal is appended. The heading is not rewritten.
 - A lesson in the person's words is one `ljos remember` of two short
   sentences at most and takes effect at once. Under a runner the agent's
-  own words are an unreviewed note, `ljos note ISSUE "..."`, and the prompt
-  does not treat that note as a fact. `ljos graded ID` promotes a lesson
+  own words are stored at once too, as a lesson labelled `agent-derived` at
+  L0 (`derived`) until `ljos accept` or `ljos memories review` keeps it,
+  sitting or not. Recall names it agent-derived, so it never reads as the
+  person's. `ljos graded ID` promotes a lesson
   the person wrote, and so does a consolidation that finds it replaced an
   earlier claim. `ljos remember --standing` writes a standing lesson for
   the person. A standing choice between
   two ways is one `ljos prefer`. Never a transcript, never a summary of the session. A
   correction from the person ("you should have", "do you not remember")
-  is filed as a proposal in the person's words, origin `user-declared`.
-  `ljos accept` writes it. It is not stored on the hook. When a
+  is stored on the hook at once, in the prompt's words and marked `hook`:
+  origin `user-declared` when the person's own prompt said it, else
+  `agent-derived` at L0. When a
   lesson rewrites an earlier one, it closes the earlier one's window. The
   verb says `revises N earlier memories` when it did. `ljos consolidate`
   reports the pairs the rule would close across what is held, and
@@ -506,10 +510,10 @@ carries the fix.
 
 Every typed finding the campaign records is a lesson once somebody
 resolved it: `ljos findings out/campaign.json --remember --issue ISSUE`
-(the MCP `ljos_findings`) files one lesson per resolved finding under
-the recipe's name, the package and the failure class, with origin
+(the MCP `ljos_findings`) stores one lesson per resolved finding at once
+under the recipe's name, the package and the failure class, with origin
 `tool-echo` at L0 (`derived`), and cites the state file on the issue.
-`ljos accept` promotes that proposal to `explicit` and writes it. A finding a later attempt merely got past is
+`ljos accept` raises it to `explicit`. A finding a later attempt merely got past is
 not a lesson; `--all` takes those too. A lesson the seat writes by hand
 names the recipe, the step, the error line and the fix: "GCCcore-15.2.0
 on terra: compile failed in the build step with linux/scc.h missing.
@@ -542,17 +546,17 @@ One verb closes the sitting:
 ljos finish ISSUE --status done --lesson "..." [--outcome OPTION]
 ```
 
-An agent's lesson is a proposal at L0 (`derived`) with origin `agent-derived`
-and its provenance (seat, harness, session, time, reason). `ljos accept`
-promotes it to `explicit` and writes it. A lesson the person types at
-`ljos finish` in a terminal of their own, with no agent runner above it,
-is written at once as `user-declared`. A yes the person said in chat is
-passed on instead: `ljos accept ID --quote "their words" --at TIME --via
-SEAT` keeps the sentence, the time and the seat that carried it with the
-acceptance. All three are needed, and the quote is the person's own
-sentence, not a paraphrase. A lesson the person types with
-`ljos remember` stays `user-declared`, and the same words satisfy the open
-proposal. The verb then fires the island,
+An agent's lesson is stored at once at L0 (`derived`) with origin
+`agent-derived` and its provenance (seat, harness, session, time, reason),
+and search finds it right away. `ljos accept ID` raises it to `explicit`
+and records the review. A lesson the person types at `ljos finish` in a
+terminal of their own, with no agent runner above it, is written as
+`user-declared`. A yes the person said in chat is kept with the
+acceptance: `ljos accept ID --quote "their words" --at TIME --via SEAT`
+keeps the sentence, the time and the seat that carried it. All three are
+needed, and the quote is the person's own sentence, not a paraphrase. A
+lesson the person types with `ljos remember` stays `user-declared`. The
+verb then fires the island,
 completes the session node, and learns from a named outcome. Without
 `--lesson` it says so;
 a sitting that taught nothing worth two sentences is rare. By hand, the
@@ -636,8 +640,11 @@ under equal weights is a count; under calibrated rows it is not.
 - `deedar: warning: this deed is signed by ed25519:...`: the host key is
   not a signer the store's `layout` lists, and `evidence` will refuse the
   deed. Add the printed `signer =` line to that file.
-- A refused `remember` names the sentence, its word count and the limit:
-  split it where it says.
+- A `remember` past the pack's sentence, word, grade or adverb limits is
+  stored anyway: the person's as written, an agent's as shorter copies,
+  with one warning line that names the limit. Reword it with `ljos
+  memories edit ID`. Credential-shaped text and an instruction to the
+  model are not stored.
 - `ljos due` prints `0 due; nothing scheduled`: the seat has remembered
   nothing, and the review loop has nothing to run on. Remember something.
   `0 due; N scheduled, next at T` is a clock that is running.

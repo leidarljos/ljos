@@ -281,10 +281,10 @@ enum SeatAction {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Remember one lesson. Typed by the person it takes effect at once.
-    /// Under a runner, words from the person's latest prompt are theirs.
-    /// With no sitting, any other text is a standing lesson. With a sitting
-    /// open, that text is an unreviewed note on the ticket.
+    /// Remember one lesson. It is stored at once, from any caller. Typed by
+    /// the person, it is theirs. Under a runner, words from the person's
+    /// latest prompt are theirs; any other text is a standing lesson
+    /// labelled agent-derived, sitting or not, until a review keeps it.
     Remember {
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
@@ -303,10 +303,11 @@ enum Cmd {
         #[arg(long, value_name = "DATE")]
         valid_to: Option<String>,
     },
-    /// Prefer one way over another, as a standing preference. Typed by the
-    /// person, it is theirs. Under a runner, only words from the person's
-    /// latest prompt are theirs; any other text is agent-derived.
-    /// `--user` writes a user rule instead: shared by every seat, never reviewed.
+    /// Prefer one way over another, as a standing preference, stored at once
+    /// from any caller. Typed by the person, it is theirs. Under a runner,
+    /// only words from the person's latest prompt are theirs; any other text
+    /// is agent-derived. `--user` writes a user rule instead: shared by every
+    /// seat, never reviewed, and listed by `ljos rules` with whose it is.
     Prefer {
         text: Vec<String>,
         /// Prefer as this persona.
@@ -346,12 +347,14 @@ enum Cmd {
         #[arg(long)]
         sync: bool,
         /// List preferences stored before a basis was kept. With `--user`,
-        /// list user rules stored before one. With `--keep`, keep one as
-        /// the person's, from a terminal with no runner.
+        /// list user rules stored before one. With `--keep`, keep one: as
+        /// the person's from a terminal with no runner, else as the agent's.
         #[arg(long)]
         review: bool,
         /// Keep this older preference, or with `--user` this older user
-        /// rule, as the person's. Pass with `--review`.
+        /// rule. From a terminal with no runner it is the person's; any
+        /// other keep is the agent's, and `ljos rules` lists the rule as
+        /// unverified. Pass with `--review`.
         #[arg(long, value_name = "ID", requires = "review")]
         keep: Option<String>,
     },
@@ -360,7 +363,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MemCmd,
     },
-    /// Write one agent proposal into the pack as a standing lesson. Under an agent runner, only a proposal another conversation filed, such as a worker's, or one the person said yes to in their own words.
+    /// Accept a stored memory, or a proposal an older ljos filed: its level rises to explicit and the review keeps it. Search finds the memory before and after.
     Accept {
         id: String,
         /// The person's own words accepting this lesson, as they said them. Needs --at and --via, and takes the place of a terminal of the person's own.
@@ -1666,18 +1669,14 @@ fn run_command() -> Result<()> {
             }
             for text in chunks {
                 // A person at the terminal, and words from their latest
-                // prompt, are their lesson. With no sitting, any other
-                // text is a standing lesson too: a note needs a ticket,
-                // and packsetd refuses one. With a sitting open, that
-                // text stays an unreviewed note on the ticket.
+                // prompt, are their lesson. Any other text is a standing
+                // lesson too, sitting or not, labelled agent-derived.
                 let body = if ljos_cli::person_present() {
                     let horizon = ljos_cli::remember_horizon(transient, standing, false);
                     packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?
                 } else if ljos_cli::capture::said_in_latest_prompt(&text) {
                     let horizon = transient.then_some(true);
                     ljos_cli::packset_write_mcp("Remember", &text, as_persona.as_deref(), horizon)?
-                } else if ljos_cli::live_held_issue().is_some() {
-                    ljos_cli::packset_write_remember_note(&text, as_persona.as_deref())?
                 } else {
                     let horizon = if transient { Some(true) } else { Some(false) };
                     ljos_cli::packset_write_agent(
@@ -1827,7 +1826,7 @@ fn run_command() -> Result<()> {
                     if !text.is_empty() {
                         bail!("prefer: pass the lesson id with --promote, or the words, not both");
                     }
-                    ljos_cli::user_rules::promote_lesson(&id, why, &mention, &reply, false)?
+                    ljos_cli::user_rules::promote_lesson(&id, why, &mention, &reply)?
                 } else {
                     ljos_cli::user_rules::write_preference(&join(&text), why, &mention, &reply)?
                 };
@@ -1891,28 +1890,6 @@ fn run_command() -> Result<()> {
         }
         Cmd::Accept { id, quote, at, via } => {
             let yes = ljos_cli::quoted_yes::read(quote.as_deref(), at.as_deref(), via.as_deref())?;
-            let id = ljos_cli::admit::resolve_id(&id)?;
-            // The agent proposed the lesson; accepting it is a review by
-            // someone else. Under a runner that is the conversation that
-            // started a worker, reviewing the worker's proposal; an agent
-            // that accepted its own proposal would skip the review. A yes
-            // the person said in their own words is the review, carried by
-            // the seat that heard it and kept with the acceptance.
-            if yes.is_none()
-                && ljos_cli::under_a_runner()
-                && !ljos_cli::accepts_another_conversation(
-                    ljos_cli::admit::proposed_by(&id).as_deref(),
-                    &ljos_cli::holder_name(),
-                )
-            {
-                bail!(
-                    "accept: this conversation filed {id}, or the proposal names no conversation, \
-                     and an agent can't accept its own proposal. The person runs `ljos accept {id}` \
-                     in a terminal of their own, the conversation that started this worker runs it, \
-                     or this one passes on what the person said: `ljos accept {id} --quote \"...\" \
-                     --at TIME --via SEAT`"
-                );
-            }
             print!("{}", ljos_cli::admit::accept_on(&id, yes.as_ref())?);
         }
         Cmd::Memories { cmd } => memories_cmd(cmd)?,
@@ -3216,10 +3193,12 @@ fn run_command() -> Result<()> {
             // on the next call.
             let mut seen_later: Vec<String> = Vec::new();
             let mut ack_nudge = false;
-            // A lesson queued while the pack was down is sent before this
-            // session reads memory, so the next prompt can recall it.
+            // A lesson queued while the pack was down, or left as a
+            // proposal by an older ljos, is sent before this session reads
+            // memory, so the next prompt can recall it.
             if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
                 let _ = ljos_cli::flush_note_queue();
+                ljos_cli::admit::import_open(ljos_cli::admit::IMPORT_SLICE_MS);
             }
             // Search on the prompt. A camel-case runner discards that
             // stdout, so each held note goes out on the next tool result.
@@ -3355,12 +3334,12 @@ fn run_command() -> Result<()> {
                 _ => {
                     // The person's prompt is the chat's consent channel; the
                     // grant goes first, ahead of the hook's deadline.
-                    // Only the person's own prompt grants, saves or
-                    // corrects: a subagent's brief or an unattended run's
-                    // prompt is an agent's words in that channel.
-                    // A tool call can run `ljos hook` with a payload of its
-                    // own; only a hook the runner itself spawned carries
-                    // the person's prompt.
+                    // Only the person's own prompt grants: a subagent's
+                    // brief or an unattended run's prompt is an agent's
+                    // words in that channel. A tool call can run `ljos hook`
+                    // with a payload of its own; only a hook the runner
+                    // itself spawned carries the person's prompt. What the
+                    // hook saves from any prompt is labelled with whose it is.
                     if call.event == "UserPromptSubmit" {
                         ljos_cli::capture::forget_latest_prompt();
                     }
@@ -3375,6 +3354,7 @@ fn run_command() -> Result<()> {
                     })
                     .flatten();
                     let person = spawner.is_some();
+                    ljos_cli::capture::set_persons_prompt(person);
                     let granted = person
                         .then(|| {
                             ljos_cli::hook_timed("approve", || {
@@ -3385,11 +3365,7 @@ fn run_command() -> Result<()> {
                             })
                         })
                         .flatten();
-                    // A standing choice the person states is saved in their
-                    // words before the note is read, so the note does not
-                    // repeat it and the correction hook does not file it
-                    // again as a proposal.
-                    let captured = if person {
+                    if person {
                         let mut sessions: Vec<String> = call.session.iter().cloned().collect();
                         for s in ljos_cli::payload_sessions(&input) {
                             if !sessions.contains(&s) {
@@ -3402,11 +3378,19 @@ fn run_command() -> Result<()> {
                             spawner.as_ref(),
                             ljos_cli::capture::payload_transcript(&input).as_deref(),
                         );
-                        ljos_cli::hook_timed("capture", || ljos_cli::capture::capture_stated(&call))
-                    } else {
-                        None
-                    };
-                    if person {
+                    }
+                    // A standing choice the prompt states is saved in its
+                    // words before the note is read, so the note does not
+                    // repeat it and the correction hook does not store it
+                    // again.
+                    let captured = (call.event == "UserPromptSubmit")
+                        .then(|| {
+                            ljos_cli::hook_timed("capture", || {
+                                ljos_cli::capture::capture_stated(&call)
+                            })
+                        })
+                        .flatten();
+                    if call.event == "UserPromptSubmit" {
                         ljos_cli::hook_timed("correction", || ljos_cli::store_correction(&call));
                     }
                     let (mut ctx, mut ids) =

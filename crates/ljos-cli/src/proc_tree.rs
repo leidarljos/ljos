@@ -1874,34 +1874,6 @@ fn confirm_runner(runner: &Proc) -> Result<(), String> {
     Ok(())
 }
 
-/// The installed runner above this process, checked against the tool-call
-/// record ([`confirm_runner`]). Shells and wrappers are stepped over. The
-/// first other program that is not an installed runner ends the walk, so
-/// a copy named like a runner cannot hide behind a real one further up.
-///
-/// # Errors
-///
-/// No installed runner is above this process, or the one that is still
-/// belongs to a recorded tool call.
-pub fn placed_runner() -> Result<(), String> {
-    for proc in ancestors() {
-        if is_shell(&proc) || is_wrapper(&proc) {
-            continue;
-        }
-        if ends_the_walk(&proc) {
-            break;
-        }
-        if exe_runner(proc.pid).is_some() {
-            return confirm_runner(&proc);
-        }
-        return Err(format!(
-            "{} (pid {}) is not an installed runner, so this is not the person's runner",
-            proc.comm, proc.pid
-        ));
-    }
-    Err("no installed runner is above this process, so this is not the person's runner".into())
-}
-
 /// The runner that spawned this `ljos hook` itself, or why none did: the
 /// parent must be an installed runner ([`exe_runner`]), with no shell or
 /// interpreter between them but the `sh -c` the runner runs its hook

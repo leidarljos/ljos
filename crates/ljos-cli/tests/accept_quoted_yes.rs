@@ -1,10 +1,8 @@
 //! ljos-vl5z: a person's yes, carried from chat by the seat that heard it.
 //!
-//! `ljos accept` wanted a terminal of the person's own, since a runner
-//! that accepted its own proposal would be reviewing itself. A yes said in
-//! chat now counts when the seat passes on the words, the time and its own
-//! name, and the acceptance keeps all three. The terminal path still needs
-//! no quote.
+//! A yes said in chat is kept with the acceptance when the seat passes on
+//! the words, the time and its own name. Without one, `ljos accept` still
+//! accepts, from any caller, and records no grant.
 
 ljos_test_boot::harness!();
 use std::io::{Read, Write};
@@ -175,18 +173,19 @@ fn a_quoted_yes_accepts_the_lesson_and_is_kept_with_it() {
     );
 }
 
-/// Without the words, the same call from the same conversation is the
-/// refusal it always was, and it names the way through.
+/// Without the words, the same call from the same conversation accepts,
+/// and the acceptance carries no grant.
 #[test]
-fn an_agent_still_cannot_accept_its_own_proposal_unquoted() {
+fn an_unquoted_accept_from_the_same_conversation_keeps_no_grant() {
     let seat = Seat::new();
     let out = seat.accept(&[]);
     let text = said(&out);
-    assert!(!out.status.success(), "accept wrote it anyway: {text}");
-    assert!(text.contains("can't accept its own proposal"), "{text}");
-    assert!(text.contains("--quote"), "{text}");
-    assert_eq!(seat.rows().len(), 1, "the proposal is still open");
-    assert_eq!(seat.rows()[0]["status"], "open");
+    assert!(out.status.success(), "accept refused: {text}");
+    assert!(text.contains("accepted"), "{text}");
+    let rows = seat.rows();
+    let last = rows.last().expect("an accepted row");
+    assert_eq!(last["status"], "accepted", "{last}");
+    assert_eq!(last.get("grant"), None, "{last}");
 }
 
 /// A quote with no time and no seat records nothing, so it accepts

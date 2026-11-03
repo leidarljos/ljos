@@ -14,12 +14,25 @@ use serde_json::{Map, Value};
 /// Whether `text` passes the pack's atom gate as an agent lesson and as a note.
 #[must_use]
 pub fn pack_copy_ok(text: &str) -> bool {
+    gate_refusal(text).is_none()
+}
+
+/// Why the pack's atom gate would turn `text` away as an agent lesson or a
+/// note, in the pack's words. `None` when it passes.
+#[must_use]
+pub fn gate_refusal(text: &str) -> Option<String> {
     let text = text.trim();
-    if text.is_empty() || text.chars().count() > packset_core::record::TEXT_SOFT_CAP {
-        return false;
+    if text.is_empty() {
+        return Some("atom text is required".into());
     }
-    if packset_core::prose_refuse(text, packset_core::ProseRole::Atom).is_err() {
-        return false;
+    let cap = packset_core::record::TEXT_SOFT_CAP;
+    if text.chars().count() > cap {
+        return Some(format!(
+            "atom text is past the soft cap of {cap} characters"
+        ));
+    }
+    if let Err(why) = packset_core::prose_refuse(text, packset_core::ProseRole::Atom) {
+        return Some(why.to_string());
     }
     let mut lesson = Map::new();
     lesson.insert("kind".into(), Value::String("lesson".into()));
@@ -27,8 +40,8 @@ pub fn pack_copy_ok(text: &str) -> bool {
     lesson.insert("text".into(), Value::String(text.to_string()));
     lesson.insert("workspace".into(), Value::String("seat".into()));
     lesson.insert("origin".into(), Value::String("agent-derived".into()));
-    if packset_core::record::validate(&mut lesson).is_err() {
-        return false;
+    if let Err(why) = packset_core::record::validate(&mut lesson) {
+        return Some(why.to_string());
     }
     let mut note = Map::new();
     note.insert(
@@ -40,7 +53,9 @@ pub fn pack_copy_ok(text: &str) -> bool {
     note.insert("workspace".into(), Value::String("seat".into()));
     note.insert("origin".into(), Value::String("agent-derived".into()));
     note.insert("issue".into(), Value::String("probe".into()));
-    packset_core::record::validate(&mut note).is_ok()
+    packset_core::record::validate(&mut note)
+        .err()
+        .map(|why| why.to_string())
 }
 
 /// `text` cut into copies [`pack_copy_ok`] accepts.
@@ -128,36 +143,25 @@ fn shrink_clause(text: &str, depth: usize) -> Vec<String> {
     chunk_words(text)
 }
 
-/// The longest prefixes of `text` that still pass, one sentence each.
-/// A sentence at [`packset_core::prose::VERY_HARD_WORDS`] is refused, so a
-/// prefix never tries more words than that.
+/// `text` cut into the fewest runs of near-equal length that each pass as
+/// one sentence. Even runs leave no one-word tail for [`pack_groups`] to
+/// glue onto a cut sentence.
 fn chunk_words(text: &str) -> Vec<String> {
     let words: Vec<&str> = text.split_whitespace().collect();
-    let max_words = packset_core::prose::VERY_HARD_WORDS
-        .saturating_sub(1)
-        .max(1);
-    let mut out = Vec::new();
-    let mut start = 0;
-    while start < words.len() {
-        let room = (words.len() - start).min(max_words);
-        let mut took = None;
-        for n in (1..=room).rev() {
-            let candidate = end_sentence(&words[start..start + n].join(" "));
-            if candidate.chars().count() > packset_core::record::TEXT_SOFT_CAP {
-                continue;
-            }
-            if pack_copy_ok(&candidate) && sentence_count(&candidate) <= 1 {
-                took = Some(candidate);
-                start += n;
-                break;
-            }
-        }
-        match took {
-            Some(candidate) => out.push(candidate),
-            None => start += 1,
+    for pieces in 1..=words.len() {
+        let copies: Vec<String> = words
+            .chunks(words.len().div_ceil(pieces))
+            .map(|run| end_sentence(&run.join(" ")))
+            .collect();
+        if copies.iter().all(|copy| {
+            copy.chars().count() <= packset_core::record::TEXT_SOFT_CAP
+                && pack_copy_ok(copy)
+                && sentence_count(copy) <= 1
+        }) {
+            return copies;
         }
     }
-    out
+    Vec::new()
 }
 
 fn pack_groups(parts: &[String]) -> Vec<String> {

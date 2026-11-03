@@ -36,7 +36,7 @@ agent, in Cursor or any other tool, can see who has it and what it taught.
 ljos finish ISSUE --lesson "One or two sentences the next agent can act on."
 ```
 
-An agent's lesson is a proposal at L0 (`derived`) with origin `agent-derived`. `ljos accept` promotes it to `explicit` and writes it.
+An agent's lesson is stored at once at L0 (`derived`) with origin `agent-derived`, and search finds it right away. `ljos accept` raises it to `explicit`.
 A lesson the person types at `ljos finish` in their own terminal is written at once as `user-declared`.
 Finishing does not close the ticket. A person closes it when the work is
 accepted. To stop without finishing, `ljos release ISSUE`.

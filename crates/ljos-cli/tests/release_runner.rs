@@ -2,7 +2,7 @@
 //!
 //! A test harness may leave a host runner cgroup. The binary it builds
 //! must not. A copy whose path contains `/deps/` is still the product,
-//! and a runner cgroup around that copy still refuses a person's keep.
+//! and a runner cgroup around that copy still makes a keep the agent's.
 
 ljos_test_boot::harness!();
 
@@ -219,7 +219,14 @@ echo $? > "$out/keep.code"
 exit 0
 "#;
     let home = dir.path().join("home");
-    fs::create_dir_all(&home).unwrap();
+    let rules = home.join(".config/ljos/user-rules.json");
+    fs::create_dir_all(rules.parent().unwrap()).unwrap();
+    fs::write(
+        &rules,
+        r#"{"rules": [{"id": "deadbeef5e1d0c4b3a29180716f5e4d3", "text": "Never post or reply to Alan.",
+            "author": "person", "reason": "he asked us to stop", "written_at": "2020-01-01T00:00:00.000Z"}]}"#,
+    )
+    .unwrap();
     let run = Command::new("bash")
         .args([
             "-c",
@@ -255,10 +262,13 @@ exit 0
         hook_cg.contains("claude-probe-"),
         "deps copy left the runner cgroup\n{dumped}"
     );
-    let keep_err = fs::read_to_string(out.join("keep.err")).unwrap_or_default();
-    assert!(
-        keep_err.contains("a runner cannot keep"),
-        "deps copy was not refused as a runner\n{dumped}"
+    let keep_code = fs::read_to_string(out.join("keep.code")).unwrap_or_default();
+    assert_eq!(keep_code.trim(), "0", "{dumped}");
+    let kept: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&rules).unwrap()).unwrap();
+    assert_eq!(
+        kept["rules"][0]["basis"], "agent",
+        "deps copy kept the rule as the person's\n{dumped}"
     );
     let _ = Command::new("sudo").args(["-n", "rmdir", &cg]).output();
 }
