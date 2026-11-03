@@ -539,6 +539,24 @@ miss, and a looser cluster as more than one. A line before the settle
 names the outcomes read, the independent voices the panel has and each
 voter discounted. Nothing is passed or printed when no pair counts.
 
+The settle also weighs each model family as one voter. A ballot's family
+is the model its verified slot records, else the model a judge ballot
+(=judge:MODEL=) names, else the runner its persona runs on. A label that
+contains a family name a panel rotates, such as =opus= or =codex=, is
+that family; any other label is its own. Ballots that name none share
+one =unknown= family; they are not one family each. Each of a family's
+/k/ voters keeps =1/k= of its inbound weight, the share =correlation=
+gives /k/ exact clones, multiplied into any correlation discount. Ten
+unlabelled ballots then weigh as one voter
+beside two ballots from two labelled families. Under one family, or with
+one ballot per family, nothing is passed. When a family holds more than
+one ballot, a line before the settle names the ballots, the families and
+each family's count; =--json= carries =families=, with =voices= the
+number of families and =of= the voters in each. The tracker's settle
+weighs no family. The push check counts families on its own terms: there
+a seat with no slot is a family of its own, so two standing seats clear
+a protected push.
+
 A row carries the domains it is scoped to. An unscoped row applies to
 every issue; a scoped row applies when one of its domains is a word of the
 issue's title. =learn= writes its rows scoped to the entities of the island

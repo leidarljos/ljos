@@ -1122,6 +1122,14 @@ enum Cmd {
     /// What the push gate decides on the issue, from seat ballots alone,
     /// then the weighted settle over every ballot as advice: shares, who
     /// leads, influence, and what each anchor did.
+    ///
+    /// The model crate's settle weighs each model family as one voter. A
+    /// ballot's family is the model its verified slot records, else the
+    /// model a judge ballot (`judge:MODEL`) names, else the runner its
+    /// persona runs on. Ballots that name none share one `unknown` family,
+    /// so ten of them weigh as much as one labelled ballot. The tracker's
+    /// settle weighs no family. The push gate counts families on its own
+    /// terms: there a seat with no slot is a family of its own.
     Consensus {
         id: String,
         /// Print one JSON document and nothing else. The push cite stays at
@@ -3584,11 +3592,22 @@ fn run_command() -> Result<()> {
                 ljos_cli::protected_push_reading(&id, std::env::current_dir().ok().as_deref())
             });
             // The named outcomes show which voters err together, and
-            // those voters are discounted.
-            let discount = settle_discount(&atoms).map(|(discount, line)| {
-                with_discount(&mut steps, &discount);
-                line
+            // those voters are discounted. Each model family weighs as one
+            // voter too, and ballots no record labels share one family.
+            let families = ljos_cli::hook_timed("consensus_families", || {
+                ljos_cli::slot::ballot_families(&id, &ballots, &personas)
             });
+            let correlation = settle_discount(&atoms);
+            let mut weights = ljos_cli::slot::family_weights(&families);
+            if let Some((discount, _)) = &correlation {
+                for (voter, d) in discount {
+                    *weights.entry(voter.clone()).or_insert(1.0) *= d;
+                }
+            }
+            if !weights.is_empty() {
+                with_discount(&mut steps, &weights);
+            }
+            let discount = correlation.map(|(_, line)| line);
             // Beside the settle: the surprisingly popular answer when two
             // or more voters forecast, and the voters' standing when rows
             // exist.
@@ -3623,6 +3642,7 @@ fn run_command() -> Result<()> {
                 }
                 let mut doc = ljos_cli::consensus_document(&gate_json, &said);
                 doc["protected_push"] = protected_json;
+                doc["families"] = serde_json::json!({"voices": families.len(), "of": families});
                 if !provenance.is_empty() {
                     doc["provenance"] = serde_json::json!(provenance);
                 }
@@ -3641,6 +3661,9 @@ fn run_command() -> Result<()> {
             println!("advice, which does not decide a push: the weighted settle over every ballot");
             if let Some(line) = discount {
                 println!("{line}");
+            }
+            if let Some(line) = ljos_cli::slot::families_in_words(&families, have_model) {
+                print!("{line}");
             }
             for step in steps {
                 let settle = step.bin == "ljos-consensus"

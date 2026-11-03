@@ -626,12 +626,124 @@ pub fn family_of(
             && pinned(&slot.launcher, &slot.key)
             && pinned(voter, &slot.run_key)
     })?;
-    let model = slot.model.to_ascii_lowercase();
-    let family = crate::panel_cloud::FAMILIES
+    Some(family_named(&slot.model))
+}
+
+/// The family a model or runner label names: the first of
+/// [`crate::panel_cloud::FAMILIES`] it contains, else the label itself.
+#[must_use]
+pub fn family_named(label: &str) -> String {
+    let label = label.trim().to_ascii_lowercase();
+    crate::panel_cloud::FAMILIES
         .iter()
-        .find(|family| model.contains(*family))
-        .map_or(model.clone(), |family| (*family).to_string());
-    Some(family)
+        .find(|family| label.contains(*family))
+        .map_or(label.clone(), |family| (*family).to_string())
+}
+
+/// The family of a ballot no record labels. Every such ballot shares it.
+pub const UNKNOWN_FAMILY: &str = "unknown";
+
+/// Voters by the family the settle weighs them in.
+pub type Families = BTreeMap<String, Vec<String>>;
+
+/// The family the settle weighs `voter` in: the model its verified slot
+/// records (`slotted`, [`family_of`]), else the model a judge ballot
+/// (`judge:MODEL`) names, else the runner its persona runs on, else
+/// [`UNKNOWN_FAMILY`].
+#[must_use]
+pub fn settle_family(voter: &str, slotted: Option<String>, runner: Option<&str>) -> String {
+    slotted
+        .or_else(|| voter.strip_prefix("judge:").map(family_named))
+        .or_else(|| runner.map(family_named))
+        .filter(|family| !family.is_empty())
+        .unwrap_or_else(|| UNKNOWN_FAMILY.to_string())
+}
+
+/// The voters on `rows` by [`settle_family`] on `issue`: slots from the
+/// issue's notes, runners from `personas`.
+#[must_use]
+pub fn ballot_families(
+    issue: &str,
+    rows: &[serde_json::Value],
+    personas: &[crate::Persona],
+) -> Families {
+    let notes = crate::issue_record(issue)
+        .map(|card| ballot_sig::notes_of(&card))
+        .unwrap_or_default();
+    // The tracker's root commits and the pins are read only when a slot
+    // is on the issue to verify.
+    let slots = notes.iter().any(|n| parse(n).is_some()).then(|| {
+        let pins = ballot_sig::pins_for_check()
+            .map(|(pins, _)| pins)
+            .unwrap_or_default();
+        (tracker_id(), pins)
+    });
+    let voters: std::collections::BTreeSet<String> = crate::voters_of(rows).into_iter().collect();
+    let mut out = Families::new();
+    for voter in voters {
+        let slotted = slots
+            .as_ref()
+            .and_then(|(tracker, pins)| family_of(tracker, issue, &voter, &notes, pins));
+        let runner = personas
+            .iter()
+            .find(|p| p.name == voter)
+            .and_then(|p| p.runner.as_deref());
+        out.entry(settle_family(&voter, slotted, runner))
+            .or_default()
+            .push(voter);
+    }
+    out
+}
+
+/// The share of its weight each voter keeps so that each family weighs as
+/// one voter: `1 / k` for each of a family's `k` voters, the share the
+/// model crate's correlation reading gives `k` exact clones. Empty when
+/// that changes nothing: under one family every voter keeps an equal
+/// weight either way, and a family of one keeps its whole weight.
+#[must_use]
+pub fn family_weights(families: &Families) -> BTreeMap<String, f64> {
+    if families.len() < 2 {
+        return BTreeMap::new();
+    }
+    let mut out = BTreeMap::new();
+    for voters in families.values().filter(|voters| voters.len() > 1) {
+        let share = 1.0 / voters.len() as f64;
+        for voter in voters {
+            out.insert(voter.clone(), share);
+        }
+    }
+    out
+}
+
+/// The line before the settle when a family holds more than one ballot:
+/// the ballots, the families they come from, and each family's count.
+/// `weighed` is whether the settle weighs each family as one voter, which
+/// the tracker's settle does not.
+#[must_use]
+pub fn families_in_words(families: &Families, weighed: bool) -> Option<String> {
+    if families.values().all(|voters| voters.len() < 2) {
+        return None;
+    }
+    let ballots: usize = families.values().map(Vec::len).sum();
+    let each: Vec<String> = families
+        .iter()
+        .map(|(family, voters)| format!("{family} {}", voters.len()))
+        .collect();
+    let noun = if families.len() == 1 {
+        "family"
+    } else {
+        "families"
+    };
+    let how = if weighed {
+        "the settle weighs each family as one voter"
+    } else {
+        "the tracker's settle does not weigh families"
+    };
+    Some(format!(
+        "model families: {ballots} ballots from {} {noun} ({}); {how}\n",
+        families.len(),
+        each.join(", ")
+    ))
 }
 
 /// Why the run seats among `seats` do not count on `issue`. A seat that
