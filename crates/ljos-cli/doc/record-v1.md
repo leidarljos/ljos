@@ -22,14 +22,9 @@ digits, `-`, `_` and `.`. It has one written form:
 - the identity is its slug: lower case, with each run of other
   characters one `-` and none at either end. `alpha`, not `Alpha`,
   `alpha.` or `alpha_`.
-- the part after `/` is the seat it sits as, read the way the tracker
-  reads a holder: its slug, less an old conversation tag (a pid in base
-  36: a last part of one to six lower-case letters and digits with at
-  least one of each, as in `inky-39u` or `inky-n9o`), with an old seat
-  name mapped to the new one (`ljos-bot` is `ljosbot`). `alpha/inky`,
-  not `alpha/Inky` or `alpha/inky-39u`. A last part of digits alone is
-  a version or a number and stays: `alpha/model-5` is its own seat, apart
-  from `alpha/model`.
+- the part after `/` is the seat it sits as, read the way the tracker reads a holder: its slug, less an old conversation tag (a pid in base 36: a last part of one to six lower-case letters and digits with at least one of each, as in `inky-39u` or `inky-n9o`), with an old seat name mapped to the new one (`ljos-bot` is `ljosbot`).
+  `alpha/inky`, not `alpha/Inky` or `alpha/inky-39u`.
+  A last part of digits alone is a version or a number and stays: `alpha/model-5` is its own seat, apart from `alpha/model`.
 - a run is `run-<id>` and a judge `judge-<model>`. Both are slugs and
   keep their ids whole, so `judge-model-1-5` keeps its version.
 - `run/<id>` has no identity and is refused; a run is

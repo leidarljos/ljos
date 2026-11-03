@@ -453,32 +453,23 @@ runner reasons in a session of its own.
    buildengineer: Jev leaned A at confidence 0.61, under the 0.80 cut; not cast.
      buildengineer reasons in its own session in herdr pane w1:p2; then `ljos consensus surf-ab12`
 
-The runner is any coding runner the machine runs: Claude Code, Codex,
-Grok Build, omp, hermes or Antigravity's ``agy``, each on whatever model it
-is set to, from a model to ``model-b`` on an
-OpenAI-compatible endpoint. It is a ``[[harness]]`` in
-``~/.config/ljos/harnesses.toml``. Its
-``start`` and ``resume`` argv say how it opens a session and how it resumes
-the latest one in a directory, for example ``resume = ["grok", "--continue"]``. It starts in a pane the person can watch and talk in: a
-herdr workspace when herdr's server is up, else a window of the tmux
-session ``ljos-personas``. A ``[[tool]]`` the runners file declares is tried
-before either (see *Open persona panes in another tool*). A runner that
-exits non-zero is resumed in its pane, at most three times a minute. It
-works in the persona's home, ``$XDG_STATE_HOME/ljos/personas/NAME``, as the
-seat named after the persona. Its memories, ballots and trust rows are
-therefore the persona's. It reads the issue and the pack, writes its
-reasoning with ``ljos note``, and casts ``ljos vote --as NAME``. Each
-runner continues the latest session of the directory it starts in, so
-the next hand-off resumes the same conversation, and an open pane takes
-the next task in place. A task goes to the persona's inbox, and the pane
-is told the file in one line. ``ljos ask NAME "..."`` puts a question to
-the persona the same way. ``ljos supervise NAME --harness RUNNER --exit crash --at SECONDS``
-says whether that child should be started again, under the restart
-policy (permanent, transient, temporary, three strikes in a minute), and
-prints the herdr line when the answer is yes. It does not start the pane.
-``ljos panel --jev`` hands each unsure persona's
-brief to its own session when the panel splits. A persona with no runner
-gets a brief for a subagent, as before.
+The runner is any coding runner the machine runs: Claude Code, Codex, Grok Build, omp, hermes or Antigravity's ``agy``.
+Each runs on whatever model it is set to, and switching one to ``model-b`` on an OpenAI-compatible endpoint changes only the model it reasons with.
+It is a ``[[harness]]`` in ``~/.config/ljos/harnesses.toml``.
+Its ``start`` and ``resume`` argv say how it opens a session and how it resumes the latest one in a directory, for example ``resume`` set to ``["grok", "--continue"]``.
+It starts in a pane the person can watch and talk in: a herdr workspace when herdr's server is up, else a window of the tmux session ``ljos-personas``.
+A ``[[tool]]`` the runners file declares is tried before either (see *Open persona panes in another tool*).
+A runner that exits non-zero is resumed in its pane, at most three times a minute.
+It works in the persona's home, ``$XDG_STATE_HOME/ljos/personas/NAME``, as the seat named after the persona.
+Its memories, ballots and trust rows are therefore the persona's.
+It reads the issue and the pack, writes its reasoning with ``ljos note``, and casts ``ljos vote --as NAME``.
+Each runner continues the latest session of the directory it starts in, so the next hand-off resumes the same conversation, and an open pane takes the next task in place.
+A task goes to the persona's inbox, and the pane is told the file in one line.
+``ljos ask NAME "..."`` puts a question to the persona the same way.
+``ljos supervise NAME --harness RUNNER --exit crash --at SECONDS`` says whether that child should be started again, under the restart policy (permanent, transient, temporary, three strikes in a minute), and prints the herdr line when the answer is yes.
+It does not start the pane.
+``ljos panel --jev`` hands each unsure persona's brief to its own session when the panel splits.
+A persona with no runner gets a brief for a subagent, as before.
 
 ``ljos due --judge`` puts the due page to the ``review`` judges. Each claim
 goes with the newer claims the pack keeps on the same subject. A claim
@@ -601,7 +592,7 @@ and ``model`` the name the server knows. A local server needs no key;
    enabled = true
    backend = "chat"
    endpoint = "http://127.0.0.1:8089/v1"
-   model = "Qwen2.5-7B-Instruct"
+   model = "model-c"
    usd_per_mtok_in = 0
    budget_ms = 6000
 
