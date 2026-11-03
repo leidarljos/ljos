@@ -187,48 +187,59 @@ struct Clock {
     depth: u32,
 }
 
-static CLOCK: Mutex<Option<Clock>> = Mutex::new(None);
+thread_local! {
+    /// This thread's pack budget. A nested call keeps the earlier deadline.
+    /// Another thread has its own: one search must not spend a read that
+    /// is running beside it.
+    static CLOCK: std::cell::RefCell<Option<Clock>> = const { std::cell::RefCell::new(None) };
+}
 
-/// Bound every pack socket call until this guard drops.
-/// A nested guard keeps the earlier deadline, so a hook's budget is not
-/// stretched by a later mail read.
-pub struct PackClock;
+/// Bound every pack socket call on this thread until this guard drops.
+/// A nested guard on the same thread keeps the earlier deadline, so a
+/// hook stays under 2s and an interactive command under 5s across every
+/// socket of the call. A call on another thread keeps the budget it armed.
+pub struct PackClock {
+    /// Drop has to run on the thread that entered, where the clock lives.
+    _thread: std::marker::PhantomData<*const ()>,
+}
 
 impl PackClock {
     #[must_use]
     pub fn enter(total: Duration) -> Self {
-        let mut slot = CLOCK.lock().unwrap_or_else(|p| p.into_inner());
-        match slot.as_mut() {
-            Some(clock) => clock.depth = clock.depth.saturating_add(1),
-            None => {
-                *slot = Some(Clock {
-                    deadline: Instant::now() + total,
-                    depth: 1,
-                });
+        CLOCK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            match slot.as_mut() {
+                Some(clock) => clock.depth = clock.depth.saturating_add(1),
+                None => {
+                    *slot = Some(Clock {
+                        deadline: Instant::now() + total,
+                        depth: 1,
+                    });
+                }
             }
+        });
+        Self {
+            _thread: std::marker::PhantomData,
         }
-        Self
     }
 }
 
 impl Drop for PackClock {
     fn drop(&mut self) {
-        let mut slot = CLOCK.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(clock) = slot.as_mut() {
-            clock.depth = clock.depth.saturating_sub(1);
-            if clock.depth == 0 {
-                *slot = None;
+        CLOCK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if let Some(clock) = slot.as_mut() {
+                clock.depth = clock.depth.saturating_sub(1);
+                if clock.depth == 0 {
+                    *slot = None;
+                }
             }
-        }
+        });
     }
 }
 
 fn clock_deadline() -> Option<Instant> {
-    CLOCK
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .as_ref()
-        .map(|clock| clock.deadline)
+    CLOCK.with(|slot| slot.borrow().as_ref().map(|clock| clock.deadline))
 }
 
 pub(crate) fn clock_armed() -> bool {

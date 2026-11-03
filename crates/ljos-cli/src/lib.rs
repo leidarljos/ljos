@@ -63364,6 +63364,34 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
     }
 
+    /// A pack clock another thread already spent is that thread's budget.
+    /// This thread's read of a pack that is up still names the person.
+    #[test]
+    fn a_spent_pack_clock_on_another_thread_does_not_hide_a_stored_origin() {
+        let _g = env_guard();
+        let id = "5707ed0000000000000000000000d0e8";
+        let (url, _) = serve_lesson_pack(id, true);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&stop);
+        let holder = std::thread::spawn(move || {
+            let _clock = pack_link::PackClock::enter(std::time::Duration::from_millis(1));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let _pack = HoldEnv::set(&[
+            ("PACKSET_URL", &url),
+            ("PACKSET_WORKSPACE", "seat"),
+            ("PACKSET_TOKEN", LESSON_PACK_TOKEN),
+        ]);
+        let got = stored_origin_of(id);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        holder.join().unwrap();
+        assert_eq!(got, Stored::Origin(StoredBy::Person));
+    }
+
     const LESSON_PACK_TOKEN: &str = "lesson-pack-token";
 
     /// A pack holding the person's lesson `id`. One that `asks` refuses a
