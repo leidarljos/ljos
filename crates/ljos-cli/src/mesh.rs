@@ -431,7 +431,14 @@ fn stop_daemon(dir: &Path, deadline: Instant) -> Option<String> {
                 while kill_group(pid, 0) && Instant::now() < until {
                     std::thread::sleep(POLL);
                 }
-                kill_group(pid, libc::SIGKILL);
+                // A pid is not reused while a group with that id has a
+                // process in it (POSIX, Process Group Lifetime). So the
+                // group is still this daemon's while the pid names no live
+                // process or still names the daemon, and only then does it
+                // get SIGKILL.
+                if started(pid).is_none() || recorded(dir).is_some_and(|(_, ours)| ours) {
+                    kill_group(pid, libc::SIGKILL);
+                }
             }
             None
         }

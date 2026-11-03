@@ -25,8 +25,10 @@ const POLL: Duration = Duration::from_millis(100 / 2);
 const FAKE_LIFE_SECS: u64 = 20 * WAIT_SECS;
 
 /// Records each start, dumps its environment into its log as a crash
-/// report would, opens its socket, and stays up.
+/// report would, opens its socket, and stays up. `FAKE_STUBBORN` ignores
+/// SIGTERM.
 const TAILSCALED: &str = r#"#!/bin/sh
+[ -n "$FAKE_STUBBORN" ] && trap '' TERM
 for a in "$@"; do case "$a" in --socket=*) sock="${a#--socket=}";; esac; done
 echo "tailscaled $*"
 env
@@ -289,6 +291,31 @@ fn a_stale_pid_file_signals_nothing_on_up_or_down() {
     assert!(
         down.contains("left the mesh") && down.contains(&named),
         "{down}"
+    );
+}
+
+#[test]
+fn down_kills_a_tailscaled_that_ignores_sigterm_after_the_grace() {
+    let world = World::new();
+    let up = world
+        .ljos(&["mesh", "up"])
+        .env("LJOS_MESH_AUTHKEY", KEY)
+        .env("FAKE_STUBBORN", "1")
+        .output()
+        .unwrap();
+    one_line(&up, "up");
+    let pid = world.daemon_pid().expect("the daemon recorded its pid");
+    let left = one_line(&world.down(), "down");
+    assert!(left.contains("left the mesh"), "{left}");
+    // `down` sends SIGKILL and returns. Up to the `-k 5` grace for the
+    // kernel to end the daemon and its new parent to reap it.
+    let until = Instant::now() + Duration::from_secs(5);
+    while !gone(&pid) && Instant::now() < until {
+        std::thread::sleep(POLL);
+    }
+    assert!(
+        gone(&pid),
+        "tailscaled {pid} outlived SIGTERM, the grace and down"
     );
 }
 
