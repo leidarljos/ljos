@@ -211,13 +211,17 @@ pub fn seat_session() -> String {
         .unwrap_or_else(|| std::process::id().to_string())
 }
 
-/// The issue argument when it is not a placeholder.
+/// The issue argument when it is not a placeholder. A missing or blank
+/// argument is the issue this seat holds.
 ///
 /// # Errors
 ///
-/// The argument is missing or a placeholder.
+/// The argument is a placeholder, or it is blank and this seat holds no issue.
 pub fn note_issue(raw: Option<&str>) -> Result<String, String> {
-    canonical_issue(raw, None).ok_or_else(|| "ljos_note: pass an issue id".into())
+    if let Some(id) = canonical_issue(raw, None) {
+        return Ok(id);
+    }
+    super::held_issue().ok_or_else(|| "ljos_note: pass an issue id".into())
 }
 
 /// No claims to list.

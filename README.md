@@ -324,7 +324,7 @@ pull request is not refused.
 ljos file "TITLE" -p PROJECT [-t decision --options A,B]
 ljos sitting ISSUE            # checks, memories for the task, and the claim
 ljos claim ISSUE --assignee NAME
-ljos note ISSUE "..."
+ljos note [ISSUE] "..."
 ljos vote ISSUE --for OPTION --used none
 ljos consensus ISSUE
 ljos finish ISSUE --lesson "..." [--outcome OPTION]

@@ -591,11 +591,14 @@ enum Cmd {
     /// Note progress on an issue, dated, and commit the tracker. The note
     /// stays on the logbook; it is not written into memory, so recall on a
     /// later task does not hand it back as something the seat knows.
+    ///
+    /// `ljos note TEXT...` notes on the issue this seat holds. `ljos note
+    /// ID TEXT...` notes on ID when the first word is an id `vissue create`
+    /// mints; any other first word is part of the note.
     Note {
-        issue: String,
-        /// The note; several words are one note.
-        #[arg(required = true, num_args = 1..)]
-        text: Vec<String>,
+        /// The note, or an issue id and then the note.
+        #[arg(value_name = "WORDS", required = true, num_args = 1..)]
+        words: Vec<String>,
     },
     /// Tracker commits by one seat. The subject is `chore(issues): ID VERB by SEAT`.
     Log {
@@ -1506,6 +1509,85 @@ enum Cmd {
     },
 }
 
+/// Where a `ljos note` line goes, and whether the issue was inferred.
+///
+/// A default mint is the issue. Any other vissue id is the issue when
+/// this seat holds nothing, so `ljos note demo-n hello` still reaches the
+/// tracker without asking vissue who holds what. While a hold record is
+/// present, a word that is not a default mint is text: `ljos-hud` is not
+/// taken for an id. A first word that is not an id at all is text on the
+/// issue [`ljos_cli::held_issue`] names.
+fn note_target(words: &[String]) -> Result<(String, String, bool)> {
+    let Some((first, rest)) = words.split_first() else {
+        bail!("{NO_HELD_ISSUE}");
+    };
+    if minted_issue_id(first) {
+        return explicit_note(first, rest);
+    }
+    // The hold record is a file. Asking vissue whether a claim is open
+    // is the wait a note must not do before it knows which issue it has.
+    if vissue_id(first) {
+        if let Some(issue) = ljos_cli::seat_held_issue() {
+            return Ok((issue, words.join(" "), true));
+        }
+        return explicit_note(first, rest);
+    }
+    let Some(issue) = ljos_cli::held_issue() else {
+        bail!("{NO_HELD_ISSUE}");
+    };
+    Ok((issue, words.join(" "), true))
+}
+
+const NO_HELD_ISSUE: &str = "ljos note: no issue is held. `ljos note ID TEXT...` names one; \
+     `ljos note TEXT...` notes on the issue this seat holds";
+
+fn explicit_note(id: &str, rest: &[String]) -> Result<(String, String, bool)> {
+    let text = rest.join(" ");
+    if text.is_empty() {
+        bail!("ljos note: pass the note after {id}");
+    }
+    Ok((id.to_string(), text, false))
+}
+
+/// Whether `word` is an id `vissue create` mints by default.
+///
+/// At the vissue commit `.github/sibling-pin` names
+/// (`bbed0146dc479856b638d76102ae307419caa390`), `generate_id` in
+/// `crates/vissue-core/src/store.rs` builds `{project}-` plus `id_length`
+/// characters from `0123456789abcdefghijklmnopqrstuvwxyz`, and
+/// `IssuesSection` in `config.rs` defaults `id_length` to 4. A shorter
+/// hyphenated word such as `ljos-hud` is not that shape.
+fn minted_issue_id(word: &str) -> bool {
+    let Some((project, suffix)) = vissue_id_parts(word) else {
+        return false;
+    };
+    // Default `IssuesSection.id_length` at the pinned vissue commit, not a
+    // length chosen to fit one fixture. `generate_id` clamps a configured
+    // length to at least 2, and the unset value is 4.
+    const MINTED_SUFFIX_LEN: usize = 4;
+    !project.is_empty() && suffix.len() == MINTED_SUFFIX_LEN
+}
+
+/// Whether `word` is an id vissue will keep.
+///
+/// `is_vissue_id` in `crates/vissue-core/src/org.rs` at the same pinned
+/// commit, and `validate_explicit_id` in `ops.rs`: `{project}-` plus one
+/// or more `0-9a-z`. `ljos note demo-n hello` is this form. It is shorter
+/// than the default mint, and it is still the issue when nothing is held.
+fn vissue_id(word: &str) -> bool {
+    vissue_id_parts(word).is_some()
+}
+
+fn vissue_id_parts(word: &str) -> Option<(&str, &str)> {
+    let (project, suffix) = word.rsplit_once('-')?;
+    (!project.is_empty()
+        && !suffix.is_empty()
+        && suffix
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase()))
+    .then_some((project, suffix))
+}
+
 /// The write acknowledgement: the plain sentence for a person at a
 /// terminal, the tab-separated row for a pipe.
 fn write_ack(body: &serde_json::Value) -> String {
@@ -2189,8 +2271,8 @@ fn run_command() -> Result<()> {
         Cmd::Options { issue, options } => {
             print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
         }
-        Cmd::Note { issue, text } => {
-            let text = text.join(" ");
+        Cmd::Note { words } => {
+            let (issue, text, inferred) = note_target(&words)?;
             // The tracker's own lock has no deadline. Wait as long as a
             // tracker commit waits, then say so. A second note once the
             // lock is free is the retry that used to be instant.
@@ -2199,6 +2281,9 @@ fn run_command() -> Result<()> {
                 &["note", &issue, &text],
                 ljos_cli::tracker_lock_wait(),
             )?;
+            if inferred {
+                println!("noted on {issue}");
+            }
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
                 print!("{line}");
             }
