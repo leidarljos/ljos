@@ -165,15 +165,32 @@ fn started(pid: u32) -> Option<String> {
     (out.status.success() && !when.is_empty()).then_some(when)
 }
 
-/// The pid in the pid file, and whether it still names the tailscaled
-/// `start_daemon` recorded: the same pid with the same start time.
-fn recorded(dir: &Path) -> Option<(u32, bool)> {
+/// The pid and start time in the pid file. An ljos before the start time
+/// check wrote the pid alone.
+fn pid_file(dir: &Path) -> Option<(u32, Option<String>)> {
     let text = std::fs::read_to_string(dir.join(PID)).ok()?;
     let mut lines = text.lines();
     let pid = lines.next()?.trim().parse::<u32>().ok()?;
     let at = lines.next().map(str::trim).filter(|at| !at.is_empty());
-    let ours = at.is_some_and(|at| started(pid).as_deref() == Some(at));
+    Some((pid, at.map(str::to_string)))
+}
+
+/// The pid in the pid file, and whether it still names the tailscaled
+/// `start_daemon` recorded: the same pid with the same start time.
+fn recorded(dir: &Path) -> Option<(u32, bool)> {
+    let (pid, at) = pid_file(dir)?;
+    let ours = at.is_some_and(|at| started(pid).as_deref() == Some(at.as_str()));
     Some((pid, ours))
+}
+
+/// The note for a pid file with no start time, or none.
+fn old_format(dir: &Path, then: &str) -> Option<String> {
+    let (pid, None) = pid_file(dir)? else {
+        return None;
+    };
+    Some(format!(
+        "{PID} names pid {pid} with no start time, as an older ljos wrote it, so {then}"
+    ))
 }
 
 fn load() -> Result<Config> {
@@ -251,7 +268,15 @@ fn join(config: &Config, key: Option<&str>, deadline: Instant) -> Result<String>
         .is_some_and(|s| s["BackendState"] == "Running" && s["Self"]["HostName"] == node.as_str())
     {
         std::fs::write(dir.join(JOINED), &node)?;
-        return Ok(format!("mesh up: {node} is already up in swarm {swarm}"));
+        let old = old_format(
+            &dir,
+            "writes carry no source.mesh label and mesh down signals nothing",
+        )
+        .map(|note| format!("; {note}"))
+        .unwrap_or_default();
+        return Ok(format!(
+            "mesh up: {node} is already up in swarm {swarm}{old}"
+        ));
     }
     let key = key.ok_or_else(|| anyhow!("{} is unset", config.key_env))?;
     let kernel = kernel_tun();
@@ -479,9 +504,11 @@ fn stop_daemon(dir: &Path, deadline: Instant) -> Option<String> {
             }
             None
         }
-        Some((pid, false)) => Some(format!(
-            "{PID} named pid {pid}, no longer the tailscaled ljos started, so nothing was signalled"
-        )),
+        Some((pid, false)) => old_format(dir, "nothing was signalled").or_else(|| {
+            Some(format!(
+                "{PID} named pid {pid}, no longer the tailscaled ljos started, so nothing was signalled"
+            ))
+        }),
         None => None,
     };
     let _ = std::fs::remove_file(dir.join(PID));

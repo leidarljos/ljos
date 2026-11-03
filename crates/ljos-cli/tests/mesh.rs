@@ -279,7 +279,8 @@ fn a_stale_pid_file_signals_nothing_on_up_or_down() {
     stale(format!("{pid}\n"));
     let up = one_line(&world.up(), "up over a stale pid file");
     assert!(other.alive(), "up signalled the group pid {pid} leads");
-    assert!(up.contains("joined") && up.contains(&named), "{up}");
+    let old = format!("tailscaled.pid names pid {pid} with no start time");
+    assert!(up.contains("joined") && up.contains(&old), "{up}");
     let ours = world.daemon_pid().expect("the daemon recorded its pid");
     assert_ne!(ours, pid);
     one_line(&world.down(), "down");
@@ -292,6 +293,26 @@ fn a_stale_pid_file_signals_nothing_on_up_or_down() {
         down.contains("left the mesh") && down.contains(&named),
         "{down}"
     );
+}
+
+#[test]
+fn up_notes_a_pid_file_in_the_old_format_when_already_up() {
+    let world = World::new();
+    one_line(&world.up(), "up");
+    let file = world.path("run/ljos/mesh/tailscaled.pid");
+    let current = std::fs::read_to_string(&file).unwrap();
+    let pid = world.daemon_pid().expect("the daemon recorded its pid");
+    std::fs::write(&file, format!("{pid}\n")).unwrap();
+    let again = one_line(&world.up(), "up over an old pid file");
+    assert!(
+        again.contains("already up")
+            && again.contains(&format!(
+                "tailscaled.pid names pid {pid} with no start time"
+            ))
+            && again.contains("no source.mesh label"),
+        "{again}"
+    );
+    std::fs::write(&file, current).unwrap();
 }
 
 #[test]

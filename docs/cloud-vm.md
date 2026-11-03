@@ -159,6 +159,8 @@ The pid file records tailscaled's start time next to its pid.
 Before either verb signals tailscaled, it checks that the pid still started at that time.
 A pid that no longer names that tailscaled gets no signal.
 The verb then drops the pid file and says so in its line.
+A pid file an older ljos wrote holds no start time.
+`mesh up` says so, even when tailscaled already answers, because that tailscaled gets no signal and its writes get no label.
 Neither verb touches git config, hooks, a checkout or `~/.gitconfig`.
 
 ljos labels each write it records in the pack with `source.mesh`, mail included.
