@@ -578,8 +578,22 @@ fn n_distinct_sessions_settle() {
     assert!(!stdout.contains("refuses to settle"), "{said}");
 }
 
+fn assert_author_label(world: &World, out: &Output, issue: &str, candidate: &str) {
+    let said = text(out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!(
+            "warning: this session authored candidate {candidate} and its vote on {issue} is labelled authored: {candidate}"
+        )),
+        "{said}"
+    );
+    let notes = std::fs::read_to_string(world.state.join("notes.json")).unwrap_or_default();
+    assert!(notes.contains(&format!("authored: {candidate}")), "{notes}");
+    assert!(notes.contains("ballot-sig:"), "{notes}");
+}
+
 #[test]
-fn an_author_who_votes_is_refused() {
+fn an_author_who_votes_is_labelled_and_the_settle_stands() {
     let world = World::new();
     let filed = world.ljos(
         "alice",
@@ -606,20 +620,58 @@ fn an_author_who_votes_is_refused() {
         "sess-alice-0001",
         &["vote", "demo-vote", "--for", "ship", "--used", "none"],
     );
-    let said = text(&author);
-    assert!(!author.status.success(), "{said}");
-    assert!(
-        said.contains("authored candidate") && said.contains("Nothing was cast"),
-        "{said}"
-    );
+    assert_author_label(&world, &author, "demo-vote", "demo-d001");
     vote(&world, "bob", "sess-bob-0001", "demo-vote");
     let out = world.ljos("bob", "sess-bob-0001", &["consensus", "demo-vote"]);
     let said = text(&out);
     assert!(out.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !String::from_utf8_lossy(&out.stdout).contains("refuses to settle"),
+        stdout.contains(
+            "session sess-alice-0001 authored candidate demo-d001 and voted on demo-vote"
+        ),
         "{said}"
     );
+    assert!(!stdout.contains("refuses to settle"), "{said}");
+}
+
+#[test]
+fn a_session_that_filed_a_candidate_stores_its_vote_with_a_label() {
+    let world = World::new();
+    let filed = world.ljos(
+        "alice",
+        "sess-alice-0001",
+        &[
+            "file",
+            "design: cache",
+            "--parent",
+            "demo-vote",
+            "-p",
+            "demo",
+            "-t",
+            "task",
+        ],
+    );
+    let said = text(&filed);
+    assert!(filed.status.success(), "{said}");
+    let author = world.ljos(
+        "alice",
+        "sess-alice-0001",
+        &["vote", "demo-vote", "--for", "ship", "--used", "none"],
+    );
+    assert_author_label(&world, &author, "demo-vote", "demo-d001");
+    vote(&world, "bob", "sess-bob-0001", "demo-vote");
+    let out = world.ljos("bob", "sess-bob-0001", &["consensus", "demo-vote"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "session sess-alice-0001 authored candidate demo-d001 and voted on demo-vote"
+        ),
+        "{said}"
+    );
+    assert!(!stdout.contains("refuses to settle"), "{said}");
 }
 
 #[test]
@@ -892,12 +944,7 @@ fn a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
         "sess-author-0001",
         &["vote", "child-b", "--for", "ship", "--used", "none"],
     );
-    let said = text(&author);
-    assert!(!author.status.success(), "{said}");
-    assert!(
-        said.contains("authored candidate") && said.contains("Nothing was cast"),
-        "{said}"
-    );
+    assert_author_label(&world, &author, "child-b", "child-a");
     let first = world.ljos(
         "saddle",
         "sess-saddle-0001",
@@ -914,8 +961,11 @@ fn a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
-    assert!(stdout.contains("1 ballot counts"), "{said}");
+    // The planted binding is not a signature settle accepts, so both
+    // ballots stay in the count. Saddle's hold on the sibling still counts.
+    assert!(stdout.contains("2 ballots count"), "{said}");
     assert!(stdout.contains("saddle  hold"), "{said}");
+    assert!(stdout.contains("alice  ship"), "{said}");
 }
 
 /// A world holding parent-1 and its children child-a and child-b.

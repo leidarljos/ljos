@@ -3,7 +3,9 @@
 //! calling shell or a harness root are all recorded. They count as one
 //! voice, the latest when they disagree. Consensus names the ballots it
 //! folded and why. A subagent of that root counts with its parent.
-//! A session that filed a design candidate does not also vote.
+//! A session that filed a design candidate still casts. The ballot is
+//! labelled `authored: CANDIDATE`. Consensus names that authorship when
+//! it settles.
 //!
 //! A design candidate whose session had already read another candidate is
 //! flagged: the round was not blind.
@@ -60,15 +62,13 @@ pub fn session_key(harness: &str, nonce: &str) -> String {
     }
 }
 
-/// Why a settle is refused, or `None` when no author of a candidate also
-/// voted. Persona ballots that share a parent are counted, not refused.
-/// The sentence is the whole refusal.
-#[must_use]
-pub fn refusal(
+/// One line per candidate whose session also cast on `issue`. The same
+/// lines are what [`refusal`] joins. An empty session is left out.
+fn author_vote_lines(
     issue: &str,
     ballots: &[BallotTrace],
     candidates: &[CandidateTrace],
-) -> Option<String> {
+) -> Vec<String> {
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for b in ballots {
         let key = session_key(&b.harness, &b.nonce);
@@ -89,6 +89,19 @@ pub fn refusal(
         ));
     }
     authored.sort();
+    authored
+}
+
+/// Why a settle is refused, or `None` when no author of a candidate also
+/// voted. Persona ballots that share a parent are counted, not refused.
+/// The sentence is the whole refusal.
+#[must_use]
+pub fn refusal(
+    issue: &str,
+    ballots: &[BallotTrace],
+    candidates: &[CandidateTrace],
+) -> Option<String> {
+    let authored = author_vote_lines(issue, ballots, candidates);
     if authored.is_empty() {
         return None;
     }
@@ -350,8 +363,9 @@ pub fn replace_hint(issue: &str, voter: &str) -> String {
 /// counts from either, but only when it verifies for `issue`: a ballot on
 /// a sibling is another question. A withdrawal is read from whichever
 /// logbook carries that signature.
-/// candidate counts from either. The session key is the connection. The
-/// voter name is not it.
+/// The session key is the connection. The voter name is not it.
+/// A session that filed a candidate still casts; [`SessionBallot::keep`]
+/// labels that ballot.
 #[must_use]
 fn session_cast_refusal_on(
     issue: &str,
@@ -420,19 +434,57 @@ fn session_cast_refusal_on(
             replace_hint(issue, voter)
         ));
     }
+    None
+}
+
+/// Candidate ids this session filed, from notes that parse as candidate
+/// bindings. A binding that does not verify still labels the ballot.
+/// Settle keeps its own check.
+fn authored_ids(key: &str, own: &[String], family: &[(String, String)]) -> Vec<String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Vec::new();
+    }
+    let mut ids = Vec::new();
     for note in own.iter().chain(family.iter().map(|(_, note)| note)) {
         let Some(candidate) = ballot_sig::parse_candidate(note) else {
             continue;
         };
-        let other = session_key(&candidate.harness, &candidate.nonce);
-        if other == key {
-            return Some(format!(
-                "this session authored candidate {} and its vote on {issue} is refused. Nothing was cast.",
-                candidate.issue
-            ));
+        if session_key(&candidate.harness, &candidate.nonce) != key {
+            continue;
+        }
+        let id = ballot_sig::field(&candidate.issue);
+        if id != "-" && !ids.contains(&id) {
+            ids.push(id);
         }
     }
-    None
+    ids.sort();
+    ids
+}
+
+/// The label left on the ballot's logbook: `authored: CANDIDATE`.
+#[must_use]
+fn authorship_label(candidate: &str) -> String {
+    format!("authored: {}", ballot_sig::field(candidate))
+}
+
+/// The one warning line a cast prints when this session filed a candidate.
+#[must_use]
+fn authorship_warning(issue: &str, ids: &[String]) -> String {
+    let word = if ids.len() == 1 {
+        "candidate"
+    } else {
+        "candidates"
+    };
+    let labels = ids
+        .iter()
+        .map(|id| authorship_label(id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "warning: this session authored {word} {} and its vote on {issue} is labelled {labels}",
+        ids.join(", ")
+    )
 }
 
 /// Why this connection must not cast on `issue`. `own` is that issue's
@@ -715,12 +767,40 @@ pub struct SessionBallot {
     mark: String,
     kept: bool,
     tree: Option<TreeHold>,
+    issue: String,
+    /// Candidates this session filed. Labelled on the logbook once the
+    /// ballot is kept.
+    authored: Vec<String>,
 }
 
 impl SessionBallot {
     /// The cast landed. That same voter in this process is refused later.
+    /// When this session filed a candidate, the ballot note gains
+    /// `authored: CANDIDATE` and stdout carries one warning line.
     pub fn keep(mut self) {
         self.kept = true;
+        self.label_authorship();
+    }
+
+    /// Leave one `authored:` note per candidate, and print the warning
+    /// where a command's stdout is the reader's. The MCP server's stdout
+    /// is its protocol, so the label on the logbook is the record there.
+    fn label_authorship(&self) {
+        if self.authored.is_empty() {
+            return;
+        }
+        for id in &self.authored {
+            let label = authorship_label(id);
+            let _ = crate::run_captured("vissue", &["note", &self.issue, &label]);
+        }
+        let mcp = std::env::current_exe().ok().is_some_and(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("ljos-mcp"))
+        });
+        if !mcp {
+            println!("{}", authorship_warning(&self.issue, &self.authored));
+        }
     }
 }
 
@@ -763,8 +843,9 @@ fn held_choice(issue: &str, voter: &str) -> Option<String> {
 ///
 /// # Errors
 ///
-/// This voter already holds a ballot on `issue`, this process already
-/// holds that claim, or it authored a candidate tied to `issue`.
+/// This voter already holds a ballot on `issue`, or this process already
+/// holds that claim. A session that filed a candidate still claims the
+/// ballot; [`SessionBallot::keep`] labels it.
 pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
     ballot_sig::begin_cast(issue);
     let claimed = ballot_sig::claimed_identity();
@@ -797,6 +878,8 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
         mark,
         kept: false,
         tree: None,
+        issue: issue.to_string(),
+        authored: authored_ids(&key, &own, &family),
     };
     ballot.tree = hold_tree(issue, &claimed, &CastTree::here())?;
     Ok(ballot)
@@ -832,7 +915,7 @@ pub fn blind_lines_for(issue: &str) -> Vec<String> {
 }
 
 /// Sessions that filed a design candidate tied to `issue`. Their ballots
-/// do not count, and a later cast is refused.
+/// do not count. A later cast is labelled, and still stored.
 fn author_sessions(issue: &str) -> std::collections::BTreeSet<String> {
     candidates_in(&candidate_notes(issue))
         .into_iter()
@@ -1350,6 +1433,14 @@ pub fn panel_provenance(issue: &str) -> String {
     let mut out = provenance_text(&notes, &raw);
     let tally = tally_voices(issue, &raw, &notes, &author_sessions(issue));
     for line in tally.folds {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    // The counted tally leaves an author ballot out of the decision. The
+    // logbook still holds it, so the reading names the same fact settle
+    // reads, and the decision stays the one the counted ballots give.
+    let traces = ballot_traces(&raw, &notes);
+    for line in author_vote_lines(issue, &traces, &candidates_in(&candidate_notes(issue))) {
         out.push_str(&line);
         out.push('\n');
     }
@@ -1890,20 +1981,33 @@ mod tests {
             recast.contains("already cast") && recast.contains("Nothing was cast"),
             "{recast}"
         );
-        let author =
-            session_cast_refusal("demo-vote", "sess-author-0001", "alice", &[], &family).unwrap();
-        assert!(author.contains("authored candidate demo-d001"), "{author}");
+        assert!(
+            session_cast_refusal("demo-vote", "sess-author-0001", "alice", &[], &family).is_none(),
+            "an author ballot is stored, not refused"
+        );
+        let ids = authored_ids("sess-author-0001", &[], &family);
+        assert_eq!(ids, vec!["demo-d001".to_string()]);
+        assert_eq!(
+            authorship_warning("demo-vote", &ids),
+            "warning: this session authored candidate demo-d001 and its vote on demo-vote is labelled authored: demo-d001"
+        );
         let own_candidate =
             ["candidate-sig: demo-d001 alice sess-author-0001 n-author - ab cd".to_string()];
-        let on_own = session_cast_refusal(
-            "demo-vote",
-            "sess-author-0001",
-            "alice",
-            &own_candidate,
-            &[],
-        )
-        .unwrap();
-        assert!(on_own.contains("authored candidate demo-d001"), "{on_own}");
+        assert!(
+            session_cast_refusal(
+                "demo-vote",
+                "sess-author-0001",
+                "alice",
+                &own_candidate,
+                &[]
+            )
+            .is_none(),
+            "a candidate note on the issue itself is a label, not a refusal"
+        );
+        assert_eq!(
+            authored_ids("sess-author-0001", &own_candidate, &[]),
+            vec!["demo-d001".to_string()]
+        );
         assert!(session_cast_refusal("demo-ind1", "sess-bob-0001", "bob", &own, &family).is_none());
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
