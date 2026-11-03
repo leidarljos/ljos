@@ -250,7 +250,7 @@ families. A push onto your own topic branch needs only the sitting. The
 `pre-commit` and `pre-push` hooks `ljos git-hooks install` writes refuse a
 commit or a push a script makes, until the sitting is open and a protected
 push has cleared. `ljos doctor` says whether that check is active for this
-seat. The person at their own terminal is not under it.
+seat. A person at their own terminal is not checked.
 `ljos cloud up` installs no git hook and sets no `core.hooksPath`, so on a
 cloud seat git runs only the hooks the repository and the login name.
 
@@ -749,7 +749,7 @@ When `LJOS_TRACKER_GIT=push`, that wake pushes this machine's sealed log before 
 The envelope names the tracker commit that carries that log: a command receives it as `LJOS_WAKE_COMMIT`, and a webhook as `commit` in the JSON. The field is left out when no log commit was made.
 The guard reads a wake command when it is set and on every run, and a rule that fires is a warning line beside it; the command still runs. Under the person's `block-on-warning`, a command policyd blocks does not run, since nobody is there to ask.
 A wake name that ends in `-` matches every longer seat that starts with it. An exact name wins, and the longest prefix wins when several match. Mail to a run whose seat is that prefix plus the run id wakes the launcher, and the envelope still names the run's seat.
-A session still at work needs no wake: its `Stop` hook reads unread interrupt mail once, so send `--interrupt` when the work cannot wait for the next prompt.
+A session still at work needs no wake: its `Stop` hook hands the unread interrupt mail to the session and keeps the turn going once, so send `--interrupt` when the work cannot wait for the next prompt.
 A seat the pack has never heard from is refused with the seat it most likely meant; `--new-seat` writes to one that has not started yet.
 
 The text of a message carries its id. Two messages with the same words stay

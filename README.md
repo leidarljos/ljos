@@ -216,8 +216,8 @@ that says whether a command is dangerous. ljos does not run a second set of
 command checks of its own. By default nothing ljos answers stops a command: it never
 refuses, asks, or keeps one waiting. The cloud seat's push rule below refuses a
 force push, a branch delete, and a push outside its allowlist. The installed
-`pre-push` git hook refuses a protected push that has not cleared and a commit
-it will not send.
+`pre-push` git hook refuses a protected push that has not cleared and a
+pushed commit whose message carries a machine trailer.
 
 policyd gives one of three answers.
 
