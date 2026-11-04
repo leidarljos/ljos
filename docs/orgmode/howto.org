@@ -190,7 +190,7 @@ With a prefix wake, =LJOS_SEAT= is still the run seat that matched the prefix.
 =LJOS_WAKE_FROM=, =LJOS_WAKE_MSG=, =LJOS_WAKE_ISSUE= and =LJOS_WAKE_INTERRUPT= name the message, so a wake can ignore plain mail and act only on an interrupt.
 policyd reads the command when it is set and again on every run.
 A rule that fires is a warning line in the reply and in =wake.log=, and the command still runs.
-A command policyd would block, including under =block-on-warning=, runs with that warning.
+A command under =block-on-warning= warns with that label. It does not block, and the command runs.
 A command is stopped after 30 seconds; =--timeout S= changes that, and an agent run such as =claude -p= needs a longer one.
 Two sends close together start two wakes, so a wake that resumes a session holds a lock (=flock -n=) and leaves a running session to its =Stop= hook.
 
@@ -281,9 +281,9 @@ Each swap also shows a note naming both commands and leaves a row in
 =$XDG_DATA_HOME/ljos/rewrite.jsonl=. Set =rewrite = false= in a repository's
 =ljos.toml= to run its lines as written. The log keeps a row for a swap it declined too.
 
-* Let policyd refuse what it warns about
+* block-on-warning warns with a label
 
-Blocking on a warning is off by default.
+block-on-warning does not block.
 policyd answers a command it warns about with =allow=, the rule and one warning, and the command runs.
 The warning is a label.
 ljos stops nothing on it.
@@ -302,7 +302,7 @@ allow	warn	uproots-person-key	the command deletes /, a tree that holds the perso
 allow	warn	rm-rf-outside-tmp	a recursive delete reaches outside /tmp and /var/tmp
 #+end_src
 
-To have those warnings refuse instead, name a policyd config in your own =ljos.toml= and put one line in that config:
+Name a policyd config in your own =ljos.toml= and put one line in that config. That line does not block. It warns with the rule's label:
 
 #+begin_src toml
 # ~/.config/ljos/ljos.toml, or ~/.config/ljos/seats/SEAT/ljos.toml
@@ -315,12 +315,11 @@ block-on-warning true
 #+end_src
 
 ljos then passes that file every time it asks policyd, as =ljos-policyd check --config PATH -- COMMAND=: the hook, =ljos policy=, =ljos doctor= and the guard shims alike.
-With that line, policyd answers a warned command with =deny=, the same rule and the same warning, and exits 2.
-ljos reports it as policyd's deny: the hook blocks the tool call, =ljos policy --fail-on-deny= exits 1, and a guard shim exits 126.
+With that line, the call is allowed. ljos warns with the rule's label. It does not block.
 An =ljos-policyd= that does not read the line, 0.7.0 among them, leaves its warnings as labels.
 The line reaches only the commands policyd warns on.
 A command policyd allows with no warning runs, whatever label ljos gives it.
-So each of ljos's own labels becomes a deny only where policyd warns on the same command.
+ljos's own labels stay warnings where policyd warns on the same command. They do not become a block.
 policyd warns on =rm -rf /=, for one.
 Those labels are =uproots-person-key=, =changes-person-key=, =changes-kept-prompt=, =writes-seat-file=, =prefer-keep-faked-terminal= and =git-push-delete=.
 =mv ~ /tmp/x= gets no warning from policyd, so it still runs with the label.
@@ -328,7 +327,7 @@ Those labels are =uproots-person-key=, =changes-person-key=, =changes-kept-promp
 #+begin_src console
 $ ljos policy -- sudo true
 sudo true
-deny	sudo	a privilege runner is on the command
+warning: sudo: a privilege runner is on the command (ljos rule `ljos-policyd`)
 #+end_src
 
 =policyd_config= is read from the user's =ljos.toml= and then the seat's, at the top of the file or under =[gates]=.
@@ -1081,10 +1080,10 @@ $ ljos-consensus settle --issue ID --susceptibility 0.8 --trust '[["alice","caro
 =ljos doctor= prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer or the note queue is damaged.
 =ljos doctor --all= prints every row.
 # [[[cog import ljos_version as v; v.lines("The block is the =ljos= row from that command on a scratch seat, taken from ljos {version}.")]]]
-The block is the =ljos= row from that command on a scratch seat, taken from ljos 0.38.0.
+The block is the =ljos= row from that command on a scratch seat, taken from ljos 0.38.1.
 # [[[end]]]
 # [[[cog import ljos_version as v; v.lines("=ljos --version= printed =ljos {version}=.")]]]
-=ljos --version= printed =ljos 0.38.0=.
+=ljos --version= printed =ljos 0.38.1=.
 # [[[end]]]
 The scratch seat's day cache already holds that version, so the row says =crates.io (cached)= and neither =behind= nor =ahead of=.
 The path stands in for the binary.
@@ -1092,9 +1091,9 @@ The scratch =PATH= holds only this =ljos=, so the sample does not show the other
 # BEGIN ljos-sample doctor
 #+begin_src text
 $ ljos --version
-ljos 0.38.0
+ljos 0.38.1
 $ ljos doctor --all
-ok	ljos	/path/to/ljos  0.38.0  crates.io (cached) 0.38.0
+ok	ljos	/path/to/ljos  0.38.1  crates.io (cached) 0.38.1
 #+end_src
 # END ljos-sample doctor
 

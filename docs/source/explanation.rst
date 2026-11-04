@@ -1,9 +1,9 @@
 .. [[[cog import ljos_version as v; v.lines("", ":description: This page describes ljos {version}.", ":cover: https://leidarljos.github.io/ljos/_static/og.png", "", "This page describes ljos {version}.", "")]]]
 
-:description: This page describes ljos 0.38.0.
+:description: This page describes ljos 0.38.1.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-This page describes ljos 0.38.0.
+This page describes ljos 0.38.1.
 
 .. [[[end]]]
 
@@ -54,8 +54,8 @@ How a shell command is judged
 Before an agent's shell command runs, the runner's hook hands it to ``ljos hook``. ``ljos hook``
 asks ``ljos-policyd`` and relays the answer. policyd is the one place that says whether a
 command is dangerous. It is the trusted part. ljos is not. By default neither stops the
-command: the answer is a label and a warning line, and the command runs. Blocking is the
-person's opt-in, made in policyd's own config, and then only policyd's deny stops a call.
+command: the answer is a label and a warning line, and the command runs.
+``block-on-warning`` does not block. It warns with the rule's label.
 A cloud seat's push rule, below, is the one exception.
 
 An earlier ljos ran nine checks of its own before it asked policyd. Each check came from a
@@ -68,8 +68,8 @@ Three answers
 
 policyd answers allow, warn or rewrite. A warning names the rule and says why, and the runner
 shows it as one line while the command runs. An older policyd that answers deny or prompt reads as
-the same warning. A policyd config that sets ``block-on-warning`` still prints a deny, and ljos reads it as
-that warning. The command runs. A refusal that stalls a turn costs more than the mistake it stops, and a
+the same warning. A policyd config that sets ``block-on-warning`` does not block. ljos warns with the rule's label.
+The command runs. A refusal that stalls a turn costs more than the mistake it stops, and a
 warning still reaches the person. It is also the only thing between a runner and the command,
 so keep backups and protect branches on the forge.
 

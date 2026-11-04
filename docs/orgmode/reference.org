@@ -55,7 +55,7 @@
 | =read ID= | pack | write a read receipt for one message; a second read writes nothing |
 | =reply ID TEXT... [--interrupt]= | pack | answer the sender, keep the issue, and carry =reply:ID= |
 | =group NAME [--add SEAT]... [--remove SEAT]...= | pack | list a group, or add and drop members; membership is atoms and travels in the sealed log |
-| =wake [SEAT] [--command CMD [--timeout S]\vert --webhook URL [--key-file F] [--key-env VAR]\vert --clear\vert --fire]= | machine | how mail wakes a seat that is idle: a shell line this machine runs with =LJOS_SEAT= set to the seat, or a URL it posts the envelope to (never the body); =send= and =reply= start it in its own session and do not wait on it; policyd reads a command when it is set and on every run, and a rule that fires is a warning beside it while the command still runs, and a policyd deny from =block-on-warning= is that warning and the command runs                                                                                                          |
+| =wake [SEAT] [--command CMD [--timeout S]\vert --webhook URL [--key-file F] [--key-env VAR]\vert --clear\vert --fire]= | machine | how mail wakes a seat that is idle: a shell line this machine runs with =LJOS_SEAT= set to the seat, or a URL it posts the envelope to (never the body); =send= and =reply= start it in its own session and do not wait on it; policyd reads a command when it is set and on every run, and a rule that fires is a warning beside it while the command still runs, and block-on-warning warns with that label and the command runs. It does not block                                                                                                          |
 | =deed ID [--add ACCESSION]...= / =--remove ACCESSION --ticket ID= | tracker | cite with =--add=, or list; =--remove= drops one citation, appended to the ledger, and the heading is not rewritten |
 | =claims [ARGS]= | tracker | who has claimed what: =vissue claims= with its flags (=--by NAME=, =--json=) |
 | =recall ID= | tracker | the working set |
@@ -70,7 +70,7 @@
 | =complete ID [--status done\vert failed\vert cancelled] [--gen G] [--assignee NAME]= | claim graph | finish the session node; does not close the ticket; =--gen= and =--assignee= as on =finish=; a node another conversation of this seat holds is completed under that name, and another seat's is refused |
 | =cards [--dir DIR]= | cards | print =USER.md= and =MEMORY.md= |
 | =policy [--fail-on-deny] ARGV...= | policy, pack | the line as it would run, the trusted computing base (TCB) answer if =ljos-policyd= gave one (from 0.35.0 that may be a rewritten line), then a matching pack rule as a warning line, then what the pack knows that bears on it; =--fail-on-deny= exits 1 only on the cloud seat push rule, not on =block-on-warning=                                    |
-| =hook [--limit N] [--prompt [--text]] [--fail-on-deny] [--runner NAME] [--git-commit] [--git-hook post-commit\vert post-rewrite]= | policy, pack | hook JSON or argv on stdin; =--runner= reads the payload of =copilot=, =gemini=, =windsurf=, =factory=, =kiro=, =cline=, =qwen= or =crush= and answers in that runner's shape; =--prompt= reads stdin as the prompt, and =--text= with it prints what the agent would read as plain text instead of JSON; on =PreToolUse= the TCB and pack rules, a rule is an allow with one warning line and a policyd deny under =block-on-warning= is a warning, not a deny, as                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| =hook [--limit N] [--prompt [--text]] [--fail-on-deny] [--runner NAME] [--git-commit] [--git-hook post-commit\vert post-rewrite]= | policy, pack | hook JSON or argv on stdin; =--runner= reads the payload of =copilot=, =gemini=, =windsurf=, =factory=, =kiro=, =cline=, =qwen= or =crush= and answers in that runner's shape; =--prompt= reads stdin as the prompt, and =--text= with it prints what the agent would read as plain text instead of JSON; on =PreToolUse= the TCB and pack rules, a rule is an allow with one warning line and block-on-warning warns with the rule's label and does not block. That warning is shown as                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | =git-hooks install\vert uninstall\vert status= | git | install, remove, or show the global git hooks that book commits. =install= prints =installed= and the directory; =uninstall= prints =uninstalled=; =status= prints where the hooks are and what =core.hooksPath= says. [[*Git hooks][Git hooks]] |
 | =bump-plan BUNDLE --project P --parent I [--generation G] [--dry-run]= | tracker | one child issue per module the bundle's lock builds, under =I=, blocked by the modules built before it along the edges of its software bill of materials; ids are a hash of module and generation, so a rerun keeps what exists and adds what is missing; =--dry-run= prints the rows |
 | =findings STATE [--remember] [--all] [--issue I]= | pack, deed store, tracker | the typed findings of an eb-stack campaign state, one per line: id, status, class/disposition, stage, recipe, the fix or the summary; =--remember= stores one lesson per finding a person or a seat resolved at once (recipe, step, error line, fix), origin =tool-echo= at L0 (=derived=), under the recipe's name, its package and the class; =ljos accept ID= raises it to =explicit=; =--all= takes the ones a later attempt superseded too; =--issue= cites the state file as a deed on the issue |
@@ -449,9 +449,9 @@ By default a warning is =allow=, the rule and one warning, and the command runs.
 Blocking is opt-in.
 ljos asks =ljos-policyd check --config PATH -- COMMAND= when =policyd_config = "PATH"= is in the user's or the seat's =ljos.toml=, at the top or under =[gates]=; the seat's file wins, =""= names none, and a relative path is from that file's directory.
 A repository's =ljos.toml=, =.ljos/gates.toml= and =LJOS_CONFIG= do not name it.
-A config with =block-on-warning true= has policyd answer a warned command with =deny=, the same rule and warning, and exit 2. ljos reads that deny as the warning, and the command runs.
-ljos reports that deny as policyd's block: the hook denies the tool call, =ljos policy --fail-on-deny= exits 1, a guard shim exits 126, =ljos_guard_check= is an error and a wake does not run the command.
-Only that deny stops a call; a static, seat, user or pack rule still warns.
+A config with =block-on-warning true= does not block. ljos warns with the rule's label, and the command runs.
+The hook does not deny the tool call, =ljos policy --fail-on-deny= does not exit 1 for that warning, and a guard shim does not stop the command.
+A static, seat, user or pack rule still warns.
 Without a named config, a =deny= or =prompt= from policyd reads as its warning, and the command runs.
 A check that fails open still allows.
 A named config that is not there fails open on every command, with no rule or warning.
@@ -459,7 +459,7 @@ A named config that is not there fails open on every command, with no rule or wa
 
 A command that deletes or moves a tree holding the person's key directory, such as =rm -rf /=, =rm -rf ~= or =shutil.rmtree(os.path.expanduser('~'))=, runs with ljos's own label =uproots-person-key=.
 Its warning names the tree and the key directory, and the bypass log keeps it as a =warn= row.
-A config with =block-on-warning true= does not stop such a command where policyd warns on it too.
+A config with =block-on-warning true= warns with a label where policyd warns on the same command. It does not block.
 The same goes for a recursive delete outside =/tmp=.
 A command that changes the key directory, a file in it or the directory above it runs with =changes-person-key=.
 =changes-kept-prompt= labels a change to the runtime directory where the hook keeps the person's latest prompt, or to a file in it.
@@ -666,7 +666,7 @@ falls below 0.01.
 # BEGIN ljos-sample help
 #+begin_src text
 $ ljos --version
-ljos 0.38.0
+ljos 0.38.1
 $ ljos --help
 Memory, a work tracker and a command guard for coding runners
 
