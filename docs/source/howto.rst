@@ -1113,9 +1113,9 @@ The scratch ``PATH`` holds only this ``ljos``, so the sample does not show the o
 .. code:: text
 
    $ ljos --version
-   ljos 0.38.0
+   ljos 0.39.0
    $ ljos doctor --all
-   ok  ljos    /path/to/ljos  0.38.0  crates.io (cached) 0.38.0
+   ok  ljos    /path/to/ljos  0.39.0  crates.io (cached) 0.39.0
 
 .. END ljos-sample doctor
 
