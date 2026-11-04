@@ -38054,7 +38054,7 @@ fn prune_push_logs(keep: Option<&Path>) {
         let Some(pid) = push_launcher_pid(&name) else {
             continue;
         };
-        if !keep.is_some_and(|k| k == ent.path()) {
+        if keep.is_none_or(|k| k != ent.path()) {
             prune_push_log(&ent.path(), pid, &gits);
         }
     }
