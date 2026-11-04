@@ -165,8 +165,36 @@ mod tests {
         root
     }
 
+    fn run_isolated_lock_case(name: &str) -> bool {
+        const CASE: &str = "LJOS_TEST_ISOLATED_LOCK_CASE";
+        if std::env::var_os(CASE).as_deref() == Some(std::ffi::OsStr::new(name)) {
+            return false;
+        }
+        let _environment = crate::test_env_lock();
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--test-threads=1", "--nocapture"])
+            .env(CASE, name)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        let errors = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{said}\n{errors}");
+        assert!(
+            said.lines().any(|line| line
+                .starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;")),
+            "{said}\n{errors}"
+        );
+        true
+    }
+
     #[test]
     fn project_subdirectories_and_symlinks_share_one_publication_owner() {
+        if run_isolated_lock_case(concat!(
+            "tracker_publish_lock::tests::",
+            "project_subdirectories_and_symlinks_share_one_publication_owner"
+        )) {
+            return;
+        }
         let _environment = crate::test_env_lock();
         let root = repository();
         let first = root.path().join("Software/First");
@@ -186,6 +214,12 @@ mod tests {
 
     #[test]
     fn linked_worktrees_share_the_object_stores_publication_owner() {
+        if run_isolated_lock_case(concat!(
+            "tracker_publish_lock::tests::",
+            "linked_worktrees_share_the_object_stores_publication_owner"
+        )) {
+            return;
+        }
         let _environment = crate::test_env_lock();
         let root = repository();
         let linked_parent = tempfile::tempdir().unwrap();
@@ -215,6 +249,12 @@ mod tests {
 
     #[test]
     fn simultaneous_publishers_cannot_both_enter() {
+        if run_isolated_lock_case(concat!(
+            "tracker_publish_lock::tests::",
+            "simultaneous_publishers_cannot_both_enter"
+        )) {
+            return;
+        }
         let common = tempfile::tempdir().unwrap();
         let barrier = Arc::new(Barrier::new(8));
         let held = Arc::new(AtomicUsize::new(0));
@@ -247,6 +287,12 @@ mod tests {
 
     #[test]
     fn explicit_and_implicit_publish_paths_share_the_same_owner() {
+        if run_isolated_lock_case(concat!(
+            "tracker_publish_lock::tests::",
+            "explicit_and_implicit_publish_paths_share_the_same_owner"
+        )) {
+            return;
+        }
         let _environment = crate::test_env_lock();
         let root = repository();
         let _held = acquire(root.path()).unwrap();
@@ -311,6 +357,12 @@ mod tests {
 
     #[test]
     fn a_publisher_retains_ownership_after_its_caller_process_exits() {
+        if run_isolated_lock_case(concat!(
+            "tracker_publish_lock::tests::",
+            "a_publisher_retains_ownership_after_its_caller_process_exits"
+        )) {
+            return;
+        }
         use std::ffi::CString;
         use std::io::Read;
         use std::os::unix::ffi::OsStrExt;
@@ -360,6 +412,12 @@ exit 0"#,
 
     #[test]
     fn an_unrelated_command_does_not_inherit_publication_ownership() {
+        if run_isolated_lock_case(concat!(
+            "tracker_publish_lock::tests::",
+            "an_unrelated_command_does_not_inherit_publication_ownership"
+        )) {
+            return;
+        }
         let common = tempfile::tempdir().unwrap();
         let held = acquire_common(common.path()).unwrap();
         let mut child = Command::new("sh")
@@ -381,6 +439,12 @@ exit 0"#,
 
     #[test]
     fn a_symlink_at_the_ownership_path_is_refused() {
+        if run_isolated_lock_case(concat!(
+            "tracker_publish_lock::tests::",
+            "a_symlink_at_the_ownership_path_is_refused"
+        )) {
+            return;
+        }
         let common = tempfile::tempdir().unwrap();
         let target = common.path().join("target");
         std::fs::write(&target, "unchanged").unwrap();
