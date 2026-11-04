@@ -77,6 +77,7 @@ pub mod sync;
 pub mod tools;
 mod tracker_attach;
 pub mod tracker_place;
+mod tracker_publish_lock;
 mod tracker_push;
 pub mod tracker_sync;
 pub mod tree_cleanup;
@@ -29203,20 +29204,432 @@ fn git_parents() -> GitParents {
     GitParents::new()
 }
 
-/// Whether a push log's push still runs, against one reading of the
-/// process table, for a loop over many logs. The launcher pid is live
-/// only while ljos is still in its wait. After it returns, the push is
-/// the recorded shell, or a git child of that shell.
+/// A caller collecting its result, a recorded shell, or its Git child
+/// still owns this record. Legacy launcher-only records cover their launch.
 fn push_still_running_among(log: &Path, launcher: u32, gits: &GitParents) -> bool {
-    if pid_alive(launcher) {
-        return true;
-    }
-    let Some(child) = recorded_push_pid(log) else {
-        return false;
-    };
-    pid_alive(child) || gits.contains(&child)
+    push_caller_owns_record(log) || push_child_or_legacy_running(log, launcher, gits)
 }
 
+fn push_child_or_legacy_running(log: &Path, launcher: u32, gits: &GitParents) -> bool {
+    if let Some(child) = recorded_push_pid(log) {
+        return pid_running(child) || gits.contains(&child);
+    }
+    let legacy = log
+        .file_name()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix("tracker-push-"))
+        .and_then(|s| s.strip_suffix(".log"))
+        .is_some_and(|s| s.parse::<u32>().is_ok());
+    legacy && pid_running(launcher)
+}
+
+/// A sibling record naming the canonical Git common directory.
+fn push_root_record(log: &Path) -> PathBuf {
+    push_child_record(log).with_extension("root")
+}
+
+fn push_owner_record(log: &Path) -> PathBuf {
+    push_child_record(log).with_extension("owner")
+}
+
+/// The caller owns its log through launch, waiting and result collection.
+/// This descriptor stays close-on-exec; the publisher's lifetime is recorded
+/// separately in `.child`.
+struct PushRecordOwner {
+    file: std::fs::File,
+    log: PathBuf,
+}
+
+impl Drop for PushRecordOwner {
+    fn drop(&mut self) {
+        if matches!(std::fs::symlink_metadata(&self.log), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+            && push_owner_matches(&self.log, &self.file)
+        {
+            let _ = std::fs::remove_file(push_owner_record(&self.log));
+        }
+    }
+}
+
+fn push_owner_matches(log: &Path, file: &std::fs::File) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    match (
+        std::fs::symlink_metadata(push_owner_record(log)),
+        file.metadata(),
+    ) {
+        (Ok(path), Ok(held)) => {
+            path.is_file() && path.dev() == held.dev() && path.ino() == held.ino()
+        }
+        _ => false,
+    }
+}
+
+fn open_push_owner(log: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(push_owner_record(log))?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(
+            "tracker push owner is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+fn push_caller_owns_record(log: &Path) -> bool {
+    use std::os::fd::AsRawFd as _;
+    match open_push_owner(log) {
+        // SAFETY: flock only operates on this open file descriptor.
+        Ok(file) => (unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) }) != 0,
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Hold a completed record's reservation while removing all its siblings.
+fn prune_push_log(log: &Path, launcher: u32, gits: &GitParents) {
+    use std::os::fd::AsRawFd as _;
+    let owner = match open_push_owner(log) {
+        Ok(file) => {
+            // SAFETY: flock only operates on this open file descriptor.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
+                || !push_owner_matches(log, &file)
+            {
+                return;
+            }
+            Some(file)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return,
+    };
+    if push_child_or_legacy_running(log, launcher, gits) {
+        return;
+    }
+    let _ = std::fs::remove_file(push_child_record(log));
+    let _ = std::fs::remove_file(push_root_record(log));
+    let _ = std::fs::remove_file(log);
+    if let Some(file) = owner {
+        if matches!(std::fs::symlink_metadata(log), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+            && push_owner_matches(log, &file)
+        {
+            let _ = std::fs::remove_file(push_owner_record(log));
+        }
+    }
+}
+
+fn pid_running(pid: u32) -> bool {
+    if !pid_alive(pid) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        let state = stat
+            .rfind(')')
+            .and_then(|end| stat[end + 1..].split_whitespace().next());
+        return !matches!(state, Some("Z" | "X"));
+    }
+    true
+}
+
+/// The launcher in either a legacy name or an invocation-specific name.
+fn push_launcher_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("tracker-push-")?.strip_suffix(".log")?;
+    let mut parts = rest.split('-');
+    let pid = parts.next()?.parse::<u32>().ok().filter(|pid| *pid > 0)?;
+    if let Some(nonce) = parts.next() {
+        nonce.parse::<u64>().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+    }
+    Some(pid)
+}
+
+/// Reserve records for one invocation without replacing another push's files.
+fn create_push_log(run: &Path) -> std::io::Result<(PathBuf, std::fs::File, PushRecordOwner)> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    std::fs::create_dir_all(run)?;
+    for _ in 0..128 {
+        let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
+        let log = run.join(format!("tracker-push-{}-{nonce}.log", std::process::id()));
+        let owner = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(push_owner_record(&log))
+        {
+            Ok(owner) => owner,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        // SAFETY: flock only operates on this newly reserved file descriptor.
+        if unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&log)
+        {
+            Ok(file) => return Ok((log.clone(), file, PushRecordOwner { file: owner, log })),
+            Err(error) => {
+                let _ = std::fs::remove_file(push_owner_record(&log));
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "cannot reserve a unique tracker push record",
+    ))
+}
+
+#[cfg(test)]
+mod push_record_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn record_names_accept_legacy_and_invocation_specific_launchers() {
+        assert_eq!(push_launcher_pid("tracker-push-42.log"), Some(42));
+        assert_eq!(push_launcher_pid("tracker-push-42-7.log"), Some(42));
+        for name in [
+            "tracker-push-0.log",
+            "tracker-push-42-.log",
+            "tracker-push-42-bad.log",
+            "tracker-push-42-7-more.log",
+            "tracker-push-42-7.child",
+        ] {
+            assert_eq!(push_launcher_pid(name), None);
+        }
+    }
+
+    #[test]
+    fn one_server_reserves_separate_logs_and_sidecars_for_each_invocation() {
+        let run = tempfile::tempdir().unwrap();
+        let (first, mut first_file, _first_owner) = create_push_log(run.path()).unwrap();
+        writeln!(first_file, "first publisher").unwrap();
+        let (second, mut second_file, _second_owner) = create_push_log(run.path()).unwrap();
+        writeln!(second_file, "second publisher").unwrap();
+        assert_ne!(first, second);
+        assert_ne!(push_child_record(&first), push_child_record(&second));
+        assert_ne!(push_root_record(&first), push_root_record(&second));
+        assert_ne!(push_owner_record(&first), push_owner_record(&second));
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "first publisher\n");
+        assert_eq!(
+            std::fs::read_to_string(second).unwrap(),
+            "second publisher\n"
+        );
+    }
+
+    #[test]
+    fn a_launching_or_collecting_push_survives_another_invocations_pruning() {
+        let _environment = test_env_lock();
+        let (first, mut first_file, first_owner) = create_push_log(&runtime_dir()).unwrap();
+        writeln!(first_file, "publisher result").unwrap();
+        let (other, _other_file, _other_owner) = create_push_log(&runtime_dir()).unwrap();
+        prune_push_logs(Some(&other));
+        assert!(first.exists());
+        assert!(push_owner_record(&first).exists());
+        assert!(tracker_push_logs().0);
+
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        std::fs::write(push_child_record(&first), child.id().to_string()).unwrap();
+        std::fs::write(push_root_record(&first), "project-one").unwrap();
+        assert!(child.wait().unwrap().success());
+        prune_push_logs(Some(&other));
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            "publisher result\n"
+        );
+        assert!(push_child_record(&first).exists());
+        drop(first_owner);
+        prune_push_logs(Some(&other));
+        assert!(!first.exists());
+        assert!(!push_child_record(&first).exists());
+        assert!(!push_root_record(&first).exists());
+        assert!(!push_owner_record(&first).exists());
+    }
+
+    #[test]
+    fn a_finished_refusal_is_not_owned_by_its_live_server() {
+        let _environment = test_env_lock();
+        record_push_refusal("destination refused");
+        let (running, leftover) = tracker_push_logs();
+        assert!(!running);
+        let log = leftover.unwrap().1;
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "destination refused\n"
+        );
+        assert!(push_owner_record(&log).exists());
+        prune_push_logs(None);
+        assert!(!log.exists());
+        assert!(!push_owner_record(&log).exists());
+    }
+}
+#[cfg(test)]
+mod asynchronous_publication_tests {
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = git_at(dir).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn identity(dir: &Path) {
+        git(dir, &["config", "user.name", "publication test"]);
+        git(
+            dir,
+            &["config", "user.email", "publication@example.invalid"],
+        );
+    }
+
+    #[test]
+    fn a_rejected_async_push_releases_parent_handles_before_its_retry() {
+        let _environment = test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        let remote = temp.path().join("remote.git");
+        let peer = temp.path().join("peer");
+        std::fs::create_dir(&root).unwrap();
+        git(
+            temp.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        identity(&root);
+        let issues = root.join("issues.org");
+        let heading = "* TODO [#C] Publication\n:PROPERTIES:\n:ID: publication-c3d4\n:END:\n";
+        std::fs::write(&issues, heading).unwrap();
+        git(&root, &["add", "issues.org"]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "main"]);
+        git(&root, &["remote", "set-head", "origin", "main"]);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                peer.to_str().unwrap(),
+            ],
+        );
+        identity(&peer);
+        std::fs::write(peer.join("peer.txt"), "remote writer\n").unwrap();
+        git(&peer, &["add", "peer.txt"]);
+        git(&peer, &["commit", "-q", "-m", "remote writer"]);
+        git(&peer, &["push", "-q"]);
+        let remote_before = git(&remote, &["rev-parse", "refs/heads/main"]);
+        assert_ne!(remote_before, git(&root, &["rev-parse", "HEAD"]));
+        std::env::set_var("VISSUE_ROOT", &root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::remove_var("LJOS_TRACKER_GIT");
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "20");
+        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        let said = persist_tracker_writes(
+            &issues,
+            &[("publication-c3d4".into(), "claimed".into())],
+            &[],
+        );
+        assert!(said.contains("committed and pushed"), "{said}");
+        assert!(!said.contains("publisher busy"), "{said}");
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/main"]),
+            git(&root, &["rev-parse", "HEAD"]),
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("peer.txt")).unwrap(),
+            "remote writer\n"
+        );
+        assert!(tracker_publish_lock::acquire(&root).is_ok());
+    }
+
+    #[test]
+    fn a_busy_async_publisher_keeps_the_new_commit_and_reports_it_queued() {
+        let _environment = test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        let remote = temp.path().join("remote.git");
+        std::fs::create_dir(&root).unwrap();
+        git(
+            temp.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        identity(&root);
+        let issues = root.join("issues.org");
+        let heading = "* TODO [#C] Publication\n:PROPERTIES:\n:ID: publication-c3d4\n:END:\n";
+        std::fs::write(&issues, heading).unwrap();
+        git(&root, &["add", "issues.org"]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "main"]);
+        git(&root, &["remote", "set-head", "origin", "main"]);
+        let published = git(&remote, &["rev-parse", "refs/heads/main"]);
+        std::env::set_var("VISSUE_ROOT", &root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::remove_var("LJOS_TRACKER_GIT");
+        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        let held = tracker_publish_lock::acquire(&root).unwrap();
+        let said = persist_tracker_writes(
+            &issues,
+            &[("publication-c3d4".into(), "claimed".into())],
+            &[],
+        );
+        assert!(said.contains("push queued:"), "{said}");
+        assert!(!said.contains("committed and pushed"), "{said}");
+        assert!(std::fs::read_to_string(&issues)
+            .unwrap()
+            .contains("STARTED"));
+        assert!(git(&root, &["status", "--porcelain", "--", "issues.org"]).is_empty());
+        assert_ne!(git(&root, &["rev-parse", "HEAD"]), published);
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), published);
+        drop(held);
+        tracker_push::publish_explicit(&root, "origin", "main").unwrap();
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/main"]),
+            git(&root, &["rev-parse", "HEAD"]),
+        );
+    }
+}
 /// Newest leftover tracker-push log whose process has exited, and whether
 /// any log's process is still running. persist_tracker removes the log on
 /// a foreground success and leaves it on a refusal or a background push.
@@ -29230,13 +29643,7 @@ fn tracker_push_logs() -> (bool, Option<(std::time::SystemTime, PathBuf)>) {
     for ent in entries.flatten() {
         let name = ent.file_name();
         let name = name.to_string_lossy();
-        let Some(rest) = name
-            .strip_prefix("tracker-push-")
-            .and_then(|s| s.strip_suffix(".log"))
-        else {
-            continue;
-        };
-        let Ok(pid) = rest.parse::<u32>() else {
+        let Some(pid) = push_launcher_pid(&name) else {
             continue;
         };
         if push_still_running_among(&ent.path(), pid, &gits) {
@@ -37463,9 +37870,15 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
     // A push can run a repository's pre-push hook that publishes data first
     // and takes minutes. The sitting waits a bounded time; a push still going
     // after that finishes on its own and writes its log where the line says.
-    let log = runtime_dir().join(format!("tracker-push-{}.log", std::process::id()));
-    let _ = std::fs::create_dir_all(runtime_dir());
-    let Ok(out) = std::fs::File::create(&log) else {
+    let publication = match tracker_publish_lock::acquire(dir) {
+        Ok(held) => held,
+        Err(why) => {
+            return say(format!(
+                "tracker git: committed {message}; push queued: {why}\n"
+            ));
+        }
+    };
+    let Ok((log, out, _record_owner)) = create_push_log(&runtime_dir()) else {
         return say(format!(
             "tracker git: committed {message}; push not started: no log file\n"
         ));
@@ -37489,6 +37902,7 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
     }
     git_hooks::hook_child_env(&mut push);
     no_git_prompt(&mut push);
+    tracker_publish_lock::inherit(&mut push);
     let mut child = match push.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -37497,6 +37911,10 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
             ))
         }
     };
+    let root_key = publication.common_dir().to_string_lossy().into_owned();
+    drop(push);
+    drop(publication);
+    let _ = std::fs::write(push_root_record(&log), root_key);
     let _ = std::fs::write(push_child_record(&log), format!("{}\n", child.id()));
     let wait = push_wait();
     let started = std::time::Instant::now();
@@ -37505,6 +37923,7 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
             Ok(Some(status)) if status.success() => {
                 let _ = std::fs::remove_file(&log);
                 let _ = std::fs::remove_file(push_child_record(&log));
+                let _ = std::fs::remove_file(push_root_record(&log));
                 return say(format!("tracker git: committed and pushed {message}\n"));
             }
             Ok(Some(status)) => {
@@ -37513,6 +37932,7 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
                 if tracker_push::git_died(status) {
                     let _ = std::fs::remove_file(&log);
                     let _ = std::fs::remove_file(push_child_record(&log));
+                    let _ = std::fs::remove_file(push_root_record(&log));
                     return say(format!(
                         "tracker git: committed {message}; {}\n",
                         tracker_push::not_reached_clause(&first_line(said.as_bytes()))
@@ -37609,35 +38029,20 @@ pub fn drain_tracker_pushes() -> String {
     }
 }
 
-/// A pid that is not this process and is not running, for a queued-push log.
-/// The log name is a pid. A live pid reads as a push still in flight.
-fn refusal_pid() -> u32 {
-    let mut pid = 3_000_017_u32;
-    for _ in 0..64 {
-        if pid != std::process::id() && !pid_alive(pid) {
-            return pid;
-        }
-        pid = pid.saturating_add(2);
-    }
-    3_000_017
-}
-
 fn record_push_refusal(why: &str) {
-    let dir = runtime_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let log = dir.join(format!("tracker-push-{}.log", refusal_pid()));
-    let _ = std::fs::write(log, format!("{why}\n"));
+    use std::io::Write as _;
+    if let Ok((_log, mut file, _record_owner)) = create_push_log(&runtime_dir()) {
+        let _ = writeln!(file, "{why}");
+    }
 }
 
 fn clear_push_refusal() {
     prune_push_logs(None);
 }
 
-/// Remove every `tracker-push-<pid>.log` whose push has exited, and its
-/// `.child` record, except `keep`. A push that finished in the background
-/// or was refused leaves its log for `ljos doctor` to read; the next push
-/// is the moment that log stops being the latest word, and without this
-/// the runtime directory held one pair per sitting, hundreds in a week.
+/// Remove completed push logs and their sidecars, except `keep`.
+/// A caller collecting its result and a live publisher retain their records.
+/// A completed log remains available to `ljos doctor` until a later push.
 fn prune_push_logs(keep: Option<&Path>) {
     let Ok(entries) = std::fs::read_dir(runtime_dir()) else {
         return;
@@ -37646,22 +38051,12 @@ fn prune_push_logs(keep: Option<&Path>) {
     for ent in entries.flatten() {
         let name = ent.file_name();
         let name = name.to_string_lossy();
-        let Some(rest) = name
-            .strip_prefix("tracker-push-")
-            .and_then(|s| s.strip_suffix(".log"))
-        else {
+        let Some(pid) = push_launcher_pid(&name) else {
             continue;
         };
-        let Ok(pid) = rest.parse::<u32>() else {
-            continue;
-        };
-        if keep.is_some_and(|k| k == ent.path())
-            || push_still_running_among(&ent.path(), pid, &gits)
-        {
-            continue;
+        if !keep.is_some_and(|k| k == ent.path()) {
+            prune_push_log(&ent.path(), pid, &gits);
         }
-        let _ = std::fs::remove_file(push_child_record(&ent.path()));
-        let _ = std::fs::remove_file(ent.path());
     }
 }
 

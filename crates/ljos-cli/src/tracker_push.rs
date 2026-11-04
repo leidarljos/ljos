@@ -45,6 +45,7 @@ const FOLD_COMMIT: &str = "chore(tracker): fold duplicate issue headings";
 pub(crate) fn push_checkout(start: &Path) -> Result<(), String> {
     let owned = repo_root(start);
     let dir = owned.as_path();
+    let _publication = crate::tracker_publish_lock::acquire(dir)?;
     prepare_tracker(dir, false, true)?;
     let mut last = String::from("push refused");
     for _ in 0..ATTEMPTS {
@@ -79,6 +80,7 @@ pub(crate) fn push_checkout(start: &Path) -> Result<(), String> {
 pub(crate) fn publish(start: &Path) -> Result<(), String> {
     let owned = repo_root(start);
     let dir = owned.as_path();
+    let _publication = crate::tracker_publish_lock::acquire(dir)?;
     prepare_tracker(dir, false, true)?;
     let mut last = String::from("push refused");
     for attempt in 0..ATTEMPTS {
@@ -126,6 +128,7 @@ pub(crate) fn publish(start: &Path) -> Result<(), String> {
 pub(crate) fn publish_explicit(start: &Path, remote: &str, branch: &str) -> Result<(), String> {
     let owned = repo_root(start);
     let dir = owned.as_path();
+    let _publication = crate::tracker_publish_lock::acquire(dir)?;
     prepare_tracker(dir, false, true)?;
     let onto = format!("{remote}/{branch}");
     let spec = format!("HEAD:refs/heads/{branch}");
@@ -777,6 +780,7 @@ fn git(dir: &Path, args: &[&str]) -> Output {
         .stdin(std::process::Stdio::null());
     crate::git_hooks::hook_child_env(&mut cmd);
     crate::seat_git_child(&mut cmd);
+    crate::tracker_publish_lock::inherit(&mut cmd);
     crate::bounded_output(&mut cmd).unwrap_or_else(|e| Output {
         status: std::process::ExitStatus::from_raw(1),
         stdout: Vec::new(),
