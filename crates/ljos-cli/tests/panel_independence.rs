@@ -607,9 +607,9 @@ fn an_author_who_votes_is_refused() {
         &["vote", "demo-vote", "--for", "ship", "--used", "none"],
     );
     let said = text(&author);
-    assert!(!author.status.success(), "{said}");
+    assert!(author.status.success(), "{said}");
     assert!(
-        said.contains("authored candidate") && said.contains("Nothing was cast"),
+        said.contains("ljos: session-authored:") && said.contains("authored candidate"),
         "{said}"
     );
     vote(&world, "bob", "sess-bob-0001", "demo-vote");
@@ -893,9 +893,9 @@ fn a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
         &["vote", "child-b", "--for", "ship", "--used", "none"],
     );
     let said = text(&author);
-    assert!(!author.status.success(), "{said}");
+    assert!(author.status.success(), "{said}");
     assert!(
-        said.contains("authored candidate") && said.contains("Nothing was cast"),
+        said.contains("ljos: session-authored:") && said.contains("authored candidate"),
         "{said}"
     );
     let first = world.ljos(
@@ -914,7 +914,8 @@ fn a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
-    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("2 ballots count"), "{said}");
+    assert!(stdout.contains("alice  ship"), "{said}");
     assert!(stdout.contains("saddle  hold"), "{said}");
 }
 
@@ -1015,9 +1016,10 @@ fn a_family_only_ballot_blocks_a_second_cli_vote() {
         &["vote", "child-a", "--for", "hold", "--used", "none"],
     );
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
     assert!(
-        said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
+        said.contains("ljos: session-authored:")
+            && said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
         "{said}"
     );
 }
@@ -1058,9 +1060,10 @@ fn a_family_only_ballot_blocks_a_second_mcp_vote() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(found["result"]["isError"] == true, "{said}");
+    assert!(found["result"]["isError"] != true, "{said}");
     assert!(
-        said.contains("already cast a ballot on child-a (sess-mcp-0001)"),
+        said.contains("ljos: session-authored:")
+            && said.contains("already cast a ballot on child-a (sess-mcp-0001)"),
         "{said}"
     );
 }
@@ -1091,9 +1094,10 @@ fn a_family_ballot_names_where_to_withdraw_over_cli() {
         &["vote", "child-a", "--for", "hold", "--used", "none"],
     );
     let said = text(&refused);
-    assert!(!refused.status.success(), "{said}");
+    assert!(refused.status.success(), "{said}");
     assert!(
-        said.contains("`ljos vote child-a --withdraw --as saddle`"),
+        said.contains("ljos: session-authored:")
+            && said.contains("`ljos vote child-a --withdraw --as saddle`"),
         "{said}"
     );
     let withdrawn = world.ljos(
@@ -1146,9 +1150,10 @@ fn a_family_ballot_names_where_to_withdraw_over_mcp() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(found["result"]["isError"] == true, "{said}");
+    assert!(found["result"]["isError"] != true, "{said}");
     assert!(
-        said.contains("`ljos vote child-a --withdraw --as saddle`"),
+        said.contains("ljos: session-authored:")
+            && said.contains("`ljos vote child-a --withdraw --as saddle`"),
         "{said}"
     );
     let withdraw = serde_json::json!({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {
@@ -1216,9 +1221,10 @@ fn a_withdrawal_on_another_issue_does_not_clear_a_family_ballot() {
         &["vote", "child-a", "--for", "hold", "--used", "none"],
     );
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
     assert!(
-        said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
+        said.contains("ljos: session-authored:")
+            && said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
         "{said}"
     );
 }
@@ -2442,7 +2448,12 @@ fn claude_subagents_voting_over_mcp_each_count() {
             }),
         );
         assert!(hook.status.success(), "{}", text(&hook));
-        assert!(hook.stdout.is_empty(), "{}", text(&hook));
+        assert!(
+            hook.stdout.is_empty()
+                || !String::from_utf8_lossy(&hook.stdout).contains("permissionDecision\":\"deny"),
+            "{}",
+            text(&hook)
+        );
     }
     let vote = |id: u64, tool_use: &str, name: &str, choice: &str| {
         serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {

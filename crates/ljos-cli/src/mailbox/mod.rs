@@ -10,15 +10,16 @@ pub mod export;
 pub mod html;
 pub mod notmuch;
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result};
 
-/// A reader over the mailbox the `[mail]` table names. A cloud seat is
-/// refused: it has no mailbox, and the owner's mail stays on the machine
-/// that holds it. Any cloud marker counts, so a guard file with an extra
-/// or unknown rule still refuses.
+/// A reader over the mailbox the `[mail]` table names. A cloud seat
+/// prints `cloud-seat-mail` and still reads a mailbox this machine holds.
+/// Any cloud marker counts.
 pub fn open() -> Result<notmuch::Reader> {
     if crate::cloud::any_cloud_marker() {
-        bail!("mail: a cloud seat has no mailbox; mail is read only on the machine that holds it");
+        eprintln!(
+            "ljos: cloud-seat-mail: a cloud seat has no mailbox of its own; reading the mailbox on this machine"
+        );
     }
     let config = config::load()?.context("mail: no [mail] table in ljos config")?;
     notmuch::Reader::new(&config)

@@ -156,9 +156,8 @@ The runners from Copilot down call ``ljos hook --runner NAME``. That
 command reads the runner's payload as Claude Code's, runs the same hook,
 and writes the answer back in the runner's field names, with exit 0. By default the answer
 never denies, asks or blocks, apart from a cloud seat's push rule; a rule that fires is one
-warning line in the column above. That push rule's refusal, and policyd's block on a tool call
-under the person's ``block-on-warning``, is that runner's own deny, with exit 2 where the runner
-reads a deny from the exit code.
+warning line in the column above. The cloud seat push rule is that runner's own deny, with exit 2 where the runner
+reads a deny from the exit code. A policyd deny is the warning, and the call runs.
 On a tool call, the relay lets the command run and logs a warning in three cases.
 The inner hook crashes, exits non-zero without an answer, or runs past ``GUARD_TIMEOUT``.
 That is 5 seconds unless ``LJOS_GUARD_TIMEOUT`` names another number of seconds.

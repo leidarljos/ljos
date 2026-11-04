@@ -251,7 +251,7 @@ fn warns(out: &Output, label: &str, needle: &str) {
     );
 }
 
-const ALAN_WARNING: &str = "warning: never post or reply to Alan";
+const ALAN_WARNING: &str = "never post or reply to Alan";
 
 fn payloads() -> Vec<(&'static str, String)> {
     vec![
@@ -360,7 +360,7 @@ fn a_malformed_rules_file_still_warns_a_forged_seat() {
         put(&h.home.join(".config/ljos/user-rules.json"), "");
         let launch = prepare(&h, scenario);
         let out = run_case(&h, &launch, &claude_note());
-        warns(&out, scenario, "warning: ");
+        warns(&out, scenario, "ljos: user-rule:");
     }
 }
 

@@ -89,8 +89,8 @@ out when it has nothing to say says so; the others are printed on every
 sitting that gets that far.
 
 1. `== blockers`. The issue's blockers, read from the tracker. An issue whose
-   blockers are still open is refused before anything is claimed, because the
-   graph says it is not workable; `--anyway` sits on it regardless and says so.
+   blockers are still open is sat anyway and labelled `blocked-by: <ids>`.
+   `--anyway` is accepted and changes nothing.
 2. `== reclaim`. Claims quiet longer than the lease (`LJOS_LEASE_SECS`, 900
    seconds when unset; 0 turns the step off) go back to ready when their
    conversation is gone, or when no hold record on this host names them. A
@@ -205,6 +205,9 @@ plan and writes nothing. A fetch or merge that failed adopts nothing.
 Another machine retires that host's copies, including each extra
 scope's `sync:HOST+SCOPE` copies, when it imports the adopt commit.
 A log is a base and the chunks sealed after it, `HOST.chunks/N.age`.
+`ljos finish` adds a chunk only when this machine can open its own log.
+When it cannot, finish prints a warning, leaves the atoms in the pack, and names `ljos sync`, which seals that log whole.
+A failed attributes stage does not cause that warning.
 A sync seals only the atoms added, changed or dropped as one chunk and
 leaves the base alone; a sync that changed no atom seals and commits
 nothing. A reader applies the chunks in order over the base: the last
@@ -533,11 +536,15 @@ lock exists before proceeding": the next seat cannot act on that.
   parent's issue on the subagent's first tool result. It keeps the
   subagent working once at its stop while that issue is open.
 
-- A tracker or sync commit queues under `.ljos-commit.lock` at the top of
-  the tracker worktree, outside `.git` and kept out of `git status`, and a
-  commit waits out another git process's `index.lock`. An `index.lock`
-  more than a minute old with no git running in the checkout is named,
-  with the `rm` that clears it.
+- A tracker or sync commit, the attributes stage, and a push queue under
+  `.ljos-commit.lock` at the top of the tracker worktree, outside `.git`
+  and kept out of `git status`. A background push holds that same file
+  until it exits, hook included. A commit waits out another git process's
+  `index.lock` and does not remove a lock it did not create. When the
+  index is still held after that wait, the record stays on disk and the
+  line says the commit is deferred to the next write or push, which
+  commits it. An `index.lock` more than a minute old with no git running
+  in the checkout is named, with the `rm` that clears it.
   Never wrap a verb in a lock of your own, and never stash, reset or
   check out files another seat is editing to get a commit through.
 
@@ -656,8 +663,8 @@ under equal weights is a count; under calibrated rows it is not.
 - `ljos guard_check` reads the commit, push, and merge gates, the same
   reading the hook gives a shell line. The answer is `allow`; a gate
   that fires adds one warning line, which names the command that makes the
-  line pass. Under the person's `block-on-warning`, a line policyd blocks
-  is an error instead: do not run it. A plain `git push` runs, and so does a commit
+  line pass. A line under `block-on-warning` warns with that label, and
+  the command runs. It does not block. A plain `git push` runs, and so does a commit
   and a push on one line. When the checkout sets `test` and the tip has no
   passing `ljos evidence record -- <test command>` run, the push still runs
   and the answer carries a warning. A force or mirror push runs too: the
@@ -749,7 +756,7 @@ An idle agent has no next prompt, so a seat can name how to wake it.
 `ljos send` and `ljos reply` start the recipient's wake after the message is written and do not wait on it.
 When `LJOS_TRACKER_GIT=push`, that wake pushes this machine's sealed log before the command runs or the webhook is posted, so a seat on another machine does not read an empty inbox. The push is in the detached wake, and the send does not wait on it. A push that fails is a line in the wake log; the wake still runs and the send still stands.
 The envelope names the tracker commit that holds that log: a command receives it as `LJOS_WAKE_COMMIT`, and a webhook as `commit` in the JSON. The field is left out when no log commit was made.
-The guard reads a wake command when it is set and on every run, and a rule that fires is a warning line beside it; the command still runs. Under the person's `block-on-warning`, a command policyd blocks does not run, since nobody is there to ask.
+The guard reads a wake command when it is set and on every run, and a rule that fires is a warning line beside it; the command still runs. `block-on-warning` does not block. It warns with the rule's label.
 A wake name that ends in `-` matches every longer seat that starts with it. An exact name wins, and the longest prefix wins when several match. Mail to a run whose seat is that prefix plus the run id wakes the launcher, and the envelope still names the run's seat.
 A session still at work needs no wake: its `Stop` hook holds the turn once for unread interrupt mail, so send `--interrupt` when the work cannot wait for the next prompt.
 A seat the pack has never heard from is refused with the seat it most likely meant; `--new-seat` writes to one that has not started yet.

@@ -1212,7 +1212,9 @@ pub fn without_preface(text: &str) -> String {
 fn as_argv(rule: &UserRule) -> Option<Rule> {
     Some(Rule {
         pattern: rule.pattern.clone()?,
-        verdict: rule.verdict.clone().unwrap_or_else(|| "ask".to_string()),
+        // A row with no verdict still matches. The report below is a
+        // warning, so a missing verdict does not become an ask.
+        verdict: rule.verdict.clone().unwrap_or_else(|| "warn".to_string()),
         reason: rule.reason.clone(),
     })
 }
@@ -1235,18 +1237,34 @@ fn fired(rule: &UserRule) -> Rule {
     )
 }
 
-/// `law`, fired by `rule`, as a guard reports it. A promoted rule the pack
-/// does not confirm still fires, with a reason that says it is unverified
-/// rather than the person's, so a slow, down or forged pack does not
-/// silence its warning.
-fn reported(rule: &UserRule, mut law: Rule) -> Rule {
+/// `law`, fired by `rule`, as a guard reports it. The call runs.
+/// An unconfirmed rule is the warning labelled `unverified-rule`.
+/// A confirmed deny, ask or warn is the warning labelled `user-rule`.
+/// The rule's own reason is kept, and the pattern it matched is named.
+fn reported(rule: &UserRule, law: Rule) -> Rule {
+    let pattern = law.pattern;
+    let reason = law.reason;
     if let Some(why) = unconfirmed(rule) {
-        law.reason = format!(
-            "unverified, not confirmed as the person's rule ({why}): {}",
-            law.reason
-        );
+        return Rule {
+            pattern: "unverified-rule".into(),
+            verdict: "warn".into(),
+            reason: format!(
+                "unverified, not confirmed as the person's rule ({why}): {reason} (rule {pattern})"
+            ),
+        };
     }
-    law
+    if matches!(law.verdict.as_str(), "deny" | "ask" | "block" | "warn") {
+        return Rule {
+            pattern: "user-rule".into(),
+            verdict: "warn".into(),
+            reason: format!("{reason} (rule {pattern})"),
+        };
+    }
+    Rule {
+        pattern,
+        verdict: law.verdict,
+        reason,
+    }
 }
 
 struct Post {
@@ -1270,10 +1288,10 @@ fn note_rules_read_error(err: &anyhow::Error) {
 fn github_write_unchecked(err: &anyhow::Error) -> Rule {
     note_rules_read_error(err);
     Rule {
-        pattern: "user-rule:file".into(),
-        verdict: "deny".into(),
+        pattern: "user-rule".into(),
+        verdict: "warn".into(),
         reason: format!(
-            "user rules could not be read ({err:#}), so this GitHub write was not checked against them"
+            "user rules could not be read ({err:#}), so this GitHub write was not checked against them (rule user-rule:file)"
         ),
     }
 }
@@ -1997,15 +2015,17 @@ mod tests {
         );
         alan();
         let denied = super::super::static_guard(mention).expect("mention");
-        assert_eq!(denied.verdict, "deny");
-        assert!(denied.pattern.starts_with("user-rule:"), "{denied:?}");
+        assert_eq!(denied.verdict, "warn");
+        assert_eq!(denied.pattern, "user-rule");
+        assert!(denied.reason.contains("(rule user-rule:"), "{denied:?}");
         assert!(
             denied.reason.contains("ocaisa") || denied.reason.contains("Alan"),
             "{denied:?}"
         );
         let reply = "gh api --method POST repos/org/repo/issues/comments/7/replies -f body=seen -F in_reply_to_user=ocaisa";
         let denied = super::super::static_guard(reply).expect("reply");
-        assert_eq!(denied.verdict, "deny");
+        assert_eq!(denied.verdict, "warn");
+        assert_eq!(denied.pattern, "user-rule");
         let allowed = "gh pr comment 12 --body 'tests passed'";
         assert!(
             super::super::static_guard(allowed).is_none(),
@@ -2020,7 +2040,8 @@ mod tests {
         );
         let named =
             super::super::static_guard("gh pr comment 12 --body 'ask Alan to look'").expect("name");
-        assert_eq!(named.verdict, "deny");
+        assert_eq!(named.verdict, "warn");
+        assert_eq!(named.pattern, "user-rule");
         assert!(super::super::static_guard("gh api user/ocaisa").is_none());
         assert!(super::super::static_guard("echo please ask @ocaisa").is_none());
         let mcp = r#"{"hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa","owner":"org","repo":"repo"}}"#;
@@ -2045,7 +2066,7 @@ mod tests {
         let (out, code) = super::super::cursor_side_answer(payload, None).unwrap();
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("\"permission\":\"allow\""), "{out}");
-        assert!(out.contains("warning:"), "{out}");
+        assert!(out.contains("ljos: user-rule:"), "{out}");
         assert!(out.contains("ocaisa") || out.contains("Alan"), "{out}");
     }
 
@@ -2109,7 +2130,8 @@ mod tests {
         let path = rules_file();
         std::fs::write(&path, "").unwrap();
         let hit = guard_payload(benign).expect("empty file allowed a write");
-        assert_eq!(hit.verdict, "deny");
+        assert_eq!(hit.verdict, "warn");
+        assert_eq!(hit.pattern, "user-rule");
         assert!(
             hit.reason.contains(&path.display().to_string()),
             "{}",
@@ -2133,7 +2155,8 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(path.with_file_name("no-such-rules.json"), &path).unwrap();
         let hit = guard_payload(benign).expect("dangling link allowed a write");
-        assert_eq!(hit.verdict, "deny");
+        assert_eq!(hit.verdict, "warn");
+        assert_eq!(hit.pattern, "user-rule");
         assert!(
             hit.reason.contains(&path.display().to_string()),
             "{}",
@@ -2209,8 +2232,8 @@ mod tests {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
             }
             let hit = guard_payload(benign).unwrap_or_else(|| panic!("{name}: allowed"));
-            assert_eq!(hit.verdict, "deny", "{name}");
-            assert!(hit.pattern.starts_with("user-rule:"), "{name}: {hit:?}");
+            assert_eq!(hit.verdict, "warn", "{name}");
+            assert_eq!(hit.pattern, "user-rule", "{name}: {hit:?}");
             assert!(
                 hit.reason.contains(&path.display().to_string()),
                 "{name}: {}",
@@ -2230,7 +2253,8 @@ mod tests {
             assert_eq!(code, 0, "{name}: {out}");
             assert_eq!(out, "{\"permission\":\"allow\"}\n", "{name}: {out}");
             let shell = guard_line("gh pr comment 12 --body 'tests passed'").unwrap();
-            assert_eq!(shell.verdict, "deny", "{name}");
+            assert_eq!(shell.verdict, "warn", "{name}");
+            assert_eq!(shell.pattern, "user-rule", "{name}");
             assert!(
                 shell.reason.contains(&path.display().to_string()),
                 "{name}: {}",
@@ -2689,7 +2713,7 @@ mod tests {
     }
 
     #[test]
-    fn an_argv_user_rule_denies_in_the_static_guard() {
+    fn an_argv_user_rule_warns_in_the_static_guard() {
         let (_lock, _dir) = isolated();
         write_argv(
             &Rule {
@@ -2701,16 +2725,21 @@ mod tests {
         )
         .unwrap();
         let denied = super::super::static_guard("gh pr comment 12 --body 'tests passed'").unwrap();
-        assert_eq!(denied.verdict, "deny");
-        assert_eq!(denied.pattern, "gh pr comment*");
+        assert_eq!(denied.verdict, "warn");
+        assert_eq!(denied.pattern, "user-rule");
+        assert!(
+            denied.reason.contains("(rule gh pr comment*)"),
+            "{denied:?}"
+        );
         assert!(super::super::static_guard("gh issue list").is_none());
     }
 
-    /// With no pack to confirm its lesson, a promoted rule still denies on
-    /// its pattern, on a mention and on an MCP post, and each reason says
-    /// it is unverified. A rule written as words keeps its own reason.
+    /// With no pack to confirm its lesson, a promoted rule still matches on
+    /// its pattern, on a mention and on an MCP post. Each is a warning
+    /// labelled `unverified-rule`, and the reason names the lesson. A rule
+    /// written as words keeps its own reason.
     #[test]
-    fn an_unconfirmed_promoted_rule_still_denies_as_unverified() {
+    fn an_unconfirmed_promoted_rule_warns_as_unverified() {
         let (_lock, _dir) = isolated();
         let lesson = serde_json::json!({
             "id": "lesson-status", "kind": "lesson", "text": "Leave git status alone.",
@@ -2732,10 +2761,11 @@ mod tests {
                 .expect("mention"),
             guard_payload(mcp).expect("mcp"),
         ] {
-            assert_eq!(denied.verdict, "deny", "{denied:?}");
+            assert_eq!(denied.verdict, "warn", "{denied:?}");
+            assert_eq!(denied.pattern, "unverified-rule", "{denied:?}");
             assert!(
                 denied.reason.starts_with("unverified") && denied.reason.contains("lesson-status"),
-                "an unconfirmed rule's denial read as the person's: {denied:?}"
+                "an unconfirmed rule's warning read as the person's: {denied:?}"
             );
         }
         write_argv(
@@ -2748,7 +2778,8 @@ mod tests {
         )
         .unwrap();
         let denied = super::super::static_guard("git log").unwrap();
-        assert_eq!(denied.reason, "leave the log alone");
+        assert_eq!(denied.pattern, "user-rule");
+        assert_eq!(denied.reason, "leave the log alone (rule git log*)");
     }
 
     fn git_ok(dir: &std::path::Path, args: &[&str]) {

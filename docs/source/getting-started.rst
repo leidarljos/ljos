@@ -237,7 +237,7 @@ rule and says why. ``rewrite`` replaces the command with a fixed one and lets th
 policyd answers ``allow``, or ``allow``, ``warn``, the rule and its warning, separated by tabs. An
 older policyd that answers ``deny`` or ``prompt`` reads as the same warning.
 Blocking is opt-in: when your own ``ljos.toml`` names a policyd config that sets
-``block-on-warning true``, a warning is policyd's ``deny`` and the command does not run (see
+``block-on-warning true``, policyd prints a deny and ljos shows that same warning. The command runs (see
 the how-to).
 A rewrite is ``allow``, ``rewrite`` and the new command, separated by tabs.
 Each rewrite leaves a note and a row in ``$XDG_DATA_HOME/ljos/rewrite.jsonl``. A repository's

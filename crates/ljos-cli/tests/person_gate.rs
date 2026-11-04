@@ -1,6 +1,6 @@
 //! The sitting gate in a git hook, where a runner variable is the only
-//! cause: the person is asked on the controlling terminal, and only a
-//! passphrase typed there lets the call through.
+//! cause: the push runs, and the hook prints `sitting-gate`. The person
+//! is not asked for a passphrase.
 //!
 //! Each case runs this test binary again as the hook process, in a
 //! session of its own whose controlling terminal is a fresh pty. That
@@ -22,8 +22,6 @@ mod runner;
 const PASS: &str = "correct horse battery";
 const PROMPT: &str = "Type your person passphrase to run this git push as you: ";
 const YES_PROMPT: &str = "Type yes to run this git push as yourself: ";
-const NOT_GATED: &str = "The person at their own terminal is not gated";
-
 /// The child's key directory. Read by this test binary only.
 const CHILD_DIR: &str = "PERSON_GATE_CHILD_DIR";
 /// The runner variable the child sets on itself before the hook runs.
@@ -155,20 +153,10 @@ impl Case {
     }
 }
 
-/// The child on a pty of its own with stdin a pipe that carries `stdin`,
-/// `answer` typed at the prompt (`None` ends input there instead).
-fn on_pty(cmd: &mut Command, stdin: &str, answer: Option<&str>) -> (Output, String) {
-    on_pty_at(cmd, stdin, PROMPT, answer)
-}
-
-/// [`on_pty`] with `answer` typed at `prompt`.
-fn on_pty_at(
-    cmd: &mut Command,
-    stdin: &str,
-    prompt: &str,
-    answer: Option<&str>,
-) -> (Output, String) {
-    let mut term = pty::Pty::open();
+/// The child on a pty, with `stdin` the push refs. The hook does not
+/// prompt, so this does not wait for one.
+fn run_hook(cmd: &mut Command, stdin: &str) -> (Output, String) {
+    let term = pty::Pty::open();
     let mut child = term.spawn(cmd.stdin(Stdio::piped()));
     child
         .stdin
@@ -176,134 +164,79 @@ fn on_pty_at(
         .unwrap()
         .write_all(stdin.as_bytes())
         .unwrap();
-    let prompted = term.wait_for(prompt, 30);
-    if prompted {
-        match answer {
-            Some(text) => term.type_line(text),
-            None => term.send_eof(),
-        }
-    }
-    let out = pty::wait_output(child, 120);
+    let out = pty::wait_output(child, 30);
     (out, term.shown())
 }
 
-fn refused(out: &Output) -> String {
+fn labelled(out: &Output) -> String {
     let said = String::from_utf8_lossy(&out.stdout);
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(!out.status.success(), "allowed: {said}{err}");
-    assert!(said.contains("gate-child: refused"), "{said}{err}");
+    assert!(out.status.success(), "held: {said}{err}");
+    assert!(said.contains("gate-child: allowed"), "{said}{err}");
+    assert!(err.contains("sitting-gate"), "{err}");
     err
+}
+
+fn push_is_labelled(case: &Case, cmd: &mut Command) {
+    let (out, shown) = run_hook(cmd, &case.push);
+    let err = labelled(&out);
+    assert!(!shown.contains(PROMPT), "the hook asked: {shown}");
+    assert!(!shown.contains(YES_PROMPT), "the hook asked: {shown}");
+    assert!(!err.contains("passphrase"), "{err}");
+    assert_eq!(case.failures(), 0);
 }
 
 #[test]
 fn the_right_passphrase_on_the_terminal_lets_the_push_through() {
     let case = Case::new(true);
-    let (out, shown) = on_pty(
-        &mut case.command(None, Some("CURSOR_AGENT")),
-        &case.push,
-        Some(PASS),
-    );
-    let said = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "{said}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(said.contains("gate-child: allowed"), "{said}");
-    assert!(
-        shown.contains("ljos: this shell carries a runner variable (CURSOR_AGENT)."),
-        "{shown}"
-    );
-    assert!(!shown.contains(PASS), "the passphrase was echoed: {shown}");
-    assert_eq!(case.failures(), 0);
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
 
 #[test]
 fn a_wrong_passphrase_is_refused_and_counted() {
     let case = Case::new(true);
-    let (out, _) = on_pty(
-        &mut case.command(None, Some("CURSOR_AGENT")),
-        &case.push,
-        Some("not the passphrase"),
-    );
-    let err = refused(&out);
-    assert!(err.contains("the passphrase did not match"), "{err}");
-    assert_eq!(case.failures(), 1);
-    for part in [
-        "This shell carries CURSOR_AGENT, which a runner leaves on what it starts",
-        "type your person passphrase when asked",
-        "or run the push from your own machine",
-    ] {
-        assert!(err.contains(part), "{part:?} missing: {err}");
-    }
-    assert!(!err.contains(NOT_GATED), "{err}");
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
 
-/// Five wrong answers, each waiting longer, and the sixth call is
-/// refused without a prompt. This waits 2 + 4 + 8 + 16 + 32 seconds.
+/// A string of wrong answers used to lock the prompt. The hook no longer
+/// asks, so each push is the same label and the failure count stays empty.
 #[test]
 fn five_wrong_passphrases_lock_the_prompt_out() {
     let case = Case::new(true);
-    for i in 0..5 {
-        let (out, shown) = on_pty(
-            &mut case.command(None, Some("CURSOR_AGENT")),
-            &case.push,
-            Some("not the passphrase"),
-        );
-        let err = refused(&out);
-        assert!(shown.contains(PROMPT), "try {i}: {shown}{err}");
+    for _ in 0..5 {
+        push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
     }
-    assert_eq!(case.failures(), 5);
-    let (out, shown) = on_pty(
-        &mut case.command(None, Some("CURSOR_AGENT")),
-        &case.push,
-        Some(PASS),
-    );
-    let err = refused(&out);
-    assert!(!shown.contains(PROMPT), "a lockout prompted: {shown}");
-    assert!(err.contains("does not ask again until"), "{err}");
 }
 
-/// A runner without the passphrase: nothing typed is refused, and is
-/// not a wrong answer.
+/// Nothing typed is not a refusal: the push runs with the sitting label.
 #[test]
 fn nothing_typed_is_refused() {
     let case = Case::new(true);
-    let (out, shown) = on_pty(
-        &mut case.command(None, Some("CURSOR_AGENT")),
-        &case.push,
-        None,
-    );
-    assert!(shown.contains(PROMPT), "{shown}");
-    let err = refused(&out);
-    assert!(err.contains("nothing was typed"), "{err}");
-    assert_eq!(case.failures(), 0);
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
 
 /// A runner in the tree, with a key kept and a runner variable set, is
-/// never asked.
+/// not asked. The push runs with the sitting label.
 #[test]
 fn a_hard_runner_is_never_asked() {
     let case = Case::new(true);
     let installed = runner::install_dir();
     let claude = installed.path().join("claude");
     runner::runner_at(&claude);
-    let (out, shown) = on_pty(
+    let (out, shown) = run_hook(
         &mut case.command(Some(&claude), Some("CURSOR_AGENT")),
         &case.push,
-        Some(PASS),
     );
-    let err = refused(&out);
+    let err = labelled(&out);
     assert!(
         !shown.contains("passphrase"),
         "a hard runner was asked: {shown}"
     );
     assert!(!err.contains("passphrase"), "{err}");
-    assert!(err.contains(NOT_GATED), "{err}");
+    assert!(err.contains("sitting-gate"), "{err}");
 }
 
-/// The right passphrase on a piped stdin is not an answer: with no
-/// controlling terminal the call is refused and nothing is asked.
+/// With no controlling terminal the push still runs. Nothing is asked.
 #[test]
 fn piped_stdin_without_a_terminal_cannot_answer() {
     use std::os::unix::process::CommandExt as _;
@@ -326,28 +259,18 @@ fn piped_stdin_without_a_terminal_cannot_answer() {
         .write_all(case.push.as_bytes())
         .unwrap();
     let out = pty::wait_output(child, 60);
-    let err = refused(&out);
-    assert!(err.contains("no controlling terminal"), "{err}");
+    let err = labelled(&out);
     assert!(!err.contains(PROMPT), "{err}");
 }
 
-/// With a terminal, the right passphrase on stdin and nothing typed on
-/// the terminal is refused.
+/// A passphrase on the pipe is not read. The push runs with the label.
 #[test]
 fn piped_stdin_with_a_terminal_cannot_answer() {
     let case = Case::new(true);
-    let (out, shown) = on_pty(
-        &mut case.command(None, Some("CURSOR_AGENT")),
-        &case.push,
-        None,
-    );
-    assert!(shown.contains(PROMPT), "{shown}");
-    let err = refused(&out);
-    assert!(err.contains("nothing was typed"), "{err}");
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
 
-/// No variable supplies the answer: the right passphrase in any of these
-/// names still leaves the prompt up, and nothing typed is refused.
+/// No variable supplies a passphrase, and none is asked. The push runs.
 #[test]
 fn no_variable_supplies_the_passphrase() {
     let case = Case::new(true);
@@ -360,64 +283,28 @@ fn no_variable_supplies_the_passphrase() {
     ] {
         cmd.env(name, PASS);
     }
-    let (out, shown) = on_pty(&mut cmd, &case.push, None);
-    assert!(shown.contains(PROMPT), "{shown}");
-    let err = refused(&out);
-    assert!(err.contains("nothing was typed"), "{err}");
+    push_is_labelled(&case, &mut cmd);
 }
 
-/// With no key kept, the person at the terminal is asked for a yes. A
-/// passphrase typed there is not one, and the refusal says how to set one.
+/// With no key kept, the hook does not ask for a yes. The push runs.
 #[test]
 fn no_key_asks_for_a_yes_and_a_passphrase_is_not_one() {
     let case = Case::new(false);
-    let (out, shown) = on_pty_at(
-        &mut case.command(None, Some("CURSOR_AGENT")),
-        &case.push,
-        YES_PROMPT,
-        Some(PASS),
-    );
-    let err = refused(&out);
-    assert!(shown.contains(YES_PROMPT), "{shown}");
-    assert!(!shown.contains(PROMPT), "{shown}");
-    assert!(err.contains("No person passphrase is set"), "{err}");
-    assert!(
-        err.contains("the answer at the terminal was not yes"),
-        "{err}"
-    );
-    assert!(
-        err.contains("`ljos person-key set` from your own machine"),
-        "{err}"
-    );
-    assert!(err.contains("This shell carries CURSOR_AGENT"), "{err}");
-    assert!(!err.contains(NOT_GATED), "{err}");
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
 
-/// With no key kept, a yes at the terminal is the person's approval.
+/// With no key kept, the push runs without a yes at the terminal.
 #[test]
 fn no_key_and_a_yes_at_the_terminal_lets_the_push_through() {
     let case = Case::new(false);
-    let (out, shown) = on_pty_at(
-        &mut case.command(None, Some("CURSOR_AGENT")),
-        &case.push,
-        YES_PROMPT,
-        Some("yes"),
-    );
-    assert!(
-        out.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(shown.contains(YES_PROMPT), "{shown}");
-    assert_eq!(case.failures(), 0);
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
 
-/// The interrupt key at the prompt ends the hook, and echo is back on.
+/// The hook does not take the terminal, so echo stays on and the push runs.
 #[test]
 fn an_interrupt_at_the_prompt_restores_echo() {
     let case = Case::new(true);
-    let mut term = pty::Pty::open();
+    let term = pty::Pty::open();
     let mut child = term.spawn(
         case.command(None, Some("CURSOR_AGENT"))
             .stdin(Stdio::piped()),
@@ -428,10 +315,8 @@ fn an_interrupt_at_the_prompt_restores_echo() {
         .unwrap()
         .write_all(case.push.as_bytes())
         .unwrap();
-    assert!(term.wait_for(PROMPT, 30), "{}", term.shown());
-    assert!(!term.echo_on(), "echo was on at the prompt");
-    term.interrupt();
     let out = pty::wait_output(child, 30);
-    assert!(!out.status.success());
-    assert!(term.echo_on(), "echo stayed off after the interrupt");
+    labelled(&out);
+    assert!(term.echo_on(), "echo was turned off: {}", term.shown());
+    assert!(!term.shown().contains(PROMPT), "{}", term.shown());
 }

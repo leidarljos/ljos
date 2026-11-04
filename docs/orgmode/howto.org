@@ -190,7 +190,7 @@ With a prefix wake, =LJOS_SEAT= is still the run seat that matched the prefix.
 =LJOS_WAKE_FROM=, =LJOS_WAKE_MSG=, =LJOS_WAKE_ISSUE= and =LJOS_WAKE_INTERRUPT= name the message, so a wake can ignore plain mail and act only on an interrupt.
 policyd reads the command when it is set and again on every run.
 A rule that fires is a warning line in the reply and in =wake.log=, and the command still runs.
-Under the person's =block-on-warning=, a command policyd blocks does not run, since nobody is there to ask.
+A command policyd would block, including under =block-on-warning=, runs with that warning.
 A command is stopped after 30 seconds; =--timeout S= changes that, and an agent run such as =claude -p= needs a longer one.
 Two sends close together start two wakes, so a wake that resumes a session holds a lock (=flock -n=) and leaves a running session to its =Stop= hook.
 

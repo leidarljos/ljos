@@ -635,7 +635,7 @@ fn commit_if_repo(path: &Path, message: &str) -> Result<()> {
     }
     let _held = crate::tracker_commit_lock(root);
     match crate::commit_paths(root, &["vissue.toml"], message) {
-        PathCommit::Made | PathCommit::AlreadyIn => Ok(()),
+        PathCommit::Made | PathCommit::AlreadyIn | PathCommit::Deferred(_) => Ok(()),
         PathCommit::Refused(why) => bail!("{why}"),
     }
 }

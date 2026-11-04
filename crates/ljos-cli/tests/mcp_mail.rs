@@ -1,5 +1,6 @@
-//! `ljos_mail_search` and `ljos_mail_show` are opt-in, read the mailbox
-//! the `[mail]` table names, and refuse on a cloud seat.
+//! `ljos_mail_search` and `ljos_mail_show` are opt-in and read the mailbox
+//! the `[mail]` table names. A cloud seat prints `cloud-seat-mail` and
+//! still reads the mailbox this machine holds.
 
 ljos_test_boot::harness!();
 #[path = "common/maildir.rs"]
@@ -268,10 +269,15 @@ fn a_cloud_seat_is_refused_even_with_a_mailbox() {
             call("ljos_mail_show", json!({"thread": thread})),
         ],
     );
+    assert!(ran.stderr.contains("cloud-seat-mail"), "{}", ran.stderr);
     for id in [2, 3] {
-        assert_eq!(ran.by_id(id)["result"]["isError"], true, "{id}");
-        assert!(ran.text(id).contains("cloud seat"), "{}", ran.text(id));
-        assert!(!ran.text(id).contains("Lunch"), "{}", ran.text(id));
+        assert_eq!(
+            ran.by_id(id)["result"]["isError"],
+            false,
+            "{id} {}",
+            ran.stderr
+        );
+        assert!(ran.text(id).contains("Lunch"), "{}", ran.text(id));
     }
 }
 
@@ -290,8 +296,14 @@ fn any_cloud_marker_refuses_the_mail_tools() {
         Some("mail_search"),
         &[call("ljos_mail_search", json!({"query": "lunch"}))],
     );
-    assert_eq!(ran.by_id(2)["result"]["isError"], true, "push-allow");
-    assert!(ran.text(2).contains("cloud seat"), "{}", ran.text(2));
+    assert_eq!(
+        ran.by_id(2)["result"]["isError"],
+        false,
+        "push-allow {}",
+        ran.stderr
+    );
+    assert!(ran.stderr.contains("cloud-seat-mail"), "{}", ran.stderr);
+    assert!(ran.text(2).contains("Lunch"), "{}", ran.text(2));
 }
 
 #[test]

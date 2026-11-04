@@ -109,7 +109,8 @@ const ALAN: &str = r#"{"rules":[{"id":"ur-ocaisa","text":"never post or reply to
 /// Whether a Cursor answer is an allow that carries the user rule's warning.
 fn warns(said: &str) -> bool {
     said.contains("\"permission\":\"allow\"")
-        && said.contains("\"user_message\":\"warning: never post")
+        && (said.contains("ljos: user-rule:") || said.contains("ljos: unverified-rule:"))
+        && said.contains("never post")
 }
 
 fn rules_path(hab: &Hab) -> PathBuf {

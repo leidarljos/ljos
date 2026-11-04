@@ -1,33 +1,130 @@
-//! `ljos upgrade`: replace the seat's binaries with a published release.
+//! `ljos upgrade` replaces the seat binaries with published releases.
 //!
-//! The seat's guard refuses any agent's write to its own binaries, since an
-//! agent that may rewrite them may rewrite the law. The binaries still have
-//! to move forward, so this verb installs only what the project's release
-//! workflow built and published for a tag: the archive is fetched from the
-//! release, its sha256 is checked against the checksum published beside it,
-//! each binary must be an executable that names the release's version, and
-//! the old binaries are kept beside the new ones.
+//! The seat guard refuses an agent write to its own binaries, since an
+//! agent that may rewrite them may rewrite the law.
+//! The binaries still have to move forward, so this verb installs only what
+//! a release workflow built and published.
+//! The ljos archive comes from this repository.
+//! Each other program comes from the repository that publishes it.
+//! The archive sha256 is checked against the checksum published beside it.
+//! Each binary must be an executable that names the release version, and
+//! the old binary is kept beside the new one.
+//! A component whose release is missing, or whose download or checksum
+//! fails, prints a warning.
+//! The others still install.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-/// The repository whose releases the seat installs from.
+/// The repository whose releases the seat installs ljos from.
 pub const RELEASE_REPO: &str = "leidarljos/ljos";
 
-/// The binaries a release carries that the seat installs, when present
+/// Every component repository lives under this owner.
+const RELEASE_OWNER: &str = "leidarljos";
+
+/// The binaries a ljos release carries that the seat installs, when present
 /// beside the running `ljos`: `ljos` and `ljos-mcp` always.
 pub const BINARIES: &[&str] = &["ljos", "ljos-mcp", "ljos-hud"];
+
+/// One program installed from another repository's release.
+pub struct Component {
+    /// The file name in the install directory, and the `--only` name.
+    pub name: &'static str,
+    /// The repository under [`RELEASE_OWNER`] that publishes the archive.
+    pub repo: &'static str,
+    /// The archive file on that release. `{version}` is the tag without a
+    /// leading `v`. `{target}` is this machine's rustc triple.
+    pub asset: &'static str,
+}
+
+/// The programs ljos runs that are published outside this repository.
+///
+/// Each asset name is the file that repository's release workflow uploads.
+/// `install.sh` installs the same programs. A program that is not in the
+/// install directory is left alone, so an upgrade does not add one the seat
+/// never installed. `--only` names one of these, or one of [`BINARIES`].
+pub const COMPONENTS: &[Component] = &[
+    // packset-v{version}-{target}.tar.gz. The top directory has that
+    // name and holds these four.
+    Component {
+        name: "packset",
+        repo: "packset",
+        asset: "packset-v{version}-{target}.tar.gz",
+    },
+    Component {
+        name: "packsetd",
+        repo: "packset",
+        asset: "packset-v{version}-{target}.tar.gz",
+    },
+    Component {
+        name: "packset-mcp",
+        repo: "packset",
+        asset: "packset-v{version}-{target}.tar.gz",
+    },
+    Component {
+        name: "packset-embed",
+        repo: "packset",
+        asset: "packset-v{version}-{target}.tar.gz",
+    },
+    // vissue-v{version}-{target}.tar.gz.
+    // The top directory has that name and holds vissue, vissue-mcp and
+    // vissue-hud.
+    // ljos runs vissue. vissue-hud is left out.
+    Component {
+        name: "vissue",
+        repo: "vissue",
+        asset: "vissue-v{version}-{target}.tar.gz",
+    },
+    Component {
+        name: "vissue-mcp",
+        repo: "vissue",
+        asset: "vissue-v{version}-{target}.tar.gz",
+    },
+    Component {
+        name: "deedar",
+        repo: "deedar",
+        asset: "deedar-v{version}-{target}.tar.gz",
+    },
+    Component {
+        name: "claimdag",
+        repo: "claimdag",
+        asset: "claimdag-v{version}-{target}.tar.gz",
+    },
+    Component {
+        name: "ljos-policyd",
+        repo: "ljos-policyd",
+        asset: "ljos-policyd-v{version}-{target}.tar.gz",
+    },
+    // consensus-v{version}-{target}.tar.gz. The top directory has
+    // that name and holds ljos-consensus.
+    Component {
+        name: "ljos-consensus",
+        repo: "consensus",
+        asset: "consensus-v{version}-{target}.tar.gz",
+    },
+];
+
+/// The archive triple for this `arch` and `os`.
+///
+/// The release workflows publish these four triples.
+#[must_use]
+pub fn target_for(arch: &str, os: &str) -> Option<&'static str> {
+    match (arch, os) {
+        ("x86_64", "linux") => Some("x86_64-unknown-linux-gnu"),
+        ("aarch64", "linux") => Some("aarch64-unknown-linux-gnu"),
+        ("x86_64", "macos") => Some("x86_64-apple-darwin"),
+        ("aarch64", "macos") => Some("aarch64-apple-darwin"),
+        _ => None,
+    }
+}
 
 /// The target triple of the published archive for this machine.
 #[must_use]
 pub fn target() -> Option<&'static str> {
-    match (std::env::consts::ARCH, std::env::consts::OS) {
-        ("x86_64", "linux") => Some("x86_64-unknown-linux-gnu"),
-        ("aarch64", "macos") => Some("aarch64-apple-darwin"),
-        _ => None,
-    }
+    target_for(std::env::consts::ARCH, std::env::consts::OS)
 }
 
 /// The archive name the release workflow publishes for `version` on
@@ -35,6 +132,13 @@ pub fn target() -> Option<&'static str> {
 #[must_use]
 pub fn asset_name(version: &str, target: &str) -> String {
     format!("ljos-v{}-{target}.tar.gz", version.trim_start_matches('v'))
+}
+
+/// [`Component::asset`] with `{version}` and `{target}` filled in.
+fn asset_of(pattern: &str, version: &str, target: &str) -> String {
+    pattern
+        .replace("{version}", version.trim_start_matches('v'))
+        .replace("{target}", target)
 }
 
 /// The digest in a `sha256sum` line: its first field, when it is 64 hex
@@ -46,10 +150,37 @@ pub fn digest_of(line: &str) -> Option<String> {
 }
 
 /// Whether `--version` output names this binary at `version`.
+///
+/// A line may carry a build note after the version, as `ljos-policyd`
+/// prints `ljos-policyd 0.7.0 (phronesis)` and `packset` prints its commit.
+/// The note is separated by whitespace, so `0.22.3` does not match `0.22.30`.
 #[must_use]
 pub fn names_version(output: &str, binary: &str, version: &str) -> bool {
     let want = format!("{binary} {}", version.trim_start_matches('v'));
-    output.lines().next().is_some_and(|l| l.trim() == want)
+    output.lines().next().is_some_and(|line| {
+        let line = line.trim();
+        match line.strip_prefix(&want) {
+            Some(rest) => rest.is_empty() || rest.starts_with(char::is_whitespace),
+            None => false,
+        }
+    })
+}
+
+fn is_ljos_name(name: &str) -> bool {
+    BINARIES.contains(&name)
+}
+
+fn is_seat_component(name: &str) -> bool {
+    COMPONENTS.iter().any(|c| c.name == name)
+}
+
+fn known_names() -> String {
+    BINARIES
+        .iter()
+        .copied()
+        .chain(COMPONENTS.iter().map(|c| c.name))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Every binary this install would replace already reports `version`.
@@ -63,10 +194,7 @@ fn already_installed(dir: &Path, version: &str) -> bool {
         if !installed.is_file() {
             return false;
         }
-        let Ok(said) = run_ok(&installed.display().to_string(), &["--version"]) else {
-            return false;
-        };
-        if !names_version(&said, name, version) {
+        if !reports(&installed, name, version) {
             return false;
         }
         saw = true;
@@ -93,11 +221,17 @@ fn keep_rollback(name: &str, installed: &Path, dir: &Path, version: &str) -> Res
     Ok(())
 }
 
+fn release_dir() -> Option<PathBuf> {
+    std::env::var_os("LJOS_RELEASE_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The published asset, from `LJOS_RELEASE_DIR` when a test or a mirror
 /// has the files on disk.
 fn obtain(name: &str, to: &Path, url: &str) -> Result<()> {
-    if let Some(dir) = std::env::var_os("LJOS_RELEASE_DIR").filter(|d| !d.is_empty()) {
-        let src = Path::new(&dir).join(name);
+    if let Some(dir) = release_dir() {
+        let src = dir.join(name);
         std::fs::copy(&src, to).with_context(|| format!("upgrade: copy {}", src.display()))?;
         return Ok(());
     }
@@ -118,19 +252,44 @@ fn fetch(url: &str, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The newest published release's version, from the forge.
-fn latest() -> Result<String> {
-    let url = format!("https://api.github.com/repos/{RELEASE_REPO}/releases/latest");
-    let v: serde_json::Value = ureq::get(&url)
+/// The version a fixture or the forge publishes for `repo`. `None` when
+/// that repository has no release. `LJOS_RELEASE_DIR` supplies
+/// `{repo}.version` and stands in for the forge, so a test makes no request.
+fn latest_release(repo: &str) -> Result<Option<String>> {
+    if let Some(dir) = release_dir() {
+        let path = dir.join(format!("{repo}.version"));
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("upgrade: reading {}", path.display()))?;
+        let v = text.trim().trim_start_matches('v');
+        return Ok((!v.is_empty()).then(|| v.to_string()));
+    }
+    let url = format!("https://api.github.com/repos/{RELEASE_OWNER}/{repo}/releases/latest");
+    let resp = ureq::get(&url)
         .set("Accept", "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(30))
-        .call()
-        .context("upgrade: asking for the latest release")?
-        .into_json()?;
-    v["tag_name"]
+        .call();
+    let resp = match resp {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(404, _)) => return Ok(None),
+        Err(err) => {
+            return Err(err).context(format!("upgrade: asking {repo} for its latest release"));
+        }
+    };
+    let body: serde_json::Value = resp
+        .into_json()
+        .with_context(|| format!("upgrade: reading {repo}'s latest release"))?;
+    Ok(body["tag_name"]
         .as_str()
-        .map(|t| t.trim_start_matches('v').to_string())
-        .context("upgrade: the latest release has no tag")
+        .map(|t| t.trim().trim_start_matches('v').to_string())
+        .filter(|t| !t.is_empty()))
+}
+
+/// The newest published ljos release's version, from the forge.
+fn latest() -> Result<String> {
+    latest_release("ljos")?.context("upgrade: the latest release has no tag")
 }
 
 fn run_ok(cmd: &str, args: &[&str]) -> Result<String> {
@@ -148,35 +307,47 @@ fn run_ok(cmd: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Install release `version` (the newest when `None`) into the directory
-/// of the running `ljos`, or `dir`. Returns what it did, a line a binary.
-///
-/// # Errors
-///
-/// No archive for this machine, a download, checksum or version that does
-/// not hold, or a file that cannot be written.
-pub fn upgrade(version: Option<&str>, dir: Option<&Path>) -> Result<String> {
-    let version = match version {
-        Some(v) => v.trim_start_matches('v').to_string(),
-        None => latest()?,
-    };
-    let target = target().context("upgrade: no published archive for this machine")?;
-    let dir: PathBuf = match dir {
-        Some(d) => d.to_path_buf(),
-        None => std::env::current_exe()?
+fn reports(path: &Path, name: &str, version: &str) -> bool {
+    run_ok(&path.display().to_string(), &["--version"])
+        .ok()
+        .is_some_and(|said| names_version(&said, name, version))
+}
+
+/// The semver `--version` printed, or a stand-in when the file is missing
+/// or the line has no version.
+fn old_version(path: &Path) -> String {
+    if !path.is_file() {
+        return "absent".to_string();
+    }
+    run_ok(&path.display().to_string(), &["--version"])
+        .ok()
+        .and_then(|said| crate::parse_semver(&said).map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn executable_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x7fELF") || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+}
+
+fn one_line(err: &anyhow::Error) -> String {
+    format!("{err:#}")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn resolve_dir(dir: Option<&Path>) -> Result<PathBuf> {
+    match dir {
+        Some(d) => Ok(d.to_path_buf()),
+        None => Ok(std::env::current_exe()?
             .canonicalize()?
             .parent()
             .context("upgrade: the running ljos has no directory")?
-            .to_path_buf(),
-    };
-    if already_installed(&dir, &version) {
-        return Ok(format!(
-            "ljos {version} is already installed at {}\n",
-            dir.display()
-        ));
+            .to_path_buf()),
     }
-    let asset = asset_name(&version, target);
-    let base = format!("https://github.com/{RELEASE_REPO}/releases/download/v{version}");
+}
+
+fn work_dir(label: &str) -> Result<PathBuf> {
     // The cache directory, on the home filesystem: a temporary directory
     // can be a quota'd tmpfs that is already full.
     let work = std::env::var_os("XDG_CACHE_HOME")
@@ -185,9 +356,33 @@ pub fn upgrade(version: Option<&str>, dir: Option<&Path>) -> Result<String> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir)
         .join("ljos")
-        .join(format!("upgrade-{}", std::process::id()));
+        .join(format!("upgrade-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work)?;
+    Ok(work)
+}
+
+/// Install release `version` (the newest when `None`) into `dir`.
+/// `only` limits the ljos archive to that one binary.
+fn upgrade_ljos(version: Option<&str>, dir: &Path, only: Option<&str>) -> Result<String> {
+    let version = match version {
+        Some(v) => v.trim_start_matches('v').to_string(),
+        None => latest()?,
+    };
+    let target = target().context("upgrade: no published archive for this machine")?;
+    if let Some(name) = only {
+        if dir.join(name).is_file() && reports(&dir.join(name), name, &version) {
+            return Ok(format!("{name} {version} current\n"));
+        }
+    } else if already_installed(dir, &version) {
+        return Ok(format!(
+            "ljos {version} is already installed at {}\n",
+            dir.display()
+        ));
+    }
+    let asset = asset_name(&version, target);
+    let base = format!("https://github.com/{RELEASE_REPO}/releases/download/v{version}");
+    let work = work_dir("ljos")?;
     let archive = work.join(&asset);
     let sum = work.join(format!("{asset}.sha256"));
     obtain(&asset, &archive, &format!("{base}/{asset}"))?;
@@ -218,19 +413,22 @@ pub fn upgrade(version: Option<&str>, dir: Option<&Path>) -> Result<String> {
     // Check every binary before replacing any, so a bad archive changes nothing.
     let mut ready = Vec::new();
     for name in BINARIES {
+        if only.is_some_and(|want| want != *name) {
+            continue;
+        }
         let new = unpacked.join(name);
         let installed = dir.join(name);
         if !new.is_file() {
-            if *name == "ljos-hud" {
+            if *name == "ljos-hud" && only != Some("ljos-hud") {
                 continue;
             }
             bail!("upgrade: {asset} carries no {name}; nothing installed");
         }
-        if *name == "ljos-hud" && !installed.exists() {
+        if *name == "ljos-hud" && !installed.exists() && only.is_none() {
             continue;
         }
         let bytes = std::fs::read(&new)?;
-        if !bytes.starts_with(b"\x7fELF") && !bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]) {
+        if !executable_image(&bytes) {
             bail!("upgrade: {name} in {asset} is not an executable; nothing installed");
         }
         let said = run_ok(&new.display().to_string(), &["--version"])?;
@@ -240,11 +438,12 @@ pub fn upgrade(version: Option<&str>, dir: Option<&Path>) -> Result<String> {
                 said.lines().next().unwrap_or("")
             );
         }
-        ready.push((name, new, installed));
+        ready.push((*name, new, installed));
     }
     let mut out = String::new();
     for (name, new, installed) in ready {
-        keep_rollback(name, &installed, &dir, &version)?;
+        let old = old_version(&installed);
+        keep_rollback(name, &installed, dir, &version)?;
         let staged = dir.join(format!("{name}.new"));
         std::fs::copy(&new, &staged)?;
         #[cfg(unix)]
@@ -253,21 +452,261 @@ pub fn upgrade(version: Option<&str>, dir: Option<&Path>) -> Result<String> {
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
         }
         std::fs::rename(&staged, &installed)?;
-        out.push_str(&format!(
-            "installed {name} {version} at {}\n",
-            installed.display()
-        ));
+        if only.is_some() {
+            out.push_str(&format!("{name} {old} {version}\n"));
+        } else {
+            out.push_str(&format!(
+                "installed {name} {version} at {}\n",
+                installed.display()
+            ));
+        }
     }
     let _ = std::fs::remove_dir_all(&work);
-    out.push_str(&format!(
-        "from {base}/{asset}, sha256 {have}; the old binaries are kept as NAME.bak-pre-{version}\n"
-    ));
+    if only.is_none() {
+        out.push_str(&format!(
+            "from {base}/{asset}, sha256 {have}; the old binaries are kept as NAME.bak-pre-{version}\n"
+        ));
+    }
+    Ok(out)
+}
+
+/// A file named `name` anywhere under `root`, not reached through a symlink.
+fn find_named(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                stack.push(path);
+            } else if entry.file_name() == name {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn tar_flag(asset: &str) -> Result<&'static str, String> {
+    if asset.ends_with(".tar.gz") {
+        Ok("-xzf")
+    } else if asset.ends_with(".tar.xz") {
+        Ok("-xJf")
+    } else {
+        Err(format!("{asset} is not a tar.gz or tar.xz archive"))
+    }
+}
+
+/// Download and unpack one archive. The error is one line a warning can carry.
+fn fetch_tree(repo: &str, pattern: &str, version: &str, work: &Path) -> Result<PathBuf, String> {
+    let target = target().ok_or_else(|| "no published archive for this machine".to_string())?;
+    let asset = asset_of(pattern, version, target);
+    let archive = work.join(&asset);
+    let sum = work.join(format!("{asset}.sha256"));
+    let base = format!("https://github.com/{RELEASE_OWNER}/{repo}/releases/download/v{version}");
+    obtain(&asset, &archive, &format!("{base}/{asset}")).map_err(|e| one_line(&e))?;
+    obtain(
+        &format!("{asset}.sha256"),
+        &sum,
+        &format!("{base}/{asset}.sha256"),
+    )
+    .map_err(|e| one_line(&e))?;
+    let text =
+        std::fs::read_to_string(&sum).map_err(|e| format!("reading {}: {e}", sum.display()))?;
+    let want = digest_of(&text).ok_or_else(|| format!("{asset}.sha256 is not a sha256 line"))?;
+    let summed =
+        run_ok("sha256sum", &[&archive.display().to_string()]).map_err(|e| one_line(&e))?;
+    let have = digest_of(&summed).ok_or_else(|| "sha256sum gave no digest".to_string())?;
+    if want != have {
+        return Err(format!(
+            "checksum mismatch (archive {have}, release {want})"
+        ));
+    }
+    let flag = tar_flag(&asset)?;
+    let unpack = work.join(format!("x-{asset}"));
+    let _ = std::fs::remove_dir_all(&unpack);
+    std::fs::create_dir_all(&unpack).map_err(|e| e.to_string())?;
+    run_ok(
+        "tar",
+        &[
+            flag,
+            &archive.display().to_string(),
+            "-C",
+            &unpack.display().to_string(),
+        ],
+    )
+    .map_err(|e| one_line(&e))?;
+    Ok(unpack)
+}
+
+fn place_component(dir: &Path, name: &str, version: &str, tree: &Path) -> Result<String, String> {
+    let new = find_named(tree, name).ok_or_else(|| format!("the archive holds no {name}"))?;
+    let bytes = std::fs::read(&new).map_err(|e| e.to_string())?;
+    if !executable_image(&bytes) {
+        return Err(format!("{name} in the archive is not an executable"));
+    }
+    let said = run_ok(&new.display().to_string(), &["--version"]).map_err(|e| one_line(&e))?;
+    if !names_version(&said, name, version) {
+        let got = said.lines().next().unwrap_or("").trim();
+        return Err(format!(
+            "{name} in the archive says {got:?}, not {name} {version}"
+        ));
+    }
+    let installed = dir.join(name);
+    let old = old_version(&installed);
+    keep_rollback(name, &installed, dir, version).map_err(|e| one_line(&e))?;
+    let staged = dir.join(format!("{name}.new"));
+    std::fs::copy(&new, &staged).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&staged, &installed).map_err(|e| e.to_string())?;
+    Ok(format!("{name} {old} {version}\n"))
+}
+
+/// Each installed component, one line. A failure is a warning line.
+fn upgrade_components(dir: &Path, only: Option<&str>) -> Result<String> {
+    let mut out = String::new();
+    let mut versions: HashMap<String, Result<Option<String>, String>> = HashMap::new();
+    let mut trees: HashMap<(String, String), Result<PathBuf, String>> = HashMap::new();
+    let mut work: Option<PathBuf> = None;
+    for component in COMPONENTS {
+        if only.is_some_and(|name| name != component.name) {
+            continue;
+        }
+        if only.is_none() && !dir.join(component.name).is_file() {
+            continue;
+        }
+        let published = if let Some(hit) = versions.get(component.repo) {
+            hit.clone()
+        } else {
+            let got = match latest_release(component.repo) {
+                Ok(v) => Ok(v),
+                Err(err) => Err(one_line(&err)),
+            };
+            versions.insert(component.repo.to_string(), got.clone());
+            got
+        };
+        let version = match published {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                out.push_str(&format!("warning: {}: no release\n", component.name));
+                continue;
+            }
+            Err(reason) => {
+                out.push_str(&format!("warning: {}: {reason}\n", component.name));
+                continue;
+            }
+        };
+        let installed = dir.join(component.name);
+        if installed.is_file() && reports(&installed, component.name, &version) {
+            out.push_str(&format!("{} {version} current\n", component.name));
+            continue;
+        }
+        let key = (component.repo.to_string(), component.asset.to_string());
+        if !trees.contains_key(&key) {
+            let fetched = (|| {
+                let slot = match work {
+                    Some(ref dir) => dir.clone(),
+                    None => {
+                        let made = work_dir("components").map_err(|e| one_line(&e))?;
+                        work = Some(made.clone());
+                        made
+                    }
+                };
+                fetch_tree(component.repo, component.asset, &version, &slot)
+            })();
+            trees.insert(key.clone(), fetched);
+        }
+        match trees.get(&key) {
+            Some(Ok(tree)) => match place_component(dir, component.name, &version, tree) {
+                Ok(line) => out.push_str(&line),
+                Err(reason) => {
+                    let old = old_version(&installed);
+                    out.push_str(&format!(
+                        "warning: {}: {reason}; kept {old}\n",
+                        component.name
+                    ));
+                }
+            },
+            Some(Err(reason)) => {
+                let old = old_version(&installed);
+                out.push_str(&format!(
+                    "warning: {}: {reason}; kept {old}\n",
+                    component.name
+                ));
+            }
+            None => {}
+        }
+    }
+    if let Some(dir) = &work {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    Ok(out)
+}
+
+/// Install the ljos release `version` (the newest when `None`) and each
+/// other seat program from its own latest release, into the directory of
+/// the running `ljos`, or `dir`.
+/// `only` moves that one program.
+///
+/// One line a program: `name old new` when it moved, `name version current`
+/// when it already matches.
+/// A component that cannot be installed prints `warning:` and the rest
+/// still run.
+///
+/// # Errors
+///
+/// `--only` names nothing this installs.
+/// The ljos archive has no build for this machine, or its download,
+/// checksum or version does not hold.
+/// A component failure is a warning, not an error.
+pub fn upgrade(version: Option<&str>, dir: Option<&Path>, only: Option<&str>) -> Result<String> {
+    if let Some(name) = only {
+        if !is_ljos_name(name) && !is_seat_component(name) {
+            bail!(
+                "upgrade: --only {name} is not a component: {}",
+                known_names()
+            );
+        }
+    }
+    let dir = resolve_dir(dir)?;
+    let mut out = String::new();
+    if only.is_none_or(is_ljos_name) {
+        out.push_str(&upgrade_ljos(version, &dir, only)?);
+    }
+    if only.is_none_or(is_seat_component) {
+        out.push_str(&upgrade_components(&dir, only)?);
+    }
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_published_target_has_its_archive_triple() {
+        assert_eq!(
+            target_for("x86_64", "linux"),
+            Some("x86_64-unknown-linux-gnu")
+        );
+        assert_eq!(
+            target_for("aarch64", "linux"),
+            Some("aarch64-unknown-linux-gnu")
+        );
+        assert_eq!(target_for("x86_64", "macos"), Some("x86_64-apple-darwin"));
+        assert_eq!(target_for("aarch64", "macos"), Some("aarch64-apple-darwin"));
+    }
 
     #[test]
     fn the_archive_name_and_its_checks_are_the_release_workflow_s() {
@@ -292,6 +731,37 @@ mod tests {
         assert!(
             !names_version("#!/usr/bin/env python3", "ljos", "0.22.3"),
             "a script is not the release"
+        );
+        assert!(
+            names_version("ljos-policyd 0.7.0 (phronesis)\n", "ljos-policyd", "0.7.0"),
+            "a build note after the version is still that version"
+        );
+        assert!(names_version(
+            "packset 0.17.3 (abc123)\n",
+            "packset",
+            "v0.17.3"
+        ));
+        assert!(
+            !names_version("ljos 0.22.30\n", "ljos", "0.22.3"),
+            "a longer version is a different version"
+        );
+        let deedar = COMPONENTS.iter().find(|c| c.name == "deedar").unwrap();
+        assert_eq!(
+            asset_of(deedar.asset, "0.6.1", "x86_64-unknown-linux-gnu"),
+            "deedar-v0.6.1-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        let vissue = COMPONENTS.iter().find(|c| c.name == "vissue").unwrap();
+        assert_eq!(
+            asset_of(vissue.asset, "0.23.1", "x86_64-unknown-linux-gnu"),
+            "vissue-v0.23.1-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        let consensus = COMPONENTS
+            .iter()
+            .find(|c| c.name == "ljos-consensus")
+            .unwrap();
+        assert_eq!(
+            asset_of(consensus.asset, "v0.9.0", "aarch64-apple-darwin"),
+            "consensus-v0.9.0-aarch64-apple-darwin.tar.gz"
         );
     }
 }

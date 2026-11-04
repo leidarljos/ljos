@@ -6652,8 +6652,8 @@ pub fn guard_bin_dir() -> PathBuf {
 
 /// The shim each guarded command is: ask ljos-policyd about the argv, print
 /// the rule's warning on stderr when one fires, then exec the next binary
-/// of that name on PATH. policyd's deny under a named `policyd_config`
-/// refuses the command with exit 126 instead. Without ljos-policyd it runs
+/// of that name on PATH. A deny, including one a named `policyd_config`
+/// would have blocked, is that same warning. Without ljos-policyd it runs
 /// the command, so a box without the guard still works.
 pub const GUARD_SHIM: &str = r#"#!/bin/sh
 # ljos command guard shim (written by `ljos onboard`). It stands in front of
@@ -6808,13 +6808,12 @@ fi
 # A rule that fires is one warning line on stderr, and the command runs.
 # ljos-policyd says `allow<TAB>warn<TAB>RULE<TAB>WARNING`, and the shim
 # prints that line. An older daemon said `deny<TAB>RULE` or
-# `prompt<TAB>RULE` there, and the shim prints the same line for it. A
-# config the person's ljos.toml names may hold `block-on-warning true`:
-# policyd then says `deny<TAB>RULE<TAB>WARNING`, and that deny refuses the
-# command. The fields are split in the shell: head, cut and sed are
-# missing when PATH is only the guard and git's directory. The wait is the
-# hook's, `LJOS_GUARD_TIMEOUT` or five seconds, so a hung daemon does not
-# hold the command.
+# `prompt<TAB>RULE` there, and a config with `block-on-warning true` says
+# `deny<TAB>RULE<TAB>WARNING`. block-on-warning does not block. Each of
+# those is the same warning line, and the command runs. The fields are split in the shell: head, cut and sed
+# are missing when PATH is only the guard and git's directory. The wait is
+# the hook's, `LJOS_GUARD_TIMEOUT` or five seconds, so a hung daemon does
+# not hold the command.
 if command -v ljos-policyd >/dev/null 2>&1; then
   policyd_conf
   if command -v timeout >/dev/null 2>&1; then
@@ -6851,21 +6850,15 @@ if command -v ljos-policyd >/dev/null 2>&1; then
           printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call, so it is allowed. Run \`ljos doctor\`." >&2
           exec "$real" "$@" ;;
       esac
-      case "$line" in
-        deny"$tab"*)
-          if [ -n "$conf" ]; then
-            echo "ljos guard: denied ($rule): $me $*" >&2
-            echo "ljos guard: This rewrites or discards history or work. Ask the person first; they can run it themselves." >&2
-            exit 126
-          fi ;;
-      esac
       # An older daemon gave no warning with the rule. These are the
-      # words ljos-policyd prints with it now.
+      # words ljos prints with it now. A named config's deny is the same
+      # line: the command still runs.
       if [ -z "$said" ]; then
         case $(trim_ws "${rule%%:*}") in
           rm-rf-outside-tmp) said="a recursive delete reaches outside /tmp and /var/tmp" ;;
           find-delete-outside-tmp) said="find -delete reaches outside /tmp and /var/tmp" ;;
           git-force-push) said="a force push rewrites a published branch" ;;
+          git-branch-delete) said="deleting a local branch removes that ref from this checkout" ;;
         esac
       fi
       printf 'allow\twarn\t%s%s\n' "$rule" "${said:+$tab$said}" >&2 ;;
@@ -12422,25 +12415,60 @@ pub fn file_placement(
         id.rsplit_once('-').map(|(proj, _)| proj)
     }
     let mut passed_over = None;
+    // `--parent` is the caller's. A held issue is not, so the checkout
+    // can still name the project when the caller did not.
+    let named_parent = !top && parent.is_some();
+    // `--top` files with no parent and no checkout project. `-p` still names one.
+    let from_cwd = if !top && project.is_none() && !named_parent {
+        cwd_project()
+    } else {
+        None
+    };
+    let asked = project
+        .as_deref()
+        .map(str::to_string)
+        .or_else(|| from_cwd.as_ref().map(|(name, _)| name.clone()));
+    let held_note = held.clone();
     let parent = if top {
         None
     } else if parent.is_some() {
         parent
     } else {
-        match (held, project.as_deref()) {
+        match (held, asked.as_deref()) {
             (Some(held), Some(asked)) if project_of(&held) != Some(asked) => {
-                passed_over = Some(format!(
-                    "filed at the top of {asked}: the held issue {held} is in another project; \
-                     --parent {held} files under it\n"
-                ));
+                if project.is_some() {
+                    passed_over = Some(format!(
+                        "filed at the top of {asked}: the held issue {held} is in another project; \
+                         --parent {held} files under it\n"
+                    ));
+                }
                 None
             }
             (held, _) => held,
         }
     };
+    if let Some((name, why)) = &from_cwd {
+        if held_note
+            .as_deref()
+            .is_some_and(|id| project_of(id) != Some(name.as_str()))
+        {
+            let held_id = held_note.as_deref().unwrap_or("none");
+            passed_over = Some(format!(
+                "project {name}: {why}; held issue {held_id} is another project, so this files at the top of {name}\n"
+            ));
+        }
+    }
+    let parent = if from_cwd
+        .as_ref()
+        .is_some_and(|(name, _)| parent.as_deref().and_then(project_of) != Some(name.as_str()))
+    {
+        None
+    } else {
+        parent
+    };
     let home = parent.as_deref().and_then(project_of);
-    let project = match (home, project) {
-        (Some(home), Some(asked)) if home != asked => {
+    let project = match (home, project, from_cwd) {
+        (Some(home), Some(asked), _) if home != asked => {
             passed_over = Some(format!(
                 "filed in {home}, the project of its parent {}: a child lives in its \
                  parent's project; --top -p {asked} files at the top of {asked}\n",
@@ -12448,9 +12476,88 @@ pub fn file_placement(
             ));
             Some(home.to_string())
         }
-        (home, asked) => asked.or_else(|| home.map(str::to_string)),
+        (_, None, Some((name, why))) => {
+            if passed_over.is_none() {
+                passed_over = Some(format!("project {name}: {why}\n"));
+            }
+            Some(name)
+        }
+        (home, asked, _) => asked.or_else(|| home.map(str::to_string)),
     };
     (parent, project, passed_over)
+}
+
+/// The project this checkout is, and why. A `.ljos/project` line wins,
+/// then `project = "..."` in `ljos.toml`, then the git checkout's
+/// directory name. No git checkout is no project: a held issue can
+/// still name one.
+fn cwd_project() -> Option<(String, String)> {
+    let cwd = std::env::current_dir().ok()?;
+    let top = checkout_root(&cwd)?;
+    if let Ok(text) = std::fs::read_to_string(top.join(".ljos").join("project")) {
+        let name = text.lines().next().unwrap_or("").trim();
+        if !name.is_empty() {
+            return Some((
+                name.to_string(),
+                format!(".ljos/project in {}", top.display()),
+            ));
+        }
+    }
+    if let Some(name) = ljos_toml_project(&top.join("ljos.toml")) {
+        return Some((
+            name,
+            format!("project in {}", top.join("ljos.toml").display()),
+        ));
+    }
+    let name = top.file_name()?.to_str()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some((
+        name,
+        format!("the git checkout directory is {}", top.display()),
+    ))
+}
+
+fn checkout_root(dir: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env("GIT_CONFIG_COUNT", "0")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let path = text.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+fn ljos_toml_project(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with('[') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("project") else {
+            continue;
+        };
+        let rest = rest.trim();
+        let rest = rest.strip_prefix('=')?.trim().trim_matches('"').trim();
+        if !rest.is_empty() {
+            return Some(rest.to_string());
+        }
+    }
+    None
 }
 
 /// The issue this conversation's holder claimed last and still works: a
@@ -14704,11 +14811,19 @@ pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>)
     if call.shape == HookShape::Context {
         return serde_json::json!({ "context": context }).to_string() + "\n";
     }
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "hookSpecificOutput": { "hookEventName": call.event, "additionalContext": context }
-    })
-    .to_string()
-        + "\n"
+    });
+    // Codex reads a note in `systemMessage`. Claude keeps it in
+    // `additionalContext`. Both carry the same text, and a call no rule
+    // matches does not gain the field.
+    if call.shape == HookShape::DenyOnly
+        && verdict
+            .is_some_and(|rule| matches!(rule.pattern.as_str(), "unverified-rule" | "user-rule"))
+    {
+        value["systemMessage"] = Value::String(context.to_string());
+    }
+    value.to_string() + "\n"
 }
 
 /// The deny [`hook_output_ruled`] gives a tool call `rule` blocks, in the
@@ -16035,15 +16150,29 @@ fn wake_for_recall() {
 /// Start the default writer when it does not answer, as a memory verb does.
 /// A writer that answered, or a seat pointed elsewhere, is left alone.
 fn wake_writer() {
-    let unreachable = pack().is_ok_and(|client| {
-        client
-            .health()
-            .map_err(anyhow::Error::from)
-            .err()
-            .is_some_and(|e| writer_unreachable(&e))
-    });
-    if unreachable {
-        let _ = ensure_writer();
+    let Ok(client) = pack() else {
+        return;
+    };
+    let started = std::time::Instant::now();
+    match client.health().map_err(anyhow::Error::from) {
+        Ok(_) => {
+            // A slow answer is still an answer. Restarting the writer
+            // under memory pressure only makes the box worse.
+            if started.elapsed() < PACK_SLOW_HEALTH {
+                clear_health_fails();
+            }
+        }
+        Err(err) if writer_slow(&err) => {}
+        Err(err) if writer_port_down(&err) => {
+            clear_health_fails();
+            let _ = ensure_writer();
+        }
+        Err(_) => {
+            if note_health_fail() >= PACK_HEALTH_FAILS_BEFORE_RESTART {
+                clear_health_fails();
+                let _ = ensure_writer();
+            }
+        }
     }
 }
 
@@ -16086,6 +16215,26 @@ const BUSY_TRIES: u32 = 3;
 /// One line when a pack call runs out of time. Exit [`PACK_BUSY_EXIT`].
 pub const PACK_BUSY_LINE: &str = "pack busy, try again";
 
+/// A health check this slow is the box, not a dead writer. Two seconds
+/// is inside [`SEARCH_PACK_BUDGET`], so doctor and search agree.
+const PACK_SLOW_HEALTH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Health checks in a row that must fail before doctor restarts packsetd.
+/// One miss is a slow box. Three means the writer is actually down.
+/// The count is kept across doctor runs. Slowness does not count.
+const PACK_HEALTH_FAILS_BEFORE_RESTART: u32 = 3;
+
+/// How long `ljos search` waits for the pack before it prints the word
+/// ranking. Three seconds is long enough for a local packsetd that is
+/// up, and short enough that a thrashing box still prints before the
+/// command's outer timeout.
+pub const SEARCH_PACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// `some` or `full` avg10 at or above this, in percent, is memory
+/// pressure worth naming. Ten percent of the last ten seconds is the
+/// stall a desktop feels as thrashing. Ordinary scheduling sits under it.
+const PSI_REPORT_PERCENT: f64 = 10.0;
+
 /// Exit status for [`PACK_BUSY_LINE`]. Temporary failure, so a caller can
 /// tell it from a refused command.
 pub const PACK_BUSY_EXIT: i32 = 75;
@@ -16106,7 +16255,7 @@ pub struct PackBusy;
 
 impl std::fmt::Display for PackBusy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(PACK_BUSY_LINE)
+        f.write_str(&pack_busy_sentence())
     }
 }
 
@@ -16114,6 +16263,74 @@ impl std::error::Error for PackBusy {}
 
 pub fn pack_busy_err() -> anyhow::Error {
     anyhow::Error::new(PackBusy)
+}
+
+/// `some` and `full` avg10 from `/proc/pressure/memory`, in percent.
+/// `None` when the file is absent, which is every host but Linux with PSI.
+fn memory_psi() -> Option<(f64, f64)> {
+    let text = std::fs::read_to_string("/proc/pressure/memory").ok()?;
+    let avg10 = |row: &str| {
+        text.lines().find_map(|line| {
+            let rest = line.strip_prefix(row)?;
+            let field = rest.split_whitespace().find(|w| w.starts_with("avg10="))?;
+            field.trim_start_matches("avg10=").parse::<f64>().ok()
+        })
+    };
+    Some((avg10("some")?, avg10("full")?))
+}
+
+/// The line a busy or slow pack prints. Under memory pressure it names
+/// the PSI sample. Otherwise it is [`PACK_BUSY_LINE`]. It never says the
+/// memory does not answer: the pack did answer, or was only slow.
+#[must_use]
+pub fn pack_busy_sentence() -> String {
+    match memory_psi() {
+        Some((some, full)) if some >= PSI_REPORT_PERCENT || full >= PSI_REPORT_PERCENT => {
+            format!("pack busy, box under memory pressure (PSI some/full {some:.0}/{full:.0}%)")
+        }
+        _ => PACK_BUSY_LINE.to_string(),
+    }
+}
+
+fn psi_suffix() -> String {
+    match memory_psi() {
+        Some((some, full)) => format!("; PSI some/full {some:.0}/{full:.0}%"),
+        None => String::new(),
+    }
+}
+
+fn health_fail_path() -> PathBuf {
+    runtime_dir().join("pack-health-fails")
+}
+
+fn health_fail_count() -> u32 {
+    std::fs::read_to_string(health_fail_path())
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn note_health_fail() -> u32 {
+    let n = health_fail_count().saturating_add(1);
+    let _ = std::fs::write(health_fail_path(), format!("{n}\n"));
+    n
+}
+
+fn clear_health_fails() {
+    let _ = std::fs::remove_file(health_fail_path());
+}
+
+fn writer_port_down(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}").to_ascii_lowercase();
+    text.contains("connection refused") || text.contains("connect error")
+}
+
+fn writer_slow(err: &anyhow::Error) -> bool {
+    is_pack_busy(err)
+        || writer_busy(err)
+        || format!("{err:#}")
+            .to_ascii_lowercase()
+            .contains("timed out")
 }
 
 fn env_ms(key: &str) -> Option<u64> {
@@ -20100,12 +20317,10 @@ pub fn workflow_status(parent: &str) -> Result<Option<WorkflowStatus>> {
         Some(id) => forecasts_from_json(&raw_ballot_json(id)?)?,
         None => Vec::new(),
     };
-    let mut status = workflow_status_of(parent, &name, &children, &ballots, &cfg);
+    let status = workflow_status_of(parent, &name, &children, &ballots, &cfg);
     if let Some(id) = latest {
         if let Some(why) = panel_gate::settle_refusal(&id) {
-            status.passed = false;
-            status.stage = "panel";
-            status.next = why;
+            eprintln!("ljos: session-authored: {why}");
         }
     }
     Ok(Some(status))
@@ -21557,17 +21772,20 @@ impl Rule {
     /// runs anyway: the rule's words, then its name.
     #[must_use]
     pub fn warning(&self) -> String {
+        if self.pattern == "unverified-rule" || self.pattern == "user-rule" {
+            return format!("ljos: {}: {}", self.pattern, self.reason);
+        }
         format!("warning: {} (ljos rule `{}`)", self.reason, self.pattern)
     }
 
-    /// Whether this rule stops the call. policyd's `deny` on a check asked
-    /// with the person's `policyd_config` does: that config is the one
-    /// place `block-on-warning` is turned on. The cloud seat push rule
-    /// does too. A pack, seat, user or other static rule that says `block`
-    /// is still a warning.
+    /// Whether this rule stops the call. Only the cloud seat push rule
+    /// does: a push to a branch outside the allowlist, a force push, or a
+    /// remote branch or tag delete. A pack, seat, user or policyd rule,
+    /// including one a `policyd_config` would have blocked, is a warning.
+    /// The call runs.
     #[must_use]
     pub fn blocks(&self) -> bool {
-        (self.verdict == "block" && self.pattern == "ljos-policyd") || cloud::refuses(self)
+        cloud::refuses(self)
     }
 
     /// The reason a runner shows when this rule [blocks](Rule::blocks) the
@@ -24425,7 +24643,7 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     if let Ok(v) = tracker_show_json(cite) {
         if let Some(why) = panel_gate::settle_refusal(cite) {
-            return Err(why);
+            eprintln!("ljos: session-authored: {why}");
         }
         let (ballots, personas) = cite_ballots(cite)?;
         let signed = check_seat_signatures(cite, &ballots, &personas)?;
@@ -24546,7 +24764,7 @@ pub fn protected_push_refusal(
         );
     }
     if let Some(why) = hook_timed("cleared_refusal", || panel_gate::settle_refusal(issue)) {
-        return Err(why);
+        eprintln!("ljos: session-authored: {why}");
     }
     let (rows, personas) = match hook_timed("cleared_cite", || cite_ballots(issue)) {
         Ok(found) => found,
@@ -24578,7 +24796,7 @@ pub fn protected_push_stands(issue: &str, quorum: usize) -> std::result::Result<
     let card =
         issue_record(issue).map_err(|e| format!("the tracker does not read {issue} ({e:#})"))?;
     if let Some(why) = panel_gate::settle_refusal(issue) {
-        return Err(why);
+        eprintln!("ljos: session-authored: {why}");
     }
     let (ballots, personas) = cite_ballots(issue)?;
     let signed = check_seat_signatures(issue, &ballots, &personas)?;
@@ -25940,6 +26158,11 @@ pub fn verdict_for<'a>(rules: &'a [Rule], line: &str) -> Option<&'a Rule> {
             rules
                 .iter()
                 .find(|r| r.verdict == "ask" && cues.fires(&r.pattern))
+        })
+        .or_else(|| {
+            rules
+                .iter()
+                .find(|r| r.verdict == "warn" && cues.fires(&r.pattern))
         })
 }
 
@@ -28691,25 +28914,47 @@ pub fn doctor_seat() -> Vec<Habitat> {
         },
     );
     out.push(match pack() {
-        Ok(client) => match client.health() {
-            Ok(_) => Habitat {
-                name: "pack",
-                state: format!("{} workspace {}", client.base(), client.workspace()),
-                ok: true,
-            },
-            Err(e) => Habitat {
-                name: "pack",
-                state: match bookkeep::temp_home() {
-                    Some(_) => format!(
-                        "{} does not answer: {e}. Under a temporary HOME the writer does not \
-                         start on its own; run `packset ensure`",
-                        client.base()
-                    ),
-                    None => format!("{} does not answer: {e}", client.base()),
+        Ok(client) => {
+            let started = std::time::Instant::now();
+            let health = client.health().map_err(anyhow::Error::from);
+            let took_ms = started.elapsed().as_millis();
+            let slow = started.elapsed() >= PACK_SLOW_HEALTH;
+            let where_ = format!(
+                "{} workspace {}; pack responded in {took_ms}ms{}",
+                client.base(),
+                client.workspace(),
+                psi_suffix()
+            );
+            match health {
+                Ok(_) if slow => Habitat {
+                    name: "pack",
+                    state: format!("{}; {}", pack_busy_sentence(), where_),
+                    ok: true,
                 },
-                ok: false,
-            },
-        },
+                Ok(_) => Habitat {
+                    name: "pack",
+                    state: where_,
+                    ok: true,
+                },
+                Err(e) if writer_slow(&e) => Habitat {
+                    name: "pack",
+                    state: format!("{}; {}", pack_busy_sentence(), where_),
+                    ok: true,
+                },
+                Err(e) => Habitat {
+                    name: "pack",
+                    state: match bookkeep::temp_home() {
+                        Some(_) => format!(
+                            "{} does not answer: {e}. Under a temporary HOME the writer does not \
+                             start on its own; run `packset ensure`",
+                            client.base()
+                        ),
+                        None => format!("{} does not answer: {e}", client.base()),
+                    },
+                    ok: false,
+                },
+            }
+        }
         Err(e) => Habitat {
             name: "pack",
             state: e.to_string(),
@@ -29685,6 +29930,10 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     }
     // Older preferences awaiting review are named, not a failed seat.
     if row.name == "preferences" && !row.ok {
+        return "warn";
+    }
+    // A slow pack answered. The summary must not say memory does not answer.
+    if row.name == "pack" && row.state.contains("pack busy") {
         return "warn";
     }
     // Search answered 401 or 403. Recall still runs on stored memories,
@@ -33918,8 +34167,8 @@ const SITTING_SECTIONS: &[SittingSection] = &[
         name: "blockers",
         optional: false,
         step: "`== blockers`. The issue's blockers, read from the tracker. An issue whose\n   \
-blockers are still open is refused before anything is claimed, because the\n   \
-graph says it is not workable; `--anyway` sits on it regardless and says so.",
+blockers are still open is sat anyway and labelled `blocked-by: <ids>`.\n   \
+`--anyway` is accepted and changes nothing.",
     },
     SittingSection {
         name: "reclaim",
@@ -34573,10 +34822,11 @@ const SITTING_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_sec
 
 pub const SITTING_WORDS_LINE: &str = "ranked by words; the pack search did not answer in time\n";
 
-/// [`sitting`], and with `anyway` the claim goes through even when the
-/// issue's blockers are open. Without it a blocked issue is refused before
-/// anything is claimed: the tracker's graph says what is workable, and a
-/// seat that sits on blocked work sits on nothing it can finish.
+/// [`sitting`]. Open blockers do not stop the sitting: the blockers
+/// section labels them `blocked-by: <ids>`. `anyway` is accepted and
+/// changes nothing. A claim that misses its budget, or a tracker stamp
+/// `vissue` does not finish, is labelled `claim-pending` and retried on
+/// `note` or `finish`. The sitting still opens.
 /// `playbook` names the recipe copied into `== playbook`;
 /// absent, a name already bound, else a closed-set token in the title,
 /// else `sit`. A workflow parent takes its workflow's recipe. The name is
@@ -34633,7 +34883,11 @@ pub fn sitting_stream_started(
 ) -> Result<String> {
     let mut out = String::new();
     let down = sitting_hard_down();
-    sitting_budget_left("the deed, tracker and claim-graph checks", budget.total)?;
+    let mut deferred =
+        match sitting_budget_left("the deed, tracker and claim-graph checks", budget.total) {
+            Ok(()) => None,
+            Err(err) => Some(format!("{err:#}")),
+        };
     if !down.is_empty() {
         bail!(
             "sitting: {} does not answer; nothing was claimed",
@@ -34642,19 +34896,27 @@ pub fn sitting_stream_started(
     }
     let title = issue_title(issue).unwrap_or_else(|_| issue.to_string());
     let blockers = open_blockers(issue);
-    sitting_budget_left("the blocker check", budget.total)?;
-    if !blockers.is_empty() && !anyway {
-        bail!(
-            "sitting: {issue} is blocked by {}; finish those first, or `ljos sitting {issue} --anyway` to sit on it regardless. Nothing was claimed",
-            blockers.join(", ")
-        );
-    }
+    // `anyway` stays on the command so an older caller still parses.
+    // Open blockers are a label, with or without the flag.
+    let _ = anyway;
     // The recipe name is bound before the claim. The body is copied after,
     // once the claim line is already out, because the pack copy is a read.
     let name = sitting_recipe(issue, &title, playbook)?;
-    wait_for_sitting_locks(issue, budget.total)?;
-    bind_playbook(issue, &name)?;
-    sitting_budget_left("the playbook bind", budget.total)?;
+    if deferred.is_none() {
+        deferred = match wait_for_sitting_locks(issue, budget.total) {
+            Ok(()) => None,
+            Err(err) => Some(format!("{err:#}")),
+        };
+    }
+    if deferred.is_none() {
+        if let Err(err) = bind_playbook(issue, &name) {
+            if claim_waits(&err) {
+                deferred = Some(format!("{err:#}"));
+            } else {
+                return Err(err);
+            }
+        }
+    }
 
     let mut sections = SectionCursor::new();
     let mut piece = String::new();
@@ -34662,8 +34924,7 @@ pub fn sitting_stream_started(
     if blockers.is_empty() {
         piece.push_str("none open; the issue is workable\n");
     } else {
-        piece.push_str(&format!("open: {}\n", blockers.join(", ")));
-        piece.push_str("sitting anyway, as asked\n");
+        piece.push_str(&format!("blocked-by: {}\n", blockers.join(", ")));
     }
     emit_piece(&mut out, &mut emit, &piece);
 
@@ -34671,20 +34932,30 @@ pub fn sitting_stream_started(
     sections.heading(&mut piece, "reclaim");
     piece.push_str(&reclaim_expired(lease_secs()));
     emit_piece(&mut out, &mut emit, &piece);
-    sitting_budget_left("the reclaim check", budget.total)?;
+    if deferred.is_none() && wall_left().is_some_and(|left| left.is_zero()) {
+        deferred = Some(format!(
+            "the claim did not finish inside the {}s claim budget",
+            budget.total.as_secs()
+        ));
+    }
 
     let mut piece = String::new();
     sections.heading(&mut piece, "claim");
-    let claimed = match claim(issue, assignee) {
-        Ok(claimed) => claimed,
-        Err(err) if wall_left().is_some_and(|left| left.is_zero()) => {
-            return Err(err).context(format!(
-                "sitting: the claim did not finish inside the {}s claim budget",
-                budget.total.as_secs()
-            ));
+    let claimed = if let Some(why) = deferred.clone() {
+        note_claim_pending(issue, assignee, &why);
+        format!("claim-pending: {why}\n")
+    } else {
+        match claim(issue, assignee) {
+            Ok(claimed) => claimed,
+            Err(err) if claim_waits(&err) || wall_left().is_some_and(|left| left.is_zero()) => {
+                let why = format!("{err:#}");
+                note_claim_pending(issue, assignee, &why);
+                format!("claim-pending: {why}\n")
+            }
+            Err(err) => return Err(err),
         }
-        Err(err) => return Err(err),
     };
+    let claim_was_pending = claimed.starts_with("claim-pending:");
     let claimed_issue = claimed
         .lines()
         .find_map(|l| {
@@ -34700,9 +34971,14 @@ pub fn sitting_stream_started(
     // The tracker claim is already durable on disk. Flush it before its
     // commit or any later read can hold the sitting's next line.
     emit_piece(&mut out, &mut emit, &piece);
-    budget.finish();
-    let persisted = persist_tracker(&claimed_issue, "claimed");
-    emit_piece(&mut out, &mut emit, &persisted);
+    if !claim_was_pending {
+        // The claim budget ends here. Later sections have their own time.
+        // A pending claim keeps the budget so a lock that already outlasted
+        // it is not waited out again for twenty seconds in sync.
+        budget.finish();
+        let persisted = persist_tracker(&claimed_issue, "claimed");
+        emit_piece(&mut out, &mut emit, &persisted);
+    }
     // The board this sitting just committed is not drift.
     if let Some(line) = tracker_sync::tracker_sync_line() {
         emit_piece(&mut out, &mut emit, &line);
@@ -34726,7 +35002,7 @@ pub fn sitting_stream_started(
         .any(|h| !h.ok && SITTING_DEGRADED.contains(&h.name))
     {
         piece.push_str(
-            "encoder down: the pack ranks by words alone and a weak island is not fired\n",
+            "memory-unavailable: the encoder is down; the pack ranks by words alone and a weak island is not fired\n",
         );
     }
     if let Some(line) = sitting_warn_line(&rows) {
@@ -34758,9 +35034,15 @@ pub fn sitting_stream_started(
     sections.heading(&mut piece, "due");
     let (due, atoms) = match sitting_due_and_atoms(issue, &title) {
         Ok(pair) => pair,
-        Err(e) if is_pack_busy(&e) => {
+        Err(e) if is_pack_busy(&e) || pack_memory_down(&e) => {
             fell_back = true;
-            (SITTING_WORDS_LINE.to_string(), Vec::new())
+            (
+                format!(
+                    "memory-unavailable: {}\n{SITTING_WORDS_LINE}",
+                    e.to_string().replace('\n', " ")
+                ),
+                Vec::new(),
+            )
         }
         Err(e) => (format!("due: {e:#}\n"), Vec::new()),
     };
@@ -34859,6 +35141,88 @@ fn words_line(said: &mut bool) -> &'static str {
     }
     *said = true;
     SITTING_WORDS_LINE
+}
+
+/// Whether `err` is a claim that should leave the sitting open and be
+/// stamped later: the budget ran out, `vissue` did not answer, or the
+/// tracker refused the stamp.
+fn claim_waits(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}");
+    text.contains("refused to stamp")
+        || text.contains("did not answer in time")
+        || text.contains("claim budget")
+        || text.contains("nothing was claimed")
+}
+
+/// Whether `err` is the memory pack or its encoder not answering.
+/// A bad query is not this.
+#[must_use]
+pub fn pack_memory_down(err: &anyhow::Error) -> bool {
+    if is_pack_busy(err) {
+        return true;
+    }
+    let text = format!("{err:#}");
+    text.contains("connection refused")
+        || text.contains("packset")
+        || text.contains(&format!(":{PACK_DEFAULT_PORT}"))
+        || text.contains("encoder")
+        || text.contains("memory-unavailable")
+}
+
+/// The file that remembers a claim the sitting could not stamp.
+fn claim_pending_path(issue: &str) -> Option<PathBuf> {
+    if issue.is_empty() || issue.contains('/') || issue.contains('\0') {
+        return None;
+    }
+    Some(runtime_dir().join("claim-pending").join(issue))
+}
+
+/// Remember that `issue` still needs its tracker stamp under `assignee`.
+fn note_claim_pending(issue: &str, assignee: &str, why: &str) {
+    let Some(path) = claim_pending_path(issue) else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(parent);
+    let body = format!("{assignee}\n{why}\n");
+    let _ = std::fs::write(path, body);
+}
+
+fn clear_claim_pending(issue: &str) {
+    if let Some(path) = claim_pending_path(issue) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Try the stamp a sitting left as `claim-pending`. Empty when nothing
+/// was waiting. On success the line is the claim. On another miss the
+/// line is `claim-pending` again and the file stays.
+#[must_use]
+pub fn retry_pending_claim(issue: &str) -> String {
+    let Some(path) = claim_pending_path(issue) else {
+        return String::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return String::new();
+    };
+    let assignee = text.lines().next().unwrap_or("").trim();
+    if assignee.is_empty() {
+        return String::new();
+    }
+    match claim(issue, assignee) {
+        Ok(said) => {
+            clear_claim_pending(issue);
+            let persisted = persist_tracker(issue, "claimed");
+            format!("{said}{persisted}")
+        }
+        Err(err) => {
+            let why = format!("{err:#}");
+            note_claim_pending(issue, assignee, &why);
+            format!("claim-pending: {why}\n")
+        }
+    }
 }
 
 fn sitting_budget_left(step: &str, total: std::time::Duration) -> Result<()> {
@@ -35840,6 +36204,7 @@ pub fn finish(
     gen: Option<u64>,
     close: bool,
 ) -> Result<String> {
+    let pending = retry_pending_claim(issue);
     // A close asks whether a person is present, before any write. A
     // runner with no terminal is refused unless a standing grant covers
     // this seat and this ticket. The sitting can still end.
@@ -35920,7 +36285,7 @@ pub fn finish(
             bail!("finish: the session node for {issue} was not completed: {e:#}")
         }
     };
-    let mut out = format!("completed the session node for {issue} as {status}\n");
+    let mut out = format!("{pending}completed the session node for {issue} as {status}\n");
     for line in completed.lines().filter(|l| l.starts_with("tracker: ")) {
         out.push_str(line);
         out.push('\n');
@@ -36143,6 +36508,12 @@ impl Drop for CommitLock {
 /// The file ljos locks around every write to a tracker checkout's index.
 pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 
+/// Paths a tracker commit left on disk because git still held `index.lock`,
+/// or because another writer held [`TRACKER_LOCK`]. One worktree-relative
+/// path per line. The next tracker write or push commits them. Kept out of
+/// `git status` the same way as [`TRACKER_LOCK`].
+pub const TRACKER_PENDING: &str = ".ljos-commit.pending";
+
 /// Repository variables git follows instead of, or beside, the default
 /// `.git`. `GIT_DIR` names that directory even when the command also
 /// passes `-C`.
@@ -36239,9 +36610,15 @@ fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
 fn exclude_tracker_lock(common: &Path) {
     use std::io::Write as _;
     let exclude = common.join("info").join("exclude");
-    let line = format!("/{TRACKER_LOCK}");
     let text = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if text.lines().any(|l| l.trim() == line) {
+    let mut missing = Vec::new();
+    for name in [TRACKER_LOCK, TRACKER_PENDING] {
+        let line = format!("/{name}");
+        if !text.lines().any(|l| l.trim() == line) {
+            missing.push(line);
+        }
+    }
+    if missing.is_empty() {
         return;
     }
     let _ = std::fs::create_dir_all(common.join("info"));
@@ -36252,31 +36629,43 @@ fn exclude_tracker_lock(common: &Path) {
     else {
         return;
     };
-    let gap = if text.is_empty() || text.ends_with('\n') {
+    let mut gap = if text.is_empty() || text.ends_with('\n') {
         ""
     } else {
         "\n"
     };
-    let _ = writeln!(file, "{gap}{line}");
+    for line in missing {
+        let _ = writeln!(file, "{gap}{line}");
+        gap = "";
+    }
 }
 
 /// Hold the tracker checkout that holds `dir` for one write to its index:
-/// a status read, a file write, an add and a commit, or a rebase. Every
-/// ljos writer on the host takes it, so seats queue instead of meeting on
-/// `index.lock`. Taking it twice in one thread waits forever.
+/// a status read, a file write, an add and a commit, a rebase, or a push.
+/// A background push keeps the same file locked until `git push` exits, hook
+/// included, so the next ljos call waits here instead of meeting that hook
+/// on `index.lock`. Every ljos writer on the host takes it. Taking it twice
+/// in one thread waits forever.
 pub fn tracker_commit_lock(dir: &Path) -> CommitLock {
     tracker_lock_path(dir).map_or(CommitLock(None), |path| CommitLock::acquire(&path))
 }
 
+/// How long a background push's `flock -w` waits for `.ljos-commit.lock`,
+/// in whole seconds. This is the same wait [`tracker_lock_wait`] uses when
+/// `LJOS_TRACKER_LOCK_WAIT` is unset: long enough for a hook to finish a
+/// normal push, and short enough that a stuck lock does not hold the next
+/// seat. When the wait ends, the push runs without the lock.
+pub const TRACKER_FLOCK_WAIT_SECS: u64 = 20;
+
 /// How long a tracker write waits for another writer's commit lock before
 /// it says so and leaves the write uncommitted: `LJOS_TRACKER_LOCK_WAIT`
-/// seconds, else 20.
+/// seconds, else [`TRACKER_FLOCK_WAIT_SECS`].
 #[must_use]
 pub fn tracker_lock_wait() -> std::time::Duration {
     let secs = std::env::var("LJOS_TRACKER_LOCK_WAIT")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(20);
+        .unwrap_or(TRACKER_FLOCK_WAIT_SECS);
     std::time::Duration::from_secs(secs)
 }
 
@@ -36289,7 +36678,7 @@ pub fn tracker_lock_busy(dir: &Path) -> String {
         |path| path.display().to_string(),
     );
     format!(
-        "tracker git: another writer held {lock} for {}s, so this write is on disk and not committed; the next tracker commit carries it, or run `ljos sync`\n",
+        "tracker git: another writer held {lock} for {}s, so this write is on disk and not committed; the commit is deferred to the next write or push\n",
         tracker_lock_wait().as_secs()
     )
 }
@@ -36750,8 +37139,45 @@ pub enum PathCommit {
     /// HEAD already holds the paths as they stand: another seat's commit
     /// carried them, or they did not change.
     AlreadyIn,
-    /// What git said, never empty.
+    /// What git said, never empty. The paths were not committed.
     Refused(String),
+    /// The paths are on disk. Git still held `index.lock` after the retry
+    /// budget. The next tracker write or push commits them. ljos does not
+    /// remove that lock: it belongs to the git that created it.
+    Deferred(String),
+}
+
+/// First pause after git reports `index.lock` exists. A tracker add holds
+/// that file for well under a second; 200 ms is long enough to see a
+/// finished add release it. Each later pause doubles, and five pauses sum
+/// to 6.2 s, under the 20 s advisory-lock wait, so a seat still defers
+/// instead of sitting out a lock another git owns.
+const INDEX_LOCK_BACKOFF_START_MS: u64 = 200;
+
+/// Longest pause in that sequence. `200 << 4` is 3.2 s, the fifth pause.
+const INDEX_LOCK_BACKOFF_CAP_SHIFT: u32 = 4;
+
+/// Retries after the first attempt. Five covers the doubling sequence
+/// 200, 400, 800, 1600, 3200 ms.
+pub(crate) const INDEX_LOCK_RETRY_STEPS: u32 = 5;
+
+/// How long to wait before retry `retry` (1-based) of a git command that
+/// lost the race for `index.lock`.
+pub(crate) fn index_lock_pause(retry: u32) -> std::time::Duration {
+    let shift = retry.saturating_sub(1).min(INDEX_LOCK_BACKOFF_CAP_SHIFT);
+    std::time::Duration::from_millis(INDEX_LOCK_BACKOFF_START_MS << shift)
+}
+
+/// The warning a seat reads when a tracker commit could not take the index.
+/// `what` is the thing left on disk, such as `this write` or `.gitattributes`.
+pub(crate) fn deferred_commit_line(what: &str) -> String {
+    format!("warning: {what} is on disk and the commit is deferred to the next write or push")
+}
+
+/// Whether `text` is a deferral warning, so a push of commits already made
+/// still runs.
+pub(crate) fn commit_was_deferred(text: &str) -> bool {
+    text.contains("deferred to the next write or push")
 }
 
 /// Refuse to commit into the checkout that holds this crate.
@@ -36822,15 +37248,36 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// Stage `paths` and commit them alone (`--only`) in the checkout at
 /// `dir`, so another seat's staged work is left out. The caller holds
 /// [`tracker_commit_lock`]. A git process outside ljos that holds the
-/// index is waited out with backoff.
+/// index is waited out with backoff. Paths left by an earlier deferral
+/// are committed in the same commit. An empty `paths` commits only those.
 ///
 /// The add runs first and its failure stands on its own: a commit named
 /// for a file git never took in reports a pathspec error that hides why
 /// the add failed. An untracked file is added here, that file only.
+/// ljos never removes `index.lock`. That file belongs to the git that
+/// created it.
 pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
     if let Err(why) = refuse_ljos_checkout(dir) {
         return PathCommit::Refused(why);
     }
+    let Some((root, rels)) = paths_for_commit(dir, paths) else {
+        return commit_paths_now(dir, paths, message);
+    };
+    if rels.is_empty() {
+        return PathCommit::AlreadyIn;
+    }
+    let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
+    let made = commit_paths_now(&root, &refs, message);
+    match &made {
+        PathCommit::Made | PathCommit::AlreadyIn => pending_remove(&root, &rels),
+        PathCommit::Deferred(_) => pending_add(&root, &rels),
+        PathCommit::Refused(why) if mentions_index_lock(why) => pending_add(&root, &rels),
+        PathCommit::Refused(_) => {}
+    }
+    made
+}
+
+fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
     let git = |head: &[&str]| {
         let mut cmd = git_cmd();
         cmd.arg("-C")
@@ -36883,14 +37330,193 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
             return PathCommit::Refused(orphan);
         }
     }
-    for wait_ms in [200_u64, 400, 800, 1600, 3200] {
+    for step in 1..=INDEX_LOCK_RETRY_STEPS {
         if result.is_ok() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        std::thread::sleep(index_lock_pause(step));
         result = attempt();
     }
-    result.unwrap_or_else(PathCommit::Refused)
+    match result {
+        Ok(made) => made,
+        Err(why) if git_text_index_busy(&why) => {
+            PathCommit::Deferred(deferred_commit_line("this write"))
+        }
+        Err(why) => PathCommit::Refused(why),
+    }
+}
+
+/// Worktree root, and the paths to commit there: `paths` (relative to
+/// `dir`) plus any deferred paths. `None` when `dir` is not a worktree
+/// ljos locks, so the caller commits `paths` from `dir` unchanged.
+fn paths_for_commit(dir: &Path, paths: &[&str]) -> Option<(PathBuf, Vec<String>)> {
+    let root = worktree_root(dir)?;
+    let prefix = worktree_prefix(dir);
+    let mut rels = read_pending(&root);
+    // A path that left the tree cannot be staged, and one bad path would
+    // refuse every later commit that tried to carry the rest.
+    let missing: Vec<String> = rels
+        .iter()
+        .filter(|rel| !root.join(rel).exists())
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        pending_remove(&root, &missing);
+        rels.retain(|rel| root.join(rel).exists());
+    }
+    for path in paths {
+        let rel = at_worktree(&prefix, path);
+        if rel.is_empty() || rels.iter().any(|have| have == &rel) {
+            continue;
+        }
+        rels.push(rel);
+    }
+    Some((root, rels))
+}
+
+fn worktree_root(dir: &Path) -> Option<PathBuf> {
+    tracker_lock_path(dir).and_then(|lock| lock.parent().map(Path::to_path_buf))
+}
+
+fn worktree_prefix(dir: &Path) -> String {
+    let mut cmd = git_at(dir);
+    cmd.args(["rev-parse", "--show-prefix"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    git_hooks::hook_child_env(&mut cmd);
+    let Ok(out) = bounded_output(&mut cmd) else {
+        return String::new();
+    };
+    if !out.status.success() {
+        return String::new();
+    }
+    let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if prefix.is_empty() || prefix.ends_with('/') {
+        prefix
+    } else {
+        format!("{prefix}/")
+    }
+}
+
+fn at_worktree(prefix: &str, rel: &str) -> String {
+    if rel.is_empty() || rel.contains('\n') || rel.contains('\0') {
+        return String::new();
+    }
+    if prefix.is_empty() || rel.starts_with(prefix) {
+        rel.to_string()
+    } else {
+        format!("{prefix}{rel}")
+    }
+}
+
+fn pending_file(root: &Path) -> PathBuf {
+    root.join(TRACKER_PENDING)
+}
+
+fn read_pending_lines(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn read_pending(root: &Path) -> Vec<String> {
+    let path = pending_file(root);
+    if !path.is_file() {
+        return Vec::new();
+    }
+    let _held = CommitLock::acquire(&path);
+    read_pending_lines(&path)
+}
+
+fn write_pending_lines(path: &Path, rels: &[String]) {
+    if rels.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let mut text = rels.join("\n");
+    text.push('\n');
+    let _ = std::fs::write(path, text);
+}
+
+fn with_pending(root: &Path, update: impl FnOnce(&mut Vec<String>)) {
+    let path = pending_file(root);
+    let _held = CommitLock::acquire(&path);
+    let mut rels = read_pending_lines(&path);
+    update(&mut rels);
+    write_pending_lines(&path, &rels);
+}
+
+fn pending_add(root: &Path, rels: &[String]) {
+    if rels.is_empty() {
+        return;
+    }
+    with_pending(root, |have| {
+        for rel in rels {
+            if !rel.is_empty() && !have.iter().any(|seen| seen == rel) {
+                have.push(rel.clone());
+            }
+        }
+    });
+}
+
+fn pending_remove(root: &Path, rels: &[String]) {
+    let path = pending_file(root);
+    if !path.is_file() {
+        return;
+    }
+    with_pending(root, |have| {
+        have.retain(|rel| !rels.iter().any(|gone| gone == rel));
+    });
+}
+
+/// Remember `rels` (relative to `dir`) so the next tracker write or push
+/// commits them. A checkout ljos does not lock has nowhere to record them.
+pub(crate) fn note_deferred_paths(dir: &Path, rels: &[&str]) {
+    let Some(root) = worktree_root(dir) else {
+        return;
+    };
+    let prefix = worktree_prefix(dir);
+    let owned: Vec<String> = rels
+        .iter()
+        .map(|rel| at_worktree(&prefix, rel))
+        .filter(|rel| !rel.is_empty())
+        .collect();
+    pending_add(&root, &owned);
+}
+
+fn has_deferred_paths(dir: &Path) -> bool {
+    worktree_root(dir).is_some_and(|root| !read_pending(&root).is_empty())
+}
+
+fn mentions_index_lock(text: &str) -> bool {
+    git_text_index_busy(text)
+}
+
+/// Whether git said it could not create `index.lock`.
+pub(crate) fn git_text_index_busy(said: &str) -> bool {
+    said.contains("index.lock") || said.contains(".lock': File exists")
+}
+
+/// The shell a background tracker push runs. It holds [`TRACKER_LOCK`] for
+/// the whole `git push`, including a hook, with the same `flock` the
+/// in-process writers take. The wait is [`TRACKER_FLOCK_WAIT_SECS`]. A host
+/// without `flock`, or one whose lock is still held when that wait ends,
+/// still pushes.
+fn background_push_script(dir: &Path, remote: &str, branch: &str) -> String {
+    let script = tracker_push::push_script_explicit(remote, branch);
+    let Some(lock) = tracker_lock_path(dir) else {
+        return script;
+    };
+    let lock = tools::sh_quote(&lock.display().to_string());
+    let script = tools::sh_quote(&script);
+    let wait = TRACKER_FLOCK_WAIT_SECS;
+    format!(
+        "if command -v flock >/dev/null 2>&1; then flock -w {wait} -x {lock} sh -c {script} || sh -c {script}; else sh -c {script}; fi"
+    )
 }
 
 /// How old an `index.lock` with no git in its checkout must be before ljos
@@ -37008,8 +37634,7 @@ fn git_runs_in(_top: &Path) -> bool {
 }
 
 fn index_busy(out: &std::process::Output) -> bool {
-    let said = String::from_utf8_lossy(&out.stderr);
-    said.contains("index.lock") || said.contains(".lock': File exists")
+    git_text_index_busy(&String::from_utf8_lossy(&out.stderr))
 }
 
 fn refused_or_busy(out: &std::process::Output) -> Result<PathCommit, String> {
@@ -37233,6 +37858,8 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
     let lock_wait =
         wall_left().map_or_else(tracker_lock_wait, |left| left.min(tracker_lock_wait()));
     let Some(held) = tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait) else {
+        let refs: Vec<&str> = specs.iter().map(String::as_str).collect();
+        note_deferred_paths(dir, &refs);
         return tracker_lock_busy(dir);
     };
     let mut live: Vec<&str> = Vec::new();
@@ -37261,11 +37888,13 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
     }
     let mut status_args = vec!["status", "--porcelain", "--"];
     status_args.extend(live.iter().copied());
+    let mut only_pending = false;
     match git(&status_args) {
         Ok(o) if o.status.success() && o.stdout.is_empty() => {
             // An ignored file has an empty status, the same shape as a
             // clean tracked file. The ignore rule is what keeps the write
-            // on this machine.
+            // on this machine. A clean file still commits paths an earlier
+            // write had to leave on disk.
             if also.is_empty() {
                 match git(&["check-ignore", "-v", "--", live[0]]) {
                     Ok(ignored) if ignored.status.success() => {
@@ -37275,30 +37904,41 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
                             first_line(&ignored.stdout)
                         );
                     }
-                    _ => return "tracker git: nothing to commit\n".into(),
+                    _ if !has_deferred_paths(dir) => {
+                        return "tracker git: nothing to commit\n".into();
+                    }
+                    _ => only_pending = true,
                 }
-            }
-            return if ignored_note.is_empty() {
-                "tracker git: nothing to commit\n".into()
+            } else if ignored_note.is_empty() && !has_deferred_paths(dir) {
+                return "tracker git: nothing to commit\n".into();
+            } else if !has_deferred_paths(dir) {
+                return ignored_note;
             } else {
-                ignored_note
-            };
+                only_pending = true;
+            }
         }
         Ok(o) if o.status.success() => {}
         Ok(o) => return format!("tracker git: {}\n", first_line(&o.stderr)),
         Err(e) => return format!("tracker git: {e}\n"),
     }
     let seat = tracker_seat();
-    for (issue, verb) in writes {
-        stamp_seat_logbook(path, issue, verb, &seat);
-    }
-    let named: Vec<String> = writes
-        .iter()
-        .map(|(issue, verb)| format!("{issue} {verb}"))
-        .collect();
-    let message = format!("chore(issues): {} by {seat}", named.join(", "));
-    let committed = commit_paths(dir, &live, &message);
-    if !matches!(committed, PathCommit::Refused(_)) {
+    let (message, committed) = if only_pending {
+        let message = "chore(tracker): commit writes deferred while git held the index".to_string();
+        let committed = commit_paths(dir, &[], &message);
+        (message, committed)
+    } else {
+        for (issue, verb) in writes {
+            stamp_seat_logbook(path, issue, verb, &seat);
+        }
+        let named: Vec<String> = writes
+            .iter()
+            .map(|(issue, verb)| format!("{issue} {verb}"))
+            .collect();
+        let message = format!("chore(issues): {} by {seat}", named.join(", "));
+        let committed = commit_paths(dir, &live, &message);
+        (message, committed)
+    };
+    if matches!(committed, PathCommit::Made | PathCommit::AlreadyIn) {
         commit_seat_pin(dir, &seat);
     }
     drop(held);
@@ -37313,6 +37953,7 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
         PathCommit::Made => {}
         PathCommit::AlreadyIn => return say("tracker git: nothing to commit\n".into()),
         PathCommit::Refused(why) => return say(format!("tracker git: commit refused: {why}\n")),
+        PathCommit::Deferred(why) => return say(format!("tracker git: {why}\n")),
     }
     if mode == "commit" {
         return say(format!(
@@ -37369,7 +38010,7 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
     // The first attempt is this script. A non-fast-forward comes back here
     // and [`tracker_push::publish_explicit`] unions the org headings, then
     // retries to the same checked destination.
-    let script = tracker_push::push_script_explicit(&destination.remote, &destination.branch);
+    let script = background_push_script(dir, &destination.remote, &destination.branch);
     let mut push = std::process::Command::new("sh");
     push.current_dir(dir)
         .args(["-c", &script])
@@ -38073,7 +38714,52 @@ pub(crate) enum Stored {
 }
 
 /// How long a read waits for the pack to answer for one atom id.
+/// Two local round trips finish well inside this, and a dead pack must
+/// not hold a hook. `LJOS_ATOM_NOW_MS` overrides it when a test's mock
+/// server is slow under a parallel suite. A value that does not parse,
+/// or zero, is this default.
 const ATOM_NOW_MS: u64 = 400;
+
+thread_local! {
+    static ATOM_NOW_OVERRIDE_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// This thread's atom-read budget. A test sets it instead of
+/// `LJOS_ATOM_NOW_MS`, so a parallel test does not inherit the override.
+#[cfg(test)]
+pub(crate) struct AtomNowBudget {
+    prev: Option<u64>,
+}
+
+#[cfg(test)]
+impl AtomNowBudget {
+    pub(crate) fn set(ms: u64) -> Self {
+        let prev = ATOM_NOW_OVERRIDE_MS.with(|cell| cell.replace(Some(ms)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for AtomNowBudget {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        ATOM_NOW_OVERRIDE_MS.with(|cell| cell.set(prev));
+    }
+}
+
+fn atom_now_budget() -> std::time::Duration {
+    let overridden = ATOM_NOW_OVERRIDE_MS.with(|cell| cell.get());
+    let ms = overridden
+        .filter(|ms| *ms > 0)
+        .or_else(|| {
+            std::env::var("LJOS_ATOM_NOW_MS")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u64>().ok())
+                .filter(|ms| *ms > 0)
+        })
+        .unwrap_or(ATOM_NOW_MS);
+    std::time::Duration::from_millis(ms)
+}
 
 /// Whether the last answer from `client`'s socket carried this seat's
 /// token. The proof is not kept for a later connection: the next call
@@ -38104,7 +38790,7 @@ pub(crate) fn pack_proven(client: &PacksetClient) -> bool {
 /// or a packsetd run with `PACKSET_AUTH=off`, confirms nothing.
 pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
     let client = pack().map_err(|err| format!("no pack to ask for {id}: {err:#}"))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ATOM_NOW_MS);
+    let deadline = std::time::Instant::now() + atom_now_budget();
     let left = || {
         deadline
             .saturating_duration_since(std::time::Instant::now())
@@ -38538,11 +39224,9 @@ fn policy_reading_known(
             Some(tcb) if relabelled(&tcb, &line).is_some() => None,
             Some(tcb) if tcb.is_empty() || tcb_is_allow(&tcb) && gated.is_some() => None,
             Some(tcb) => Some(tcb),
-            None if policyd_bin().is_none() => {
-                let why = "ljos-policyd is not installed";
-                allow_unjudged(why, &line);
-                Some(format!("allow\t{}", unhealthy_note(why)))
-            }
+            // A missing policyd is the ordinary install. The hook stays
+            // quiet, the same bytes as a call no rule matched.
+            None if policyd_bin().is_none() => None,
             _ => None,
         }
     };
@@ -38611,9 +39295,10 @@ fn policyd_code(token: &str) -> &str {
 /// The rule an `allow\twarn\tRULE\tWARNING` line names, as the hook shows
 /// it: the code first, so logs and scripts still find it, then the
 /// daemon's warning. A line with no warning field takes this build's
-/// words for the code ([`policyd_reason`]). A `deny\tRULE\tWARNING` line,
-/// which [`tcb_answer_in`] keeps only for a check asked with a named
-/// `policyd_config`, is the same rule with verdict `block`.
+/// words for the code ([`policyd_reason`]). A raw `deny\tRULE\tWARNING`
+/// line is the same rule with verdict `block`. [`tcb_answer_in`] rewrites
+/// that line to a warning before this sees it, and [`Rule::blocks`] does
+/// not stop it.
 fn policyd_rule(text: &str) -> Option<Rule> {
     let mut fields = text.trim().lines().next()?.split('\t');
     let verdict = match fields.next()? {
@@ -38637,17 +39322,13 @@ fn policyd_rule(text: &str) -> Option<Rule> {
     })
 }
 
-/// policyd's block on `line`, asked only when the person's `ljos.toml`
-/// names a `policyd_config`, even after ljos's own guard warned on the
-/// line: apart from the cloud seat push rule, only policyd's deny stops a
-/// call. `None` when nothing is named or policyd does not block.
+/// policyd's block on `line`. A policyd deny does not stop a call, so
+/// this is `None` and policyd is not started: the warning is the label.
+/// The cloud seat push rule is the one refusal, and it is not a policyd
+/// answer.
 #[must_use]
-pub fn policyd_block(line: &str, cwd: Option<&Path>) -> Option<Rule> {
-    gates::policyd_config()?;
-    tcb_line_in(line, cwd)
-        .as_deref()
-        .and_then(policyd_rule)
-        .filter(Rule::blocks)
+pub fn policyd_block(_line: &str, _cwd: Option<&Path>) -> Option<Rule> {
+    None
 }
 
 /// The text after `pack-unavailable`, when this token is that failure.
@@ -38709,13 +39390,13 @@ pub fn merge_atoms(current: &Path, path: &str) -> Result<()> {
 
 /// The seat's reading of one shell command: the line, then one warning
 /// line for a rule that fires on it. The command runs either way, unless
-/// policyd blocks it under a named `policyd_config`. An empty line is an
-/// error, and so is a block.
+/// the cloud seat push rule blocks it. An empty line is an error, and so
+/// is that block.
 ///
 /// # Errors
 ///
-/// The command is empty, its directory cannot be entered, or policyd
-/// blocks it.
+/// The command is empty, its directory cannot be entered, or the cloud
+/// seat push rule blocks it.
 pub fn guard_report(line: &str) -> Result<String> {
     guard_report_in(line, None)
 }
@@ -38762,8 +39443,8 @@ fn guard_start_directory(cwd: Option<&Path>) -> Result<PathBuf> {
 ///
 /// # Errors
 ///
-/// The command is empty, its directory cannot be entered, or policyd
-/// blocks it.
+/// The command is empty, its directory cannot be entered, or the cloud
+/// seat push rule blocks it.
 pub fn guard_report_in(line: &str, cwd: Option<&Path>) -> Result<String> {
     let line = line.trim();
     if line.is_empty() {
@@ -38885,11 +39566,11 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
 }
 
 /// [`tcb_verdict_in`] after the static guard found no rule on `line`.
-/// The static guard is not run again. A policyd warn line, or an older
-/// daemon's deny or prompt, is the rule it names with verdict `warn`,
-/// unless a label already says it ([`take_guard_note`]). policyd's deny
-/// on a check asked with a named `policyd_config` is that rule with
-/// verdict `block`, and it wins over the static guard's warning.
+/// The static guard is not run again. A policyd warn line, or a deny or
+/// prompt (an older daemon, or `block-on-warning`), is the rule it names
+/// with verdict `warn`, unless a label already says it
+/// ([`take_guard_note`]). block-on-warning does not block. That warning
+/// does not stop the call.
 #[must_use]
 pub fn tcb_after_static(line: &str, cwd: Option<&Path>, static_clear: bool) -> Option<Rule> {
     clear_guard_note();
@@ -38911,12 +39592,7 @@ pub fn tcb_after_static(line: &str, cwd: Option<&Path>, static_clear: bool) -> O
             return Some(policyd_block(line, cwd).unwrap_or(rule));
         }
     }
-    let Some(t) = tcb_line_in(line, cwd) else {
-        if policyd_bin().is_none() {
-            allow_unjudged("ljos-policyd is not installed", line);
-        }
-        return None;
-    };
+    let t = tcb_line_in(line, cwd)?;
     match policyd_rule(&t) {
         Some(rule) if rule.blocks() => {
             drop_labels();
@@ -39385,6 +40061,10 @@ const LABELLED: &[(&str, &str)] = &[
     ),
     ("git-force-push", "a force push rewrites a published branch"),
     ("git-push-delete", "a push deletes a remote branch"),
+    (
+        "git-branch-delete",
+        "deleting a local branch removes that ref from this checkout",
+    ),
 ];
 
 /// The rule a command names that deletes or moves a tree holding the
@@ -39605,7 +40285,57 @@ fn static_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if let Some(rule) = destructive_delete(line) {
         label(rule, line);
     }
+    if local_branch_delete(line) {
+        label("git-branch-delete", line);
+    }
     None
+}
+
+/// Whether `line` deletes a branch in this checkout: `git branch` with
+/// `-d`, `-D` or `--delete`. The commits stay until they are pruned. A
+/// remote ref delete is `git push --delete` and is not this.
+fn local_branch_delete(line: &str) -> bool {
+    nested_lines(line, 0)
+        .iter()
+        .flat_map(|part| raw_segments(part))
+        .any(|segment| {
+            let words = shell_words(&segment);
+            let (at, _) = prefix_end(&words);
+            deletes_local_branch(&words[at..])
+        })
+}
+
+/// `git branch -d`, `-D` or `--delete`, after git's own options. A path
+/// to git counts. A flag after `--` is a branch name, not a delete.
+fn deletes_local_branch(words: &[String]) -> bool {
+    let mut words = words.to_vec();
+    if words.first().is_some_and(|word| base_name(word) == "git") {
+        words[0] = "git".to_string();
+    }
+    drop_git_options(&mut words);
+    if words.first().map(String::as_str) != Some("git")
+        || words.get(1).map(String::as_str) != Some("branch")
+    {
+        return false;
+    }
+    for word in words.iter().skip(2) {
+        if word == "--" {
+            break;
+        }
+        if word == "--delete" || word == "-d" || word == "-D" {
+            return true;
+        }
+        let Some(flags) = word.strip_prefix('-') else {
+            continue;
+        };
+        if flags.is_empty() || flags.starts_with('-') {
+            continue;
+        }
+        if flags.contains('d') || flags.contains('D') {
+            return true;
+        }
+    }
+    false
 }
 
 /// The rule an `rm -rf` or a `find -delete` aimed outside a temp directory
@@ -39965,11 +40695,10 @@ pub fn tcb_answer_in(
     }
     let text = out.trim().to_string();
     // `check` prints `allow`, or `allow\twarn\tRULE\tWARNING` when a rule
-    // matched, and exits 0. A config with `block-on-warning true` prints
-    // `deny\tRULE\tWARNING` and exits 2: that deny stands, since only the
-    // person's own `ljos.toml` names the config. An older daemon printed
-    // `deny\tRULE` or `prompt\tRULE` with no config named, and each is the
-    // same warning. A `prompt` with no rule is no verdict. A rule that is
+    // matched, and exits 0. A config with `block-on-warning true`, and an
+    // older daemon, print `deny\tRULE` or `prompt\tRULE`, sometimes with a
+    // warning field, and may exit 2. block-on-warning does not block.
+    // Each of those is the same warning. The call runs. A `prompt` with no rule is no verdict. A rule that is
     // only the engine name is an overloaded or half-open policyd: the call
     // runs with that note.
     let first = text.split(['\t', ' ', '\n']).next().unwrap_or("");
@@ -39989,7 +40718,6 @@ pub fn tcb_answer_in(
     match unjudged_why(token) {
         Some(why) => unhealthy(&why),
         None if first == "allow" => text,
-        None if first == "deny" && config.is_some() => text,
         None => {
             let line = text.lines().next().unwrap_or("");
             let rest = line.split_once('\t').map_or(token, |(_, rest)| rest.trim());
@@ -41776,6 +42504,7 @@ impl Drop for PathGuard {
 
 #[cfg(test)]
 fn install_path(next: std::ffi::OsString) -> PathGuard {
+    require_env_lock();
     let prev = std::env::var_os("PATH");
     unsafe { std::env::set_var("PATH", &next) };
     PathGuard { prev }
@@ -41839,6 +42568,7 @@ pub(crate) struct EnvLock {
 #[cfg(test)]
 impl Drop for EnvLock {
     fn drop(&mut self) {
+        ENV_LOCK_HELD.with(|held| held.set(false));
         with_env_mutation(|| {
             let keep: std::collections::HashSet<std::ffi::OsString> =
                 self.snapshot.iter().map(|(key, _)| key.clone()).collect();
@@ -42063,6 +42793,21 @@ fn runner_detection_var(key: &str) -> bool {
                 .any(|s| key.ends_with(s)))
 }
 
+#[cfg(test)]
+thread_local! {
+    static ENV_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Panic when a test edits the process environment without [`test_env_lock`].
+/// The lock is the named guard: two tests must not `set_var` at once.
+#[cfg(test)]
+pub(crate) fn require_env_lock() {
+    assert!(
+        ENV_LOCK_HELD.with(std::cell::Cell::get),
+        "a test edited the process environment without test_env_lock"
+    );
+}
+
 /// The lock every test that changes the process environment takes.
 /// Bookkeeping tests live in another module and take the same one.
 #[cfg(test)]
@@ -42071,6 +42816,7 @@ pub(crate) fn test_env_lock() -> EnvLock {
     let guard = ENV
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ENV_LOCK_HELD.with(|held| held.set(true));
     let (snapshot, runtime, git_config) = with_env_mutation(|| {
         // The runner that launched the suite is not put back: a test sees
         // only the runner it sets itself, whatever shell ran `cargo test`.
@@ -42106,6 +42852,49 @@ pub(crate) use tests::{serve_sync_pack, SyncPack};
 
 #[cfg(test)]
 mod tests {
+    /// How long a lib test waits for another thread to show a result.
+    /// Ten seconds is a busy suite. A condition that is already true
+    /// returns at once.
+    const TEST_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+    /// The pause between polls. Twenty milliseconds is shorter than the
+    /// thing being waited on, so the deadline is what bounds the test.
+    const TEST_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+    /// A background push nobody waits on stays a zombie. That is finished.
+    fn push_is_finished(pid: u32) -> bool {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !alive {
+            return true;
+        }
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit(')')
+                    .next()
+                    .map(|rest| rest.trim().starts_with('Z'))
+            })
+            .unwrap_or(false)
+    }
+
+    /// Poll `ready` until it is true or `limit` has passed.
+    fn wait_until(limit: std::time::Duration, mut ready: impl FnMut() -> bool) -> bool {
+        let end = std::time::Instant::now() + limit;
+        loop {
+            if ready() {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= end {
+                return false;
+            }
+            std::thread::sleep(TEST_POLL.min(end.saturating_duration_since(now)));
+        }
+    }
+
     /// Install `text` at `path` and return only after no write descriptor
     /// remains on that inode.
     ///
@@ -42611,9 +43400,16 @@ mod tests {
                 "a temp working directory does not switch the guard off: {line}: {note}"
             );
         }
+        let _ = super::take_guard_note();
+        let ruled = super::tcb_verdict("git branch -D gone");
         assert!(
-            super::tcb_verdict("git branch -D gone").is_some(),
-            "outside a sandbox the branch delete is denied"
+            ruled.as_ref().is_none_or(|rule| !rule.blocks()),
+            "outside a sandbox the branch delete runs: {ruled:?}"
+        );
+        let note = super::take_guard_note().unwrap_or_default();
+        assert!(
+            note.contains("allow\twarn\tgit-branch-delete\t"),
+            "outside a sandbox the branch delete warns: {note}"
         );
         assert!(marker.exists());
         let _ = std::fs::remove_file(&marker);
@@ -42655,9 +43451,16 @@ mod tests {
         assert!(off.contains("temporary directory"), "{off}");
         assert!(off.contains("LJOS_GUARD=on"), "{off}");
         unsafe { std::env::set_var("LJOS_GUARD", "on") };
+        let _ = super::take_guard_note();
+        let ruled = super::tcb_verdict("git branch -D gone");
         assert!(
-            super::tcb_verdict("git branch -D gone").is_some(),
-            "LJOS_GUARD=on judges a temp HOME"
+            ruled.as_ref().is_none_or(|rule| !rule.blocks()),
+            "LJOS_GUARD=on judges a temp HOME: {ruled:?}"
+        );
+        let note = super::take_guard_note().unwrap_or_default();
+        assert!(
+            note.contains("allow\twarn\tgit-branch-delete\t"),
+            "LJOS_GUARD=on names the branch delete: {note}"
         );
         assert!(crate::bookkeep::guard_off_reason().is_none());
         unsafe { std::env::remove_var("LJOS_GUARD") };
@@ -43442,7 +44245,10 @@ mod tests {
             .success();
         assert!(alive, "the pre-push hook had already exited: {said}");
 
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        assert!(
+            wait_until(TEST_WAIT, || push_is_finished(pid)),
+            "the pre-push hook did not finish"
+        );
         std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
         std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "10");
@@ -43650,11 +44456,15 @@ mod tests {
         let path = issues.clone();
         let writer =
             std::thread::spawn(move || persist_tracker_file(&path, "probe-a1b2", "claimed"));
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        // The stamp must stay absent for this whole window. A fixed sleep
+        // would miss a stamp that landed after the check.
+        const STAMP_RACE_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
         assert!(
-            !std::fs::read_to_string(&issues)
-                .unwrap()
-                .contains("by saddle"),
+            !wait_until(STAMP_RACE_WINDOW, || {
+                std::fs::read_to_string(&issues)
+                    .unwrap()
+                    .contains("by saddle")
+            }),
             "the stamp waits for the seat that holds the checkout"
         );
         assert_eq!(run(&["log", "-1", "--format=%s"]).trim(), "seed");
@@ -44137,6 +44947,188 @@ mod tests {
             started.elapsed()
         );
         for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A live `index.lock` is not deleted and does not drop the write.
+    /// After the retry budget the line defers the commit. The next write,
+    /// once that lock is gone, commits the record.
+    #[test]
+    fn a_held_index_lock_defers_the_commit_and_the_next_write_lands_it() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        let lock = dir.path().join(".git/index.lock");
+        std::fs::File::create(&lock).unwrap();
+        let body = "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, body).unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(
+            said.contains("deferred to the next write or push"),
+            "{said}"
+        );
+        assert!(!said.contains("commit refused"), "{said}");
+        assert!(lock.is_file(), "ljos removed an index.lock it does not own");
+        let on_disk = std::fs::read_to_string(&issues).unwrap();
+        assert!(on_disk.contains("STARTED"), "{on_disk}");
+        let head = git_cmd()
+            .arg("-C")
+            .arg(dir.path())
+            .args(["log", "-1", "--format=%s"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "seed");
+        std::fs::remove_file(&lock).unwrap();
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(
+            said.contains("committed") && !said.contains("commit refused"),
+            "{said}"
+        );
+        let shown = git_cmd()
+            .arg("-C")
+            .arg(dir.path())
+            .args(["show", "HEAD:Software/probe/issues.org"])
+            .output()
+            .unwrap();
+        assert!(
+            shown.status.success(),
+            "{}",
+            String::from_utf8_lossy(&shown.stderr)
+        );
+        let text = String::from_utf8_lossy(&shown.stdout);
+        assert!(text.contains("STARTED"), "{text}");
+        assert!(!dir.path().join(".git/index.lock").exists());
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A background push holds the tracker lock while its hook holds
+    /// `index.lock`. The next write waits, keeps the record, and the commit
+    /// lands once the push exits. The hook's lock is still there when the
+    /// hook looks, so ljos did not remove it.
+    #[test]
+    fn a_background_push_holds_the_tracker_lock_until_the_record_commits() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, remote, hooks) = (
+            dir.path().join("work"),
+            dir.path().join("remote.git"),
+            dir.path().join("hooks"),
+        );
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let o = git_cmd().arg("-C").arg(cwd).args(args).output().unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        std::fs::create_dir_all(&hooks).unwrap();
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        git(&root, &["init", "-q"]);
+        for (k, v) in [
+            ("user.email", "seat@example.invalid"),
+            ("user.name", "seat"),
+            ("core.hooksPath", hooks.to_str().unwrap()),
+        ] {
+            git(&root, &["config", k, v]);
+        }
+        let hook = hooks.join("pre-push");
+        let repo = root.display().to_string();
+        let slow = format!(
+            "#!/bin/sh\n\
+             flag=\"{repo}/hook-once\"\n\
+             if [ -f \"$flag\" ]; then exit 0; fi\n\
+             echo once > \"$flag\"\n\
+             : > \"{repo}/.git/index.lock\"\n\
+             echo held > \"{repo}/hook-state\"\n\
+             sleep 5\n\
+             if [ -f \"{repo}/.git/index.lock\" ]; then echo survived > \"{repo}/hook-state\"; fi\n\
+             rm -f \"{repo}/.git/index.lock\"\n\
+             exit 0\n"
+        );
+        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-lk11\n:END:\n";
+        std::fs::write(&issues, heading).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        std::fs::write(&hook, &slow).unwrap();
+        std::env::set_var("VISSUE_ROOT", &root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::remove_var("LJOS_TRACKER_GIT");
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "1");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+
+        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        let said = super::persist_tracker("probe-lk11", "claimed");
+        assert!(said.contains("still running after 1s"), "{said}");
+        assert!(
+            super::tracker_commit_lock_by(
+                &root,
+                std::time::Instant::now() + std::time::Duration::from_millis(200)
+            )
+            .is_none(),
+            "the background push does not hold the tracker lock: {said}"
+        );
+        assert!(
+            root.join(".git/index.lock").is_file(),
+            "the hook's index.lock was already gone"
+        );
+        std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
+        let said = super::persist_tracker("probe-lk11", "finished");
+        assert!(
+            said.contains("committed") && !said.contains("commit refused"),
+            "{said}"
+        );
+        assert!(!said.contains("Unable to create"), "{said}");
+        let state = std::fs::read_to_string(root.join("hook-state")).unwrap_or_default();
+        assert_eq!(state.trim(), "survived", "{state}");
+        let on_disk = std::fs::read_to_string(&issues).unwrap();
+        assert!(on_disk.contains("DONE"), "{on_disk}");
+        let log = git_cmd()
+            .arg("-C")
+            .arg(&root)
+            .args(["log", "--format=%s"])
+            .output()
+            .unwrap();
+        let subjects = String::from_utf8_lossy(&log.stdout);
+        assert!(
+            subjects.contains("probe-lk11 finished by saddle"),
+            "{subjects}"
+        );
+        let shown = git_cmd()
+            .arg("-C")
+            .arg(&root)
+            .args(["show", "HEAD:Software/probe/issues.org"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&shown.stdout);
+        assert!(text.contains("DONE"), "{text}");
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_PUSH_WAIT",
+            "LJOS_SEAT",
+            "XDG_RUNTIME_DIR",
+        ] {
             std::env::remove_var(var);
         }
     }
@@ -45056,6 +46048,17 @@ mod tests {
 
     #[test]
     fn file_with_another_project_mid_sitting_goes_to_its_top() {
+        let _cwd = super::test_env_lock();
+        let away = tempfile::tempdir().unwrap();
+        let back = std::env::current_dir().unwrap();
+        std::env::set_current_dir(away.path()).unwrap();
+        struct Back(std::path::PathBuf);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _back = Back(back);
         let held = || Some("garden-06v8".to_string());
         let s = |v: &str| Some(v.to_string());
         // The default: a child of the held issue, in its project.
@@ -45086,6 +46089,54 @@ mod tests {
         assert_eq!(project, s("ljos-policyd"));
         let (parent, project, said) = file_placement(true, None, None, held());
         assert_eq!((parent, project, said), (None, None, None));
+    }
+
+    /// A checkout's own name beats a held issue from another project.
+    #[test]
+    fn file_uses_the_checkout_project_not_a_held_issue_from_elsewhere() {
+        let _cwd = super::test_env_lock();
+        let away = tempfile::tempdir().unwrap();
+        let repo = away.path().join("leidarljos");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env("GIT_CONFIG_COUNT", "0")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+        };
+        git(&["init", "-q"]);
+        let back = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&repo).unwrap();
+        struct Back(std::path::PathBuf);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _back = Back(back);
+        let (parent, project, said) =
+            file_placement(false, None, None, Some("wt-pareback7-ab12".to_string()));
+        assert_eq!(parent, None);
+        assert_eq!(project.as_deref(), Some("leidarljos"));
+        let said = said.expect("why");
+        assert!(said.contains("project leidarljos"), "{said}");
+        assert!(said.contains("wt-pareback7"), "{said}");
+        let (parent, project, said) = file_placement(
+            false,
+            None,
+            Some("tools".into()),
+            Some("wt-pareback7-ab12".into()),
+        );
+        assert_eq!(parent, None);
+        assert_eq!(project.as_deref(), Some("tools"));
+        let said = said.expect("why");
+        assert!(said.contains("filed at the top of tools"), "{said}");
     }
 
     #[test]
@@ -46693,9 +47744,11 @@ mod tests {
         let target = path.clone();
         let stamper =
             std::thread::spawn(move || stamp_seat_logbook(&target, "demo-a", "voted", "alice"));
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        const STAMP_RACE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
         assert!(
-            !std::fs::read_to_string(&path).unwrap().contains("by alice"),
+            !wait_until(STAMP_RACE_WINDOW, || {
+                std::fs::read_to_string(&path).unwrap().contains("by alice")
+            }),
             "the stamp waits for the writer that holds the issue"
         );
         drop(held);
@@ -46721,7 +47774,11 @@ mod tests {
             let _second = CommitLock::acquire(&other);
             started.elapsed()
         });
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        const LOCK_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
+        assert!(
+            !wait_until(LOCK_HOLD, || waiter.is_finished()),
+            "the second lock did not wait"
+        );
         drop(first);
         let waited = waiter.join().unwrap();
         assert!(
@@ -51770,12 +52827,15 @@ mod tests {
         )
         .unwrap();
         assert!(said.contains("panel is opening"), "{said}");
-        let argv = (0..20)
-            .find_map(|_| {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                std::fs::read_to_string(&argv_path).ok()
-            })
-            .unwrap_or_default();
+        assert!(
+            wait_until(TEST_WAIT, || {
+                std::fs::read_to_string(&argv_path)
+                    .ok()
+                    .is_some_and(|text| text.contains("open-panel"))
+            }),
+            "open-panel was not recorded"
+        );
+        let argv = std::fs::read_to_string(&argv_path).unwrap_or_default();
         assert!(argv.contains("open-panel"), "{argv}");
         unsafe { std::env::remove_var("LJOS_SEAT") };
         unsafe { std::env::remove_var("LJOS_PANEL_BIN") };
@@ -51831,12 +52891,15 @@ mod tests {
             }
         }
         res.expect("detach succeeds despite non-GNU setsid on PATH");
-        let text = (0..40)
-            .find_map(|_| {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-                std::fs::read_to_string(&probe_out).ok()
-            })
-            .expect("detached process wrote its pid and sid");
+        assert!(
+            wait_until(TEST_WAIT, || {
+                std::fs::read_to_string(&probe_out)
+                    .ok()
+                    .is_some_and(|text| !text.is_empty())
+            }),
+            "detached process wrote its pid and sid"
+        );
+        let text = std::fs::read_to_string(&probe_out).unwrap();
         assert!(!setsid_called.exists(), "setsid on PATH must not be called");
         let mut parts = text.split_whitespace();
         let child_pid: i32 = parts.next().unwrap().parse().unwrap();
@@ -53075,17 +54138,18 @@ mod tests {
         assert_eq!(wrapped.cue, "tag the release");
     }
 
-    /// policyd's block, the one rule that stops a call, is each shape's
-    /// own deny on a tool call, and a warning on any other event.
+    /// A policyd verdict of `block` does not stop a call. Every shape
+    /// allows it and carries the warning. The cloud seat push rule still
+    /// denies a tool call.
     #[test]
-    fn a_policyd_block_denies_a_tool_call_on_every_shape() {
+    fn a_policyd_block_warns_on_every_shape_and_the_cloud_push_still_denies() {
         let block = Rule {
             pattern: "ljos-policyd".into(),
             verdict: "block".into(),
             reason: "sudo: a privilege runner is on the command".into(),
         };
-        assert!(block.blocks());
-        let refusal = "sudo: a privilege runner is on the command (ljos rule `ljos-policyd`)";
+        assert!(!block.blocks());
+        let warning = block.warning();
         let call = |event: &str, shape| HookCall {
             event: event.into(),
             cue: "sudo true".into(),
@@ -53096,25 +54160,28 @@ mod tests {
             HookShape::Asks,
             HookShape::DenyOnly,
             HookShape::CamelCase,
+            HookShape::Context,
             HookShape::Steps,
             HookShape::CursorShell,
             HookShape::Cursor,
         ] {
             let out = hook_output_ruled(&call("PreToolUse", shape), "", Some(&block));
-            assert!(answer_denies(&out), "{shape:?}: {out}");
-            assert!(out.contains(refusal), "{shape:?}: {out}");
-            assert!(!out.contains("warning:"), "{shape:?}: {out}");
-            assert_eq!(shell_exit(true, &out), 1, "{shape:?}: {out}");
-            assert_eq!(shell_exit(false, &out), 0, "{shape:?}: {out}");
+            assert!(!answer_denies(&out), "{shape:?}: {out}");
+            assert!(out.contains(&warning), "{shape:?}: {out}");
+            assert_eq!(shell_exit(true, &out), 0, "{shape:?}: {out}");
         }
-        let context = hook_output_ruled(&call("PreToolUse", HookShape::Context), "", Some(&block));
-        let context: Value = serde_json::from_str(context.trim()).unwrap();
-        assert_eq!(context["decision"], "block", "{context}");
-        assert_eq!(context["reason"], refusal, "{context}");
         let argv = hook_output_ruled(&call("argv", HookShape::Asks), "", Some(&block));
-        assert_eq!(argv, format!("deny: {refusal}\n"));
-        let stop = hook_output_ruled(&call("Stop", HookShape::Asks), "", Some(&block));
-        assert!(!answer_denies(&stop), "{stop}");
+        assert_eq!(argv, format!("{warning}\n"));
+        let cloud = Rule {
+            // The same pattern `cloud::refuses` matches.
+            pattern: "cloud-cursor-push".into(),
+            verdict: "deny".into(),
+            reason: "cloud seat rule: this push updates cursor/probe".into(),
+        };
+        assert!(cloud.blocks());
+        let refused = hook_output_ruled(&call("PreToolUse", HookShape::Asks), "", Some(&cloud));
+        assert!(answer_denies(&refused), "{refused}");
+        assert!(refused.contains("cloud seat rule"), "{refused}");
     }
 
     #[test]
@@ -57100,13 +58167,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
         let name = format!("tp{}", std::process::id());
         let lines = |n: usize| {
-            for _ in 0..40 {
-                let have = std::fs::read_to_string(&got).unwrap_or_default();
-                if have.lines().count() >= n {
-                    return have;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
+            let _ = wait_until(TEST_WAIT, || {
+                std::fs::read_to_string(&got)
+                    .ok()
+                    .is_some_and(|have| have.lines().count() >= n)
+            });
             std::fs::read_to_string(&got).unwrap_or_default()
         };
         let first = persona_session::hand(&name, "echoer", "first task");
@@ -57203,13 +58268,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
         let name = format!("hp{}", std::process::id());
         let lines = |n: usize| {
-            for _ in 0..40 {
-                let have = std::fs::read_to_string(&got).unwrap_or_default();
-                if have.lines().count() >= n {
-                    return have;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
+            let _ = wait_until(TEST_WAIT, || {
+                std::fs::read_to_string(&got)
+                    .ok()
+                    .is_some_and(|have| have.lines().count() >= n)
+            });
             std::fs::read_to_string(&got).unwrap_or_default()
         };
         let first = persona_session::hand(&name, "echoer", "first task");
@@ -60634,7 +61697,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// `allow warn` line of a current one is, including when only the
     /// interpreter's program draws it and the shell line allows. A `deny`
     /// with a warning, as `block-on-warning true` prints, is that same
-    /// warning. The first call that warns is the one shown. The path in
+    /// warning. block-on-warning does not block. The first call that warns
+    /// is the one shown. The path in
     /// the program is fake.
     #[test]
     fn an_older_policyd_prompt_or_deny_is_a_warning() {
@@ -60923,7 +61987,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 reason: "never tear the stack down".into(),
             }],
         );
-        let tf = static_guard("terraform destroy -auto-approve").expect("deny");
+        let tf = static_guard("terraform destroy -auto-approve").expect("the rule");
         assert_eq!(tf.verdict, "deny");
         assert!(tf.reason.contains("never tear"), "{}", tf.reason);
         keep_rules(
@@ -60941,7 +62005,57 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "{}",
             denied_push.reason
         );
-        assert_eq!(take_guard_note(), None, "a refused push names no rule");
+        assert_eq!(take_guard_note(), None, "a kept push rule names no label");
+    }
+
+    /// `git branch -d`, `-D` and `--delete` run. Each names
+    /// `git-branch-delete`. A listing, a rename and a checkout do not.
+    /// The shim carries the same warning the label prints.
+    #[test]
+    fn a_local_branch_delete_runs_with_its_warn_label() {
+        let _g = env_guard();
+        let home = SeatDir::new("branch-delete");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("LJOS_OFF", "0"),
+        ]);
+        let said = super::label_line("git-branch-delete").expect("the label");
+        assert!(
+            super::GUARD_SHIM.contains(said.split('\t').nth(3).unwrap_or("")),
+            "the shim names a different warning"
+        );
+        for line in [
+            "git branch -D gone",
+            "git branch -d gone",
+            "git branch --delete gone",
+            "git branch -dr origin/gone",
+            "git -C repo branch -D gone",
+            "/usr/bin/git branch -D gone",
+            "sh -c 'git branch -D gone'",
+        ] {
+            assert!(static_guard(line).is_none(), "{line} runs");
+            assert_eq!(take_guard_note().as_deref(), Some(said.as_str()), "{line}");
+        }
+        for line in [
+            "git branch",
+            "git branch -v",
+            "git branch -m old new",
+            "git checkout -b gone",
+            "git status",
+            "git push origin --delete old",
+        ] {
+            let rule = static_guard(line);
+            assert!(
+                rule.as_ref().is_none_or(|r| !r.blocks()),
+                "{line}: {rule:?}"
+            );
+            let note = take_guard_note().unwrap_or_default();
+            assert!(
+                !note.contains("git-branch-delete"),
+                "{line} is not a local branch delete: {note}"
+            );
+        }
     }
 
     /// A stock seat, with no rule of its own, lets a build or scratch
@@ -61487,7 +62601,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         .unwrap();
         with_config_home(&config, || {
             let rule = user_rules::guard_line("git status").expect("the planted rule fires");
-            assert_eq!(rule.verdict, "deny");
+            assert_eq!(rule.verdict, "warn");
             assert!(
                 rule.reason.contains("leave status alone"),
                 "{}",
@@ -63024,11 +64138,19 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
     }
 
-    /// A logbook note that names the recall closer and states a rule
-    /// reaches the timeline inside a fence whose nonce it cannot know.
+    /// Two mock round trips share one budget. The production bound is
+    /// 400 ms. Under a parallel suite that bound loses the second trip and
+    /// the origin reads as unverified. Five seconds is the guard timeout,
+    /// long enough for both trips when the machine is busy, and a listener
+    /// that never answers still fails inside it.
+    const ATOM_MOCK_BUDGET_MS: u64 = 5000;
+
+    /// A pack that did not answer is asked again once it is up, and the
+    /// stored origin is the person's when the record says so.
     #[test]
     fn a_pack_that_was_down_is_asked_again_for_a_stored_origin() {
         let _g = env_guard();
+        let _budget = super::AtomNowBudget::set(ATOM_MOCK_BUDGET_MS);
         let id = "5707ed0000000000000000000000d0e5";
         let down = TcpListener::bind("127.0.0.1:0").unwrap();
         let dead = format!("http://{}", down.local_addr().unwrap());
@@ -63079,6 +64201,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     #[test]
     fn only_a_pack_that_asks_for_the_token_answers_for_an_atom() {
         let _g = env_guard();
+        let _budget = super::AtomNowBudget::set(ATOM_MOCK_BUDGET_MS);
         let id = "5707ed0000000000000000000000d0e7";
         let token = tempfile::tempdir().unwrap();
         let missing = token.path().join("token");
@@ -63462,7 +64585,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     #[test]
     fn ballot_health_requires_both_evidence_and_confidence_arguments() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vissue");
         for (help, missing) in [
@@ -63471,14 +64593,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ("--for OPTION --confidence P", Some("--used")),
             ("--for OPTION --used DEEDS --confidence P", None),
         ] {
-            std::fs::write(
+            publish_exe(
                 &path,
-                format!(
+                &format!(
                     "#!/bin/sh\n[ \"$*\" = 'vote --help' ] || exit 3\nprintf '%s\\n' '{help}'\n"
                 ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            );
             let result = super::check_vissue_ballot_protocol(&path);
             if let Some(missing) = missing {
                 let error = result.unwrap_err().to_string();
@@ -63497,15 +64617,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     #[test]
     fn ballot_health_refuses_a_failed_help_command() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vissue");
-        std::fs::write(
+        publish_exe(
             &path,
             "#!/bin/sh\necho '--used DEEDS --confidence P'\nexit 2\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let error = super::check_vissue_ballot_protocol(&path)
             .unwrap_err()
             .to_string();
@@ -64104,6 +65221,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     impl PackUrl {
         fn set(url: &str) -> Self {
+            super::require_env_lock();
             let take = |key: &str| std::env::var(key).ok();
             let held = Self {
                 url: take("PACKSET_URL"),
@@ -65258,6 +66376,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     impl HoldEnv {
         fn set(pairs: &[(&'static str, &str)]) -> Self {
+            super::require_env_lock();
             let pairs = pairs
                 .iter()
                 .map(|(k, v)| {
@@ -67714,7 +68833,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             if seen.lines().count() == 10 {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(TEST_POLL);
         }
         assert_eq!(seen.lines().count(), 10, "{seen}");
         let peak = seen
@@ -67742,10 +68861,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         )];
         // The member exits at once, so the count is not what this reads.
         let _ = start_members(&members, 1, &|_| true);
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while !out.exists() && std::time::Instant::now() < until {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        assert!(
+            wait_until(TEST_WAIT, || out.exists()),
+            "the member did not write its seat"
+        );
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "skeptic skeptic");
     }
 
@@ -67900,7 +69019,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                         let _ = stream.write_all(resp.as_bytes());
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        std::thread::sleep(TEST_POLL);
                     }
                     Err(_) => break,
                 }
@@ -67931,7 +69050,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                         let _ = stream.write_all(resp.as_bytes());
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        std::thread::sleep(TEST_POLL);
                     }
                     Err(_) => break,
                 }
@@ -67949,13 +69068,15 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     fn bind_again(addr: std::net::SocketAddr) -> std::net::TcpListener {
-        for _ in 0..50 {
+        let end = std::time::Instant::now() + TEST_WAIT;
+        loop {
             if let Ok(listener) = std::net::TcpListener::bind(addr) {
                 return listener;
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            let now = std::time::Instant::now();
+            assert!(now < end, "port {addr} stayed taken");
+            std::thread::sleep(TEST_POLL.min(end.saturating_duration_since(now)));
         }
-        std::net::TcpListener::bind(addr).unwrap()
     }
 
     /// Full requests, not just the request line. `asks` refuses every

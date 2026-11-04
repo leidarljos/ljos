@@ -8,9 +8,9 @@
 //! writes the answer back in the runner's own field names. An answer
 //! allows the call and exits 0. A rule's warning rides in the runner's
 //! context field, or on stderr where the runner reads no context. The
-//! one deny the seat prints, policyd's block under the person's
-//! `block-on-warning`, is the runner's own deny: its fields, and for some
-//! runners exit 2.
+//! one deny the seat prints, the cloud seat push rule, is the runner's
+//! own deny: its fields, and for some runners exit 2. A policyd deny is
+//! a warning, and the call runs.
 
 use serde_json::{json, Map, Value};
 use std::path::Path;
@@ -295,9 +295,8 @@ fn read_answer(out: &str) -> String {
 }
 
 /// The reason and the context of a seat answer that denies a tool call:
-/// policyd's block under the person's `block-on-warning`, or the cloud
-/// seat push rule's refusal. `None` on any other answer, and on any other
-/// event: a held stop's `block` keeps the runner going.
+/// the cloud seat push rule's refusal. `None` on any other answer, and on
+/// any other event: a held stop's `block` keeps the runner going.
 fn denial(event: &str, out: &str) -> Option<(String, String)> {
     if !gate_event(event) {
         return None;

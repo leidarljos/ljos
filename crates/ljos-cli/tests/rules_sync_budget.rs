@@ -237,7 +237,8 @@ fn assert_synced(delay: &str) {
     let wrote = call(hook(&h, &tracker, None), &covered(), Duration::from_secs(8));
     assert!(
         wrote.contains("\"permission\":\"allow\"")
-            && wrote.contains("\"user_message\":\"warning: never post"),
+            && (wrote.contains("ljos: user-rule:") || wrote.contains("ljos: unverified-rule:"))
+            && wrote.contains("never post"),
         "delay {delay}: covered write had no warning after sync: {wrote}"
     );
 }

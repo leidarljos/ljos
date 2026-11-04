@@ -820,13 +820,15 @@ fn an_unconfirmed_promoted_deny_still_warns_as_unverified() {
         let context = decision["additionalContext"].as_str().unwrap_or("");
         let reason = context.lines().next().unwrap_or("");
         if held {
-            assert_eq!(
-                reason, "warning: fixture (ljos rule `git status*`)",
+            assert!(
+                reason.starts_with("ljos: user-rule:")
+                    && reason.contains("fixture")
+                    && reason.contains("git status*"),
                 "{out}"
             );
         } else {
             assert!(
-                reason.starts_with("warning: unverified") && reason.contains(ID),
+                reason.starts_with("ljos: unverified-rule:") && reason.contains(ID),
                 "an unconfirmed rule's warning read as the person's: {out}"
             );
         }

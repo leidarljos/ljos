@@ -593,7 +593,11 @@ mod tests {
                 .args(["config", &format!("alias.{name}"), &format!("!git {next}")])
                 .output()
                 .unwrap();
-            assert!(out.status.success());
+            assert!(
+                out.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         let _posed = Posed::runner();
         assert!(guard_line("git a", Some(dir.path())).is_none());

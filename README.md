@@ -62,6 +62,17 @@ The programs are `ljos`, `ljos-mcp`, `packset`, `vissue`, `deedar`, `claimdag`,
 `ljos-policyd` and `ljos-consensus`. `packset-embed` is the encoder for
 meaning-based search. `--no-embed` leaves it out, and search then matches words only.
 
+`ljos upgrade` moves each installed program to its latest published
+release.
+`ljos`, `ljos-mcp` and `ljos-hud` come from the ljos release.
+Each other program comes from the repository that publishes it.
+One line a program names the version it had and the version it has, or
+`current` when those are the same.
+A missing release, a failed download or a checksum that does not match
+is a warning, and the other programs still move.
+`ljos upgrade --only NAME` moves one program.
+The previous binary is kept as `NAME.bak-pre-VERSION`.
+
 To install by hand:
 
 ```
@@ -224,11 +235,9 @@ policyd gives one of three answers.
 | warn | The command runs, and the runner shows one line that names the rule and says why. |
 | rewrite | policyd returns a corrected command, and that one runs. |
 
-Blocking is opt-in. When your own `ljos.toml` names a `policyd_config` whose file
-sets `block-on-warning true`, policyd answers a warned command with `deny`. The hook
-denies the tool call, `ljos policy --fail-on-deny` exits 1, and a guard shim exits
-126. Without that line, a `deny` or `prompt` from an older policyd reads as the same
-warning.
+A `deny` or `prompt` from policyd, including one printed because a named `policyd_config` sets `block-on-warning true`, is the same warning.
+The command runs.
+The hook does not deny the tool call, and a guard shim does not stop it.
 
 > **Security:** a warning is the only thing between a runner and a destructive
 > command. Keep backups, protect branches on the forge, and keep a runner where it
@@ -325,7 +334,8 @@ and counts as advice. When Jev does not answer, ljos uses the local answer.
 `ljos cloud up` puts a fresh machine on the shared tracker. `sh scripts/install.sh --cloud`
 does the same from a checkout. A cloud seat has one push rule. It may push the branches
 named in its `ljos.toml` and `develop`.
-A cloud seat cannot force push, delete a branch, or push to a branch outside its allowlist.
+A cloud seat cannot force push, delete a remote branch or tag, or push to a branch outside its allowlist.
+A local `git branch -d` or `git branch -D` runs and prints `allow\twarn\tgit-branch-delete`.
 Every other push from a cloud seat runs with a warning.
 Opening or merging a pull request is not refused.
 `ljos mesh up` joins the swarm's tailnet on a Headscale login server, and `ljos mesh down` leaves it.

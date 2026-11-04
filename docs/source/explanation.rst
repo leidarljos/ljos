@@ -68,8 +68,8 @@ Three answers
 
 policyd answers allow, warn or rewrite. A warning names the rule and says why, and the runner
 shows it as one line while the command runs. An older policyd that answers deny or prompt reads as
-the same warning, unless the person's policyd config sets ``block-on-warning``; then policyd's deny
-stands and the command does not run. A refusal that stalls a turn costs more than the mistake it stops, and a
+the same warning. A policyd config that sets ``block-on-warning`` still prints a deny, and ljos reads it as
+that warning. The command runs. A refusal that stalls a turn costs more than the mistake it stops, and a
 warning still reaches the person. It is also the only thing between a runner and the command,
 so keep backups and protect branches on the forge.
 

@@ -372,8 +372,9 @@ pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> 
 }
 
 /// Whether `rule` is the one [`guard_line`] makes. It stays a refusal: a
-/// cloud seat cannot force push, delete a branch, or push to a branch
-/// outside its allowlist.
+/// cloud seat cannot force push, delete a remote branch or tag, or push
+/// to a branch outside its allowlist. A local `git branch -d` or `-D`
+/// is not this rule.
 pub(crate) fn refuses(rule: &crate::Rule) -> bool {
     rule.pattern == CURSOR_PUSH && rule.verdict == "deny"
 }

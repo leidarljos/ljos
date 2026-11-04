@@ -1725,8 +1725,10 @@ fn seal_ticket(
 
 /// Seal the atoms of `issue` in `scope_name` as one chunk over this
 /// host's log, or as the whole log when there is none yet. A log this
-/// machine cannot add a chunk to is left alone, and the line says that
-/// `ljos sync` seals it. The bool is whether a file was written.
+/// machine cannot add a chunk to is left alone. That is separate from a
+/// failed attributes stage: opening the log does not use the git index.
+/// The line is a warning and names `ljos sync`, which seals the log whole.
+/// The atoms stay in the pack. The bool is whether a file was written.
 fn seal_ticket_scope(
     root: &Path,
     primary_scope: &str,
@@ -1775,7 +1777,9 @@ fn seal_ticket_scope(
     let previous = read_beneath(root, &digest_rel)?;
     let left = |why: &str| {
         Ok((
-            format!("sync: {issue}: {why}; `ljos sync` seals the {scope_name} log whole\n"),
+            format!(
+                "sync: {issue}: warning: {why}; the atoms stay in the pack, and `ljos sync` seals the {scope_name} log whole\n"
+            ),
             false,
         ))
     };
@@ -1787,7 +1791,7 @@ fn seal_ticket_scope(
         recipients,
         previous.as_deref(),
     ) else {
-        return left("this machine's log is not one it can add a chunk to");
+        return left("this machine's log cannot take a chunk");
     };
     if log.view.stopped.is_some() {
         return left("a chunk of this machine's log did not read");
@@ -3897,6 +3901,12 @@ fn report_commit(root: &Path, message: &str, push: bool, made: crate::PathCommit
                 landed: false,
             };
         }
+        crate::PathCommit::Deferred(why) => {
+            return CommitReport {
+                said: format!("sync: {why}\n"),
+                landed: false,
+            };
+        }
         crate::PathCommit::AlreadyIn => {
             return CommitReport {
                 said: if push {
@@ -5283,10 +5293,20 @@ fn commit_host(
     let paths: Vec<&str> = rels.iter().map(String::as_str).collect();
     let mut add = vec!["add", "-A", "--"];
     add.extend(&paths);
-    let added = git_within(root, &add, deadline)?;
+    let added = git_within_index(root, &add, deadline)?;
     if !git_succeeded(&added) {
         if let Some(orphan) = crate::orphaned_index_lock(root) {
+            drop(held);
+            crate::note_deferred_paths(root, &paths);
             bail!("sync: user rules: {orphan}");
+        }
+        if crate::git_text_index_busy(&one_line(&added)) {
+            drop(held);
+            crate::note_deferred_paths(root, &paths);
+            bail!(
+                "sync: user rules: {}",
+                crate::deferred_commit_line("the user rules")
+            );
         }
         bail!(
             "sync: user rules: could not stage {}: {}",
@@ -5304,16 +5324,53 @@ fn commit_host(
     let message = format!("chore(sync): {host} user rules");
     let mut commit = vec!["commit", "-q", "--only", "-m", message.as_str(), "--"];
     commit.extend(&paths);
-    let committed = git_within(root, &commit, deadline)?;
+    let committed = git_within_index(root, &commit, deadline)?;
     drop(held);
     if git_succeeded(&committed) {
         Ok(true)
+    } else if crate::git_text_index_busy(&one_line(&committed)) {
+        crate::note_deferred_paths(root, &paths);
+        bail!(
+            "sync: user rules: {}",
+            crate::deferred_commit_line("the user rules")
+        );
     } else {
         bail!("sync: user rules: commit refused: {}", one_line(&committed))
     }
 }
 
+/// [`git_within`], retried while git reports `index.lock`, without sleeping
+/// past `deadline`. A lock still held after that is the caller's to defer.
+fn git_within_index(
+    root: &Path,
+    args: &[&str],
+    deadline: std::time::Instant,
+) -> Result<std::process::Output> {
+    let mut attempt = 0;
+    loop {
+        let out = git_within(root, args, deadline)?;
+        if git_succeeded(&out) || !crate::git_text_index_busy(&one_line(&out)) {
+            return Ok(out);
+        }
+        attempt += 1;
+        if attempt > crate::INDEX_LOCK_RETRY_STEPS {
+            return Ok(out);
+        }
+        let pause = crate::index_lock_pause(attempt);
+        if deadline.saturating_duration_since(std::time::Instant::now()) <= pause {
+            return Ok(out);
+        }
+        std::thread::sleep(pause);
+    }
+}
+
 fn push_host(root: &Path, deadline: std::time::Instant) -> Result<()> {
+    let Some(_held) = crate::tracker_commit_lock_by(root, deadline) else {
+        bail!(
+            "sync: user rules: {}",
+            crate::deferred_commit_line("the user rules")
+        );
+    };
     let upstream = git(root, &["rev-parse", "--abbrev-ref", "@{upstream}"])
         .ok()
         .is_some_and(|out| out.status.success());
@@ -5537,11 +5594,23 @@ pub fn exchange_user_rules(
     if tracked(root, &plain) {
         rels.push(plain);
     }
-    let committed = commit_host(root, &rels, &name, deadline)?;
+    let committed = match commit_host(root, &rels, &name, deadline) {
+        Ok(done) => done,
+        Err(err) if crate::commit_was_deferred(&err.to_string()) => {
+            out.push_str(&format!("{err:#}\n"));
+            false
+        }
+        Err(err) => return Err(err),
+    };
     match mode {
         TrackerGit::Push if remote && (committed || commits_to_push(root)) => {
-            push_host(root, deadline)?;
-            out.push_str("sync: user rules: sealed and pushed\n");
+            match push_host(root, deadline) {
+                Ok(()) => out.push_str("sync: user rules: sealed and pushed\n"),
+                Err(err) if crate::commit_was_deferred(&err.to_string()) => {
+                    out.push_str(&format!("{err:#}\n"));
+                }
+                Err(err) => return Err(err),
+            }
         }
         TrackerGit::Commit if committed => {
             out.push_str(

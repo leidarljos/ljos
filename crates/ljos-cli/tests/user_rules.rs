@@ -309,7 +309,8 @@ fn the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment() {
     let mention_text = output_text(&mention);
     assert!(mention.status.success(), "{mention_text}");
     assert!(
-        mention_text.contains("\nwarning: ")
+        (mention_text.contains("ljos: user-rule:")
+            || mention_text.contains("ljos: unverified-rule:"))
             && mention_text.contains("never post or reply to Alan"),
         "{mention_text}"
     );
@@ -321,14 +322,20 @@ fn the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment() {
     let reply_text = output_text(&reply);
     assert!(reply.status.success(), "{reply_text}");
     assert!(
-        reply_text.contains("\nwarning: ") && reply_text.contains("never post or reply to Alan"),
+        (reply_text.contains("ljos: user-rule:") || reply_text.contains("ljos: unverified-rule:"))
+            && reply_text.contains("never post or reply to Alan"),
         "{reply_text}"
     );
 
     let allowed = policy(&home, "gh pr comment 12 --body 'tests passed'");
     let allowed_text = output_text(&allowed);
     assert!(allowed.status.success(), "{allowed_text}");
-    assert!(!allowed_text.contains("warning: "), "{allowed_text}");
+    assert!(
+        !allowed_text.contains("warning: ")
+            && !allowed_text.contains("ljos: user-rule:")
+            && !allowed_text.contains("ljos: unverified-rule:"),
+        "{allowed_text}"
+    );
 }
 
 /// The variables an agent runner stamps on the shell that runs the suite.

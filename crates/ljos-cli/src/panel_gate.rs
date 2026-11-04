@@ -715,6 +715,9 @@ pub struct SessionBallot {
     mark: String,
     kept: bool,
     tree: Option<TreeHold>,
+    /// A session that already cast, or that filed a candidate. The ballot
+    /// is still recorded. The line is the label, not a refusal.
+    pub label: Option<String>,
 }
 
 impl SessionBallot {
@@ -772,16 +775,19 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
     let key = session_key(&id.harness, &id.nonce);
     let own = notes_on(issue);
     let family = family_notes(issue);
-    if let Some(why) = session_cast_refusal_on(issue, &key, voter, &own, &family) {
-        ballot_sig::end_cast();
-        bail!("{why}");
+    let label = session_cast_refusal_on(issue, &key, voter, &own, &family);
+    if let Some(why) = &label {
+        eprintln!("ljos: session-authored: {why}");
     }
     if let Some(choice) = held_choice(issue, voter) {
         ballot_sig::end_cast();
-        bail!(
-            "{voter} already holds a ballot on {issue} for {choice}. Nothing was cast. {}",
-            replace_hint(issue, voter)
-        );
+        let why = label.unwrap_or_else(|| {
+            format!(
+                "{voter} already holds a ballot on {issue} for {choice}. Nothing was cast. {}",
+                replace_hint(issue, voter)
+            )
+        });
+        bail!("{why}");
     }
     let mark = format!("{}\n{voter}", issue.trim());
     let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
@@ -797,6 +803,7 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
         mark,
         kept: false,
         tree: None,
+        label,
     };
     ballot.tree = hold_tree(issue, &claimed, &CastTree::here())?;
     Ok(ballot)

@@ -230,6 +230,8 @@ enum MeshCmd {
     Up,
     /// Log out, stop the tailscaled `mesh up` started, and remove its state.
     Down,
+    /// Print this node and the peers `tailscale status` reports, with their tags.
+    Status,
     /// Print the Headscale ACL policy `mesh.toml` implies.
     Acl {
         /// Other swarm ids, each given rules of its own.
@@ -891,13 +893,16 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["view", "about", "runner"])]
         retire: bool,
     },
-    /// Install a published release's binaries beside this ljos: fetched from the release, checked against its sha256 and its version, the old ones kept.
+    /// Install published releases beside this ljos. The ljos archive is checked against its sha256, then each other seat program comes from the repository that publishes it. A missing release or a bad download is a warning and the rest still move. The old binary is kept as NAME.bak-pre-VERSION.
     Upgrade {
-        /// The release version; the newest when absent.
+        /// The ljos release; the newest when absent. Other programs take their own latest release.
         version: Option<String>,
         /// Install here instead of beside the running ljos.
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Move this one program.
+        #[arg(long)]
+        only: Option<String>,
     },
     /// Classify one harness exit under the restart policy, and print the
     /// herdr line that would start the child again. This does not start it.
@@ -1407,7 +1412,7 @@ enum Cmd {
         /// Where the cards are read from.
         #[arg(long, default_value = ".")]
         cards: PathBuf,
-        /// Sit even when the issue's blockers are open. Without it a blocked issue is refused before anything is claimed.
+        /// Accepted and ignored. A blocked issue is sat and labelled `blocked-by`.
         #[arg(long)]
         anyway: bool,
         /// The recipe this sitting copies before recall. Absent, a closed-set token in the title else sit. Held until finish or release.
@@ -1905,6 +1910,7 @@ fn run_command() -> Result<()> {
         Cmd::Mesh { cmd } => match cmd {
             MeshCmd::Up => println!("{}", ljos_cli::mesh::up()),
             MeshCmd::Down => println!("{}", ljos_cli::mesh::down()),
+            MeshCmd::Status => println!("{}", ljos_cli::mesh::status_text()),
             MeshCmd::Acl { swarms } => println!("{}", ljos_cli::mesh::acl(&swarms)?),
         },
         Cmd::Sync {
@@ -1958,11 +1964,9 @@ fn run_command() -> Result<()> {
             explain,
         } => {
             ljos_cli::log_recall("search", &query.join(" "));
-            // A rerank used to wait at least a minute, and a silent writer
-            // was asked again after that. The command budget covers the
-            // proof and the search once. A server call keeps the timeout
-            // it was given; this is the verb a person runs.
-            let _pack_clock = ljos_cli::arm_cmd_pack();
+            // A short budget. Past it the word ranking prints. The call
+            // does not sit until an outer timeout with nothing on screen.
+            let _pack_clock = ljos_cli::pack_link::PackClock::enter(ljos_cli::SEARCH_PACK_BUDGET);
             let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
             let day = match valid_at.as_deref().map(str::trim) {
                 Some("any") => None,
@@ -1988,8 +1992,9 @@ fn run_command() -> Result<()> {
             let mut hits =
                 match packset_search_as_of(&join(&query), fetch, as_of.as_deref(), rerank) {
                     Ok(hits) => hits,
-                    Err(err) if !dated && ljos_cli::is_pack_busy(&err) => {
-                        eprintln!("{}", ljos_cli::SITTING_WORDS_LINE.trim_end());
+                    Err(err) if !dated && ljos_cli::pack_memory_down(&err) => {
+                        eprintln!("{}", ljos_cli::pack_busy_sentence());
+                        eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
                         ljos_cli::search_by_words(&join(&query), fetch)
                     }
                     Err(err) => return Err(err),
@@ -2183,6 +2188,10 @@ fn run_command() -> Result<()> {
             print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
         }
         Cmd::Note { issue, text } => {
+            let pending = ljos_cli::retry_pending_claim(&issue);
+            if !pending.is_empty() {
+                print!("{pending}");
+            }
             let text = text.join(" ");
             // The tracker's own lock has no deadline. Wait as long as a
             // tracker commit waits, then say so. A second note once the
@@ -2571,10 +2580,10 @@ fn run_command() -> Result<()> {
             println!("{}", write_ack(&body));
             ljos_cli::refresh_agents();
         }
-        Cmd::Upgrade { version, dir } => {
+        Cmd::Upgrade { version, dir, only } => {
             print!(
                 "{}",
-                ljos_cli::upgrade::upgrade(version.as_deref(), dir.as_deref())?
+                ljos_cli::upgrade::upgrade(version.as_deref(), dir.as_deref(), only.as_deref())?
             );
         }
         Cmd::Supervise {
@@ -3143,8 +3152,8 @@ fn run_command() -> Result<()> {
                 &call.cue,
             );
             // The call runs. One rule is its warning: the guard's, else the
-            // push gate's or a seat rule's. policyd's block, under a named
-            // `policyd_config`, is the one rule that stops it.
+            // push gate's or a seat rule's. The cloud seat push rule is the
+            // one rule that stops it.
             let verdict = tcb_rule.as_ref().or(gated.as_ref());
             // A command the ask pack would have asked about runs because a
             // setting turned that class off: the bypass log keeps a row.
@@ -3498,23 +3507,7 @@ fn run_command() -> Result<()> {
             if let Some(msg) = ljos_cli::hook_timed("consensus_refusal", || {
                 ljos_cli::panel_gate::settle_refusal(&id)
             }) {
-                let flags = ljos_cli::panel_gate::blind_lines_for(&id);
-                if json {
-                    let doc = serde_json::json!({
-                        "settled": false,
-                        "panel": {"settled": false, "refusal": msg, "blind": flags},
-                        "push_cite": {"issue": id, "stands": false, "refusal": msg},
-                        "provenance": provenance,
-                    });
-                    println!("{}", serde_json::to_string_pretty(&doc)?);
-                } else {
-                    print!("{provenance}");
-                    println!("{msg}");
-                    for line in flags {
-                        println!("blind design: {line}");
-                    }
-                }
-                std::process::exit(1);
+                println!("ljos: session-authored: {msg}");
             }
             for line in ljos_cli::panel_gate::blind_lines_for(&id) {
                 println!("blind design: {line}");

@@ -1005,3 +1005,128 @@ fn a_rewritten_lesson_closes_the_one_that_cited_an_amended_commit() {
         "a lesson still cites the replaced commit: {listed}"
     );
 }
+
+fn user_rules(hab: &Habitat, rules: &str) {
+    let path = hab.home.join(".config/ljos/user-rules.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, rules).unwrap();
+}
+
+fn bash_hook(hab: &Habitat, line: &str) -> String {
+    claude(
+        "PreToolUse",
+        "rule-label",
+        &hab.repo,
+        serde_json::json!({"tool_name": "Bash", "tool_input": {"command": line}}),
+    )
+}
+
+fn rule_row(id: &str, pattern: &str, verdict: Option<&str>, basis: &str, reason: &str) -> String {
+    let verdict = match verdict {
+        Some(verdict) => format!(",\"verdict\":\"{verdict}\""),
+        None => String::new(),
+    };
+    format!(
+        r#"{{"id":"{id}","text":"{reason}","author":"ada","reason":"{reason}","pattern":"{pattern}"{verdict},"written_at":"2026-11-04T00:00:00Z","updated_at":"2026-11-04T00:00:00Z","basis":"{basis}"}}"#
+    )
+}
+
+/// An unverified `notmuch search*` rule lets `ssh host 'notmuch search x'`
+/// run. The hook names `unverified-rule` and writes no approval. A row
+/// with no verdict does the same. A confirmed deny is `user-rule`. A
+/// command no rule matches is the same bytes with or without that file.
+#[test]
+fn an_unverified_user_rule_is_a_label_on_the_hook() {
+    let (_dir, hab) = habitat();
+    let line = "ssh -F /dev/null rg.terra 'notmuch search x'";
+    let bare = bash_hook(&hab, "echo hi");
+    let before = ljos_cmd(&hab, &["hook"], &bare, &[]);
+    let before_out = before.stdout.clone();
+
+    user_rules(
+        &hab,
+        &format!(
+            "{{\"rules\":[{}]}}\n",
+            rule_row(
+                "ur-notmuch",
+                "notmuch search*",
+                Some("deny"),
+                "agent",
+                "mail search stays local"
+            )
+        ),
+    );
+    let payload = bash_hook(&hab, line);
+    let out = ljos_cmd(&hab, &["hook"], &payload, &[]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("unverified-rule"), "{text}");
+    assert!(text.contains("notmuch search*"), "{text}");
+    assert!(!text.contains("approve "), "{text}");
+    assert!(!hab.run.join("ljos/approvals").exists(), "{text}");
+    assert!(!hab.home.join(".local/share/ljos/approvals").exists());
+
+    let codex = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "turn_id": "turn-notmuch",
+        "cwd": hab.repo,
+        "tool_name": "Bash",
+        "tool_input": {"command": line}
+    })
+    .to_string();
+    let codex_out = ljos_cmd(&hab, &["hook"], &codex, &[]);
+    let codex_text = String::from_utf8_lossy(&codex_out.stdout);
+    assert!(codex_text.contains("\"systemMessage\""), "{codex_text}");
+    assert!(codex_text.contains("unverified-rule"), "{codex_text}");
+
+    user_rules(
+        &hab,
+        &format!(
+            "{{\"rules\":[{}]}}\n",
+            rule_row(
+                "ur-notmuch",
+                "notmuch search*",
+                None,
+                "agent",
+                "mail search stays local"
+            )
+        ),
+    );
+    let missing = ljos_cmd(&hab, &["hook"], &payload, &[]);
+    let missing_text = String::from_utf8_lossy(&missing.stdout);
+    assert!(missing_text.contains("unverified-rule"), "{missing_text}");
+    assert!(
+        !missing_text.contains("\"permissionDecision\":\"deny\""),
+        "{missing_text}"
+    );
+
+    user_rules(
+        &hab,
+        &format!(
+            "{{\"rules\":[{}]}}\n",
+            rule_row(
+                "ur-notmuch",
+                "notmuch search*",
+                Some("deny"),
+                "person",
+                "mail search stays local"
+            )
+        ),
+    );
+    let confirmed = ljos_cmd(&hab, &["hook"], &payload, &[]);
+    let confirmed_text = String::from_utf8_lossy(&confirmed.stdout);
+    assert!(confirmed_text.contains("user-rule"), "{confirmed_text}");
+    assert!(
+        !confirmed_text.contains("unverified-rule"),
+        "{confirmed_text}"
+    );
+
+    let again = ljos_cmd(&hab, &["hook"], &bare, &[]);
+    assert_eq!(
+        again.stdout,
+        before_out,
+        "a command no rule matches changed\nbefore:\n{}\nafter:\n{}",
+        String::from_utf8_lossy(&before_out),
+        String::from_utf8_lossy(&again.stdout)
+    );
+}

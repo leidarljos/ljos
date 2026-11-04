@@ -1241,8 +1241,8 @@ fn one_line(text: &str) -> String {
     cut
 }
 
-/// The guard rows a digest shows. `refusal` is a call policyd blocked
-/// under the person's `block-on-warning`, or a row an older build wrote.
+/// The guard rows a digest shows. `refusal` is a call the cloud seat
+/// push rule blocked, or a row an older build wrote.
 const GUARD_KINDS: [&str; 3] = ["warning", "rewrite", "refusal"];
 
 /// Append one guard row. A row that cannot be written is skipped.

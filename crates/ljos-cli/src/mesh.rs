@@ -1,7 +1,8 @@
-//! `ljos mesh up`, `ljos mesh down` and `ljos mesh acl`: join this machine
-//! to its swarm's tailnet on a Headscale login server, leave it, and print
-//! the policy that server enforces. A seat works without the mesh, so `up`
-//! and `down` end every failure with one line and exit 0.
+//! `ljos mesh up`, `ljos mesh down`, `ljos mesh status` and `ljos mesh acl`:
+//! join this machine to its swarm's tailnet on a Headscale login server,
+//! leave it, print the nodes the daemon reports, and print the policy that
+//! server enforces. A seat works without the mesh, so `up` and `down` end
+//! every failure with one line and exit 0.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
@@ -487,6 +488,112 @@ pub fn down() -> String {
         line = format!("{line}; {}", notes.join("; "));
     }
     one_line(&line, None)
+}
+
+/// `ljos mesh status`: the nodes `tailscale status --json` reports, each
+/// with the tags, addresses and id the daemon gave it. A node the JSON
+/// marks ephemeral says so. Nothing here names a particular host.
+#[must_use]
+pub fn status_text() -> String {
+    let deadline = Instant::now() + wait();
+    let key_env = load().map(|c| c.key_env).unwrap_or_default();
+    let Ok(tailscale) = which::which("tailscale") else {
+        return "mesh status: tailscale is not on PATH".into();
+    };
+    let socket = state_dir().join(SOCKET);
+    match status(&tailscale, &socket, &key_env, deadline) {
+        Ok(Some(value)) => format_status(&value),
+        Ok(None) => "mesh status: not on the mesh".into(),
+        Err(e) => format!("mesh status: {e:#}"),
+    }
+}
+
+/// The lines [`status_text`] prints for one status document. Peers come
+/// from the `Peer` object. Tags, ids and addresses are the fields the
+/// daemon set. A missing `Ephemeral` field is not called either way.
+#[must_use]
+pub fn format_status(status: &Value) -> String {
+    let mut lines = Vec::new();
+    if let Some(node) = node_of(&status["Self"]) {
+        lines.push(render_node("self", &node));
+    }
+    if let Some(peers) = status.get("Peer").and_then(Value::as_object) {
+        let mut peers: Vec<Node> = peers.values().filter_map(node_of).collect();
+        peers.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        for peer in peers {
+            lines.push(render_node("peer", &peer));
+        }
+    }
+    if lines.is_empty() {
+        "mesh status: no node".into()
+    } else {
+        lines.join("\n")
+    }
+}
+
+struct Node {
+    name: String,
+    id: String,
+    ips: Vec<String>,
+    tags: Vec<String>,
+    ephemeral: Option<bool>,
+}
+
+fn node_of(value: &Value) -> Option<Node> {
+    let name = value.get("HostName")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let strings = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    Some(Node {
+        name: name.to_string(),
+        id: match value.get("ID") {
+            Some(Value::String(id)) => id.trim().to_string(),
+            Some(Value::Number(id)) => id.to_string(),
+            _ => String::new(),
+        },
+        ips: strings("TailscaleIPs"),
+        tags: strings("Tags"),
+        ephemeral: value.get("Ephemeral").and_then(Value::as_bool),
+    })
+}
+
+fn render_node(kind: &str, node: &Node) -> String {
+    let id = if node.id.is_empty() {
+        String::new()
+    } else {
+        format!(" id {}", node.id)
+    };
+    let ips = if node.ips.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", node.ips.join(" "))
+    };
+    let tags = if node.tags.is_empty() {
+        String::new()
+    } else {
+        format!(" tags {}", node.tags.join(","))
+    };
+    let life = match node.ephemeral {
+        Some(true) => " ephemeral",
+        Some(false) => " non-ephemeral",
+        None => "",
+    };
+    format!("mesh status: {kind} {}{id}{ips}{tags}{life}", node.name)
 }
 
 /// `ljos mesh acl`: the Headscale ACL policy for the config's swarm and
