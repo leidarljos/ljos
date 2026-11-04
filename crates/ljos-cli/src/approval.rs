@@ -1,4 +1,4 @@
-//! One-use consent for an ask verdict when the caller has no approval UI.
+//! Human consent for an ask verdict through a client form or trusted prompt.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -66,7 +66,8 @@ struct Scope {
     /// The seat that raised the request. The approval tool matches this
     /// plus the directory plus the request id, so a different conversation
     /// string from the same session still grants. It is not part of the
-    /// hook retry's equality. A named conversation stays bound to the
+    /// one-use hook retry's equality. Task reuse also requires this seat.
+    /// A named conversation stays bound to the
     /// command, directory, conversation, tool and rule. A request with no
     /// conversation stays bound to the command and directory. A seat rename
     /// between the ask and the retry does not drop the grant.
@@ -78,6 +79,8 @@ struct Scope {
     command: String,
     pattern: String,
     reason: String,
+    #[serde(default)]
+    task_push: Option<TaskPush>,
 }
 
 impl PartialEq for Scope {
@@ -124,7 +127,11 @@ impl Scope {
             .filter(|v| !v.is_null())
             .or_else(|| value.get("toolInput"));
         let directory = args
-            .and_then(|args| args.get("workdir").or_else(|| args.get("cwd")))
+            .and_then(|args| {
+                args.get("workdir")
+                    .or_else(|| args.get("cwd"))
+                    .or_else(|| args.get("working_directory"))
+            })
             .filter(|v| !v.is_null());
         let cwd = match directory {
             Some(v) => base.join(v.as_str().context("invalid tool working directory")?),
@@ -134,6 +141,9 @@ impl Scope {
         if !cwd.is_dir() || call.cue.is_empty() {
             bail!("approval needs a directory and a command");
         }
+        let task_push = (!session.is_empty() && task_execution_supported(&value))
+            .then(|| task_push_context(&call.cue, &cwd))
+            .flatten();
         Ok(Self {
             session: session.into(),
             seat: crate::seat_name(),
@@ -143,6 +153,7 @@ impl Scope {
             command: call.cue.clone(),
             pattern: rule.pattern.clone(),
             reason: rule.reason.clone(),
+            task_push,
         })
     }
 }
@@ -183,6 +194,8 @@ struct Request {
     scope: Scope,
     created: u64,
     approved: bool,
+    #[serde(default)]
+    for_task: bool,
 }
 
 impl Request {
@@ -266,14 +279,19 @@ impl Store {
     }
 
     fn request_or_consume(&mut self, scope: Scope, now: u64) -> Result<Option<String>> {
-        if let Some(index) = self
-            .requests
-            .iter()
-            .position(|request| request.scope == scope)
-        {
-            if self.requests[index].approved {
-                self.requests.remove(index);
-                self.save()?;
+        if let Some(index) = self.requests.iter().position(|request| {
+            request.scope == scope
+                && if request.for_task {
+                    task_push_matches(&request.scope, &scope)
+                } else {
+                    request.approved || request.scope.task_push == scope.task_push
+                }
+        }) {
+            if self.requests[index].approved || self.requests[index].for_task {
+                if !self.requests[index].for_task {
+                    self.requests.remove(index);
+                    self.save()?;
+                }
                 return Ok(None);
             }
             return Ok(Some(self.requests[index].id.clone()));
@@ -287,6 +305,7 @@ impl Store {
             scope,
             created: now,
             approved: false,
+            for_task: false,
         });
         self.save()?;
         Ok(Some(id))
@@ -319,7 +338,7 @@ impl Store {
                 .requests
                 .iter()
                 .enumerate()
-                .filter(|(_, request)| !request.approved)
+                .filter(|(_, request)| !request.approved && !request.for_task)
                 .max_by_key(|(_, request)| request.created)
                 .map(|(index, _)| index)
                 .context("no approval request is waiting; retry the original command");
@@ -356,7 +375,7 @@ impl Store {
         if !no_conversation && !conversation_ok && !place_ok {
             bail!("approval belongs to a different conversation");
         }
-        if request.approved {
+        if request.approved || request.for_task {
             bail!("request is already approved; retry the original command");
         }
         Ok(request.clone())
@@ -370,15 +389,44 @@ impl Store {
         self.approve(&pending.id)
     }
 
+    fn confirm_task(&mut self, pending: &Request) -> Result<String> {
+        let current = self.pending(&pending.id, &pending.scope.session)?;
+        if !task_push_matches(&current.scope, &pending.scope) || current.created != pending.created
+        {
+            bail!("task approval request changed while awaiting consent");
+        }
+        self.approve_with_task(&pending.id, true)
+    }
+
     fn approve(&mut self, id: &str) -> Result<String> {
+        self.approve_with_task(id, false)
+    }
+
+    fn approve_with_task(&mut self, id: &str, for_task: bool) -> Result<String> {
         let index = self.request_index(id)?;
         let request = &mut self.requests[index];
-        if request.approved {
+        if request.approved || request.for_task {
             bail!("request is already approved; retry the original command");
         }
-        request.approved = true;
+        let title = if for_task {
+            let task = request
+                .scope
+                .task_push
+                .as_ref()
+                .context("this request has no ordinary push task scope")?;
+            if request.scope.session.is_empty() || request.scope.seat.is_empty() {
+                bail!("task approval needs a named conversation and seat");
+            }
+            format!("Approved for task {}", task.task.issue)
+        } else {
+            "Approved once".to_string()
+        };
+        // The one-use bit stays false for task consent. A reader without
+        // task binding checks cannot spend this consent.
+        request.approved = !for_task;
+        request.for_task = for_task;
         let answer = format!(
-            "Approved once: {}\nDirectory: {}\nConversation: {}\nRetry the original command.\n",
+            "{title}: {}\nDirectory: {}\nConversation: {}\nRetry the original command.\n",
             request.scope.command,
             request.scope.cwd.display(),
             request.scope.session
@@ -393,6 +441,11 @@ impl Store {
     /// from another conversation's request, quoted into this one, grants
     /// nothing.
     fn approve_in(&mut self, id: &str, sessions: &[String]) -> Result<String> {
+        self.pending_in(id, sessions)?;
+        self.approve(id)
+    }
+
+    fn pending_in(&self, id: &str, sessions: &[String]) -> Result<Request> {
         let request = &self.requests[self.request_index(id)?];
         // Chat text never grants a request that was not asked in a
         // conversation, even when the session list contains an empty id.
@@ -403,7 +456,7 @@ impl Store {
         {
             bail!("approval {id} was not asked in this conversation");
         }
-        self.approve(id)
+        Ok(request.clone())
     }
 }
 
@@ -513,6 +566,7 @@ fn approve_from_prompt_at(
     now: Result<u64>,
 ) -> Option<String> {
     let ids = approved_ids(prompt);
+    let task_ids = task_approval_ids(prompt);
     if ids.is_empty() {
         return None;
     }
@@ -522,13 +576,19 @@ fn approve_from_prompt_at(
             if sessions.iter().all(|session| session.is_empty()) {
                 anyhow::bail!("approval needs a conversation id");
             }
-            Store::open(
-                root,
-                now.as_ref()
-                    .map_err(|e| anyhow::anyhow!("{e:#}"))
-                    .copied()?,
-            )?
-            .approve_in(&id, sessions)
+            let stamp = now
+                .as_ref()
+                .map_err(|e| anyhow::anyhow!("{e:#}"))
+                .copied()?;
+            if task_ids.contains(&id) {
+                let pending = Store::open(root, stamp)?.pending_in(&id, sessions)?;
+                if !task_push_is_current(&pending.scope) {
+                    bail!("task approval is unavailable or its push scope changed; command remains blocked");
+                }
+                Store::open(root, stamp)?.confirm_task(&pending)
+            } else {
+                Store::open(root, stamp)?.approve_in(&id, sessions)
+            }
         })();
         match line {
             Ok(text) => said.push_str(&format!("The person approved in this chat. {text}")),
@@ -554,8 +614,9 @@ fn terminal_consent(is_terminal: bool) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "approve: consent is the person's. This needs a terminal; the person runs \
-         `ljos approve` in a terminal of their own"
+        "approve: consent is the person's. Use the connected client's \
+         ljos_request_approval form or a trusted chat approval. The CLI fallback \
+         requires the person's terminal"
     )
 }
 
@@ -600,28 +661,19 @@ async fn request_approval_at(
         cap.form.is_some() || cap.url.is_none()
     });
     let tag = request_tag(&pending.id).unwrap_or_else(|| pending.id.clone());
+    let offer_task = task_push_is_current(&pending.scope);
     if !supports_form {
-        bail!("this client cannot display a consent form; run `ljos approve {tag}` in your own terminal");
+        bail!("{}", chat_fallback(&pending, &tag, offer_task));
     }
     let schema = ElicitationSchema::from_json_schema(
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "approve": {
-                    "type": "boolean",
-                    "title": "Allow this command once",
-                    "description": "Consent to the exact command and directory shown above.",
-                    "default": false
-                }
-            },
-            "required": ["approve"]
-        })
-        .as_object()
-        .expect("object schema")
-        .clone(),
+        approval_schema(offer_task)
+            .as_object()
+            .expect("object schema")
+            .clone(),
     )?;
+    let task_detail = task_summary(&pending, offer_task);
     let message = format!(
-        "Allow one attempt of this command?\nCommand (JSON): {}\nDirectory: {}\nConversation: {}\nRule: {}\nReason: {}\nRequest: {}\nThe grant expires fifteen minutes after the request was created.",
+        "Allow one attempt of this command?\nCommand (JSON): {}\nDirectory: {}\nConversation: {}\nRule: {}\nReason: {}\nRequest: {}\nThe grant expires 24 hours after the request was created.{task_detail}",
         serde_json::to_string(&pending.scope.command)?,
         serde_json::to_string(&pending.scope.cwd)?,
         pending.scope.session, pending.scope.pattern, pending.scope.reason,
@@ -644,7 +696,17 @@ async fn request_approval_at(
     if !consents(&answer) {
         bail!("consent was not granted; command remains blocked");
     }
-    Store::open(root, now()?)?.confirm(&pending)
+    let for_task = task_choice(&answer)?;
+    if for_task {
+        if !offer_task || !task_push_is_current(&pending.scope) {
+            bail!(
+                "task approval is unavailable or its push scope changed; command remains blocked"
+            );
+        }
+        Store::open(root, now()?)?.confirm_task(&pending)
+    } else {
+        Store::open(root, now()?)?.confirm(&pending)
+    }
 }
 
 fn consents(answer: &rmcp::model::ElicitResult) -> bool {
@@ -652,13 +714,13 @@ fn consents(answer: &rmcp::model::ElicitResult) -> bool {
         && answer.content.as_ref().and_then(|v| v.get("approve")) == Some(&Value::Bool(true))
 }
 
-/// Apply a one-use grant only to an ask verdict. Denials reach the caller
+/// Apply explicit consent only to an ask verdict. Denials reach the caller
 /// unchanged, including denials from the policy binary.
 pub fn hook_output(input: &str, call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
     let mut granted = false;
     let out = hook_output_at(input, call, context, verdict, &root(), now(), &mut granted);
     if let (true, Some(rule)) = (granted, verdict) {
-        crate::log_bypass("approval", "one-use grant", &call.cue, rule);
+        crate::log_bypass("approval", "human-approved command", &call.cue, rule);
     }
     if crate::answer_denies(&out) {
         if let Some(rule) = verdict {
@@ -710,9 +772,9 @@ fn hook_output_at(
                 Ok(Some((no_conversation, id))) => {
                     let tag = request_tag(&id).unwrap_or(id);
                     if no_conversation {
-                        format!("Call the ljos_request_approval MCP tool with id {tag} for a consent form, or run `ljos approve {tag}` in your own terminal. Retry only after consent is recorded. The grant is for one attempt of this command in this directory and expires fifteen minutes after the request.")
+                        format!("Call the ljos_request_approval MCP tool with id {tag} for a consent form, or run `ljos approve {tag}` in your own terminal. Retry only after consent is recorded. The default grant is one attempt of this command in this directory and expires 24 hours after the request. A consent form can offer reuse for an active ordinary-push task.")
                     } else {
-                        format!("Reply `approve {tag}` in this conversation, call the ljos_request_approval MCP tool with id {tag} for a consent form, or run `ljos approve {tag}` in your own terminal. Retry only after consent is recorded. The grant is for one attempt of this command in this directory and expires fifteen minutes after the request.")
+                        format!("Reply `approve {tag}` in this conversation, call the ljos_request_approval MCP tool with id {tag} for a consent form, or run `ljos approve {tag}` in your own terminal. Retry only after consent is recorded. The default grant is one attempt of this command in this directory and expires 24 hours after the request. A consent form can offer reuse for an active ordinary-push task.")
                     }
                 }
                 Err(error) => format!(
@@ -726,6 +788,935 @@ fn hook_output_at(
     }
 }
 
+/// The live claim generation that the caller is working under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaskLease {
+    issue: String,
+    holder: String,
+    since: String,
+    graph: String,
+    generation: u64,
+}
+
+/// The destination and local branch of one ordinary branch push.
+/// Remote addresses are fingerprinted rather than copied into consent records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaskPush {
+    task: TaskLease,
+    common: PathBuf,
+    remote: String,
+    source: String,
+    destination: String,
+    addresses: String,
+    configuration: String,
+}
+
+fn branch_name(name: &str) -> Option<&str> {
+    let name = name.strip_prefix("refs/heads/").unwrap_or(name);
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.starts_with("refs/")
+        || name.contains("..")
+        || name.split('/').any(|part| {
+            part.is_empty()
+                || part.starts_with('.')
+                || part.ends_with('.')
+                || part.ends_with(".lock")
+        })
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/_-.".contains(&byte))
+    {
+        return None;
+    }
+    Some(name)
+}
+
+/// Exact command reuse covers one plain branch push, with no shell expansion,
+/// wrappers, executable options, force, deletion, tags or extra commands.
+fn ordinary_push(command: &str) -> Option<(String, String, String)> {
+    if !command
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b" /_-.:".contains(&byte))
+    {
+        return None;
+    }
+    let mut words = command.split_whitespace();
+    if words.next()? != "git" || words.next()? != "push" {
+        return None;
+    }
+    let mut rest: Vec<_> = words.collect();
+    while rest
+        .first()
+        .is_some_and(|word| matches!(*word, "-q" | "--quiet" | "-u" | "--set-upstream"))
+    {
+        rest.remove(0);
+    }
+    let [remote, refspec] = rest.as_slice() else {
+        return None;
+    };
+    if remote.is_empty()
+        || remote.starts_with('-')
+        || !remote
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+    {
+        return None;
+    }
+    let (source, destination) = refspec.split_once(':').unwrap_or((refspec, refspec));
+    if source != "HEAD" {
+        branch_name(source)?;
+    }
+    let destination = branch_name(destination)?;
+    if destination == "HEAD" {
+        return None;
+    }
+    Some((
+        remote.to_string(),
+        source.to_string(),
+        format!("refs/heads/{destination}"),
+    ))
+}
+
+fn approval_git(cwd: &Path, args: &[&str]) -> Option<std::process::Output> {
+    let mut command = crate::git_at(cwd);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::git_hooks::hook_child_env(&mut command);
+    crate::no_git_prompt(&mut command);
+    crate::bounded_output(&mut command).ok()
+}
+
+fn approval_git_text(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = approval_git(cwd, args)?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
+}
+
+fn config_allows_task_push(cwd: &Path, key: &str, wanted: &[&str]) -> bool {
+    let Some(output) = approval_git(cwd, &["config", "--get", key]) else {
+        return false;
+    };
+    output.status.code() == Some(1)
+        || (output.status.success()
+            && std::str::from_utf8(&output.stdout)
+                .ok()
+                .is_some_and(|text| wanted.contains(&text.trim().to_ascii_lowercase().as_str())))
+}
+
+fn graph_task_generation(text: &str, node: &str, actor: &str) -> Option<u64> {
+    let words: Vec<_> = text.split_whitespace().collect();
+    if words.first().copied() != Some(node)
+        || !matches!(words.get(1).copied(), Some("claimed" | "running"))
+    {
+        return None;
+    }
+    let actors: Vec<_> = words
+        .iter()
+        .filter_map(|word| word.strip_prefix("assignee="))
+        .collect();
+    let generations: Vec<_> = words
+        .iter()
+        .filter_map(|word| word.strip_prefix("gen="))
+        .collect();
+    if actors.as_slice() != [actor] || generations.len() != 1 {
+        return None;
+    }
+    generations[0].parse().ok()
+}
+
+fn task_push_target(command: &str, cwd: &Path, task: TaskLease) -> Option<TaskPush> {
+    use sha2::{Digest as _, Sha256};
+    let (remote, source, destination) = ordinary_push(command)?;
+    if !config_allows_task_push(cwd, "push.followTags", &["false", "no", "off", "0"])
+        || !config_allows_task_push(
+            cwd,
+            &format!("remote.{remote}.mirror"),
+            &["false", "no", "off", "0"],
+        )
+        || !config_allows_task_push(cwd, "push.recurseSubmodules", &["false", "no", "off", "0"])
+    {
+        return None;
+    }
+    let common = approval_git_text(cwd, &["rev-parse", "--git-common-dir"])?;
+    let common = fs::canonicalize(cwd.join(common.trim())).ok()?;
+    let source = approval_git_text(
+        cwd,
+        &["rev-parse", "--symbolic-full-name", "--verify", &source],
+    )?;
+    let source = source.trim().to_string();
+    if !source.starts_with("refs/heads/") || branch_name(&source).is_none() {
+        return None;
+    }
+    let addresses = approval_git_text(cwd, &["remote", "get-url", "--push", "--all", &remote])?;
+    if addresses.trim().is_empty() {
+        return None;
+    }
+    let addresses = format!("{:x}", Sha256::digest(addresses.as_bytes()));
+    let pattern = format!(
+        "^(remote\\.{}\\.|push\\.|core\\.(sshcommand|gitproxy)$|protocol\\.)",
+        remote.replace('.', "\\.")
+    );
+    let config = approval_git(cwd, &["config", "--null", "--get-regexp", &pattern])?;
+    if !config.status.success() && config.status.code() != Some(1) {
+        return None;
+    }
+    let configuration = format!("{:x}", Sha256::digest(&config.stdout));
+    Some(TaskPush {
+        task,
+        common,
+        remote,
+        source,
+        destination,
+        addresses,
+        configuration,
+    })
+}
+
+fn task_push_context(command: &str, cwd: &Path) -> Option<TaskPush> {
+    if crate::cloud::cloud_seat() || ordinary_push(command).is_none() {
+        return None;
+    }
+    let (issue, hold) = crate::live_held_issue()?;
+    if issue.is_empty()
+        || hold.assignee.is_empty()
+        || hold.since.is_empty()
+        || hold.assignee != crate::holder_name()
+        || hold.seat != crate::seat_name()
+    {
+        return None;
+    }
+    let graph = crate::claim_graph_scope();
+    let node = crate::work_id(&issue);
+    let actor = crate::work_id(&crate::occupancy_scope(&hold.assignee, &issue));
+    let claim = crate::run_captured("claimdag", &["get", &node])
+        .ok()?
+        .stdout;
+    let generation = graph_task_generation(&claim, &node, &actor)?;
+    task_push_target(
+        command,
+        cwd,
+        TaskLease {
+            issue,
+            holder: hold.assignee,
+            since: hold.since,
+            graph,
+            generation,
+        },
+    )
+}
+
+fn task_execution_supported(input: &Value) -> bool {
+    if crate::capture::not_the_person(&input.to_string()).is_some() {
+        return false;
+    }
+    [Some(input), input.get("tool_input"), input.get("toolInput")]
+        .into_iter()
+        .flatten()
+        .all(|value| {
+            if ["workdir", "cwd", "working_directory"]
+                .iter()
+                .filter(|key| value.get(**key).is_some_and(|value| !value.is_null()))
+                .count()
+                > 1
+            {
+                return false;
+            }
+            [
+                "env",
+                "environment",
+                "shell",
+                "executable",
+                "interpreter",
+                "stdin",
+                "script",
+                "login",
+                "tty",
+            ]
+            .iter()
+            .all(|key| value.get(*key).is_none_or(Value::is_null))
+        })
+}
+
+fn task_push_is_current(scope: &Scope) -> bool {
+    !scope.session.is_empty()
+        && !scope.seat.is_empty()
+        && scope.task_push.is_some()
+        && task_push_context(&scope.command, &scope.cwd) == scope.task_push
+}
+
+fn task_push_matches(left: &Scope, right: &Scope) -> bool {
+    left == right
+        && !left.session.is_empty()
+        && !left.seat.is_empty()
+        && left.seat == right.seat
+        && left.task_push.is_some()
+        && left.task_push == right.task_push
+}
+
+fn approval_schema(offer_task: bool) -> Value {
+    let mut schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "approve": {
+                "type": "boolean", "title": "Allow this command",
+                "description": "Consent to the exact command and directory shown above.",
+                "default": false
+            }
+        },
+        "required": ["approve"]
+    });
+    if offer_task {
+        schema["properties"]["for_task"] = serde_json::json!({
+            "type": "boolean", "title": "Repeat this exact push for this task",
+            "description": "Also allow matching ordinary branch pushes while the displayed task lease is active. The exact command, directory, conversation, rule, local branch and remote address binding must match. The grant expires with the request. Git checks still apply.",
+            "default": false
+        });
+    }
+    schema
+}
+
+fn task_summary(pending: &Request, offer_task: bool) -> String {
+    pending.scope.task_push.as_ref().filter(|_| offer_task).map_or_else(String::new, |push| {
+        format!("\nOptional task scope: {}\nLocal branch: {}\nRemote: {}\nDestination: {}\nReuse requires this exact command, directory, conversation, rule, task lease and remote address binding. Git checks still apply.", push.task.issue, push.source, push.remote, push.destination)
+    })
+}
+
+fn chat_fallback(pending: &Request, tag: &str, offer_task: bool) -> String {
+    if pending.scope.session.is_empty() {
+        return format!("This client does not advertise consent forms and this request has no named conversation for trusted chat consent. Connect a client that supports form elicitation and request {tag}. The command remains blocked until the person approves.");
+    }
+    let task = if offer_task {
+        format!(
+            " For the displayed task scope, explicitly reply `approve {tag} for task`.{}",
+            task_summary(pending, true)
+        )
+    } else {
+        String::new()
+    };
+    format!("This client does not advertise consent forms. A trusted prompt hook can record `approve {tag}` in this conversation.{task} Otherwise connect a client that supports form elicitation. The command remains blocked until the person approves.")
+}
+
+fn task_choice(answer: &rmcp::model::ElicitResult) -> Result<bool> {
+    match answer
+        .content
+        .as_ref()
+        .and_then(|value| value.get("for_task"))
+    {
+        None | Some(Value::Bool(false)) => Ok(false),
+        Some(Value::Bool(true)) => Ok(true),
+        _ => bail!("invalid task choice; command remains blocked"),
+    }
+}
+
+fn task_approval_ids(prompt: &str) -> Vec<String> {
+    if let Some(body) = prompt
+        .trim()
+        .strip_prefix("<send_user_message_question_reply>")
+    {
+        let Some(body) = body.strip_suffix("</send_user_message_question_reply>") else {
+            return Vec::new();
+        };
+        return serde_json::from_str::<Vec<Value>>(body)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|reply| reply.get("answer").and_then(Value::as_str))
+            .flat_map(task_approval_ids)
+            .collect();
+    }
+    let words: Vec<_> = prompt
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect();
+    if words.len() == 4
+        && words[2].eq_ignore_ascii_case("for")
+        && words[3].eq_ignore_ascii_case("task")
+    {
+        approval_directives(prompt)
+    } else {
+        Vec::new()
+    }
+}
+#[cfg(test)]
+mod task_approval_tests {
+    use super::*;
+
+    fn scoped(cwd: &Path) -> Scope {
+        Scope {
+            session: "conversation-one".into(),
+            seat: "owner-seat".into(),
+            shape: "Fallback".into(),
+            tool: "Bash".into(),
+            cwd: cwd.into(),
+            command: "git push origin HEAD:refs/heads/topic".into(),
+            pattern: "git push*".into(),
+            reason: "Publication needs consent.".into(),
+            task_push: Some(TaskPush {
+                task: TaskLease {
+                    issue: "project-abcd".into(),
+                    holder: "owner-holder".into(),
+                    since: "lease-one".into(),
+                    graph: "graph-one".into(),
+                    generation: 7,
+                },
+                common: cwd.join(".git"),
+                remote: "origin".into(),
+                source: "refs/heads/topic".into(),
+                destination: "refs/heads/topic".into(),
+                addresses: "address-fingerprint-one".into(),
+                configuration: "configuration-one".into(),
+            }),
+        }
+    }
+
+    fn grant(root: &Path, scope: Scope) -> String {
+        let mut store = Store::open(root, 100).unwrap();
+        let id = store.request_or_consume(scope, 100).unwrap().unwrap();
+        let pending = store.pending(&id, "conversation-one").unwrap();
+        store.confirm_task(&pending).unwrap();
+        id
+    }
+
+    #[test]
+    fn task_pushes_accept_only_plain_explicit_single_branch_commands() {
+        for command in [
+            "git push origin main",
+            "git push -q -u origin HEAD:refs/heads/topic",
+            "git push --quiet --set-upstream origin refs/heads/topic",
+        ] {
+            assert!(ordinary_push(command).is_some(), "{command}");
+        }
+        for command in [
+            "git push",
+            "git push origin",
+            "git push --force origin main",
+            "git push --force-with-lease origin main",
+            "git push --delete origin main",
+            "git push origin :main",
+            "git push origin +main:main",
+            "git push --tags origin main",
+            "git push origin refs/tags/v1",
+            "git push origin main:refs/notes/test",
+            "git push origin main other",
+            "git push origin main; touch result",
+            "git push origin main && touch result",
+            "git push origin $(cat target)",
+            "git push origin `cat target`",
+            "git push origin 'main'",
+            "git -c core.hooksPath=/dev/null push origin main",
+            "git -C other push origin main",
+            "env git push origin main",
+            "sh -c git push origin main",
+            "git push https://example.invalid/repo main",
+            "git push origin HEAD",
+            "git push origin main\ngit push origin other",
+            "git push origin main:../bad",
+            "git push origin main:refs/heads/.bad",
+            "git push origin main:refs/heads/a.lock",
+        ] {
+            assert!(ordinary_push(command).is_none(), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_task_choice_is_optional_false_by_default_and_not_a_tool_argument() {
+        let once = approval_schema(false);
+        assert_eq!(once["properties"]["approve"]["default"], false);
+        assert!(once["properties"].get("for_task").is_none());
+        let task = approval_schema(true);
+        assert_eq!(task["properties"]["for_task"]["type"], "boolean");
+        assert_eq!(task["properties"]["for_task"]["default"], false);
+        assert_eq!(task["required"], serde_json::json!(["approve"]));
+        let mut answer = rmcp::model::ElicitResult::new(rmcp::model::ElicitationAction::Accept);
+        for content in [
+            serde_json::json!({"approve":true}),
+            serde_json::json!({"approve":true,"for_task":false}),
+        ] {
+            answer.content = Some(content);
+            assert!(consents(&answer));
+            assert!(!task_choice(&answer).unwrap());
+        }
+        answer.content = Some(serde_json::json!({"approve":false,"for_task":true}));
+        assert!(!consents(&answer));
+        answer.content = Some(serde_json::json!({"approve":true,"for_task":"true"}));
+        assert!(task_choice(&answer).is_err());
+        answer.content = Some(serde_json::json!({"approve":true,"for_task":true}));
+        assert!(consents(&answer));
+        assert!(task_choice(&answer).unwrap());
+    }
+
+    #[test]
+    fn explicit_task_consent_repeats_the_exact_push_without_consuming_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let scope = scoped(temp.path());
+        grant(&root, scope.clone());
+        for stamp in 101..105 {
+            assert!(Store::open(&root, stamp)
+                .unwrap()
+                .request_or_consume(scope.clone(), stamp)
+                .unwrap()
+                .is_none());
+        }
+        let store = Store::open(&root, 105).unwrap();
+        assert_eq!(store.requests.len(), 1);
+        assert!(!store.requests[0].approved && store.requests[0].for_task);
+    }
+
+    #[test]
+    fn task_consent_is_bound_to_every_command_and_lease_target_field() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let scope = scoped(temp.path());
+        grant(&root, scope.clone());
+        for field in [
+            "session",
+            "seat",
+            "shape",
+            "tool",
+            "cwd",
+            "command",
+            "pattern",
+            "reason",
+            "issue",
+            "holder",
+            "since",
+            "graph",
+            "generation",
+            "common",
+            "remote",
+            "source",
+            "destination",
+            "addresses",
+            "configuration",
+            "missing-task",
+        ] {
+            let mut other = scope.clone();
+            match field {
+                "session" => other.session.push_str("-other"),
+                "seat" => other.seat.push_str("-other"),
+                "shape" => other.shape.push_str("-other"),
+                "tool" => other.tool.push_str("-other"),
+                "cwd" => other.cwd = temp.path().join("elsewhere"),
+                "command" => other.command.push_str(" --force"),
+                "pattern" => other.pattern.push_str("-other"),
+                "reason" => other.reason.push_str("-other"),
+                "missing-task" => other.task_push = None,
+                field => {
+                    let task = other.task_push.as_mut().unwrap();
+                    match field {
+                        "issue" => task.task.issue.push_str("-other"),
+                        "holder" => task.task.holder.push_str("-other"),
+                        "since" => task.task.since.push_str("-other"),
+                        "graph" => task.task.graph.push_str("-other"),
+                        "generation" => task.task.generation += 1,
+                        "common" => task.common = temp.path().join("other.git"),
+                        "remote" => task.remote.push_str("-other"),
+                        "source" => task.source.push_str("-other"),
+                        "destination" => task.destination.push_str("-other"),
+                        "addresses" => task.addresses.push_str("-other"),
+                        "configuration" => task.configuration.push_str("-other"),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            assert!(
+                Store::open(&root, 101)
+                    .unwrap()
+                    .request_or_consume(other, 101)
+                    .unwrap()
+                    .is_some(),
+                "{field}"
+            );
+        }
+        assert!(Store::open(&root, 102)
+            .unwrap()
+            .request_or_consume(scope, 102)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn task_consent_expires_with_the_existing_request_lifetime() {
+        for stamp in [99, 100 + TTL_SECONDS] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("approvals");
+            let scope = scoped(temp.path());
+            let id = grant(&root, scope.clone());
+            let replacement = Store::open(&root, stamp)
+                .unwrap()
+                .request_or_consume(scope, stamp)
+                .unwrap()
+                .unwrap();
+            assert_ne!(replacement, id);
+            let store = Store::open(&root, stamp).unwrap();
+            assert!(!store.requests[0].approved && !store.requests[0].for_task);
+        }
+    }
+
+    #[test]
+    fn a_task_confirmation_rechecks_the_pending_scope_without_granting_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let mut store = Store::open(&root, 100).unwrap();
+        let id = store
+            .request_or_consume(scoped(temp.path()), 100)
+            .unwrap()
+            .unwrap();
+        let pending = store.pending(&id, "conversation-one").unwrap();
+        let mut changed = pending.clone();
+        changed.scope.task_push.as_mut().unwrap().task.generation += 1;
+        assert!(store.confirm_task(&changed).is_err());
+        assert!(!store.requests[0].approved);
+        let mut changed = pending.clone();
+        changed
+            .scope
+            .task_push
+            .as_mut()
+            .unwrap()
+            .addresses
+            .push_str("-other");
+        assert!(store.confirm_task(&changed).is_err());
+        assert!(!store.requests[0].approved);
+        store.confirm_task(&pending).unwrap();
+        assert!(store.confirm_task(&pending).is_err());
+    }
+
+    #[test]
+    fn stored_one_use_grants_remain_one_use_without_new_scope_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let scope = scoped(temp.path());
+        let mut store = Store::open(&root, 100).unwrap();
+        let id = store
+            .request_or_consume(scope.clone(), 100)
+            .unwrap()
+            .unwrap();
+        store.approve(&id).unwrap();
+        let mut value = serde_json::to_value(&store.requests[0]).unwrap();
+        value.as_object_mut().unwrap().remove("for_task");
+        value["scope"].as_object_mut().unwrap().remove("task_push");
+        store.requests[0] = serde_json::from_value(value).unwrap();
+        store.save().unwrap();
+        drop(store);
+        assert!(Store::open(&root, 101)
+            .unwrap()
+            .request_or_consume(scope.clone(), 101)
+            .unwrap()
+            .is_none());
+        assert!(Store::open(&root, 102)
+            .unwrap()
+            .request_or_consume(scope, 102)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn task_chat_choice_reads_only_the_answer_and_requires_an_explicit_suffix() {
+        let id = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            task_approval_ids(&format!("approve {id} for task")),
+            vec![id.to_string()]
+        );
+        assert!(task_approval_ids(&format!("approve {id}")).is_empty());
+        assert!(task_approval_ids(&format!("approve {id} for tasks")).is_empty());
+        let wrapped = format!(
+            "<send_user_message_question_reply>{}</send_user_message_question_reply>",
+            serde_json::json!([{"question":format!("approve {id} for task"),"answer":"decline"}])
+        );
+        assert!(task_approval_ids(&wrapped).is_empty());
+        let wrapped = format!(
+            "<send_user_message_question_reply>{}</send_user_message_question_reply>",
+            serde_json::json!([{"question":"scope?","answer":format!("approve {id} for task")}])
+        );
+        assert_eq!(task_approval_ids(&wrapped), vec![id.to_string()]);
+    }
+
+    #[test]
+    fn authoritative_release_or_reclaim_invalidates_an_unchanged_local_hold() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut scope = scoped(temp.path());
+        let node = "0123456789abcdef0123456789abcdef";
+        let actor = "abcdef0123456789abcdef0123456789";
+        let original = format!("{node} claimed task gen=7 assignee={actor}");
+        assert_eq!(graph_task_generation(&original, node, actor), Some(7));
+        for status in ["ready", "done", "failed", "cancelled"] {
+            let released = format!("{node} {status} task gen=8 assignee={actor}");
+            assert_eq!(graph_task_generation(&released, node, actor), None);
+        }
+        let other = format!("{node} claimed task gen=8 assignee=other");
+        assert_eq!(graph_task_generation(&other, node, actor), None);
+        let reclaimed = format!("{node} claimed task gen=9 assignee={actor}");
+        let original_scope = scope.clone();
+        scope.task_push.as_mut().unwrap().task.generation =
+            graph_task_generation(&reclaimed, node, actor).unwrap();
+        assert!(!task_push_matches(&original_scope, &scope));
+        for malformed in [
+            format!("other claimed task gen=7 assignee={actor}"),
+            format!("{node} claimed task gen=7 gen=8 assignee={actor}"),
+            format!("{node} claimed task gen=7 assignee={actor} assignee={actor}"),
+        ] {
+            assert_eq!(graph_task_generation(&malformed, node, actor), None);
+        }
+    }
+
+    #[test]
+    fn a_changed_task_or_remote_mints_a_new_pending_consent_form() {
+        for field in ["generation", "addresses"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("approvals");
+            let scope = scoped(temp.path());
+            let mut store = Store::open(&root, 100).unwrap();
+            let first = store
+                .request_or_consume(scope.clone(), 100)
+                .unwrap()
+                .unwrap();
+            let pending = store.pending(&first, "conversation-one").unwrap();
+            let mut changed = scope.clone();
+            let push = changed.task_push.as_mut().unwrap();
+            if field == "generation" {
+                push.task.generation += 1;
+            } else {
+                push.addresses.push_str("-other");
+            }
+            let second = store
+                .request_or_consume(changed.clone(), 101)
+                .unwrap()
+                .unwrap();
+            assert_ne!(first, second, "{field}");
+            assert_eq!(
+                store.request_or_consume(changed.clone(), 102).unwrap(),
+                Some(second.clone())
+            );
+            let mut wrong_form = pending.clone();
+            wrong_form.id = second.clone();
+            assert!(store.confirm_task(&wrong_form).is_err());
+            assert!(!store.requests.iter().any(|request| request.approved));
+            store.confirm_task(&pending).unwrap();
+            assert_eq!(
+                store.request_or_consume(changed, 103).unwrap(),
+                Some(second)
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_forms_offer_chat_scope_only_when_the_task_is_eligible() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let mut store = Store::open(&root, 100).unwrap();
+        let id = store
+            .request_or_consume(scoped(temp.path()), 100)
+            .unwrap()
+            .unwrap();
+        let pending = store.pending(&id, "conversation-one").unwrap();
+        let once = chat_fallback(&pending, "olive-123abc", false);
+        assert!(once.contains("trusted prompt hook"));
+        assert!(once.contains("approve olive-123abc"));
+        assert!(!once.contains("for task"));
+        assert!(!once.contains("terminal"));
+        let task = chat_fallback(&pending, "olive-123abc", true);
+        assert!(task.contains("approve olive-123abc for task"));
+        assert!(task.contains("project-abcd"));
+        assert!(task.contains("refs/heads/topic"));
+        assert!(task.contains("command remains blocked"));
+        assert!(!store.requests[0].approved);
+        let mut anonymous = pending.clone();
+        anonymous.scope.session.clear();
+        let unsupported = chat_fallback(&anonymous, "olive-123abc", false);
+        assert!(!unsupported.contains("approve olive-123abc"));
+        assert!(unsupported.contains("no named conversation"));
+        assert!(unsupported.contains("supports form elicitation"));
+    }
+
+    #[test]
+    fn local_git_configuration_and_branch_changes_invalidate_task_targets() {
+        let _environment = crate::test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path();
+        let git = |args: &[&str]| {
+            let output = crate::git_at(cwd).args(args).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        for args in [
+            vec!["init", "-q", "--initial-branch=main"],
+            vec!["config", "user.name", "publication test"],
+            vec!["config", "user.email", "publication@example.invalid"],
+            vec!["commit", "-q", "--allow-empty", "-m", "seed"],
+            vec!["remote", "add", "origin", "https://example.invalid/one"],
+        ] {
+            git(&args);
+        }
+        let lease = scoped(cwd).task_push.unwrap().task;
+        let command = "git push origin HEAD:refs/heads/topic";
+        let original = task_push_target(command, cwd, lease.clone()).unwrap();
+        git(&["config", "remote.origin.receivepack", "git-receive-pack"]);
+        let configured = task_push_target(command, cwd, lease.clone()).unwrap();
+        assert_eq!(configured.addresses, original.addresses);
+        assert_ne!(configured.configuration, original.configuration);
+        git(&["config", "--unset", "remote.origin.receivepack"]);
+        git(&["config", "core.sshCommand", "ssh -o BatchMode=yes"]);
+        assert_ne!(
+            task_push_target(command, cwd, lease.clone())
+                .unwrap()
+                .configuration,
+            original.configuration
+        );
+        git(&["config", "--unset", "core.sshCommand"]);
+        for (key, value) in [
+            ("push.followTags", "true"),
+            ("remote.origin.mirror", "true"),
+            ("push.recurseSubmodules", "on-demand"),
+        ] {
+            git(&["config", key, value]);
+            assert!(
+                task_push_target(command, cwd, lease.clone()).is_none(),
+                "{key}"
+            );
+            git(&["config", "--unset", key]);
+        }
+        git(&[
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            "https://example.invalid/two",
+        ]);
+        assert_ne!(
+            task_push_target(command, cwd, lease.clone())
+                .unwrap()
+                .addresses,
+            original.addresses
+        );
+        git(&[
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            "https://example.invalid/three",
+        ]);
+        let multiple = task_push_target(command, cwd, lease.clone()).unwrap();
+        assert_ne!(multiple.addresses, original.addresses);
+        git(&["checkout", "-q", "-b", "other"]);
+        assert_ne!(
+            task_push_target(command, cwd, lease.clone())
+                .unwrap()
+                .source,
+            original.source
+        );
+        git(&["checkout", "-q", "--detach"]);
+        assert!(task_push_target(command, cwd, lease).is_none());
+    }
+
+    #[test]
+    fn per_call_execution_overrides_cannot_reuse_an_ordinary_push_task() {
+        let _environment = crate::test_env_lock();
+        std::env::remove_var("LJOS_UNATTENDED");
+        let plain =
+            serde_json::json!({"tool_input":{"command":"git push origin main", "workdir":"/tmp"}});
+        assert!(task_execution_supported(&plain));
+        for marker in ["agent_id", "agentId"] {
+            let mut child = plain.clone();
+            child[marker] = serde_json::json!("child-one");
+            assert!(!task_execution_supported(&child), "{marker}");
+        }
+        for field in [
+            "env",
+            "environment",
+            "shell",
+            "executable",
+            "interpreter",
+            "stdin",
+            "script",
+            "login",
+            "tty",
+        ] {
+            for envelope in ["tool_input", "toolInput"] {
+                let mut overridden = plain.clone();
+                overridden[envelope] = serde_json::json!({});
+                overridden[envelope][field] = serde_json::json!("override");
+                assert!(!task_execution_supported(&overridden), "{envelope}.{field}");
+            }
+            let mut overridden = plain.clone();
+            overridden[field] = serde_json::json!("override");
+            assert!(!task_execution_supported(&overridden), "{field}");
+        }
+    }
+
+    #[test]
+    fn a_working_directory_alias_is_resolved_before_request_scoping() {
+        let temp = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let input = serde_json::json!({"hook_event_name":"PreToolUse", "session_id":"fixture-session", "cwd":temp.path(), "tool_name":"Bash", "tool_input":{"command":"printf fixture", "working_directory":other.path()}}).to_string();
+        let call = crate::hook_call(&input);
+        let rule = Rule {
+            pattern: "fixture".into(),
+            verdict: "ask".into(),
+            reason: "Fixture".into(),
+        };
+        let scope = Scope::from_hook(&input, &call, &rule).unwrap();
+        assert_eq!(scope.cwd, fs::canonicalize(other.path()).unwrap());
+    }
+
+    #[test]
+    fn a_task_grant_never_decodes_as_approved_in_the_one_use_format() {
+        #[derive(Deserialize)]
+        struct OldScope {
+            session: String,
+            #[serde(default)]
+            seat: String,
+            shape: String,
+            tool: String,
+            cwd: PathBuf,
+            command: String,
+            pattern: String,
+            reason: String,
+        }
+        #[derive(Deserialize)]
+        struct OldRequest {
+            id: String,
+            scope: OldScope,
+            created: u64,
+            approved: bool,
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let scope = scoped(temp.path());
+        let id = grant(&root, scope.clone());
+        let bytes = fs::read(root.join("requests.json")).unwrap();
+        let decoded: Vec<OldRequest> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.len(), 1);
+        let old = &decoded[0];
+        assert!(!old.approved);
+        assert_eq!(old.id, id);
+        assert_eq!(old.created, 100);
+        assert_eq!(old.scope.session, scope.session);
+        assert_eq!(old.scope.seat, scope.seat);
+        assert_eq!(old.scope.shape, scope.shape);
+        assert_eq!(old.scope.tool, scope.tool);
+        assert_eq!(old.scope.cwd, scope.cwd);
+        assert_eq!(old.scope.command, scope.command);
+        assert_eq!(old.scope.pattern, scope.pattern);
+        assert_eq!(old.scope.reason, scope.reason);
+        assert!(decoded
+            .iter()
+            .filter(|request| request.approved)
+            .next()
+            .is_none());
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2234,3 +2234,118 @@ fn a_typed_prompt_on_claude_and_codex_still_stores_after_a_tool_call() {
         assert!(rules_text(&seat).contains("checked fuse"), "{name}: {err}");
     }
 }
+
+mod chat_relay_approval_tests {
+    use super::*;
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+
+    const REQUEST: &str = "0123456789abcdef0123456789abcdef";
+
+    fn pending(seat: &Seat) {
+        let directory = seat.run.path().join("ljos/approvals");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(directory.join("requests.json"))
+            .unwrap();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let fixture = serde_json::json!([{
+            "id":REQUEST, "created":stamp, "approved":false,
+            "scope": {"session":RUNNER_SESSION, "seat":"fixture-seat", "shape":"fallback", "tool":"Bash", "cwd":seat.home.path(), "command":"git push origin topic", "pattern":"fixture-push", "reason":"Fixture consent"}
+        }]);
+        file.write_all(fixture.to_string().as_bytes()).unwrap();
+    }
+
+    fn approved(seat: &Seat) -> bool {
+        let bytes = std::fs::read(seat.run.path().join("ljos/approvals/requests.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value[0]["approved"] == true
+    }
+
+    fn payload() -> String {
+        serde_json::json!({"hook_event_name":"BeforeAgent", "session_id":RUNNER_SESSION, "prompt":format!("approve {REQUEST}")}).to_string()
+    }
+
+    #[test]
+    fn a_normalized_prompt_grants_consent_from_its_attested_runner() {
+        let adapter = "gemini";
+        for via_sh in [false, true] {
+            let seat = Seat::new();
+            pending(&seat);
+            let command = if via_sh {
+                let mut command = Command::new(seat.runner(adapter));
+                command
+                    .args(["-c", "\"$@\"; exit $?", adapter, "/bin/sh", "-c"])
+                    .arg(format!(
+                        "{} hook --runner {adapter}",
+                        env!("CARGO_BIN_EXE_ljos")
+                    ));
+                seat.seat_env(&mut command);
+                command
+            } else {
+                let mut command = seat.hook_under(adapter);
+                command.args(["--runner", adapter]);
+                command
+            };
+            let out = fed(command, &payload());
+            assert!(out.status.success(), "{}", text_of(&out));
+            assert!(approved(&seat), "via shell {via_sh}: {}", text_of(&out));
+        }
+    }
+
+    #[test]
+    fn normalized_tool_subagent_and_unattended_prompts_grant_nothing() {
+        let adapter = "gemini";
+        for mode in [
+            "tool",
+            "wrong-runner",
+            "subagent",
+            "unattended",
+            "non-runner",
+        ] {
+            let seat = Seat::new();
+            pending(&seat);
+            let mut input: serde_json::Value = serde_json::from_str(&payload()).unwrap();
+            let mut command = match mode {
+                "tool" => seat.under(
+                    adapter,
+                    &[("GEMINI_SESSION_ID", RUNNER_SESSION)],
+                    "",
+                    &["hook", "--runner", adapter],
+                ),
+                "wrong-runner" => {
+                    let mut command = seat.hook_under("codex");
+                    command.args(["--runner", adapter]);
+                    command
+                }
+                "non-runner" => {
+                    let mut command = seat.hook_under("sshd");
+                    command.args(["--runner", adapter]);
+                    command
+                }
+                _ => {
+                    let mut command = seat.hook_under(adapter);
+                    command.args(["--runner", adapter]);
+                    command
+                }
+            };
+            if mode == "subagent" {
+                input["agent_id"] = serde_json::json!("child-one");
+            }
+            if mode == "unattended" {
+                command.env("LJOS_UNATTENDED", "1");
+            }
+            let out = fed(command, &input.to_string());
+            assert!(!approved(&seat), "{mode}: {}", text_of(&out));
+        }
+    }
+}

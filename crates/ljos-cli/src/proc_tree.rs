@@ -1874,10 +1874,78 @@ fn confirm_runner(runner: &Proc) -> Result<(), String> {
     Ok(())
 }
 
+/// One adapter process running the same executable file can relay a hook.
+/// Its command line must be the shipped adapter entry; environment markers
+/// and executable path names do not establish this identity.
+fn relay_runner_from(
+    words: &[String],
+    parent_file: Option<(u64, u64)>,
+    own_file: Option<(u64, u64)>,
+) -> Option<String> {
+    if parent_file.is_none() || parent_file != own_file {
+        return None;
+    }
+    match words {
+        [_, hook, flag, runner]
+            if hook == "hook" && flag == "--runner" && crate::runner_hooks::is_runner(runner) =>
+        {
+            Some(runner.clone())
+        }
+        _ => None,
+    }
+}
+
+fn hook_relay(pid: u32) -> Option<String> {
+    relay_runner_from(
+        &argv(pid)?,
+        running_exe(pid)?.1,
+        running_exe(std::process::id())?.1,
+    )
+}
+
+#[cfg(test)]
+mod relay_approval_tests {
+    use super::*;
+
+    #[test]
+    fn one_adapter_hop_needs_exact_arguments_and_executable_file_identity() {
+        let words = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        let file = Some((7, 11));
+        let adapter = "gemini";
+        assert!(crate::runner_hooks::is_runner(adapter));
+        let valid = words(&["ljos", "hook", "--runner", adapter]);
+        assert_eq!(
+            relay_runner_from(&valid, file, file),
+            Some(adapter.to_string())
+        );
+        assert!(relay_runner_from(&valid, Some((7, 12)), file).is_none());
+        assert!(relay_runner_from(&valid, None, file).is_none());
+        assert!(relay_runner_from(&valid, file, None).is_none());
+        for values in [
+            vec!["ljos", "hook"],
+            vec!["ljos", "hook", "--runner", "unknown-runner"],
+            vec!["ljos", "hook", "--runner", adapter, "--limit", "8"],
+            vec!["ljos", "hook", "--runner", adapter, "--runner", adapter],
+            vec!["ljos", "hook", "--event", "UserPromptSubmit"],
+            vec!["ljos", "hook", "--runner", adapter, "<", "prompt.json"],
+        ] {
+            assert!(
+                relay_runner_from(&words(&values), file, file).is_none(),
+                "{values:?}"
+            );
+        }
+    }
+}
 /// The runner that spawned this `ljos hook` itself, or why none did: the
 /// parent must be an installed runner ([`exe_runner`]), with no shell or
 /// interpreter between them but the `sh -c` the runner runs its hook
-/// command in ([`hook_shell`]). That runner must not run inside a tool
+/// command in ([`hook_shell`]). One adapter using the same executable file
+/// and its shipped arguments may relay the hook. That runner must not run inside a tool
 /// call, which a runner above it, a tool call's variables in the
 /// environment it was started with, or the guard's tool-call record
 /// ([`confirm_runner`]) would show. Only such a hook's prompt is the
@@ -1889,6 +1957,10 @@ fn confirm_runner(runner: &Proc) -> Result<(), String> {
 /// Why the parent is not a runner the person started.
 pub fn hook_runner() -> Result<(Proc, &'static str), String> {
     let mut chain = ancestors();
+    let relay = chain.first().and_then(|parent| hook_relay(parent.pid));
+    if relay.is_some() && chain.len() > 1 {
+        chain.remove(0);
+    }
     let parent = chain.first().ok_or("it has no parent process")?;
     if exe_runner(parent.pid).is_none() && chain.len() > 1 && hook_shell(parent.pid) {
         chain.remove(0);
@@ -1900,6 +1972,9 @@ pub fn hook_runner() -> Result<(Proc, &'static str), String> {
             parent.comm, parent.pid
         ));
     };
+    if relay.as_deref().is_some_and(|expected| expected != runner) {
+        return Err("the hook adapter does not match its attested runner".into());
+    }
     let env = environ(parent.pid).ok_or_else(|| {
         format!(
             "the environment {} (pid {}) was started with cannot be read, so a tool call's stamp would be hidden",

@@ -1403,9 +1403,9 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Show the person a confirmation form for a pending command request printed by the hook. Pass only its id. A grant requires the person's explicit acceptance through the connected client, permits one attempt, and expires with the request. Decline, cancellation, unsupported clients and errors leave the command blocked.",
+        description = "Show the person an in-chat consent form for a pending command request. Pass only its id; tool arguments never grant consent. The default is one attempt. An eligible ordinary branch push can offer an explicit human-selected task scope bound to the exact command, directory, conversation, live task lease and remote binding. Decline, cancellation and errors leave the command blocked.",
         annotations(
-            title = "Approve one command",
+            title = "Review command consent",
             read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = false,

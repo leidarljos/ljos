@@ -191,6 +191,30 @@ fn command_of(args: &Value) -> Option<String> {
     })
 }
 
+fn command_with_context(args: &Value, command: String) -> Value {
+    let mut normalized = Map::new();
+    for key in [
+        "workdir",
+        "cwd",
+        "working_directory",
+        "env",
+        "environment",
+        "shell",
+        "executable",
+        "interpreter",
+        "stdin",
+        "script",
+        "login",
+        "tty",
+    ] {
+        if let Some(value) = args.get(key) {
+            normalized.insert(key.into(), value.clone());
+        }
+    }
+    normalized.insert("command".into(), Value::String(command));
+    Value::Object(normalized)
+}
+
 /// The runner's stdin as the Claude Code payload `ljos hook` reads:
 /// `hook_event_name`, `session_id`, `cwd`, and `tool_name` with
 /// `tool_input`, or `prompt`. A payload that is not JSON, or a runner
@@ -221,7 +245,10 @@ pub fn normalize_input(runner: &str, input: &str) -> String {
             put(&mut out, "cwd", info["cwd"].as_str());
             if let Some(line) = info["command_line"].as_str() {
                 out.insert("tool_name".into(), json!("Bash"));
-                out.insert("tool_input".into(), json!({ "command": line }));
+                out.insert(
+                    "tool_input".into(),
+                    command_with_context(info, line.to_string()),
+                );
             }
             put(&mut out, "prompt", info["user_prompt"].as_str());
         }
@@ -235,7 +262,7 @@ pub fn normalize_input(runner: &str, input: &str) -> String {
                 let args = &pre["parameters"];
                 match command_of(args) {
                     Some(c) => {
-                        out.insert("tool_input".into(), json!({ "command": c }));
+                        out.insert("tool_input".into(), command_with_context(args, c));
                     }
                     None => {
                         out.insert("tool_input".into(), args.clone());
@@ -247,7 +274,7 @@ pub fn normalize_input(runner: &str, input: &str) -> String {
                 let args = &call["input"];
                 match command_of(args) {
                     Some(c) => {
-                        out.insert("tool_input".into(), json!({ "command": c }));
+                        out.insert("tool_input".into(), command_with_context(args, c));
                     }
                     None => {
                         out.insert("tool_input".into(), args.clone());
@@ -338,7 +365,7 @@ pub fn normalize_input(runner: &str, input: &str) -> String {
                 .or_else(|| command_of(&v))
             {
                 Some(c) => {
-                    out.insert("tool_input".into(), json!({ "command": c }));
+                    out.insert("tool_input".into(), command_with_context(&v, c));
                 }
                 None => {
                     out.insert("tool_input".into(), v.clone());
@@ -352,6 +379,13 @@ pub fn normalize_input(runner: &str, input: &str) -> String {
             return v.to_string();
         }
         _ => return input.to_string(),
+    }
+    // Prompt origin survives normalization so a child or another thread
+    // cannot become the person through an adapter's field selection.
+    for key in ["agent_id", "agentId", "transcript_path"] {
+        if let Some(value) = v.get(key) {
+            out.insert(key.into(), value.clone());
+        }
     }
     Value::Object(out).to_string()
 }
@@ -1958,5 +1992,68 @@ mod tests {
             with_start_line("", "ljos is on").trim(),
             r#"{"additionalContext":"ljos is on"}"#
         );
+    }
+}
+
+#[cfg(test)]
+mod relay_prompt_origin_tests {
+    use super::*;
+
+    #[test]
+    fn normalization_preserves_prompt_origin_markers_for_every_adapter() {
+        let _environment = crate::test_env_lock();
+        std::env::remove_var("LJOS_UNATTENDED");
+        let input = json!({
+            "hook_event_name": "UserPromptSubmit", "session_id": "parent-session", "sessionId": "parent-session", "taskId": "parent-session",
+            "agent_action_name": "pre_user_prompt", "tool_info": {"user_prompt":"approve latest","cwd":"/tmp"},
+            "userPromptSubmit": {"prompt":"approve latest"}, "event": "UserPromptSubmit", "event_type":"UserPromptSubmit",
+            "prompt":"approve latest", "message":"approve latest", "agent_id":"child-one", "agentId":"child-two", "transcript_path":"other-thread.jsonl"
+        }).to_string();
+        for runner in RUNNERS {
+            let normalized = normalize_input(runner, &input);
+            let value: Value = serde_json::from_str(&normalized).unwrap();
+            assert_eq!(value["agent_id"], "child-one", "{runner}");
+            assert_eq!(value["agentId"], "child-two", "{runner}");
+            assert_eq!(value["transcript_path"], "other-thread.jsonl", "{runner}");
+            assert_eq!(
+                crate::capture::not_the_person(&normalized),
+                Some("a subagent's brief"),
+                "{runner}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_normalization_keeps_execution_context_for_consent_scoping() {
+        let command = "git push origin HEAD:refs/heads/topic";
+        let arguments = json!({"command":command,"working_directory":"/other","env":{"CONFIG":"fixture"},"shell":"/bin/sh"});
+        for (runner, input) in [
+            (
+                "cline",
+                json!({"taskId":"fixture","preToolUse":{"toolName":"Bash","parameters":arguments.clone()}}),
+            ),
+            (
+                "cline",
+                json!({"taskId":"fixture","tool_call":{"name":"Bash","input":arguments.clone()}}),
+            ),
+            (
+                "amp",
+                json!({"cmd":command,"working_directory":"/other","env":{"CONFIG":"fixture"},"shell":"/bin/sh"}),
+            ),
+            (
+                "windsurf",
+                json!({"agent_action_name":"pre_run_command","tool_info":{"command_line":command,"working_directory":"/other","env":{"CONFIG":"fixture"},"shell":"/bin/sh"}}),
+            ),
+        ] {
+            let value: Value =
+                serde_json::from_str(&normalize_input(runner, &input.to_string())).unwrap();
+            assert_eq!(value["tool_input"]["command"], command, "{runner}");
+            assert_eq!(
+                value["tool_input"]["working_directory"], "/other",
+                "{runner}"
+            );
+            assert_eq!(value["tool_input"]["env"], arguments["env"], "{runner}");
+            assert_eq!(value["tool_input"]["shell"], "/bin/sh", "{runner}");
+        }
     }
 }
