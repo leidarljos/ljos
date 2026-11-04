@@ -35,8 +35,8 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           set -euo pipefail
-          cargo publish --locked --no-verify -p ljos
-          cargo publish --locked --no-verify -p ljos-hud
+          cargo publish --locked -p ljos
+          cargo publish --locked -p ljos-hud
 
   # Lists the release in the official MCP Registry once crates.io has it.
   # The registry reads the crate's README on crates.io for the mcp-name line.
