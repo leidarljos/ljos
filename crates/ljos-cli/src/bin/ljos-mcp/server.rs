@@ -316,6 +316,10 @@ fn runs_without_seat(name: &str) -> bool {
     SEAT_FREE_TOOLS.contains(&name)
 }
 
+fn unseated_fallback(name: &str, has_named_seat: bool) -> bool {
+    runs_without_seat(name) && (name != "ljos_request_approval" || !has_named_seat)
+}
+
 /// The call's `seat`, when the bot passed one.
 fn seat_argument(
     args: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -3706,17 +3710,18 @@ impl ServerHandler for LjosServer {
             .peer
             .peer_info()
             .map(|info| info.client_info.name.clone());
+        let has_named_seat = seat_text.is_some();
         let resolved = tokio::task::spawn_blocking(move || {
             note_connected_client(client.as_deref());
             ljos_cli::resolve_call_seat(seat_text.as_deref())
         })
         .await
         .map_err(|e| McpError::internal_error(format!("seat: {e}"), None))?;
-        // The guard, the approval form and the reading tools act under no
-        // seat, so a seat this tracker does not know never stops them.
+        // Readers and the guard can proceed without a registered seat.
+        // Command consent refuses an unresolved name supplied by the caller.
         let seat = match resolved {
             Ok(seat) => Some(seat),
-            Err(e) if runs_without_seat(&name) => {
+            Err(e) if unseated_fallback(&name, has_named_seat) => {
                 ljos_cli::bookkeep::log_line(&format!("{name}: ran without a seat: {e}"));
                 None
             }
@@ -4464,6 +4469,32 @@ mod tests {
         assert_eq!(queued_ids(), vec![RequestId::Number(2)]);
         clear_call_queue();
         crate::lifetime::forget_calls();
+    }
+
+    #[test]
+    fn an_unresolved_named_seat_cannot_request_command_consent() {
+        let arguments = serde_json::json!({
+            "id": "11111111111111111111111111111111",
+            "seat": "unknown-test-seat"
+        });
+        let seat = seat_argument(arguments.as_object()).expect("string seat");
+        assert_eq!(seat.as_deref(), Some("unknown-test-seat"));
+        assert!(runs_without_seat("ljos_request_approval"));
+        assert!(!unseated_fallback("ljos_request_approval", seat.is_some()));
+        assert!(unseated_fallback("ljos_request_approval", false));
+    }
+
+    #[test]
+    fn unseated_fallback_preserves_guard_and_reader_access() {
+        for name in SEAT_FREE_TOOLS {
+            if *name == "ljos_request_approval" {
+                continue;
+            }
+            assert!(unseated_fallback(name, false), "{name}");
+            assert!(unseated_fallback(name, true), "{name}");
+        }
+        assert!(!unseated_fallback("ljos_note", false));
+        assert!(!unseated_fallback("ljos_note", true));
     }
 
     /// A tool that runs with no seat only reads, or is the consent form
