@@ -1083,13 +1083,13 @@ Check the seat
 
 .. [[[cog import ljos_version as v; v.lines("", "The block is the ``ljos`` row from that command on a scratch seat, taken from ljos {version}.", "")]]]
 
-The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.38.0.
+The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.39.0.
 
 .. [[[end]]]
 
 .. [[[cog import ljos_version as v; v.lines("", "``ljos --version`` printed ``ljos {version}``.", "")]]]
 
-``ljos --version`` printed ``ljos 0.38.0``.
+``ljos --version`` printed ``ljos 0.39.0``.
 
 .. [[[end]]]
 

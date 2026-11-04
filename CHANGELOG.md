@@ -5,6 +5,20 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.39.0 (2026-11-04)
+
+### Features
+
+- Support command consent through registered chat relays and explicit task approvals for ordinary branch pushes.
+  Keep approvals bound to their command, repository, task and confirmed scope.
+
+### Fixes
+
+- Serialize tracker publication across callers sharing a Git object store.
+  Keep background pushes exclusive after their caller exits and retain separate lifecycle records for concurrent callers.
+- Verify extracted crate packages before publication.
+
+
 ## 0.38.0 (2026-11-03)
 
 ### Features
