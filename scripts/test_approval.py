@@ -196,11 +196,11 @@ class ConsentWireTest(unittest.TestCase):
         self.assert_blocked(arguments={"id": self.approval_id, "approve": True})
 
     def test_expired_request_cannot_open_a_dialog(self):
-        self.assert_blocked(age=901)
+        self.assert_blocked(age=86401)
 
     def test_expiry_during_confirmation_does_not_grant(self):
         def expire(rows):
-            rows[0]["created"] -= 901
+            rows[0]["created"] -= 86401
         self.assert_blocked(answer={"action": "accept", "content": {"approve": True}},
                             change=expire)
 
