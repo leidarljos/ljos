@@ -242,42 +242,53 @@ $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --forc
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"allow\twarn\tgit-force-push\ta force push rewrites a published branch"}}
 #+end_src
 
-An =ask= rule uses the caller's approval UI when that UI is supported.
-Otherwise the hook stops the command and prints a request id. Calling
-=ljos_request_approval= with that id shows a consent form in a client
-that can display one. Otherwise the person replies =approve REQUEST_ID=
-in the same conversation, where the prompt hook records the grant, or runs
-=ljos approve REQUEST_ID= in a terminal of their own. The command refuses under an agent
-runner or without a terminal. A request from another conversation is not
-granted from this one. An agent therefore cannot grant itself consent. Once the person has
-approved, the agent retries the original tool call.
+An =ask= rule uses the caller's native permission UI when available. If
+the hook stops a command and prints a request tag, the agent calls
+=ljos_request_approval= with that tag to open a confirmation form in chat.
+For a request tagged =olive-123abc=, the tool arguments are:
+
+#+begin_src json
+{"id":"olive-123abc"}
+#+end_src
+
+The person reviews the command and directory in chat, then approves the
+form. One attempt is the default. For an eligible branch push under a
+verified active task, the form also offers =Repeat this exact push for this task=,
+unchecked by default. The person selects it to allow matching pushes under
+that task lease. The agent retries the original tool call after consent is
+recorded. Selecting task reuse returns a receipt such as:
 
 #+begin_src console
-$ ljos approve REQUEST_ID
-Approved once: git push origin main
+Approved for task project-abcd: git push origin HEAD:refs/heads/main
 Directory: /work/project
 Conversation: example-session
 Retry the original command.
 #+end_src
 
-=REQUEST_ID= is the 32-character hexadecimal id printed by the hook, not
-an arbitrary command or a wildcard. The receipt names the exact command
-and the directory and conversation reported by the hook. A tool-level
-working directory takes precedence when the caller includes it. A caller
-that supplies only its conversation directory does not expose shell
-working-directory overrides to this check.
+Task reuse matches the exact command, directory, conversation, seat, tool
+and rule, together with the active task lease, local branch and remote
+binding. Changing the branch, remote settings or execution context needs
+fresh approval. Releasing or reclaiming the task invalidates its lease.
+Task reuse covers ordinary pushes naming one remote and one branch.
+Wrappers, configuration overrides on the command line, force pushes,
+deletions and tags keep their existing permission path. All requests
+expire 24 hours after creation.
 
-The grant lasts for one matching attempt and expires fifteen minutes
-after the request. A changed command, reported directory, conversation,
-tool, or rule needs its own approval. Retrying an expired or consumed id
-is refused. Deny rules and policyd still run on every attempt
-and take precedence over consent. Native execution permissions still
-apply after the hook accepts the retry.
+The connected client must support consent forms. A typed reply is an
+alternative only where an attested prompt hook verifies that the
+installed runner delivered the person's prompt. On that path, reply
+=approve olive-123abc= for one attempt, or =approve olive-123abc for task=
+for an eligible push. A session id or a supplied transcript is insufficient.
+If neither a native UI, an advertised form nor an attested prompt path is
+available, the command stays blocked; use a client with form support.
 
-Requests live in the private login runtime directory, under
-=ljos/approvals/requests.json=. They are temporary consent records, not
-standing rules or memories. The file is locked while a grant is recorded
-or consumed; unavailable or invalid state keeps the command blocked.
+The short tag and full id of 32 hexadecimal digits both identify the pending
+request. Tool arguments and supplied transcripts do not grant consent;
+the person's form response or verified prompt does. Deny rules, native
+execution permissions, worker restrictions and normal Git hooks still
+apply on every attempt. Requests remain temporary records under
+=ljos/approvals/requests.json= in the private login runtime directory,
+rather than standing rules or memories.
 
 **Grok Build.** =ljos onboard --harness grok= writes
 =~/.grok/hooks/ljos.json=. The hook searches on the prompt, keeps the
