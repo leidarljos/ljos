@@ -261,6 +261,33 @@ mod tests {
 
     #[test]
     fn a_child_retains_ownership_after_the_callers_guard_is_dropped() {
+        // A fresh process keeps sibling test-worker forks out of this ownership check.
+        const CHILD: &str = "LJOS_TEST_PUBLICATION_CHILD";
+        if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
+            let _environment = crate::test_env_lock();
+            let out = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    concat!(
+                        "tracker_publish_lock::tests::",
+                        "a_child_retains_ownership_after_the_callers_guard_is_dropped"
+                    ),
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            let errors = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{said}\n{errors}");
+            assert!(
+                said.lines().any(|line| line
+                    .starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;")),
+                "{said}\n{errors}"
+            );
+            return;
+        }
         let common = tempfile::tempdir().unwrap();
         let held = acquire_common(common.path()).unwrap();
         let mut cmd = Command::new("sh");
