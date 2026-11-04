@@ -1712,8 +1712,7 @@ mod task_approval_tests {
         assert_eq!(old.scope.reason, scope.reason);
         assert!(decoded
             .iter()
-            .filter(|request| request.approved)
-            .next()
+            .find(|request| request.approved)
             .is_none());
     }
 }
