@@ -236,13 +236,14 @@ fn assert_synced(delay: &str) {
     );
     let wrote = call(hook(&h, &tracker, None), &covered(), Duration::from_secs(8));
     assert!(
-        wrote.contains("deny"),
-        "delay {delay}: covered write allowed after sync: {wrote}"
+        wrote.contains("\"permission\":\"allow\"")
+            && wrote.contains("\"user_message\":\"warning: never post"),
+        "delay {delay}: covered write had no warning after sync: {wrote}"
     );
 }
 
 /// A fetch of 0.35 s and 0.8 s is inside the 1.5 s tracker budget and
-/// outside the 250 ms side budget. The rule arrives and the write is denied.
+/// outside the 250 ms side budget. The rule arrives and the write warns.
 #[test]
 fn a_slow_tracker_fetch_still_syncs_the_user_rule() {
     assert_synced("0.35");

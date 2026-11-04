@@ -1,6 +1,8 @@
 //! Under an agent runner, the git verbs that write history wait for a
 //! sitting: a live claim this seat holds on an open tracker ticket. A push
-//! onto a protected branch asks until that ticket has a settled consensus.
+//! onto a protected branch warns until that ticket has a settled consensus.
+//! The git hooks hold the write. A runner's pre-command hook shows the
+//! same rule as one warning line, and the call runs.
 //! The person at their own terminal is never asked. No variable switches
 //! the gate off: `LJOS_OFF` and a temporary `HOME` keep the rest of the
 //! guard out, not this.
@@ -44,61 +46,19 @@ fn runner() -> bool {
     RUNNER.with(std::cell::Cell::get)
 }
 
-#[cfg(not(test))]
-fn cause() -> Option<crate::RunnerCause> {
-    crate::runner_cause()
-}
-
-/// A posed runner is a hard one, so a unit test never prompts.
-#[cfg(test)]
-fn cause() -> Option<crate::RunnerCause> {
-    runner().then_some(crate::RunnerCause::Hard)
-}
-
-/// The refusal for `line` run from `cwd` under a runner: a git call that
-/// writes history while this conversation holds no live sitting, or a
-/// push that may land on a branch [`crate::gates::consensus_push`] names
-/// while the sitting's ticket does not clear it. A cloud seat whose push
-/// the allowlist already accepts, and that is not a force or a delete,
-/// asks instead when the only miss is a seat ballot: the hook then writes
-/// a one-use request for that exact command. `None` when no runner is
-/// above this process, when the line writes no history, or when both
-/// hold. An unattributed call, one whose payload and environment name
-/// no conversation, is not checked for a commit, a merge, or a push onto
-/// a topic branch: that write is a line in the book log. A push onto a
-/// protected branch from such a call is refused, since no ticket's seats
-/// can clear it. When a runner variable is the only cause and the line
-/// is refused, the person is asked for their passphrase on the
-/// controlling terminal; a right answer lets this one line through.
+/// The warning for `line` run from `cwd` under a runner: a tool command
+/// that writes a sitting record, or a push that may land on a branch
+/// [`crate::gates::consensus_push`] names while the sitting's ticket does
+/// not clear it. The line runs either way; the rule's verdict is a label.
+/// `None` when no runner is above this process, when the line writes no
+/// history, or when both hold. An unattributed call, one whose payload
+/// and environment name no conversation, is a line in the book log.
 #[must_use]
 pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if crate::user_rules::allows(line).is_some() {
         return None;
     }
-    let rule = judge_line(line, cwd)?;
-    if rule.verdict != "deny" || cause() != Some(crate::RunnerCause::MarkOnly) {
-        return Some(rule);
-    }
-    let verb = crate::gates::git_calls(line, cwd)
-        .ok()
-        .and_then(|calls| calls.into_iter().find(writes_history))
-        .map_or_else(|| "command".to_string(), |call| call.sub);
-    let what = if verb == "command" {
-        verb.clone()
-    } else {
-        format!("git {verb}")
-    };
-    let marks = crate::runner_marks();
-    match crate::person_key::ask_person(&marks, &what) {
-        Ok(()) => None,
-        Err(why) => Some(refusal(&for_marks(
-            rule.reason.trim_start_matches("sitting-gate: "),
-            &marks,
-            &verb,
-            crate::person_key::is_set(),
-            &why,
-        ))),
-    }
+    judge_line(line, cwd)
 }
 
 fn judge_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
@@ -151,8 +111,8 @@ fn plain_protected_push(args: &[String]) -> bool {
     !(crate::cloud::cloud_seat() && args.iter().any(refused))
 }
 
-/// A push onto a protected branch asks when the sitting has no settled
-/// consensus, and the ask names the refusal after that sentence. One
+/// A push onto a protected branch is an `ask` label when the sitting has
+/// no settled consensus, and its warning names why after that sentence. One
 /// active seat settles on its own vote. Two or more use the ordinary
 /// quorum. A conversation id is not read here.
 fn protected_branch_ask(calls: &[GitCall], line: &str) -> Option<Rule> {
@@ -188,7 +148,7 @@ fn protected_ask(dest: &str, branches: &[String]) -> String {
         .map(|branch| format!("`{branch}`"))
         .collect();
     format!(
-        "`git push` may land on {dest}, and a push onto {} asks until the sitting's ticket \
+        "`git push` may land on {dest}, and a push onto {} warns until the sitting's ticket \
          has a settled consensus. One active seat settles on its own vote. Two or more seats \
          use the ordinary quorum. Run `ljos consensus` on the ticket, then push again",
         named.join(", ")

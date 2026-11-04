@@ -648,7 +648,8 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
 /// The hook used to refuse every finish close before finish could read a
 /// grant. A grant that covers the ticket is allowed, and running it closes
 /// the ticket and notes the grant. With no grant, finish refuses and the
-/// ticket stays open. A raw tracker close under a runner is still refused.
+/// ticket stays open. A raw tracker close under a runner is allowed with a
+/// warning that names finish.
 #[test]
 fn a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
     let w = World::new();
@@ -712,7 +713,11 @@ fn a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
 
     let raw = hook_line(&w, "granted-close-raw", "vissue close proj-clerk");
     let said = text(&raw);
-    assert!(!hook_allows(&raw), "raw close was allowed:\n{said}");
+    assert!(hook_allows(&raw), "raw close was refused:\n{said}");
+    assert!(
+        said.contains("warning: "),
+        "raw close had no warning:\n{said}"
+    );
     assert!(
         said.contains("ljos finish proj-clerk"),
         "raw close did not name finish:\n{said}"

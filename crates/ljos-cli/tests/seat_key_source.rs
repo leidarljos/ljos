@@ -241,14 +241,17 @@ fn run_case(h: &Hab, launch: &Launch, payload: &str) -> Output {
     call(hook(h, launch), payload)
 }
 
-fn denies(out: &Output, label: &str) {
+/// The hook allowed the call and carried a warning that contains `needle`.
+fn warns(out: &Output, label: &str, needle: &str) {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("deny"),
-        "{label} allowed the forged seat: {stdout} stderr {}",
+        !ljos_cli::answer_denies(&stdout) && stdout.contains(needle),
+        "{label} gave the forged seat no warning: {stdout} stderr {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+const ALAN_WARNING: &str = "warning: never post or reply to Alan";
 
 fn payloads() -> Vec<(&'static str, String)> {
     vec![
@@ -285,7 +288,7 @@ const SCENARIOS: &[&str] = &[
 ];
 
 /// The 27 cursor payloads from a foreign seat layout, plus the control
-/// with no forged file. Each one names @ocaisa and is denied.
+/// with no forged file. Each one names @ocaisa and carries the rule's warning.
 #[test]
 fn a_forged_seat_key_does_not_skip_the_user_rule() {
     let mut missed = Vec::new();
@@ -299,27 +302,27 @@ fn a_forged_seat_key_does_not_skip_the_user_rule() {
             let launch = prepare(&h, scenario);
             let out = run_case(&h, &launch, &payload);
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            if !stdout.contains("deny") {
+            if ljos_cli::answer_denies(&stdout) || !stdout.contains(ALAN_WARNING) {
                 missed.push(format!("{scenario} / {name}: {stdout}"));
             }
         }
     }
     assert!(
         missed.is_empty(),
-        "forged seat allowed:\n{}",
+        "forged seat had no warning:\n{}",
         missed.join("\n")
     );
 }
 
-/// No forged file. The same three payloads are denied from the rule alone.
+/// No forged file. The same three payloads warn from the rule alone.
 #[test]
-fn a_foreign_ljos_tool_is_denied_with_no_seat_file() {
+fn a_foreign_ljos_tool_warns_with_no_seat_file() {
     for (name, payload) in payloads() {
         let h = hab("none");
         put(&h.home.join(".config/ljos/user-rules.json"), ALAN);
         let launch = prepare(&h, "none");
         let out = run_case(&h, &launch, &payload);
-        denies(&out, name);
+        warns(&out, name, ALAN_WARNING);
     }
 }
 
@@ -340,13 +343,13 @@ fn a_plugin_under_claude_config_dir_does_not_name_the_seat() {
         "tool_use_id": "toolu_p",
     })
     .to_string();
-    denies(&run_case(&h, &launch, &payload), "plugin");
+    warns(&run_case(&h, &launch, &payload), "plugin", ALAN_WARNING);
 }
 
-/// Malformed user rules. The three sources Codex forged still deny
+/// Malformed user rules. The three sources Codex forged still warn on
 /// `mcp__github__ljos_note` instead of taking the early allow.
 #[test]
-fn a_malformed_rules_file_still_denies_a_forged_seat() {
+fn a_malformed_rules_file_still_warns_a_forged_seat() {
     let sources = [
         "CODEX_HOME=repo",
         "CLAUDE_CONFIG_DIR=repo",
@@ -357,7 +360,7 @@ fn a_malformed_rules_file_still_denies_a_forged_seat() {
         put(&h.home.join(".config/ljos/user-rules.json"), "");
         let launch = prepare(&h, scenario);
         let out = run_case(&h, &launch, &claude_note());
-        denies(&out, scenario);
+        warns(&out, scenario, "warning: ");
     }
 }
 
@@ -388,7 +391,7 @@ fn the_home_cursor_file_still_names_the_seat() {
     let out = run_case(&h, &launch, &payload);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !stdout.contains("deny"),
-        "the seat's own tool was refused: {stdout}"
+        !ljos_cli::answer_denies(&stdout) && !stdout.contains("warning: "),
+        "the seat's own tool was warned on: {stdout}"
     );
 }

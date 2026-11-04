@@ -232,9 +232,6 @@ pub fn named_open_issue(_message: &str) -> Option<String> {
     None
 }
 
-/// A guard ask is not written into a book.
-pub fn note_ask(_raw: &str, _call: &super::HookCall, _reason: &str) {}
-
 /// The SessionStart brief is not printed. The book does not keep one.
 pub fn print_brief_once() {}
 
@@ -432,10 +429,6 @@ pub(crate) fn session_key(call: &super::HookCall) -> String {
 
 pub(crate) fn hook_owner() -> (u32, u64) {
     (0, 0)
-}
-
-pub(crate) fn note_ask_within(_raw: &str, _call: &super::HookCall, _reason: &str) -> bool {
-    true
 }
 
 /// Write `bytes` beside `path` and rename them into place.

@@ -371,6 +371,13 @@ pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> 
     })
 }
 
+/// Whether `rule` is the one [`guard_line`] makes. It stays a refusal: a
+/// cloud seat cannot force push, delete a branch, or push to a branch
+/// outside its allowlist.
+pub(crate) fn refuses(rule: &crate::Rule) -> bool {
+    rule.pattern == CURSOR_PUSH && rule.verdict == "deny"
+}
+
 /// git's org merge driver. The merged text replaces `ours`.
 ///
 /// # Errors

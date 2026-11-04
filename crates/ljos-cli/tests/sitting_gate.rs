@@ -147,8 +147,7 @@ impl Seat {
         self.hook_with(line, &[])
     }
 
-    /// A Codex-shaped hook: `turn_id` means an ask is written down, because
-    /// that runner does not stop for one.
+    /// A Codex-shaped hook, with the `turn_id` Codex sends.
     fn hook_turn(&self, line: &str, env: &[(&str, &str)]) -> String {
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
@@ -468,13 +467,12 @@ fn git_ok(repo: &Path, args: &[&str]) {
 }
 
 /// A cloud seat cannot collect another seat's ballot: the tracker is
-/// private to the run. A protected push that is missing only that ballot,
-/// with the sitting live and the allowlist already accepting the
-/// repository and the branch, asks for that one command. A force, a
-/// delete, a cursor ref, another repository, and a push with no sitting
-/// stay refused.
+/// private to the run. A protected push that is missing only that ballot
+/// warns that the sitting has no settled consensus, in `ljos policy` and
+/// in the hook, and the hook still allows it. A force, a delete and a
+/// cursor ref stay refused, in `ljos policy` and in the hook.
 #[test]
-fn a_cloud_seat_asks_for_one_protected_push_when_no_seat_has_voted() {
+fn a_cloud_seat_warns_on_a_protected_push_when_no_seat_has_voted() {
     let seat = Seat::new();
     let origin = seat._dir.path().join("origin.git");
     let other = seat._dir.path().join("other.git");
@@ -514,22 +512,12 @@ fn a_cloud_seat_asks_for_one_protected_push_when_no_seat_has_voted() {
     seat.sit();
     let said = seat.policy(develop, &env);
     asks_for_consensus(&said, develop);
-    assert!(said.contains("\nask:"), "{said}");
-    assert!(!said.contains("\ndeny:"), "{said}");
+    assert!(said.contains("\nwarning: "), "{said}");
 
     let hooked = seat.hook_turn(develop, &env);
-    assert!(hooked.contains("ljos approve "), "{hooked}");
-    assert!(hooked.contains("ljos_request_approval"), "{hooked}");
-    assert!(hooked.contains("Reply `approve "), "{hooked}");
-    assert!(
-        hooked.contains("\"permissionDecision\":\"deny\""),
-        "{hooked}"
-    );
-    let store = std::fs::read_to_string(seat.run.join("ljos/approvals/requests.json"))
-        .expect("the hook wrote a one-use request");
-    let command = serde_json::to_string(develop).unwrap();
-    assert!(store.contains(&command), "{store}");
-    assert_eq!(store.matches("\"approved\":false").count(), 1, "{store}");
+    asks_for_consensus(&hooked, develop);
+    assert!(!hooked.contains("\"permissionDecision\""), "{hooked}");
+    assert!(!seat.run.join("ljos/approvals").exists(), "{hooked}");
 
     for line in [
         "git push --force origin develop",
@@ -544,6 +532,11 @@ fn a_cloud_seat_asks_for_one_protected_push_when_no_seat_has_voted() {
             said.contains("\ndeny:") || said.contains("deny:"),
             "{line}\n{said}"
         );
+        let hooked = seat.hook_turn(line, &env);
+        assert!(
+            hooked.contains("\"permissionDecision\":\"deny\""),
+            "{line}\n{hooked}"
+        );
     }
 
     let seats = seat.home.join(".config/ljos/seats/inky");
@@ -551,8 +544,7 @@ fn a_cloud_seat_asks_for_one_protected_push_when_no_seat_has_voted() {
     std::fs::write(seats.join("ljos.toml"), "[cloud]\nbranches = [\"main\"]\n").unwrap();
     let main = seat.policy("git push origin main", &env);
     asks_for_consensus(&main, "git push origin main");
-    assert!(main.contains("\nask:"), "{main}");
-    assert!(!main.contains("\ndeny:"), "{main}");
+    assert!(main.contains("\nwarning: "), "{main}");
 
     seat.vote(&[("inky", "revise"), ("flint", "revise")]);
     let back = seat.policy(develop, &env);
@@ -641,10 +633,11 @@ fn two_unslotted_seats_clear_a_protected_push() {
     assert!(said.contains("1 of the 2 seats"), "{said}");
 }
 
-/// A gates file that does not parse asks. The git hook does not answer
-/// with the two-seat quorum line.
+/// A gates file that does not parse is a warning on the policy line, and
+/// the git hook holds the push. Neither answers with the two-seat quorum
+/// line.
 #[test]
-fn a_gates_file_that_does_not_parse_asks_the_git_hook() {
+fn a_gates_file_that_does_not_parse_warns_and_holds_the_git_hook() {
     let seat = Seat::new();
     std::fs::create_dir_all(seat.repo.join(".ljos")).unwrap();
     std::fs::write(seat.repo.join(".ljos/gates.toml"), "quorum = [\n").unwrap();
@@ -653,8 +646,8 @@ fn a_gates_file_that_does_not_parse_asks_the_git_hook() {
     assert!(said.contains("do not read"), "{said}");
     assert!(!said.contains("1 of the 2 seats"), "{said}");
     assert!(
-        said.contains("ask"),
-        "a malformed gates file was not an ask\n{said}"
+        said.contains("\nwarning: sitting-gate: "),
+        "a malformed gates file was not a warning\n{said}"
     );
     let refs = seat.same_commit_refs();
     let out = seat.git_hook_push(&refs, &[]);

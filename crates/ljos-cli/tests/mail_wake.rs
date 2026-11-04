@@ -220,17 +220,18 @@ fn a_send_wakes_the_recipient_and_an_interrupt_holds_its_stop() {
         text(&missed)
     );
 
-    // A wake the guard refuses is not set.
-    let refused = home.ljos(
+    // A wake a rule fires on is set, with the rule's warning beside it.
+    let warned = home.ljos(
         RECIPIENT,
         &["wake", "--command", "kubectl delete namespace prod"],
         None,
     );
-    assert!(!refused.status.success(), "{}", text(&refused));
+    assert!(warned.status.success(), "{}", text(&warned));
     assert!(
-        text(&refused).contains("the guard says"),
+        text(&warned).contains("runs `kubectl delete namespace prod`")
+            && text(&warned).contains("\nwarning: cluster-delete: "),
         "{}",
-        text(&refused)
+        text(&warned)
     );
 
     let script = home.dir.path().join("wake.sh");

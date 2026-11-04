@@ -1,5 +1,5 @@
-//! A relay that cannot read its stdin allows the call and warns. A prompt
-//! still exits 1.
+//! A relay that cannot read its stdin allows the call and warns, on a
+//! tool call and on a prompt alike, and exits 0.
 
 ljos_test_boot::harness!();
 use std::io::Write;
@@ -49,12 +49,10 @@ fn invalid_utf8_on_a_tool_hook_allows_and_warns() {
 }
 
 #[test]
-fn invalid_utf8_on_a_prompt_hook_is_not_a_deny() {
+fn invalid_utf8_on_a_prompt_hook_exits_0_with_a_note() {
     let out = hook("gemini", Some("BeforeAgent"), &[0xff, 0xfe]);
-    assert_eq!(out.status.code(), Some(1), "{out:?}");
-    assert!(
-        out.stdout.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&out.stdout)
-    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(said.contains("unhealthy"), "{said}");
+    assert!(!said.contains("deny"), "{said}");
 }

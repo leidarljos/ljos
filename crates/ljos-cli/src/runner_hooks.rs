@@ -5,9 +5,12 @@
 //! `onboard` writes each runner's hook file with the command
 //! `ljos hook --runner NAME`. That command turns the runner's stdin into
 //! the Claude Code payload the seat reads, runs the ordinary hook, and
-//! writes the answer back in the runner's own contract: its field names,
-//! and for some runners an exit code. A runner that cannot ask the person
-//! gets a deny in place of an ask, with the reason saying so.
+//! writes the answer back in the runner's own field names. An answer
+//! allows the call and exits 0. A rule's warning rides in the runner's
+//! context field, or on stderr where the runner reads no context. The
+//! one deny the seat prints, policyd's block under the person's
+//! `block-on-warning`, is the runner's own deny: its fields, and for some
+//! runners exit 2.
 
 use serde_json::{json, Map, Value};
 use std::path::Path;
@@ -30,109 +33,6 @@ pub const RUNNERS: &[&str] = &[
     "openhands",
 ];
 
-#[derive(Clone, Copy)]
-struct RunnerContract {
-    asks: bool,
-    deny_by_exit: bool,
-}
-
-const RUNNER_CONTRACTS: &[(&str, RunnerContract)] = &[
-    (
-        "copilot",
-        RunnerContract {
-            asks: true,
-            deny_by_exit: false,
-        },
-    ),
-    (
-        "gemini",
-        RunnerContract {
-            asks: false,
-            deny_by_exit: false,
-        },
-    ),
-    (
-        "windsurf",
-        RunnerContract {
-            asks: false,
-            deny_by_exit: true,
-        },
-    ),
-    (
-        "factory",
-        RunnerContract {
-            asks: true,
-            deny_by_exit: true,
-        },
-    ),
-    (
-        "kiro",
-        RunnerContract {
-            asks: false,
-            deny_by_exit: true,
-        },
-    ),
-    (
-        "cline",
-        RunnerContract {
-            asks: false,
-            deny_by_exit: false,
-        },
-    ),
-    (
-        "qwen",
-        RunnerContract {
-            asks: true,
-            deny_by_exit: true,
-        },
-    ),
-    (
-        "crush",
-        RunnerContract {
-            asks: false,
-            deny_by_exit: true,
-        },
-    ),
-    (
-        "auggie",
-        RunnerContract {
-            asks: false,
-            deny_by_exit: false,
-        },
-    ),
-    (
-        "goose",
-        RunnerContract {
-            asks: false,
-            deny_by_exit: true,
-        },
-    ),
-    (
-        "amp",
-        RunnerContract {
-            asks: true,
-            deny_by_exit: true,
-        },
-    ),
-    (
-        "openhands",
-        RunnerContract {
-            asks: false,
-            deny_by_exit: true,
-        },
-    ),
-];
-
-fn contract(runner: &str) -> RunnerContract {
-    RUNNER_CONTRACTS
-        .iter()
-        .find_map(|(name, contract)| (*name == runner).then_some(*contract))
-        .unwrap_or(RunnerContract {
-            asks: false,
-            deny_by_exit: false,
-        })
-}
-
 /// Runners whose hook entry must name one program with no arguments (Amp's
 /// delegate) or a `.sh` file (Auggie): onboard writes this script beside
 /// the settings file, and the entry names it.
@@ -154,9 +54,13 @@ pub fn is_runner(name: &str) -> bool {
     RUNNERS.contains(&name)
 }
 
-/// Whether the runner shows the person a prompt on an `ask`.
-fn asks(runner: &str) -> bool {
-    contract(runner).asks
+/// Whether the runner reads a deny from the hook's exit code, 2, beside
+/// or in place of its JSON.
+fn denies_by_exit(runner: &str) -> bool {
+    matches!(
+        runner,
+        "windsurf" | "factory" | "kiro" | "qwen" | "crush" | "goose" | "amp" | "openhands"
+    )
 }
 
 fn reason_stderr(reason: &str) -> String {
@@ -356,160 +260,181 @@ pub fn normalize_input(runner: &str, input: &str) -> String {
     Value::Object(out).to_string()
 }
 
-/// What the seat's answer says, whatever shape it came in.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct Said {
-    decision: Option<String>,
-    reason: String,
-    context: String,
+/// The context in the seat's answer, whatever shape it came in. The
+/// reason of a decision that is no [`denial`], such as an ask only a
+/// hook from an older build prints, leads as a warning line: a runner
+/// here reads it as an allow.
+fn read_answer(out: &str) -> String {
+    let trimmed = out.trim();
+    let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+        return trimmed.to_string();
+    };
+    let specific = &v["hookSpecificOutput"];
+    let reason = specific["permissionDecisionReason"]
+        .as_str()
+        .or_else(|| v["reason"].as_str())
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(|r| {
+            if r.starts_with("warning:") {
+                r.to_string()
+            } else {
+                format!("warning: {r}")
+            }
+        });
+    let context = specific["additionalContext"]
+        .as_str()
+        .or_else(|| v["context"].as_str())
+        .filter(|c| !c.trim().is_empty())
+        .map(str::to_string);
+    reason
+        .into_iter()
+        .chain(context)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-fn read_answer(out: &str) -> Said {
+/// The reason and the context of a seat answer that denies a tool call:
+/// policyd's block under the person's `block-on-warning`, or the cloud
+/// seat push rule's refusal. `None` on any other answer, and on any other
+/// event: a held stop's `block` keeps the runner going.
+fn denial(event: &str, out: &str) -> Option<(String, String)> {
+    if !gate_event(event) {
+        return None;
+    }
     let trimmed = out.trim();
     let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
         // A plain-text answer is an argv line; a deny says so first.
-        if trimmed.starts_with("deny:") {
-            return Said {
-                decision: Some("deny".into()),
-                reason: trimmed.trim_start_matches("deny:").trim().to_string(),
-                context: String::new(),
-            };
-        }
-        return Said {
-            context: trimmed.to_string(),
-            ..Said::default()
-        };
+        let reason = trimmed.strip_prefix("deny:")?;
+        return Some((reason.trim().to_string(), String::new()));
     };
     let specific = &v["hookSpecificOutput"];
     let decision = specific["permissionDecision"]
         .as_str()
-        .or_else(|| v["decision"].as_str())
-        .map(|d| if d == "block" { "deny" } else { d })
-        .filter(|d| matches!(*d, "deny" | "ask"))
-        .map(str::to_string);
-    let reason = specific["permissionDecisionReason"]
-        .as_str()
-        .or_else(|| v["reason"].as_str())
-        .unwrap_or("")
-        .to_string();
-    let context = specific["additionalContext"]
-        .as_str()
-        .or_else(|| v["context"].as_str())
-        .unwrap_or("")
-        .to_string();
-    Said {
-        decision,
-        reason,
-        context,
+        .or_else(|| v["decision"].as_str());
+    if !matches!(decision, Some("deny" | "block")) {
+        return None;
     }
+    let field = |inner: &str, top: &str| {
+        specific[inner]
+            .as_str()
+            .or_else(|| v[top].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    Some((
+        field("permissionDecisionReason", "reason"),
+        field("additionalContext", "context"),
+    ))
 }
 
-/// The seat's answer (the Claude Code JSON `ljos hook` prints) in the
-/// runner's contract: what to print, what to write to stderr, and the
-/// exit code. `event` is the event name the runner sent.
-#[must_use]
-pub fn answer(runner: &str, event: &str, out: &str) -> (String, String, i32) {
-    let mut said = read_answer(out);
-    if said.decision.as_deref() == Some("ask") && !asks(runner) {
-        said.decision = Some("deny".into());
-        said.reason = format!(
-            "ask the person before running this: {}. This runner cannot ask, so retrying \
-             returns this same refusal: stop, tell the person the exact command, and leave \
-             it for them to run.",
-            said.reason
-        );
-    }
+/// A [`denial`] in the runner's contract: what to print, what to write
+/// to stderr, and the exit code. `out` is the seat's whole answer.
+fn denied(
+    runner: &str,
+    event: &str,
+    out: &str,
+    reason: &str,
+    context: &str,
+) -> (String, String, i32) {
     let line = |v: Value| v.to_string() + "\n";
-    let reason = said.reason.clone();
-    let context = said.context.clone();
-    let mut rendered = match (runner, said.decision.as_deref()) {
-        ("factory" | "qwen", _) => (out.to_string(), String::new(), 0),
-        ("copilot", Some(d)) => (
+    let mut rendered = match runner {
+        "factory" | "qwen" => (out.to_string(), String::new(), 0),
+        "copilot" => (
             line(json!({
-                "permissionDecision": d,
-                "permissionDecisionReason": reason.clone(),
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
             })),
             String::new(),
             0,
         ),
-        ("copilot", None) => (String::new(), String::new(), 0),
-        ("gemini", d) => {
-            let mut v = Map::new();
-            if let Some(d) = d {
-                v.insert("decision".into(), json!(d));
-                v.insert("reason".into(), json!(reason.clone()));
-            }
+        "gemini" => {
+            let mut v = json!({ "decision": "deny", "reason": reason });
             if !context.is_empty() {
-                v.insert(
-                    "hookSpecificOutput".into(),
-                    json!({ "hookEventName": event, "additionalContext": context }),
-                );
-            }
-            (line(Value::Object(v)), String::new(), 0)
-        }
-        ("windsurf" | "kiro" | "goose", Some(_)) => (String::new(), reason_stderr(&reason), 2),
-        ("goose", None) => (String::new(), String::new(), 0),
-        ("openhands", Some(_)) => (
-            line(json!({ "decision": "deny", "reason": reason.clone() })),
-            reason_stderr(&reason),
-            2,
-        ),
-        ("openhands", None) if !context.is_empty() => (
-            line(json!({ "additionalContext": context })),
-            String::new(),
-            0,
-        ),
-        ("amp", Some("ask")) => (String::new(), reason_stderr(&reason), 1),
-        ("amp", Some(_)) => (String::new(), reason_stderr(&reason), 2),
-        ("amp", None) => (String::new(), String::new(), 0),
-        ("auggie", Some(d)) => (
-            line(json!({ "hookSpecificOutput": {
-                "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
-                "permissionDecision": d,
-                "permissionDecisionReason": reason.clone(),
-            }})),
-            String::new(),
-            0,
-        ),
-        ("auggie", None) if !context.is_empty() => (
-            line(json!({ "hookSpecificOutput": {
-                "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
-                "additionalContext": context,
-            }})),
-            String::new(),
-            0,
-        ),
-        ("kiro", None) if !context.is_empty() => (context + "\n", String::new(), 0),
-        ("windsurf" | "kiro", None) => (String::new(), String::new(), 0),
-        ("cline", Some(_)) => (
-            line(json!({ "cancel": true, "errorMessage": reason.clone() })),
-            String::new(),
-            0,
-        ),
-        ("cline", None) => {
-            let mut v = json!({ "cancel": false });
-            if !context.is_empty() {
-                v["contextModification"] = json!(context);
+                v["hookSpecificOutput"] =
+                    json!({ "hookEventName": event, "additionalContext": context });
             }
             (line(v), String::new(), 0)
         }
-        ("crush", Some(d)) => (
-            line(json!({ "decision": d, "reason": reason.clone() })),
+        "openhands" => (
+            line(json!({ "decision": "deny", "reason": reason })),
+            reason_stderr(reason),
+            2,
+        ),
+        "auggie" => (
+            line(json!({ "hookSpecificOutput": {
+                "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }})),
             String::new(),
             0,
         ),
-        ("crush", None) if !context.is_empty() => {
-            (line(json!({ "context": context })), String::new(), 0)
-        }
-        _ => (String::new(), String::new(), 0),
+        "cline" => (
+            line(json!({ "cancel": true, "errorMessage": reason })),
+            String::new(),
+            0,
+        ),
+        "crush" => (
+            line(json!({ "decision": "deny", "reason": reason })),
+            String::new(),
+            0,
+        ),
+        // Windsurf, Kiro, goose and Amp read the deny from the exit alone.
+        _ => (String::new(), reason_stderr(reason), 2),
     };
-    if said.decision.as_deref() == Some("deny") && contract(runner).deny_by_exit {
+    if denies_by_exit(runner) {
         rendered.2 = 2;
         if rendered.1.trim().is_empty() {
-            rendered.1 = reason_stderr(&reason);
+            rendered.1 = reason_stderr(reason);
         }
     }
     rendered
+}
+
+/// The seat's answer (the Claude Code JSON `ljos hook` prints) in the
+/// runner's own field names: what to print, what to write to stderr, and
+/// the exit code. A warning is no decision, so each runner goes on with
+/// the call as it would with no hook, and the exit is 0. A [`denial`] is
+/// the runner's deny. `event` is the event name the runner sent.
+#[must_use]
+pub fn answer(runner: &str, event: &str, out: &str) -> (String, String, i32) {
+    if let Some((reason, context)) = denial(event, out) {
+        return denied(runner, event, out, &reason, &context);
+    }
+    let context = read_answer(out);
+    let line = |v: Value| v.to_string() + "\n";
+    let named = if event.is_empty() {
+        "PreToolUse"
+    } else {
+        event
+    };
+    let printed = match runner {
+        "gemini" if context.is_empty() => line(json!({})),
+        "cline" if context.is_empty() => line(json!({ "cancel": false })),
+        _ if context.is_empty() => String::new(),
+        "gemini" | "factory" | "qwen" | "auggie" => line(json!({ "hookSpecificOutput": {
+            "hookEventName": named,
+            "additionalContext": context,
+        }})),
+        "openhands" => line(json!({ "additionalContext": context })),
+        "kiro" => format!("{context}\n"),
+        "cline" => line(json!({ "cancel": false, "contextModification": context })),
+        "crush" => line(json!({ "context": context })),
+        _ => String::new(),
+    };
+    // These runners read no context from a hook, so stderr is the one
+    // place left for a warning; the rest of the context has none.
+    let warned = if matches!(runner, "copilot" | "windsurf" | "goose" | "amp") {
+        context
+            .lines()
+            .filter(|l| l.starts_with("warning:"))
+            .map(|l| format!("{l}\n"))
+            .collect()
+    } else {
+        String::new()
+    };
+    (printed, warned, 0)
 }
 
 /// The event name in a runner's stdin, as the runner spelled it.
@@ -565,8 +490,7 @@ fn gate_event(event: &str) -> bool {
 /// How long [`relay`] waits. A tool call uses [`crate::guard_timeout`].
 /// A prompt waits out the inner hook's own deadline
 /// ([`crate::HOOK_DEADLINE_MS`]): that hook exits on its own with whatever
-/// it has, and a shorter wait kills the answer. Rendering that kill as a
-/// deny blocks the person's prompt.
+/// it has, and a shorter wait kills the answer and the recall in it.
 #[must_use]
 pub fn relay_timeout(event: &str) -> std::time::Duration {
     if gate_event(event) {
@@ -590,100 +514,23 @@ fn fault_output(event: &str, what: &str) -> String {
     .to_string()
 }
 
-/// Whether `event` is a tool call the relay answers on a fault. An
-/// unnamed event is a tool call: Amp sends the arguments alone, and stdin
-/// that is not text has no event to read.
+/// The answer for a relay that failed before it could judge, in the
+/// runner's field names: an allow with the unhealthy-guard note.
 #[must_use]
-pub fn relay_event_is_gate(event: Option<&str>) -> bool {
-    match event {
-        Some(name) if !name.is_empty() => gate_event(name),
-        _ => true,
-    }
-}
-
-/// Whether this payload is a tool call. The event in the payload wins;
-/// otherwise the `--event` flag, and an unnamed one is a gate.
-#[must_use]
-pub fn relay_input_is_gate(input: &str, event: Option<&str>) -> bool {
-    let raw = raw_event(input);
-    if raw.is_empty() {
-        relay_event_is_gate(event)
-    } else {
-        gate_event(&raw)
-    }
-}
-
-/// A deny for a relay that failed before it could judge, in the runner's
-/// own contract. `None` when `event` is a prompt: that error still exits
-/// 1, and denying it would block the person. Exit 2 with no JSON allows
-/// the command on Gemini, Copilot, Cline and Auggie, so those runners
-/// get their deny object and the exit their contract uses.
-#[must_use]
-pub fn relay_fault_answer(runner: &str, event: &str, what: &str) -> Option<(String, String, i32)> {
-    if !event.is_empty() && !gate_event(event) {
-        return None;
-    }
+pub fn relay_fault_answer(runner: &str, event: &str, what: &str) -> (String, String) {
     let what: String = what
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(240)
         .collect();
-    let text = fault_output(event, &what);
-    Some(answer(runner, event, &text))
-}
-
-/// The command a normalized payload would run, or empty when it has none.
-fn tool_command(normalized: &str) -> String {
-    serde_json::from_str::<Value>(normalized.trim())
-        .ok()
-        .and_then(|v| command_of(&v["tool_input"]))
-        .unwrap_or_default()
-}
-
-/// The fast in-process verdict, in the shape the inner hook prints, when
-/// the command is one the static check refuses. `None` means the slow
-/// hook still has to run.
-/// A runner's pre-tool event, as the seat names it. Gemini's `BeforeTool`
-/// and Windsurf's `pre_run_command` are that gate. Rendering the verdict
-/// under the raw name prints no decision, and Gemini reads a JSON object
-/// with no `decision` as an allow.
-fn seat_tool_event(event: &str) -> &str {
-    match event {
-        "" | "BeforeTool" | "pre_run_command" => "PreToolUse",
-        other => other,
-    }
-}
-
-fn early_answer(normalized: &str, event: &str) -> Option<String> {
-    let line = tool_command(normalized);
-    let parsed = serde_json::from_str::<Value>(normalized.trim()).ok();
-    let cwd = parsed
-        .as_ref()
-        .and_then(|v| v["cwd"].as_str().map(std::path::PathBuf::from));
-    let rule = crate::static_guard_in(&line, cwd.as_deref())?;
-    let named = parsed
-        .as_ref()
-        .and_then(|v| v["hook_event_name"].as_str())
-        .filter(|name| !name.is_empty());
-    let event = seat_tool_event(named.unwrap_or(event));
-    let call = crate::HookCall {
-        event: event.to_string(),
-        cue: line,
-        session: None,
-        shape: crate::HookShape::CamelCase,
-    };
-    Some(crate::hook_output_ruled(&call, "", Some(&rule)))
+    let (out, err, _) = answer(runner, event, &fault_output(event, &what));
+    (out, err)
 }
 
 /// Run `cmd` as the inner hook with `stdin` as its input, and give back
-/// what it printed. On a tool call, a spawn error, a kill by signal, a
-/// non-zero exit, or no exit within `timeout` is a deny that says how the
-/// guard failed. A prompt keeps the old allow with a note: the person's
-/// turn is not a command. A non-zero exit that still printed a deny or an
-/// ask keeps it. A successful exit is that answer, including an allow
-/// that carries the unhealthy-guard sentence: the check already denied
-/// a real fault, and matching the sentence again missed it once a push
-/// warning was joined on.
+/// what it printed. A spawn error, a kill by signal, a non-zero exit, or
+/// no exit within `timeout` is an allow with a note that says how the
+/// guard failed. A successful exit is that answer.
 #[must_use]
 pub fn run_inner(
     mut cmd: std::process::Command,
@@ -740,8 +587,7 @@ pub fn run_inner(
         .and_then(|r| r.join().ok())
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
-    let said = read_answer(&out);
-    if said.decision.is_some() || status.success() {
+    if status.success() {
         return out;
     }
     let what = match status.code() {
@@ -752,30 +598,25 @@ pub fn run_inner(
 }
 
 /// Run the seat's hook for a runner: `ljos hook` on the normalized
-/// payload, its answer put in the runner's contract. Returns the exit
-/// code the runner reads. A force push, a seat deny, and an `rm -rf` are
-/// judged here, before the inner hook. An inner hook that crashes, exits
-/// non-zero without a decision, or runs past [`crate::guard_timeout`]
-/// denies the call and says the guard failed. A prompt is not denied: the
-/// wait is the prompt hook's own deadline, and a fault stays an allow
-/// with a note.
-pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> anyhow::Result<i32> {
+/// payload, its answer put in the runner's field names. Returns the exit
+/// code the runner reads: 0, or 2 for a [`denial`] where the runner reads
+/// a deny that way. An inner hook that crashes, exits non-zero, or runs
+/// past [`relay_timeout`] is an allow with a note that says the guard
+/// failed.
+pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> i32 {
     let normalized = normalize_input(runner, input);
     let raw = raw_event(input);
-    let text = match early_answer(&normalized, &raw) {
-        Some(text) => text,
-        None => match std::env::current_exe() {
-            Ok(exe) => {
-                let mut cmd = std::process::Command::new(exe);
-                cmd.arg("hook").arg("--limit").arg(limit.to_string());
-                cmd.env(crate::rewrite::RELAY_VAR, runner);
-                if let Some(e) = event {
-                    cmd.arg("--event").arg(e);
-                }
-                run_inner(cmd, &normalized, &raw, relay_timeout(&raw))
+    let text = match std::env::current_exe() {
+        Ok(exe) => {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("hook").arg("--limit").arg(limit.to_string());
+            cmd.env(crate::rewrite::RELAY_VAR, runner);
+            if let Some(e) = event {
+                cmd.arg("--event").arg(e);
             }
-            Err(e) => fault_output(&raw, &format!("could not find its own binary ({e})")),
-        },
+            run_inner(cmd, &normalized, &raw, relay_timeout(&raw))
+        }
+        Err(e) => fault_output(&raw, &format!("could not find its own binary ({e})")),
     };
     let (mut out, err, code) = answer(runner, &raw, &text);
     if let Some(line) = first_prompt_start_line(runner, &raw, input) {
@@ -783,7 +624,7 @@ pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> an
     }
     print!("{out}");
     eprint!("{err}");
-    Ok(code)
+    code
 }
 
 /// OpenHands drops a `SessionStart` hook's output, so the session-start
@@ -817,9 +658,6 @@ fn first_prompt_start_line(runner: &str, raw: &str, input: &str) -> Option<Strin
 /// An OpenHands answer with `line` put ahead of its context.
 fn with_start_line(out: &str, line: &str) -> String {
     let mut v: Value = serde_json::from_str(out.trim()).unwrap_or_else(|_| json!({}));
-    if v.get("decision").is_some() {
-        return out.to_string();
-    }
     let rest = v["additionalContext"].as_str().unwrap_or("").to_string();
     v["additionalContext"] = json!(if rest.is_empty() {
         line.to_string()
@@ -991,11 +829,10 @@ fn spec(runner: &str, root: &mut Value, command: &str) -> Result<bool, String> {
             )
         }
         "goose" => {
-            // The plugin's hooks file is the seat's whole; a hook that
-            // cannot run blocks the call.
+            // The plugin's hooks file is the seat's whole.
             let want = json!({ "hooks": {
                 "PreToolUse": [{ "matcher": "shell", "hooks": [{
-                    "type": "command", "command": command, "timeout": 20, "on_failure": "block"
+                    "type": "command", "command": command, "timeout": 20
                 }]}],
                 "UserPromptSubmit": [{ "hooks": [{
                     "type": "command", "command": command, "timeout": 15
@@ -1208,22 +1045,25 @@ fn set_executable(_path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    const WARNED: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"warning: no force push (ljos rule `git-force-push`)"}}"#;
     const DENY: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"no force push (ljos rule `ljos-policyd`)"}}"#;
-    const ASK: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"a push"}}"#;
+    const OLD_ASK: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"a push"}}"#;
+    const OLD_BLOCK: &str = r#"{"decision":"block","reason":"no rm -rf"}"#;
     const NOTE: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"lesson: run the tests"}}"#;
 
-    #[test]
-    fn each_runner_has_one_contract_row() {
-        for runner in RUNNERS {
-            assert_eq!(
-                RUNNER_CONTRACTS
-                    .iter()
-                    .filter(|(name, _)| name == runner)
-                    .count(),
-                1,
-                "{runner}"
-            );
-        }
+    /// Whether a runner's answer carries any decision but the allow it
+    /// takes from no answer at all.
+    fn decides(stdout: &str, stderr: &str) -> bool {
+        let body = format!("{stdout}{stderr}");
+        [
+            "\"deny\"",
+            "\"ask\"",
+            "\"block\"",
+            "\"cancel\":true",
+            "permissionDecision\"",
+        ]
+        .iter()
+        .any(|word| body.contains(word))
     }
 
     fn payload(runner: &str, input: Value) -> Value {
@@ -1316,6 +1156,28 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_reaches_every_runner_as_an_allow_with_its_warning() {
+        for runner in RUNNERS {
+            let (out, err, _) = answer(runner, "PreToolUse", WARNED);
+            assert!(!decides(&out, &err), "{runner}: {out}{err}");
+            assert!(
+                format!("{out}{err}").contains("warning: no force push"),
+                "{runner}: {out}{err}"
+            );
+        }
+        let (out, _, _) = answer("gemini", "BeforeTool", WARNED);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "BeforeTool");
+        let (out, _, _) = answer("cline", "PreToolUse", WARNED);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["cancel"], json!(false));
+        assert!(v["contextModification"]
+            .as_str()
+            .unwrap()
+            .contains("git-force-push"));
+    }
+
+    #[test]
     fn a_deny_reaches_each_runner_in_its_own_contract() {
         let (out, _, code) = answer("copilot", "PreToolUse", DENY);
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -1355,18 +1217,26 @@ mod tests {
         assert!(err.contains("force push"));
     }
 
+    /// A deny or a `block` on a tool call is every runner's deny, by its
+    /// fields or its exit. On a stop, a `block` keeps the runner going and
+    /// is no deny; an ask, which only an older hook prints, is a warning.
     #[test]
-    fn an_ask_is_a_deny_where_the_runner_cannot_ask() {
-        let (out, _, _) = answer("copilot", "PreToolUse", ASK);
-        assert!(out.contains("\"ask\""));
-        for runner in ["gemini", "cline", "crush"] {
-            let (out, _, _) = answer(runner, "PreToolUse", ASK);
-            assert!(!out.contains("\"ask\""), "{runner}: {out}");
-            assert!(out.contains("cannot ask"), "{runner}: {out}");
+    fn a_tool_call_deny_is_each_runners_deny_and_nothing_else_is() {
+        for runner in RUNNERS {
+            for (refused, why) in [(DENY, "no force push"), (OLD_BLOCK, "no rm -rf")] {
+                let (out, err, code) = answer(runner, "PreToolUse", refused);
+                assert!(decides(&out, &err) || code == 2, "{runner}: {out}{err}");
+                assert!(format!("{out}{err}").contains(why), "{runner}: {out}{err}");
+            }
+            for (old, event, why) in [
+                (OLD_ASK, "PreToolUse", "warning: a push"),
+                (OLD_BLOCK, "Stop", "warning: no rm -rf"),
+            ] {
+                let (out, err, code) = answer(runner, event, old);
+                assert!(!decides(&out, &err) && code == 0, "{runner}: {out}{err}");
+                assert!(format!("{out}{err}").contains(why), "{runner}: {out}{err}");
+            }
         }
-        let (_, err, code) = answer("windsurf", "PreToolUse", ASK);
-        assert_eq!(code, 2);
-        assert!(err.contains("ask the person"));
     }
 
     #[test]
@@ -1377,12 +1247,12 @@ mod tests {
                 (String::new(), String::new(), 0)
             );
         }
-        let (out, _, code) = answer("cline", "PreToolUse", "");
+        let (out, _, _) = answer("cline", "PreToolUse", "");
         assert_eq!(
             serde_json::from_str::<Value>(&out).unwrap(),
             json!({"cancel": false})
         );
-        assert_eq!(code, 0);
+        assert_eq!(answer("goose", "UserPromptSubmit", NOTE).1, "");
         let (out, _, _) = answer("gemini", "BeforeAgent", NOTE);
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["hookSpecificOutput"]["hookEventName"], "BeforeAgent");
@@ -1411,58 +1281,19 @@ mod tests {
         )
     }
 
-    fn runner_denied(runner: &str, stdout: &str, _stderr: &str, code: i32) -> bool {
-        match runner {
-            "copilot" => code == 0 && stdout.contains(r#""permissionDecision":"deny""#),
-            "gemini" => code == 0 && stdout.contains(r#""decision":"deny""#),
-            "windsurf" | "factory" | "kiro" | "qwen" | "crush" | "goose" | "amp" | "openhands" => {
-                code == 2
-            }
-            "cline" => code == 0 && stdout.contains(r#""cancel":true"#),
-            "auggie" => code == 0 && stdout.contains(r#""permissionDecision":"deny""#),
-            _ => false,
-        }
-    }
-
     #[test]
     fn a_relay_fault_allows_and_warns_in_the_runners_contract() {
-        for runner in RUNNERS {
-            let (stdout, stderr, code) =
-                relay_fault_answer(runner, "", "stdin is not utf-8").expect(runner);
-            let body = format!("{stdout}{stderr}");
-            assert_eq!(code, 0, "{runner}: code {code} {body}");
-            assert!(
-                !runner_denied(runner, &stdout, &stderr, code),
-                "{runner}: {body}"
-            );
-            if shows_context(runner) {
-                assert!(body.contains("unhealthy"), "{runner}: {body}");
-                assert!(body.contains("stdin is not utf-8"), "{runner}: {body}");
+        for event in ["", "BeforeTool", "UserPromptSubmit", "BeforeAgent"] {
+            for runner in RUNNERS {
+                let (stdout, stderr) = relay_fault_answer(runner, event, "stdin is not utf-8");
+                let body = format!("{stdout}{stderr}");
+                assert!(!decides(&stdout, &stderr), "{runner} {event}: {body}");
+                if shows_context(runner) {
+                    assert!(body.contains("unhealthy"), "{runner}: {body}");
+                    assert!(body.contains("stdin is not utf-8"), "{runner}: {body}");
+                }
             }
         }
-        for runner in ["gemini", "copilot", "cline", "auggie"] {
-            let (stdout, stderr, code) =
-                relay_fault_answer(runner, "BeforeTool", "stdin is not utf-8").expect(runner);
-            let body = format!("{stdout}{stderr}");
-            assert_eq!(code, 0, "{runner}: {body}");
-            assert!(
-                !runner_denied(runner, &stdout, &stderr, code),
-                "{runner}: {body}"
-            );
-        }
-        assert!(relay_fault_answer("windsurf", "UserPromptSubmit", "stdin is not utf-8").is_none());
-        assert!(relay_fault_answer("gemini", "BeforeAgent", "stdin is not utf-8").is_none());
-        assert!(relay_event_is_gate(None));
-        assert!(relay_event_is_gate(Some("")));
-        assert!(!relay_event_is_gate(Some("BeforeAgent")));
-        assert!(relay_input_is_gate(
-            r#"{"hook_event_name":"PreToolUse"}"#,
-            Some("UserPromptSubmit")
-        ));
-        assert!(!relay_input_is_gate(
-            r#"{"hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
-            None
-        ));
     }
 
     fn shows_context(runner: &str) -> bool {
@@ -1474,17 +1305,12 @@ mod tests {
 
     fn allows_fault(out: &str, why: &str) {
         let said = read_answer(out);
-        assert!(said.decision.is_none(), "{out}");
-        assert!(said.context.contains("unhealthy"), "{out}");
-        assert!(said.context.contains(why), "{out}");
+        assert!(said.contains("unhealthy"), "{out}");
+        assert!(said.contains(why), "{out}");
         for runner in RUNNERS {
-            let (stdout, stderr, code) = answer(runner, "PreToolUse", out);
+            let (stdout, stderr, _) = answer(runner, "PreToolUse", out);
             let body = format!("{stdout}{stderr}");
-            assert_eq!(code, 0, "{runner}: {body}");
-            assert!(
-                !runner_denied(runner, &stdout, &stderr, code),
-                "{runner}: {body}"
-            );
+            assert!(!decides(&stdout, &stderr), "{runner}: {body}");
             if shows_context(runner) {
                 assert!(body.contains("unhealthy"), "{runner}: {body}");
                 assert!(body.contains(why), "{runner}: {body}");
@@ -1495,8 +1321,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_inner_hook_fault_allows_in_every_runner_shape() {
-        let _lock = crate::test_env_lock();
-        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         // The timeout, the exit, and the signal are injected. A wall-clock
         // race is what made a slow runner report the timeout instead of
         // the signal.
@@ -1527,7 +1351,6 @@ mod tests {
     #[test]
     fn a_prompt_fault_is_not_a_deny() {
         let _lock = crate::test_env_lock();
-        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let why = format!(
             "gave no answer within {} s",
             crate::GUARD_TIMEOUT.as_secs_f32()
@@ -1542,20 +1365,17 @@ mod tests {
         ];
         for (runner, event) in prompts {
             let fault = fault_output(event, &why);
-            let said = read_answer(&fault);
-            assert!(said.decision.is_none(), "{runner}: {fault}");
             assert!(
                 !fault.contains("while checking this command"),
                 "{runner}: {fault}"
             );
-            assert!(said.context.contains("unhealthy"), "{runner}: {fault}");
-            let (stdout, stderr, code) = answer(runner, event, &fault);
-            let body = format!("{stdout}{stderr}");
-            assert_eq!(code, 0, "{runner}: {body}");
             assert!(
-                !runner_denied(runner, &stdout, &stderr, code),
-                "{runner}: {body}"
+                read_answer(&fault).contains("unhealthy"),
+                "{runner}: {fault}"
             );
+            let (stdout, stderr, _) = answer(runner, event, &fault);
+            let body = format!("{stdout}{stderr}");
+            assert!(!decides(&stdout, &stderr), "{runner}: {body}");
             assert!(
                 !body.contains("while checking this command"),
                 "{runner}: {body}"
@@ -1575,30 +1395,21 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_prompt_hook_that_exits_early_is_not_denied() {
-        let _lock = crate::test_env_lock();
-        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let out = run_inner(
             sh("exit 3"),
             r#"{"hook_event_name":"UserPromptSubmit","prompt":"hello"}"#,
             "UserPromptSubmit",
             std::time::Duration::from_secs(2),
         );
-        let said = read_answer(&out);
-        assert!(said.decision.is_none(), "{out}");
         assert!(!out.contains("while checking this command"), "{out}");
-        assert!(said.context.contains("unhealthy"), "{out}");
+        assert!(read_answer(&out).contains("unhealthy"), "{out}");
     }
 
-    /// The relay used to deny a tool call whose answer was the exact
-    /// unhealthy-guard sentence. A push warning joined onto that sentence
-    /// defeated the match, so the same fault was allowed. The check denies
-    /// a real fault itself. An allow that carries the sentence, alone or
-    /// with a warning, stays that allow.
+    /// An allow that carries the unhealthy-guard sentence, alone or with a
+    /// push warning joined on, stays that allow.
     #[cfg(unix)]
     #[test]
     fn an_unhealthy_note_is_not_a_second_deny() {
-        let _lock = crate::test_env_lock();
-        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let why = "did not answer in time";
         let exact = json!({
             "hookSpecificOutput": {
@@ -1626,107 +1437,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_inner_hook_that_answers_keeps_its_answer() {
-        let _lock = crate::test_env_lock();
-        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         assert_eq!(inner("true", 30_000), "", "a clean allow");
-        assert_eq!(inner(&format!("printf '%s' '{DENY}'"), 30_000), DENY);
-        assert_eq!(
-            inner(&format!("printf '%s' '{DENY}'; exit 1"), 30_000),
-            DENY,
-            "a deny printed before a non-zero exit stands"
-        );
-        let note = inner(&format!("printf '%s' '{NOTE}'; exit 1"), 30_000);
+        assert_eq!(inner(&format!("printf '%s' '{WARNED}'"), 30_000), WARNED);
+        let note = inner(&format!("printf '%s' '{WARNED}'; exit 1"), 30_000);
         allows_fault(&note, "exited with status 1");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn guard_fail_open_restores_allow_with_note() {
-        let _lock = crate::test_env_lock();
-        unsafe { std::env::set_var("LJOS_GUARD_FAIL_OPEN", "1") };
-        allows_fault(
-            &fault_output("PreToolUse", "exited with status 3"),
-            "exited with status 3",
-        );
-        allows_fault(&inner("exit 3", 30_000), "exited with status 3");
-        let unhealthy = json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "additionalContext": crate::unhealthy_note("did not answer in time"),
-            }
-        })
-        .to_string();
-        let from_policyd = inner(&format!("printf '%s' '{unhealthy}'"), 30_000);
-        allows_fault(&from_policyd, "did not answer in time");
-    }
-
-    #[test]
-    fn a_known_dangerous_command_is_judged_before_the_inner_hook() {
-        use std::os::unix::fs::PermissionsExt;
-        let _lock = crate::test_env_lock();
-        let dir = crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp)
-            .join(format!("ljos-early-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let data = dir.join("data");
-        unsafe {
-            std::env::set_var("HOME", &dir);
-            std::env::set_var("XDG_DATA_HOME", &data);
-            std::env::set_var("LJOS_OFF", "0");
-            std::env::set_var("POLICYD_BIN", dir.join("does-not-run"));
-            std::env::set_var("PACKSET_WORKSPACE", "early-guard");
-        }
-        let started = std::time::Instant::now();
-        let plain = json!({"tool_input": {"command": "git status"}}).to_string();
-        assert!(
-            early_answer(&plain, "").is_none(),
-            "git status is not dangerous"
-        );
-        // The inner hook gives a warning on a force push, a delete push
-        // and an `rm -rf`, and each runs, so nothing answers for them
-        // here.
-        for line in [
-            "git push --force origin main",
-            "git push origin --delete old",
-            "rm -rf /home/u/proj",
-        ] {
-            let call = json!({"tool_input": {"command": line}}).to_string();
-            assert!(early_answer(&call, "PreToolUse").is_none(), "{line}");
-        }
-        let approve = json!({"tool_input": {"command": "ljos approve req-1"}}).to_string();
-        let denied = early_answer(&approve, "PreToolUse").expect("ljos approve denies");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "the static check waited on the guard"
-        );
-        assert_eq!(
-            read_answer(&denied).decision.as_deref(),
-            Some("deny"),
-            "{denied}"
-        );
-        assert!(denied.contains("seat-guard"), "{denied}");
-        // Gemini names the gate BeforeTool. A verdict rendered under that
-        // name used to omit the decision, and Gemini allows an object
-        // that has none.
-        let before = early_answer(&approve, "BeforeTool").expect("BeforeTool is still a gate");
-        assert_eq!(
-            read_answer(&before).decision.as_deref(),
-            Some("deny"),
-            "{before}"
-        );
-        let (out, _, code) = answer("gemini", "BeforeTool", &before);
-        assert_eq!(code, 0);
-        assert!(out.contains("\"deny\""), "{out}");
-        assert!(!out.contains("\"ask\""), "{out}");
-        let wind =
-            early_answer(&approve, "pre_run_command").expect("pre_run_command is still a gate");
-        assert_eq!(
-            read_answer(&wind).decision.as_deref(),
-            Some("deny"),
-            "{wind}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1846,7 +1560,7 @@ mod tests {
     }
 
     #[test]
-    fn goose_payload_reaches_the_seat_and_a_deny_exits_2() {
+    fn goose_payload_reaches_the_seat_and_a_rule_is_a_warning_on_stderr() {
         let n = normalize_input(
             "goose",
             r#"{"event":"PreToolUse","session_id":"g-1","tool_name":"shell","tool_input":{"command":"rm -rf /"},"working_dir":"/r"}"#,
@@ -1855,39 +1569,46 @@ mod tests {
         assert_eq!(v["hook_event_name"], "PreToolUse");
         assert_eq!(v["tool_input"]["command"], "rm -rf /");
         assert_eq!(v["cwd"], "/r");
-        let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no"}}"#;
         assert_eq!(
-            answer("goose", "PreToolUse", deny),
-            (String::new(), "no\n".into(), 2)
+            answer("goose", "PreToolUse", WARNED),
+            (
+                String::new(),
+                "warning: no force push (ljos rule `git-force-push`)\n".into(),
+                0
+            )
         );
-        assert_eq!(answer("goose", "PreToolUse", "{}").2, 0);
+        assert_eq!(
+            answer("goose", "PreToolUse", "{}"),
+            (String::new(), String::new(), 0)
+        );
     }
 
     #[test]
-    fn amp_reads_cmd_and_rejects_with_2_and_asks_with_1() {
+    fn amp_reads_cmd_and_a_rule_is_a_warning_on_stderr() {
         let n = normalize_input("amp", r#"{"cmd":"git push --force"}"#);
         let v: Value = serde_json::from_str(&n).unwrap();
         assert_eq!(v["tool_input"]["command"], "git push --force");
-        let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no"}}"#;
-        assert_eq!(answer("amp", "", deny).2, 2);
-        let ask = r#"{"hookSpecificOutput":{"permissionDecision":"ask","permissionDecisionReason":"sure?"}}"#;
-        assert_eq!(answer("amp", "", ask).2, 1);
-        assert_eq!(answer("amp", "", "").2, 0);
+        let (out, err, _) = answer("amp", "", WARNED);
+        assert_eq!(out, "");
+        assert!(err.starts_with("warning: no force push"), "{err}");
+        assert_eq!(answer("amp", "", ""), (String::new(), String::new(), 0));
     }
 
     #[test]
-    fn auggie_launch_process_is_the_shell_and_its_deny_is_claude_shaped() {
+    fn auggie_launch_process_is_the_shell_and_its_warning_is_claude_shaped() {
         let n = normalize_input(
             "auggie",
             r#"{"hook_event_name":"PreToolUse","tool_name":"launch-process","tool_input":{"command":"ls"}}"#,
         );
         let v: Value = serde_json::from_str(&n).unwrap();
         assert_eq!(v["tool_name"], "Bash");
-        let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no"}}"#;
-        let (out, _, code) = answer("auggie", "PreToolUse", deny);
+        let (out, _, _) = answer("auggie", "PreToolUse", WARNED);
         let o: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(o["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert_eq!(code, 0);
+        assert_eq!(o["hookSpecificOutput"]["permissionDecision"], Value::Null);
+        assert!(o["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .starts_with("warning: no force push"));
     }
 
     #[test]
@@ -1918,7 +1639,7 @@ mod tests {
     }
 
     #[test]
-    fn goose_hook_is_a_plugin_that_fails_closed() {
+    fn goose_hook_is_a_plugin_whose_failure_does_not_block() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("ljos/hooks/hooks.json");
         let step = hook_step("goose", &file, "/bin/ljos hook", false);
@@ -1926,7 +1647,7 @@ mod tests {
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(
             v["hooks"]["PreToolUse"][0]["hooks"][0]["on_failure"],
-            "block"
+            Value::Null
         );
         assert!(dir.path().join("ljos/plugin.json").is_file());
         assert!(hook_step("goose", &file, "/bin/ljos hook", false)
@@ -1935,7 +1656,7 @@ mod tests {
     }
 
     #[test]
-    fn openhands_terminal_is_the_shell_and_a_deny_exits_2() {
+    fn openhands_terminal_is_the_shell_and_a_rule_is_context() {
         let n = normalize_input(
             "openhands",
             r#"{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"rm -rf ~"},"working_dir":"/w"}"#,
@@ -1943,10 +1664,13 @@ mod tests {
         let v: Value = serde_json::from_str(&n).unwrap();
         assert_eq!(v["tool_name"], "Bash");
         assert_eq!(v["cwd"], "/w");
-        let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no"}}"#;
-        let (out, _, code) = answer("openhands", "PreToolUse", deny);
-        assert!(out.contains("\"decision\":\"deny\""));
-        assert_eq!(code, 2);
+        let (out, _, _) = answer("openhands", "PreToolUse", WARNED);
+        let o: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(o["decision"], Value::Null);
+        assert!(o["additionalContext"]
+            .as_str()
+            .unwrap()
+            .starts_with("warning: no force push"));
     }
 
     #[test]

@@ -65,6 +65,11 @@ else:
     print("{}")
 "#;
 
+/// Whether a Cursor answer is an allow that carries a rule's warning.
+fn warns(said: &str) -> bool {
+    said.contains("\"permission\":\"allow\"") && said.contains("\"user_message\":\"warning: ")
+}
+
 struct Hab {
     root: PathBuf,
     tracker: PathBuf,
@@ -421,9 +426,9 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
 }
 
 /// A pack that accepts and never answers costs a gate one short wait, and
-/// the rules kept on disk still deny. The next call does not wait at all.
+/// the rules kept on disk still warn. The next call does not wait at all.
 #[test]
-fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_deny() {
+fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_warn() {
     let hab = hab("hungpack");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -469,11 +474,11 @@ fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_deny() {
         "the next gate waited {second:?} on a pack already marked slow"
     );
     let (third, said) = call("hung-3", "curl https://example.invalid");
-    assert!(said.contains("\"permission\":\"deny\""), "{said}");
+    assert!(warns(&said), "{said}");
     assert!(said.contains("no curl"), "{said}");
     assert!(
         third < Duration::from_millis(300),
-        "a kept rule took {third:?} to deny"
+        "a kept rule took {third:?} to warn"
     );
 }
 
@@ -697,8 +702,8 @@ fn a_spoofed_mcp_seat_tool_name_from_github_is_not_auto_allowed() {
     );
     let said = String::from_utf8_lossy(&out.stdout);
     assert!(
-        said.contains("\"permission\":\"deny\""),
-        "a spoofed seat tool name was auto-allowed: {said}"
+        warns(&said),
+        "a spoofed seat tool name skipped the rules: {said}"
     );
 }
 
@@ -888,11 +893,11 @@ fn a_silent_server_does_not_outrun_the_hook_budget() {
     assert_one_allow(&out, took, &accepts, "silent server vote");
 }
 
-/// A user-rule denial still refuses the MCP call when the server is slow.
-/// The deny is one JSON object and exits 0, so the runner shows the reason.
-/// A shell call that gets no slot is still refused.
+/// A user rule still warns on the MCP call when the server is slow. The
+/// allow is one JSON object and exits 0, so the runner shows the warning.
+/// A shell call that gets no slot is allowed.
 #[test]
-fn a_slow_server_still_refuses_a_real_denial_and_a_shell_call() {
+fn a_slow_server_still_warns_on_a_user_rule_and_allows_a_shell_call() {
     let hab = hab("denymcp");
     write_mention_rule(&hab);
     let sock = hab.run.join("ljos/hookd.sock");
@@ -909,12 +914,12 @@ fn a_slow_server_still_refuses_a_real_denial_and_a_shell_call() {
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
         took < Duration::from_millis(1500),
-        "denial took {took:?}\n{stdout}\n{stderr}"
+        "the warning took {took:?}\n{stdout}\n{stderr}"
     );
     assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    assert!(warns(&stdout), "{stdout}");
     let value: serde_json::Value =
         serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
-    assert_eq!(value["permission"], "deny", "{stdout}");
     assert!(
         value["user_message"]
             .as_str()
@@ -930,7 +935,7 @@ fn a_slow_server_still_refuses_a_real_denial_and_a_shell_call() {
     assert_eq!(
         accepts.load(Ordering::SeqCst),
         0,
-        "the denial waited on the server"
+        "the warning waited on the server"
     );
 
     let mut cmd = ljos(&hab, &["hook"]);
@@ -955,10 +960,10 @@ fn a_slow_server_still_refuses_a_real_denial_and_a_shell_call() {
     );
 }
 
-/// A rules file that cannot be parsed denies the GitHub write and still
+/// A rules file that cannot be parsed warns on the GitHub write and
 /// allows a seat tool. A FIFO must not stall either call.
 #[test]
-fn a_bad_rules_file_denies_the_github_write_from_the_hook() {
+fn a_bad_rules_file_warns_on_the_github_write_from_the_hook() {
     let hab = hab("badrules");
     let path = hab.home.join(".config/ljos/user-rules.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -977,8 +982,8 @@ fn a_bad_rules_file_denies_the_github_write_from_the_hook() {
         "{took:?}\n{stdout}\n{stderr}"
     );
     assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    assert!(warns(&stdout), "{stdout}");
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(value["permission"], "deny", "{stdout}");
     assert!(
         value["user_message"]
             .as_str()
@@ -1016,7 +1021,7 @@ fn a_bad_rules_file_denies_the_github_write_from_the_hook() {
         "fifo took {took:?}\n{stdout}"
     );
     assert_eq!(out.status.code(), Some(0), "{stdout}");
-    assert!(stdout.contains("\"permission\":\"deny\""), "{stdout}");
+    assert!(warns(&stdout), "{stdout}");
     let mut cmd = ljos(&hab, &["hook"]);
     cmd.env("LJOS_HOOKD", "off");
     let (took, out) = finished(
@@ -1169,15 +1174,15 @@ fn only_the_configured_seat_server_skips_the_rules_file() {
     let renamed = hook_stdout(&hab, &pre_tool("mcp__my__seat__ljos_note", None));
     assert_eq!(renamed, ALLOW, "{renamed}");
     let spoof = hook_stdout(&hab, &pre_tool("mcp__github__ljos_note", None));
-    assert!(spoof.contains("\"permission\":\"deny\""), "{spoof}");
+    assert!(warns(&spoof), "{spoof}");
     let case = hook_stdout(&hab, &pre_tool("mcp__Ljos__ljos_note", None));
     assert!(
-        !case.contains("\"permission\":\"deny\""),
+        !warns(&case),
         "a case mismatch was treated as GitHub: {case}"
     );
     assert!(case.contains("\"permission\":\"allow\""), "{case}");
     let disagree = hook_stdout(&hab, &pre_tool("mcp__ljos__ljos_note", Some("github")));
-    assert!(disagree.contains("\"permission\":\"deny\""), "{disagree}");
+    assert!(warns(&disagree), "{disagree}");
     let plugin = hook_stdout(&hab, &pre_tool("mcp__plugin_ljos_ljos__ljos_vote", None));
     assert!(plugin.contains("\"permission\":\"allow\""), "{plugin}");
 }
@@ -1207,7 +1212,7 @@ fn a_seat_server_named_github_is_not_a_foreign_write() {
         })
         .to_string(),
     );
-    assert!(real.contains("\"permission\":\"deny\""), "{real}");
+    assert!(warns(&real), "{real}");
 }
 
 /// `beforeMCPExecution` names the server in a field. A GitHub field on a
@@ -1227,7 +1232,7 @@ fn a_before_mcp_server_field_is_not_taken_from_the_tool_name() {
     })
     .to_string();
     let said = hook_stdout(&hab, &github);
-    assert!(said.contains("\"permission\":\"deny\""), "{said}");
+    assert!(warns(&said), "{said}");
     let seat = serde_json::json!({
         "cursor_version": "2.4.0",
         "conversation_id": "c-field",
@@ -1356,7 +1361,7 @@ fn a_pretooluse_mcp_tool_name_reaches_user_rules() {
     cmd.env("LJOS_HOOKD", "off");
     let (_took, out) = finished(feed(cmd, &payload), Duration::from_secs(3), "mcp-name");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("\"permission\":\"deny\""), "{stdout}");
+    assert!(warns(&stdout), "{stdout}");
 }
 
 /// A `command` key in the tool input is an argument of the tool. It does
@@ -1386,7 +1391,7 @@ fn a_command_in_tool_input_does_not_replace_the_mcp_tool_name() {
     let (_took, out) = finished(feed(cmd, &payload), Duration::from_secs(3), "mcp-cmd");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("\"permission\":\"deny\""),
+        warns(&stdout),
         "tool_input.command replaced the MCP cue: {stdout}"
     );
 }

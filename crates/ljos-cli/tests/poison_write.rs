@@ -947,9 +947,13 @@ fn guard_labels(asks: bool) {
         let stdout = hook_stdout(&seat, &payload);
         let answer: serde_json::Value =
             serde_json::from_str(stdout.trim()).unwrap_or(serde_json::Value::Null);
-        let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
+        let reason = answer["hookSpecificOutput"]["additionalContext"]
             .as_str()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches("warning: ");
         assert!(reason.contains(PLANT), "{name}: {stdout}");
         let labelled = reason.starts_with("unverified agent note: ");
         let theirs = asks && basis == Some("person");

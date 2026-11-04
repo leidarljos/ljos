@@ -51,10 +51,10 @@ fn ljos_mcp_serves_and_lists_the_guard_first() {
         names[..5],
         [
             "ljos_rule",
-            "ljos_request_approval",
             "ljos_prefer",
             "ljos_remember",
-            "ljos_search"
+            "ljos_search",
+            "ljos_start"
         ],
         "{text}"
     );

@@ -1,7 +1,8 @@
 //! `policyd_config` in the person's `ljos.toml` names the file
 //! `ljos-policyd check --config` reads. The policyd here stands in for one
 //! whose config takes `block-on-warning true`: a warning is then a deny
-//! with the same rule and warning, and `check` exits 2. A config it cannot
+//! with the same rule and warning, and `check` exits 2. Without that line
+//! a warning is one warning line, and the command runs. A config it cannot
 //! open fails open. The warnings are the lines ljos-policyd 0.7.0 prints.
 
 ljos_test_boot::harness!();
@@ -37,7 +38,7 @@ fi
 printf 'allow\twarn\t%s\t%s\n' "$rule" "$said"
 "#;
 
-const BLOCKS: &str = "block-on-warning true\n";
+const BLOCK_ON_WARNING_SET: &str = "block-on-warning true\n";
 
 /// A command run through a guard shim: the exit code, stderr, and whether
 /// its victim is still there.
@@ -251,16 +252,28 @@ fn deny_of(answer: &str) -> (String, String) {
     )
 }
 
+/// `ljos policy`, the hook and the rm, git and find shims each show the
+/// rule's one warning, and the command runs.
 fn assert_label(seat: &Seat, why: &str) {
     assert_eq!(
         seat.policy(),
         (
             Some(0),
-            "sudo true\nallow\twarn\tsudo\ta privilege runner is on the command\n".to_string()
+            "sudo true\nwarning: sudo: a privilege runner is on the command (ljos rule \
+             `ljos-policyd`)\n"
+                .to_string()
         ),
         "{why}"
     );
-    assert_eq!(seat.hook(), "", "{why}: the hook allows");
+    let answer = seat.hook();
+    assert!(
+        !ljos_cli::answer_denies(&answer) && !answer.contains("\"ask\""),
+        "{why}: {answer}"
+    );
+    assert!(
+        answer.contains("warning: sudo: a privilege runner is on the command"),
+        "{why}: {answer}"
+    );
     assert_shims_allow(seat, why, shim_warning);
     assert_eq!(
         seat.policy_on(&["rm", "-r", "/srv/data"]),
@@ -273,11 +286,11 @@ fn assert_label(seat: &Seat, why: &str) {
 }
 
 /// The line a guard shim prints on stderr for the warning policyd gives
-/// `rule` here. ljos names a recursive delete and `find -delete`, and
-/// leaves `git clean -f` to policyd.
+/// `rule` here: policyd's own line, for every rule.
 fn shim_warning(rule: &str) -> String {
     match rule {
         "rm-rf-outside-tmp" => format!("allow\twarn\t{rule}\t{RM_WARNING}\n"),
+        "git-clean-force" => format!("allow\twarn\t{rule}\tgit clean -f deletes untracked files\n"),
         "find-delete" => {
             format!("allow\twarn\t{rule}\tfind -delete reaches outside /tmp and /var/tmp\n")
         }
@@ -334,7 +347,7 @@ fn assert_denied(seat: &Seat, why: &str) {
 fn with_no_policyd_config_a_warning_stays_a_label() {
     let seat = Seat::new();
     assert_label(&seat, "nothing configured");
-    seat.write(".config/ljos/blocks.conf", BLOCKS);
+    seat.write(".config/ljos/blocks.conf", BLOCK_ON_WARNING_SET);
     seat.write(
         ".config/ljos/ljos.toml",
         "[identity]\nname = \"A Person\"\nemail = \"a@example.org\"\n",
@@ -356,7 +369,7 @@ fn with_no_policyd_config_a_warning_stays_a_label() {
 #[test]
 fn a_named_config_holding_block_on_warning_reports_policyd_deny() {
     let mut seat = Seat::new();
-    seat.write(".config/ljos/blocks.conf", BLOCKS);
+    seat.write(".config/ljos/blocks.conf", BLOCK_ON_WARNING_SET);
     seat.write(
         ".config/ljos/ljos.toml",
         "policyd_config = \"blocks.conf\"\n\n[identity]\nname = \"A Person\"\n",
@@ -409,7 +422,7 @@ fn a_named_config_holding_block_on_warning_denies_deleting_the_root() {
         )
     );
     assert_eq!(labelled(), 1);
-    seat.write(".config/ljos/blocks.conf", BLOCKS);
+    seat.write(".config/ljos/blocks.conf", BLOCK_ON_WARNING_SET);
     seat.write(
         ".config/ljos/ljos.toml",
         "policyd_config = \"blocks.conf\"\n",
@@ -431,7 +444,7 @@ fn a_named_config_holding_block_on_warning_denies_deleting_the_root() {
 #[test]
 fn block_on_warning_leaves_a_label_policyd_does_not_warn_on() {
     let seat = Seat::new();
-    seat.write(".config/ljos/blocks.conf", BLOCKS);
+    seat.write(".config/ljos/blocks.conf", BLOCK_ON_WARNING_SET);
     seat.write(
         ".config/ljos/ljos.toml",
         "policyd_config = \"blocks.conf\"\n",
@@ -461,6 +474,25 @@ fn block_on_warning_leaves_a_label_policyd_does_not_warn_on() {
     }
 }
 
+/// The same rules on the same commands, under one named config: with
+/// `block-on-warning` off each is one warning and the command runs, and
+/// with it on each is policyd's deny in `ljos policy`, the hook and the rm,
+/// git and find shims.
+#[test]
+fn block_on_warning_turns_the_same_warning_into_a_deny() {
+    let seat = Seat::new();
+    seat.write(
+        ".config/ljos/ljos.toml",
+        "policyd_config = \"policyd.conf\"\n",
+    );
+    seat.write(".config/ljos/policyd.conf", "block-on-warning false\n");
+    assert_label(&seat, "block-on-warning is off");
+    seat.write(".config/ljos/policyd.conf", BLOCK_ON_WARNING_SET);
+    assert_denied(&seat, "block-on-warning is on");
+    seat.write(".config/ljos/policyd.conf", "block-on-warning false\n");
+    assert_label(&seat, "block-on-warning is off again");
+}
+
 /// A named config policyd cannot open is a check that fails open: the
 /// command still runs.
 #[test]
@@ -486,7 +518,7 @@ fn a_check_that_fails_open_still_allows() {
 #[test]
 fn a_policyd_config_under_another_table_names_none() {
     let seat = Seat::new();
-    seat.write(".config/ljos/blocks.conf", BLOCKS);
+    seat.write(".config/ljos/blocks.conf", BLOCK_ON_WARNING_SET);
     seat.write(
         ".config/ljos/ljos.toml",
         "[identity]\nname = \"A Person\"\npolicyd_config = \"blocks.conf\"\n",
@@ -518,6 +550,6 @@ fn the_doctor_warns_of_a_named_policyd_config_that_is_not_there() {
             )]
         )
     );
-    seat.write(".config/ljos/gone.conf", BLOCKS);
+    seat.write(".config/ljos/gone.conf", BLOCK_ON_WARNING_SET);
     assert_eq!(seat.doctor(), (code, Vec::new()), "the file is there");
 }

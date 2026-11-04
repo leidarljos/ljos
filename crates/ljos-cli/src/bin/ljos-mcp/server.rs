@@ -42,13 +42,11 @@ const PROTOCOL_URI: &str = "ljos://protocol";
 const RESOURCE_TTL_MS: u64 = 0;
 
 /// The tools a session lists when `LJOS_MCP_TOOLS` is unset: the command
-/// rules and the consent form for a held command, memory, tickets, claims,
-/// mail, decisions and the doctor. Every tool costs its description and
+/// rules, memory, tickets, claims, mail, decisions and the doctor. Every tool costs its description and
 /// schema in the model's context on every session, so the rest wait for an
 /// opt-in. `tools/list` keeps this order, so the guard and memory lead.
 pub const CORE_TOOLS: &[&str] = &[
     "ljos_rule",
-    "ljos_request_approval",
     "ljos_prefer",
     "ljos_remember",
     "ljos_search",
@@ -160,7 +158,7 @@ fn next_step(tool: &str) -> &'static str {
         "ljos_note" | "ljos_remember" => {
             "next: keep going, or ljos_finish with the lesson when the task is done"
         }
-        "ljos_guard_check" => "next: run the command only when this allowed it",
+        "ljos_guard_check" => "next: run the command, minding any warning line",
         "ljos_finish" => "next: the claim is released; this sitting is closed",
         name if ljos_cli::bookkeep::mcp_tool_writes(name) => {
             "next: ljos_finish with the lesson when the task is done"
@@ -239,14 +237,12 @@ fn supply_issue(arguments: &mut serde_json::Map<String, serde_json::Value>, sess
     }
 }
 
-/// Tools that run when the call's seat cannot be resolved: the guard,
-/// the consent form for a command the guard held, and tools that only
-/// read. Nothing here claims, sits, books, mails or writes under a seat,
+/// Tools that run when the call's seat cannot be resolved: the guard and
+/// tools that only read. Nothing here claims, sits, books, mails or writes under a seat,
 /// so none of them needs one. Every other tool still refuses an unknown
 /// seat.
 const SEAT_FREE_TOOLS: &[&str] = &[
     "ljos_guard_check",
-    "ljos_request_approval",
     "ljos_policy",
     "ljos_recall",
     "ljos_search",
@@ -551,14 +547,6 @@ pub struct ForgetArgs {
     pub why: Option<String>,
 }
 
-/// The pending one-command request printed by the hook.
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ApprovalArgs {
-    /// The short approval tag or full request id. The client form supplies consent.
-    pub id: String,
-}
-
 /// One deed accession.
 #[derive(Deserialize, JsonSchema)]
 pub struct AccessionArgs {
@@ -668,9 +656,9 @@ pub struct PredictArgs {
 pub struct RuleArgs {
     /// A glob over the whole command line, such as `*--force*`.
     pub pattern: String,
-    /// `deny` stops the action at the runner; `ask` hands it to the person.
+    /// `deny` or `ask`: a label the warning carries. Neither stops the action.
     pub verdict: String,
-    /// The reason a stopped reader sees.
+    /// The reason the warning gives.
     pub why: String,
     /// Write a user rule, shared by every seat and never reviewed, instead of a seat rule.
     #[serde(default)]
@@ -1131,13 +1119,13 @@ pub struct Said {
     pub aside: Option<String>,
 }
 
-/// The seat's reading of one command. `verdict` is `allow` or `ask`.
-/// A deny is a tool error, so this field does not say deny for an ask.
+/// The seat's reading of one command. The command runs; a rule that
+/// fires on it is a warning line in the text.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GuardSaid {
     /// The policy text.
     pub text: String,
-    /// `allow` or `ask`.
+    /// `allow`.
     pub verdict: String,
     /// What it said aside, when anything.
     pub aside: Option<String>,
@@ -1400,27 +1388,6 @@ impl LjosServer {
     #[must_use]
     pub fn at(cards_dir: PathBuf) -> Self {
         Self { cards_dir }
-    }
-
-    #[tool(
-        description = "Show the person a confirmation form for a pending command request printed by the hook. Pass only its id. A grant requires the person's explicit acceptance through the connected client, permits one attempt, and expires with the request. Decline, cancellation, unsupported clients and errors leave the command blocked.",
-        annotations(
-            title = "Approve one command",
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn ljos_request_approval(
-        &self,
-        Parameters(args): Parameters<ApprovalArgs>,
-        peer: rmcp::Peer<rmcp::RoleServer>,
-    ) -> Result<Json<Said>, McpError> {
-        let text = ljos_cli::approval::request_approval(&args.id, &peer)
-            .await
-            .map_err(refused)?;
-        Ok(Json(Said { text, aside: None }))
     }
 
     // ---- the pack --------------------------------------------------------
@@ -1861,7 +1828,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this for one view of what happened across every seat, newest first: tickets filed, claimed and closed, votes and consensus, deeds, claims taken or released, guard refusals and rewrites, and memory. Pass since as a day, a time, or last. last continues from the previous digest. Read-only.",
+        description = "Call this for one view of what happened across every seat, newest first: tickets filed, claimed and closed, votes and consensus, deeds, claims taken or released, guard warnings and rewrites, and memory. Pass since as a day, a time, or last. last continues from the previous digest. Read-only.",
         annotations(
             title = "Digest across seats",
             read_only_hint = true,
@@ -2045,7 +2012,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this before a destructive shell command, a git commit, a git push, or a merge. Pass the command line, and pass cwd when the command runs outside the server's start directory. It returns verdict allow or ask. Run the command only when verdict is allow. An ask names the command and waits for the person; it is not a deny. A commit, push, or merge the gates refuse is an error that names what makes the line pass.",
+        description = "Call this before a destructive shell command, a git commit, a git push, or a merge. Pass the command line, and pass cwd when the command runs outside the server's start directory. It returns verdict allow, and a warning line in the text when a rule fires on the command. Read the warning before you run it. An error is a block the person turned on in policyd: do not run that command.",
         annotations(
             title = "Check a command",
             read_only_hint = true,
@@ -2056,11 +2023,11 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<GuardArgs>,
     ) -> Result<Json<GuardSaid>, McpError> {
-        let report = ljos_cli::guard_report_in(&args.command, args.cwd.as_deref().map(Path::new))
+        let text = ljos_cli::guard_report_in(&args.command, args.cwd.as_deref().map(Path::new))
             .map_err(refused)?;
         Ok(Json(GuardSaid {
-            text: report.text,
-            verdict: report.verdict,
+            text,
+            verdict: "allow".into(),
             aside: None,
         }))
     }
@@ -2415,7 +2382,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the work has shown that a kind of command must never run, or must be asked about first: writes a rule to the pack, a glob over the command line with a verdict. The memory hook and `ljos policy` enforce it at the point of action, and it travels in handovers like any memory. Pass user true to write that law into the user config instead, shared by every seat and never reviewed.",
+        description = "Call this when the work has shown that a kind of command needs a warning before it runs: writes a rule to the pack, a glob over the command line with a verdict label. The memory hook and `ljos policy` show its warning at the point of action and the command still runs, and it travels in handovers like any memory. Pass user true to write that law into the user config instead, shared by every seat and never reviewed.",
         annotations(
             title = "Write a rule",
             read_only_hint = false,
@@ -3278,8 +3245,8 @@ async fn relay_forward_request(
 /// order the lines were read, recorded in [`CALL_QUEUE`] before either task
 /// runs. A call that changes what this seat reads back waits for every such
 /// call read before it, and a read waits for those too. Reads still run
-/// beside each other, and every other tool, the guard and approval included,
-/// waits for nothing.
+/// beside each other, and every other tool, the guard included, waits for
+/// nothing.
 static CALL_QUEUE: std::sync::Mutex<std::collections::VecDeque<QueuedCall>> =
     std::sync::Mutex::new(std::collections::VecDeque::new());
 static CALL_WAKE: std::sync::LazyLock<tokio::sync::Notify> =
@@ -3712,8 +3679,8 @@ impl ServerHandler for LjosServer {
         })
         .await
         .map_err(|e| McpError::internal_error(format!("seat: {e}"), None))?;
-        // The guard, the approval form and the reading tools act under no
-        // seat, so a seat this tracker does not know never stops them.
+        // The guard and the reading tools act under no seat, so a seat
+        // this tracker does not know never stops them.
         let seat = match resolved {
             Ok(seat) => Some(seat),
             Err(e) if runs_without_seat(&name) => {
@@ -4235,13 +4202,7 @@ mod tests {
             listing_order(&mut tools);
             tools.into_iter().map(|t| t.name.to_string()).collect()
         };
-        let lead = [
-            "ljos_rule",
-            "ljos_request_approval",
-            "ljos_prefer",
-            "ljos_remember",
-            "ljos_search",
-        ];
+        let lead = ["ljos_rule", "ljos_prefer", "ljos_remember", "ljos_search"];
         let core = order(tool_set(None).as_deref());
         assert_eq!(core, CORE_TOOLS);
         let every = order(None);
@@ -4293,11 +4254,7 @@ mod tests {
             assert_eq!(hint(name), Some(true), "{name}");
             assert_eq!(call_order(name), Order::Read);
         }
-        for name in [
-            "ljos_guard_check",
-            "ljos_request_approval",
-            "ljos_consensus",
-        ] {
+        for name in ["ljos_guard_check", "ljos_consensus"] {
             assert_eq!(call_order(name), Order::Free, "{name}");
         }
     }
@@ -4482,10 +4439,7 @@ mod tests {
                 .as_ref()
                 .and_then(|hints| hints.read_only_hint)
                 == Some(true);
-            assert!(
-                read_only || *name == "ljos_request_approval",
-                "{name} writes and runs without a seat"
-            );
+            assert!(read_only, "{name} writes and runs without a seat");
             assert!(!ljos_cli::bookkeep::mcp_tool_writes(name), "{name}");
         }
         assert!(runs_without_seat("ljos_guard_check"));
@@ -4512,7 +4466,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            53,
+            52,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -4571,7 +4525,6 @@ mod tests {
                 "ljos_release",
                 "ljos_remember",
                 "ljos_reply",
-                "ljos_request_approval",
                 "ljos_rule",
                 "ljos_send",
                 "ljos_sitting",
@@ -4633,7 +4586,7 @@ mod tests {
         };
         let last = done.content.last().unwrap().as_text().expect("text");
         assert_eq!(last.text, next_step("ljos_start"));
-        assert!(next_step("ljos_guard_check").contains("allowed"));
+        assert!(next_step("ljos_guard_check").contains("warning"));
         assert!(next_step("ljos_finish").contains("released"));
         assert!(!next_step("ljos_finish").contains("is pushed"));
         let failed =
@@ -4788,8 +4741,8 @@ mod tests {
         assert_eq!(card_named("file:///etc/passwd"), None);
     }
 
-    /// The guard tool mirrors the hook's outcome mapping: allowed commands
-    /// return a verdict, and refused commands are surfaced as tool errors.
+    /// The guard tool reads a command the way the hook does: it runs, and a
+    /// rule that fires on it is one warning line.
     #[tokio::test]
     async fn guard_check_allows_an_ordinary_command_and_a_commit() {
         let _env_lock = ENV_TEST_LOCK.lock().await;
@@ -4834,8 +4787,8 @@ mod tests {
             &bin,
             "#!/bin/sh\n\
              if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
-             printf 'deny\\tcwd-deny\\n'\n\
-             exit 2\n\
+             printf 'allow\\twarn\\tcwd-rule\\tthis directory is marked\\n'\n\
+             exit 0\n\
              fi\n\
              printf 'allow\\n'\n",
         )
@@ -4850,36 +4803,42 @@ mod tests {
             std::env::remove_var("LJOS_OFF");
         }
         let server = LjosServer::at(std::env::temp_dir());
-        let allow = server
+        let plain = server
             .ljos_guard_check(Parameters(GuardArgs {
                 command: "echo hi".into(),
                 cwd: None,
             }))
             .await
             .expect("allow");
-        assert_eq!(allow.0.verdict, "allow");
-        let err = match server
+        assert_eq!(plain.0.verdict, "allow");
+        assert!(!plain.0.text.contains("warning:"), "{}", plain.0.text);
+        let warned = server
             .ljos_guard_check(Parameters(GuardArgs {
                 command: "echo hi".into(),
                 cwd: Some(danger.display().to_string()),
             }))
             .await
-        {
-            Err(err) => err,
-            Ok(out) => panic!("allowed {}: {}", out.0.verdict, out.0.text),
-        };
-        let said = format!("{err:?}");
-        assert!(said.contains("cwd-deny"), "{said}");
+            .expect("a rule warns and the command runs");
+        assert_eq!(warned.0.verdict, "allow");
+        assert!(
+            warned
+                .0
+                .text
+                .contains("warning: cwd-rule: this directory is marked"),
+            "{}",
+            warned.0.text
+        );
     }
 
     #[tokio::test]
-    async fn guard_check_expands_tilde_and_refuses_an_unresolved_cwd() {
+    async fn guard_check_expands_tilde_and_names_an_unresolved_cwd() {
         let _env_lock = ENV_TEST_LOCK.lock().await;
         let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF", "HOME"]);
         let home = tempfile::tempdir().expect("tempdir");
         let danger = home.path().join("proj/danger");
         std::fs::create_dir_all(&danger).expect("danger dir");
         let bin = home.path().join("ljos-policyd");
+        // An older daemon's deny is read as the same warning.
         std::fs::write(
             &bin,
             "#!/bin/sh\n\
@@ -4905,18 +4864,19 @@ mod tests {
             std::env::set_var("HOME", home.path());
         }
         let server = LjosServer::at(std::env::temp_dir());
-        let denied = match server
+        let warned = server
             .ljos_guard_check(Parameters(GuardArgs {
                 command: "make clean-all".into(),
                 cwd: Some("~/proj/danger".into()),
             }))
             .await
-        {
-            Err(err) => err,
-            Ok(out) => panic!("allowed {}: {}", out.0.verdict, out.0.text),
-        };
-        let said = format!("{denied:?}");
-        assert!(said.contains("make-clean-all"), "{said}");
+            .expect("an older deny is a warning");
+        assert_eq!(warned.0.verdict, "allow");
+        assert!(
+            warned.0.text.contains("warning: make-clean-all"),
+            "{}",
+            warned.0.text
+        );
 
         let missing = match server
             .ljos_guard_check(Parameters(GuardArgs {
@@ -4926,7 +4886,7 @@ mod tests {
             .await
         {
             Err(err) => err,
-            Ok(out) => panic!("allowed {}: {}", out.0.verdict, out.0.text),
+            Ok(out) => panic!("read {}: {}", out.0.verdict, out.0.text),
         };
         let miss = format!("{missing:?}");
         assert!(miss.contains("guard cwd is unavailable"), "{miss}");
@@ -4935,7 +4895,8 @@ mod tests {
     /// The check asks the real ljos-policyd what the hook asks it: the
     /// line as the shell reads it, and the program a heredoc feeds
     /// `python3 -`. Both allow the same lines, and the check's text
-    /// carries the rule ljos-policyd names for the hook write.
+    /// carries the hook's warning, which names the rule ljos-policyd
+    /// sees for the hook write.
     #[tokio::test]
     async fn guard_check_asks_policyd_what_the_hook_asks() {
         if !ljos_cli::tool_installed("ljos-policyd") {
@@ -4981,14 +4942,20 @@ mod tests {
                 .await
                 .unwrap_or_else(|err| panic!("refused {command:?}: {err:?}"));
             assert_eq!(out.0.verdict, "allow", "{command:?}: {}", out.0.text);
-            let hook = ljos_cli::tcb_verdict_in(command, Some(root.path()));
-            assert!(hook.is_none(), "{command:?}: {hook:?}");
+            if let Some(hook) = ljos_cli::tcb_verdict_in(command, Some(root.path())) {
+                assert_eq!(hook.verdict, "warn", "{command:?}: {}", hook.reason);
+                assert!(
+                    out.0.text.contains(&hook.warning()),
+                    "{command:?}: {}",
+                    out.0.text
+                );
+            }
         }
         let seat = check("(cd project; echo x > seat/hooks.json)")
             .await
             .expect("allow");
         assert!(
-            seat.0.text.contains("allow\twarn\tseat-guard-path"),
+            seat.0.text.contains("warning: seat-guard-path"),
             "{}",
             seat.0.text
         );

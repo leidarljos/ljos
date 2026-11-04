@@ -212,23 +212,33 @@ facts one at a time with `ljos timeline ISSUE`, `ljos claims` and `ljos log --se
 
 Before an agent's shell command runs, the runner's hook hands it to `ljos hook`.
 `ljos hook` asks `ljos-policyd` and relays the answer. policyd is the one place
-that decides whether a command is dangerous. ljos does not run a second set of
-command checks of its own.
+that says whether a command is dangerous. ljos does not run a second set of
+command checks of its own. By default nothing ljos answers stops a command: it never
+refuses, asks or holds one. A cloud seat's push rule, below, is the one exception.
 
-policyd gives one of four answers.
+policyd gives one of three answers.
 
 | Answer | What happens |
 |---|---|
 | allow | The command runs. |
-| ask | The runner shows its own permission prompt, and you answer. |
-| deny | The command does not run, and the reason names the rule. |
+| warn | The command runs, and the runner shows one line that names the rule and says why. |
 | rewrite | policyd returns a corrected command, and that one runs. |
+
+Blocking is opt-in. When your own `ljos.toml` names a `policyd_config` whose file
+sets `block-on-warning true`, policyd answers a warned command with `deny`. The hook
+denies the tool call, `ljos policy --fail-on-deny` exits 1, and a guard shim exits
+126. Without that line, a `deny` or `prompt` from an older policyd reads as the same
+warning.
+
+> **Security:** a warning is the only thing between a runner and a destructive
+> command. Keep backups, protect branches on the forge, and keep a runner where it
+> cannot reach what it must not touch.
 
 policyd reads the command as a shell does. It looks through `sh -c`, `env`, `timeout`,
 `xargs` and `nohup`, through `$cmd` and pipes, and through quotes. It does not run a
-shell and does not read scripts. First deny wins.
+shell and does not read scripts. The first rule that fires is the warning.
 
-policyd refuses some of these commands and asks about the others.
+policyd warns on these commands.
 
 - `sudo`, and `curl` or `wget` piped to a shell, including decoded text piped to a shell.
 - `chmod` that sets setuid, and raw disk writes such as `dd of=/dev/sda` and `mkfs`.
@@ -259,24 +269,25 @@ policyd can answer with a fixed command. Its first rewrite runs the command thro
 `uv run`. The answer is one line of text: `allow`, then `rewrite`, then the new
 command, separated by tabs.
 
-The new command runs only when the guard also allows it. Claude Code, Codex, Grok Build
+The new command runs only when the guard has no warning on it. Claude Code, Codex, Grok Build
 and Cursor's `preToolUse` take it back from the hook and run it. A runner that has no
-field for this gets a refusal that names the new command, so the old line never runs.
+field for this runs the old line, with a warning that names the new command.
 Each swap also shows a note naming both commands and leaves a row in
 `$XDG_DATA_HOME/ljos/rewrite.jsonl`. Set `rewrite = false` in a repository's
 `ljos.toml` to run its lines as written. The log keeps a row for a swap it declined too.
-policyd keeps a log of what it denies.
+policyd keeps a log of what it warns on.
 
 ### The two checks ljos keeps
 
 Only ljos knows the tracker and the sitting, so it keeps two checks.
 
-- A command or file tool that writes the tracker's files by hand is refused.
+- A command or file tool that writes the tracker's files by hand gets a warning.
   Use `ljos file`, `ljos note`, `ljos vote` and `ljos finish`. Ticket text is data
   and is never read as a command.
-- A protected-branch push asks when the current sitting's ticket has no
-  settled consensus. It asks. It does not deny. With one active seat, that seat's own vote
+- A protected-branch push warns when the current sitting's ticket has no
+  settled consensus. The push runs. With one active seat, that seat's own vote
   is the consensus for the push check. With two or more seats, the normal quorum applies.
+  The `pre-push` git hook, once installed, still holds that push under a runner.
 
 If `ljos-policyd` is missing or slow, the command runs and ljos logs a warning.
 `ljos doctor` shows the policy row. `ljos policy -- COMMAND` prints the answer for
@@ -313,8 +324,10 @@ and counts as advice. When Jev does not answer, ljos uses the local answer.
 
 `ljos cloud up` puts a fresh machine on the shared tracker. `sh scripts/install.sh --cloud`
 does the same from a checkout. A cloud seat has one push rule. It may push the branches
-named in its `ljos.toml` and `develop`, with no force and no delete. Opening or merging a
-pull request is not refused.
+named in its `ljos.toml` and `develop`.
+A cloud seat cannot force push, delete a branch, or push to a branch outside its allowlist.
+Every other push from a cloud seat runs with a warning.
+Opening or merging a pull request is not refused.
 `ljos mesh up` joins the swarm's tailnet on a Headscale login server, and `ljos mesh down` leaves it.
 [docs/cloud-vm.md](docs/cloud-vm.md) has the environment file, the push mode and the mesh.
 
@@ -362,13 +375,13 @@ a transcript. `forget` retires a claim and keeps the record that it was held.
 
 ## The MCP server
 
-`ljos-mcp` serves the same verbs over stdio. By default it lists twenty-one core
-tools, guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
+`ljos-mcp` serves the same verbs over stdio. By default it lists twenty core
+tools, guard and memory first: `rule`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. Every listed tool costs its description and
-schema on every session: 8,111 tokens for the core set against 18,028 for all
-fifty-three (o200k_base count of `initialize` instructions and the `tools/list`
+schema on every session: 7,872 tokens for the core set against 17,788 for all
+fifty-two (o200k_base count of `initialize` instructions and the `tools/list`
 result). `LJOS_MCP_TOOLS=all` lists every tool. Cards are the resources
 `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, and the protocol is `ljos://protocol`.
 

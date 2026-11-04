@@ -313,7 +313,7 @@ enum Cmd {
         /// Prefer as this persona.
         #[arg(long = "as")]
         as_persona: Option<String>,
-        /// Also write a deny rule over this command pattern, with the preference as its reason, so the hook refuses what the preference forbids. Repeatable.
+        /// Also write a deny rule over this command pattern, with the preference as its reason, so the hook warns on what the preference forbids. Repeatable.
         #[arg(long, value_name = "PATTERN")]
         deny: Vec<String>,
         /// Also write an ask rule over this command pattern, with the preference as its reason. Repeatable.
@@ -1029,17 +1029,18 @@ enum Cmd {
         as_persona: Option<String>,
     },
     /// Add a command guard rule: a glob over the command line and a verdict (deny, ask or allow).
+    /// A matching command runs, with the rule's reason as a warning; the verdict is its label.
     /// `--user` keeps it in the user config, shared by every agent and never reviewed. An allow
-    /// is the person's: written with `--user` at your own terminal, it clears the seat's asks
-    /// and denies for the lines it matches (policyd still judges them).
+    /// is the person's: written with `--user` at your own terminal, it clears the seat's
+    /// warnings for the lines it matches (policyd still reads them).
     Rule {
         /// A glob over the whole command line: `rm -rf *`, `*--force*`, `git push --force*`.
         pattern: String,
-        /// deny stops the action; ask hands it to the person; allow (with --user, at your
-        /// own terminal) clears the seat's asks and denies for the matching lines.
+        /// deny or ask labels the warning; allow (with --user, at your own terminal) clears
+        /// the seat's warnings for the matching lines.
         #[arg(long, default_value = "ask")]
         verdict: String,
-        /// The reason a stopped reader sees.
+        /// The reason a reader sees when the rule fires.
         #[arg(long)]
         why: String,
         /// Print the atom JSON. The default is one line: id, kind, due, text.
@@ -1054,11 +1055,6 @@ enum Cmd {
         /// Print them as JSON.
         #[arg(long)]
         json: bool,
-    },
-    /// Record the person's explicit consent for one pending hook request.
-    Approve {
-        /// The request id printed by the hook. Approve only after the person agrees.
-        id: String,
     },
     /// What the command guard says about a command, then what ljos remembers about it. Runs nothing.
     Policy {
@@ -1522,19 +1518,16 @@ fn write_ack(body: &serde_json::Value) -> String {
     }
 }
 
-/// Print a relay fault in the runner's contract and exit with its code.
-/// A prompt has no such deny; the caller then returns the error.
-fn exit_relay_fault(runner: &str, event: &str, what: &str) -> Result<()> {
+/// Print a relay fault in the runner's field names, an allow with a
+/// note, and exit 0.
+fn exit_relay_fault(runner: &str, event: &str, what: &str) -> ! {
     eprintln!("ljos: the guard could not judge ({what}); the call is allowed");
-    let Some((out, err, code)) = ljos_cli::runner_hooks::relay_fault_answer(runner, event, what)
-    else {
-        anyhow::bail!("hook: {what}");
-    };
+    let (out, err) = ljos_cli::runner_hooks::relay_fault_answer(runner, event, what);
     print!("{out}");
     eprint!("{err}");
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let _ = std::io::Write::flush(&mut std::io::stderr());
-    std::process::exit(code);
+    std::process::exit(0);
 }
 
 fn main() -> Result<()> {
@@ -2791,9 +2784,6 @@ fn run_command() -> Result<()> {
                 print!("{}", ljos_cli::user_rules::format_list());
             }
         }
-        Cmd::Approve { id } => {
-            print!("{}", ljos_cli::approval::approve(&id)?);
-        }
         Cmd::Policy { argv, fail_on_deny } => {
             let text = policy_with_memory(&argv)?;
             print!("{text}");
@@ -2874,10 +2864,8 @@ fn run_command() -> Result<()> {
                     // armed. Invalid text used to exit 1 with no output,
                     // which nine runners read as an allow.
                     if let Some(name) = runner.as_deref() {
-                        if ljos_cli::runner_hooks::is_runner(name)
-                            && ljos_cli::runner_hooks::relay_event_is_gate(event.as_deref())
-                        {
-                            return exit_relay_fault(
+                        if ljos_cli::runner_hooks::is_runner(name) {
+                            exit_relay_fault(
                                 name,
                                 event.as_deref().unwrap_or(""),
                                 "stdin is not utf-8",
@@ -2900,33 +2888,8 @@ fn run_command() -> Result<()> {
                     ljos_cli::runner_hooks::relay(runner, &input, limit, event.as_deref())
                 }));
                 match caught {
-                    Ok(Ok(code)) => std::process::exit(code),
-                    Ok(Err(err))
-                        if ljos_cli::runner_hooks::relay_input_is_gate(
-                            &input,
-                            event.as_deref(),
-                        ) =>
-                    {
-                        return exit_relay_fault(
-                            runner,
-                            event.as_deref().unwrap_or(""),
-                            &format!("{err:#}"),
-                        );
-                    }
-                    Ok(Err(err)) => return Err(err),
-                    Err(_)
-                        if ljos_cli::runner_hooks::relay_input_is_gate(
-                            &input,
-                            event.as_deref(),
-                        ) =>
-                    {
-                        return exit_relay_fault(
-                            runner,
-                            event.as_deref().unwrap_or(""),
-                            "panicked",
-                        );
-                    }
-                    Err(_) => anyhow::bail!("hook: relay panicked"),
+                    Ok(code) => std::process::exit(code),
+                    Err(_) => exit_relay_fault(runner, event.as_deref().unwrap_or(""), "panicked"),
                 }
             }
             let mut call = if prompt {
@@ -3153,7 +3116,12 @@ fn run_command() -> Result<()> {
             let tcb_rule = if unresolved_dir {
                 None
             } else if let Some(rule) = fast {
-                Some(rule)
+                // ljos's own rule warns. A named policyd config may still
+                // block the line, and that block is the verdict.
+                (!suspended && !argv.is_empty())
+                    .then(|| ljos_cli::policyd_block(&call.cue, dir))
+                    .flatten()
+                    .or(Some(rule))
             } else if suspended {
                 None
             } else if on_tool && !argv.is_empty() {
@@ -3174,13 +3142,10 @@ fn run_command() -> Result<()> {
                 ),
                 &call.cue,
             );
-            // A seat rule that denies this push still denies it. Otherwise
-            // the policyd ask (a force push) is the verdict, then the gate.
-            let verdict = if gated.as_ref().is_some_and(|rule| rule.verdict == "deny") {
-                gated.as_ref()
-            } else {
-                tcb_rule.as_ref().or(gated.as_ref())
-            };
+            // The call runs. One rule is its warning: the guard's, else the
+            // push gate's or a seat rule's. policyd's block, under a named
+            // `policyd_config`, is the one rule that stops it.
+            let verdict = tcb_rule.as_ref().or(gated.as_ref());
             // A command the ask pack would have asked about runs because a
             // setting turned that class off: the bypass log keeps a row.
             if verdict.is_none() && call.event == "PreToolUse" {
@@ -3332,11 +3297,9 @@ fn run_command() -> Result<()> {
                 // to say either.
                 "TurnEnd" => String::new(),
                 _ => {
-                    // The person's prompt is the chat's consent channel; the
-                    // grant goes first, ahead of the hook's deadline.
-                    // Only the person's own prompt grants: a subagent's
-                    // brief or an unattended run's prompt is an agent's
-                    // words in that channel. A tool call can run `ljos hook`
+                    // Only the person's own prompt is kept as theirs: a
+                    // subagent's brief or an unattended run's prompt is an
+                    // agent's words in that channel. A tool call can run `ljos hook`
                     // with a payload of its own; only a hook the runner
                     // itself spawned carries the person's prompt. What the
                     // hook saves from any prompt is labelled with whose it is.
@@ -3355,16 +3318,6 @@ fn run_command() -> Result<()> {
                     .flatten();
                     let person = spawner.is_some();
                     ljos_cli::capture::set_persons_prompt(person);
-                    let granted = person
-                        .then(|| {
-                            ljos_cli::hook_timed("approve", || {
-                                ljos_cli::approval::approve_from_prompt(
-                                    &call.cue,
-                                    call.session.as_deref(),
-                                )
-                            })
-                        })
-                        .flatten();
                     if person {
                         let mut sessions: Vec<String> = call.session.iter().cloned().collect();
                         for s in ljos_cli::payload_sessions(&input) {
@@ -3428,13 +3381,6 @@ fn run_command() -> Result<()> {
                             format!("{line}\n{ctx}")
                         };
                     }
-                    if let Some(granted) = granted {
-                        ctx = if ctx.is_empty() {
-                            granted
-                        } else {
-                            format!("{granted}\n{ctx}")
-                        };
-                    }
                     if call.event == "UserPromptSubmit" {
                         let (mail, mail_ids) =
                             ljos_cli::hook_timed("mail", ljos_cli::mail::prompt_note);
@@ -3453,21 +3399,20 @@ fn run_command() -> Result<()> {
                     prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)
                 }
             };
-            // The book is kept here, after a deny has already been decided,
-            // so a tracker that does not answer cannot turn into a refusal.
+            // The book is kept here, after the answer is decided, so a
+            // tracker that does not answer cannot hold the call. A call a
+            // rule warned on runs, so it is booked too; a blocked call does
+            // not run and is not booked.
             // A Stop the audit held never reaches this line, except an agy
             // stop that is idle: that one is the session end and finishes.
             // A mid-loop agy stop, fullyIdle absent, does not finish.
             // The book is queued, not kept in this call: it waits on a lock
             // every seat shares, and a claim reads the whole tracker. A
             // gate's book is queued once its answer is out.
-            let ask = verdict
-                .filter(|rule| rule.verdict == "ask")
-                .map(|rule| rule.reason.clone());
             let agy_mid_loop = call.shape == ljos_cli::HookShape::Steps
                 && call.event == "Stop"
                 && !ljos_cli::stop_is_idle(&input);
-            let book = verdict.is_none() && !agy_mid_loop;
+            let book = !agy_mid_loop && !verdict.is_some_and(ljos_cli::Rule::blocks);
             let gate = ljos_cli::is_gate_event(&call.event);
             if book && !gate {
                 let extra = ljos_cli::hook_timed("bookkeep", || {
@@ -3485,10 +3430,12 @@ fn run_command() -> Result<()> {
                 ljos_cli::tcb_verdict_in(line, dir)
                     .or_else(|| ljos_cli::ruled_verdict(&rules, line))
             })
-            .unwrap_or_else(|| ljos_cli::approval::hook_output(&input, &call, &context, verdict));
+            .unwrap_or_else(|| ljos_cli::hook_output_ruled(&call, &context, verdict));
             ljos_cli::answer_gate(&output);
-            if let Some(reason) = ask {
-                ljos_cli::book_queue::enqueue_ask(&input, &call, &reason);
+            if let Some(rule) = verdict {
+                let seat = std::env::var("LJOS_SEAT").unwrap_or_default();
+                let kind = if rule.blocks() { "refusal" } else { "warning" };
+                ljos_cli::digest::note_guard(kind, &seat, &rule.reason);
             }
             if book && gate {
                 ljos_cli::hook_timed("bookkeep", || {

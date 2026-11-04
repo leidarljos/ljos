@@ -155,11 +155,11 @@ fresh=$(echo '{"hook_event_name":"SessionStart","session_id":"smoke-fresh","sour
 echo "$fresh" | grep -q '"additionalContext":"ljos is on: ' || { echo "$fresh"; fail "the ljos is on line at SessionStart"; }
 
 ljos rule '*--force*' --verdict deny --why "Never force push." >/dev/null
-echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook | grep -q '"permissionDecision":"deny"' || fail "rule through the hook"
+echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook | grep -q '"additionalContext":"warning: ' || fail "rule through the hook"
 # A tool call must not search the pack. The inject script exits empty.
 out=$(printf '%s' '{"hook_event_name":"PreToolUse","toolName":"read_file"}' | "$here/grok/ljos-inject.sh" || true)
 [ -z "$out" ] || fail "inject searched on PreToolUse"
-ljos policy -- git push --force | grep -q '^deny:' || fail "rule through policy"
+ljos policy -- git push --force | grep -q '^warning: ' || fail "rule through policy"
 
 ljos handover --out "$root/bag" --issue "$id" | grep -q 'manifest-sha256.txt.sig' || fail "signed handover"
 got=$(ljos receive "$root/bag")

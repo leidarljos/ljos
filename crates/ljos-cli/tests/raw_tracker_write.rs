@@ -1,7 +1,8 @@
-//! Under an agent runner the guard refuses a raw `vissue` verb that writes
+//! Under an agent runner the guard warns on a raw `vissue` verb that writes
 //! and names the ljos verb to run in its place: the raw verb skips the
-//! seat check, the parent's project and the tracker commit. Reads stay
-//! allowed, and the `vissue` children ljos runs itself are not refused.
+//! seat check, the parent's project and the tracker commit. The verb still
+//! runs. Reads carry no warning, and the `vissue` children ljos runs itself
+//! are not judged.
 
 ljos_test_boot::harness!();
 use std::io::Write;
@@ -45,13 +46,11 @@ fn text(out: &Output) -> String {
 }
 
 fn policy(home: &Path, line: &str) -> Output {
-    as_agent(home, &["policy", "--fail-on-deny", line])
-        .output()
-        .unwrap()
+    as_agent(home, &["policy", line]).output().unwrap()
 }
 
 #[test]
-fn a_raw_tracker_write_under_a_runner_is_refused_with_the_ljos_verb() {
+fn a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
     let home = tempfile::tempdir().unwrap();
     for (line, instead) in [
         (
@@ -85,8 +84,8 @@ fn a_raw_tracker_write_under_a_runner_is_refused_with_the_ljos_verb() {
     ] {
         let out = policy(home.path(), line);
         let said = text(&out);
-        assert!(!out.status.success(), "{line} was allowed:\n{said}");
-        assert!(said.contains("deny:"), "{line}:\n{said}");
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(said.contains("\nwarning: "), "{line}:\n{said}");
         assert!(
             said.contains(&format!("Run `{instead}")),
             "{line} did not name {instead}:\n{said}"
@@ -118,12 +117,12 @@ fn a_tracker_read_under_a_runner_stays_allowed() {
         let out = policy(home.path(), line);
         let said = text(&out);
         assert!(out.status.success(), "{line} was refused:\n{said}");
-        assert!(!said.contains("deny:"), "{line}:\n{said}");
+        assert!(!said.contains("\nwarning: "), "{line}:\n{said}");
     }
 }
 
 #[test]
-fn the_runner_hook_refuses_a_raw_tracker_write() {
+fn the_runner_hook_warns_on_a_raw_tracker_write() {
     let home = tempfile::tempdir().unwrap();
     let payload = serde_json::json!({
         "hook_event_name": "PreToolUse",
@@ -145,7 +144,9 @@ fn the_runner_hook_refuses_a_raw_tracker_write() {
         .unwrap();
     let out = hook.wait_with_output().unwrap();
     let said = text(&out);
-    assert!(said.contains("deny"), "{said}");
+    assert!(out.status.success(), "{said}");
+    assert!(!said.contains("permissionDecision"), "{said}");
+    assert!(said.contains("\"additionalContext\":\"warning: "), "{said}");
     assert!(
         said.contains("Run `ljos finish ljos-ab12` instead."),
         "{said}"
@@ -153,11 +154,11 @@ fn the_runner_hook_refuses_a_raw_tracker_write() {
     assert!(!said.contains("--close"), "{said}");
 }
 
-/// A runner must not reach a tracker close by naming something other than
+/// A runner does not slip past the warning by naming something other than
 /// `vissue`: an interpreter, a substitution, a copied binary, or a write
 /// into `issues.org`.
 #[test]
-fn an_indirect_tracker_write_under_a_runner_is_refused() {
+fn an_indirect_tracker_write_under_a_runner_warns() {
     let home = tempfile::tempdir().unwrap();
     let lines = [
         r#"python3 -c 'import subprocess; subprocess.run(["vissue","close","ljos-ab12"])'"#,
@@ -171,9 +172,9 @@ fn an_indirect_tracker_write_under_a_runner_is_refused() {
     for line in lines {
         let out = policy(home.path(), line);
         let said = text(&out);
-        assert!(!out.status.success(), "{line} was allowed:\n{said}");
-        assert!(said.contains("deny:"), "{line}:\n{said}");
-        let reason = said.split("deny:").nth(1).unwrap_or("");
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(said.contains("\nwarning: "), "{line}:\n{said}");
+        let reason = said.split("warning:").nth(1).unwrap_or("");
         assert!(
             !reason.contains("--close"),
             "{line} still names the close flag:\n{said}"
@@ -183,7 +184,7 @@ fn an_indirect_tracker_write_under_a_runner_is_refused() {
 
 /// `ljos finish ID --close` is finish's own close. The guard leaves it
 /// to finish, which refuses a close no grant covers. A raw `vissue close`
-/// stays refused above.
+/// warns above.
 #[test]
 fn a_finish_close_under_a_runner_is_left_to_finish() {
     let home = tempfile::tempdir().unwrap();
@@ -194,7 +195,7 @@ fn a_finish_close_under_a_runner_is_left_to_finish() {
         let out = policy(home.path(), line);
         let said = text(&out);
         assert!(out.status.success(), "{line} was refused:\n{said}");
-        assert!(!said.contains("deny:"), "{line}:\n{said}");
+        assert!(!said.contains("\nwarning: "), "{line}:\n{said}");
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "finish-close-allow-0001",
@@ -210,8 +211,8 @@ fn a_finish_close_under_a_runner_is_left_to_finish() {
             hooked.status
         );
         assert!(
-            !ljos_cli::answer_denies(&String::from_utf8_lossy(&hooked.stdout)),
-            "hook refused {line}:\n{said}"
+            !said.contains("warning: "),
+            "hook warned on {line}:\n{said}"
         );
     }
 }
@@ -227,7 +228,7 @@ fn an_ordinary_interpreter_under_a_runner_stays_allowed() {
         let out = policy(home.path(), line);
         let said = text(&out);
         assert!(out.status.success(), "{line} was refused:\n{said}");
-        assert!(!said.contains("deny:"), "{line}:\n{said}");
+        assert!(!said.contains("\nwarning: "), "{line}:\n{said}");
     }
 }
 
@@ -305,10 +306,10 @@ fn the_seat_hook_matches_a_vissue_write_tool() {
     );
 }
 
-/// A vissue MCP write under a runner is the same refusal as the shell
+/// A vissue MCP write under a runner is the same warning as the shell
 /// verb. A DONE state names `ljos finish` and does not name a close flag.
 #[test]
-fn a_vissue_mcp_write_under_a_runner_is_refused() {
+fn a_vissue_mcp_write_under_a_runner_warns() {
     let home = tempfile::tempdir().unwrap();
     let cases = [
         (
@@ -362,7 +363,8 @@ fn a_vissue_mcp_write_under_a_runner_is_refused() {
         });
         let out = hook_payload(home.path(), payload);
         let said = text(&out);
-        assert!(said.contains("deny"), "{tool} was allowed:\n{said}");
+        assert!(said.contains("warning: "), "{tool} had no warning:\n{said}");
+        assert!(!said.contains("\"deny\""), "{tool} was refused:\n{said}");
         assert!(
             said.contains(instead),
             "{tool} did not name {instead}:\n{said}"
@@ -381,7 +383,11 @@ fn a_vissue_mcp_write_under_a_runner_is_refused() {
     });
     let out = hook_payload(home.path(), cursor);
     let said = text(&out);
-    assert!(said.contains("deny"), "cursor update was allowed:\n{said}");
+    assert!(said.contains("\"permission\":\"allow\""), "{said}");
+    assert!(
+        said.contains("warning: "),
+        "cursor update had no warning:\n{said}"
+    );
     assert!(said.contains("ljos finish ljos-ab12"), "{said}");
     assert!(!said.contains("--close"), "{said}");
 }
@@ -409,13 +415,13 @@ fn a_vissue_mcp_read_under_a_runner_stays_allowed() {
         });
         let out = hook_payload(home.path(), payload);
         let said = text(&out);
-        assert!(!said.contains("deny"), "{tool} was refused:\n{said}");
+        assert!(!said.contains("warning: "), "{tool} warned:\n{said}");
     }
 }
 
 /// A Write or Edit of issues.org is a tracker write. Another file is not.
 #[test]
-fn a_file_tool_write_of_issues_org_under_a_runner_is_refused() {
+fn a_file_tool_write_of_issues_org_under_a_runner_warns() {
     let home = tempfile::tempdir().unwrap();
     for (tool, path) in [
         ("Write", "/tmp/tracker/Software/ljos/issues.org"),
@@ -436,7 +442,14 @@ fn a_file_tool_write_of_issues_org_under_a_runner_is_refused() {
         });
         let out = hook_payload(home.path(), payload);
         let said = text(&out);
-        assert!(said.contains("deny"), "{tool} {path} was allowed:\n{said}");
+        assert!(
+            said.contains("warning: "),
+            "{tool} {path} had no warning:\n{said}"
+        );
+        assert!(
+            !said.contains("\"deny\""),
+            "{tool} {path} was refused:\n{said}"
+        );
         assert!(said.contains("ljos finish"), "{tool}:\n{said}");
         assert!(!said.contains("--close"), "{tool}:\n{said}");
     }
@@ -449,5 +462,5 @@ fn a_file_tool_write_of_issues_org_under_a_runner_is_refused() {
     });
     let out = hook_payload(home.path(), payload);
     let said = text(&out);
-    assert!(!said.contains("deny"), "README was refused:\n{said}");
+    assert!(!said.contains("warning: "), "README warned:\n{said}");
 }

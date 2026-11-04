@@ -303,14 +303,9 @@ fn hook_in(
     hab: &Habitat,
     payload: &str,
     dir: &Path,
-    fail_on_deny: bool,
     extra: &[(&str, &str)],
 ) -> std::process::Output {
-    let mut args = vec!["hook"];
-    if fail_on_deny {
-        args.push("--fail-on-deny");
-    }
-    run_ljos(hab, &args, payload, dir, extra)
+    run_ljos(hab, &["hook"], payload, dir, extra)
 }
 
 fn run_ljos(
@@ -393,8 +388,10 @@ fn context(stdout: &[u8]) -> String {
         .to_string()
 }
 
+/// An ask from ljos-policyd is an allow with the rule's warning in every
+/// runner's shape. No runner is told deny, ask or block.
 #[test]
-fn an_ask_is_rendered_for_each_harness() {
+fn an_ask_is_an_allow_with_its_warning_for_each_harness() {
     let (_dir, hab) = habitat();
     record_evidence(&hab.repo);
     sit(&hab);
@@ -406,133 +403,84 @@ fn an_ask_is_rendered_for_each_harness() {
     );
     let cwd = hab.repo.clone();
     let env = [("POLICYD_BIN", policyd.to_str().unwrap())];
+    let line = "git reset --hard HEAD~1";
     let command = serde_json::json!({
         "tool_name": "Bash",
-        "tool_input": {"command": "git reset --hard HEAD~1"}
+        "tool_input": {"command": line}
     });
-    // Claude Code and opencode stop on permissionDecision ask. opencode's
-    // plugin throws before the tool runs; the payload it sends has no
-    // turn_id, so the seat answers in the ask shape.
-    for name in ["claude", "opencode"] {
-        let out = ljos(
-            &hab,
-            &claude("PreToolUse", &format!("ask-{name}"), &cwd, command.clone()),
-            &env,
-        );
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            text.contains("\"permissionDecision\":\"ask\""),
-            "{name}: {text}"
-        );
-        assert!(text.contains("git-reset-hard"), "{name}: {text}");
-        assert!(
-            !text.contains("\"permissionDecision\":\"deny\""),
-            "{name}: {text}"
-        );
-    }
-    let plugin = include_str!("../assets/opencode/ljos.ts");
-    let plugin_v2 = include_str!("../assets/opencode/ljos-v2.ts");
-    for source in [plugin, plugin_v2] {
-        assert!(source.contains("verdict === \"ask\""));
-        assert!(source.contains("needs the person's approval"));
-    }
-    // Codex PreToolUse does not honour ask: the hook is marked failed and
-    // the command runs. The seat denies, and the reason says how to grant it.
     let mut codex_body = command.clone();
     codex_body["turn_id"] = serde_json::json!("turn-1");
-    let codex = ljos(
-        &hab,
-        &claude("PreToolUse", "ask-codex", &cwd, codex_body),
-        &env,
-    );
-    let codex = String::from_utf8_lossy(&codex.stdout);
-    assert!(codex.contains("\"permissionDecision\":\"deny\""), "{codex}");
-    assert!(!codex.contains("\"permissionDecision\":\"ask\""), "{codex}");
-    assert!(codex.contains("ljos approve "), "{codex}");
-    assert!(codex.contains("ljos_request_approval"), "{codex}");
-    assert!(codex.contains("git-reset-hard"), "{codex}");
-    assert!(!codex.contains("leave it for them"), "{codex}");
-    // agy asks on decision ask.
-    let agy = ljos_cmd(
-        &hab,
-        &["hook", "--event", "PreToolUse"],
-        &serde_json::json!({
-            "conversationId": "ask-agy",
-            "cwd": cwd,
-            "toolCall": {
-                "name": "run_command",
-                "args": {"CommandLine": "git reset --hard HEAD~1"}
-            }
-        })
-        .to_string(),
-        &env,
-    );
-    let agy = String::from_utf8_lossy(&agy.stdout);
-    assert!(agy.contains("\"decision\":\"ask\""), "{agy}");
-    assert!(!agy.contains("\"decision\":\"deny\""), "{agy}");
-    assert!(agy.contains("git-reset-hard"), "{agy}");
-    // Cursor beforeShellExecution enforces permission ask. The payload
-    // names no conversation, so the habitat's `LJOS_HOLD` sits for it.
-    let shell = ljos(
-        &hab,
-        &serde_json::json!({
-            "cursor_version": "2.4.0",
-            "hook_event_name": "beforeShellExecution",
-            "command": "git reset --hard HEAD~1",
-            "cwd": cwd,
-        })
-        .to_string(),
-        &env,
-    );
-    let shell = String::from_utf8_lossy(&shell.stdout);
-    assert!(shell.contains("\"permission\":\"ask\""), "{shell}");
-    assert!(!shell.contains("\"permission\":\"deny\""), "{shell}");
-    assert!(shell.contains("git-reset-hard"), "{shell}");
-    // Cursor preToolUse accepts ask and does not enforce it. The payload
-    // names its conversation, which sits under its own holder.
     sit_as(
         &hab,
         &format!("probe-seat@{}", ljos_cli::session_tag("ask-cursor-tool")),
     );
-    let tool = ljos(
-        &hab,
-        &serde_json::json!({
-            "cursor_version": "2.4.0",
-            "conversation_id": "ask-cursor-tool",
-            "hook_event_name": "preToolUse",
-            "tool_name": "Shell",
-            "tool_input": {"command": "git reset --hard HEAD~1"},
-            "cwd": cwd,
-        })
-        .to_string(),
-        &env,
-    );
-    let tool = String::from_utf8_lossy(&tool.stdout);
-    assert!(tool.contains("\"permission\":\"deny\""), "{tool}");
-    assert!(!tool.contains("\"permission\":\"ask\""), "{tool}");
-    assert!(tool.contains("ljos approve "), "{tool}");
-    assert!(tool.contains("ljos_request_approval"), "{tool}");
-    assert!(!tool.contains("leave it for them"), "{tool}");
-    // Gemini honours decision deny (and, in current source, ask). The
-    // seat sends deny, including when the event is still BeforeTool.
-    let gemini = ljos_cmd(
-        &hab,
-        &["hook", "--runner", "gemini"],
-        &serde_json::json!({
-            "hook_event_name": "BeforeTool",
-            "session_id": "ask-gemini",
-            "cwd": cwd,
-            "tool_name": "run_shell_command",
-            "tool_input": {"command": "git reset --hard HEAD~1"}
-        })
-        .to_string(),
-        &env,
-    );
-    let gemini = String::from_utf8_lossy(&gemini.stdout);
-    assert!(gemini.contains("\"decision\":\"deny\""), "{gemini}");
-    assert!(!gemini.contains("\"ask\""), "{gemini}");
-    assert!(gemini.contains("git-reset-hard"), "{gemini}");
-    assert!(gemini.contains("cannot ask"), "{gemini}");
+    let runs = [
+        (
+            "claude",
+            &["hook"][..],
+            claude("PreToolUse", "ask-claude", &cwd, command.clone()),
+        ),
+        (
+            "codex",
+            &["hook"],
+            claude("PreToolUse", "ask-codex", &cwd, codex_body),
+        ),
+        (
+            "agy",
+            &["hook", "--event", "PreToolUse"],
+            serde_json::json!({
+                "conversationId": "ask-agy",
+                "cwd": cwd,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": line}}
+            })
+            .to_string(),
+        ),
+        (
+            "cursor shell",
+            &["hook"],
+            serde_json::json!({
+                "cursor_version": "2.4.0",
+                "hook_event_name": "beforeShellExecution",
+                "command": line,
+                "cwd": cwd,
+            })
+            .to_string(),
+        ),
+        (
+            "cursor tool",
+            &["hook"],
+            serde_json::json!({
+                "cursor_version": "2.4.0",
+                "conversation_id": "ask-cursor-tool",
+                "hook_event_name": "preToolUse",
+                "tool_name": "Shell",
+                "tool_input": {"command": line},
+                "cwd": cwd,
+            })
+            .to_string(),
+        ),
+        (
+            "gemini",
+            &["hook", "--runner", "gemini"],
+            serde_json::json!({
+                "hook_event_name": "BeforeTool",
+                "session_id": "ask-gemini",
+                "cwd": cwd,
+                "tool_name": "run_shell_command",
+                "tool_input": {"command": line}
+            })
+            .to_string(),
+        ),
+    ];
+    for (name, args, payload) in runs {
+        let out = ljos_cmd(&hab, args, &payload, &env);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{name}: {text}");
+        assert!(text.contains("warning: git-reset-hard"), "{name}: {text}");
+        for refusal in ["\"deny\"", "\"ask\"", "\"block\""] {
+            assert!(!text.contains(refusal), "{name}: {text}");
+        }
+    }
 }
 
 /// In every harness shape, a force push and a delete push run, whether
@@ -842,11 +790,11 @@ fn a_relative_workdir_resolves_and_a_normal_git_command_is_allowed() {
     let child = child_repo(&hab.repo);
     let session = hab.repo.to_str().unwrap();
     let forwarded = pretool(session, Some("path/to/git/repo"), NORMAL_GIT);
-    let out = hook_in(&hab, &forwarded, &hab.repo, true, &[]);
+    let out = hook_in(&hab, &forwarded, &hab.repo, &[]);
     assert_ordinary(&out, &forwarded);
     assert!(child.join(".git").is_dir());
     let as_cwd = pretool("path/to/git/repo", None, NORMAL_GIT);
-    let out = hook_in(&hab, &as_cwd, &hab.repo, true, &[]);
+    let out = hook_in(&hab, &as_cwd, &hab.repo, &[]);
     assert_ordinary(&out, &as_cwd);
 }
 
@@ -856,12 +804,10 @@ fn short_sha(sha: &str) -> String {
 
 /// A command whose directory does not resolve, a workdir or a session
 /// `cwd` that is missing, a symlink loop, or a directory it cannot enter,
-/// is denied as `cwd-unresolved`: judged in the session or the process
-/// directory instead, it was judged where it does not run. With
-/// `LJOS_GUARD_FAIL_OPEN=1` it is judged there, and a prompt from such a
-/// directory is never denied.
+/// is allowed and exits 0, as is a prompt from such a directory. With
+/// `LJOS_GUARD_FAIL_OPEN=1` the answer is the ordinary one.
 #[test]
-fn a_workdir_that_does_not_resolve_denies_the_command() {
+fn a_workdir_that_does_not_resolve_still_allows_the_command() {
     use std::os::unix::fs::PermissionsExt;
     let (_dir, hab) = habitat();
     sit(&hab);
@@ -882,13 +828,12 @@ fn a_workdir_that_does_not_resolve_denies_the_command() {
     ];
     let denied: Vec<_> = payloads
         .iter()
-        .map(|p| hook_in(&hab, p, &hab.repo, true, &on))
+        .map(|p| hook_in(&hab, p, &hab.repo, &on))
         .collect();
     let open = hook_in(
         &hab,
         &payloads[0],
         &hab.repo,
-        true,
         &[on[0], on[1], ("LJOS_GUARD_FAIL_OPEN", "1")],
     );
     let prompt = claude(
@@ -897,7 +842,7 @@ fn a_workdir_that_does_not_resolve_denies_the_command() {
         &missing,
         serde_json::json!({"prompt": "Fix the build"}),
     );
-    let asked = hook_in(&hab, &prompt, &hab.repo, true, &on);
+    let asked = hook_in(&hab, &prompt, &hab.repo, &on);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     for (payload, out) in payloads.iter().zip(&denied) {
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -944,7 +889,6 @@ fn payload_cwd_is_used_when_hook_process_runs_elsewhere() {
         &hab,
         &payload,
         elsewhere.path(),
-        true,
         &[
             ("LJOS_GUARD", "on"),
             ("LJOS_OFF", "0"),
@@ -952,8 +896,8 @@ fn payload_cwd_is_used_when_hook_process_runs_elsewhere() {
         ],
     );
     assert!(
-        !out.status.success(),
-        "guard should deny in payload cwd\nstdout:\n{}\nstderr:\n{}",
+        out.status.success(),
+        "a guard warning exits 0\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
