@@ -1710,10 +1710,7 @@ mod task_approval_tests {
         assert_eq!(old.scope.command, scope.command);
         assert_eq!(old.scope.pattern, scope.pattern);
         assert_eq!(old.scope.reason, scope.reason);
-        assert!(decoded
-            .iter()
-            .find(|request| request.approved)
-            .is_none());
+        assert!(!decoded.iter().any(|request| request.approved));
     }
 }
 #[cfg(test)]
