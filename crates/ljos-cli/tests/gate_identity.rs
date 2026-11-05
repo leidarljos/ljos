@@ -3610,34 +3610,7 @@ fn advisory_a_forged_sitting_record_with_another_conversations_tag_is_refused() 
 #[test]
 fn advisory_a_tool_command_that_writes_the_records_that_bind_a_conversation_warns() {
     let _mode = guard_mode::advisory();
-
-    let home = Box_::new();
-    for name in [
-        "session-bare-inky",
-        "tmux-hook-conv",
-        "tmux-sock-abc",
-        "tmux-pane-abc-1",
-        "first-hook-conv",
-    ] {
-        let cmd = format!(
-            "printf '%s\\n' inky {} > {}/ljos/{name}",
-            holder(CONV_X),
-            home.run.display()
-        );
-        let payload = serde_json::json!({
-            "cursor_version": "2.4.0",
-            "hook_event_name": "beforeShellExecution",
-            "conversation_id": CONV_Z,
-            "cwd": home.repo,
-            "command": cmd,
-        })
-        .to_string();
-        let said = home.hook_with(&payload, &[]);
-        assert!(
-            said.contains("sitting-gate") && said.contains("\"permission\":\"allow\""),
-            "a shell write to {name} was not warned on:\n{said}"
-        );
-    }
+    a_tool_command_that_writes_the_records_that_bind_a_conversation_warns();
 }
 
 fn a_tool_command_that_writes_the_records_that_bind_a_conversation_warns() {

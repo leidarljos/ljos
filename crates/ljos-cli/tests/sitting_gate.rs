@@ -997,110 +997,13 @@ fn the_person_at_a_terminal_is_not_refused() {
 #[test]
 fn advisory_a_cloud_seat_warns_on_a_protected_push_when_no_seat_has_voted() {
     let _mode = guard_mode::advisory();
-
-    let seat = Seat::new();
-    let origin = seat._dir.path().join("origin.git");
-    let other = seat._dir.path().join("other.git");
-    git_ok(
-        seat._dir.path(),
-        &["init", "--bare", "-q", origin.to_str().unwrap()],
-    );
-    git_ok(
-        seat._dir.path(),
-        &["init", "--bare", "-q", other.to_str().unwrap()],
-    );
-    let origin = origin.canonicalize().unwrap();
-    let other = other.canonicalize().unwrap();
-    git_ok(
-        &seat.repo,
-        &["remote", "add", "origin", origin.to_str().unwrap()],
-    );
-    git_ok(
-        &seat.repo,
-        &["remote", "add", "other", other.to_str().unwrap()],
-    );
-    cloud_mark(&seat);
-    write_allow(&seat, &origin);
-    let pack = empty_pack();
-    let env = [
-        ("PACKSET_URL", pack.as_str()),
-        ("LJOS_UNSIGNED_BALLOTS", "allow"),
-        // A temporary HOME would leave the cloud rules unread. This seat
-        // is a cloud seat, so those rules have to run.
-        ("LJOS_GUARD", "on"),
-    ];
-    let develop = "git push origin develop";
-
-    let idle = seat.policy(develop, &env);
-    asks_for_consensus(&idle, develop);
-
-    seat.sit();
-    let said = seat.policy(develop, &env);
-    asks_for_consensus(&said, develop);
-    assert!(said.contains("\nwarning: "), "{said}");
-
-    let hooked = seat.hook_turn(develop, &env);
-    asks_for_consensus(&hooked, develop);
-    assert!(!hooked.contains("\"permissionDecision\""), "{hooked}");
-    assert!(!seat.run.join("ljos/approvals").exists(), "{hooked}");
-
-    for line in [
-        "git push --force origin develop",
-        "git push --force-with-lease origin develop",
-        "git push origin :develop",
-        "git push origin --delete develop",
-        "git push origin HEAD:cursor/topic",
-    ] {
-        let said = seat.policy(line, &env);
-        assert!(!said.contains("\nask:"), "{line}\n{said}");
-        assert!(
-            said.contains("\ndeny:") || said.contains("deny:"),
-            "{line}\n{said}"
-        );
-        let hooked = seat.hook_turn(line, &env);
-        assert!(
-            hooked.contains("\"permissionDecision\":\"deny\""),
-            "{line}\n{hooked}"
-        );
-    }
-
-    let seats = seat.home.join(".config/ljos/seats/inky");
-    std::fs::create_dir_all(&seats).unwrap();
-    std::fs::write(seats.join("ljos.toml"), "[cloud]\nbranches = [\"main\"]\n").unwrap();
-    let main = seat.policy("git push origin main", &env);
-    asks_for_consensus(&main, "git push origin main");
-    assert!(main.contains("\nwarning: "), "{main}");
-
-    seat.vote(&[("inky", "revise"), ("flint", "revise")]);
-    let back = seat.policy(develop, &env);
-    asks_for_consensus(&back, develop);
+    a_cloud_seat_warns_on_a_protected_push_when_no_seat_has_voted();
 }
 
 #[test]
 fn advisory_a_gates_file_that_does_not_parse_warns_and_holds_the_git_hook() {
     let _mode = guard_mode::advisory();
-
-    let seat = Seat::new();
-    std::fs::create_dir_all(seat.repo.join(".ljos")).unwrap();
-    std::fs::write(seat.repo.join(".ljos/gates.toml"), "quorum = [\n").unwrap();
-    let develop = "git push origin develop";
-    let said = seat.policy(develop, &[]);
-    assert!(said.contains("do not read"), "{said}");
-    assert!(!said.contains("1 of the 2 seats"), "{said}");
-    assert!(
-        said.contains("\nwarning: sitting-gate: "),
-        "a malformed gates file was not a warning\n{said}"
-    );
-    let refs = seat.same_commit_refs();
-    let out = seat.git_hook_push(&refs, &[]);
-    let hooked = text_of(&out);
-    assert!(
-        out.status.success(),
-        "a malformed gates file is a label and the push runs\n{hooked}"
-    );
-    assert!(hooked.contains("sitting-gate"), "{hooked}");
-    assert!(hooked.contains("do not read"), "{hooked}");
-    assert!(!hooked.contains("1 of the 2 seats"), "{hooked}");
+    a_gates_file_that_does_not_parse_warns_and_holds_the_git_hook();
 }
 
 #[test]

@@ -65,12 +65,7 @@ fn invalid_utf8_on_a_prompt_hook_is_not_a_deny() {
 #[test]
 fn advisory_invalid_utf8_on_a_prompt_hook_exits_0_with_a_note() {
     let _mode = guard_mode::advisory();
-
-    let out = hook("gemini", Some("BeforeAgent"), &[0xff, 0xfe]);
-    let said = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(out.status.code(), Some(0), "{out:?}");
-    assert!(said.contains("unhealthy"), "{said}");
-    assert!(!said.contains("deny"), "{said}");
+    invalid_utf8_on_a_prompt_hook_exits_0_with_a_note();
 }
 
 fn invalid_utf8_on_a_prompt_hook_exits_0_with_a_note() {

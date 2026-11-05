@@ -1438,58 +1438,7 @@ fn ordinary_non_permission_events_do_not_stall_on_hung_pack() {
 #[test]
 fn advisory_a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_warn() {
     let _mode = guard_mode::advisory();
-
-    let hab = hab("hungpack");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        let mut held = Vec::new();
-        for conn in listener.incoming().flatten() {
-            held.push(conn);
-        }
-    });
-    let rules = hab.home.join(".local/share/ljos/rules-probe.json");
-    std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
-    std::fs::write(
-        &rules,
-        r#"[["curl*","deny","the person said no curl from this seat"]]"#,
-    )
-    .unwrap();
-    let url = format!("http://127.0.0.1:{port}");
-    let call = |conversation: &str, command: &str| {
-        let mut cmd = ljos(&hab, &["hook"]);
-        cmd.env("PACKSET_URL", &url)
-            .env("PACKSET_WORKSPACE", "probe");
-        let started = Instant::now();
-        let out = within(
-            feed(cmd, &cursor_shell(&hab, conversation, command)),
-            Duration::from_secs(10),
-            command,
-        );
-        (
-            started.elapsed(),
-            String::from_utf8_lossy(&out.stdout).to_string(),
-        )
-    };
-    let (first, said) = call("hung-1", "ls");
-    assert!(said.contains("\"permission\":\"allow\""), "{said}");
-    assert!(
-        first < Duration::from_millis(1000),
-        "the first gate waited {first:?} on a hung pack"
-    );
-    let (second, said) = call("hung-2", "ls");
-    assert!(said.contains("\"permission\":\"allow\""), "{said}");
-    assert!(
-        second < Duration::from_millis(300),
-        "the next gate waited {second:?} on a pack already marked slow"
-    );
-    let (third, said) = call("hung-3", "curl https://example.invalid");
-    assert!(warns(&said), "{said}");
-    assert!(said.contains("no curl"), "{said}");
-    assert!(
-        third < Duration::from_millis(300),
-        "a kept rule took {third:?} to warn"
-    );
+    a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_warn();
 }
 
 #[test]
@@ -1525,144 +1474,13 @@ fn advisory_a_spoofed_mcp_seat_tool_name_from_github_is_not_auto_allowed() {
 #[test]
 fn advisory_a_slow_server_still_warns_on_a_user_rule_and_allows_a_shell_call() {
     let _mode = guard_mode::advisory();
-
-    let hab = hab("denymcp");
-    write_mention_rule(&hab);
-    let sock = hab.run.join("ljos/hookd.sock");
-    let accepts = delaying_server(&sock, Duration::from_secs(8));
-    std::thread::sleep(Duration::from_millis(20));
-    let mut cmd = ljos(&hab, &["hook"]);
-    cmd.env("LJOS_HOOK_ADMIT_MS", "4000");
-    let (took, out) = finished(
-        feed(cmd, &github_comment_payload()),
-        Duration::from_secs(6),
-        "a mentioned comment",
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(
-        took < Duration::from_millis(1500),
-        "the warning took {took:?}\n{stdout}\n{stderr}"
-    );
-    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
-    assert!(warns(&stdout), "{stdout}");
-    let value: serde_json::Value =
-        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
-    assert!(
-        value["user_message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("ocaisa")
-            || value["user_message"]
-                .as_str()
-                .unwrap_or("")
-                .contains("Alan"),
-        "{stdout}"
-    );
-    assert_eq!(stdout.lines().filter(|l| !l.trim().is_empty()).count(), 1);
-    assert_eq!(
-        accepts.load(Ordering::SeqCst),
-        0,
-        "the warning waited on the server"
-    );
-
-    let mut cmd = ljos(&hab, &["hook"]);
-    cmd.env("LJOS_HOOK_ADMIT_MS", "800");
-    let (took, out) = finished(
-        feed(cmd, &cursor_shell(&hab, "shell", "ls")),
-        Duration::from_secs(5),
-        "a shell call with no slot",
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
-    assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
-    assert!(
-        stderr.contains("did not answer") || stderr.contains("judged in this process"),
-        "{stderr}"
-    );
-    assert!(took < Duration::from_secs(3), "shell answer took {took:?}");
-    assert!(
-        accepts.load(Ordering::SeqCst) >= 1,
-        "the shell call did not ask the server"
-    );
+    a_slow_server_still_warns_on_a_user_rule_and_allows_a_shell_call();
 }
 
 #[test]
 fn advisory_a_bad_rules_file_warns_on_the_github_write_from_the_hook() {
     let _mode = guard_mode::advisory();
-
-    let hab = hab("badrules");
-    let path = hab.home.join(".config/ljos/user-rules.json");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, "{\"rules\":[").unwrap();
-    let mut cmd = ljos(&hab, &["hook"]);
-    cmd.env("LJOS_HOOKD", "off");
-    let (took, out) = finished(
-        feed(cmd, &github_comment_payload()),
-        Duration::from_millis(1500),
-        "malformed rules",
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(
-        took < Duration::from_millis(1500),
-        "{took:?}\n{stdout}\n{stderr}"
-    );
-    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
-    assert!(warns(&stdout), "{stdout}");
-    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert!(
-        value["user_message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("user-rules.json"),
-        "{stdout}"
-    );
-    let mut cmd = ljos(&hab, &["hook"]);
-    cmd.env("LJOS_HOOKD", "off");
-    let (took, out) = finished(
-        feed(cmd, &mcp_payload("ljos_note")),
-        Duration::from_millis(1500),
-        "note beside a bad rules file",
-    );
-    assert_eq!(out.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), ALLOW);
-    assert!(took < Duration::from_millis(1500));
-
-    std::fs::remove_file(&path).unwrap();
-    assert!(guard_mode::command("mkfifo")
-        .arg(&path)
-        .status()
-        .unwrap()
-        .success());
-    let mut cmd = ljos(&hab, &["hook"]);
-    cmd.env("LJOS_HOOKD", "off");
-    let (took, out) = finished(
-        feed(cmd, &github_comment_payload()),
-        Duration::from_millis(1500),
-        "fifo rules",
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(
-        took < Duration::from_millis(1500),
-        "fifo took {took:?}\n{stdout}"
-    );
-    assert_eq!(out.status.code(), Some(0), "{stdout}");
-    assert!(warns(&stdout), "{stdout}");
-    let mut cmd = ljos(&hab, &["hook"]);
-    cmd.env("LJOS_HOOKD", "off");
-    let (took, out) = finished(
-        feed(cmd, &read_payload()),
-        Duration::from_millis(1500),
-        "fifo read",
-    );
-    assert_eq!(String::from_utf8_lossy(&out.stdout), ALLOW);
-    assert_eq!(out.status.code(), Some(0));
-    assert!(
-        took < Duration::from_millis(1500),
-        "fifo read took {took:?}"
-    );
+    a_bad_rules_file_warns_on_the_github_write_from_the_hook();
 }
 
 #[test]

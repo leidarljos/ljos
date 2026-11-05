@@ -550,71 +550,13 @@ fn advisory_with_no_policyd_config_a_warning_stays_a_label() {
 #[test]
 fn advisory_a_named_config_holding_block_on_warning_warns_with_a_label() {
     let _mode = guard_mode::advisory();
-
-    let mut seat = Seat::new();
-    seat.write(".config/ljos/blocks.conf", BLOCK_ON_WARNING_SET);
-    seat.write(
-        ".config/ljos/ljos.toml",
-        "policyd_config = \"blocks.conf\"\n\n[identity]\nname = \"A Person\"\n",
-    );
-    assert_label(
-        &seat,
-        "the user's ljos.toml names it, relative to that file",
-    );
-    seat.seat = Some("box");
-    seat.write(
-        ".config/ljos/seats/box/ljos.toml",
-        "policyd_config = \"\"\n",
-    );
-    assert_label(&seat, "the seat's file names none");
-    seat.write(".config/ljos/ljos.toml", "");
-    seat.write(
-        ".config/ljos/seats/box/ljos.toml",
-        "[gates]\npolicyd_config = '~/.config/ljos/blocks.conf'\n",
-    );
-    assert_label(&seat, "the seat's ljos.toml names it under [gates]");
+    a_named_config_holding_block_on_warning_warns_with_a_label();
 }
 
 #[test]
 fn advisory_a_named_config_holding_block_on_warning_warns_on_deleting_the_root() {
     let _mode = guard_mode::advisory();
-
-    let seat = Seat::new();
-    let key = ljos_cli::person_key::key_dir().expect("a passwd home");
-    let uproots = format!(
-        "allow\twarn\tuproots-person-key\tthe command deletes /, a tree that holds the \
-         person's key directory {}\n",
-        key.display()
-    );
-    let labelled = || {
-        std::fs::read_to_string(seat.path(".local/share/ljos/bypass.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|row| serde_json::from_str::<serde_json::Value>(row).ok())
-            .filter(|row| row["rule"] == "uproots-person-key")
-            .count()
-    };
-    assert_eq!(
-        seat.policy_on(&["rm", "-rf", "/"]),
-        (
-            Some(0),
-            format!("rm -rf /\n{uproots}allow\twarn\trm-rf-outside-tmp\t{RM_WARNING}\n")
-        )
-    );
-    assert_eq!(labelled(), 1);
-    seat.write(".config/ljos/blocks.conf", BLOCK_ON_WARNING_SET);
-    seat.write(
-        ".config/ljos/ljos.toml",
-        "policyd_config = \"blocks.conf\"\n",
-    );
-    assert_eq!(
-        seat.policy_on(&["rm", "-rf", "/"]),
-        (
-            Some(0),
-            format!("rm -rf /\n{uproots}allow\twarn\trm-rf-outside-tmp\t{RM_WARNING}\n")
-        )
-    );
-    assert_eq!(labelled(), 2, "the warning keeps a row for the label");
+    a_named_config_holding_block_on_warning_warns_on_deleting_the_root();
 }
 
 #[test]
@@ -655,18 +597,7 @@ fn advisory_block_on_warning_leaves_a_label_policyd_does_not_warn_on() {
 #[test]
 fn advisory_block_on_warning_allows_the_call_and_labels_the_warning() {
     let _mode = guard_mode::advisory();
-
-    let seat = Seat::new();
-    seat.write(
-        ".config/ljos/ljos.toml",
-        "policyd_config = \"policyd.conf\"\n",
-    );
-    seat.write(".config/ljos/policyd.conf", "block-on-warning false\n");
-    assert_label(&seat, "block-on-warning is off");
-    seat.write(".config/ljos/policyd.conf", BLOCK_ON_WARNING_SET);
-    assert_label(&seat, "block-on-warning is on");
-    seat.write(".config/ljos/policyd.conf", "block-on-warning false\n");
-    assert_label(&seat, "block-on-warning is off again");
+    block_on_warning_allows_the_call_and_labels_the_warning();
 }
 
 #[test]

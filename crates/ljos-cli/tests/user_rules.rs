@@ -369,58 +369,7 @@ fn the_user_rule_tests_pass_under_a_runner_environment() {
 #[test]
 fn advisory_the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment() {
     let _mode = guard_mode::advisory();
-
-    let home = Home::new();
-    let wrote = home
-        .ljos()
-        .args([
-            "prefer",
-            "--user",
-            "--why",
-            "he asked not to be pinged",
-            "--deny-mention",
-            "ocaisa",
-            "--deny-name",
-            "Alan",
-            "--deny-reply-to",
-            "ocaisa",
-            "never post or reply to Alan (ocaisa)",
-        ])
-        .output()
-        .unwrap();
-    assert!(wrote.status.success(), "{}", output_text(&wrote));
-
-    let mention = policy(&home, "gh pr comment 12 --body 'please ask @ocaisa'");
-    let mention_text = output_text(&mention);
-    assert!(mention.status.success(), "{mention_text}");
-    assert!(
-        (mention_text.contains("ljos: user-rule:")
-            || mention_text.contains("ljos: unverified-rule:"))
-            && mention_text.contains("never post or reply to Alan"),
-        "{mention_text}"
-    );
-
-    let reply = policy(
-        &home,
-        "gh api --method POST repos/org/repo/issues/comments/7/replies -f body=seen -F in_reply_to_user=ocaisa",
-    );
-    let reply_text = output_text(&reply);
-    assert!(reply.status.success(), "{reply_text}");
-    assert!(
-        (reply_text.contains("ljos: user-rule:") || reply_text.contains("ljos: unverified-rule:"))
-            && reply_text.contains("never post or reply to Alan"),
-        "{reply_text}"
-    );
-
-    let allowed = policy(&home, "gh pr comment 12 --body 'tests passed'");
-    let allowed_text = output_text(&allowed);
-    assert!(allowed.status.success(), "{allowed_text}");
-    assert!(
-        !allowed_text.contains("warning: ")
-            && !allowed_text.contains("ljos: user-rule:")
-            && !allowed_text.contains("ljos: unverified-rule:"),
-        "{allowed_text}"
-    );
+    the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment();
 }
 
 #[test]

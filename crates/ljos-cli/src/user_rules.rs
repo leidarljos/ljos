@@ -1892,6 +1892,21 @@ fn mentions_name(text: &str, name: &str) -> bool {
     false
 }
 
+pub fn mcp_event_denies(event: &str, rule: &Rule) -> bool {
+    event == "beforeMCPExecution"
+        && rule.verdict == "deny"
+        && rule.pattern.starts_with("user-rule:")
+}
+
+fn github_write_blocked(err: &anyhow::Error) -> Rule {
+    note_rules_read_error(err);
+    Rule {
+        pattern: "user-rule:file".into(),
+        verdict: "deny".into(),
+        reason: format!("user rules could not be read ({err:#}), so this GitHub write is refused"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3691,20 +3706,5 @@ mod tests {
         .unwrap();
         let denied = super::super::static_guard("git log").unwrap();
         assert_eq!(denied.reason, "leave the log alone");
-    }
-}
-
-pub fn mcp_event_denies(event: &str, rule: &Rule) -> bool {
-    event == "beforeMCPExecution"
-        && rule.verdict == "deny"
-        && rule.pattern.starts_with("user-rule:")
-}
-
-fn github_write_blocked(err: &anyhow::Error) -> Rule {
-    note_rules_read_error(err);
-    Rule {
-        pattern: "user-rule:file".into(),
-        verdict: "deny".into(),
-        reason: format!("user rules could not be read ({err:#}), so this GitHub write is refused"),
     }
 }

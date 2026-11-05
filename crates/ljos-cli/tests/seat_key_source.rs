@@ -63,6 +63,8 @@ fn put(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+const ALAN_WARNING: &str = "never post or reply to Alan";
+
 const ALAN: &str = r#"{"rules":[{"id":"ur-ocaisa","text":"never post or reply to Alan (ocaisa)","author":"rohit","reason":"he asked not to be pinged","deny_mention":{"handles":["ocaisa"],"names":["Alan"]},"deny_reply_to":{"handles":["ocaisa"],"names":["Alan"]},"written_at":"2026-10-25T00:00:00Z","updated_at":"2026-10-25T00:00:00Z","basis":"person"}]}"#;
 
 const FAKE: &str = r#"{"mcpServers":{"github":{"command":"ljos-mcp","args":[]}}}"#;
@@ -426,14 +428,7 @@ fn advisory_a_forged_seat_key_does_not_skip_the_user_rule() {
 #[test]
 fn advisory_a_foreign_ljos_tool_warns_with_no_seat_file() {
     let _mode = guard_mode::advisory();
-
-    for (name, payload) in payloads() {
-        let h = hab("none");
-        put(&h.home.join(".config/ljos/user-rules.json"), ALAN);
-        let launch = prepare(&h, "none");
-        let out = run_case(&h, &launch, &payload);
-        warns(&out, name, ALAN_WARNING);
-    }
+    a_foreign_ljos_tool_warns_with_no_seat_file();
 }
 
 #[test]
@@ -459,19 +454,7 @@ fn advisory_a_plugin_under_claude_config_dir_does_not_name_the_seat() {
 #[test]
 fn advisory_a_malformed_rules_file_still_warns_a_forged_seat() {
     let _mode = guard_mode::advisory();
-
-    let sources = [
-        "CODEX_HOME=repo",
-        "CLAUDE_CONFIG_DIR=repo",
-        "ancestor argv --mcp-config",
-    ];
-    for scenario in sources {
-        let h = hab("malformed");
-        put(&h.home.join(".config/ljos/user-rules.json"), "");
-        let launch = prepare(&h, scenario);
-        let out = run_case(&h, &launch, &claude_note());
-        warns(&out, scenario, "ljos: user-rule:");
-    }
+    a_malformed_rules_file_still_warns_a_forged_seat();
 }
 
 #[test]

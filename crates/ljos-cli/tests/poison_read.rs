@@ -1901,55 +1901,7 @@ fn an_unproven_island_is_not_a_timeline_memory() {
 #[test]
 fn advisory_an_unconfirmed_promoted_deny_still_warns_as_unverified() {
     let _mode = guard_mode::advisory();
-
-    const ID: &str = "lessonid0000000000000000000008";
-    let lesson = persons_lesson(ID, RELEASE_KEY);
-    for held in [true, false] {
-        let seat = Seat::new(if held { vec![lesson.clone()] } else { vec![] });
-        promoted_rule(&seat, &lesson);
-        let path = seat.home.path().join(".config/ljos/user-rules.json");
-        let mut rules: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        rules["rules"][0]["pattern"] = serde_json::json!("git status*");
-        rules["rules"][0]["verdict"] = serde_json::json!("deny");
-        std::fs::write(&path, rules.to_string()).unwrap();
-        let out = seat.hook_with(
-            serde_json::json!({
-                "hook_event_name": "PreToolUse",
-                "session_id": "guard-1",
-                "tool_name": "Bash",
-                "tool_input": {"command": "git status"},
-                "cwd": seat.home.path(),
-            }),
-            &[("LJOS_GUARD", "on")],
-        );
-        let said = out
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .next_back()
-            .unwrap_or_else(|| panic!("no hook answer: {out}"));
-        let decision = &said["hookSpecificOutput"];
-        assert_eq!(
-            decision["permissionDecision"],
-            serde_json::Value::Null,
-            "{out}"
-        );
-        let context = decision["additionalContext"].as_str().unwrap_or("");
-        let reason = context.lines().next().unwrap_or("");
-        if held {
-            assert!(
-                reason.starts_with("ljos: user-rule:")
-                    && reason.contains("fixture")
-                    && reason.contains("git status*"),
-                "{out}"
-            );
-        } else {
-            assert!(
-                reason.starts_with("ljos: unverified-rule:") && reason.contains(ID),
-                "an unconfirmed rule's warning read as the person's: {out}"
-            );
-        }
-    }
+    an_unconfirmed_promoted_deny_still_warns_as_unverified();
 }
 
 fn an_unconfirmed_promoted_deny_still_warns_as_unverified() {

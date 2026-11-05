@@ -4,6 +4,8 @@
 //!
 //! [`Packsetd`] starts the pack writer for a test and stops it again.
 
+pub mod guard_mode;
+
 mod packsetd;
 
 pub use packsetd::{Builder, Packsetd};
