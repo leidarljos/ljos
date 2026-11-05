@@ -135,7 +135,7 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --keep-going -- -D warnings
       # Mail reader tests build a notmuch database. Detach tests need tmux.
       # The identity gate tests start a one-shot runner under zsh -c.
       # The hook queue test reads each call's peak RSS from GNU time.
@@ -345,11 +345,11 @@ jobs:
           rustup target add x86_64-apple-darwin
           rustup target list --installed | grep -qx x86_64-apple-darwin
       - name: Check aarch64-apple-darwin
-        run: cargo check --locked --workspace --all-targets --target aarch64-apple-darwin
+        run: cargo check --locked --workspace --all-targets --keep-going --target aarch64-apple-darwin
       - name: Check x86_64-apple-darwin
-        run: cargo check --locked --workspace --all-targets --target x86_64-apple-darwin
+        run: cargo check --locked --workspace --all-targets --keep-going --target x86_64-apple-darwin
       - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --keep-going -- -D warnings
       # The sync, rules and push tests seal with age, as on the Linux job.
       - name: age
         run: |
