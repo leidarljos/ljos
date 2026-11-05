@@ -31377,7 +31377,10 @@ pub fn format_due(atoms: &[Value]) -> String {
 pub fn graded(id: &str, recalled: bool) -> Result<Value> {
     let id = id.trim();
     if id.is_empty() {
-        bail!("graded: an atom id is required");
+        return Err(policy_label::failed(
+            "input-warning",
+            anyhow::anyhow!("graded: an atom id is required"),
+        ));
     }
     let shown: Vec<String> = due_shown_live(
         &std::fs::read_to_string(due_shown_path()).unwrap_or_default(),
@@ -31392,11 +31395,14 @@ pub fn graded(id: &str, recalled: bool) -> Result<Value> {
     // showed in the last hour was not, and a loop over a saved list grades
     // a thousand claims it never read, each lapse bringing it back sooner.
     if !take_due_shown(id) {
-        bail!(
-            "graded: {id} is not on a due page read in the last hour; `ljos due` (or \
+        return Err(policy_label::labelled(
+            "review-not-shown",
+            format!(
+                "graded: {id} is not on a due page read in the last hour; `ljos due` (or \
              ljos_due) shows the soonest {SITTING_DUE}, and only those are graded, \
              each after checking it against the work"
-        );
+            ),
+        ));
     }
     let client = pack()?;
     client

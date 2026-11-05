@@ -82,6 +82,13 @@ mod tests {
     }
 
     #[test]
+    fn a_grade_with_no_id_stays_a_failed_read() {
+        let err = crate::graded("", true).unwrap_err();
+        assert!(as_policy(&err).is_none(), "{err}");
+        assert!(err.to_string().contains("atom id is required"), "{err}");
+    }
+
+    #[test]
     fn an_empty_message_is_an_input_warning() {
         let err = crate::mail::send(&crate::mail::Send {
             seat: Some("beta"),
