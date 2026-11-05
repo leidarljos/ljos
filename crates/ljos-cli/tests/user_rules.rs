@@ -378,7 +378,7 @@ fn advisory_the_user_rule_tests_pass_under_a_runner_environment() {
 
     for test in [
         "prefer_user_is_read_by_a_second_seat_and_promote_copies_a_fixture_lesson",
-        "the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment",
+        "advisory_the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment",
     ] {
         for env in [RUNNER_ENV, &[("CURSOR_CONVERSATION_ID", "x")]] {
             let out = rerun(test, env);

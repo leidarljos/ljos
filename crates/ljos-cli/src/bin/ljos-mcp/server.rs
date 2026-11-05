@@ -69,6 +69,37 @@ pub const CORE_TOOLS: &[&str] = &[
     "ljos_doctor",
 ];
 
+const ADVISORY_CORE_TOOLS: &[&str] = &[
+    "ljos_rule",
+    "ljos_prefer",
+    "ljos_remember",
+    "ljos_search",
+    "ljos_start",
+    "ljos_guard_check",
+    "ljos_file",
+    "ljos_options",
+    "ljos_note",
+    "ljos_recall",
+    "ljos_sitting",
+    "ljos_finish",
+    "ljos_claim",
+    "ljos_release",
+    "ljos_send",
+    "ljos_inbox",
+    "ljos_reply",
+    "ljos_vote",
+    "ljos_consensus",
+    "ljos_doctor",
+];
+
+fn active_core_tools() -> &'static [&'static str] {
+    if ljos_cli::guard_mode::is_strict() {
+        CORE_TOOLS
+    } else {
+        ADVISORY_CORE_TOOLS
+    }
+}
+
 /// The persona and playbook tools, listed after every other tool.
 const PERSONA_TOOLS: &[&str] = &[
     "ljos_brief",
@@ -83,7 +114,7 @@ const PERSONA_TOOLS: &[&str] = &[
 fn listing_order(tools: &mut [Tool]) {
     tools.sort_by_cached_key(|t| {
         let name = t.name.as_ref();
-        let rank = match CORE_TOOLS.iter().position(|c| *c == name) {
+        let rank = match active_core_tools().iter().position(|c| *c == name) {
             Some(at) => (0, at),
             None if PERSONA_TOOLS.contains(&name) => (2, 0),
             None => (1, 0),
@@ -100,14 +131,19 @@ fn listing_order(tools: &mut [Tool]) {
 pub fn tool_set(spec: Option<&str>) -> Option<Vec<String>> {
     let spec = spec.map(str::trim).unwrap_or("");
     if spec.is_empty() {
-        return Some(CORE_TOOLS.iter().map(|t| (*t).to_string()).collect());
+        return Some(
+            active_core_tools()
+                .iter()
+                .map(|t| (*t).to_string())
+                .collect(),
+        );
     }
     let mut set: Vec<String> = Vec::new();
     for word in spec.split(|c: char| c == ',' || c.is_whitespace()) {
         match word.trim() {
             "" => {}
             "all" => return None,
-            "core" => set.extend(CORE_TOOLS.iter().map(|t| (*t).to_string())),
+            "core" => set.extend(active_core_tools().iter().map(|t| (*t).to_string())),
             name if name.starts_with("ljos_") => set.push(name.to_string()),
             name => set.push(format!("ljos_{name}")),
         }
@@ -1382,7 +1418,17 @@ fn mail_said(text: anyhow::Result<String>) -> Result<Json<Said>, McpError> {
         .map_err(refused)
 }
 
-#[tool_router]
+impl LjosServer {
+    fn tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        let mut router = Self::all_tool_router();
+        if !ljos_cli::guard_mode::is_strict() {
+            router.remove_route("ljos_request_approval");
+        }
+        router
+    }
+}
+
+#[tool_router(router = all_tool_router)]
 impl LjosServer {
     /// Read the cards directory from `LJOS_CARDS_DIR`, or the working directory,
     /// the same default the command line has.
@@ -4160,6 +4206,27 @@ mod tests {
     }
 
     #[test]
+    fn the_core_and_router_expose_only_the_selected_mode_tools() {
+        for (mode, consent) in [("advisory", false), ("strict", true)] {
+            let _mode = fixture_mode(mode);
+            let core = tool_set(None).expect("the default core set");
+            assert_eq!(
+                core.iter().any(|name| name == "ljos_request_approval"),
+                consent
+            );
+            let router = LjosServer::tool_router();
+            assert_eq!(router.get("ljos_request_approval").is_some(), consent);
+            assert_eq!(
+                router
+                    .list_all()
+                    .iter()
+                    .any(|tool| tool.name == "ljos_request_approval"),
+                consent
+            );
+        }
+    }
+
+    #[test]
     fn command_consent_discovery_and_seat_fallback_follow_the_selected_mode() {
         let explicit = vec!["ljos_request_approval".to_string()];
         {
@@ -4291,6 +4358,7 @@ mod tests {
 
     #[test]
     fn advisory_the_guard_and_memory_lead_and_the_personas_close_the_list() {
+        const CORE_TOOLS: &[&str] = ADVISORY_CORE_TOOLS;
         let _selected_guard_mode = fixture_mode("advisory");
         let order = |set: Option<&[String]>| -> Vec<String> {
             let mut tools: Vec<Tool> = LjosServer::tool_router()

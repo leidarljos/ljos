@@ -10,13 +10,18 @@ pub mod export;
 pub mod html;
 pub mod notmuch;
 
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 
-/// A reader over the mailbox the `[mail]` table names. A cloud seat
-/// prints `cloud-seat-mail` and still reads a mailbox this machine holds.
-/// Any cloud marker counts.
+/// A reader over the mailbox the `[mail]` table names. Any cloud marker
+/// refuses access in strict mode. Advisory mode prints `cloud-seat-mail`
+/// and reads the mailbox this machine holds.
 pub fn open() -> Result<notmuch::Reader> {
     if crate::cloud::any_cloud_marker() {
+        if crate::guard_mode::is_strict() {
+            bail!(
+                "mail: a cloud seat has no mailbox; mail is read only on the machine that holds it"
+            );
+        }
         eprintln!(
             "ljos: cloud-seat-mail: a cloud seat has no mailbox of its own; reading the mailbox on this machine"
         );

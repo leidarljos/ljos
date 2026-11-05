@@ -255,7 +255,7 @@ fn deny_of(answer: &str) -> (String, String) {
     )
 }
 
-fn assert_label(seat: &Seat, why: &str) {
+fn assert_strict_label(seat: &Seat, why: &str) {
     assert_eq!(
         seat.policy(),
         (
@@ -276,16 +276,74 @@ fn assert_label(seat: &Seat, why: &str) {
     );
 }
 
+fn assert_advisory_label(seat: &Seat, why: &str) {
+    assert_eq!(
+        seat.policy(),
+        (
+            Some(0),
+            "sudo true\nwarning: sudo: a privilege runner is on the command (ljos rule \
+             `ljos-policyd`)\n"
+                .to_string()
+        ),
+        "{why}"
+    );
+    let answer = seat.hook();
+    assert!(
+        !ljos_cli::answer_denies(&answer) && !answer.contains("\"ask\""),
+        "{why}: {answer}"
+    );
+    assert!(
+        answer.contains("warning: sudo: a privilege runner is on the command"),
+        "{why}: {answer}"
+    );
+    assert_shims_allow(seat, why, shim_warning);
+    assert_eq!(
+        seat.policy_on(&["rm", "-r", "/srv/data"]),
+        (
+            Some(0),
+            format!("rm -r /srv/data\n{}", shim_warning("rm-rf-outside-tmp"))
+        ),
+        "{why}"
+    );
+}
+
+fn assert_label(seat: &Seat, why: &str) {
+    if guard_mode::environment()[0].1 == "advisory" {
+        assert_advisory_label(seat, why);
+    } else {
+        assert_strict_label(seat, why);
+    }
+}
+
 /// The line a guard shim prints on stderr for the warning policyd gives
 /// `rule` here. ljos names a recursive delete and `find -delete`, and
 /// leaves `git clean -f` to policyd.
-fn shim_warning(rule: &str) -> String {
+fn strict_shim_warning(rule: &str) -> String {
     match rule {
         "rm-rf-outside-tmp" => format!("allow\twarn\t{rule}\t{RM_WARNING}\n"),
         "find-delete" => {
             format!("allow\twarn\t{rule}\tfind -delete reaches outside /tmp and /var/tmp\n")
         }
         _ => String::new(),
+    }
+}
+
+fn advisory_shim_warning(rule: &str) -> String {
+    match rule {
+        "rm-rf-outside-tmp" => format!("allow\twarn\t{rule}\t{RM_WARNING}\n"),
+        "git-clean-force" => format!("allow\twarn\t{rule}\tgit clean -f deletes untracked files\n"),
+        "find-delete" => {
+            format!("allow\twarn\t{rule}\tfind -delete reaches outside /tmp and /var/tmp\n")
+        }
+        _ => String::new(),
+    }
+}
+
+fn shim_warning(rule: &str) -> String {
+    if guard_mode::environment()[0].1 == "advisory" {
+        advisory_shim_warning(rule)
+    } else {
+        strict_shim_warning(rule)
     }
 }
 

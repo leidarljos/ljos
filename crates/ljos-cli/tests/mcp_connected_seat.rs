@@ -37,9 +37,10 @@ fn the_connected_seat_reaches_policy_without_borrowing_a_historical_holder() {
          XDG_CONFIG_HOME={home}/config XDG_RUNTIME_DIR={home} \
          XDG_STATE_HOME={home}/state XDG_DATA_HOME={home}/data \
          VISSUE_ROOT={tracker} ISSUE_ROOT={tracker} VISSUE_NO_ROUTE=1 \
-         PACKSET_URL=off LJOS_ASK_PACK=off LJOS_MCP_TOOLS=all LJOS_GUARD=on {binary}\n",
+         PACKSET_URL=off LJOS_ASK_PACK=off LJOS_MCP_TOOLS=all LJOS_GUARD=on LJOS_GUARD_MODE={mode} {binary}\n",
         home = quote(root.path().to_str().unwrap()),
         tracker = quote(tracker.to_str().unwrap()),
+        mode = quote(guard_mode::environment()[0].1),
         binary = quote(env!("CARGO_BIN_EXE_ljos-mcp")),
     )
     .unwrap();
@@ -178,9 +179,10 @@ fn advisory_the_connected_seat_reaches_policy_without_borrowing_a_historical_hol
          XDG_CONFIG_HOME={home}/config XDG_RUNTIME_DIR={home} \
          XDG_STATE_HOME={home}/state XDG_DATA_HOME={home}/data \
          VISSUE_ROOT={tracker} ISSUE_ROOT={tracker} VISSUE_NO_ROUTE=1 \
-         PACKSET_URL=off LJOS_ASK_PACK=off LJOS_MCP_TOOLS=all LJOS_GUARD=on {binary}\n",
+         PACKSET_URL=off LJOS_ASK_PACK=off LJOS_MCP_TOOLS=all LJOS_GUARD=on LJOS_GUARD_MODE={mode} {binary}\n",
         home = quote(root.path().to_str().unwrap()),
         tracker = quote(tracker.to_str().unwrap()),
+        mode = quote(guard_mode::environment()[0].1),
         binary = quote(env!("CARGO_BIN_EXE_ljos-mcp")),
     )
     .unwrap();
