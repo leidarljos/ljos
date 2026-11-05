@@ -15,6 +15,7 @@ ignore = [
     { id = "RUSTSEC-2026-0371", reason = "zbus_names, part of zbus 5" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant, part of zbus 5" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, part of zbus 5" },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils 0.1.0 under wasmtimer, which iced_futures 0.14 reaches; the advisory says no upgrade is available" },
     # Flagged by version only. ureq 2.12.1 depends on webpki-roots 0.26.11,
     # which re-exports TLS_SERVER_ROOTS from webpki-roots 1. The bans below
     # fail the check on any webpki-roots release that ships its own copy of
