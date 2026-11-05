@@ -9,7 +9,6 @@ mod guard_mode;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 
 static ENV: Mutex<()> = Mutex::new(());

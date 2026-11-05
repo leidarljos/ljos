@@ -7,7 +7,7 @@ ljos_test_boot::harness!();
 mod guard_mode;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[path = "common/seat_root.rs"]
 mod seat_root;
@@ -303,6 +303,15 @@ fn ljos_cmd(
 }
 
 fn hook_in(
+    hab: &Habitat,
+    payload: &str,
+    dir: &Path,
+    extra: &[(&str, &str)],
+) -> std::process::Output {
+    hook_in_checked(hab, payload, dir, false, extra)
+}
+
+fn hook_in_checked(
     hab: &Habitat,
     payload: &str,
     dir: &Path,
@@ -852,11 +861,11 @@ fn a_relative_workdir_resolves_and_a_normal_git_command_is_allowed() {
     let child = child_repo(&hab.repo);
     let session = hab.repo.to_str().unwrap();
     let forwarded = pretool(session, Some("path/to/git/repo"), NORMAL_GIT);
-    let out = hook_in(&hab, &forwarded, &hab.repo, true, &[]);
+    let out = hook_in_checked(&hab, &forwarded, &hab.repo, true, &[]);
     assert_ordinary(&out, &forwarded);
     assert!(child.join(".git").is_dir());
     let as_cwd = pretool("path/to/git/repo", None, NORMAL_GIT);
-    let out = hook_in(&hab, &as_cwd, &hab.repo, true, &[]);
+    let out = hook_in_checked(&hab, &as_cwd, &hab.repo, true, &[]);
     assert_ordinary(&out, &as_cwd);
 }
 
@@ -892,9 +901,9 @@ fn a_workdir_that_does_not_resolve_denies_the_command() {
     ];
     let denied: Vec<_> = payloads
         .iter()
-        .map(|p| hook_in(&hab, p, &hab.repo, true, &on))
+        .map(|p| hook_in_checked(&hab, p, &hab.repo, true, &on))
         .collect();
-    let open = hook_in(
+    let open = hook_in_checked(
         &hab,
         &payloads[0],
         &hab.repo,
@@ -907,7 +916,7 @@ fn a_workdir_that_does_not_resolve_denies_the_command() {
         &missing,
         serde_json::json!({"prompt": "Fix the build"}),
     );
-    let asked = hook_in(&hab, &prompt, &hab.repo, true, &on);
+    let asked = hook_in_checked(&hab, &prompt, &hab.repo, true, &on);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     for (payload, out) in payloads.iter().zip(&denied) {
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -950,7 +959,7 @@ fn payload_cwd_is_used_when_hook_process_runs_elsewhere() {
     let policyd = policyd.to_str().unwrap().to_string();
     let elsewhere = tempfile::tempdir().unwrap();
     let payload = pretool(repo.to_str().unwrap(), None, "echo hi");
-    let out = hook_in(
+    let out = hook_in_checked(
         &hab,
         &payload,
         elsewhere.path(),

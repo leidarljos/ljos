@@ -6,7 +6,7 @@ ljos_test_boot::harness!();
 #[path = "common/guard_mode.rs"]
 mod guard_mode;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn hook(runner: &str, event: Option<&str>, bytes: &[u8]) -> std::process::Output {
     let home = tempfile::tempdir().unwrap();

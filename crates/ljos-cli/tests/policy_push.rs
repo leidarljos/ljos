@@ -11,7 +11,6 @@ ljos_test_boot::harness!();
 #[path = "common/guard_mode.rs"]
 mod guard_mode;
 use std::path::Path;
-use std::process::Command;
 
 fn policy(home: &Path, line: &str) -> std::process::Output {
     guard_mode::command(env!("CARGO_BIN_EXE_ljos"))

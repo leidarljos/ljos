@@ -7,7 +7,7 @@ ljos_test_boot::harness!();
 #[path = "common/guard_mode.rs"]
 mod guard_mode;
 use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[test]
 fn ljos_mcp_serves_and_lists_the_guard_first() {

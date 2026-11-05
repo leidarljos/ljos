@@ -10,7 +10,7 @@ mod maildir;
 
 use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{json, Value};
