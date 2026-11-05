@@ -276,61 +276,6 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// America/Chicago civil time. The US Energy Policy Act puts daylight
-/// time on the second Sunday of March at 02:00 and standard time back
-/// on the first Sunday of November at 02:00. CST is six hours behind
-/// UTC. CDT is five. The zone label is part of the text so the offset
-/// is not left to the reader to guess.
-#[must_use]
-pub fn chicago_clock(utc: chrono::DateTime<chrono::Utc>) -> String {
-    use chrono::Datelike;
-    let year = utc.year();
-    let daylight = match (nth_sunday(year, 3, 2), nth_sunday(year, 11, 1)) {
-        (Some(start), Some(end)) => {
-            let start_utc = local_as_utc(start, 2, 0, 6);
-            let end_utc = local_as_utc(end, 2, 0, 5);
-            match (start_utc, end_utc) {
-                (Some(start_utc), Some(end_utc)) => utc >= start_utc && utc < end_utc,
-                _ => false,
-            }
-        }
-        _ => false,
-    };
-    let (hours, zone) = if daylight { (-5, "CDT") } else { (-6, "CST") };
-    let wall = utc + chrono::Duration::hours(hours);
-    format!("{} {zone}", wall.format("%Y-%m-%d %H:%M:%S"))
-}
-
-fn nth_sunday(year: i32, month: u32, n: u32) -> Option<chrono::NaiveDate> {
-    use chrono::Datelike;
-    let mut date = chrono::NaiveDate::from_ymd_opt(year, month, 1)?;
-    let mut seen = 0u32;
-    loop {
-        if date.weekday() == chrono::Weekday::Sun {
-            seen += 1;
-            if seen == n {
-                return Some(date);
-            }
-        }
-        date = date.succ_opt()?;
-        if date.month() != month {
-            return None;
-        }
-    }
-}
-
-fn local_as_utc(
-    day: chrono::NaiveDate,
-    hour: u32,
-    minute: u32,
-    behind_utc: i64,
-) -> Option<chrono::DateTime<chrono::Utc>> {
-    use chrono::TimeZone;
-    let local = day.and_hms_opt(hour, minute, 0)?;
-    let utc_naive = local.checked_add_signed(chrono::Duration::hours(behind_utc))?;
-    Some(chrono::Utc.from_utc_datetime(&utc_naive))
-}
-
 fn parse_time(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     use chrono::TimeZone;
     if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) {
@@ -341,9 +286,17 @@ fn parse_time(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     Some(chrono::Utc.from_utc_datetime(&naive))
 }
 
+/// UTC as stored, then the same instant in the process zone.
+/// The zone comes from the system clock chrono already uses.
+/// A value that does not parse is returned unchanged.
 fn show_time(raw: &str) -> (String, Vec<String>) {
     match parse_time(raw) {
-        Some(utc) => (chicago_clock(utc), Vec::new()),
+        Some(utc) => {
+            let utc_text = utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let local = utc.with_timezone(&chrono::Local);
+            let local_text = local.format("%Y-%m-%d %H:%M:%S %:z").to_string();
+            (format!("{utc_text} local {local_text}"), Vec::new())
+        }
         None => (raw.to_string(), vec!["time-unparsed".into()]),
     }
 }
@@ -935,7 +888,7 @@ fn import_bytes(
             "source_seat": parsed.seat,
             "imported_at": now_rfc3339(),
             "source_exported_at": parsed.exported_at,
-            "source_exported_at_chicago": shown,
+            "source_exported_at_local": shown,
             "input_sha256": import_id,
             "rows": parsed.rows.len(),
             "labels": labels,
@@ -1597,7 +1550,7 @@ struct ImportView {
     materialised: usize,
     integrated: bool,
     imported_at: String,
-    imported_at_chicago: String,
+    imported_at_local: String,
 }
 
 pub fn imports_cmd(json_out: bool) -> Result<String> {
@@ -1619,7 +1572,7 @@ pub fn imports_cmd(json_out: bool) -> Result<String> {
             view.rows,
             view.materialised,
             view.integrated,
-            view.imported_at_chicago,
+            view.imported_at_local,
         ));
     }
     Ok(out)
@@ -1644,7 +1597,7 @@ fn import_views(place: &Place) -> Vec<ImportView> {
                 })
                 .unwrap_or_default();
             let imported_at = manifest["imported_at"].as_str().unwrap_or("").to_string();
-            let (chicago, _) = if imported_at.is_empty() {
+            let (local, _) = if imported_at.is_empty() {
                 (String::new(), Vec::new())
             } else {
                 show_time(&imported_at)
@@ -1677,7 +1630,7 @@ fn import_views(place: &Place) -> Vec<ImportView> {
                 materialised,
                 integrated,
                 imported_at,
-                imported_at_chicago: chicago,
+                imported_at_local: local,
             })
         })
         .collect()
@@ -2234,16 +2187,19 @@ mod tests {
     }
 
     #[test]
-    fn chicago_labels_a_winter_and_a_summer_instant() {
+    fn a_listing_shows_the_stored_utc_and_the_system_zone() {
         use chrono::TimeZone;
-        let winter = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 18, 0, 0).unwrap();
-        let summer = chrono::Utc.with_ymd_and_hms(2026, 7, 15, 18, 0, 0).unwrap();
-        let winter = chicago_clock(winter);
-        let summer = chicago_clock(summer);
-        assert!(winter.contains("CST"), "{winter}");
-        assert!(summer.contains("CDT"), "{summer}");
-        assert!(winter.contains("12:00:00"), "{winter}");
-        assert!(summer.contains("13:00:00"), "{summer}");
+        let utc = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 18, 0, 0).unwrap();
+        let raw = utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let (shown, labels) = show_time(&raw);
+        assert!(labels.is_empty(), "{labels:?}");
+        assert!(shown.starts_with(&raw), "{shown}");
+        let local = utc.with_timezone(&chrono::Local);
+        let local_text = local.format("%Y-%m-%d %H:%M:%S %:z").to_string();
+        assert!(shown.contains(&local_text), "{shown} vs {local_text}");
+        let (bad, bad_labels) = show_time("not-a-time");
+        assert_eq!(bad, "not-a-time");
+        assert_eq!(bad_labels, vec!["time-unparsed".to_string()]);
     }
 
     #[test]

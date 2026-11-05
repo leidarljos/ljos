@@ -3,15 +3,20 @@
 `ljos memory export` writes this seat's lessons to a file on the machine that runs it.
 The file is not sent anywhere.
 `ljos memory import` stores that file in the seat tracker.
-`ljos memory integrate` maps the rows onto lessons this seat already holds.
+`ljos memory integrate` maps the rows onto lessons already stored for this seat.
 `ljos memory imports` lists the slots.
 
 The tracker path is `<tracker>/.ljos/memory/imports/<seat>/<sha256>/`.
 `manifest.json` records the format, the two seats, both times, and the input digest.
 `payload.jsonl` is the file bytes.
-`receipts/` holds one file per importing machine.
-`integration/` holds one file per mapping.
+`receipts/` stores one file per importing machine.
+`integration/` stores one file per mapping.
 A repeated import finds those files and does not write a second copy.
+
+Those path segments are names, so they are percent-encoded.
+`.` and `..` are encoded as well, so a seat name cannot choose a parent directory.
+Linux allows 255 bytes in one directory entry.
+An encoded name longer than 200 bytes is stored by its SHA-256, and the manifest keeps the name.
 
 The file format is `ljos-memory-1`.
 One header line names the exporting machine, seat, time, and the package version.
@@ -21,22 +26,14 @@ That second digest names the source text.
 A file with another format, or a line that is not JSON, is kept and labelled.
 Search still finds the words.
 
-Times are stored as given, offset included.
-A listing also shows the civil time in America/Chicago.
-Daylight time there follows the US Energy Policy Act.
-It starts on the second Sunday of March at 02:00.
-It ends on the first Sunday of November at 02:00.
-CST is six hours behind UTC and CDT is five.
+Each of those times is stored as given, offset included.
+A listing shows that stored timestamp.
+It also shows the same instant in the process zone, from the system clock.
 A value that does not parse is shown raw and labelled `time-unparsed`.
 
-Names in paths are percent-encoded.
-`.` and `..` are encoded as well, so a seat name cannot choose a parent directory.
-Linux allows 255 bytes in one directory entry.
-An encoded name longer than 200 bytes is stored by its SHA-256, and the manifest keeps the name.
-
-Export skips another seat's lessons.
-It skips a lesson whose source carries a password, token, key, or environment field.
-It skips text the pack rejects as a credential or as an instruction.
+The export that writes this file leaves out another seat's lessons.
+It leaves out a lesson whose source carries a password, token, key, or environment field.
+It leaves out text the pack rejects as a credential or as an instruction.
 It does not write embeddings.
 
 Import labels each row `imported` and `unintegrated`.
@@ -58,8 +55,9 @@ The match runs before the result limit.
 With no filter, pack hits keep their order.
 Slot hits that share a query word are added after them.
 
-A lesson the pack's prose gate would split is also stored whole.
-The label is `prose-warning`, `oversize`, or `content-warning`, matching the gate's reason.
+That same search also finds a lesson the pack's prose check would split.
+The original is stored whole.
+The label is `prose-warning`, `oversize`, or `content-warning`, matching what the check reported.
 The fitted copies can still be posted.
 The original remains one record.
 An empty write is stored with an empty text and `empty-input`.
