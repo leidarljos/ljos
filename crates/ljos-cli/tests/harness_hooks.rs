@@ -775,7 +775,14 @@ else:
     let (ok, stdout, stderr) = vote(&["vote", "probe-uw2n", "--for", "A", "--used", "none"]);
     assert!(ok, "{stdout}\n{stderr}");
     let (ok, stdout, stderr) = vote(&[
-        "vote", "probe-uw2n", "--for", "B", "--used", "none", "--as", "alpha",
+        "vote",
+        "probe-uw2n",
+        "--for",
+        "B",
+        "--used",
+        "none",
+        "--as",
+        "alpha",
     ]);
     assert!(ok, "{stdout}\n{stderr}");
     assert!(
