@@ -106,6 +106,7 @@ pub const CARD_NAMES: &[&str] = &["USER.md", "MEMORY.md"];
 /// `ljos protocol` prints it, `ljos onboard` installs it as a skill, and the
 /// server serves it at `ljos://protocol`. Harness agnostic on purpose.
 pub const PROTOCOL: &str = include_str!("../doc/protocol.md");
+const STRICT_PROTOCOL: &str = include_str!("../assets/modes/strict/protocol.md");
 
 /// The skill file a harness loads: front matter, then the protocol.
 #[must_use]
@@ -125,9 +126,14 @@ a deed, a claim or a vote.\n---\n\n{}",
 #[must_use]
 pub fn protocol_text() -> String {
     const MARK: &str = "@@SITTING_SECTIONS@@\n";
-    match PROTOCOL.split_once(MARK) {
+    let protocol = if guard_mode::is_strict() {
+        STRICT_PROTOCOL
+    } else {
+        PROTOCOL
+    };
+    match protocol.split_once(MARK) {
         Some((head, tail)) => format!("{head}{}{tail}", render_sitting_steps()),
-        None => PROTOCOL.to_string(),
+        None => protocol.to_string(),
     }
 }
 
@@ -677,15 +683,38 @@ pub fn export_agents(harness: Option<&str>, dry: bool) -> Result<Vec<Step>> {
 /// The plugins `ljos` carries for runners whose hooks are code, by name.
 /// `{ljos}` in each is filled with the absolute path at onboard.
 pub const PLUGIN_TEMPLATES: &[(&str, &str)] = &[
-    ("opencode", include_str!("../assets/opencode/ljos.ts")),
-    ("opencode-v2", include_str!("../assets/opencode/ljos-v2.ts")),
+    (
+        "opencode",
+        include_str!("../assets/modes/advisory/opencode/ljos.ts"),
+    ),
+    (
+        "opencode-v2",
+        include_str!("../assets/modes/advisory/opencode/ljos-v2.ts"),
+    ),
     ("omp", include_str!("../assets/omp/ljos.ts")),
+];
+
+const STRICT_PLUGIN_TEMPLATES: &[(&str, &str)] = &[
+    (
+        "opencode",
+        include_str!("../assets/modes/strict/opencode/ljos.ts"),
+    ),
+    (
+        "opencode-v2",
+        include_str!("../assets/modes/strict/opencode/ljos-v2.ts"),
+    ),
+    ("omp", include_str!("../assets/modes/strict/omp/ljos.ts")),
 ];
 
 /// A runner's plugin as it is written: the template, `{ljos}` filled.
 fn plugin_text(h: &Harness, ljos: &Path) -> Option<String> {
     let name = h.plugin_template.as_deref()?;
-    PLUGIN_TEMPLATES
+    let templates = if guard_mode::is_strict() {
+        STRICT_PLUGIN_TEMPLATES
+    } else {
+        PLUGIN_TEMPLATES
+    };
+    templates
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, t)| t.replace("{ljos}", &ljos.display().to_string()))
@@ -6808,12 +6837,8 @@ if [ "$me" = git ] && command -v ljos >/dev/null 2>&1; then
     ljos hook --event SessionStart --brief-once >&2 || true
   fi
 fi
-# A rule that fires is one warning line on stderr, and the command runs.
-# ljos-policyd says `allow<TAB>warn<TAB>RULE<TAB>WARNING`, and the shim
-# prints that line. An older daemon said `deny<TAB>RULE` or
-# `prompt<TAB>RULE` there, and a config with `block-on-warning true` says
-# `deny<TAB>RULE<TAB>WARNING`. block-on-warning does not block. Each of
-# those is the same warning line, and the command runs. The fields are split in the shell: head, cut and sed
+# Strict mode retains named denials; advisory mode prints their warning
+# and runs the command. The fields are split in the shell: head, cut and sed
 # are missing when PATH is only the guard and git's directory. The wait is
 # the hook's, `LJOS_GUARD_TIMEOUT` or five seconds, so a hung daemon does
 # not hold the command.
@@ -6827,45 +6852,107 @@ if command -v ljos-policyd >/dev/null 2>&1; then
   nl='
 '
   tab=$(printf '\t')
-  line=${verdict%%"$nl"*}
-  case "$line" in
-    allow"$tab"warn"$tab"*) printf '%s\n' "$line" >&2 ;;
-    deny"$tab"*|prompt"$tab"*)
-      rest=${line#*"$tab"}
-      rule=$(trim_ws "${rest%%"$tab"*}")
-      said=
-      case "$rest" in *"$tab"*) said=${rest#*"$tab"} ;; esac
-      folded=$(lower_ascii "$rule")
-      # The same seat-not-ready tokens as `policyd_unjudged`: empty, the
-      # bare engine name, a bind that did not take, and `pack-unavailable`
-      # with or without the pack's text. A `phronesis:` token, or a named
-      # pack code, is a rule. The note is `unhealthy_note`.
-      case "$folded" in
-        ""|phronesis|bind-failed|pack-unavailable|pack-unavailable:*)
-          why="ljos-policyd refused without a reason"
-          case "$folded" in
-            pack-unavailable:*)
-              text=${rule#*:}
-              text=$(trim_ws "$text")
-              [ -n "$text" ] && why="$why: $text"
-              ;;
-          esac
-          printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call, so it is allowed. Run \`ljos doctor\`." >&2
-          exec "$real" "$@" ;;
-      esac
-      # An older daemon gave no warning with the rule. These are the
-      # words ljos prints with it now. A named config's deny is the same
-      # line: the command still runs.
-      if [ -z "$said" ]; then
-        case $(trim_ws "${rule%%:*}") in
-          rm-rf-outside-tmp) said="a recursive delete reaches outside /tmp and /var/tmp" ;;
-          find-delete-outside-tmp) said="find -delete reaches outside /tmp and /var/tmp" ;;
-          git-force-push) said="a force push rewrites a published branch" ;;
-          git-branch-delete) said="deleting a local branch removes that ref from this checkout" ;;
+  if [ "$(trim_ws "${LJOS_GUARD_MODE-}")" = strict ]; then
+    case $verdict in
+      "allow${tab}warn${tab}"*)
+        # A recursive delete or a force push says ljos-policyd's own
+        # warning line for it, then runs.
+        line=${verdict%%"$nl"*}
+        rest=${line#"allow${tab}warn${tab}"}
+        case ${rest%%"$tab"*} in
+          rm-rf-outside-tmp|find-delete|find-delete-outside-tmp|git-force-push)
+            printf '%s\n' "$line" >&2 ;;
+        esac ;;
+      deny*)
+        # First line, field after the first tab. Trim and fold in the shell.
+        # head, cut, sed and tr are missing when PATH is only the guard and
+        # git's directory, and an empty read allows a named denial.
+        line=${verdict%%"$nl"*}
+        case "$line" in
+          *"$tab"*)
+            rest=${line#*"$tab"}
+            rule=${rest%%"$tab"*}
+            ;;
+          *) rule=$line ;;
         esac
-      fi
-      printf 'allow\twarn\t%s%s\n' "$rule" "${said:+$tab$said}" >&2 ;;
-  esac
+        rule=$(trim_ws "$rule")
+        folded=$(lower_ascii "$rule")
+        # The same seat-not-ready tokens as `policyd_unjudged`: empty, the
+        # bare engine name, a bind that did not take, and `pack-unavailable`
+        # with or without the pack's text. A `phronesis:` token, or a named
+        # pack code, is a real denial. The note is `unhealthy_note`.
+        case "$folded" in
+          ""|phronesis|bind-failed|pack-unavailable|pack-unavailable:*)
+            why="ljos-policyd refused without a reason"
+            case "$folded" in
+              pack-unavailable:*)
+                text=${rule#*:}
+                text=$(trim_ws "$text")
+                [ -n "$text" ] && why="$why: $text"
+                ;;
+            esac
+            printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call, so it is allowed. No ljos rule would refuse it. Run \`ljos doctor\`." >&2
+            exec "$real" "$@" ;;
+        esac
+        # A recursive delete and a force push run, with the line
+        # ljos-policyd's allow-with-warning prints for that rule. A config
+        # the person named chose the deny, and ljos keeps it.
+        code=$(trim_ws "${rule%%:*}")
+        case "$code" in
+          rm-rf-outside-tmp) warning="a recursive delete reaches outside /tmp and /var/tmp" ;;
+          find-delete-outside-tmp) warning="find -delete reaches outside /tmp and /var/tmp" ;;
+          git-force-push) warning="a force push rewrites a published branch" ;;
+          *) warning= ;;
+        esac
+        if [ -n "$warning" ] && [ -z "$conf" ]; then
+          printf 'allow\twarn\t%s\t%s\n' "$code" "$warning" >&2
+          exec "$real" "$@"
+        fi
+        echo "ljos guard: denied ($rule): $me $*" >&2
+        echo "ljos guard: This rewrites or discards history or work. Ask the person first; they can run it themselves." >&2
+        exit 126 ;;
+    esac
+  else
+    line=${verdict%%"$nl"*}
+    case "$line" in
+      allow"$tab"warn"$tab"*) printf '%s\n' "$line" >&2 ;;
+      deny"$tab"*|prompt"$tab"*)
+        rest=${line#*"$tab"}
+        rule=$(trim_ws "${rest%%"$tab"*}")
+        said=
+        case "$rest" in *"$tab"*) said=${rest#*"$tab"} ;; esac
+        folded=$(lower_ascii "$rule")
+        # The same seat-not-ready tokens as `policyd_unjudged`: empty, the
+        # bare engine name, a bind that did not take, and `pack-unavailable`
+        # with or without the pack's text. A `phronesis:` token, or a named
+        # pack code, is a rule. The note is `unhealthy_note`.
+        case "$folded" in
+          ""|phronesis|bind-failed|pack-unavailable|pack-unavailable:*)
+            why="ljos-policyd refused without a reason"
+            case "$folded" in
+              pack-unavailable:*)
+                text=${rule#*:}
+                text=$(trim_ws "$text")
+                [ -n "$text" ] && why="$why: $text"
+                ;;
+            esac
+            printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call, so it is allowed. Run \`ljos doctor\`." >&2
+            exec "$real" "$@" ;;
+        esac
+        # An older daemon gave no warning with the rule. These are the
+        # words ljos prints with it now. A named config's deny is the same
+        # line: the command still runs.
+        if [ -z "$said" ]; then
+          case $(trim_ws "${rule%%:*}") in
+            rm-rf-outside-tmp) said="a recursive delete reaches outside /tmp and /var/tmp" ;;
+            find-delete-outside-tmp) said="find -delete reaches outside /tmp and /var/tmp" ;;
+            git-force-push) said="a force push rewrites a published branch" ;;
+            git-branch-delete) said="deleting a local branch removes that ref from this checkout" ;;
+          esac
+        fi
+        printf 'allow\twarn\t%s%s\n' "$rule" "${said:+$tab$said}" >&2 ;;
+    esac
+  fi
 fi
 exec "$real" "$@"
 "#;
@@ -41548,6 +41635,19 @@ fn clear_guard_note() {
 /// The rules ljos names and lets run, each with ljos-policyd's sentence
 /// for it: a recursive delete outside a temp directory, a push that
 /// replaces history on the remote, and a push that deletes a remote branch.
+const STRICT_LABELLED: &[(&str, &str)] = &[
+    (
+        "rm-rf-outside-tmp",
+        "a recursive delete reaches outside /tmp and /var/tmp",
+    ),
+    (
+        "find-delete-outside-tmp",
+        "find -delete reaches outside /tmp and /var/tmp",
+    ),
+    ("git-force-push", "a force push rewrites a published branch"),
+    ("git-push-delete", "a push deletes a remote branch"),
+];
+
 const LABELLED: &[(&str, &str)] = &[
     (
         "rm-rf-outside-tmp",
@@ -41600,7 +41700,7 @@ pub fn label_line(rule: &str) -> Option<String> {
     }
 
     let rule = rule.split(':').next().unwrap_or(rule).trim();
-    LABELLED
+    STRICT_LABELLED
         .iter()
         .find(|(name, _)| *name == rule)
         .map(|(name, warning)| format!("allow\twarn\t{name}\t{warning}"))
@@ -41622,7 +41722,7 @@ fn label(rule: &str, line: &str) {
     }
 
     let rule = rule.split(':').next().unwrap_or(rule).trim();
-    if let Some(&(rule, warning)) = LABELLED.iter().find(|(name, _)| *name == rule) {
+    if let Some(&(rule, warning)) = STRICT_LABELLED.iter().find(|(name, _)| *name == rule) {
         label_saying(rule, warning.to_string(), line);
     }
 }
@@ -44482,6 +44582,7 @@ pub(crate) fn strip_guard_bin(cmd: &mut std::process::Command) {
 /// waits on a terminal for a credential.
 pub(crate) fn git_cmd() -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
+    guard_mode::configure_child(&mut cmd);
     strip_guard_bin(&mut cmd);
     no_git_prompt(&mut cmd);
     cmd
@@ -56384,6 +56485,7 @@ mod tests {
                     env.display()
                 ))
                 .env_clear()
+                .envs(crate::guard_mode::child_environment())
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .output()
                 .unwrap();
@@ -56400,6 +56502,7 @@ mod tests {
                     env.display()
                 ))
                 .env_clear()
+                .envs(crate::guard_mode::child_environment())
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .output()
                 .unwrap();
@@ -75521,5 +75624,35 @@ mod background_push_syscall_tests {
             unsafe { libc::fcntl(second.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod dual_mode_runtime_tests {
+    #[test]
+    fn selected_modes_keep_their_warning_whitelists() {
+        {
+            let _mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+            assert!(super::label_line("git-branch-delete").is_none());
+            assert!(super::label_line("git-force-push").is_some());
+        }
+        {
+            let _mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Advisory);
+            assert_eq!(
+                super::label_line("git-branch-delete").as_deref(),
+                Some("allow\twarn\tgit-branch-delete\tdeleting a local branch removes that ref from this checkout")
+            );
+        }
+    }
+
+    #[test]
+    fn the_protocol_names_command_consent_only_in_strict_mode() {
+        for (mode, consent) in [
+            (crate::guard_mode::GuardMode::Strict, true),
+            (crate::guard_mode::GuardMode::Advisory, false),
+        ] {
+            let _mode = crate::guard_mode::for_test(mode);
+            assert_eq!(super::protocol_text().contains("request_approval"), consent);
+        }
     }
 }

@@ -123,7 +123,8 @@ fn env_tool_set() -> Option<Vec<String>> {
 }
 
 fn listed(set: Option<&[String]>, name: &str) -> bool {
-    set.is_none_or(|s| s.iter().any(|t| t == name))
+    (name != "ljos_request_approval" || ljos_cli::guard_mode::is_strict())
+        && set.is_none_or(|s| s.iter().any(|t| t == name))
 }
 
 /// A refusal from a tool that ran, as a tool result the model reads. The
@@ -249,7 +250,6 @@ fn supply_issue(arguments: &mut serde_json::Map<String, serde_json::Value>, sess
 /// seat.
 const SEAT_FREE_TOOLS: &[&str] = &[
     "ljos_guard_check",
-    "ljos_request_approval",
     "ljos_policy",
     "ljos_recall",
     "ljos_search",
@@ -317,6 +317,7 @@ fn call_assignee(verb: &str, passed: Option<&str>) -> Result<String, McpError> {
 
 fn runs_without_seat(name: &str) -> bool {
     SEAT_FREE_TOOLS.contains(&name)
+        || (name == "ljos_request_approval" && ljos_cli::guard_mode::is_strict())
 }
 
 fn unseated_fallback(name: &str, has_named_seat: bool) -> bool {
@@ -4151,8 +4152,36 @@ mod tests {
 
     /// The default lists the core set, every name in it is a tool, and the
     /// EasyBuild tools wait for an opt-in.
+    fn fixture_mode(mode: &str) -> (RestoreEnv, tokio::sync::MutexGuard<'static, ()>) {
+        let lock = ENV_TEST_LOCK.blocking_lock();
+        let saved = RestoreEnv::new(&["LJOS_GUARD_MODE"]);
+        unsafe { std::env::set_var("LJOS_GUARD_MODE", mode) };
+        (saved, lock)
+    }
+
+    #[test]
+    fn command_consent_discovery_and_seat_fallback_follow_the_selected_mode() {
+        let explicit = vec!["ljos_request_approval".to_string()];
+        {
+            let _mode = fixture_mode("advisory");
+            assert!(!listed(None, "ljos_request_approval"));
+            assert!(!listed(Some(&explicit), "ljos_request_approval"));
+            assert!(!runs_without_seat("ljos_request_approval"));
+            assert!(!unseated_fallback("ljos_request_approval", false));
+            assert!(runs_without_seat("ljos_guard_check"));
+        }
+        {
+            let _mode = fixture_mode("strict");
+            assert!(listed(None, "ljos_request_approval"));
+            assert!(listed(Some(&explicit), "ljos_request_approval"));
+            assert!(runs_without_seat("ljos_request_approval"));
+            assert!(unseated_fallback("ljos_request_approval", false));
+            assert!(!unseated_fallback("ljos_request_approval", true));
+        }
+    }
     #[test]
     fn the_core_set_is_the_default_and_all_lists_every_tool() {
+        let _selected_guard_mode = fixture_mode("strict");
         let every: Vec<String> = LjosServer::tool_router()
             .list_all()
             .into_iter()
@@ -4230,6 +4259,7 @@ mod tests {
     /// it, whichever set the server lists.
     #[test]
     fn the_guard_and_memory_lead_and_the_personas_close_the_list() {
+        let _selected_guard_mode = fixture_mode("strict");
         let order = |set: Option<&[String]>| -> Vec<String> {
             let mut tools: Vec<Tool> = LjosServer::tool_router()
                 .list_all()
@@ -4261,6 +4291,7 @@ mod tests {
 
     #[test]
     fn advisory_the_guard_and_memory_lead_and_the_personas_close_the_list() {
+        let _selected_guard_mode = fixture_mode("advisory");
         let order = |set: Option<&[String]>| -> Vec<String> {
             let mut tools: Vec<Tool> = LjosServer::tool_router()
                 .list_all()
@@ -4497,6 +4528,7 @@ mod tests {
 
     #[test]
     fn an_unresolved_named_seat_cannot_request_command_consent() {
+        let _selected_guard_mode = fixture_mode("strict");
         let arguments = serde_json::json!({
             "id": "11111111111111111111111111111111",
             "seat": "unknown-test-seat"
@@ -4510,6 +4542,7 @@ mod tests {
 
     #[test]
     fn unseated_fallback_preserves_guard_and_reader_access() {
+        let _selected_guard_mode = fixture_mode("strict");
         for name in SEAT_FREE_TOOLS {
             if *name == "ljos_request_approval" {
                 continue;
@@ -4526,6 +4559,7 @@ mod tests {
     /// writer still need the seat.
     #[test]
     fn only_readers_and_the_guard_run_without_a_seat() {
+        let _selected_guard_mode = fixture_mode("strict");
         let tools = LjosServer::tool_router().list_all();
         for name in SEAT_FREE_TOOLS {
             let tool = tools
@@ -4563,6 +4597,7 @@ mod tests {
 
     #[test]
     fn advisory_only_readers_and_the_guard_run_without_a_seat() {
+        let _selected_guard_mode = fixture_mode("advisory");
         let tools = LjosServer::tool_router().list_all();
         for name in SEAT_FREE_TOOLS {
             let tool = tools
@@ -4674,6 +4709,7 @@ mod tests {
     /// The instructions a bot hears are the loop, and every tool accepts seat.
     #[test]
     fn the_bot_loop_is_the_instructions_and_every_tool_takes_a_seat() {
+        let _selected_guard_mode = fixture_mode("strict");
         let next_step = |tool| next_step_for_mode(tool, true);
 
         let cards = tempfile::tempdir().unwrap();
@@ -4748,6 +4784,7 @@ mod tests {
 
     #[test]
     fn advisory_the_bot_loop_is_the_instructions_and_every_tool_takes_a_seat() {
+        let _selected_guard_mode = fixture_mode("advisory");
         let next_step = |tool| next_step_for_mode(tool, false);
 
         let cards = tempfile::tempdir().unwrap();
@@ -5113,7 +5150,7 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().await;
         let _guard_mode_saved = RestoreEnv::new(&["LJOS_GUARD_MODE"]);
         unsafe {
-            std::env::set_var("LJOS_GUARD_MODE", "strict");
+            std::env::set_var("LJOS_GUARD_MODE", "advisory");
         }
         let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF", "HOME"]);
         let home = tempfile::tempdir().expect("tempdir");
@@ -5321,6 +5358,7 @@ mod tests {
     /// tools in the order a sitting calls them.
     #[test]
     fn the_protocol_is_served_and_orders_the_sitting() {
+        let _selected_guard_mode = fixture_mode("strict");
         assert_eq!(card_named(PROTOCOL_URI), None, "the protocol is not a card");
         let protocol = protocol_text();
         for verb in [

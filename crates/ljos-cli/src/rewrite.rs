@@ -882,6 +882,25 @@ mod tests {
     /// The fake policyd, answering in 0.6.0's `bash -c` form: `python a.py`
     /// is rewritten to an accepted line, `python b.py` to one a rule warns
     /// on, and `python c.py` to one that is rewritten again.
+    const STRICT_FAKE_POLICYD: &str = r#"#!/bin/sh
+case "$5" in
+  "python a.py") printf "allow\trewrite\tbash -c 'uv run a.py'\n" ;;
+  "python b.py") printf "allow\trewrite\tbash -c 'uv run b.py'\n" ;;
+  "python c.py") printf "allow\trewrite\tbash -c 'uv run c.py'\n" ;;
+  "uv run b.py") printf 'deny\tpython-requires-uv\n'; exit 2 ;;
+  "uv run c.py") printf "allow\trewrite\tbash -c 'echo c'\n" ;;
+  *) echo allow ;;
+esac
+"#;
+
+    fn fixture_policyd() -> &'static str {
+        if crate::guard_mode::is_strict() {
+            STRICT_FAKE_POLICYD
+        } else {
+            FAKE_POLICYD
+        }
+    }
+
     const FAKE_POLICYD: &str = r#"#!/bin/sh
 case "$5" in
   "python a.py") printf "allow\trewrite\tbash -c 'uv run a.py'\n" ;;
@@ -903,7 +922,7 @@ esac
         let _g = crate::tests::env_guard();
         let home = tempfile::tempdir().unwrap();
         let bin = home.path().join("policyd");
-        std::fs::write(&bin, FAKE_POLICYD).unwrap();
+        std::fs::write(&bin, fixture_policyd()).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let keys = [
             "HOME",
@@ -973,7 +992,7 @@ esac
         let _g = crate::tests::env_guard();
         let home = tempfile::tempdir().unwrap();
         let bin = home.path().join("policyd");
-        std::fs::write(&bin, FAKE_POLICYD).unwrap();
+        std::fs::write(&bin, fixture_policyd()).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let keys = [
             "HOME",

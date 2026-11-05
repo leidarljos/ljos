@@ -1638,6 +1638,8 @@ mod tests {
 
     #[test]
     fn a_relay_fault_allows_and_warns_in_the_runners_contract() {
+        let _selected_guard_mode =
+            crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
         for runner in RUNNERS {
             let (stdout, stderr, code) =
                 relay_fault_answer(runner, "", "stdin is not utf-8").expect(runner);
@@ -1844,6 +1846,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_inner_hook_that_answers_keeps_its_answer() {
+        let _selected_guard_mode =
+            crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
         let _lock = crate::test_env_lock();
         unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         assert_eq!(inner("true", 30_000), "", "a clean allow");
