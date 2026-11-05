@@ -3420,6 +3420,11 @@ fn run_command() -> Result<()> {
                             })
                         })
                         .flatten();
+                    if call.event == "UserPromptSubmit" {
+                        ljos_cli::hook_timed("correction", || ljos_cli::store_correction(&call));
+                    }
+                    let (mut ctx, mut ids) =
+                        ljos_cli::hook_timed("hook_note", || hook_note(&call, limit));
                     if let Some(granted) = granted {
                         ctx = if ctx.is_empty() {
                             granted
@@ -3427,11 +3432,6 @@ fn run_command() -> Result<()> {
                             format!("{granted}\n{ctx}")
                         };
                     }
-                    if call.event == "UserPromptSubmit" {
-                        ljos_cli::hook_timed("correction", || ljos_cli::store_correction(&call));
-                    }
-                    let (mut ctx, mut ids) =
-                        ljos_cli::hook_timed("hook_note", || hook_note(&call, limit));
                     if let Some((line, keys)) = captured {
                         ctx = if ctx.is_empty() {
                             line
