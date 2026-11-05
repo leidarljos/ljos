@@ -2356,7 +2356,7 @@ mod chat_relay_approval_tests {
 use chat_relay_approval_tests::{approved, payload, pending};
 
 #[test]
-fn strict_a_normalized_prompt_grants_consent_from_its_attested_runner() {
+fn a_normalized_prompt_grants_consent_only_in_strict_mode() {
     let _mode = guard_mode::select("strict");
 
     let adapter = "gemini";
@@ -2382,6 +2382,15 @@ fn strict_a_normalized_prompt_grants_consent_from_its_attested_runner() {
         assert!(out.status.success(), "{}", text_of(&out));
         assert!(approved(&seat), "via shell {via_sh}: {}", text_of(&out));
     }
+
+    let _advisory_mode = guard_mode::advisory();
+    let seat = Seat::new();
+    pending(&seat);
+    let mut command = seat.hook_under(adapter);
+    command.args(["--runner", adapter]);
+    let out = fed(command, &payload());
+    assert!(out.status.success(), "{}", text_of(&out));
+    assert!(!approved(&seat), "{}", text_of(&out));
 }
 
 #[test]
