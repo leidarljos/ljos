@@ -238,9 +238,18 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
             .env("CURSOR_AGENT", "1")
             .output()
             .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
-            !out.status.success(),
-            "ljos {args:?} closed with no person: {out:?}"
+            out.status.success(),
+            "ljos {args:?} should label the close and write nothing: {text}"
+        );
+        assert!(
+            text.contains("label close-unverified"),
+            "ljos {args:?} missing close label: {text}"
         );
         format!(
             "{}{}",

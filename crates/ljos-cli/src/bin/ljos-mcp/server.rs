@@ -130,7 +130,12 @@ fn listed(set: Option<&[String]>, name: &str) -> bool {
 /// arguments that do not parse.
 fn as_tool_error(e: McpError) -> Result<CallToolResponse, McpError> {
     if e.code == ErrorCode::INTERNAL_ERROR {
-        Ok(CallToolResult::error(vec![ContentBlock::text(e.message.to_string())]).into())
+        let text = e.message.to_string();
+        if text.starts_with("label ") {
+            Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
+        } else {
+            Ok(CallToolResult::error(vec![ContentBlock::text(text)]).into())
+        }
     } else {
         Err(e)
     }
@@ -1239,6 +1244,9 @@ fn said(out: ljos_cli::Said) -> Json<Said> {
 /// A refusal. `call_tool` hands it to the model as a tool result with
 /// `isError`, so the model reads the reason.
 fn refused(e: anyhow::Error) -> McpError {
+    if let Some(label) = ljos_cli::policy_label::as_policy(&e) {
+        return McpError::internal_error(format!("label {}: {}", label.label, label.detail), None);
+    }
     let text = format!("{e:#}");
     // The pack's prose rule refuses a hard sentence; the seat that hit it
     // is told what passes, so the second try is not a guess.

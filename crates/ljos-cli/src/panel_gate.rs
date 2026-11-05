@@ -8,7 +8,7 @@
 //! A design candidate whose session had already read another candidate is
 //! flagged: the round was not blind.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -787,16 +787,19 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
                 replace_hint(issue, voter)
             )
         });
-        bail!("{why}");
+        return Err(crate::policy_label::labelled("repeated-ballot", why));
     }
     let mark = format!("{}\n{voter}", issue.trim());
     let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
     if !held.insert(mark.clone()) {
         ballot_sig::end_cast();
-        bail!(
-            "{voter} already cast a ballot on {issue} in this process. Nothing was cast. {}",
-            replace_hint(issue, voter)
-        );
+        return Err(crate::policy_label::labelled(
+            "repeated-ballot",
+            format!(
+                "{voter} already cast a ballot on {issue} in this process. Nothing was cast. {}",
+                replace_hint(issue, voter)
+            ),
+        ));
     }
     drop(held);
     let mut ballot = SessionBallot {

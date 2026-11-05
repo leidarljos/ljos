@@ -85,20 +85,32 @@ pub fn grant(
     let close = close_value(spec, ids_file)?;
     let quote = quote.trim();
     if quote.is_empty() {
-        bail!("seat grant: pass the owner's words with --quote. Nothing was written");
+        return Err(crate::policy_label::labelled(
+            "grant-unverified",
+            "seat grant: pass the owner's words with --quote. Nothing was written",
+        ));
     }
     if chrono::DateTime::parse_from_rfc3339(at.trim()).is_err() {
-        bail!("seat grant: --at {at:?} is not RFC 3339. Nothing was written");
+        return Err(crate::policy_label::labelled(
+            "grant-unverified",
+            format!("seat grant: --at {at:?} is not RFC 3339. Nothing was written"),
+        ));
     }
     let target = seat_slug_of(seat).context("seat grant")?;
     let via = seat_slug_of(via).context("seat grant")?;
     if via == target {
-        bail!("seat grant: a seat cannot grant itself. Nothing was written");
+        return Err(crate::policy_label::labelled(
+            "grant-unverified",
+            "seat grant: a seat cannot grant itself. Nothing was written",
+        ));
     }
     let caller = crate::write_seat("seat grant")?;
     let caller_slug = crate::canonical_seat_name(&caller.seat);
     if caller_slug == target {
-        bail!("seat grant: a seat cannot grant itself. Nothing was written");
+        return Err(crate::policy_label::labelled(
+            "grant-unverified",
+            "seat grant: a seat cannot grant itself. Nothing was written",
+        ));
     }
     if caller_slug != via {
         bail!("seat grant: --via names {via}, and this seat is {caller_slug}. Nothing was written");
@@ -162,16 +174,22 @@ pub fn close_note(issue: &str) -> Result<Option<String>> {
     let seat = crate::seat_name();
     let Some(grant) = honored_grant(&seat) else {
         let slug = crate::canonical_seat_name(&seat);
-        bail!(
-            "finish: a person closes a ticket. A standing grant is \
+        return Err(crate::policy_label::labelled(
+            "close-unverified",
+            format!(
+                "finish: a person closes a ticket. A standing grant is \
              `ljos seat grant {slug} close=own --quote TEXT --at TIME --via SEAT`. \
              Nothing was written"
-        );
+            ),
+        ));
     };
     if !covers(&grant, issue, &seat)? {
-        bail!(
-            "finish: {issue} is not {seat}'s to close. A grant of own covers a ticket this seat filed or holds. Nothing was written"
-        );
+        return Err(crate::policy_label::labelled(
+            "close-unverified",
+            format!(
+                "finish: {issue} is not {seat}'s to close. A grant of own covers a ticket this seat filed or holds. Nothing was written"
+            ),
+        ));
     }
     Ok(Some(grant.note()))
 }

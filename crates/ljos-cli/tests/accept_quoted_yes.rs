@@ -195,7 +195,8 @@ fn a_half_recorded_yes_writes_nothing() {
     let seat = Seat::new();
     let out = seat.accept(&["--quote", "yes, keep that one about the parser"]);
     let text = said(&out);
-    assert!(!out.status.success(), "{text}");
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("label approval-unverified"), "{text}");
     assert!(text.contains("--at and --via"), "{text}");
     assert!(text.contains("Nothing was written"), "{text}");
     assert_eq!(seat.rows().len(), 1);

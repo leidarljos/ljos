@@ -1734,6 +1734,42 @@ pub fn classify_failure(text: &str) -> &'static str {
 
 /// Store a failed `memory` command. Other commands are left untouched so
 /// a claim or a sitting writes the same files it wrote before.
+/// Store one labelled attempt. A repeat of the same text is one file.
+pub fn record_label(label: &str, detail: &str, effect: &str) {
+    let place = Place::current();
+    let _ = store_label_row(&place, label, detail, effect);
+}
+
+fn store_label_row(place: &Place, label: &str, detail: &str, effect: &str) -> Result<()> {
+    if label == "cloud-push-block" {
+        return Ok(());
+    }
+    let text = detail.to_string();
+    let digest = sha256_hex(format!("{label}\n{effect}\n{text}").as_bytes());
+    let row = Row {
+        id: format!("attempt:{digest}"),
+        text,
+        kind: "lesson".into(),
+        origin: String::new(),
+        labels: vec![label.into()],
+        entities: Vec::new(),
+        machine: place.machine.clone(),
+        seat: place.seat.clone(),
+        import_id: String::new(),
+        source_id: String::new(),
+        content_sha256: digest.clone(),
+        origin_hash: digest.clone(),
+        at: now_rfc3339(),
+        diagnostic: detail.to_string(),
+        effect: effect.into(),
+    };
+    write_if_absent(
+        &place.home.join("attempts").join(format!("{digest}.json")),
+        &serde_json::to_vec_pretty(&row)?,
+    )?;
+    Ok(())
+}
+
 pub fn record_memory_error(args: &[String], err: &str) {
     if args.first().is_some_and(|arg| arg == "memory") {
         let _ = store_attempt(&Place::current(), args, err);

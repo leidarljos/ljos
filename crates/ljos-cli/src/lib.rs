@@ -56,6 +56,7 @@ pub mod person_key;
 mod person_tty;
 pub mod persona_session;
 pub mod plugin;
+pub mod policy_label;
 pub mod proc_tree;
 pub mod quiet_claims;
 pub mod quoted_yes;
@@ -4418,19 +4419,28 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
         (Some(name), _) => (name.to_string(), false),
         (None, Some(seat)) => (seat.to_string(), true),
         (None, None) => {
-            bail!("pass seat, your own bot name, on every call: this server has no LJOS_SEAT")
+            return Err(policy_label::labelled(
+                "seat-unresolved",
+                "pass seat, your own bot name, on every call: this server has no LJOS_SEAT",
+            ))
         }
     };
     if is_raw_subagent_name(&raw) {
-        bail!(SUBAGENT_NO_SEAT);
+        return Err(policy_label::labelled("seat-unresolved", SUBAGENT_NO_SEAT));
     }
     let slug_source = raw.split('@').next().unwrap_or(raw.as_str()).trim();
     if slug_source.is_empty() || omitted_actor_name(slug_source) {
-        bail!("pass seat, your own bot name, not {raw:?}");
+        return Err(policy_label::labelled(
+            "seat-unresolved",
+            format!("pass seat, your own bot name, not {raw:?}"),
+        ));
     }
     let named_slug = canonical_seat_name(&raw);
     if named_slug.is_empty() || named_slug == "runner" || omitted_actor_name(&named_slug) {
-        bail!("pass seat, your own bot name, not {raw:?}");
+        return Err(policy_label::labelled(
+            "seat-unresolved",
+            format!("pass seat, your own bot name, not {raw:?}"),
+        ));
     }
     let known = seat_roster(&named_slug);
     // The initialized connection names its own seat even when this tracker
@@ -4705,11 +4715,14 @@ pub fn write_assignee(
     }
     claim_holder(&assignee).map_err(|e| anyhow::anyhow!("{verb}: {e}"))?;
     if !delegates {
-        bail!(
-            "{verb}: {assignee} is not this seat, {}; a write is recorded as the seat that makes it. \
+        return Err(policy_label::labelled(
+            "assignee-mismatch",
+            format!(
+                "{verb}: {assignee} is not this seat, {}; a write is recorded as the seat that makes it. \
              Drop --assignee, or run it as that seat (`export LJOS_SEAT={slug}`); nothing was written",
-            checked.seat
-        );
+                checked.seat
+            ),
+        ));
     }
     registered_seat(&assignee).map_err(|e| anyhow::anyhow!("{verb}: {e}"))?;
     Ok(assignee)
@@ -4809,24 +4822,31 @@ pub fn registered_seat(seat: &str) -> Result<()> {
     let slug = canonical_seat_name(seat);
     match seat_roster::seat_list() {
         seat_roster::SeatList::Absent => Ok(()),
-        seat_roster::SeatList::Broken { why } => {
-            bail!("{why}, so no seat may write. Nothing was written")
-        }
+        seat_roster::SeatList::Broken { why } => Err(policy_label::labelled(
+            "seat-unlisted",
+            format!("{why}, so no seat may write. Nothing was written"),
+        )),
         seat_roster::SeatList::Listed { path, seats } => {
             if seats.contains(&slug) {
                 return Ok(());
             }
             if seats.is_empty() {
-                bail!(
-                    "{} lists no seat, so no seat may write. Nothing was written",
-                    path.display()
-                );
+                return Err(policy_label::labelled(
+                    "seat-unlisted",
+                    format!(
+                        "{} lists no seat, so no seat may write. Nothing was written",
+                        path.display()
+                    ),
+                ));
             }
-            bail!(
-                "no seat named {slug} in {}, which lists {}. Nothing was written",
-                path.display(),
-                seats.into_iter().collect::<Vec<_>>().join(", ")
-            )
+            Err(policy_label::labelled(
+                "seat-unlisted",
+                format!(
+                    "no seat named {slug} in {}, which lists {}. Nothing was written",
+                    path.display(),
+                    seats.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            ))
         }
     }
 }
@@ -5480,10 +5500,13 @@ pub(crate) fn seat_for_env(name: &str) -> String {
 pub(crate) fn claim_holder(raw: &str) -> Result<String> {
     let raw = raw.trim();
     if raw.is_empty() {
-        bail!("pass a seat name");
+        return Err(policy_label::labelled(
+            "seat-unresolved",
+            "pass a seat name",
+        ));
     }
     if is_raw_subagent_name(raw) {
-        bail!(SUBAGENT_NO_SEAT);
+        return Err(policy_label::labelled("seat-unresolved", SUBAGENT_NO_SEAT));
     }
     let (body, scope) = split_claim_scope(raw);
     let (seat, tag) = holder_parts(body);
@@ -36255,13 +36278,16 @@ pub fn finish(
     if close && tracker_show_json(issue).is_ok_and(|v| is_decision(&v)) {
         let ballots = ballot_rows(issue).len();
         if ballots < 2 {
-            bail!(
-                "finish: {issue} is a decision and holds {ballots} ballot{}; run the panel \
+            return Err(policy_label::labelled(
+                "panel-incomplete",
+                format!(
+                    "finish: {issue} is a decision and holds {ballots} ballot{}; run the panel \
                  (`ljos panel {issue}`), have each persona cast `ljos vote {issue} --for OPTION --expect OPTION --as NAME`, \
                  then `ljos consensus {issue}`. A person closes it after the panel passes. \
                  Nothing was written",
-                if ballots == 1 { "" } else { "s" }
-            );
+                    if ballots == 1 { "" } else { "s" }
+                ),
+            ));
         }
     }
     // A workflow parent closes when its panel passed and no child is open,
@@ -36271,18 +36297,23 @@ pub fn finish(
         match workflow_status(issue) {
             Ok(Some(s)) => {
                 if let Some(why) = workflow_close_refusal(&s) {
-                    bail!("{why}");
+                    return Err(policy_label::labelled("workflow-warning", why));
                 }
             }
             Ok(None) => {
                 if let Some(why) = open_child_close_refusal(issue) {
-                    bail!("{why}");
+                    return Err(policy_label::labelled("children-open", why));
                 }
             }
             // A workflow parent whose children cannot be read fails closed.
-            Err(e) if workflow_on(issue).is_some() => bail!(
-                "finish: {issue} runs a workflow and its status could not be read: {e:#}. Nothing was written"
-            ),
+            Err(e) if workflow_on(issue).is_some() => {
+                return Err(policy_label::failed(
+                    "children-open",
+                    anyhow::anyhow!(
+                        "finish: {issue} runs a workflow and its status could not be read: {e:#}. Nothing was written"
+                    ),
+                ));
+            }
             Err(_) => {}
         }
     }

@@ -1635,6 +1635,10 @@ fn main() -> Result<()> {
     if let Err(e) = &ran {
         let args: Vec<String> = std::env::args().skip(1).collect();
         ljos_cli::memory_port::record_memory_error(&args, &format!("{e:#}"));
+        if let Some(label) = ljos_cli::policy_label::as_policy(e) {
+            println!("label {}: {}", label.label, label.detail);
+            return Ok(());
+        }
         if ljos_cli::is_pack_busy(e) {
             // A hook that still holds the error prints nothing. The runner
             // is not failed for a pack that did not answer in time.

@@ -661,7 +661,10 @@ pub fn recipients(
 ) -> Result<Vec<String>> {
     if let Some(group) = group {
         if seat.is_some() {
-            bail!("send: name a seat or a group");
+            return Err(crate::policy_label::labelled(
+                "routing-warning",
+                "send: name a seat or a group",
+            ));
         }
         let to: Vec<String> = members
             .iter()
@@ -669,16 +672,25 @@ pub fn recipients(
             .cloned()
             .collect();
         if to.is_empty() {
-            bail!("send: {group} has no other member");
+            return Err(crate::policy_label::labelled(
+                "routing-warning",
+                format!("send: {group} has no other member"),
+            ));
         }
         return Ok(to);
     }
     let Some(seat) = seat.map(str::trim).filter(|s| !s.is_empty()) else {
-        bail!("send: name a seat or a group");
+        return Err(crate::policy_label::labelled(
+            "routing-warning",
+            "send: name a seat or a group",
+        ));
     };
     let seat = check_name("send", seat)?;
     if seat == from {
-        bail!("send: {seat} is this seat");
+        return Err(crate::policy_label::labelled(
+            "routing-warning",
+            format!("send: {seat} is this seat"),
+        ));
     }
     Ok(vec![seat])
 }
@@ -794,7 +806,10 @@ pub fn send(args: &Send<'_>) -> Result<String> {
     let _clock = super::arm_cmd_pack();
     let text = args.text.trim();
     if text.is_empty() {
-        bail!("send: empty text");
+        return Err(crate::policy_label::labelled(
+            "message-input-warning",
+            "send: empty text",
+        ));
     }
     check_length("send", text)?;
     let from = super::seat_name();

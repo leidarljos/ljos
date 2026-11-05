@@ -849,12 +849,18 @@ fn refuse_push_messages(refs: &str) -> Result<()> {
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() != 4 {
-            bail!("pre-push: cannot read `{line}`");
+            return Err(crate::policy_label::failed(
+                "effect-unavailable",
+                anyhow!("pre-push: cannot read `{line}`"),
+            ));
         }
         let local_sha = fields[1];
         let remote_sha = fields[3];
         if !is_object_name(local_sha) || !is_object_name(remote_sha) {
-            bail!("pre-push: cannot read `{line}`");
+            return Err(crate::policy_label::failed(
+                "effect-unavailable",
+                anyhow!("pre-push: cannot read `{line}`"),
+            ));
         }
         if is_zero_name(local_sha) {
             continue;
@@ -868,9 +874,11 @@ fn refuse_push_messages(refs: &str) -> Result<()> {
         for sha in listed {
             let body = commit_body(&sha)?;
             if message_refused(&body) {
-                eprintln!(
-                    "ljos: machine-trailer: {sha} message carries a machine mark; the push runs"
+                let detail = format!(
+                    "machine-trailer: {sha} message carries a machine mark; the push runs"
                 );
+                crate::memory_port::record_label("commit-message-warning", &detail, "labelled");
+                eprintln!("ljos: label commit-message-warning: {detail}");
             }
         }
     }

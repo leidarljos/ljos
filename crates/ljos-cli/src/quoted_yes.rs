@@ -14,7 +14,7 @@
 //! rests on, and can be read back and disowned. The terminal path is
 //! unchanged, and still needs no quote.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// The fewest words a quote may have.
@@ -84,10 +84,13 @@ pub fn read(quote: Option<&str>, at: Option<&str>, via: Option<&str>) -> Result<
         .filter(|(_, had)| !had)
         .map(|(flag, _)| flag)
         .collect();
-        bail!(
-            "accept: a quoted yes needs {}, so the record says what was said, when, and which seat carried it. Nothing was written",
-            missing.join(" and ")
-        );
+        return Err(crate::policy_label::labelled(
+            "approval-unverified",
+            format!(
+                "accept: a quoted yes needs {}, so the record says what was said, when, and which seat carried it. Nothing was written",
+                missing.join(" and ")
+            ),
+        ));
     }
     let quote = quote.unwrap_or_default().trim();
     let at = at.unwrap_or_default().trim();
@@ -101,45 +104,66 @@ pub fn read(quote: Option<&str>, at: Option<&str>, via: Option<&str>) -> Result<
 
 fn quote_words(quote: &str) -> Result<String> {
     if quote.is_empty() {
-        bail!("accept: --quote is empty, and an empty quote is not a yes. Nothing was written");
+        return Err(crate::policy_label::labelled(
+            "approval-unverified",
+            "accept: --quote is empty, and an empty quote is not a yes. Nothing was written",
+        ));
     }
     if quote.chars().count() > MAX_CHARS {
-        bail!(
-            "accept: --quote is longer than {MAX_CHARS} characters. Quote the sentence that says yes, not the conversation. Nothing was written"
-        );
+        return Err(crate::policy_label::labelled(
+            "approval-unverified",
+            format!(
+                "accept: --quote is longer than {MAX_CHARS} characters. Quote the sentence that says yes, not the conversation. Nothing was written"
+            ),
+        ));
     }
     let words = quote.split_whitespace().count();
     if words < MIN_WORDS {
-        bail!(
-            "accept: --quote is {words} words, and a yes is kept from {MIN_WORDS} or more, so the record names what was agreed to. Nothing was written"
-        );
+        return Err(crate::policy_label::labelled(
+            "approval-unverified",
+            format!(
+                "accept: --quote is {words} words, and a yes is kept from {MIN_WORDS} or more, so the record names what was agreed to. Nothing was written"
+            ),
+        ));
     }
     Ok(quote.to_string())
 }
 
 fn said_at(at: &str) -> Result<String> {
     let when = chrono::DateTime::parse_from_rfc3339(at).map_err(|e| {
-        anyhow::anyhow!(
-            "accept: --at {at:?} is not RFC 3339 ({e}), such as 2026-10-28T14:02:11Z. Nothing was written"
+        crate::policy_label::labelled(
+            "approval-unverified",
+            format!(
+                "accept: --at {at:?} is not RFC 3339 ({e}), such as 2026-10-28T14:02:11Z. Nothing was written"
+            ),
         )
     })?;
     let ahead = when.timestamp() - chrono::Utc::now().timestamp();
     if ahead > AHEAD {
-        bail!(
-            "accept: --at {at:?} is ahead of now, so nobody has said it yet. Nothing was written"
-        );
+        return Err(crate::policy_label::labelled(
+            "approval-unverified",
+            format!(
+                "accept: --at {at:?} is ahead of now, so nobody has said it yet. Nothing was written"
+            ),
+        ));
     }
     Ok(at.to_string())
 }
 
 fn carrier(via: &str) -> Result<String> {
     if via.is_empty() {
-        bail!("accept: --via is empty, and a yes is carried by a named seat. Nothing was written");
+        return Err(crate::policy_label::labelled(
+            "approval-unverified",
+            "accept: --via is empty, and a yes is carried by a named seat. Nothing was written",
+        ));
     }
     if via.chars().any(char::is_whitespace) || via.chars().count() > VIA_MAX {
-        bail!(
-            "accept: --via {via:?} is not a seat name: one word, {VIA_MAX} characters or fewer. Nothing was written"
-        );
+        return Err(crate::policy_label::labelled(
+            "approval-unverified",
+            format!(
+                "accept: --via {via:?} is not a seat name: one word, {VIA_MAX} characters or fewer. Nothing was written"
+            ),
+        ));
     }
     Ok(via.to_string())
 }
