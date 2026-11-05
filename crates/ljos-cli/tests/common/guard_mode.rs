@@ -16,6 +16,13 @@ impl Drop for Mode {
     }
 }
 
+pub fn strict() -> Mode {
+    Mode {
+        previous: MODE.with(|slot| slot.replace("strict")),
+        _thread: std::marker::PhantomData,
+    }
+}
+
 pub fn advisory() -> Mode {
     Mode {
         previous: MODE.with(|slot| slot.replace("advisory")),

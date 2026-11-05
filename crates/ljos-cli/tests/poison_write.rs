@@ -2244,7 +2244,7 @@ mod chat_relay_approval_tests {
 
     const REQUEST: &str = "0123456789abcdef0123456789abcdef";
 
-    fn pending(seat: &Seat) {
+    pub(super) fn pending(seat: &Seat) {
         let directory = seat.run.path().join("ljos/approvals");
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -2268,13 +2268,13 @@ mod chat_relay_approval_tests {
         file.write_all(fixture.to_string().as_bytes()).unwrap();
     }
 
-    fn approved(seat: &Seat) -> bool {
+    pub(super) fn approved(seat: &Seat) -> bool {
         let bytes = std::fs::read(seat.run.path().join("ljos/approvals/requests.json")).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         value[0]["approved"] == true
     }
 
-    fn payload() -> String {
+    pub(super) fn payload() -> String {
         serde_json::json!({"hook_event_name":"BeforeAgent", "session_id":RUNNER_SESSION, "prompt":format!("approve {REQUEST}")}).to_string()
     }
 
@@ -2353,9 +2353,11 @@ mod chat_relay_approval_tests {
     }
 }
 
+use chat_relay_approval_tests::{approved, payload, pending};
+
 #[test]
-fn advisory_a_normalized_prompt_grants_consent_from_its_attested_runner() {
-    let _mode = guard_mode::advisory();
+fn strict_a_normalized_prompt_grants_consent_from_its_attested_runner() {
+    let _mode = guard_mode::strict();
 
     let adapter = "gemini";
     for via_sh in [false, true] {
@@ -2383,8 +2385,8 @@ fn advisory_a_normalized_prompt_grants_consent_from_its_attested_runner() {
 }
 
 #[test]
-fn advisory_normalized_tool_subagent_and_unattended_prompts_grant_nothing() {
-    let _mode = guard_mode::advisory();
+fn strict_normalized_tool_subagent_and_unattended_prompts_grant_nothing() {
+    let _mode = guard_mode::strict();
 
     let adapter = "gemini";
     for mode in [
