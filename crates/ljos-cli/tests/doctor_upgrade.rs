@@ -292,7 +292,10 @@ fn the_mcp_server_refreshes_a_stale_skill_on_start() {
         loop {
             match stderr.read(&mut bytes) {
                 Ok(0) => break,
-                Ok(count) => collected_errors.lock().unwrap().extend_from_slice(&bytes[..count]),
+                Ok(count) => collected_errors
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&bytes[..count]),
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(err) => panic!("read MCP fixture stderr: {err}"),
             }
@@ -304,8 +307,7 @@ fn the_mcp_server_refreshes_a_stale_skill_on_start() {
         let notices = {
             let bytes = observed_errors.lock().unwrap();
             let err = String::from_utf8_lossy(&bytes);
-            err.contains("refreshed cursor:")
-                && err.contains("was edited by hand; ljos left it")
+            err.contains("refreshed cursor:") && err.contains("was edited by hand; ljos left it")
         };
         if published && notices {
             break true;
