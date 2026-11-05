@@ -1,5 +1,7 @@
 # Portable memory
 
+A seat can move its lessons to another machine as one file.
+
 `ljos memory export` writes this seat's lessons to a file on the machine that runs it.
 The file is not sent anywhere.
 `ljos memory import` stores that file in the seat tracker.
@@ -31,7 +33,8 @@ A listing shows that stored timestamp.
 It also shows the same instant in the process zone, from the system clock.
 A value that does not parse is shown raw and labelled `time-unparsed`.
 
-The export that writes this file leaves out another seat's lessons.
+The export chooses which lessons go into that file.
+It leaves out another seat's lessons.
 It leaves out a lesson whose source carries a password, token, key, or environment field.
 It leaves out text the pack rejects as a credential or as an instruction.
 It does not write embeddings.
@@ -51,18 +54,21 @@ Integrate does not pick a winner.
 
 `ljos search` reads the slot as well as the pack.
 `--source-machine`, `--source-seat`, and `--import-id` match those fields exactly.
-The match runs before the result limit.
+Those filters run before the result limit cuts the list.
 With no filter, pack hits keep their order.
 Slot hits that share a query word are added after them.
 
-That same search also finds a lesson the pack's prose check would split.
+Search also returns a lesson the pack's prose check would split.
 The original is stored whole.
 The label is `prose-warning`, `oversize`, or `content-warning`, matching what the check reported.
 The fitted copies can still be posted.
 The original remains one record.
-An empty write is stored with an empty text and `empty-input`.
+
+An empty write is stored with an empty text and the label `empty-input`.
 No claim is invented.
-A note with no sitting is stored with `unattached-note` and is not filed on a ticket.
+
+A note with no sitting is stored with the label `unattached-note`.
+It is not filed on a ticket.
 
 A queued note that has to wait stays queued.
 Later notes are still sent.

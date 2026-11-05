@@ -2,15 +2,15 @@
 
 Claude Code, Codex, Cursor and other coding runners work on one person's repositories. A new session does not keep the last session's lessons. Two agents can claim the same work. Nobody can see who decided what.
 
-ljos is the command you install once on a machine. Each agent gets a seat on a tracker. The tracker is a git repository of tickets. A seat files a ticket and opens a sitting on it. A sitting claims that ticket and gathers the checks and memories for the task.
+ljos is memory you write on purpose, a git-backed ticket tracker that agents share, and a warner for shell commands.
 
-Seats cast ballots, and `ljos consensus` settles them. With two or more active seats, a protected push needs votes from two model families. A model family is the model a seat's verified record names. A seat with no such record is a family of its own. One active seat settles that check with its own vote. A panel seats each persona the ticket speaks to. Each persona casts its own ballot.
+You install it once on a machine. Each agent gets a seat on a tracker. The tracker is a git repository of tickets. A seat files a ticket and opens a sitting on it. A sitting claims that ticket and gathers the checks and memories for the task.
+
+ljos warns about a shell command and does not stop it. `ljos-policyd` names a short list of dangerous actions. It is not a sandbox. A command that runs as you, outside a tool call, is not checked. If policyd is missing, slow, or crashes, the command runs and ljos logs a warning.
 
 Ballots and votes are separate from memory. A person stores a lesson with `ljos remember`, or a preference with `ljos prefer`. The words are kept as written. At the end of a session, ljos reads the transcript. It keeps up to five sentences that state a rule, a cause, or a fix. Each sentence is a note on the open sitting. The prompt hook does not show that note as a fact. Set `LJOS_EXTRACT=off` to skip the read. With no open sitting, it writes nothing.
 
 A person can also record a grant that lets a seat close tickets. The grant stores the person's quote.
-
-`ljos-policyd` checks a shell command against a short list of dangerous actions. It is not a sandbox. A command that runs as you, outside a tool call, is not checked. If policyd is missing, slow, or crashes, the command runs and ljos logs a warning.
 
 <!-- [[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]] -->
 These notes describe ljos 0.38.1.
@@ -18,16 +18,18 @@ These notes describe ljos 0.38.1.
 
 ## Try it
 
+Linux and macOS are supported. Windows works through WSL and is untested.
+
 ```
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 export PATH="$HOME/.local/bin:$PATH"
 ljos doctor
-ljos prefer "The lexical default is BM25+."
-ljos search lexical
+ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
+echo "how do I push the v0.32.0 tag?" | ljos hook --prompt --text
 ljos due
 ```
 
-The installer puts the programs in `~/.local/bin`. It sets up the tracker and the memory writer, then runs `ljos onboard`. `ljos doctor` names any part that does not answer. The preference is stored as written. `ljos search` prints what matches. `ljos due` lists what is ready to grade.
+The installer puts the programs in `~/.local/bin`. It sets up the tracker and the memory writer, then runs `ljos onboard`. `ljos doctor` names any part that does not answer. The preference is stored as written. The hook then prints that preference ahead of the prompt. `ljos due` lists what is ready to grade.
 
 ## What a seat does
 
@@ -153,6 +155,8 @@ reviewed. A yes you said in chat is kept with the acceptance. The seat that hear
 
 Two agents, `alice` and `bob`, each name their seat with `LJOS_SEAT` on the command. Alice adds both seats. One shell can then file, claim, vote, note and read. That shell casts one ballot. Bob writes a note from this shell. His ballot has to come from his own runner.
 
+Seats cast ballots, and `ljos consensus` settles them. With two or more active seats, a protected push needs votes from two model families. A model family is the model a seat's verified record names. A seat with no such record is a family of its own. One active seat settles that check with its own vote. A panel seats each persona the ticket speaks to. Each persona casts its own ballot.
+
 ```
 LJOS_SEAT=alice ljos seat add alice
 LJOS_SEAT=alice ljos seat add bob
@@ -166,7 +170,9 @@ LJOS_SEAT=alice ljos consensus "$id"
 LJOS_SEAT=alice ljos digest
 ```
 
-A second claim on a held ticket is refused, and the refusal names the holder.
+A second claim on a held ticket prints `label claim-conflict:` and names the holder. The ticket stays with that holder.
+A close with open children prints `label children-open:` and leaves the parent open.
+A block that would loop prints `label graph-cycle:` and does not store the edge.
 A persona ballot records the casting seat, the parent session and the persona.
 Every ballot is recorded.
 Ballots count as one voice when they share a session id, a parent, a calling shell or the root session of one agent runner.
@@ -216,7 +222,7 @@ settles consensus for the push check. With two or more seats, the normal quorum 
 ### What happened
 
 `ljos digest` reads the tracker and says what the seats did:
-what each filed, claimed, voted on, noted and finished. Today you read the same
+what each filed, claimed, voted on, noted and finished. You read the same
 facts one at a time with `ljos timeline ISSUE`, `ljos claims` and `ljos log --seat NAME`.
 
 ## What policyd does
@@ -314,8 +320,9 @@ commit's SHA on the held ticket. It never refuses a commit.
 
 ## Jev
 
-Jev is TypeSafe's hosted decision model. It is optional and off by default. Turn it on
-with `~/.config/ljos/jev.toml`. Without that file, ljos calls no model.
+Jev is an optional hosted model. It is off by default. The host named in
+`~/.config/ljos/jev.toml` runs it. Without that file, ljos calls no model.
+[What leaves the machine](docs/privacy.md) is the prompt and the candidate memories.
 
 When ljos calls the model, the model does not judge shell commands. Jev answers questions the seat
 would otherwise answer with word lists and one subagent per voter. Jev answers which memories, which ballots, and which claims:
@@ -394,9 +401,9 @@ tools, guard and memory first: `rule`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. Every listed tool costs its description and
-schema on every session: 7,865 tokens for the core set against 17,781 for all
-fifty-two (o200k_base count of `initialize` instructions and the `tools/list`
-result). `LJOS_MCP_TOOLS=all` lists every tool. Cards are the resources
+schema on every session. The counts are in `measurements/mcp-size.txt`:
+7,865 tokens for the core set and 17,781 for all fifty-two.
+`LJOS_MCP_TOOLS=all` lists every tool. Cards are the resources
 `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, and the protocol is `ljos://protocol`.
 
 ```json
