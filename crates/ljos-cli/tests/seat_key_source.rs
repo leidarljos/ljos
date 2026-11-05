@@ -195,6 +195,7 @@ fn hook(h: &Hab, launch: &Launch) -> Command {
 
 fn apply_env(cmd: &mut Command, h: &Hab, launch: &Launch) {
     cmd.env_clear()
+        .envs(guard_mode::environment())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &h.home)
         .env("XDG_CONFIG_HOME", h.home.join(".config"))

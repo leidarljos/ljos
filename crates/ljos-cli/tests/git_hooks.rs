@@ -88,6 +88,7 @@ impl Hab {
         cmd.args(args)
             .current_dir(cwd)
             .env_clear()
+            .envs(guard_mode::environment())
             .envs(self.base_env())
             .stdin(std::process::Stdio::piped());
         for (key, value) in extra {
@@ -128,6 +129,7 @@ impl Hab {
             .args(args)
             .current_dir(dir)
             .env_clear()
+            .envs(guard_mode::environment())
             .envs(self.base_env())
             .output()
             .unwrap();
@@ -189,6 +191,7 @@ fn git_bare(dir: &Path, args: &[&str]) {
         .arg(dir)
         .args(args)
         .env_clear()
+        .envs(guard_mode::environment())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", dir)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -559,6 +562,7 @@ fn ljos_seat_and_doctor_keep_an_exported_seat() {
         .args(["90", env!("CARGO_BIN_EXE_ljos"), "doctor", "--all"])
         .current_dir(&hab.repo)
         .env_clear()
+        .envs(guard_mode::environment())
         .envs(hab.base_env())
         .envs(extra)
         .output()
@@ -643,6 +647,7 @@ fn under_exec_daemon(hab: &Hab, extra: &[(&str, &str)]) -> Output {
         .args(["hook", "--git-commit"])
         .current_dir(&hab.repo)
         .env_clear()
+        .envs(guard_mode::environment())
         .envs(env_without_seat(hab));
     for (key, value) in extra {
         cmd.env(key, value);
@@ -717,6 +722,7 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
         .arg("seat")
         .current_dir(&hab.repo)
         .env_clear()
+        .envs(guard_mode::environment())
         .envs(hab.base_env())
         .env("LJOS_SEAT", "")
         .env("CURSOR_CONVERSATION_ID", "sand-subagent-002")
@@ -746,6 +752,7 @@ fn repeated_subagent_claim_on_parent_is_idempotent() {
             .args(["claim", id])
             .current_dir(&hab.repo)
             .env_clear()
+            .envs(guard_mode::environment())
             .envs(hab.base_env())
             .env("CURSOR_CONVERSATION_ID", "sand-subagent-0001cccc")
             .output()
@@ -798,6 +805,7 @@ fn git_status(hab: &Hab, args: &[&str]) -> Output {
         .args(args)
         .current_dir(&hab.repo)
         .env_clear()
+        .envs(guard_mode::environment())
         .envs(hab.base_env())
         .output()
         .unwrap()
@@ -924,6 +932,7 @@ fn commit_with(
             .args(args)
             .current_dir(&hab.repo)
             .env_clear()
+            .envs(guard_mode::environment())
             .envs(env.clone())
             .output()
             .unwrap();
@@ -983,6 +992,7 @@ fn a_tracker_commit_is_checked_as_a_tracker_write() {
                 .args(args)
                 .current_dir(&hab.tracker)
                 .env_clear()
+                .envs(guard_mode::environment())
                 .envs(env.clone())
                 .output()
                 .unwrap();
@@ -1171,6 +1181,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
             .args(["push", "-q", "origin", dest])
             .current_dir(&hab.repo)
             .env_clear()
+            .envs(guard_mode::environment())
             .envs(commit_env(&hab, &runner, false))
             .stdin(std::process::Stdio::null())
             .output()
@@ -1187,6 +1198,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
                 &format!("refs/heads/{branch}"),
             ])
             .env_clear()
+            .envs(guard_mode::environment())
             .env("PATH", "/usr/bin:/bin")
             .output()
             .unwrap()
@@ -1198,6 +1210,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
             .args(["doctor", "--all"])
             .current_dir(&hab.repo)
             .env_clear()
+            .envs(guard_mode::environment())
             .envs(hab.base_env())
             .output()
             .unwrap();
@@ -1257,6 +1270,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         .arg(&hab.repo)
         .args(["add", "again.txt"])
         .env_clear()
+        .envs(guard_mode::environment())
         .envs(hab.base_env())
         .output()
         .unwrap();
@@ -1270,6 +1284,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         .arg(&hab.repo)
         .args(["commit", "-q", "-m", "after reinstall"])
         .env_clear()
+        .envs(guard_mode::environment())
         .envs(hab.base_env())
         .output()
         .unwrap();
@@ -1283,6 +1298,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         .arg(&bare)
         .args(["rev-parse", "refs/heads/develop"])
         .env_clear()
+        .envs(guard_mode::environment())
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
@@ -1300,6 +1316,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         .arg(&bare)
         .args(["rev-parse", "refs/heads/develop"])
         .env_clear()
+        .envs(guard_mode::environment())
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
@@ -1328,6 +1345,7 @@ fn a_git_hook_notes_only_a_seat_vissue_toml_lists() {
                 .args(args)
                 .current_dir(&hab.repo)
                 .env_clear()
+                .envs(guard_mode::environment())
                 .envs(env.clone())
                 .output()
                 .unwrap()
@@ -1402,6 +1420,7 @@ fn advisory_a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
             .args(["push", "-q", "origin", dest])
             .current_dir(&hab.repo)
             .env_clear()
+            .envs(guard_mode::environment())
             .envs(commit_env(&hab, &runner, false))
             .stdin(std::process::Stdio::null())
             .output()
@@ -1418,6 +1437,7 @@ fn advisory_a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
                 &format!("refs/heads/{branch}"),
             ])
             .env_clear()
+            .envs(guard_mode::environment())
             .env("PATH", "/usr/bin:/bin")
             .output()
             .unwrap()
@@ -1429,6 +1449,7 @@ fn advisory_a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
             .args(["doctor", "--all"])
             .current_dir(&hab.repo)
             .env_clear()
+            .envs(guard_mode::environment())
             .envs(hab.base_env())
             .output()
             .unwrap();
@@ -1472,6 +1493,7 @@ fn advisory_a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         .arg(&bare)
         .args(["update-ref", "-d", "refs/heads/develop"])
         .env_clear()
+        .envs(guard_mode::environment())
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
@@ -1503,6 +1525,7 @@ fn advisory_a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         .arg(&hab.repo)
         .args(["add", "again.txt"])
         .env_clear()
+        .envs(guard_mode::environment())
         .envs(hab.base_env())
         .output()
         .unwrap();
@@ -1516,6 +1539,7 @@ fn advisory_a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         .arg(&hab.repo)
         .args(["commit", "-q", "-m", "after reinstall"])
         .env_clear()
+        .envs(guard_mode::environment())
         .envs(hab.base_env())
         .output()
         .unwrap();
@@ -1529,6 +1553,7 @@ fn advisory_a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         .arg(&bare)
         .args(["rev-parse", "refs/heads/develop"])
         .env_clear()
+        .envs(guard_mode::environment())
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
@@ -1546,6 +1571,7 @@ fn advisory_a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         .arg(&bare)
         .args(["rev-parse", "refs/heads/develop"])
         .env_clear()
+        .envs(guard_mode::environment())
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();

@@ -148,6 +148,7 @@ fn hook(h: &Hab, tracker: &Path, pack: Option<String>) -> Command {
     let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()
+        .envs(guard_mode::environment())
         .env(
             "PATH",
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),

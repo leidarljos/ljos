@@ -66,6 +66,7 @@ fn hook(hab: &Hab, pack: Option<u16>) -> Command {
     let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()
+        .envs(guard_mode::environment())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))

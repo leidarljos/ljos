@@ -336,6 +336,7 @@ fn run_ljos(
     let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
+        .envs(guard_mode::environment())
         .env("PATH", path)
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))
@@ -723,6 +724,7 @@ else:
         let out = guard_mode::command(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
+            .envs(guard_mode::environment())
             .env("PATH", &path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

@@ -139,6 +139,7 @@ impl World {
         let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
+            .envs(guard_mode::environment())
             .env("PATH", &self.path)
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
@@ -198,6 +199,7 @@ fn runner_cmd(w: &World, args: &[&str]) -> Command {
     let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
+        .envs(guard_mode::environment())
         .env("PATH", &w.path)
         .env("HOME", &w.home)
         .env("XDG_CONFIG_HOME", w.home.join(".config"))

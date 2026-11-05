@@ -28,17 +28,20 @@ pub fn advisory() -> Mode {
     select("advisory")
 }
 
+/// Child entries for the calling thread's explicitly selected mode.
+pub fn environment() -> [(&'static str, &'static str); 1] {
+    MODE.with(|slot| [("LJOS_GUARD_MODE", slot.get())])
+}
+
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program);
-    MODE.with(|slot| {
-        command.env("LJOS_GUARD_MODE", slot.get());
-    });
+    command.envs(environment());
     command
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{advisory, command, select};
+    use super::{advisory, command, environment, select};
     use std::ffi::OsStr;
 
     fn command_mode() -> String {
@@ -82,5 +85,54 @@ mod tests {
         });
         other.join().expect("the independent mode assertions hold");
         assert_eq!(command_mode(), "advisory");
+    }
+
+    #[test]
+    fn cleared_child_environment_retains_explicit_strict_mode() {
+        let _strict = select("strict");
+        let mut child = command("fixture-command");
+        child
+            .arg("fixture-argument")
+            .env("CLEARED_FIXTURE_ENTRY", "discarded")
+            .env_clear()
+            .envs(environment());
+        assert_eq!(child.get_program(), OsStr::new("fixture-command"));
+        assert_eq!(
+            child.get_args().collect::<Vec<_>>(),
+            [OsStr::new("fixture-argument")]
+        );
+        assert_eq!(
+            child.get_envs().collect::<Vec<_>>(),
+            [(OsStr::new("LJOS_GUARD_MODE"), Some(OsStr::new("strict")))]
+        );
+    }
+
+    #[test]
+    fn cleared_child_environment_retains_advisory_and_later_overrides() {
+        let _advisory = advisory();
+        let mut child = command("fixture-command");
+        child
+            .arg("fixture-argument")
+            .env("CLEARED_FIXTURE_ENTRY", "discarded")
+            .env_clear()
+            .envs(environment());
+        assert_eq!(
+            child.get_envs().collect::<Vec<_>>(),
+            [(OsStr::new("LJOS_GUARD_MODE"), Some(OsStr::new("advisory")))]
+        );
+        child.env("LJOS_GUARD_MODE", "strict");
+        child.env("LATER_FIXTURE_ENTRY", "retained");
+        let entries: Vec<_> = child.get_envs().collect();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.contains(&(OsStr::new("LJOS_GUARD_MODE"), Some(OsStr::new("strict")))));
+        assert!(entries.contains(&(
+            OsStr::new("LATER_FIXTURE_ENTRY"),
+            Some(OsStr::new("retained"))
+        )));
+        assert_eq!(child.get_program(), OsStr::new("fixture-command"));
+        assert_eq!(
+            child.get_args().collect::<Vec<_>>(),
+            [OsStr::new("fixture-argument")]
+        );
     }
 }

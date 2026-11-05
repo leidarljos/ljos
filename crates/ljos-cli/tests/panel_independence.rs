@@ -279,6 +279,7 @@ printf '%s' "$2" > "$d/$id.prompt"
         cmd.args(args)
             .current_dir(&self.bin)
             .env_clear()
+            .envs(guard_mode::environment())
             .env("PATH", path)
             .env("HOME", &self.home)
             .env("XDG_DATA_HOME", self.home.join(".local/share"))
@@ -760,6 +761,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         ])
         .current_dir(&world.bin)
         .env_clear()
+        .envs(guard_mode::environment())
         .env(
             "PATH",
             format!(
@@ -789,6 +791,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         .args(["panel", "run", "demo-brief", "--designers", "3"])
         .current_dir(&world.bin)
         .env_clear()
+        .envs(guard_mode::environment())
         .env(
             "PATH",
             format!(

@@ -38,6 +38,7 @@ impl Home {
         let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.env(&mut cmd);
+        cmd.envs(guard_mode::environment());
         cmd.env("LJOS_SEAT", seat);
         run(cmd, stdin)
     }

@@ -55,6 +55,7 @@ impl Session {
 fn session(home: &Path, tools: Option<&str>, calls: &[Value]) -> Session {
     let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
+        .envs(guard_mode::environment())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))

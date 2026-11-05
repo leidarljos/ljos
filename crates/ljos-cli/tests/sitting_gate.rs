@@ -115,6 +115,7 @@ impl Seat {
         let mut cmd = guard_mode::command(program);
         cmd.args(args)
             .env_clear()
+            .envs(guard_mode::environment())
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
