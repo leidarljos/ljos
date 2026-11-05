@@ -343,11 +343,15 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
         bail!("memory: {} is a symlink", path.display());
     }
+    // Two writers of one path must not share a temporary name. A shared
+    // name lets one rename take the file the other is about to place.
+    static TMP_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = TMP_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut tmp_name = path
         .file_name()
         .context("memory: path has no file name")?
         .to_os_string();
-    tmp_name.push(".tmp");
+    tmp_name.push(format!(".{n}.tmp"));
     let tmp = path.with_file_name(tmp_name);
     {
         use std::os::unix::fs::OpenOptionsExt;
