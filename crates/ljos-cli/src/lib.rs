@@ -24850,7 +24850,7 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
 /// issue another seat voted on.
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     if !crate::guard_mode::is_strict() {
-        return advisory_cite_stands(cite, std, result);
+        return advisory_cite_stands(cite);
     }
 
     if let Ok(v) = tracker_show_json(cite) {
@@ -24995,7 +24995,7 @@ pub fn protected_push_refusal(
     quorum: usize,
 ) -> std::result::Result<(), String> {
     if !crate::guard_mode::is_strict() {
-        return advisory_protected_push_refusal(issue, pusher, quorum, std, result);
+        return advisory_protected_push_refusal(issue, pusher, quorum);
     }
 
     let roster = hook_timed("cleared_roster", tracker_roster_names);
@@ -25081,7 +25081,7 @@ fn advisory_protected_push_refusal(
 /// Why the push waits, naming the ballots counted.
 pub fn protected_push_stands(issue: &str, quorum: usize) -> std::result::Result<String, String> {
     if !crate::guard_mode::is_strict() {
-        return advisory_protected_push_stands(issue, quorum, std, result);
+        return advisory_protected_push_stands(issue, quorum);
     }
 
     let card =

@@ -804,6 +804,7 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
         mark,
         kept: false,
         tree: None,
+        label: None,
     };
     ballot.tree = hold_tree(issue, &claimed, &CastTree::here())?;
     Ok(ballot)
