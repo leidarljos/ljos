@@ -29,14 +29,20 @@ pub fn is_strict() -> bool {
     current() == GuardMode::Strict
 }
 
-pub(crate) fn configure_child(command: &mut std::process::Command) {
-    command.env(
+/// Snapshot the selected command mode for an explicitly configured child.
+#[must_use]
+pub fn child_environment() -> [(&'static str, &'static str); 1] {
+    [(
         "LJOS_GUARD_MODE",
         match current() {
             GuardMode::Advisory => "advisory",
             GuardMode::Strict => "strict",
         },
-    );
+    )]
+}
+
+pub(crate) fn configure_child(command: &mut std::process::Command) {
+    command.envs(child_environment());
 }
 
 #[cfg(test)]
@@ -122,6 +128,60 @@ mod tests {
                 .unwrap();
             assert_eq!(value, expected);
         }
+    }
+
+    #[test]
+    fn cleared_child_environments_retain_the_selected_mode_only() {
+        for (mode, expected) in [
+            (GuardMode::Advisory, "advisory"),
+            (GuardMode::Strict, "strict"),
+        ] {
+            let _mode = for_test(mode);
+            let mut command = fixture_command("unused-fixture-command");
+            command.env("DISCARDED_FIXTURE_VALUE", "discarded");
+            command.env_clear().envs(child_environment());
+            let values: Vec<_> = command.get_envs().collect();
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0].0, "LJOS_GUARD_MODE");
+            assert_eq!(values[0].1, Some(std::ffi::OsStr::new(expected)));
+        }
+    }
+
+    #[test]
+    fn explicit_child_overrides_follow_the_selected_mode_snapshot() {
+        let _strict = for_test(GuardMode::Strict);
+        let mut command = fixture_command("unused-fixture-command");
+        command
+            .env_clear()
+            .envs(child_environment())
+            .env("LJOS_GUARD_MODE", "advisory");
+        let value = command
+            .get_envs()
+            .find(|(key, _)| *key == "LJOS_GUARD_MODE")
+            .and_then(|(_, value)| value)
+            .unwrap();
+        assert_eq!(value, "advisory");
+        assert!(is_strict());
+    }
+
+    #[test]
+    fn child_mode_snapshots_remain_stable_across_fixture_scope_changes() {
+        let _advisory = for_test(GuardMode::Advisory);
+        let saved = {
+            let _strict = for_test(GuardMode::Strict);
+            child_environment()
+        };
+        assert_eq!(saved, [("LJOS_GUARD_MODE", "strict")]);
+        assert_eq!(child_environment(), [("LJOS_GUARD_MODE", "advisory")]);
+        let mut command = std::process::Command::new("unused-fixture-command");
+        command.env_clear().envs(saved);
+        let value = command
+            .get_envs()
+            .find(|(key, _)| *key == "LJOS_GUARD_MODE")
+            .and_then(|(_, value)| value)
+            .unwrap();
+        assert_eq!(value, "strict");
+        assert!(!is_strict());
     }
 
     #[test]

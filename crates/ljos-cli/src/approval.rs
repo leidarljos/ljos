@@ -1775,6 +1775,8 @@ mod tests {
     }
 
     fn output(input: &str, rule: &Rule, root: &Path, now: u64) -> String {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         hook_output_at(
             input,
             &hook_call(input),

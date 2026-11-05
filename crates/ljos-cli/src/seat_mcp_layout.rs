@@ -167,6 +167,7 @@ fn codex_home_does_not_name_the_seat() {
 #[test]
 fn a_payload_command_that_is_not_the_seat_is_a_foreign_tool() {
     let (_lock, dir) = review_env();
+    let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
     put(
         &dir.path().join(".cursor/mcp.json"),
         r#"{"mcpServers":{"github":{"command":"ljos-mcp","args":[]}}}"#,
@@ -189,6 +190,7 @@ fn a_payload_command_that_is_not_the_seat_is_a_foreign_tool() {
 #[test]
 fn advisory_a_payload_command_that_is_not_the_seat_is_a_foreign_tool() {
     let (_lock, dir) = review_env();
+    let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Advisory);
     put(
         &dir.path().join(".cursor/mcp.json"),
         r#"{"mcpServers":{"github":{"command":"ljos-mcp","args":[]}}}"#,
