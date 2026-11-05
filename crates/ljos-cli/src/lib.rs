@@ -12478,15 +12478,17 @@ pub fn file_placement(
 /// the subagent is a slice of.
 #[must_use]
 pub fn held_issue() -> Option<String> {
-    // The record the runner's own server left names the holder its claims
-    // were made under. A hook's environment can carry session variables
-    // the server's did not, which hash to another holder that holds
-    // nothing, so the record is asked first.
+    // A named conversation uses its own holder for records and tracker
+    // fallback. Unstamped callers and explicit subagents can also use
+    // their runner's parent records.
     let mut holders: Vec<String> = runner_record_holders(&own_ancestry());
     let own = holder_name();
     if !holders.contains(&own) {
-        holders.push(own);
+        holders.push(own.clone());
     }
+    let conversation = hold_conversation();
+    let (holders, _) =
+        conversation_hold_selection(conversation.as_deref(), own, holders, Vec::new());
     // The hold records answer in milliseconds; the tracker walk below takes
     // seconds on a large tracker, past what a runner lets a hook run.
     if let Some(node) = held_from_records(&holders) {
@@ -33162,13 +33164,45 @@ fn graph_scope_of(dir: Option<&str>) -> String {
     )
 }
 
+/// The authoritative conversation for a hold lookup, including call-local
+/// metadata and every supported runner stamp. A shared shell holder is not
+/// a conversation identifier.
+fn hold_conversation() -> Option<String> {
+    CALL_CONVERSATION
+        .try_with(Clone::clone)
+        .ok()
+        .or_else(cursor_conversation)
+        .or_else(runner_session_id)
+}
+
+/// Select exact holders for a named conversation. Parent lookup remains
+/// available for an unstamped caller or an explicitly named subagent.
+fn conversation_hold_selection(
+    conversation: Option<&str>,
+    own: String,
+    inherited: Vec<String>,
+    chain: Vec<(u32, String)>,
+) -> (Vec<String>, Vec<(u32, String)>) {
+    if conversation.is_some_and(|id| !subagent_id(id)) {
+        return (vec![own], Vec::new());
+    }
+    (inherited, chain)
+}
+
 /// The issue the newest hold record of this conversation names: a record
 /// whose holder is one of `holders`, or whose conversation process is an
 /// ancestor of this one. File reads only, so a hook can afford it.
 fn held_from_records(holders: &[String]) -> Option<String> {
     let seat = seat_name();
     let graph = claim_graph_scope();
-    held_from_records_in(holders, &runtime_dir(), &own_ancestry(), &seat, &graph)
+    let conversation = hold_conversation();
+    let (holders, chain) = conversation_hold_selection(
+        conversation.as_deref(),
+        holder_name(),
+        holders.to_vec(),
+        own_ancestry(),
+    );
+    held_from_records_in(&holders, &runtime_dir(), &chain, &seat, &graph)
 }
 
 /// [`held_from_records`] over one directory and one chain of ancestors. A
@@ -33236,6 +33270,16 @@ pub fn live_held_issues() -> Vec<(String, Hold)> {
             holders.push(own);
         }
         return records_in(&holders, &dir, &chain, &seat, &graph, &hold_alive);
+    }
+    if hold_conversation().is_some_and(|id| !subagent_id(&id)) {
+        return records_in(
+            &[holder_name()],
+            &runtime_dir(),
+            &[],
+            &seat_name(),
+            &claim_graph_scope(),
+            &hold_alive,
+        );
     }
     let mut holders: Vec<String> = runner_record_holders(&own_ancestry());
     let own = holder_name();
@@ -52468,6 +52512,107 @@ mod tests {
             child_sid, my_sid,
             "detached opener left the caller's session"
         );
+    }
+
+    fn stamped_hold_fixture(
+        include_own: bool,
+    ) -> (tempfile::TempDir, String, String, Vec<(u32, String)>) {
+        let dir = tempfile::tempdir().unwrap();
+        let own = holder_for_session("runner", "fixture-thread-own");
+        let other = holder_for_session("runner", "fixture-thread-other");
+        let write = |name: &str, holder: &str, at: &str, issue: &str| {
+            std::fs::write(
+                dir.path().join(format!("hold-{name}")),
+                format!("{holder}\nrunner\n4042\nfixture-runner\n{at}\n{issue}\n-\n"),
+            )
+            .unwrap();
+        };
+        if include_own {
+            write("own", &own, "2026-01-01T00:00:00Z", "project-own1");
+        }
+        write("other", &other, "2026-01-01T01:00:00Z", "project-other2");
+        let chain = vec![(4042, "fixture-runner".to_string())];
+        (dir, own, other, chain)
+    }
+
+    #[test]
+    fn a_stamped_conversation_ignores_a_newer_same_seat_ancestor_hold() {
+        let (dir, own, other, chain) = stamped_hold_fixture(true);
+        let stamp = ("FIXTURE_THREAD_ID", "fixture-thread-own");
+        assert!(runner_session_var(stamp.0, stamp.1));
+        let (conversation, _) =
+            session_choice(vec![(stamp.0.to_string(), stamp.1.to_string())]).unwrap();
+        let unscoped = records_in(
+            std::slice::from_ref(&own),
+            dir.path(),
+            &chain,
+            "runner",
+            "-",
+            &|_| true,
+        );
+        assert_eq!(
+            unscoped[0].0, "project-other2",
+            "the fixture includes the ancestor collision"
+        );
+        let (holders, ancestors) =
+            conversation_hold_selection(Some(&conversation), own.clone(), vec![other], chain);
+        assert_eq!(holders, [own]);
+        assert!(ancestors.is_empty());
+        let found = records_in(&holders, dir.path(), &ancestors, "runner", "-", &|_| true);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "project-own1");
+    }
+
+    #[test]
+    fn a_stamped_conversation_without_a_hold_does_not_borrow_an_ancestor() {
+        let (dir, own, other, chain) = stamped_hold_fixture(false);
+        let (holders, ancestors) = conversation_hold_selection(
+            Some("fixture-thread-own"),
+            own.clone(),
+            vec![other],
+            chain,
+        );
+        assert_eq!(
+            holders,
+            [own],
+            "the tracker fallback receives only the current holder"
+        );
+        assert!(ancestors.is_empty());
+        assert!(records_in(&holders, dir.path(), &ancestors, "runner", "-", &|_| true).is_empty());
+    }
+
+    #[test]
+    fn an_unstamped_lookup_retains_its_parent_hold_candidates() {
+        let (dir, own, other, chain) = stamped_hold_fixture(false);
+        let (holders, ancestors) = conversation_hold_selection(
+            None,
+            own.clone(),
+            vec![other.clone(), own.clone()],
+            chain.clone(),
+        );
+        assert_eq!(holders, [other, own]);
+        assert_eq!(ancestors, chain);
+        let found = records_in(&holders, dir.path(), &ancestors, "runner", "-", &|_| true);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "project-other2");
+    }
+
+    #[test]
+    fn an_explicit_subagent_retains_its_parent_hold_candidates() {
+        let (dir, own, other, chain) = stamped_hold_fixture(false);
+        let id = "sand-sub-fixture-001";
+        assert!(subagent_id(id));
+        let (holders, ancestors) = conversation_hold_selection(
+            Some(id),
+            own.clone(),
+            vec![other.clone(), own.clone()],
+            chain.clone(),
+        );
+        assert_eq!(holders, [other, own]);
+        assert_eq!(ancestors, chain);
+        let found = records_in(&holders, dir.path(), &ancestors, "runner", "-", &|_| true);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "project-other2");
     }
 
     #[test]
