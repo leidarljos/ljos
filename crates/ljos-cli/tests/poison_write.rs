@@ -2357,7 +2357,7 @@ use chat_relay_approval_tests::{approved, payload, pending};
 
 #[test]
 fn strict_a_normalized_prompt_grants_consent_from_its_attested_runner() {
-    let _mode = guard_mode::strict();
+    let _mode = guard_mode::select("strict");
 
     let adapter = "gemini";
     for via_sh in [false, true] {
@@ -2386,7 +2386,7 @@ fn strict_a_normalized_prompt_grants_consent_from_its_attested_runner() {
 
 #[test]
 fn strict_normalized_tool_subagent_and_unattended_prompts_grant_nothing() {
-    let _mode = guard_mode::strict();
+    let _mode = guard_mode::select("strict");
 
     let adapter = "gemini";
     for mode in [

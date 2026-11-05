@@ -16,18 +16,16 @@ impl Drop for Mode {
     }
 }
 
-pub fn strict() -> Mode {
+pub fn select(mode: &'static str) -> Mode {
+    assert!(matches!(mode, "strict" | "advisory"));
     Mode {
-        previous: MODE.with(|slot| slot.replace("strict")),
+        previous: MODE.with(|slot| slot.replace(mode)),
         _thread: std::marker::PhantomData,
     }
 }
 
 pub fn advisory() -> Mode {
-    Mode {
-        previous: MODE.with(|slot| slot.replace("advisory")),
-        _thread: std::marker::PhantomData,
-    }
+    select("advisory")
 }
 
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
