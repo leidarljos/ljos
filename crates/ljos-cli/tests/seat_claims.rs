@@ -128,7 +128,8 @@ fn a_raw_or_legacy_name_does_not_hold_the_claim() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(!out.status.success(), "{said}\n{calls}");
+    assert!(out.status.success(), "{said}\n{calls}");
+    assert!(said.contains("label seat-unresolved"), "{said}");
     assert!(said.contains("no seat of its own"), "{said}");
     assert!(!log_has_claim(&calls), "{calls}");
     clear_log();
@@ -140,7 +141,8 @@ fn a_raw_or_legacy_name_does_not_hold_the_claim() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(!out.status.success(), "{said}\n{calls}");
+    assert!(out.status.success(), "{said}\n{calls}");
+    assert!(said.contains("label seat-unresolved"), "{said}");
     assert!(said.contains("no seat of its own"), "{said}");
     assert!(!log_has_claim(&calls), "{calls}");
 }

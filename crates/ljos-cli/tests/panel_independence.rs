@@ -412,7 +412,8 @@ fn a_choice_with_a_space_is_one_ballot_per_session() {
         &["vote", issue, "--for", "xdg home", "--used", "none"],
     );
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains("already cast") && said.contains("Nothing was cast"),
         "{said}"
@@ -515,7 +516,8 @@ fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
             ],
         );
         let said = text(&out);
-        assert!(!out.status.success(), "{persona}: {said}");
+        assert!(out.status.success(), "{persona}: {said}");
+        assert!(said.contains("label repeated-ballot"), "{persona}: {said}");
         assert!(
             said.contains("already cast")
                 && said.contains("Nothing was cast")
@@ -951,7 +953,8 @@ fn one_session_casts_once_per_sibling_on_the_command_line() {
     assert!(sibling.status.success(), "{}", text(&sibling));
     let again = cast("child-a", "hold");
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
         "{said}"
@@ -983,7 +986,8 @@ fn one_session_casts_once_per_sibling_over_mcp() {
     let (error, said) = cast("child-b", "hold");
     assert!(!error, "a ballot on a sibling is another question: {said}");
     let (error, said) = cast("child-a", "hold");
-    assert!(error, "{said}");
+    assert!(!error, "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains("already cast a ballot on child-a (sess-mcp-0001)"),
         "{said}"
@@ -1528,7 +1532,8 @@ fn a_voter_holding_a_ballot_is_told_to_withdraw_then_cast() {
             ],
         );
         let said = text(&again);
-        assert!(!again.status.success(), "{said}");
+        assert!(again.status.success(), "{said}");
+        assert!(said.contains("label repeated-ballot"), "{said}");
         assert!(
             said.contains("Nothing was cast")
                 && said.contains("for ship")
@@ -1624,7 +1629,8 @@ fn options_appends_a_line_an_existing_issue_can_vote() {
     );
     let one = world.ljos("clerk", "sess-file-0001", &["options", &id, "age"]);
     let said = text(&one);
-    assert!(!one.status.success(), "{said}");
+    assert!(one.status.success(), "{said}");
+    assert!(said.contains("label panel-incomplete"), "{said}");
     assert!(said.contains("two or more"), "{said}");
     let many = world.ljos("clerk", "sess-file-0001", &["options", &id, "age,gpg"]);
     assert!(many.status.success(), "{}", text(&many));
@@ -1720,7 +1726,8 @@ fn runs_with_their_own_harness_ids_each_count_and_one_run_counts_once() {
         ],
     );
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains("already cast") && said.contains("Nothing was cast"),
         "{said}"
@@ -2080,7 +2087,8 @@ fn a_line_run_again_after_its_call_was_taken_is_already_cast() {
     );
     let again = world.ljos_env("reviewer-a", none, &args);
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains(&format!(
             "already cast a ballot on {issue} ({parent}:agent-r1)"
@@ -2119,7 +2127,8 @@ fn a_line_run_again_after_its_call_was_taken_is_already_cast() {
     );
     let again = world.ljos_env("reviewer-b", named, &args);
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains(&format!(
             "already cast a ballot on {issue} ({parent}:agent-r2)"

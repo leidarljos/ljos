@@ -186,12 +186,10 @@ fn a_reopen_without_a_person_is_refused() -> Result<(), String> {
     b.vissue(&["update", &id, "-s", "DONE"]);
     b.stamp_close(&id, "saddle");
     let out = b.reopen(&id, "saddle");
-    assert!(!out.status.success(), "{}", said(&out));
-    assert!(
-        said(&out).contains("a person reopens a ticket"),
-        "{}",
-        said(&out)
-    );
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("label reopen-warning"), "{text}");
+    assert!(text.contains("a person reopens a ticket"), "{text}");
     assert_eq!(b.show(&id)["state"], "DONE");
     Ok(())
 }
@@ -209,7 +207,8 @@ fn a_hand_close_is_not_refused_for_its_writer() -> Result<(), String> {
     b.git_add_commit(&format!("chore(issues): {id} finished by rohit"));
     let out = b.reopen(&id, "mallory");
     let text = said(&out);
-    assert!(!out.status.success(), "{text}");
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("label reopen-warning"), "{text}");
     assert!(text.contains("a person reopens a ticket"), "{text}");
     assert!(!text.contains("no close this program wrote"), "{text}");
     assert!(!text.contains("was closed by"), "{text}");
@@ -225,7 +224,9 @@ fn an_open_ticket_is_not_reopened() -> Result<(), String> {
     let id = b.issue("still open");
     b.vissue(&["update", &id, "-s", "STARTED"]);
     let out = b.reopen(&id, "saddle");
-    assert!(!out.status.success(), "{}", said(&out));
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("label reopen-warning"), "{text}");
     assert_eq!(b.show(&id)["state"], "STARTED");
     Ok(())
 }

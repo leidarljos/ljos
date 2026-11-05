@@ -4703,6 +4703,15 @@ fn seated() -> Option<Seat> {
 ///
 /// `assignee` is another seat and the verb does not delegate, or
 /// `vissue.toml` does not list it.
+/// Keep a policy label on `err`. A plain failure is named with `verb`.
+fn keep_policy(verb: &str, err: anyhow::Error) -> anyhow::Error {
+    if policy_label::as_policy(&err).is_some() {
+        err
+    } else {
+        anyhow::anyhow!("{verb}: {err}")
+    }
+}
+
 pub fn write_assignee(
     verb: &str,
     checked: &Seat,
@@ -4713,7 +4722,9 @@ pub fn write_assignee(
     if same_holder(&assignee, &checked.holder) || slug == canonical_seat_name(&checked.seat) {
         return Ok(assignee);
     }
-    claim_holder(&assignee).map_err(|e| anyhow::anyhow!("{verb}: {e}"))?;
+    if let Err(err) = claim_holder(&assignee) {
+        return Err(keep_policy(verb, err));
+    }
     if !delegates {
         return Err(policy_label::labelled(
             "assignee-mismatch",
@@ -4724,7 +4735,9 @@ pub fn write_assignee(
             ),
         ));
     }
-    registered_seat(&assignee).map_err(|e| anyhow::anyhow!("{verb}: {e}"))?;
+    if let Err(err) = registered_seat(&assignee) {
+        return Err(keep_policy(verb, err));
+    }
     Ok(assignee)
 }
 
@@ -17884,7 +17897,10 @@ fn post_claim_horizon(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        bail!("{label}: empty text is not a claim");
+        return Err(policy_label::labelled(
+            "empty-input",
+            format!("{label}: empty text is not a claim"),
+        ));
     }
     let kind = atom_kind(label)?;
     let mut atom = atom_body(kind, trimmed, workspace);
@@ -17923,7 +17939,10 @@ pub fn packset_write_agent(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        bail!("{label}: empty text is not a claim");
+        return Err(policy_label::labelled(
+            "empty-input",
+            format!("{label}: empty text is not a claim"),
+        ));
     }
     let kind = atom_kind(label)?;
     let prefix = format!("{label}: POST /v1/atoms failed");
@@ -18041,7 +18060,10 @@ pub fn mcp_claim_atom(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        bail!("{label}: empty text is not a claim");
+        return Err(policy_label::labelled(
+            "empty-input",
+            format!("{label}: empty text is not a claim"),
+        ));
     }
     let kind = atom_kind(label)?;
     let mut atom = atom_body(kind, trimmed, workspace);
@@ -18167,7 +18189,10 @@ fn agent_sourced_atom(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        bail!("{label}: empty text is not a claim");
+        return Err(policy_label::labelled(
+            "empty-input",
+            format!("{label}: empty text is not a claim"),
+        ));
     }
     let kind = atom_kind(label)?;
     let mut atom = atom_body(kind, trimmed, workspace);
@@ -18386,7 +18411,10 @@ pub(crate) fn queue_memory(
         let why = pack_copy::gate_refusal(text)
             .unwrap_or_else(|| "the pack would refuse this copy".into());
         memory_port::keep_prose(text, kind, &why);
-        bail!("queue: the pack would refuse this copy");
+        return Err(policy_label::labelled(
+            "writer-pending",
+            "queue: the pack would refuse this copy",
+        ));
     }
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -18596,7 +18624,10 @@ pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> R
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        bail!("{label}: empty text is not a claim");
+        return Err(policy_label::labelled(
+            "empty-input",
+            format!("{label}: empty text is not a claim"),
+        ));
     }
     let kind = atom_kind(label)?;
     let prefix = format!("{label}: POST /v1/atoms failed");
@@ -18630,11 +18661,17 @@ pub fn packset_write_agent_note_tagged(text: &str, tags: &[String]) -> Result<Va
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty("note");
-        bail!("Remember: empty text is not a note");
+        return Err(policy_label::labelled(
+            "empty-input",
+            "Remember: empty text is not a note",
+        ));
     }
     let Some((issue, _)) = live_held_issue() else {
         memory_port::keep_unattached(trimmed);
-        bail!(NOTE_WITHOUT_TICKET);
+        return Err(policy_label::labelled(
+            "unattached-note",
+            NOTE_WITHOUT_TICKET,
+        ));
     };
     let client = pack()?;
     let workspace = client.workspace();
@@ -18765,7 +18802,10 @@ pub fn packset_write_scoped(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        bail!("{label}: empty text is not a claim");
+        return Err(policy_label::labelled(
+            "empty-input",
+            format!("{label}: empty text is not a claim"),
+        ));
     }
     let kind = atom_kind(label)?;
     let mut atom = atom_body(kind, trimmed, &workspace);
@@ -18827,7 +18867,10 @@ pub fn packset_write_as(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        bail!("{label}: empty text is not a claim");
+        return Err(policy_label::labelled(
+            "empty-input",
+            format!("{label}: empty text is not a claim"),
+        ));
     }
     let kind = atom_kind(label)?;
     let mut atom = atom_body(kind, trimmed, &workspace);
@@ -18919,14 +18962,23 @@ pub struct Persona {
 pub fn persona_atom(p: &Persona, workspace: &str) -> Result<Value> {
     let name = p.name.trim();
     if name.is_empty() {
-        bail!("persona: a name is required");
+        return Err(policy_label::labelled(
+            "persona-owner-warning",
+            "persona: a name is required",
+        ));
     }
     if !(0.0..=1.0).contains(&p.anchor) {
-        bail!("persona: anchor {} is not in [0, 1]", p.anchor);
+        return Err(policy_label::labelled(
+            "persona-owner-warning",
+            format!("persona: anchor {} is not in [0, 1]", p.anchor),
+        ));
     }
     let view = p.view.trim();
     if view.is_empty() {
-        bail!("persona: say in a sentence or two how {name} reads the work");
+        return Err(policy_label::labelled(
+            "persona-owner-warning",
+            format!("persona: say in a sentence or two how {name} reads the work"),
+        ));
     }
     let mut atom = atom_body("persona", view, workspace);
     atom["name"] = Value::String(name.into());
@@ -18937,11 +18989,14 @@ pub fn persona_atom(p: &Persona, workspace: &str) -> Result<Value> {
     if let Some(r) = p.runner.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
         let names = persona_session::runner_names();
         if !names.is_empty() && !names.iter().any(|n| n == r) {
-            bail!(
-                "persona: runner {r:?} is not a [[harness]] in {}; it names {}",
-                harnesses_path().display(),
-                names.join(", ")
-            );
+            return Err(policy_label::labelled(
+                "persona-owner-warning",
+                format!(
+                    "persona: runner {r:?} is not a [[harness]] in {}; it names {}",
+                    harnesses_path().display(),
+                    names.join(", ")
+                ),
+            ));
         }
         atom["runner"] = Value::String(r.into());
     }
@@ -19035,11 +19090,14 @@ pub fn write_persona_as(p: &Persona, how: PersonaWrite) -> Result<Value> {
     let owner = match (how, live.as_ref().and_then(persona_owner)) {
         (PersonaWrite::Learned, Some(kept)) => kept,
         (PersonaWrite::Define, Some(kept)) if foreign_owner(&kept, &seat, &holder) => {
-            bail!(
-                "persona: {name} was defined by {}, and personas are shared by every seat on this pack. \
+            return Err(policy_label::labelled(
+                "persona-owner-warning",
+                format!(
+                    "persona: {name} was defined by {}, and personas are shared by every seat on this pack. \
                  Pass --replace to take it over, or pick another name. Nothing was written",
-                owner_phrase(&kept),
-            );
+                    owner_phrase(&kept),
+                ),
+            ));
         }
         (PersonaWrite::Define, Some(kept)) => kept,
         _ => (seat, holder, now_utc()),
@@ -19199,7 +19257,10 @@ pub fn check_persona(p: &Persona, how: PersonaWrite) -> Result<String> {
 pub fn retire_persona(name: &str, take_over: bool) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
-        bail!("persona: name the persona to retire");
+        return Err(policy_label::labelled(
+            "persona-owner-warning",
+            "persona: name the persona to retire",
+        ));
     }
     let client = pack()?;
     let workspace = client.workspace();
@@ -19210,16 +19271,22 @@ pub fn retire_persona(name: &str, take_over: bool) -> Result<String> {
         .filter(|a| a.get("name").and_then(Value::as_str) == Some(name))
         .collect();
     let Some(live) = latest_persona_atoms(&same).remove(name) else {
-        bail!("persona: no persona {name} on this pack; `ljos personas` lists them");
+        return Err(policy_label::labelled(
+            "persona-owner-warning",
+            format!("persona: no persona {name} on this pack; `ljos personas` lists them"),
+        ));
     };
     let owner = persona_owner(&live)
         .filter(|kept| !take_over && foreign_owner(kept, &seat_name(), &holder_name()));
     if let Some(kept) = owner {
-        bail!(
-            "persona: {name} was defined by {}, so this seat may not retire it. \
+        return Err(policy_label::labelled(
+            "persona-owner-warning",
+            format!(
+                "persona: {name} was defined by {}, so this seat may not retire it. \
              Pass --replace to retire it anyway. Nothing was withdrawn",
-            owner_phrase(&kept)
-        );
+                owner_phrase(&kept)
+            ),
+        ));
     }
     let mut withdrawn = 0;
     for id in same
@@ -19529,19 +19596,25 @@ pub fn shipped_playbooks() -> Vec<Playbook> {
 pub fn parse_playbook_name(name: &str) -> Result<&'static str> {
     let n = name.trim();
     if n.is_empty() {
-        bail!(
-            "playbook: a name is required ({})",
-            PLAYBOOK_NAMES.join(", ")
-        );
+        return Err(policy_label::labelled(
+            "playbook-warning",
+            format!(
+                "playbook: a name is required ({})",
+                PLAYBOOK_NAMES.join(", ")
+            ),
+        ));
     }
     PLAYBOOK_NAMES
         .iter()
         .copied()
         .find(|k| *k == n)
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "playbook: unknown name {n:?}; the closed set is {}",
-                PLAYBOOK_NAMES.join(", ")
+            policy_label::labelled(
+                "playbook-warning",
+                format!(
+                    "playbook: unknown name {n:?}; the closed set is {}",
+                    PLAYBOOK_NAMES.join(", ")
+                ),
             )
         })
 }
@@ -19555,7 +19628,10 @@ pub fn playbook_atom(p: &Playbook, workspace: &str) -> Result<Value> {
     let name = parse_playbook_name(&p.name)?;
     let body = p.body.trim();
     if body.is_empty() {
-        bail!("playbook: {name} needs a recipe body");
+        return Err(policy_label::labelled(
+            "playbook-warning",
+            format!("playbook: {name} needs a recipe body"),
+        ));
     }
     let mut atom = atom_body("playbook", body, workspace);
     atom["name"] = Value::String(name.into());
@@ -19689,9 +19765,12 @@ pub fn playbook_among(name: &str, pack: &[Playbook]) -> Result<Playbook> {
         .into_iter()
         .find(|p| p.name == name)
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "playbook: unknown name {name:?}; the closed set is {}",
-                PLAYBOOK_NAMES.join(", ")
+            policy_label::labelled(
+                "playbook-warning",
+                format!(
+                    "playbook: unknown name {name:?}; the closed set is {}",
+                    PLAYBOOK_NAMES.join(", ")
+                ),
             )
         })
 }
@@ -19875,18 +19954,27 @@ pub fn bind_playbook(issue: &str, name: &str) -> Result<()> {
     let issue = issue.trim();
     let name = name.trim();
     if issue.is_empty() {
-        bail!("playbook: an issue is required");
+        return Err(policy_label::labelled(
+            "playbook-warning",
+            "playbook: an issue is required",
+        ));
     }
     if name.is_empty() {
-        bail!("playbook: a name is required");
+        return Err(policy_label::labelled(
+            "playbook-warning",
+            "playbook: a name is required",
+        ));
     }
     let name = parse_playbook_name(name)?;
     if let Some(have) = bound_playbook(issue) {
         if have != name {
-            bail!(
-                "playbook: {issue} is bound to {have} until finish or release; \
+            return Err(policy_label::labelled(
+                "playbook-warning",
+                format!(
+                    "playbook: {issue} is bound to {have} until finish or release; \
                  a new task is a new sitting"
-            );
+                ),
+            ));
         }
         let _ = write_playbook_cache(issue, name);
         return Ok(());
@@ -20433,7 +20521,10 @@ pub fn workflow_start(parent: &str, name: &str) -> Result<String> {
     let mut out = String::new();
     match workflow_name_from_issue(&v) {
         Some(have) if have != name => {
-            bail!("workflow: {parent} already runs the {have} workflow; nothing was written")
+            return Err(policy_label::labelled(
+                "workflow-warning",
+                format!("workflow: {parent} already runs the {have} workflow; nothing was written"),
+            ));
         }
         Some(_) => out.push_str(&format!("{parent} already runs the {name} workflow\n")),
         None => {
@@ -20563,23 +20654,32 @@ fn note_objections_below(issue: &str, state: &converge::PanelState) -> Result<()
 /// tracker refusing a write.
 pub fn workflow_round(parent: &str) -> Result<String> {
     let Some(status) = workflow_status(parent)? else {
-        bail!("workflow: {parent} carries no workflow; `ljos workflow {parent} --start feature` starts one");
+        return Err(policy_label::labelled(
+            "workflow-warning",
+            format!("workflow: {parent} carries no workflow; `ljos workflow {parent} --start feature` starts one"),
+        ));
     };
     if status.stage == "design" && status.open.is_empty() {
-        bail!(
-            "workflow: {parent} has no design child; next: {}",
-            status.next
-        );
+        return Err(policy_label::labelled(
+            "workflow-warning",
+            format!(
+                "workflow: {parent} has no design child; next: {}",
+                status.next
+            ),
+        ));
     }
     let state = panel_state_for(parent, &status)?;
     let limits = converge::load_budget().workflow;
     match converge::plan_round(&state, &limits) {
         converge::RoundPlan::Passed => {
             let _ = note_objections_below(parent, &state);
-            bail!(
-                "workflow: {parent} passed round {}; a person closes it",
-                status.round
-            );
+            Err(policy_label::labelled(
+                "workflow-warning",
+                format!(
+                    "workflow: {parent} passed round {}; a person closes it",
+                    status.round
+                ),
+            ))
         }
         converge::RoundPlan::Hold { why } => {
             let ids: Vec<&str> = status.open.iter().map(|c| c.id.as_str()).collect();
@@ -20588,7 +20688,10 @@ pub fn workflow_round(parent: &str) -> Result<String> {
             } else {
                 format!(" ({})", ids.join(", "))
             };
-            bail!("workflow: {parent} {why}{which}. Nothing was written");
+            Err(policy_label::labelled(
+                "workflow-warning",
+                format!("workflow: {parent} {why}{which}. Nothing was written"),
+            ))
         }
         converge::RoundPlan::FileBlocking {
             objections,
@@ -21264,26 +21367,35 @@ fn tags_of(v: &Value) -> Vec<String> {
 /// to `issue`.
 pub(crate) fn panel_roster(issue: &str) -> Result<(usize, Vec<Persona>)> {
     if bound_playbook(issue).is_none() {
-        bail!(
-            "panel: no playbook bound on {issue}; `ljos playbook {issue} NAME` or \
+        return Err(policy_label::labelled(
+            "panel-incomplete",
+            format!(
+                "panel: no playbook bound on {issue}; `ljos playbook {issue} NAME` or \
              `ljos sitting {issue} --playbook NAME` names one before personas enter"
-        );
+            ),
+        ));
     }
     let all = personas_from_pack()?;
     if all.is_empty() {
-        bail!("panel: the pack holds no personas; `ljos persona NAME --anchor A --view ...` writes one");
+        return Err(policy_label::labelled(
+            "panel-incomplete",
+            "panel: the pack holds no personas; `ljos persona NAME --anchor A --view ...` writes one",
+        ));
     }
     let words = issue_words(issue);
     let personas = panel_personas(issue, &all);
     if personas.is_empty() {
-        bail!(
-            "panel: none of the {} personas speaks to {issue}: none holds its words ({}) as a \
+        return Err(policy_label::labelled(
+            "panel-incomplete",
+            format!(
+                "panel: none of the {} personas speaks to {issue}: none holds its words ({}) as a \
              domain or in its view. Write the voters it needs, one domain per --about or \
              comma-separated: `ljos persona NAME --view \"how it reads the work\" --about cvmfs,security`, \
              or tag the issue with a domain a persona holds",
-            all.len(),
-            words.join(", ")
-        );
+                all.len(),
+                words.join(", ")
+            ),
+        ));
     }
     Ok((all.len(), personas))
 }
@@ -21347,7 +21459,10 @@ pub fn options_line(raw: &[String]) -> Result<String> {
         .map(str::to_string)
         .collect();
     if options.len() < 2 {
-        bail!("options: name two or more, separated by commas");
+        return Err(policy_label::labelled(
+            "panel-incomplete",
+            "options: name two or more, separated by commas",
+        ));
     }
     Ok(format!("Options: {}", options.join(", ")))
 }
@@ -21393,7 +21508,10 @@ pub fn jev_ballot(name: &str, issue: &str) -> Result<jev::Ballot> {
     let v = issue_record(issue)?;
     let options = issue_options(v["body"].as_str().unwrap_or(""));
     if options.len() < 2 {
-        bail!("vote --jev: {issue} has no `Options: A, B` line with two options or more");
+        return Err(policy_label::labelled(
+            "panel-incomplete",
+            format!("vote --jev: {issue} has no `Options: A, B` line with two options or more"),
+        ));
     }
     let full = brief(name, issue)?;
     let state = full
@@ -21627,7 +21745,10 @@ pub fn panel_jev(issue: &str, out: &Path) -> Result<String> {
     let all = personas_from_pack()?;
     let personas = panel_personas(issue, &all);
     if personas.is_empty() {
-        bail!("panel --jev: no persona speaks to {issue}");
+        return Err(policy_label::labelled(
+            "panel-incomplete",
+            format!("panel --jev: no persona speaks to {issue}"),
+        ));
     }
     let mut ballots = Vec::new();
     for p in &personas {
@@ -21861,10 +21982,11 @@ impl Rule {
 pub fn write_rule(rule: &Rule, basis: Basis) -> Result<Value> {
     validate_rule(rule)?;
     if rule.verdict == "allow" {
-        bail!(
+        return Err(policy_label::labelled(
+            "rule-input-warning",
             "rule: an allow is kept in the user rules, not the pack: `ljos rule --user PATTERN \
-             --verdict allow --why REASON` at your own terminal"
-        );
+             --verdict allow --why REASON` at your own terminal",
+        ));
     }
     let pattern = rule.pattern.trim();
     let reason = rule.reason.trim();
@@ -21889,7 +22011,10 @@ pub fn write_rule(rule: &Rule, basis: Basis) -> Result<Value> {
 /// bad pattern leaves neither the preference nor a rule behind.
 pub fn preference_rules(text: &str, deny: &[String], ask: &[String]) -> Result<Vec<Rule>> {
     if text.trim().is_empty() && !(deny.is_empty() && ask.is_empty()) {
-        bail!("prefer: the preference is the rule's reason, so it needs words");
+        return Err(policy_label::labelled(
+            "rule-input-warning",
+            "prefer: the preference is the rule's reason, so it needs words",
+        ));
     }
     let rules: Vec<Rule> = deny
         .iter()
@@ -21902,23 +22027,32 @@ pub fn preference_rules(text: &str, deny: &[String], ask: &[String]) -> Result<V
         })
         .collect();
     if rules.iter().any(|r| r.pattern.is_empty()) {
-        bail!("prefer: a --deny or --ask pattern over the command line is required");
+        return Err(policy_label::labelled(
+            "rule-input-warning",
+            "prefer: a --deny or --ask pattern over the command line is required",
+        ));
     }
     if let Some(rule) = rules.iter().find(|r| blankets_ordinary_pushes(&r.pattern)) {
-        bail!(
-            "prefer: `{}` matches an ordinary git push. Cite the exact command; `git push*` is refused",
-            rule.pattern
-        );
+        return Err(policy_label::labelled(
+            "rule-input-warning",
+            format!(
+                "prefer: `{}` matches an ordinary git push. Cite the exact command; `git push*` is refused",
+                rule.pattern
+            ),
+        ));
     }
     if under_a_runner() {
         if let Some(rule) = rules
             .iter()
             .find(|r| broader_than_cited(&r.pattern, &r.reason))
         {
-            bail!(
-                "prefer: `{}` is broader than the command this cites",
-                rule.pattern
-            );
+            return Err(policy_label::labelled(
+                "rule-input-warning",
+                format!(
+                    "prefer: `{}` is broader than the command this cites",
+                    rule.pattern
+                ),
+            ));
         }
     }
     Ok(rules)
@@ -21976,17 +22110,26 @@ fn cited_push(reason: &str) -> Option<String> {
 pub fn validate_rule(rule: &Rule) -> Result<()> {
     let pattern = rule.pattern.trim();
     if pattern.is_empty() {
-        bail!("rule: a pattern over the command line is required");
+        return Err(policy_label::labelled(
+            "rule-input-warning",
+            "rule: a pattern over the command line is required",
+        ));
     }
     if !matches!(rule.verdict.as_str(), "deny" | "ask" | "allow") {
-        bail!(
-            "rule: the verdict is deny, ask or allow, not {:?}",
-            rule.verdict
-        );
+        return Err(policy_label::labelled(
+            "rule-input-warning",
+            format!(
+                "rule: the verdict is deny, ask or allow, not {:?}",
+                rule.verdict
+            ),
+        ));
     }
     let reason = rule.reason.trim();
     if reason.is_empty() {
-        bail!("rule: say in a sentence why, so the reader who is stopped knows");
+        return Err(policy_label::labelled(
+            "rule-input-warning",
+            "rule: say in a sentence why, so the reader who is stopped knows",
+        ));
     }
     // An allow is the person loosening their own gate; how wide is theirs
     // to say. The checks below keep a deny or an ask as exact as its cite.
@@ -21994,18 +22137,24 @@ pub fn validate_rule(rule: &Rule) -> Result<()> {
         return Ok(());
     }
     if blankets_ordinary_pushes(pattern) {
-        bail!(
-            "rule: `{pattern}` matches an ordinary git push. A rule stays as exact as the command \
+        return Err(policy_label::labelled(
+            "rule-input-warning",
+            format!(
+                "rule: `{pattern}` matches an ordinary git push. A rule stays as exact as the command \
              it cites; `git push*` and any pattern that covers ordinary branch pushes is refused. \
              A deny can still name a force push (`git push --force*`, `*--force*`) or deleting \
              a remote branch (`git push*--delete*`)"
-        );
+            ),
+        ));
     }
     if under_a_runner() && broader_than_cited(pattern, reason) {
-        bail!(
-            "rule: `{pattern}` is broader than the command this cites. An agent-written rule \
+        return Err(policy_label::labelled(
+            "rule-input-warning",
+            format!(
+                "rule: `{pattern}` is broader than the command this cites. An agent-written rule \
              matches that command and nothing wider"
-        );
+            ),
+        ));
     }
     Ok(())
 }
@@ -30687,7 +30836,10 @@ pub fn receive(
         .trim_end()
         .to_string();
         if !said.starts_with("signed by ") {
-            bail!("receive: satchel is not signed by an accepted key: {said}");
+            return Err(policy_label::labelled(
+                "import-unverified",
+                format!("receive: satchel is not signed by an accepted key: {said}"),
+            ));
         }
         if let Some(hex) = said
             .strip_prefix("signed by ")
@@ -30698,7 +30850,10 @@ pub fn receive(
         }
         lines.push(said);
     } else if import {
-        bail!("receive: unsigned satchel; will not import");
+        return Err(policy_label::labelled(
+            "import-unverified",
+            "receive: unsigned satchel; will not import",
+        ));
     } else {
         lines.push("unsigned".into());
     }
@@ -32424,22 +32579,29 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                                 assignee,
                             )
                         }
-                        Some(h) => bail!(
-                            "{}",
-                            held_by_another_message(
-                                node,
-                                assignee,
-                                &h,
-                                if hold_alive(&h) {
-                                    "still running"
-                                } else {
-                                    "its runner is gone"
-                                }
-                            )
-                        ),
-                        None => bail!(
-                            "claim: {node} is held by another conversation, not by {assignee} (this one; `ljos seat` says where the name came from), and no record on this host names it. That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; a conversation that is gone is released with `ljos release {node} --assignee NAME` under the name it held"
-                        ),
+                        Some(h) => {
+                            return Err(policy_label::labelled(
+                                "claim-conflict",
+                                held_by_another_message(
+                                    node,
+                                    assignee,
+                                    &h,
+                                    if hold_alive(&h) {
+                                        "still running"
+                                    } else {
+                                        "its runner is gone"
+                                    },
+                                ),
+                            ));
+                        }
+                        None => {
+                            return Err(policy_label::labelled(
+                                "claim-conflict",
+                                format!(
+                                    "claim: {node} is held by another conversation, not by {assignee} (this one; `ljos seat` says where the name came from), and no record on this host names it. That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; a conversation that is gone is released with `ljos release {node} --assignee NAME` under the name it held"
+                                ),
+                            ));
+                        }
                     },
                     None => Err(e),
                 };
@@ -32471,7 +32633,7 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                      `ljos release {name} --assignee {assignee}` hands it back"
                 ));
             }
-            bail!("{}", lines.join("\n"))
+            Err(policy_label::labelled("claim-conflict", lines.join("\n")))
         }
     }
 }
@@ -32505,7 +32667,10 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
     let rows: Vec<Value> =
         serde_json::from_str(listed.trim()).context("claim --next: claimdag ready --json")?;
     if rows.is_empty() {
-        bail!("claim --next: nothing in the claim graph is ready");
+        return Err(policy_label::labelled(
+            "claim-conflict",
+            "claim --next: nothing in the claim graph is ready",
+        ));
     }
     for row in &rows {
         let Some(id) = row["id"].as_str() else {
@@ -32525,10 +32690,13 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
             Err(e) => return Err(e),
         }
     }
-    bail!(
-        "claim --next: {} ready, and another conversation took each first",
-        rows.len()
-    )
+    Err(policy_label::labelled(
+        "claim-conflict",
+        format!(
+            "claim --next: {} ready, and another conversation took each first",
+            rows.len()
+        ),
+    ))
 }
 
 /// Whether a refusal means the graph moved since the listing.
@@ -34468,10 +34636,16 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
     let issue = issue.trim();
     let on = on.trim();
     if issue.is_empty() || on.is_empty() {
-        bail!("block: name the ticket and the one it waits on");
+        return Err(policy_label::labelled(
+            "input-warning",
+            "block: name the ticket and the one it waits on",
+        ));
     }
     if !remove && issue == on {
-        bail!("block: issue {issue} cannot block itself");
+        return Err(policy_label::labelled(
+            "graph-cycle",
+            format!("block: issue {issue} cannot block itself"),
+        ));
     }
     let layout = vissue_core::Layout::resolve(None, None)?;
     layout.require_tracker()?;
@@ -34525,7 +34699,15 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
         doc.write()?;
         Ok(Some(()))
     })
-    .map_err(|err| anyhow::anyhow!("block: {err}"))?;
+    .map_err(|err| {
+        let detail = format!("block: {err}");
+        let lower = detail.to_ascii_lowercase();
+        if lower.contains("cycle") || lower.contains("loop") {
+            policy_label::labelled("graph-cycle", detail)
+        } else {
+            policy_label::failed("effect-unavailable", anyhow::anyhow!(detail))
+        }
+    })?;
     match changed {
         None if remove => Ok(format!("block: {issue} was not blocked by {on}\n")),
         None => Ok(format!("block: {issue} already waits on {on}\n")),
@@ -35891,16 +36073,27 @@ struct StateFlip {
 pub fn reopen(issue: &str) -> Result<String> {
     let issue = issue.trim();
     if issue.is_empty() {
-        bail!("reopen: an issue id is required; nothing was written");
+        return Err(policy_label::labelled(
+            "reopen-warning",
+            "reopen: an issue id is required; nothing was written",
+        ));
     }
     if !person_present() {
-        bail!("reopen: a person reopens a ticket; nothing was written");
+        return Err(policy_label::labelled(
+            "reopen-warning",
+            "reopen: a person reopens a ticket; nothing was written",
+        ));
     }
     let caller = reopen_caller()?;
     let v = issue_record(issue)?;
     let state = v["state"].as_str().unwrap_or("");
     if !undo::is_closed(state) {
-        bail!("reopen: {issue} is {state}, neither finished nor cancelled; nothing was written");
+        return Err(policy_label::labelled(
+            "reopen-warning",
+            format!(
+                "reopen: {issue} is {state}, neither finished nor cancelled; nothing was written"
+            ),
+        ));
     }
     let prior = match find_written_close(issue) {
         CloseFind::Ready(found) if same_writer(&caller, &found.writer) => found.prior,
@@ -35942,11 +36135,19 @@ fn reopen_caller() -> Result<String> {
             Ok(canonical_seat_name(&file))
         }
         (Some(file), None) => Ok(canonical_seat_name(&file)),
-        (Some(file), Some(process)) => bail!(
-            "reopen: LJOS_SEAT {process} does not match the seat file {file}; nothing was written"
-        ),
+        (Some(file), Some(process)) => {
+            Err(policy_label::labelled(
+                "reopen-warning",
+                format!(
+                    "reopen: LJOS_SEAT {process} does not match the seat file {file}; nothing was written"
+                ),
+            ))
+        }
         (None, _) => {
-            bail!("reopen: the seat file does not name the caller; nothing was written")
+            Err(policy_label::labelled(
+                "reopen-warning",
+                "reopen: the seat file does not name the caller; nothing was written",
+            ))
         }
     }
 }
@@ -36158,28 +36359,37 @@ fn ticket_has_lesson(issue: &str) -> bool {
 /// of `issue`, or it is `DONE` or `CANCELLED`.
 pub fn against_child(issue: &str, child: Option<&str>) -> Result<String> {
     let Some(child) = child.map(str::trim).filter(|id| !id.is_empty()) else {
-        bail!(
-            "vote: a no ballot on {issue} has to name a child ticket. \
+        return Err(policy_label::labelled(
+            "ballot-eligibility-warning",
+            format!(
+                "vote: a no ballot on {issue} has to name a child ticket. \
              `ljos file --parent {issue} \"TITLE\"` files one, then \
              `ljos vote {issue} --against REASON --child ID` links it. Nothing was cast"
-        );
+            ),
+        ));
     };
     let card = tracker_show_json(child).with_context(|| {
         format!("vote: {child} is not a ticket on this tracker. Nothing was cast")
     })?;
     let parent = card["parent"].as_str().unwrap_or("").trim();
     if parent != issue.trim() {
-        bail!(
-            "vote: {child} is not a child of {issue}. \
+        return Err(policy_label::labelled(
+            "ballot-eligibility-warning",
+            format!(
+                "vote: {child} is not a child of {issue}. \
              `ljos file --parent {issue} \"TITLE\"` files one under it. Nothing was cast"
-        );
+            ),
+        ));
     }
     let state = card["state"].as_str().unwrap_or("").trim();
     if matches!(state, "DONE" | "CANCELLED") {
-        bail!(
-            "vote: {child} is {state}, so it does not keep the objection open. \
+        return Err(policy_label::labelled(
+            "ballot-eligibility-warning",
+            format!(
+                "vote: {child} is {state}, so it does not keep the objection open. \
              File another child with `ljos file --parent {issue}`. Nothing was cast"
-        );
+            ),
+        ));
     }
     Ok(child.to_string())
 }

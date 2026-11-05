@@ -351,7 +351,8 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
         true,
     );
     let said = text(&other);
-    assert!(!other.status.success(), "other ticket closed: {said}");
+    assert!(other.status.success(), "other ticket closed: {said}");
+    assert!(said.contains("label close-unverified"), "{said}");
     assert!(
         said.contains("not papers's to close") || said.contains("not papers"),
         "{said}"
@@ -377,7 +378,8 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
         true,
     );
     let said = text(&ungranted);
-    assert!(!ungranted.status.success(), "ungranted closed: {said}");
+    assert!(ungranted.status.success(), "ungranted closed: {said}");
+    assert!(said.contains("label close-unverified"), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
     assert!(said.contains("a person closes a ticket"), "{said}");
     assert!(
@@ -422,7 +424,8 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
         true,
     );
     let said = text(&handed);
-    assert!(!handed.status.success(), "hand edit closed: {said}");
+    assert!(handed.status.success(), "hand edit closed: {said}");
+    assert!(said.contains("label close-unverified"), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
     assert!(
         !std::fs::read_to_string(&w.log)
@@ -448,7 +451,8 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
         false,
     );
     let said = text(&self_grant);
-    assert!(!self_grant.status.success(), "self grant: {said}");
+    assert!(self_grant.status.success(), "self grant: {said}");
+    assert!(said.contains("label grant-unverified"), "{said}");
     assert!(said.contains("cannot grant itself"), "{said}");
 }
 
@@ -516,7 +520,8 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
 
     let unlisted = finish_close(&w, "papers", "proj-own");
     let said = text(&unlisted);
-    assert!(!unlisted.status.success(), "unlisted closed: {said}");
+    assert!(unlisted.status.success(), "unlisted closed: {said}");
+    assert!(said.contains("label close-unverified"), "{said}");
     assert!(
         said.contains("not papers's to close") || said.contains("not papers"),
         "{said}"
@@ -590,9 +595,10 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
     let other = finish_close(&w, "reachbook", "proj-own");
     let said = text(&other);
     assert!(
-        !other.status.success(),
+        other.status.success(),
         "file grant closed another id: {said}"
     );
+    assert!(said.contains("label close-unverified"), "{said}");
     assert_eq!(log_updates(&w, "proj-own"), 0);
 
     let mut doc: toml::Value =
@@ -623,7 +629,8 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
     .unwrap();
     let handed = finish_close(&w, "scribe", "proj-scribe");
     let said = text(&handed);
-    assert!(!handed.status.success(), "hand edit closed: {said}");
+    assert!(handed.status.success(), "hand edit closed: {said}");
+    assert!(said.contains("label close-unverified"), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
     assert_eq!(
         log_updates(&w, "proj-scribe"),
@@ -632,14 +639,20 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
     );
     let edited = finish_close(&w, "papers", "proj-own");
     let said = text(&edited);
-    assert!(!edited.status.success(), "edited list closed: {said}");
+    assert!(edited.status.success(), "edited list closed: {said}");
+    assert!(said.contains("label close-unverified"), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
     assert_eq!(log_updates(&w, "proj-own"), 0, "a hand-edited list closed");
     let before = log_updates(&w, "proj-else");
     let again = finish_close(&w, "papers", "proj-else");
     assert!(
-        !again.status.success(),
+        again.status.success(),
         "edited grant still closed: {}",
+        text(&again)
+    );
+    assert!(
+        text(&again).contains("label close-unverified"),
+        "{}",
         text(&again)
     );
     assert_eq!(log_updates(&w, "proj-else"), before);
@@ -706,7 +719,8 @@ fn a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
     );
     let refused = runner_finish(&w, "clerk", "proj-clerk");
     let said = text(&refused);
-    assert!(!refused.status.success(), "ungranted close wrote: {said}");
+    assert!(refused.status.success(), "ungranted close wrote: {said}");
+    assert!(said.contains("label close-unverified"), "{said}");
     assert!(said.contains("a person closes a ticket"), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
     assert_eq!(log_updates(&w, "proj-clerk"), 0, "an ungranted close wrote");

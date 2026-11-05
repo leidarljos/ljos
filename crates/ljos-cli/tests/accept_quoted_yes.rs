@@ -210,8 +210,9 @@ fn a_yes_that_records_nothing_useful_is_refused() {
     let seat = Seat::new();
     let at = an_hour_ago();
     let out = seat.accept(&["--quote", "yes", "--at", &at, "--via", "inky"]);
-    assert!(!out.status.success());
     let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("label approval-unverified"), "{text}");
     assert!(text.contains("1 words"), "{text}");
 
     let ahead = ljos_cli::utc_at(
@@ -229,7 +230,12 @@ fn a_yes_that_records_nothing_useful_is_refused() {
         "--via",
         "inky",
     ]);
-    assert!(!out.status.success());
-    assert!(said(&out).contains("ahead of now"), "{}", said(&out));
+    let ahead_text = said(&out);
+    assert!(out.status.success(), "{ahead_text}");
+    assert!(
+        ahead_text.contains("label approval-unverified"),
+        "{ahead_text}"
+    );
+    assert!(ahead_text.contains("ahead of now"), "{ahead_text}");
     assert_eq!(seat.rows()[0]["status"], "open");
 }

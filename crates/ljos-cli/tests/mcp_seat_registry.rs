@@ -134,7 +134,8 @@ fn a_listed_seat_cannot_write_as_another_assignee() {
         args["seat"] = "saddle".into();
         args["assignee"] = "stranger".into();
         let said = call(tool, args);
-        assert!(said.contains("\"isError\":true"), "{tool}: {said}");
+        assert!(said.contains("\"isError\":false"), "{tool}: {said}");
+        assert!(said.contains("label assignee-mismatch"), "{tool}: {said}");
         assert!(
             said.contains("stranger is not this seat, saddle"),
             "{tool}: {said}"

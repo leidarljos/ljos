@@ -125,4 +125,69 @@ mod tests {
         assert_eq!(label.label, "grant-unverified");
         assert!(err.to_string().contains("Nothing was written"), "{err}");
     }
+
+    #[test]
+    fn an_empty_lesson_is_an_input_label() {
+        let err = crate::packset_write_agent("remember", "  ", None, None).unwrap_err();
+        let label = as_policy(&err).expect("label");
+        assert_eq!(label.label, "empty-input");
+        assert!(
+            err.to_string().contains("empty text is not a claim"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_persona_without_a_name_is_an_owner_warning() {
+        let err = crate::persona_atom(
+            &crate::Persona {
+                name: " ".into(),
+                anchor: 0.5,
+                view: "It reads the work.".into(),
+                ..crate::Persona::default()
+            },
+            "seat",
+        )
+        .unwrap_err();
+        assert_eq!(
+            as_policy(&err).expect("label").label,
+            "persona-owner-warning"
+        );
+    }
+
+    #[test]
+    fn an_unknown_playbook_name_is_a_warning() {
+        let err = crate::parse_playbook_name("not-a-recipe").unwrap_err();
+        let label = as_policy(&err).expect("label");
+        assert_eq!(label.label, "playbook-warning");
+        assert!(err.to_string().contains("unknown name"), "{err}");
+    }
+
+    #[test]
+    fn an_unseen_recipient_is_labelled() {
+        let known = std::collections::BTreeSet::from(["claude-review".to_string()]);
+        let err = crate::mail::check_known("claude", &known, false).unwrap_err();
+        let label = as_policy(&err).expect("label");
+        assert_eq!(label.label, "recipient-unseen");
+        assert!(err.to_string().contains("claude-review"), "{err}");
+    }
+
+    #[test]
+    fn a_rule_without_a_pattern_is_an_input_warning() {
+        let err = crate::validate_rule(&crate::Rule {
+            pattern: " ".into(),
+            verdict: "deny".into(),
+            reason: "the command is named".into(),
+        })
+        .unwrap_err();
+        assert_eq!(as_policy(&err).expect("label").label, "rule-input-warning");
+    }
+
+    #[test]
+    fn a_self_block_is_a_cycle_label() {
+        let err = crate::block_edge("probe-aaaa", "probe-aaaa", false).unwrap_err();
+        let label = as_policy(&err).expect("label");
+        assert_eq!(label.label, "graph-cycle");
+        assert!(err.to_string().contains("cannot block itself"), "{err}");
+    }
 }

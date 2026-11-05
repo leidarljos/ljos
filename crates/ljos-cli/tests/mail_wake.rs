@@ -213,9 +213,10 @@ fn a_send_wakes_the_recipient_and_an_interrupt_holds_its_stop() {
     assert!(joined.status.success(), "{}", text(&joined));
 
     let missed = home.ljos(SENDER, &["send", "claude", "hello"], None);
-    assert!(!missed.status.success(), "{}", text(&missed));
+    assert!(missed.status.success(), "{}", text(&missed));
     assert!(
-        text(&missed).contains("Did you mean claude-review?"),
+        text(&missed).contains("label recipient-unseen")
+            && text(&missed).contains("Did you mean claude-review?"),
         "{}",
         text(&missed)
     );

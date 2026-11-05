@@ -150,10 +150,11 @@ fn inbox_exits_when_the_pack_rejects_kind_message() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !out.status.success(),
+        out.status.success(),
         "inbox exited {:?}: {said}",
         out.status.code()
     );
+    assert!(said.contains("label writer-version-warning"), "{said}");
     assert!(said.contains("does not keep mail"), "{said}");
     assert!(said.contains("kind message"), "{said}");
     assert!(said.contains("0.13.0"), "{said}");

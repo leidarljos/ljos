@@ -181,8 +181,13 @@ fn with_no_roster_any_named_seat_writes_and_a_list_keeps_the_rest_out() {
     let b = Bench::new();
     let path = b.roster("seats = [\"saddle\"]\n");
     let refused = b.ljos(Some("stranger"), &note);
-    let err = String::from_utf8_lossy(&refused.stderr);
-    assert!(!refused.status.success(), "{refused:?}");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(refused.status.success(), "{err}");
+    assert!(err.contains("label seat-unlisted"), "{err}");
     assert!(err.contains("no seat named stranger"), "{err}");
     assert!(err.contains("vissue.toml"), "{err}");
     assert!(err.contains(&path.display().to_string()), "{err}");
@@ -270,8 +275,13 @@ fn a_panel_opened_by_an_unnamed_or_unlisted_seat_files_nothing() {
     );
     b.roster("seats = [\"saddle\"]\n");
     let unlisted = open_panel(&b, &[("LJOS_SEAT", "stranger")]);
-    let err = String::from_utf8_lossy(&unlisted.stderr);
-    assert!(!unlisted.status.success(), "{unlisted:?}");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&unlisted.stdout),
+        String::from_utf8_lossy(&unlisted.stderr)
+    );
+    assert!(unlisted.status.success(), "{err}");
+    assert!(err.contains("label seat-unlisted"), "{err}");
     assert!(err.contains("no seat named stranger"), "{err}");
     assert_eq!(b.calls(), before, "an unlisted seat adds nothing");
 }
@@ -336,8 +346,13 @@ fn a_bump_plan_is_filed_only_as_a_listed_seat() {
     assert_eq!(b.calls(), "", "a dry run writes nothing");
 
     let unlisted = b.ljos(Some("stranger"), &plan);
-    let err = String::from_utf8_lossy(&unlisted.stderr);
-    assert!(!unlisted.status.success(), "{unlisted:?}");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&unlisted.stdout),
+        String::from_utf8_lossy(&unlisted.stderr)
+    );
+    assert!(unlisted.status.success(), "{err}");
+    assert!(err.contains("label seat-unlisted"), "{err}");
     assert!(err.contains("no seat named stranger"), "{err}");
     assert_eq!(b.calls(), "", "nothing reached the tracker");
 
@@ -406,8 +421,13 @@ fn an_assignee_that_is_another_seat_is_refused() {
         &["complete", "proj-aaaa", "--assignee", "stranger"],
     ] {
         let out = b.ljos(Some("saddle"), args);
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "{args:?} went through: {out:?}");
+        let err = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{args:?} went through: {err}");
+        assert!(err.contains("label assignee-mismatch"), "{args:?}: {err}");
         assert!(
             err.contains("stranger is not this seat, saddle"),
             "{args:?}: {err}"
@@ -424,8 +444,13 @@ fn release_hands_back_only_to_a_seat_vissue_toml_lists() {
         Some("saddle"),
         &["release", "proj-aaaa", "--assignee", "stranger"],
     );
-    let err = String::from_utf8_lossy(&refused.stderr);
-    assert!(!refused.status.success(), "{refused:?}");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(refused.status.success(), "{err}");
+    assert!(err.contains("label seat-unlisted"), "{err}");
     assert!(err.contains("no seat named stranger"), "{err}");
     assert_eq!(b.calls(), "", "nothing reached the tracker");
 
@@ -444,8 +469,13 @@ fn a_vissue_seats_array_is_the_list_of_seats() {
     let note = ["note", "proj-aaaa", "progress"];
     b.roster("seats = [\"saddle\"]\n");
     let refused = b.ljos(Some("stranger"), &note);
-    let err = String::from_utf8_lossy(&refused.stderr);
-    assert!(!refused.status.success(), "{refused:?}");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(refused.status.success(), "{err}");
+    assert!(err.contains("label seat-unlisted"), "{err}");
     assert!(err.contains("no seat named stranger"), "{err}");
     assert!(err.contains("which lists saddle"), "{err}");
     assert_eq!(b.calls(), "", "nothing reached the tracker");
@@ -459,8 +489,13 @@ fn a_vissue_list_that_names_no_seat_refuses_every_write() {
     let b = Bench::new();
     let path = b.roster("seats = []\n");
     let out = b.ljos(Some("saddle"), &["note", "proj-aaaa", "progress"]);
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "{out:?}");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("label seat-unlisted"), "{err}");
     assert!(err.contains("lists no seat"), "{err}");
     assert!(err.contains("vissue.toml"), "{err}");
     assert!(err.contains(&path.display().to_string()), "{err}");
@@ -575,8 +610,13 @@ fn a_vissue_file_that_is_not_toml_refuses_every_write() {
     let path = b.roster("seats = [\"saddle\"\n");
     for args in WRITES {
         let out = b.ljos(Some("saddle"), args);
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "{args:?} went through: {out:?}");
+        let err = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{args:?}: {err}");
+        assert!(err.contains("label seat-unlisted"), "{args:?}: {err}");
         assert!(err.contains("vissue.toml"), "{args:?}: {err}");
         assert!(
             err.contains(&format!("{} is not TOML", path.display())),
@@ -599,8 +639,13 @@ fn ljos_seats_does_not_point_the_check_at_another_file() {
         ],
         &["note", "proj-aaaa", "progress"],
     );
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "{out:?}");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("label seat-unlisted"), "{err}");
     assert!(err.contains("no seat named stranger"), "{err}");
     assert!(err.contains("vissue.toml"), "{err}");
     assert!(err.contains(&path.display().to_string()), "{err}");
@@ -617,10 +662,15 @@ fn a_vissue_file_that_links_to_nothing_refuses_every_write() {
     for seat in ["saddle", "rohit"] {
         for args in WRITES {
             let out = b.ljos(Some(seat), args);
-            let err = String::from_utf8_lossy(&out.stderr);
+            let err = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(out.status.success(), "{seat} {args:?}: {err}");
             assert!(
-                !out.status.success(),
-                "{seat} {args:?} went through: {out:?}"
+                err.contains("label seat-unlisted"),
+                "{seat} {args:?}: {err}"
             );
             assert!(err.contains("vissue.toml"), "{seat} {args:?}: {err}");
             assert!(
@@ -730,15 +780,25 @@ fn seat_add_writes_the_roster_row_and_that_seat_can_file_and_note() {
     );
 
     let refused = b.ljos(Some("stranger"), &["note", "proj-aaaa", "left out"]);
-    let err = String::from_utf8_lossy(&refused.stderr);
-    assert!(!refused.status.success(), "{refused:?}");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(refused.status.success(), "{err}");
+    assert!(err.contains("label seat-unlisted"), "{err}");
     assert!(err.contains("no seat named stranger"), "{err}");
     assert!(err.contains("vissue.toml"), "{err}");
     assert!(!b.calls().contains("left out"), "{}", b.calls());
 
     let blocked = b.ljos(Some("stranger"), &["seat", "add", "inky"]);
-    let err = String::from_utf8_lossy(&blocked.stderr);
-    assert!(!blocked.status.success(), "{blocked:?}");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&blocked.stdout),
+        String::from_utf8_lossy(&blocked.stderr)
+    );
+    assert!(blocked.status.success(), "{err}");
+    assert!(err.contains("label seat-unlisted"), "{err}");
     assert!(err.contains("vissue.toml"), "{err}");
     let roster = std::fs::read_to_string(b.tracker.join("vissue.toml")).unwrap();
     assert!(!roster.contains("inky"), "{roster}");
@@ -757,8 +817,13 @@ fn a_seat_table_in_vissue_toml_is_the_list() {
     );
     assert!(b.calls().contains("vissue note"), "{}", b.calls());
     let refused = b.ljos(Some("stranger"), &["file", "nope", "--top", "-p", "proj"]);
-    let err = String::from_utf8_lossy(&refused.stderr);
-    assert!(!refused.status.success(), "{refused:?}");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(refused.status.success(), "{err}");
+    assert!(err.contains("label seat-unlisted"), "{err}");
     assert!(err.contains("vissue.toml"), "{err}");
     assert!(!b.calls().contains("vissue create"), "{}", b.calls());
 }

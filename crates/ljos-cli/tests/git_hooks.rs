@@ -719,9 +719,14 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
         .env("CURSOR_CONVERSATION_ID", "sand-subagent-002")
         .output()
         .unwrap();
-    let seat_err = String::from_utf8_lossy(&seat.stderr);
-    assert!(!seat.status.success(), "ljos seat named a subagent seat");
-    assert!(seat_err.contains("no seat of its own"), "{seat_err}");
+    let seat_said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&seat.stdout),
+        String::from_utf8_lossy(&seat.stderr)
+    );
+    assert!(seat.status.success(), "{seat_said}");
+    assert!(seat_said.contains("label seat-unresolved"), "{seat_said}");
+    assert!(seat_said.contains("no seat of its own"), "{seat_said}");
 }
 
 /// Re-running `ljos claim <parent>` from the same sand-sub conversation

@@ -1715,7 +1715,10 @@ fn run_command() -> Result<()> {
             | Cmd::Deed { .. }
     ) && ljos_cli::unseated_subagent()
     {
-        bail!("{}", ljos_cli::SUBAGENT_NO_SEAT);
+        return Err(ljos_cli::policy_label::labelled(
+            "seat-unresolved",
+            ljos_cli::SUBAGENT_NO_SEAT,
+        ));
     }
     // These act on the claims the hooks keep, and the hooks of the tool
     // calls before this one may still be queued.
