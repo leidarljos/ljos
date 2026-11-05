@@ -1531,6 +1531,8 @@ mod tests {
 
     #[test]
     fn simultaneous_quiet_guards_keep_independent_state() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         use super::{mark_pack_quiet, pack_quiet, QuietPack};
         use std::sync::{Arc, Barrier};
 
@@ -1557,6 +1559,8 @@ mod tests {
 
     #[test]
     fn nested_quiet_guards_clear_only_after_the_last_drop() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         use super::{holding_quiet, mark_pack_quiet, pack_quiet, QuietPack};
 
         let outer = QuietPack::enter();

@@ -103,14 +103,15 @@ it has no command hook, so the env file names its seat.
    ok  env wrote /home/you/.config/ljos/example-host.env; source /home/you/.config/ljos/example-host.env
    $ source ~/.config/ljos/example-host.env
    $ echo "$prompt" | ljos hook --prompt
-   $ ljos policy --fail-on-deny -- git push --force
+   $ ljos policy -- git push --force
 
 ``--skills DIR`` writes the protocol there. ``ljos onboard --harness shell --skills DIR``
 is the same shape under the name ``shell``. The env file sets
 ``LJOS_SEAT`` to the runner's name. Nothing is registered as an MCP server
-or a hook. ``--fail-on-deny`` exits 1 when the answer is a deny. Without
-the flag, ``ljos hook`` and ``ljos policy`` still exit 0, so a runner that
-reads the JSON sees no change. An ``ask`` still exits 0; the text says ``ask``.
+or a hook. ``ljos hook`` and ``ljos policy`` exit 0 on every answer, and a rule
+that fires is one ``warning:`` line in the text. The command runs either way,
+unless the person turned on blocking; then ``--fail-on-deny`` exits 1 on
+policyd's ``deny``.
 
 Add a seat, and let it close tickets
 ====================================
@@ -190,8 +191,9 @@ The sender does not wait on it and needs to know nothing about the recipient's r
 A command runs under ``sh -c`` with ``LJOS_SEAT`` set to the recipient, so ``ljos inbox`` in it reads the right mail.
 With a prefix wake, ``LJOS_SEAT`` is still the run seat that matched the prefix.
 ``LJOS_WAKE_FROM``, ``LJOS_WAKE_MSG``, ``LJOS_WAKE_ISSUE`` and ``LJOS_WAKE_INTERRUPT`` name the message, so a wake can ignore plain mail and act only on an interrupt.
-policyd judges the command when it is set and again on every run.
-A ``deny`` or an ``ask`` keeps it from running, since nobody is there to answer an ask.
+policyd reads the command when it is set and again on every run.
+A rule that fires is a warning line in the reply and in ``wake.log``, and the command still runs.
+A command under ``block-on-warning`` warns with that label. It does not block, and the command runs.
 A command is stopped after 30 seconds; ``--timeout S`` changes that, and an agent run such as ``claude -p`` needs a longer one.
 Two sends close together start two wakes, so a wake that resumes a session holds a lock (``flock -n``) and leaves a running session to its ``Stop`` hook.
 
@@ -236,7 +238,9 @@ From then on, before each prompt, the runner pipes it to ``ljos hook`` and
 the memories it activates return as context, preferences first.
 Do not add ``PreToolUse`` as a search event. A turn issues many tool
 calls and one prompt. On a tool call the hook asks ``ljos-policyd``, the
-Trusted Computing Base (TCB), and then applies pack rules. A deny blocks.
+Trusted Computing Base (TCB), and then applies pack rules. A rule that fires
+is one warning line the runner shows, and the command runs. The hook never
+answers deny, ask or block.
 If policyd is missing, slow or crashes, the command runs and ljos logs a warning.
 A force push or a recursive delete outside ``/tmp`` runs, and the answer carries its rule and warning.
 The bypass log keeps the label.
@@ -246,7 +250,7 @@ The bypass log keeps the label.
    $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
    {"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"allow\twarn\tgit-force-push\ta force push rewrites a published branch"}}
 
-An ``ask`` rule uses the caller's native permission UI when available. If
+In strict mode, an ``ask`` rule uses the caller's native permission UI when available. If
 the hook stops a command and prints a request tag, the agent calls
 ``ljos_request_approval`` with that tag to open a confirmation form in chat.
 For a request tagged ``olive-123abc``, the tool arguments are:
@@ -313,13 +317,13 @@ A policy daemon does the same with the argv:
 Let policyd fix a command
 =========================
 
-policyd can answer a command with a fixed one instead of a refusal.
+policyd can answer a command with a fixed one instead of a warning.
 The answer is one line of three tab-separated fields: ``allow``, ``rewrite`` and the new command.
 The first rewrite runs a command through ``uv run``.
 
-The new line runs only when the guard also allows it. Claude Code, Codex, Grok Build and
-Cursor's ``preToolUse`` take it through the hook's updated input. Other runners get a refusal
-that names the new command, so the old line never runs. ``ljos policy -- COMMAND``
+The new line runs only when the guard has no warning on it. Claude Code, Codex, Grok Build and
+Cursor's ``preToolUse`` take it through the hook's updated input. Other runners run the old line,
+with a warning that names the new command. ``ljos policy -- COMMAND``
 prints the answer without running anything, so you can see a rewrite before an agent meets it.
 
 Each swap also shows a note naming both commands and leaves a row in
@@ -329,8 +333,8 @@ Each swap also shows a note naming both commands and leaves a row in
 Choose which branches the push check covers
 ===========================================
 
-ljos keeps one push check. A push onto a protected branch asks when the ticket of your
-sitting has no settled consensus. The check asks and never denies. It covers ``develop`` and ``main``
+ljos keeps one push check. A push onto a protected branch warns when the ticket of your
+sitting has no settled consensus. The push runs either way. It covers ``develop`` and ``main``
 unless ``consensus_branches`` in ``ljos.toml`` names others. The user and seat files set the list.
 The repository's ``ljos.toml``, ``LJOS_CONFIG`` and ``.ljos/gates.toml`` only add branches to it.
 
@@ -344,10 +348,11 @@ lease push to a feature branch.
 A lease push or a force push onto a protected branch runs too, with the ``git-force-push`` warning, and the bypass log keeps the label.
 ``main``, ``master`` and ``develop`` are always protected, and ``protected_branches`` adds more.
 Deleting a remote branch runs with the ``git-push-delete`` warning, and the bypass log keeps the label.
-On a protected branch each asks for the same consensus as an ordinary push, and nothing more.
+On a protected branch each warns on the same consensus as an ordinary push, and nothing more.
 
 With one active seat in ``vissue.toml``, that seat's own vote settles consensus for the check.
 This is solo mode. With two or more seats, the normal quorum applies.
+The ``pre-push`` git hook, once installed, still holds that push under a runner.
 For a push that must never happen, protect the branch on the forge as well.
 
 Let Jev judge the prompt
@@ -541,8 +546,8 @@ Cursor's IDE and its ``agent`` command line take the server from the same
 ``~/.cursor/mcp.json`` and the hooks from ``~/.cursor/hooks.json``. Cursor
 does not hand a prompt hook's context to the model, so the memories a
 prompt activates arrive with the first tool result instead, as on Grok
-Build. A shell command gets an ``ask`` rule's question as Cursor's own
-permission prompt. Cursor runs the Claude hooks itself where
+Build. A shell command that a rule names is allowed, with the rule's
+warning in Cursor's ``user_message``. Cursor runs the Claude hooks itself where
 ``ljos onboard --harness claude`` already ran. The events Claude's file
 names stay there. ``beforeShellExecution``, ``preToolUse``,
 ``beforeMCPExecution``, ``beforeReadFile`` and ``postToolUseFailure`` are
@@ -1129,3 +1134,16 @@ claim graph is reported and is not a failure: the first claim creates it.
 A seat nobody named is a derived seat, and a derived seat is a seat. The ``seat source`` row says where the name came from.
 A damaged note queue is a ``no`` row and fails: it holds lessons the pack has not taken.
 An empty or missing log of either is whole.
+
+Command decision modes
+----------------------
+
+Command rules warn by default. To enforce deny rules and ask for command
+consent, launch the client and its hook/server processes with
+``LJOS_GUARD_MODE=strict``. In strict mode an ask uses native confirmation or
+an explicit one-use grant; eligible ordinary branch pushes can offer a
+human-selected task scope. In advisory mode no command-consent request is
+created or consumed. Git attribution and leak checks, shared hooks and
+cloud worker isolation remain enforced in both modes. Consent does not
+bypass those checks.
+

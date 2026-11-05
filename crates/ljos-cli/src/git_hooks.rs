@@ -1012,6 +1012,10 @@ fn dropped_refusal(name: &str) -> Option<String> {
 /// be refused, the person is asked for their passphrase on the
 /// controlling terminal; a right answer lets this one call through.
 fn gate(name: &str, refs: &str) -> Result<()> {
+    if !crate::guard_mode::is_strict() {
+        return advisory_gate(name, refs);
+    }
+
     let Some(cause) = crate::runner_cause() else {
         return Ok(());
     };
@@ -1039,6 +1043,23 @@ fn gate(name: &str, refs: &str) -> Result<()> {
             Err(anyhow!("sitting-gate: {text}"))
         }
     }
+}
+
+fn advisory_gate(name: &str, refs: &str) -> Result<()> {
+    if crate::runner_cause().is_none() {
+        return Ok(());
+    }
+    let refused = match gate_runner(name, refs) {
+        Ok(()) => return Ok(()),
+        Err(refused) => refused,
+    };
+    // A sitting that has not settled is a label. The push or commit runs.
+    // The cloud seat push rule is judged on the shell line, not here.
+    eprintln!("ljos: sitting-gate: {refused:#}");
+    if let Some(why) = dropped_refusal(name) {
+        eprintln!("ljos: {why}");
+    }
+    Ok(())
 }
 
 fn gate_runner(name: &str, refs: &str) -> Result<()> {
@@ -1694,6 +1715,8 @@ mod tests {
 
     #[test]
     fn the_doctor_fails_a_pre_push_stub_that_drops_a_refusal() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let dir = tempfile::tempdir().unwrap();
         let ours = dir.path().join("git-hooks");
         let ours_s = ours.display().to_string();
@@ -1744,6 +1767,8 @@ mod tests {
 
     #[test]
     fn a_pre_push_ref_list_names_the_protected_branch_it_sends() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let branches = vec!["develop".to_string(), "main".to_string()];
         let line = |dst: &str| format!("refs/heads/x 1111 {dst} 0000\n");
         assert_eq!(protected_ref("", &branches), None);
@@ -1760,16 +1785,18 @@ mod tests {
 
     #[test]
     fn hook_children_carry_the_guard_without_touching_the_process() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let before_hook = std::env::var_os("LJOS_GIT_HOOK");
         let before_dir = std::env::var_os("GIT_DIR");
-        let mut plain = Command::new("true");
+        let mut plain = crate::guard_mode::fixture_command("true");
         plain.env("GIT_DIR", "keep");
         hook_child_env(&mut plain);
         assert_eq!(mapped(&plain, "GIT_DIR"), Some(Some(OsStr::new("keep"))));
         assert_eq!(mapped(&plain, "LJOS_GIT_HOOK"), None);
 
         let _guard = HookChildren::enter();
-        let mut cmd = Command::new("true");
+        let mut cmd = crate::guard_mode::fixture_command("true");
         cmd.env("GIT_DIR", "from-the-hook");
         cmd.env("PATH", "/usr/bin");
         hook_child_env(&mut cmd);
@@ -1784,6 +1811,8 @@ mod tests {
 
     #[test]
     fn a_tests_paragraph_is_kept_and_a_by_line_is_refused() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         assert!(!super::line_refused("Tests: cargo test"));
         assert!(!super::message_refused("note\n\nTests: cargo test\n"));
         assert!(super::line_refused("Co-authored-by: Ada <ada@example.com>"));

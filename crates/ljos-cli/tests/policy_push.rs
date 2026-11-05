@@ -7,11 +7,14 @@
 //! whose `LJOS_CITE` does not stand is denied.
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::path::Path;
 use std::process::Command;
 
 fn policy(home: &Path, line: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    guard_mode::command(env!("CARGO_BIN_EXE_ljos"))
         .arg("policy")
         .arg(line)
         .env("HOME", home)

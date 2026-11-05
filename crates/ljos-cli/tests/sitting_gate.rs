@@ -6,6 +6,9 @@
 //! person at their own terminal is never refused.
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 #[path = "common/terminal.rs"]
 mod terminal;
 
@@ -91,7 +94,7 @@ impl Seat {
                 ballots.display()
             ),
         );
-        let init = Command::new("git")
+        let init = guard_mode::command("git")
             .args(["init", "-q"])
             .current_dir(&repo)
             .output()
@@ -109,7 +112,7 @@ impl Seat {
     }
 
     fn command(&self, program: &str, args: &[&str]) -> Command {
-        let mut cmd = Command::new(program);
+        let mut cmd = guard_mode::command(program);
         cmd.args(args)
             .env_clear()
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
@@ -221,7 +224,7 @@ impl Seat {
     /// to read and the sitting check still sees `develop`.
     fn same_commit_refs(&self) -> String {
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = guard_mode::command("git")
                 .args(args)
                 .current_dir(&self.repo)
                 .output()
@@ -233,7 +236,7 @@ impl Seat {
         git(&["config", "user.name", "t"]);
         git(&["config", "commit.gpgsign", "false"]);
         git(&["config", "core.hooksPath", "/dev/null"]);
-        let head = Command::new("git")
+        let head = guard_mode::command("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&self.repo)
             .output()
@@ -459,7 +462,7 @@ fn write_allow(seat: &Seat, origin: &Path) {
 }
 
 fn git_ok(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = guard_mode::command("git")
         .args(args)
         .current_dir(repo)
         .output()
@@ -566,7 +569,7 @@ fn a_solo_seat_clears_policy_and_the_git_hook() {
     let seat = Seat::new();
     let tracker = seat.home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
-    let init = Command::new("git")
+    let init = guard_mode::command("git")
         .args(["init", "-q"])
         .current_dir(&tracker)
         .output()
@@ -602,7 +605,7 @@ fn two_unslotted_seats_clear_a_protected_push() {
     let seat = Seat::new();
     let tracker = seat.home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
-    let init = Command::new("git")
+    let init = guard_mode::command("git")
         .args(["init", "-q"])
         .current_dir(&tracker)
         .output()
@@ -696,7 +699,7 @@ fn a_commit_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     );
     let fake = seat.bin.join("ljos-mcp");
     std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
-    let mut sleeper = Command::new(&fake).arg("300").spawn().unwrap();
+    let mut sleeper = guard_mode::command(&fake).arg("300").spawn().unwrap();
     let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
     std::fs::write(
         runtime.join(format!("hold-{bare}")),
@@ -779,7 +782,7 @@ fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
     let seat = Seat::new();
     let tracker = seat.home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
-    let init = Command::new("git")
+    let init = guard_mode::command("git")
         .args(["init", "-q"])
         .current_dir(&tracker)
         .output()
@@ -803,7 +806,7 @@ fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
     std::fs::create_dir_all(&runtime).unwrap();
     let fake = seat.bin.join("ljos-mcp");
     std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
-    let mut sleeper = Command::new(&fake)
+    let mut sleeper = guard_mode::command(&fake)
         .arg("300")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -915,7 +918,7 @@ fn a_push_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     );
     let fake = seat.bin.join("ljos-mcp");
     std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
-    let mut sleeper = Command::new(&fake)
+    let mut sleeper = guard_mode::command(&fake)
         .arg("300")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -989,4 +992,332 @@ fn the_person_at_a_terminal_is_not_refused() {
         assert!(out.status.success(), "{line}\n{}", text_of(&out));
         not_refused(&text_of(&out), line);
     }
+}
+
+#[test]
+fn advisory_a_cloud_seat_warns_on_a_protected_push_when_no_seat_has_voted() {
+    let _mode = guard_mode::advisory();
+
+    let seat = Seat::new();
+    let origin = seat._dir.path().join("origin.git");
+    let other = seat._dir.path().join("other.git");
+    git_ok(
+        seat._dir.path(),
+        &["init", "--bare", "-q", origin.to_str().unwrap()],
+    );
+    git_ok(
+        seat._dir.path(),
+        &["init", "--bare", "-q", other.to_str().unwrap()],
+    );
+    let origin = origin.canonicalize().unwrap();
+    let other = other.canonicalize().unwrap();
+    git_ok(
+        &seat.repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git_ok(
+        &seat.repo,
+        &["remote", "add", "other", other.to_str().unwrap()],
+    );
+    cloud_mark(&seat);
+    write_allow(&seat, &origin);
+    let pack = empty_pack();
+    let env = [
+        ("PACKSET_URL", pack.as_str()),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+        // A temporary HOME would leave the cloud rules unread. This seat
+        // is a cloud seat, so those rules have to run.
+        ("LJOS_GUARD", "on"),
+    ];
+    let develop = "git push origin develop";
+
+    let idle = seat.policy(develop, &env);
+    asks_for_consensus(&idle, develop);
+
+    seat.sit();
+    let said = seat.policy(develop, &env);
+    asks_for_consensus(&said, develop);
+    assert!(said.contains("\nwarning: "), "{said}");
+
+    let hooked = seat.hook_turn(develop, &env);
+    asks_for_consensus(&hooked, develop);
+    assert!(!hooked.contains("\"permissionDecision\""), "{hooked}");
+    assert!(!seat.run.join("ljos/approvals").exists(), "{hooked}");
+
+    for line in [
+        "git push --force origin develop",
+        "git push --force-with-lease origin develop",
+        "git push origin :develop",
+        "git push origin --delete develop",
+        "git push origin HEAD:cursor/topic",
+    ] {
+        let said = seat.policy(line, &env);
+        assert!(!said.contains("\nask:"), "{line}\n{said}");
+        assert!(
+            said.contains("\ndeny:") || said.contains("deny:"),
+            "{line}\n{said}"
+        );
+        let hooked = seat.hook_turn(line, &env);
+        assert!(
+            hooked.contains("\"permissionDecision\":\"deny\""),
+            "{line}\n{hooked}"
+        );
+    }
+
+    let seats = seat.home.join(".config/ljos/seats/inky");
+    std::fs::create_dir_all(&seats).unwrap();
+    std::fs::write(seats.join("ljos.toml"), "[cloud]\nbranches = [\"main\"]\n").unwrap();
+    let main = seat.policy("git push origin main", &env);
+    asks_for_consensus(&main, "git push origin main");
+    assert!(main.contains("\nwarning: "), "{main}");
+
+    seat.vote(&[("inky", "revise"), ("flint", "revise")]);
+    let back = seat.policy(develop, &env);
+    asks_for_consensus(&back, develop);
+}
+
+#[test]
+fn advisory_a_gates_file_that_does_not_parse_warns_and_holds_the_git_hook() {
+    let _mode = guard_mode::advisory();
+
+    let seat = Seat::new();
+    std::fs::create_dir_all(seat.repo.join(".ljos")).unwrap();
+    std::fs::write(seat.repo.join(".ljos/gates.toml"), "quorum = [\n").unwrap();
+    let develop = "git push origin develop";
+    let said = seat.policy(develop, &[]);
+    assert!(said.contains("do not read"), "{said}");
+    assert!(!said.contains("1 of the 2 seats"), "{said}");
+    assert!(
+        said.contains("\nwarning: sitting-gate: "),
+        "a malformed gates file was not a warning\n{said}"
+    );
+    let refs = seat.same_commit_refs();
+    let out = seat.git_hook_push(&refs, &[]);
+    let hooked = text_of(&out);
+    assert!(
+        out.status.success(),
+        "a malformed gates file is a label and the push runs\n{hooked}"
+    );
+    assert!(hooked.contains("sitting-gate"), "{hooked}");
+    assert!(hooked.contains("do not read"), "{hooked}");
+    assert!(!hooked.contains("1 of the 2 seats"), "{hooked}");
+}
+
+#[test]
+fn advisory_a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
+    let _mode = guard_mode::advisory();
+
+    use std::time::{Duration, Instant};
+    let seat = Seat::new();
+    let tracker = seat.home.join("tracker");
+    std::fs::create_dir_all(&tracker).unwrap();
+    let init = guard_mode::command("git")
+        .args(["init", "-q"])
+        .current_dir(&tracker)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", text_of(&init));
+    std::fs::write(
+        tracker.join("vissue.toml"),
+        "seats = [\"inky\", \"flint\"]\n",
+    )
+    .unwrap();
+    let marker = seat._dir.path().join("vote-called");
+    let holder = format!("inky@{}", ljos_cli::session_tag(SESSION));
+    script(
+        &seat.bin.join("vissue"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  show) sleep 4 ;;\n  vote) touch '{}' ;;\nesac\nexit 0\n",
+            marker.display()
+        ),
+    );
+    let runtime = seat.run.join("ljos");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let fake = seat.bin.join("ljos-mcp");
+    std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
+    let mut sleeper = guard_mode::command(&fake)
+        .arg("300")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    std::fs::write(
+        runtime.join(format!("hold-{bare}")),
+        format!(
+            "inky\ninky\n{}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n",
+            sleeper.id()
+        ),
+    )
+    .unwrap();
+    let tagged = ljos_cli::work_id(&format!("{holder}:{ISSUE}"));
+    std::fs::write(
+        runtime.join(format!("hold-{tagged}")),
+        format!(
+            "{holder}\ninky\n{}\nljos-mcp\n2026-10-25T00:00:01Z\n{ISSUE}\n-\n",
+            sleeper.id()
+        ),
+    )
+    .unwrap();
+    let root = tracker.to_str().unwrap();
+    let env = [
+        ("VISSUE_ROOT", root),
+        ("ISSUE_ROOT", root),
+        ("VISSUE_NO_ROUTE", "1"),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+        ("CURSOR_CONVERSATION_ID", SESSION),
+    ];
+    let run = |refs: &str| {
+        let started = Instant::now();
+        let out = seat.git_hook_push(refs, &env);
+        (out, started.elapsed())
+    };
+    let develop = seat.same_commit_refs();
+    let (out, took) = run(&develop);
+    let said = text_of(&out);
+    assert!(
+        took >= Duration::from_millis(1500) && took < Duration::from_secs(15),
+        "protected push took {took:?}\n{said}"
+    );
+    assert!(
+        out.status.success(),
+        "a stalled tracker is a label and the push runs\n{said}"
+    );
+    assert!(said.contains("sitting-gate"), "{said}");
+    assert!(
+        said.contains("the tracker was slow, so retry the push"),
+        "protected push\n{said}"
+    );
+    assert!(!said.contains("settled consensus"), "{said}");
+    assert!(!said.contains("model families"), "{said}");
+    assert!(
+        !marker.exists(),
+        "the protected push reached a consensus check"
+    );
+    let topic = develop.replace("refs/heads/develop", "refs/heads/topic");
+    let (out, took) = run(&topic);
+    let said = text_of(&out);
+    assert!(
+        took >= Duration::from_millis(1500) && took < Duration::from_secs(15),
+        "ordinary push took {took:?}\n{said}"
+    );
+    assert!(out.status.success(), "ordinary push was refused\n{said}");
+    assert!(
+        said.contains("the tracker or lock was slow"),
+        "ordinary push\n{said}"
+    );
+    assert!(
+        said.contains(&format!("sitting {ISSUE}")),
+        "the slow check did not name the sitting\n{said}"
+    );
+    assert!(!said.contains("retry the push"), "{said}");
+    assert!(
+        !marker.exists(),
+        "the ordinary push reached a consensus check"
+    );
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
+fn a_cloud_seat_warns_on_a_protected_push_when_no_seat_has_voted() {
+    let seat = Seat::new();
+    let origin = seat._dir.path().join("origin.git");
+    let other = seat._dir.path().join("other.git");
+    git_ok(
+        seat._dir.path(),
+        &["init", "--bare", "-q", origin.to_str().unwrap()],
+    );
+    git_ok(
+        seat._dir.path(),
+        &["init", "--bare", "-q", other.to_str().unwrap()],
+    );
+    let origin = origin.canonicalize().unwrap();
+    let other = other.canonicalize().unwrap();
+    git_ok(
+        &seat.repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git_ok(
+        &seat.repo,
+        &["remote", "add", "other", other.to_str().unwrap()],
+    );
+    cloud_mark(&seat);
+    write_allow(&seat, &origin);
+    let pack = empty_pack();
+    let env = [
+        ("PACKSET_URL", pack.as_str()),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+        // A temporary HOME would leave the cloud rules unread. This seat
+        // is a cloud seat, so those rules have to run.
+        ("LJOS_GUARD", "on"),
+    ];
+    let develop = "git push origin develop";
+
+    let idle = seat.policy(develop, &env);
+    asks_for_consensus(&idle, develop);
+
+    seat.sit();
+    let said = seat.policy(develop, &env);
+    asks_for_consensus(&said, develop);
+    assert!(said.contains("\nwarning: "), "{said}");
+
+    let hooked = seat.hook_turn(develop, &env);
+    asks_for_consensus(&hooked, develop);
+    assert!(!hooked.contains("\"permissionDecision\""), "{hooked}");
+    assert!(!seat.run.join("ljos/approvals").exists(), "{hooked}");
+
+    for line in [
+        "git push --force origin develop",
+        "git push --force-with-lease origin develop",
+        "git push origin :develop",
+        "git push origin --delete develop",
+        "git push origin HEAD:cursor/topic",
+    ] {
+        let said = seat.policy(line, &env);
+        assert!(!said.contains("\nask:"), "{line}\n{said}");
+        assert!(
+            said.contains("\ndeny:") || said.contains("deny:"),
+            "{line}\n{said}"
+        );
+        let hooked = seat.hook_turn(line, &env);
+        assert!(
+            hooked.contains("\"permissionDecision\":\"deny\""),
+            "{line}\n{hooked}"
+        );
+    }
+
+    let seats = seat.home.join(".config/ljos/seats/inky");
+    std::fs::create_dir_all(&seats).unwrap();
+    std::fs::write(seats.join("ljos.toml"), "[cloud]\nbranches = [\"main\"]\n").unwrap();
+    let main = seat.policy("git push origin main", &env);
+    asks_for_consensus(&main, "git push origin main");
+    assert!(main.contains("\nwarning: "), "{main}");
+
+    seat.vote(&[("inky", "revise"), ("flint", "revise")]);
+    let back = seat.policy(develop, &env);
+    asks_for_consensus(&back, develop);
+}
+
+fn a_gates_file_that_does_not_parse_warns_and_holds_the_git_hook() {
+    let seat = Seat::new();
+    std::fs::create_dir_all(seat.repo.join(".ljos")).unwrap();
+    std::fs::write(seat.repo.join(".ljos/gates.toml"), "quorum = [\n").unwrap();
+    let develop = "git push origin develop";
+    let said = seat.policy(develop, &[]);
+    assert!(said.contains("do not read"), "{said}");
+    assert!(!said.contains("1 of the 2 seats"), "{said}");
+    assert!(
+        said.contains("\nwarning: sitting-gate: "),
+        "a malformed gates file was not a warning\n{said}"
+    );
+    let refs = seat.same_commit_refs();
+    let out = seat.git_hook_push(&refs, &[]);
+    let hooked = text_of(&out);
+    assert!(
+        out.status.success(),
+        "a malformed gates file is a label and the push runs\n{hooked}"
+    );
+    assert!(hooked.contains("sitting-gate"), "{hooked}");
+    assert!(hooked.contains("do not read"), "{hooked}");
+    assert!(!hooked.contains("1 of the 2 seats"), "{hooked}");
 }

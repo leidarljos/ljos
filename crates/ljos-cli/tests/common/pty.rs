@@ -18,6 +18,7 @@ pub struct Pty {
     shown: Arc<Mutex<Vec<u8>>>,
 }
 
+#[allow(dead_code)]
 impl Pty {
     #[must_use]
     pub fn open() -> Self {

@@ -371,6 +371,14 @@ pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> 
     })
 }
 
+/// Whether `rule` is the one [`guard_line`] makes. It stays a refusal: a
+/// cloud seat cannot force push, delete a remote branch or tag, or push
+/// to a branch outside its allowlist. A local `git branch -d` or `-D`
+/// is not this rule.
+pub(crate) fn refuses(rule: &crate::Rule) -> bool {
+    rule.pattern == CURSOR_PUSH && rule.verdict == "deny"
+}
+
 /// git's org merge driver. The merged text replaces `ours`.
 ///
 /// # Errors
@@ -4116,12 +4124,14 @@ hrwxr-xr-x  0 runner staff       0 Oct 29 22:00 bin/b link to bin/a file\n";
 
     #[test]
     fn tar_listing_refuses_a_symlink_member() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("tree");
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         std::os::unix::fs::symlink("/etc/passwd", dir.join("bin/packset-embed")).unwrap();
         let archive = root.path().join("bad.tar.gz");
-        let out = std::process::Command::new("tar")
+        let out = crate::guard_mode::fixture_command("tar")
             .arg("-C")
             .arg(&dir)
             .arg("-czf")
@@ -4245,6 +4255,8 @@ mod tests {
 
     #[test]
     fn mode_fix_refuses_a_symlink_planted_at_the_target_path() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cloud.age");
         let outside = dir.path().join("outside");
@@ -4271,6 +4283,8 @@ mod tests {
     /// chmod would change the file in the directory the link points at.
     #[test]
     fn mode_fix_refuses_a_symlink_parent() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real");
         fs::create_dir(&real).unwrap();

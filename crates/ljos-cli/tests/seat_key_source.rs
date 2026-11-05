@@ -4,6 +4,9 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -46,7 +49,7 @@ fn hab(name: &str) -> Hab {
     }
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let git = Command::new("git")
+    let git = guard_mode::command("git")
         .args(["init", "-q", "-b", "main"])
         .current_dir(&hab.repo)
         .status()
@@ -178,7 +181,7 @@ fn prepare(h: &Hab, scenario: &str) -> Launch {
 }
 
 fn hook(h: &Hab, launch: &Launch) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook");
     apply_env(&mut cmd, h, launch);
     cmd.current_dir(launch.cwd.as_deref().unwrap_or(&h.repo))
@@ -223,7 +226,7 @@ fn call(mut cmd: Command, payload: &str) -> Output {
 
 fn run_case(h: &Hab, launch: &Launch, payload: &str) -> Output {
     if let Some(json) = &launch.ancestor {
-        let mut cmd = Command::new("sh");
+        let mut cmd = guard_mode::command("sh");
         cmd.args([
             "-c",
             "\"$0\" hook; rc=$?; exit $rc",
@@ -391,4 +394,148 @@ fn the_home_cursor_file_still_names_the_seat() {
         !stdout.contains("deny"),
         "the seat's own tool was refused: {stdout}"
     );
+}
+
+#[test]
+fn advisory_a_forged_seat_key_does_not_skip_the_user_rule() {
+    let _mode = guard_mode::advisory();
+
+    let mut missed = Vec::new();
+    for scenario in SCENARIOS {
+        if *scenario == "none" {
+            continue;
+        }
+        for (name, payload) in payloads() {
+            let h = hab("fake");
+            put(&h.home.join(".config/ljos/user-rules.json"), ALAN);
+            let launch = prepare(&h, scenario);
+            let out = run_case(&h, &launch, &payload);
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            if ljos_cli::answer_denies(&stdout) || !stdout.contains(ALAN_WARNING) {
+                missed.push(format!("{scenario} / {name}: {stdout}"));
+            }
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "forged seat had no warning:\n{}",
+        missed.join("\n")
+    );
+}
+
+#[test]
+fn advisory_a_foreign_ljos_tool_warns_with_no_seat_file() {
+    let _mode = guard_mode::advisory();
+
+    for (name, payload) in payloads() {
+        let h = hab("none");
+        put(&h.home.join(".config/ljos/user-rules.json"), ALAN);
+        let launch = prepare(&h, "none");
+        let out = run_case(&h, &launch, &payload);
+        warns(&out, name, ALAN_WARNING);
+    }
+}
+
+#[test]
+fn advisory_a_plugin_under_claude_config_dir_does_not_name_the_seat() {
+    let _mode = guard_mode::advisory();
+
+    let h = hab("plug");
+    put(&h.home.join(".config/ljos/user-rules.json"), ALAN);
+    let launch = prepare(&h, "CLAUDE_CONFIG_DIR plugin from repo");
+    let payload = serde_json::json!({
+        "session_id": "s-f",
+        "transcript_path": "/x",
+        "cwd": "/w",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "mcp__plugin_x_github__ljos_issue_comment",
+        "tool_input": {"body": "cc @ocaisa"},
+        "tool_use_id": "toolu_p",
+    })
+    .to_string();
+    warns(&run_case(&h, &launch, &payload), "plugin", ALAN_WARNING);
+}
+
+#[test]
+fn advisory_a_malformed_rules_file_still_warns_a_forged_seat() {
+    let _mode = guard_mode::advisory();
+
+    let sources = [
+        "CODEX_HOME=repo",
+        "CLAUDE_CONFIG_DIR=repo",
+        "ancestor argv --mcp-config",
+    ];
+    for scenario in sources {
+        let h = hab("malformed");
+        put(&h.home.join(".config/ljos/user-rules.json"), "");
+        let launch = prepare(&h, scenario);
+        let out = run_case(&h, &launch, &claude_note());
+        warns(&out, scenario, "ljos: user-rule:");
+    }
+}
+
+#[test]
+fn advisory_the_home_cursor_file_still_names_the_seat() {
+    let _mode = guard_mode::advisory();
+
+    let h = hab("home");
+    put(
+        &h.home.join(".cursor/mcp.json"),
+        r#"{"mcpServers":{"ljos":{"command":"ljos-mcp","args":[]}}}"#,
+    );
+    put(&h.run.join("ljos/hook-trace"), "");
+    let payload = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-home",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "mcp__ljos__ljos_note",
+        "command": "ljos-mcp",
+        "tool_input": {"issue": "demo-1", "text": "progress"},
+    })
+    .to_string();
+    let launch = Launch {
+        extra: Vec::new(),
+        cwd: None,
+        ancestor: None,
+    };
+    let out = run_case(&h, &launch, &payload);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !ljos_cli::answer_denies(&stdout) && !stdout.contains("warning: "),
+        "the seat's own tool was warned on: {stdout}"
+    );
+}
+
+fn warns(out: &Output, label: &str, needle: &str) {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !ljos_cli::answer_denies(&stdout) && stdout.contains(needle),
+        "{label} gave the forged seat no warning: {stdout} stderr {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn a_foreign_ljos_tool_warns_with_no_seat_file() {
+    for (name, payload) in payloads() {
+        let h = hab("none");
+        put(&h.home.join(".config/ljos/user-rules.json"), ALAN);
+        let launch = prepare(&h, "none");
+        let out = run_case(&h, &launch, &payload);
+        warns(&out, name, ALAN_WARNING);
+    }
+}
+
+fn a_malformed_rules_file_still_warns_a_forged_seat() {
+    let sources = [
+        "CODEX_HOME=repo",
+        "CLAUDE_CONFIG_DIR=repo",
+        "ancestor argv --mcp-config",
+    ];
+    for scenario in sources {
+        let h = hab("malformed");
+        put(&h.home.join(".config/ljos/user-rules.json"), "");
+        let launch = prepare(&h, scenario);
+        let out = run_case(&h, &launch, &claude_note());
+        warns(&out, scenario, "ljos: user-rule:");
+    }
 }

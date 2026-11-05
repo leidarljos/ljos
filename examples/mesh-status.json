@@ -1,0 +1,20 @@
+{
+  "BackendState": "Running",
+  "Self": {
+    "HostName": "ag-example-self",
+    "ID": "1",
+    "TailscaleIPs": ["100.64.0.10"],
+    "Tags": ["tag:swarm-example"],
+    "Ephemeral": true
+  },
+  "Peer": {
+    "nodekey:example": {
+      "ID": 99,
+      "HostName": "ag-example-abcdef",
+      "TailscaleIPs": ["100.64.0.99", "fd7a:115c:a1e0::99"],
+      "Tags": ["tag:example"],
+      "Online": true,
+      "Ephemeral": false
+    }
+  }
+}

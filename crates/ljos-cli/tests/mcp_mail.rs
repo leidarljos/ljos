@@ -2,6 +2,9 @@
 //! the `[mail]` table names, and refuse on a cloud seat.
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 #[path = "common/maildir.rs"]
 mod maildir;
 
@@ -50,7 +53,7 @@ impl Session {
 
 /// One server run: initialize, then `calls` as ids 2, 3 and so on.
 fn session(home: &Path, tools: Option<&str>, calls: &[Value]) -> Session {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+    let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
@@ -69,7 +72,7 @@ fn session(home: &Path, tools: Option<&str>, calls: &[Value]) -> Session {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(60));
-        let _ = Command::new("kill").arg(pid.to_string()).status();
+        let _ = guard_mode::command("kill").arg(pid.to_string()).status();
     });
     let mut lines = vec![
         json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
@@ -312,4 +315,65 @@ fn calling_a_mail_tool_that_was_not_asked_for_is_refused() {
     let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
     assert!(refused, "{answer}");
     assert!(!answer.to_string().contains("Lunch"), "{answer}");
+}
+
+#[test]
+fn advisory_a_cloud_seat_is_refused_even_with_a_mailbox() {
+    let _mode = guard_mode::advisory();
+
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let mailbox = maildir::mailbox();
+    configure(home.path(), &mailbox);
+    std::fs::create_dir_all(home.path().join("config/ljos")).unwrap();
+    std::fs::write(home.path().join("config/ljos/push-allow"), "").unwrap();
+    let thread = mailbox.thread_of("plain-1@example.test");
+    let ran = session(
+        home.path(),
+        Some("mail_search,mail_show"),
+        &[
+            call("ljos_mail_search", json!({"query": "lunch"})),
+            call("ljos_mail_show", json!({"thread": thread})),
+        ],
+    );
+    assert!(ran.stderr.contains("cloud-seat-mail"), "{}", ran.stderr);
+    for id in [2, 3] {
+        assert_eq!(
+            ran.by_id(id)["result"]["isError"],
+            false,
+            "{id} {}",
+            ran.stderr
+        );
+        assert!(ran.text(id).contains("Lunch"), "{}", ran.text(id));
+    }
+}
+
+#[test]
+fn advisory_any_cloud_marker_refuses_the_mail_tools() {
+    let _mode = guard_mode::advisory();
+
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
+    let mailbox = maildir::mailbox();
+    let home = tempfile::tempdir().unwrap();
+    configure(home.path(), &mailbox);
+    std::fs::write(home.path().join("config/ljos/push-allow"), "").unwrap();
+    let ran = session(
+        home.path(),
+        Some("mail_search"),
+        &[call("ljos_mail_search", json!({"query": "lunch"}))],
+    );
+    assert_eq!(
+        ran.by_id(2)["result"]["isError"],
+        false,
+        "push-allow {}",
+        ran.stderr
+    );
+    assert!(ran.stderr.contains("cloud-seat-mail"), "{}", ran.stderr);
+    assert!(ran.text(2).contains("Lunch"), "{}", ran.text(2));
 }

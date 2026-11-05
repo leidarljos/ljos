@@ -29,9 +29,9 @@ answer five questions for it. Cards are what the human froze. The pack
 keeps what the seat has learned. The deed store records what the work
 produced. The tracker says what the work is and who agrees, and the
 claim graph shows who is working on what right now. The judging of
-shell commands is not a store: ``ljos-policyd`` refuses the dangerous
-ones before they run, seat rules refuse more, and ``ljos policy --
-COMMAND`` prints the answer for one command. ``ljos`` is the one command and the one Model
+shell commands is not a store: ``ljos-policyd`` warns on the dangerous
+ones before they run, seat rules warn on more, the command runs either
+way unless the person turns on blocking, and ``ljos policy -- COMMAND`` prints the answer for one command. ``ljos`` is the one command and the one Model
 Context Protocol (MCP) server over those habitats. It adds three loops
 the habitats do not have alone: memory that is reviewed and forgotten
 on a clock, agreement that weighs voters by who turned out right, and

@@ -32,6 +32,8 @@ Export builds this machine's atoms of the scope as before. When the digest match
 
 Otherwise it diffs the atoms against the log as a reader sees it, base and chunks. An atom added or changed is written whole as an atom line, and an atom that is gone is a drop line. Those lines are sealed as the chunk after the last one read, or folded into a chunk before it. Chunk files from that number on are removed first, so a chunk a reader left unread is replaced, and what it carried is in the new one. When nothing differs, nothing is sealed: chunk files past the ones read are removed and the digest is written again. The commit stages the base, the digest and the chunk directory.
 
+`ljos finish` does not seal a log whole. It appends one chunk when this machine can open its own log: the digest has three fields, the recipients match, and the base header names this host and scope. Otherwise it prints a warning, leaves the atoms in the pack, and names `ljos sync`, which seals that log whole. Opening the log reads the files on disk. A git `index.lock` that stops the attributes stage does not decide it.
+
 ## Compaction
 
 A new chunk folds into the chunk before it, its lines winning, while its plaintext comes to at least half of that chunk's, and so on down. The fold takes that chunk's number, and chunk files from that number on are removed. Folding into the base is a whole seal, so the log is sealed whole once its chunks would come to half the plaintext of the base. A chunk that would be number 65 folds too, as a reader opens at most 64. The rule is counted from the files in the tree and the atoms being written, so every machine that writes the same atoms over the same log folds on the same sync.

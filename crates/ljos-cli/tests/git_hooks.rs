@@ -2,6 +2,9 @@
 //! The directory is outside the temp roots, not /tmp: ljos skips a temp seat.
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -81,7 +84,7 @@ impl Hab {
         stdin: Option<&str>,
         extra: &[(&str, &str)],
     ) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(cwd)
             .env_clear()
@@ -119,7 +122,7 @@ impl Hab {
     }
 
     fn git(&self, dir: &Path, args: &[&str]) -> Output {
-        let out = Command::new("/usr/bin/git")
+        let out = guard_mode::command("/usr/bin/git")
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -181,7 +184,7 @@ impl Drop for Hab {
 }
 
 fn git_bare(dir: &Path, args: &[&str]) {
-    let out = Command::new("/usr/bin/git")
+    let out = guard_mode::command("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -552,7 +555,7 @@ fn ljos_seat_and_doctor_keep_an_exported_seat() {
     assert!(said.contains("ljosbot"), "{said}");
     assert!(said.contains("LJOS_SEAT"), "{said}");
     assert!(!said.contains("example-host-sand-sub"), "{said}");
-    let doctor = Command::new("timeout")
+    let doctor = guard_mode::command("timeout")
         .args(["90", env!("CARGO_BIN_EXE_ljos"), "doctor", "--all"])
         .current_dir(&hab.repo)
         .env_clear()
@@ -611,7 +614,7 @@ fn exec_daemon(dir: &Path) -> PathBuf {
          }\n",
     )
     .unwrap();
-    let out = Command::new("/usr/bin/cc")
+    let out = guard_mode::command("/usr/bin/cc")
         .args(["-O2", "-o"])
         .arg(&bin)
         .arg(&src)
@@ -635,7 +638,7 @@ fn env_without_seat(hab: &Hab) -> Vec<(String, String)> {
 
 fn under_exec_daemon(hab: &Hab, extra: &[(&str, &str)]) -> Output {
     let daemon = exec_daemon(&hab.bin);
-    let mut cmd = Command::new(&daemon);
+    let mut cmd = guard_mode::command(&daemon);
     cmd.arg(env!("CARGO_BIN_EXE_ljos"))
         .args(["hook", "--git-commit"])
         .current_dir(&hab.repo)
@@ -710,7 +713,7 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
     assert!(said.contains("not booked"), "{said}\n{err}");
     assert!(said.contains("LJOS_SEAT"), "{said}");
     // `ljos_in` asserts success, so the refusal runs the binary directly.
-    let seat = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let seat = guard_mode::command(env!("CARGO_BIN_EXE_ljos"))
         .arg("seat")
         .current_dir(&hab.repo)
         .env_clear()
@@ -739,7 +742,7 @@ fn repeated_subagent_claim_on_parent_is_idempotent() {
 
     // Same subagent retries parent claim three times.
     for _ in 0..3 {
-        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        let out = guard_mode::command(env!("CARGO_BIN_EXE_ljos"))
             .args(["claim", id])
             .current_dir(&hab.repo)
             .env_clear()
@@ -789,7 +792,7 @@ fn write_hook(path: &Path, body: &str) {
 }
 
 fn git_status(hab: &Hab, args: &[&str]) -> Output {
-    Command::new("/usr/bin/git")
+    guard_mode::command("/usr/bin/git")
         .arg("-C")
         .arg(&hab.repo)
         .args(args)
@@ -915,7 +918,7 @@ fn commit_with(
     fs::write(hab.repo.join(name), "x\n").unwrap();
     let env = commit_env(hab, extra, drop_seat);
     let run = |args: &[&str]| {
-        let out = Command::new("/usr/bin/git")
+        let out = guard_mode::command("/usr/bin/git")
             .arg("-C")
             .arg(&hab.repo)
             .args(args)
@@ -974,7 +977,7 @@ fn a_tracker_commit_is_checked_as_a_tracker_write() {
             .chain(seat.map(|s| ("LJOS_SEAT".to_string(), s.to_string())))
             .collect();
         let run = |args: &[&str]| {
-            let out = Command::new("/usr/bin/git")
+            let out = guard_mode::command("/usr/bin/git")
                 .arg("-C")
                 .arg(&hab.tracker)
                 .args(args)
@@ -1162,7 +1165,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     );
     let runner = [("GROK_SESSION_ID", "5b0c2a71-9d1e-4f3a-8c6b-2e7f1a0d9c43")];
     let push = |dest: &str| {
-        Command::new("/usr/bin/git")
+        guard_mode::command("/usr/bin/git")
             .arg("-C")
             .arg(&hab.repo)
             .args(["push", "-q", "origin", dest])
@@ -1174,7 +1177,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
             .unwrap()
     };
     let sent = |branch: &str| {
-        Command::new("/usr/bin/git")
+        guard_mode::command("/usr/bin/git")
             .arg("--git-dir")
             .arg(&bare)
             .args([
@@ -1191,7 +1194,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
             .success()
     };
     let hooks_row = || {
-        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        let out = guard_mode::command(env!("CARGO_BIN_EXE_ljos"))
             .args(["doctor", "--all"])
             .current_dir(&hab.repo)
             .env_clear()
@@ -1249,7 +1252,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
 
     install(&hab);
     fs::write(hab.repo.join("again.txt"), "z\n").unwrap();
-    let add = Command::new("/usr/bin/git")
+    let add = guard_mode::command("/usr/bin/git")
         .arg("-C")
         .arg(&hab.repo)
         .args(["add", "again.txt"])
@@ -1262,7 +1265,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
-    let commit = Command::new("/usr/bin/git")
+    let commit = guard_mode::command("/usr/bin/git")
         .arg("-C")
         .arg(&hab.repo)
         .args(["commit", "-q", "-m", "after reinstall"])
@@ -1275,7 +1278,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         "{}",
         String::from_utf8_lossy(&commit.stderr)
     );
-    let remote = Command::new("/usr/bin/git")
+    let remote = guard_mode::command("/usr/bin/git")
         .arg("--git-dir")
         .arg(&bare)
         .args(["rev-parse", "refs/heads/develop"])
@@ -1292,7 +1295,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     );
     assert!(err.contains("sitting-gate"), "{err}");
     assert!(!err.contains("predates this gate"), "{err}");
-    let remote = Command::new("/usr/bin/git")
+    let remote = guard_mode::command("/usr/bin/git")
         .arg("--git-dir")
         .arg(&bare)
         .args(["rev-parse", "refs/heads/develop"])
@@ -1319,7 +1322,7 @@ fn a_git_hook_notes_only_a_seat_vissue_toml_lists() {
         fs::write(hab.repo.join(name), "x\n").unwrap();
         let env = commit_env(&hab, extra, drop_seat);
         let run = |args: &[&str]| {
-            Command::new("/usr/bin/git")
+            guard_mode::command("/usr/bin/git")
                 .arg("-C")
                 .arg(&hab.repo)
                 .args(args)
@@ -1376,4 +1379,180 @@ fn a_git_hook_notes_only_a_seat_vissue_toml_lists() {
         "listed seat was not noted\nstderr: {listed}\nlog: {}",
         book_log(&hab)
     );
+}
+
+#[test]
+fn advisory_a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
+    let _mode = guard_mode::advisory();
+
+    let hab = Hab::new("repo");
+    install(&hab);
+    let bare = hab.root.join("bare.git");
+    fs::create_dir_all(&bare).unwrap();
+    git_bare(&bare, &["init", "--bare", "-q"]);
+    hab.git(
+        &hab.repo,
+        &["remote", "add", "origin", bare.to_str().unwrap()],
+    );
+    let runner = [("GROK_SESSION_ID", "5b0c2a71-9d1e-4f3a-8c6b-2e7f1a0d9c43")];
+    let push = |dest: &str| {
+        guard_mode::command("/usr/bin/git")
+            .arg("-C")
+            .arg(&hab.repo)
+            .args(["push", "-q", "origin", dest])
+            .current_dir(&hab.repo)
+            .env_clear()
+            .envs(commit_env(&hab, &runner, false))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let sent = |branch: &str| {
+        guard_mode::command("/usr/bin/git")
+            .arg("--git-dir")
+            .arg(&bare)
+            .args([
+                "rev-parse",
+                "-q",
+                "--verify",
+                &format!("refs/heads/{branch}"),
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    let hooks_row = || {
+        let out = guard_mode::command(env!("CARGO_BIN_EXE_ljos"))
+            .args(["doctor", "--all"])
+            .current_dir(&hab.repo)
+            .env_clear()
+            .envs(hab.base_env())
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).to_string();
+        said.lines()
+            .find(|line| line.contains("\tgit hooks\t"))
+            .unwrap_or_else(|| panic!("no git hooks row:\n{said}"))
+            .to_string()
+    };
+    let blocked = push("HEAD:develop");
+    let err = String::from_utf8_lossy(&blocked.stderr);
+    assert!(
+        blocked.status.success(),
+        "a sitting gate is a label and the push runs: {err}"
+    );
+    assert!(err.contains("sitting-gate"), "{err}");
+    assert!(!err.contains("predates this gate"), "{err}");
+    assert!(sent("develop"), "develop did not reach the remote: {err}");
+    assert!(hooks_row().starts_with("ok\t"), "{}", hooks_row());
+
+    let path = hab.share.join("ljos/git-hooks/pre-push");
+    let stub = fs::read_to_string(&path).unwrap();
+    let begin = stub.find("# ljos:begin git-hook").unwrap();
+    let end_mark = "# ljos:end git-hook\n";
+    let end = stub.find(end_mark).unwrap() + end_mark.len();
+    let bin = shellish(Path::new(env!("CARGO_BIN_EXE_ljos")));
+    let old = format!(
+        "# ljos:begin git-hook\n\
+         if command -v ljos >/dev/null 2>&1; then\n\
+         \tljos git-hook pre-push \"$@\" >&2 || true\n\
+         else\n\
+         \t{bin} git-hook pre-push \"$@\" >&2 || true\n\
+         fi\n\
+         {end_mark}"
+    );
+    fs::write(&path, format!("{}{old}{}", &stub[..begin], &stub[end..])).unwrap();
+    // The current hook already sent develop. Git does not run pre-push
+    // when the remote has the commit, so drop that ref and send it again.
+    let dropped = guard_mode::command("/usr/bin/git")
+        .arg("--git-dir")
+        .arg(&bare)
+        .args(["update-ref", "-d", "refs/heads/develop"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        dropped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dropped.stderr)
+    );
+
+    let out = push("HEAD:develop");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("sitting-gate"), "{err}");
+    assert!(
+        err.contains("predates this gate"),
+        "the refusal hid that git pushed: {err}"
+    );
+    assert!(out.status.success() && sent("develop"), "{err}");
+    let row = hooks_row();
+    assert!(!row.starts_with("ok\t"), "{row}");
+    assert!(row.contains("pre-push stub predates"), "{row}");
+    assert!(row.contains("ljos git-hooks install"), "{row}");
+    let status = String::from_utf8(hab.ljos(&["git-hooks", "status"]).stdout).unwrap();
+    assert!(status.contains("pre-push stub predates"), "{status}");
+
+    install(&hab);
+    fs::write(hab.repo.join("again.txt"), "z\n").unwrap();
+    let add = guard_mode::command("/usr/bin/git")
+        .arg("-C")
+        .arg(&hab.repo)
+        .args(["add", "again.txt"])
+        .env_clear()
+        .envs(hab.base_env())
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let commit = guard_mode::command("/usr/bin/git")
+        .arg("-C")
+        .arg(&hab.repo)
+        .args(["commit", "-q", "-m", "after reinstall"])
+        .env_clear()
+        .envs(hab.base_env())
+        .output()
+        .unwrap();
+    assert!(
+        commit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let remote = guard_mode::command("/usr/bin/git")
+        .arg("--git-dir")
+        .arg(&bare)
+        .args(["rev-parse", "refs/heads/develop"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let before = String::from_utf8_lossy(&remote.stdout).trim().to_string();
+    let again = push("HEAD:develop");
+    let err = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        again.status.success(),
+        "a reinstalled gate is a label and the push runs: {err}"
+    );
+    assert!(err.contains("sitting-gate"), "{err}");
+    assert!(!err.contains("predates this gate"), "{err}");
+    let remote = guard_mode::command("/usr/bin/git")
+        .arg("--git-dir")
+        .arg(&bare)
+        .args(["rev-parse", "refs/heads/develop"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert_ne!(
+        String::from_utf8_lossy(&remote.stdout).trim(),
+        before,
+        "develop did not move after reinstall: {err}"
+    );
+    assert!(hooks_row().starts_with("ok\t"), "{}", hooks_row());
 }

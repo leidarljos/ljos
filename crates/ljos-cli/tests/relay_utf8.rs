@@ -2,12 +2,15 @@
 //! still exits 1.
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn hook(runner: &str, event: Option<&str>, bytes: &[u8]) -> std::process::Output {
     let home = tempfile::tempdir().unwrap();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook").arg("--runner").arg(runner);
     if let Some(event) = event {
         cmd.arg("--event").arg(event);
@@ -57,4 +60,23 @@ fn invalid_utf8_on_a_prompt_hook_is_not_a_deny() {
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
+}
+
+#[test]
+fn advisory_invalid_utf8_on_a_prompt_hook_exits_0_with_a_note() {
+    let _mode = guard_mode::advisory();
+
+    let out = hook("gemini", Some("BeforeAgent"), &[0xff, 0xfe]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(said.contains("unhealthy"), "{said}");
+    assert!(!said.contains("deny"), "{said}");
+}
+
+fn invalid_utf8_on_a_prompt_hook_exits_0_with_a_note() {
+    let out = hook("gemini", Some("BeforeAgent"), &[0xff, 0xfe]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(said.contains("unhealthy"), "{said}");
+    assert!(!said.contains("deny"), "{said}");
 }

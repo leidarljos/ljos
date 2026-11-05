@@ -443,6 +443,10 @@ fn read_answer(out: &str) -> Said {
 /// exit code. `event` is the event name the runner sent.
 #[must_use]
 pub fn answer(runner: &str, event: &str, out: &str) -> (String, String, i32) {
+    if !crate::guard_mode::is_strict() {
+        return advisory_answer(runner, event, out);
+    }
+
     let mut said = read_answer(out);
     if said.decision.as_deref() == Some("ask") && !asks(runner) {
         said.decision = Some("deny".into());
@@ -544,6 +548,45 @@ pub fn answer(runner: &str, event: &str, out: &str) -> (String, String, i32) {
         }
     }
     rendered
+}
+
+fn advisory_answer(runner: &str, event: &str, out: &str) -> (String, String, i32) {
+    if let Some((reason, context)) = denial(event, out) {
+        return denied(runner, event, out, &reason, &context);
+    }
+    let context = advisory_read_answer(out);
+    let line = |v: Value| v.to_string() + "\n";
+    let named = if event.is_empty() {
+        "PreToolUse"
+    } else {
+        event
+    };
+    let printed = match runner {
+        "gemini" if context.is_empty() => line(json!({})),
+        "cline" if context.is_empty() => line(json!({ "cancel": false })),
+        _ if context.is_empty() => String::new(),
+        "gemini" | "factory" | "qwen" | "auggie" => line(json!({ "hookSpecificOutput": {
+            "hookEventName": named,
+            "additionalContext": context,
+        }})),
+        "openhands" => line(json!({ "additionalContext": context })),
+        "kiro" => format!("{context}\n"),
+        "cline" => line(json!({ "cancel": false, "contextModification": context })),
+        "crush" => line(json!({ "context": context })),
+        _ => String::new(),
+    };
+    // These runners read no context from a hook, so stderr is the one
+    // place left for a warning; the rest of the context has none.
+    let warned = if matches!(runner, "copilot" | "windsurf" | "goose" | "amp") {
+        context
+            .lines()
+            .filter(|l| l.starts_with("warning:"))
+            .map(|l| format!("{l}\n"))
+            .collect()
+    } else {
+        String::new()
+    };
+    (printed, warned, 0)
 }
 
 /// The event name in a runner's stdin, as the runner spelled it.
@@ -654,6 +697,13 @@ pub fn relay_input_is_gate(input: &str, event: Option<&str>) -> bool {
 /// get their deny object and the exit their contract uses.
 #[must_use]
 pub fn relay_fault_answer(runner: &str, event: &str, what: &str) -> Option<(String, String, i32)> {
+    if !crate::guard_mode::is_strict() {
+        return {
+            let (out, err) = advisory_relay_fault_answer(runner, event, what);
+            Some((out, err, 0))
+        };
+    }
+
     if !event.is_empty() && !gate_event(event) {
         return None;
     }
@@ -664,6 +714,16 @@ pub fn relay_fault_answer(runner: &str, event: &str, what: &str) -> Option<(Stri
         .collect();
     let text = fault_output(event, &what);
     Some(answer(runner, event, &text))
+}
+
+fn advisory_relay_fault_answer(runner: &str, event: &str, what: &str) -> (String, String) {
+    let what: String = what
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(240)
+        .collect();
+    let (out, err, _) = answer(runner, event, &fault_output(event, &what));
+    (out, err)
 }
 
 /// The command a normalized payload would run, or empty when it has none.
@@ -725,6 +785,12 @@ pub fn run_inner(
     event: &str,
     timeout: std::time::Duration,
 ) -> String {
+    crate::guard_mode::configure_child(&mut cmd);
+
+    if !crate::guard_mode::is_strict() {
+        return advisory_run_inner(cmd, stdin, event, timeout);
+    }
+
     use std::io::{Read, Write};
     let spawned = cmd
         .stdin(std::process::Stdio::piped())
@@ -785,6 +851,71 @@ pub fn run_inner(
     fault_output(event, &what)
 }
 
+fn advisory_run_inner(
+    mut cmd: std::process::Command,
+    stdin: &str,
+    event: &str,
+    timeout: std::time::Duration,
+) -> String {
+    use std::io::{Read, Write};
+    let spawned = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => return fault_output(event, &format!("did not start ({e})")),
+    };
+    // Feed and drain on their own threads, so a hook that reads nothing or
+    // prints a lot cannot stall the clock below.
+    let input = stdin.to_string();
+    // The writer is never joined: a child that left a grandchild holding
+    // its stdin could block it, and the process exits soon after.
+    if let Some(mut pipe) = child.stdin.take() {
+        std::thread::spawn(move || {
+            let _ = pipe.write_all(input.as_bytes());
+        });
+    }
+    let reader = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!("gave no answer within {} s", timeout.as_secs_f32()));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => break Err(format!("could not be waited on ({e})")),
+        }
+    };
+    let status = match status {
+        Ok(status) => status,
+        // A killed hook's children may still hold the pipe; do not wait
+        // for the reader.
+        Err(what) => return fault_output(event, &what),
+    };
+    let out = reader
+        .and_then(|r| r.join().ok())
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    if status.success() {
+        return out;
+    }
+    let what = match status.code() {
+        Some(code) => format!("exited with status {code}"),
+        None => "was killed by a signal".to_string(),
+    };
+    fault_output(event, &what)
+}
+
 /// Run the seat's hook for a runner: `ljos hook` on the normalized
 /// payload, its answer put in the runner's contract. Returns the exit
 /// code the runner reads. A force push, a seat deny, and an `rm -rf` are
@@ -794,6 +925,10 @@ pub fn run_inner(
 /// wait is the prompt hook's own deadline, and a fault stays an allow
 /// with a note.
 pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> anyhow::Result<i32> {
+    if !crate::guard_mode::is_strict() {
+        return Ok(advisory_relay(runner, input, limit, event));
+    }
+
     let normalized = normalize_input(runner, input);
     let raw = raw_event(input);
     let text = match early_answer(&normalized, &raw) {
@@ -818,6 +953,30 @@ pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> an
     print!("{out}");
     eprint!("{err}");
     Ok(code)
+}
+
+fn advisory_relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> i32 {
+    let normalized = normalize_input(runner, input);
+    let raw = raw_event(input);
+    let text = match std::env::current_exe() {
+        Ok(exe) => {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("hook").arg("--limit").arg(limit.to_string());
+            cmd.env(crate::rewrite::RELAY_VAR, runner);
+            if let Some(e) = event {
+                cmd.arg("--event").arg(e);
+            }
+            run_inner(cmd, &normalized, &raw, relay_timeout(&raw))
+        }
+        Err(e) => fault_output(&raw, &format!("could not find its own binary ({e})")),
+    };
+    let (mut out, err, code) = answer(runner, &raw, &text);
+    if let Some(line) = first_prompt_start_line(runner, &raw, input) {
+        out = with_start_line(&out, &line);
+    }
+    print!("{out}");
+    eprint!("{err}");
+    code
 }
 
 /// OpenHands drops a `SessionStart` hook's output, so the session-start
@@ -850,10 +1009,25 @@ fn first_prompt_start_line(runner: &str, raw: &str, input: &str) -> Option<Strin
 
 /// An OpenHands answer with `line` put ahead of its context.
 fn with_start_line(out: &str, line: &str) -> String {
+    if !crate::guard_mode::is_strict() {
+        return advisory_with_start_line(out, line);
+    }
+
     let mut v: Value = serde_json::from_str(out.trim()).unwrap_or_else(|_| json!({}));
     if v.get("decision").is_some() {
         return out.to_string();
     }
+    let rest = v["additionalContext"].as_str().unwrap_or("").to_string();
+    v["additionalContext"] = json!(if rest.is_empty() {
+        line.to_string()
+    } else {
+        format!("{line}\n\n{rest}")
+    });
+    v.to_string() + "\n"
+}
+
+fn advisory_with_start_line(out: &str, line: &str) -> String {
+    let mut v: Value = serde_json::from_str(out.trim()).unwrap_or_else(|_| json!({}));
     let rest = v["additionalContext"].as_str().unwrap_or("").to_string();
     v["additionalContext"] = json!(if rest.is_empty() {
         line.to_string()
@@ -1351,6 +1525,8 @@ mod tests {
 
     #[test]
     fn a_deny_reaches_each_runner_in_its_own_contract() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (out, _, code) = answer("copilot", "PreToolUse", DENY);
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!((v["permissionDecision"].as_str(), code), (Some("deny"), 0));
@@ -1391,6 +1567,8 @@ mod tests {
 
     #[test]
     fn an_ask_is_a_deny_where_the_runner_cannot_ask() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (out, _, _) = answer("copilot", "PreToolUse", ASK);
         assert!(out.contains("\"ask\""));
         for runner in ["gemini", "cline", "crush"] {
@@ -1560,6 +1738,8 @@ mod tests {
     /// Cline all block on that deny. A prompt is not a tool call.
     #[test]
     fn a_prompt_fault_is_not_a_deny() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let _lock = crate::test_env_lock();
         unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let why = format!(
@@ -1609,6 +1789,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_prompt_hook_that_exits_early_is_not_denied() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let _lock = crate::test_env_lock();
         unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let out = run_inner(
@@ -1631,6 +1813,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_unhealthy_note_is_not_a_second_deny() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let _lock = crate::test_env_lock();
         unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let why = "did not answer in time";
@@ -1676,6 +1860,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn guard_fail_open_restores_allow_with_note() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let _lock = crate::test_env_lock();
         unsafe { std::env::set_var("LJOS_GUARD_FAIL_OPEN", "1") };
         allows_fault(
@@ -1696,6 +1882,8 @@ mod tests {
 
     #[test]
     fn a_known_dangerous_command_is_judged_before_the_inner_hook() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         use std::os::unix::fs::PermissionsExt;
         let _lock = crate::test_env_lock();
         let dir = crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp)
@@ -1881,6 +2069,8 @@ mod tests {
 
     #[test]
     fn goose_payload_reaches_the_seat_and_a_deny_exits_2() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let n = normalize_input(
             "goose",
             r#"{"event":"PreToolUse","session_id":"g-1","tool_name":"shell","tool_input":{"command":"rm -rf /"},"working_dir":"/r"}"#,
@@ -1899,6 +2089,8 @@ mod tests {
 
     #[test]
     fn amp_reads_cmd_and_rejects_with_2_and_asks_with_1() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let n = normalize_input("amp", r#"{"cmd":"git push --force"}"#);
         let v: Value = serde_json::from_str(&n).unwrap();
         assert_eq!(v["tool_input"]["command"], "git push --force");
@@ -1911,6 +2103,8 @@ mod tests {
 
     #[test]
     fn auggie_launch_process_is_the_shell_and_its_deny_is_claude_shaped() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let n = normalize_input(
             "auggie",
             r#"{"hook_event_name":"PreToolUse","tool_name":"launch-process","tool_input":{"command":"ls"}}"#,
@@ -1953,6 +2147,8 @@ mod tests {
 
     #[test]
     fn goose_hook_is_a_plugin_that_fails_closed() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("ljos/hooks/hooks.json");
         let step = hook_step("goose", &file, "/bin/ljos hook", false);
@@ -1970,6 +2166,8 @@ mod tests {
 
     #[test]
     fn openhands_terminal_is_the_shell_and_a_deny_exits_2() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let n = normalize_input(
             "openhands",
             r#"{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"rm -rf ~"},"working_dir":"/w"}"#,
@@ -2025,6 +2223,8 @@ mod relay_prompt_origin_tests {
 
     #[test]
     fn command_normalization_keeps_execution_context_for_consent_scoping() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let command = "git push origin HEAD:refs/heads/topic";
         let arguments = json!({"command":command,"working_directory":"/other","env":{"CONFIG":"fixture"},"shell":"/bin/sh"});
         for (runner, input) in [
@@ -2056,4 +2256,133 @@ mod relay_prompt_origin_tests {
             assert_eq!(value["tool_input"]["shell"], "/bin/sh", "{runner}");
         }
     }
+}
+
+fn denies_by_exit(runner: &str) -> bool {
+    matches!(
+        runner,
+        "windsurf" | "factory" | "kiro" | "qwen" | "crush" | "goose" | "amp" | "openhands"
+    )
+}
+
+fn denied(
+    runner: &str,
+    event: &str,
+    out: &str,
+    reason: &str,
+    context: &str,
+) -> (String, String, i32) {
+    let line = |v: Value| v.to_string() + "\n";
+    let mut rendered = match runner {
+        "factory" | "qwen" => (out.to_string(), String::new(), 0),
+        "copilot" => (
+            line(json!({
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            })),
+            String::new(),
+            0,
+        ),
+        "gemini" => {
+            let mut v = json!({ "decision": "deny", "reason": reason });
+            if !context.is_empty() {
+                v["hookSpecificOutput"] =
+                    json!({ "hookEventName": event, "additionalContext": context });
+            }
+            (line(v), String::new(), 0)
+        }
+        "openhands" => (
+            line(json!({ "decision": "deny", "reason": reason })),
+            reason_stderr(reason),
+            2,
+        ),
+        "auggie" => (
+            line(json!({ "hookSpecificOutput": {
+                "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }})),
+            String::new(),
+            0,
+        ),
+        "cline" => (
+            line(json!({ "cancel": true, "errorMessage": reason })),
+            String::new(),
+            0,
+        ),
+        "crush" => (
+            line(json!({ "decision": "deny", "reason": reason })),
+            String::new(),
+            0,
+        ),
+        // Windsurf, Kiro, goose and Amp read the deny from the exit alone.
+        _ => (String::new(), reason_stderr(reason), 2),
+    };
+    if denies_by_exit(runner) {
+        rendered.2 = 2;
+        if rendered.1.trim().is_empty() {
+            rendered.1 = reason_stderr(reason);
+        }
+    }
+    rendered
+}
+
+fn denial(event: &str, out: &str) -> Option<(String, String)> {
+    if !gate_event(event) {
+        return None;
+    }
+    let trimmed = out.trim();
+    let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+        // A plain-text answer is an argv line; a deny says so first.
+        let reason = trimmed.strip_prefix("deny:")?;
+        return Some((reason.trim().to_string(), String::new()));
+    };
+    let specific = &v["hookSpecificOutput"];
+    let decision = specific["permissionDecision"]
+        .as_str()
+        .or_else(|| v["decision"].as_str());
+    if !matches!(decision, Some("deny" | "block")) {
+        return None;
+    }
+    let field = |inner: &str, top: &str| {
+        specific[inner]
+            .as_str()
+            .or_else(|| v[top].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    Some((
+        field("permissionDecisionReason", "reason"),
+        field("additionalContext", "context"),
+    ))
+}
+
+fn advisory_read_answer(out: &str) -> String {
+    let trimmed = out.trim();
+    let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+        return trimmed.to_string();
+    };
+    let specific = &v["hookSpecificOutput"];
+    let reason = specific["permissionDecisionReason"]
+        .as_str()
+        .or_else(|| v["reason"].as_str())
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(|r| {
+            if r.starts_with("warning:") {
+                r.to_string()
+            } else {
+                format!("warning: {r}")
+            }
+        });
+    let context = specific["additionalContext"]
+        .as_str()
+        .or_else(|| v["context"].as_str())
+        .filter(|c| !c.trim().is_empty())
+        .map(str::to_string);
+    reason
+        .into_iter()
+        .chain(context)
+        .collect::<Vec<_>>()
+        .join("\n")
 }

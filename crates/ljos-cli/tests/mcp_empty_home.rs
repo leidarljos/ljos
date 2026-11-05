@@ -11,7 +11,6 @@ use std::time::Duration;
 
 const EVERY_TOOL: &[&str] = &[
     "ljos_rule",
-    "ljos_request_approval",
     "ljos_prefer",
     "ljos_remember",
     "ljos_search",

@@ -1254,6 +1254,8 @@ mod task_approval_tests {
 
     #[test]
     fn explicit_task_consent_repeats_the_exact_push_without_consuming_it() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let scope = scoped(temp.path());
@@ -1272,6 +1274,8 @@ mod task_approval_tests {
 
     #[test]
     fn task_consent_is_bound_to_every_command_and_lease_target_field() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let scope = scoped(temp.path());
@@ -1345,6 +1349,8 @@ mod task_approval_tests {
 
     #[test]
     fn task_consent_expires_with_the_existing_request_lifetime() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         for stamp in [99, 100 + TTL_SECONDS] {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().join("approvals");
@@ -1469,6 +1475,8 @@ mod task_approval_tests {
 
     #[test]
     fn a_changed_task_or_remote_mints_a_new_pending_consent_form() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         for field in ["generation", "addresses"] {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().join("approvals");
@@ -1720,6 +1728,8 @@ mod tests {
 
     #[tokio::test]
     async fn approval_uses_the_full_call_id_with_a_named_holder() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let input = input(temp.path());
@@ -1794,6 +1804,8 @@ mod tests {
 
     #[test]
     fn a_question_quoted_in_a_reply_cannot_grant_consent() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let input = input(temp.path());
@@ -1915,6 +1927,8 @@ mod tests {
 
     #[test]
     fn approval_allows_one_matching_retry_and_cannot_be_replayed() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let input = input(temp.path());
@@ -2012,6 +2026,8 @@ mod tests {
 
     #[test]
     fn grants_are_bound_to_command_directory_conversation_tool_and_rule() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let other = tempfile::tempdir().unwrap();
@@ -2088,6 +2104,8 @@ mod tests {
 
     #[test]
     fn deny_verdicts_win_over_an_approved_request() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let input = input(temp.path());
@@ -2109,6 +2127,8 @@ mod tests {
 
     #[test]
     fn a_native_ask_does_not_create_a_local_grant() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let mut value: Value = serde_json::from_str(&input(temp.path())).unwrap();
@@ -2121,6 +2141,8 @@ mod tests {
 
     #[test]
     fn a_grok_ask_is_the_permission_prompt_and_mints_no_request() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let input = serde_json::json!({
@@ -2145,6 +2167,8 @@ mod tests {
 
     #[test]
     fn approval_does_not_depend_on_the_retry_turn_id() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let input = input(temp.path());
@@ -2275,6 +2299,8 @@ mod tests {
     }
     #[test]
     fn client_consent_requires_accept_and_a_true_boolean() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         use rmcp::model::{ElicitResult, ElicitationAction};
         for action in [
             ElicitationAction::Accept,
@@ -2385,6 +2411,8 @@ mod tests {
     /// conversation then runs that command once.
     #[test]
     fn an_ask_with_no_conversation_is_one_use_for_that_command() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let cwd = temp.path();

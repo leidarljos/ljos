@@ -4,6 +4,9 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -53,7 +56,7 @@ fn hab(name: &str) -> Hab {
 }
 
 fn git(cwd: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let status = guard_mode::command("git")
         .arg("-c")
         .arg("core.hooksPath=/dev/null")
         .arg("-C")
@@ -76,7 +79,9 @@ fn ident(cwd: &Path) {
 /// A tracker whose fetch sleeps `delay` seconds, holding the Alan rule
 /// in another machine's plaintext file.
 fn tracker(h: &Hab, delay: &str) -> PathBuf {
-    let pub_out = Command::new("age-keygen").output().expect("age-keygen");
+    let pub_out = guard_mode::command("age-keygen")
+        .output()
+        .expect("age-keygen");
     assert!(pub_out.status.success(), "age-keygen");
     let text = String::from_utf8_lossy(&pub_out.stdout);
     let rcpt = text
@@ -85,7 +90,7 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
         .expect("age public key")
         .to_string();
     let bare = h.root.join("remote.git");
-    let status = Command::new("git")
+    let status = guard_mode::command("git")
         .args(["init", "-q", "--bare", "-b", "main"])
         .arg(&bare)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -93,7 +98,7 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
         .unwrap();
     assert!(status.success());
     let other = h.root.join("other");
-    let status = Command::new("git")
+    let status = guard_mode::command("git")
         .args(["clone", "-q"])
         .arg(&bare)
         .arg(&other)
@@ -112,7 +117,7 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
     git(&other, &["commit", "-q", "-m", "scope"]);
     git(&other, &["push", "-q", "origin", "HEAD:main"]);
     let tracker = h.root.join("tracker");
-    let status = Command::new("git")
+    let status = guard_mode::command("git")
         .args(["clone", "-q"])
         .arg(&bare)
         .arg(&tracker)
@@ -140,7 +145,7 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
 }
 
 fn hook(h: &Hab, tracker: &Path, pack: Option<String>) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()
         .env(

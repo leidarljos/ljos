@@ -10,6 +10,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -74,7 +77,7 @@ impl Case {
         }
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let init = Command::new("git")
+        let init = guard_mode::command("git")
             .args(["init", "-q"])
             .current_dir(&repo)
             .status()
@@ -86,14 +89,14 @@ impl Case {
             ("commit.gpgsign", "false"),
             ("core.hooksPath", "/dev/null"),
         ] {
-            let out = Command::new("git")
+            let out = guard_mode::command("git")
                 .args(["config", key, value])
                 .current_dir(&repo)
                 .output()
                 .unwrap();
             assert!(out.status.success(), "{key}");
         }
-        let made = Command::new("git")
+        let made = guard_mode::command("git")
             .args(["commit", "-q", "--allow-empty", "-m", "seed"])
             .current_dir(&repo)
             .output()
@@ -103,7 +106,7 @@ impl Case {
             "{}",
             String::from_utf8_lossy(&made.stderr)
         );
-        let head = Command::new("git")
+        let head = guard_mode::command("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&repo)
             .output()
@@ -125,11 +128,11 @@ impl Case {
         let exe = std::env::current_exe().unwrap();
         let mut cmd = match wrapper {
             Some(runner) => {
-                let mut cmd = Command::new(runner);
+                let mut cmd = guard_mode::command(runner);
                 cmd.args(["-c", "\"$@\"; exit $?", "claude"]).arg(&exe);
                 cmd
             }
-            None => Command::new(&exe),
+            None => guard_mode::command(&exe),
         };
         cmd.args(["--exact", "gate_child", "--nocapture", "--test-threads=1"])
             .current_dir(&self.repo)
@@ -434,4 +437,181 @@ fn an_interrupt_at_the_prompt_restores_echo() {
     let out = pty::wait_output(child, 30);
     assert!(!out.status.success());
     assert!(term.echo_on(), "echo stayed off after the interrupt");
+}
+
+#[test]
+fn advisory_the_right_passphrase_on_the_terminal_lets_the_push_through() {
+    let _mode = guard_mode::advisory();
+
+    let case = Case::new(true);
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
+}
+
+#[test]
+fn advisory_a_wrong_passphrase_is_refused_and_counted() {
+    let _mode = guard_mode::advisory();
+
+    let case = Case::new(true);
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
+}
+
+#[test]
+fn advisory_five_wrong_passphrases_lock_the_prompt_out() {
+    let _mode = guard_mode::advisory();
+
+    let case = Case::new(true);
+    for _ in 0..5 {
+        push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
+    }
+}
+
+#[test]
+fn advisory_nothing_typed_is_refused() {
+    let _mode = guard_mode::advisory();
+
+    let case = Case::new(true);
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
+}
+
+#[test]
+fn advisory_a_hard_runner_is_never_asked() {
+    let _mode = guard_mode::advisory();
+
+    let case = Case::new(true);
+    let installed = runner::install_dir();
+    let claude = installed.path().join("claude");
+    runner::runner_at(&claude);
+    let (out, shown) = run_hook(
+        &mut case.command(Some(&claude), Some("CURSOR_AGENT")),
+        &case.push,
+    );
+    let err = labelled(&out);
+    assert!(
+        !shown.contains("passphrase"),
+        "a hard runner was asked: {shown}"
+    );
+    assert!(!err.contains("passphrase"), "{err}");
+    assert!(err.contains("sitting-gate"), "{err}");
+}
+
+#[test]
+fn advisory_piped_stdin_without_a_terminal_cannot_answer() {
+    let _mode = guard_mode::advisory();
+
+    use std::os::unix::process::CommandExt as _;
+    let case = Case::new(true);
+    let mut cmd = case.command(None, Some("CURSOR_AGENT"));
+    // SAFETY: setsid is async-signal-safe; the child gets no terminal.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.stdin(Stdio::piped()).spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(case.push.as_bytes())
+        .unwrap();
+    let out = pty::wait_output(child, 60);
+    let err = labelled(&out);
+    assert!(!err.contains(PROMPT), "{err}");
+}
+
+#[test]
+fn advisory_piped_stdin_with_a_terminal_cannot_answer() {
+    let _mode = guard_mode::advisory();
+
+    let case = Case::new(true);
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
+}
+
+#[test]
+fn advisory_no_variable_supplies_the_passphrase() {
+    let _mode = guard_mode::advisory();
+
+    let case = Case::new(true);
+    let mut cmd = case.command(None, Some("CURSOR_AGENT"));
+    for name in [
+        "LJOS_PERSON_KEY",
+        "LJOS_PASSPHRASE",
+        "LJOS_PERSON_PASSPHRASE",
+        "PERSON_KEY",
+    ] {
+        cmd.env(name, PASS);
+    }
+    push_is_labelled(&case, &mut cmd);
+}
+
+#[test]
+fn advisory_no_key_asks_for_a_yes_and_a_passphrase_is_not_one() {
+    let _mode = guard_mode::advisory();
+
+    let case = Case::new(false);
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
+}
+
+#[test]
+fn advisory_no_key_and_a_yes_at_the_terminal_lets_the_push_through() {
+    let _mode = guard_mode::advisory();
+
+    let case = Case::new(false);
+    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
+}
+
+#[test]
+fn advisory_an_interrupt_at_the_prompt_restores_echo() {
+    let _mode = guard_mode::advisory();
+
+    let case = Case::new(true);
+    let term = pty::Pty::open();
+    let mut child = term.spawn(
+        case.command(None, Some("CURSOR_AGENT"))
+            .stdin(Stdio::piped()),
+    );
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(case.push.as_bytes())
+        .unwrap();
+    let out = pty::wait_output(child, 30);
+    labelled(&out);
+    assert!(term.echo_on(), "echo was turned off: {}", term.shown());
+    assert!(!term.shown().contains(PROMPT), "{}", term.shown());
+}
+
+fn run_hook(cmd: &mut Command, stdin: &str) -> (Output, String) {
+    let term = pty::Pty::open();
+    let mut child = term.spawn(cmd.stdin(Stdio::piped()));
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let out = pty::wait_output(child, 30);
+    (out, term.shown())
+}
+
+fn labelled(out: &Output) -> String {
+    let said = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "held: {said}{err}");
+    assert!(said.contains("gate-child: allowed"), "{said}{err}");
+    assert!(err.contains("sitting-gate"), "{err}");
+    err
+}
+
+fn push_is_labelled(case: &Case, cmd: &mut Command) {
+    let (out, shown) = run_hook(cmd, &case.push);
+    let err = labelled(&out);
+    assert!(!shown.contains(PROMPT), "the hook asked: {shown}");
+    assert!(!shown.contains(YES_PROMPT), "the hook asked: {shown}");
+    assert!(!err.contains("passphrase"), "{err}");
+    assert_eq!(case.failures(), 0);
 }

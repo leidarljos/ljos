@@ -42,8 +42,7 @@ const PROTOCOL_URI: &str = "ljos://protocol";
 const RESOURCE_TTL_MS: u64 = 0;
 
 /// The tools a session lists when `LJOS_MCP_TOOLS` is unset: the command
-/// rules and the consent form for a held command, memory, tickets, claims,
-/// mail, decisions and the doctor. Every tool costs its description and
+/// rules, memory, tickets, claims, mail, decisions and the doctor. Every tool costs its description and
 /// schema in the model's context on every session, so the rest wait for an
 /// opt-in. `tools/list` keeps this order, so the guard and memory lead.
 pub const CORE_TOOLS: &[&str] = &[
@@ -153,6 +152,10 @@ The server also claims on the first write and finishes on shutdown or when the s
 
 /// One line on a tool result, so the next call is named.
 fn next_step(tool: &str) -> &'static str {
+    next_step_for_mode(tool, ljos_cli::guard_mode::is_strict())
+}
+
+fn next_step_for_mode(tool: &str, strict: bool) -> &'static str {
     match tool {
         "ljos_start" => {
             "next: do the work; ljos_note your own findings; ljos_remember or ljos_prefer only what the person stated; ljos_guard_check before a destructive command; ljos_finish when done"
@@ -160,7 +163,8 @@ fn next_step(tool: &str) -> &'static str {
         "ljos_note" | "ljos_remember" => {
             "next: keep going, or ljos_finish with the lesson when the task is done"
         }
-        "ljos_guard_check" => "next: run the command only when this allowed it",
+        "ljos_guard_check" if strict => "next: run the command only when this allowed it",
+        "ljos_guard_check" => "next: run the command, minding any warning line",
         "ljos_finish" => "next: the claim is released; this sitting is closed",
         name if ljos_cli::bookkeep::mcp_tool_writes(name) => {
             "next: ljos_finish with the lesson when the task is done"
@@ -239,9 +243,8 @@ fn supply_issue(arguments: &mut serde_json::Map<String, serde_json::Value>, sess
     }
 }
 
-/// Tools that run when the call's seat cannot be resolved: the guard,
-/// the consent form for a command the guard held, and tools that only
-/// read. Nothing here claims, sits, books, mails or writes under a seat,
+/// Tools that run when the call's seat cannot be resolved: the guard and
+/// tools that only read. Nothing here claims, sits, books, mails or writes under a seat,
 /// so none of them needs one. Every other tool still refuses an unknown
 /// seat.
 const SEAT_FREE_TOOLS: &[&str] = &[
@@ -555,14 +558,6 @@ pub struct ForgetArgs {
     pub why: Option<String>,
 }
 
-/// The pending one-command request printed by the hook.
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ApprovalArgs {
-    /// The short approval tag or full request id. The client form supplies consent.
-    pub id: String,
-}
-
 /// One deed accession.
 #[derive(Deserialize, JsonSchema)]
 pub struct AccessionArgs {
@@ -672,9 +667,9 @@ pub struct PredictArgs {
 pub struct RuleArgs {
     /// A glob over the whole command line, such as `*--force*`.
     pub pattern: String,
-    /// `deny` stops the action at the runner; `ask` hands it to the person.
+    /// `deny` or `ask`: a label the warning carries. Neither stops the action.
     pub verdict: String,
-    /// The reason a stopped reader sees.
+    /// The reason the warning gives.
     pub why: String,
     /// Write a user rule, shared by every seat and never reviewed, instead of a seat rule.
     #[serde(default)]
@@ -989,8 +984,7 @@ pub struct SittingArgs {
     /// named after the client that connected, tagged with the runner's process.
     #[serde(default)]
     pub assignee: Option<String>,
-    /// Sit even when the issue's blockers are open. Without it a blocked
-    /// issue is refused before anything is claimed.
+    /// Accepted and ignored. A blocked issue is sat and labelled `blocked-by`.
     #[serde(default)]
     pub anyway: bool,
     /// The recipe this sitting copies before recall (`sit`, `arena`, `land`,
@@ -1135,13 +1129,13 @@ pub struct Said {
     pub aside: Option<String>,
 }
 
-/// The seat's reading of one command. `verdict` is `allow` or `ask`.
-/// A deny is a tool error, so this field does not say deny for an ask.
+/// The seat's reading of one command. The command runs; a rule that
+/// fires on it is a warning line in the text.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GuardSaid {
     /// The policy text.
     pub text: String,
-    /// `allow` or `ask`.
+    /// `allow`.
     pub verdict: String,
     /// What it said aside, when anything.
     pub aside: Option<String>,
@@ -1407,7 +1401,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Show the person an in-chat consent form for a pending command request. Pass only its id; tool arguments never grant consent. The default is one attempt. An eligible ordinary branch push can offer an explicit human-selected task scope bound to the exact command, directory, conversation, live task lease and remote binding. Decline, cancellation and errors leave the command blocked.",
+        description = "In strict mode, show the person an in-chat consent form for a pending command request. Pass only its id; tool arguments never grant consent. The default is one attempt. An eligible ordinary branch push can offer an explicit human-selected task scope bound to the exact command, directory, conversation, live task lease and remote binding. Decline, cancellation and errors leave the command blocked.",
         annotations(
             title = "Review command consent",
             read_only_hint = false,
@@ -1421,6 +1415,11 @@ impl LjosServer {
         Parameters(args): Parameters<ApprovalArgs>,
         peer: rmcp::Peer<rmcp::RoleServer>,
     ) -> Result<Json<Said>, McpError> {
+        if !ljos_cli::guard_mode::is_strict() {
+            return Err(refused(anyhow::anyhow!(
+                "command consent requires LJOS_GUARD_MODE=strict"
+            )));
+        }
         let text = ljos_cli::approval::request_approval(&args.id, &peer)
             .await
             .map_err(refused)?;
@@ -1865,7 +1864,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this for one view of what happened across every seat, newest first: tickets filed, claimed and closed, votes and consensus, deeds, claims taken or released, guard refusals and rewrites, and memory. Pass since as a day, a time, or last. last continues from the previous digest. Read-only.",
+        description = "Call this for one view of what happened across every seat, newest first: tickets filed, claimed and closed, votes and consensus, deeds, claims taken or released, guard warnings and rewrites, and memory. Pass since as a day, a time, or last. last continues from the previous digest. Read-only.",
         annotations(
             title = "Digest across seats",
             read_only_hint = true,
@@ -1906,6 +1905,7 @@ impl LjosServer {
                     ljos_cli::ballot_voter("vote", args.as_persona.as_deref()).map_err(refused)?;
                 let cast = ljos_cli::panel_gate::claim_session_ballot(&args.issue, &who)
                     .map_err(refused)?;
+                let session_label = cast.label.clone();
                 let used = args.used.as_deref().unwrap_or("");
                 if used.is_empty() {
                     return Err(refused(anyhow::anyhow!(
@@ -1926,6 +1926,9 @@ impl LjosServer {
                 }
                 let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                 let mut said = habitat_as("vissue", &refs, Some(&who))?;
+                if let Some(why) = session_label {
+                    said.0.text = format!("ljos: session-authored: {why}\n{}", said.0.text);
+                }
                 cast.keep();
                 match ljos_cli::ballot_sig::sign_ballot(&args.issue, &who, c) {
                     Ok(line) => said.0.text.push_str(&line),
@@ -2049,7 +2052,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this before a destructive shell command, a git commit, a git push, or a merge. Pass the command line, and pass cwd when the command runs outside the server's start directory. It returns verdict allow or ask. Run the command only when verdict is allow. An ask names the command and waits for the person; it is not a deny. A commit, push, or merge the gates refuse is an error that names what makes the line pass.",
+        description = "Call this before a destructive shell command, a git commit, a git push, or a merge. Pass the command line, and pass cwd when the command runs outside the server's start directory. It returns advisory warnings by default. With LJOS_GUARD_MODE=strict it returns allow or ask, and a denial is an error. An ask requires the person's consent before retrying. Cloud worker restrictions remain enforced in either mode.",
         annotations(
             title = "Check a command",
             read_only_hint = true,
@@ -2292,11 +2295,7 @@ impl LjosServer {
         let ballots = ljos_cli::ballot_rows(&args.issue);
         ljos_cli::require_ballots(&args.issue, &ballots).map_err(refused)?;
         if let Some(msg) = ljos_cli::panel_gate::settle_refusal(&args.issue) {
-            let mut text = msg;
-            for line in ljos_cli::panel_gate::blind_lines_for(&args.issue) {
-                text.push_str(&format!("\nblind design: {line}"));
-            }
-            return Err(refused(anyhow::anyhow!(text)));
+            eprintln!("ljos: session-authored: {msg}");
         }
         let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
         // As the CLI: the model crate's settle, and the tracker's only on
@@ -2419,7 +2418,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the work has shown that a kind of command must never run, or must be asked about first: writes a rule to the pack, a glob over the command line with a verdict. The memory hook and `ljos policy` enforce it at the point of action, and it travels in handovers like any memory. Pass user true to write that law into the user config instead, shared by every seat and never reviewed.",
+        description = "Call this when the work has shown that a kind of command needs a warning before it runs: writes a rule to the pack, a glob over the command line with a verdict label. The memory hook and `ljos policy` show its warning at the point of action and the command still runs, and it travels in handovers like any memory. Pass user true to write that law into the user config instead, shared by every seat and never reviewed.",
         annotations(
             title = "Write a rule",
             read_only_hint = false,
@@ -3282,8 +3281,8 @@ async fn relay_forward_request(
 /// order the lines were read, recorded in [`CALL_QUEUE`] before either task
 /// runs. A call that changes what this seat reads back waits for every such
 /// call read before it, and a read waits for those too. Reads still run
-/// beside each other, and every other tool, the guard and approval included,
-/// waits for nothing.
+/// beside each other, and every other tool, the guard included, waits for
+/// nothing.
 static CALL_QUEUE: std::sync::Mutex<std::collections::VecDeque<QueuedCall>> =
     std::sync::Mutex::new(std::collections::VecDeque::new());
 static CALL_WAKE: std::sync::LazyLock<tokio::sync::Notify> =
@@ -4260,6 +4259,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn advisory_the_guard_and_memory_lead_and_the_personas_close_the_list() {
+        let order = |set: Option<&[String]>| -> Vec<String> {
+            let mut tools: Vec<Tool> = LjosServer::tool_router()
+                .list_all()
+                .into_iter()
+                .filter(|t| listed(set, &t.name))
+                .collect();
+            listing_order(&mut tools);
+            tools.into_iter().map(|t| t.name.to_string()).collect()
+        };
+        let lead = ["ljos_rule", "ljos_prefer", "ljos_remember", "ljos_search"];
+        let core = order(tool_set(None).as_deref());
+        assert_eq!(core, CORE_TOOLS);
+        let every = order(None);
+        assert_eq!(every.len(), LjosServer::tool_router().list_all().len());
+        assert_eq!(&every[..lead.len()], lead);
+        assert_eq!(&every[..CORE_TOOLS.len()], CORE_TOOLS);
+        let tail = &every[every.len() - PERSONA_TOOLS.len()..];
+        assert_eq!(tail, PERSONA_TOOLS);
+        for name in PERSONA_TOOLS {
+            assert!(!CORE_TOOLS.contains(name), "{name} is in the core set");
+        }
+    }
+
     /// A tool that ran and refused answers with a result the model reads; a
     /// call the protocol cannot route stays a protocol error.
     #[test]
@@ -4537,6 +4561,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn advisory_only_readers_and_the_guard_run_without_a_seat() {
+        let tools = LjosServer::tool_router().list_all();
+        for name in SEAT_FREE_TOOLS {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == *name)
+                .unwrap_or_else(|| panic!("{name} is not a tool"));
+            let read_only = tool
+                .annotations
+                .as_ref()
+                .and_then(|hints| hints.read_only_hint)
+                == Some(true);
+            assert!(read_only, "{name} writes and runs without a seat");
+            assert!(!ljos_cli::bookkeep::mcp_tool_writes(name), "{name}");
+        }
+        assert!(runs_without_seat("ljos_guard_check"));
+        for name in [
+            "ljos_claim",
+            "ljos_sitting",
+            "ljos_start",
+            "ljos_finish",
+            "ljos_release",
+            "ljos_send",
+            "ljos_inbox",
+            "ljos_reply",
+            "ljos_vote",
+            "ljos_note",
+            "ljos_remember",
+        ] {
+            assert!(!runs_without_seat(name), "{name}");
+        }
+    }
+
     /// Every tool is annotated, and the writers are the ones the contract names.
     #[test]
     fn the_writers_are_the_ones_the_contract_names() {
@@ -4616,6 +4674,8 @@ mod tests {
     /// The instructions a bot hears are the loop, and every tool accepts seat.
     #[test]
     fn the_bot_loop_is_the_instructions_and_every_tool_takes_a_seat() {
+        let next_step = |tool| next_step_for_mode(tool, true);
+
         let cards = tempfile::tempdir().unwrap();
         let info = LjosServer::at(cards.path().to_path_buf()).get_info();
         assert_eq!(info.instructions.as_deref(), Some(SERVER_INSTRUCTIONS));
@@ -4665,6 +4725,80 @@ mod tests {
         let last = done.content.last().unwrap().as_text().expect("text");
         assert_eq!(last.text, next_step("ljos_start"));
         assert!(next_step("ljos_guard_check").contains("allowed"));
+        assert!(next_step("ljos_finish").contains("released"));
+        assert!(!next_step("ljos_finish").contains("is pushed"));
+        let failed =
+            "tracker git: committed chore(issues): probe claimed; push refused: no upstream\n";
+        let next = finish_next_from(failed);
+        assert!(next.contains("failed"), "{next}");
+        assert!(!next.contains("is pushed"), "{next}");
+        let landed =
+            finish_next_from("tracker git: committed and pushed chore(issues): probe claimed\n");
+        assert!(landed.contains("is pushed"), "{landed}");
+        let sync_failed =
+            finish_next_from("sync: committed chore; push refused: non-fast-forward\n");
+        assert!(sync_failed.contains("failed"), "{sync_failed}");
+        assert!(next_step("ljos_note").contains("ljos_finish"));
+        assert!(next_step("ljos_remember").contains("ljos_finish"));
+        assert!(next_step("ljos_search").contains("ljos_start"));
+        assert!(next_step("ljos_prefer").contains("ljos_finish"));
+        assert!(!ljos_cli::bookkeep::mcp_tool_writes("ljos_start"));
+        assert!(!ljos_cli::bookkeep::mcp_tool_writes("ljos_guard_check"));
+    }
+
+    #[test]
+    fn advisory_the_bot_loop_is_the_instructions_and_every_tool_takes_a_seat() {
+        let next_step = |tool| next_step_for_mode(tool, false);
+
+        let cards = tempfile::tempdir().unwrap();
+        let info = LjosServer::at(cards.path().to_path_buf()).get_info();
+        assert_eq!(info.instructions.as_deref(), Some(SERVER_INSTRUCTIONS));
+        let mut tools = LjosServer::tool_router().list_all();
+        assert!(tools.iter().any(|tool| tool.name == "ljos_start"));
+        assert!(tools.iter().any(|tool| tool.name == "ljos_guard_check"));
+        for tool in &mut tools {
+            publish_tool(tool);
+            assert_listed_schema(&tool.name, &tool.input_schema);
+            if let Some(output) = &tool.output_schema {
+                assert_listed_schema(&tool.name, output);
+            }
+            let props = tool
+                .input_schema
+                .get("properties")
+                .and_then(|value| value.as_object())
+                .unwrap_or_else(|| panic!("{} has no properties", tool.name));
+            let seat = props
+                .get("seat")
+                .unwrap_or_else(|| panic!("{} has no seat", tool.name));
+            assert_eq!(
+                seat.get("type").and_then(|value| value.as_str()),
+                Some("string"),
+                "{}",
+                tool.name
+            );
+            assert_eq!(
+                seat.get("description").and_then(|value| value.as_str()),
+                Some(SEAT_PROPERTY),
+                "{}",
+                tool.name
+            );
+            if let Some(required) = tool.input_schema.get("required").and_then(|r| r.as_array()) {
+                assert!(
+                    required.iter().all(|value| value.as_str() != Some("seat")),
+                    "{} requires seat",
+                    tool.name
+                );
+            }
+        }
+        let CallToolResponse::Complete(done) = attach_next(
+            "ljos_start",
+            CallToolResult::success(vec![ContentBlock::text("claimed")]).into(),
+        ) else {
+            panic!("a start completes");
+        };
+        let last = done.content.last().unwrap().as_text().expect("text");
+        assert_eq!(last.text, next_step("ljos_start"));
+        assert!(next_step("ljos_guard_check").contains("warning"));
         assert!(next_step("ljos_finish").contains("released"));
         assert!(!next_step("ljos_finish").contains("is pushed"));
         let failed =
@@ -4762,6 +4896,10 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_is_an_error() {
         let _env_lock = ENV_TEST_LOCK.lock().await;
+        let _guard_mode_saved = RestoreEnv::new(&["LJOS_GUARD_MODE"]);
+        unsafe {
+            std::env::set_var("LJOS_GUARD_MODE", "strict");
+        }
         let _saved = RestoreEnv::new(&["PATH"]);
         let cards = tempfile::tempdir().unwrap();
         let server = LjosServer::at(cards.path().to_path_buf());
@@ -4819,11 +4957,15 @@ mod tests {
         assert_eq!(card_named("file:///etc/passwd"), None);
     }
 
-    /// The guard tool mirrors the hook's outcome mapping: allowed commands
-    /// return a verdict, and refused commands are surfaced as tool errors.
+    /// The guard tool reads a command the way the hook does: it runs, and a
+    /// rule that fires on it is one warning line.
     #[tokio::test]
     async fn guard_check_allows_an_ordinary_command_and_a_commit() {
         let _env_lock = ENV_TEST_LOCK.lock().await;
+        let _guard_mode_saved = RestoreEnv::new(&["LJOS_GUARD_MODE"]);
+        unsafe {
+            std::env::set_var("LJOS_GUARD_MODE", "strict");
+        }
         // A parallel test points HOME at a temporary directory, which
         // suspends the guard. This check is about the command, so keep it on.
         let _saved = RestoreEnv::new(&["LJOS_GUARD", "LJOS_OFF"]);
@@ -4856,6 +4998,10 @@ mod tests {
     #[tokio::test]
     async fn guard_check_uses_the_passed_cwd() {
         let _env_lock = ENV_TEST_LOCK.lock().await;
+        let _guard_mode_saved = RestoreEnv::new(&["LJOS_GUARD_MODE"]);
+        unsafe {
+            std::env::set_var("LJOS_GUARD_MODE", "strict");
+        }
         let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF"]);
         let home = tempfile::tempdir().expect("tempdir");
         let danger = home.path().join("danger");
@@ -4904,13 +5050,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guard_check_expands_tilde_and_refuses_an_unresolved_cwd() {
+    async fn advisory_guard_check_uses_the_passed_cwd() {
         let _env_lock = ENV_TEST_LOCK.lock().await;
+        let _guard_mode_saved = RestoreEnv::new(&["LJOS_GUARD_MODE"]);
+        unsafe {
+            std::env::set_var("LJOS_GUARD_MODE", "advisory");
+        }
+        let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF"]);
+        let home = tempfile::tempdir().expect("tempdir");
+        let danger = home.path().join("danger");
+        std::fs::create_dir(&danger).expect("danger dir");
+        let bin = home.path().join("ljos-policyd");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n\
+             if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
+             printf 'allow\\twarn\\tcwd-rule\\tthis directory is marked\\n'\n\
+             exit 0\n\
+             fi\n\
+             printf 'allow\\n'\n",
+        )
+        .expect("policyd");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        unsafe {
+            std::env::set_var("POLICYD_BIN", &bin);
+            std::env::set_var("LJOS_GUARD", "on");
+            std::env::remove_var("LJOS_OFF");
+        }
+        let server = LjosServer::at(std::env::temp_dir());
+        let plain = server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: "echo hi".into(),
+                cwd: None,
+            }))
+            .await
+            .expect("allow");
+        assert_eq!(plain.0.verdict, "allow");
+        assert!(!plain.0.text.contains("warning:"), "{}", plain.0.text);
+        let warned = server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: "echo hi".into(),
+                cwd: Some(danger.display().to_string()),
+            }))
+            .await
+            .expect("a rule warns and the command runs");
+        assert_eq!(warned.0.verdict, "allow");
+        assert!(
+            warned
+                .0
+                .text
+                .contains("warning: cwd-rule: this directory is marked"),
+            "{}",
+            warned.0.text
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_check_expands_tilde_and_names_an_unresolved_cwd() {
+        let _env_lock = ENV_TEST_LOCK.lock().await;
+        let _guard_mode_saved = RestoreEnv::new(&["LJOS_GUARD_MODE"]);
+        unsafe {
+            std::env::set_var("LJOS_GUARD_MODE", "strict");
+        }
         let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF", "HOME"]);
         let home = tempfile::tempdir().expect("tempdir");
         let danger = home.path().join("proj/danger");
         std::fs::create_dir_all(&danger).expect("danger dir");
         let bin = home.path().join("ljos-policyd");
+        // An older daemon's deny is read as the same warning.
         std::fs::write(
             &bin,
             "#!/bin/sh\n\
@@ -4936,18 +5146,19 @@ mod tests {
             std::env::set_var("HOME", home.path());
         }
         let server = LjosServer::at(std::env::temp_dir());
-        let denied = match server
+        let warned = server
             .ljos_guard_check(Parameters(GuardArgs {
                 command: "make clean-all".into(),
                 cwd: Some("~/proj/danger".into()),
             }))
             .await
-        {
-            Err(err) => err,
-            Ok(out) => panic!("allowed {}: {}", out.0.verdict, out.0.text),
-        };
-        let said = format!("{denied:?}");
-        assert!(said.contains("make-clean-all"), "{said}");
+            .expect("an older deny is a warning");
+        assert_eq!(warned.0.verdict, "allow");
+        assert!(
+            warned.0.text.contains("warning: make-clean-all"),
+            "{}",
+            warned.0.text
+        );
 
         let missing = match server
             .ljos_guard_check(Parameters(GuardArgs {
@@ -4957,7 +5168,7 @@ mod tests {
             .await
         {
             Err(err) => err,
-            Ok(out) => panic!("allowed {}: {}", out.0.verdict, out.0.text),
+            Ok(out) => panic!("read {}: {}", out.0.verdict, out.0.text),
         };
         let miss = format!("{missing:?}");
         assert!(miss.contains("guard cwd is unavailable"), "{miss}");
@@ -4966,7 +5177,8 @@ mod tests {
     /// The check asks the real ljos-policyd what the hook asks it: the
     /// line as the shell reads it, and the program a heredoc feeds
     /// `python3 -`. Both allow the same lines, and the check's text
-    /// carries the rule ljos-policyd names for the hook write.
+    /// carries the hook's warning, which names the rule ljos-policyd
+    /// sees for the hook write.
     #[tokio::test]
     async fn guard_check_asks_policyd_what_the_hook_asks() {
         if !ljos_cli::tool_installed("ljos-policyd") {
@@ -4974,6 +5186,10 @@ mod tests {
             return;
         }
         let _env_lock = ENV_TEST_LOCK.lock().await;
+        let _guard_mode_saved = RestoreEnv::new(&["LJOS_GUARD_MODE"]);
+        unsafe {
+            std::env::set_var("LJOS_GUARD_MODE", "strict");
+        }
         let _saved = RestoreEnv::new(&[
             "POLICYD_BIN",
             "LJOS_GUARD",
@@ -5020,6 +5236,78 @@ mod tests {
             .expect("allow");
         assert!(
             seat.0.text.contains("allow\twarn\tseat-guard-path"),
+            "{}",
+            seat.0.text
+        );
+        let allowed = check("python3 - <<'PY'\nprint('hi')\nPY")
+            .await
+            .expect("allow");
+        assert_eq!(allowed.0.verdict, "allow");
+    }
+
+    #[tokio::test]
+    async fn advisory_guard_check_asks_policyd_what_the_hook_asks() {
+        if !ljos_cli::tool_installed("ljos-policyd") {
+            eprintln!("skipped: ljos-policyd is not installed");
+            return;
+        }
+        let _env_lock = ENV_TEST_LOCK.lock().await;
+        let _guard_mode_saved = RestoreEnv::new(&["LJOS_GUARD_MODE"]);
+        unsafe {
+            std::env::set_var("LJOS_GUARD_MODE", "advisory");
+        }
+        let _saved = RestoreEnv::new(&[
+            "POLICYD_BIN",
+            "LJOS_GUARD",
+            "LJOS_OFF",
+            "HOME",
+            "PHRONESIS_STATE_DIR",
+        ]);
+        let bin = which::which("ljos-policyd")
+            .expect("ljos-policyd is not on PATH; CI builds the commit ci.yml pins");
+        let root = tempfile::tempdir().expect("tempdir");
+        let project = root.path().join("project");
+        let home = tempfile::tempdir().expect("home");
+        let cursor = home.path().join(".cursor");
+        std::fs::create_dir_all(&cursor).expect("cursor dir");
+        std::fs::create_dir(&project).expect("project dir");
+        std::os::unix::fs::symlink(&cursor, project.join("seat")).expect("seat link");
+        unsafe {
+            std::env::set_var("POLICYD_BIN", &bin);
+            std::env::set_var("LJOS_GUARD", "on");
+            std::env::remove_var("LJOS_OFF");
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("PHRONESIS_STATE_DIR", home.path().join("policyd"));
+        }
+        let server = LjosServer::at(std::env::temp_dir());
+        let check = |command: &str| {
+            server.ljos_guard_check(Parameters(GuardArgs {
+                command: command.into(),
+                cwd: Some(root.path().display().to_string()),
+            }))
+        };
+        for command in [
+            "python3 - <<'PY'\nimport os\nos.system('rm -rf /')\nPY",
+            "(cd project; echo x > seat/hooks.json)",
+        ] {
+            let out = check(command)
+                .await
+                .unwrap_or_else(|err| panic!("refused {command:?}: {err:?}"));
+            assert_eq!(out.0.verdict, "allow", "{command:?}: {}", out.0.text);
+            if let Some(hook) = ljos_cli::tcb_verdict_in(command, Some(root.path())) {
+                assert_eq!(hook.verdict, "warn", "{command:?}: {}", hook.reason);
+                assert!(
+                    out.0.text.contains(&hook.warning()),
+                    "{command:?}: {}",
+                    out.0.text
+                );
+            }
+        }
+        let seat = check("(cd project; echo x > seat/hooks.json)")
+            .await
+            .expect("allow");
+        assert!(
+            seat.0.text.contains("warning: seat-guard-path"),
             "{}",
             seat.0.text
         );
@@ -5155,4 +5443,75 @@ mod tests {
         assert!(said.contains("/tmp/bag"), "{said}");
         ordered(said, &["`ljos_receive`", "`ljos_current`", "`import`"]);
     }
+
+    #[tokio::test]
+    async fn guard_check_expands_tilde_and_refuses_an_unresolved_cwd() {
+        let _env_lock = ENV_TEST_LOCK.lock().await;
+        let _guard_mode_saved = RestoreEnv::new(&["LJOS_GUARD_MODE"]);
+        unsafe {
+            std::env::set_var("LJOS_GUARD_MODE", "strict");
+        }
+        let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF", "HOME"]);
+        let home = tempfile::tempdir().expect("tempdir");
+        let danger = home.path().join("proj/danger");
+        std::fs::create_dir_all(&danger).expect("danger dir");
+        let bin = home.path().join("ljos-policyd");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n\
+             case \"$*\" in\n\
+             *\"make clean-all\"*)\n\
+             if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
+             printf 'deny\\tmake-clean-all\\n'\n\
+             exit 2\n\
+             fi\n\
+             ;;\n\
+             esac\n\
+             printf 'allow\\n'\n",
+        )
+        .expect("policyd");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        unsafe {
+            std::env::set_var("POLICYD_BIN", &bin);
+            std::env::set_var("LJOS_GUARD", "on");
+            std::env::remove_var("LJOS_OFF");
+            std::env::set_var("HOME", home.path());
+        }
+        let server = LjosServer::at(std::env::temp_dir());
+        let denied = match server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: "make clean-all".into(),
+                cwd: Some("~/proj/danger".into()),
+            }))
+            .await
+        {
+            Err(err) => err,
+            Ok(out) => panic!("allowed {}: {}", out.0.verdict, out.0.text),
+        };
+        let said = format!("{denied:?}");
+        assert!(said.contains("make-clean-all"), "{said}");
+
+        let missing = match server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: "echo hi".into(),
+                cwd: Some("~/proj/missing".into()),
+            }))
+            .await
+        {
+            Err(err) => err,
+            Ok(out) => panic!("allowed {}: {}", out.0.verdict, out.0.text),
+        };
+        let miss = format!("{missing:?}");
+        assert!(miss.contains("guard cwd is unavailable"), "{miss}");
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalArgs {
+    /// The short approval tag or full request id. The client form supplies consent.
+    pub id: String,
 }

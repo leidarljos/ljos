@@ -1210,9 +1210,23 @@ pub fn without_preface(text: &str) -> String {
 }
 
 fn as_argv(rule: &UserRule) -> Option<Rule> {
+    if !crate::guard_mode::is_strict() {
+        return advisory_as_argv(rule);
+    }
+
     Some(Rule {
         pattern: rule.pattern.clone()?,
         verdict: rule.verdict.clone().unwrap_or_else(|| "ask".to_string()),
+        reason: rule.reason.clone(),
+    })
+}
+
+fn advisory_as_argv(rule: &UserRule) -> Option<Rule> {
+    Some(Rule {
+        pattern: rule.pattern.clone()?,
+        // A row with no verdict still matches. The report below is a
+        // warning, so a missing verdict does not become an ask.
+        verdict: rule.verdict.clone().unwrap_or_else(|| "warn".to_string()),
         reason: rule.reason.clone(),
     })
 }
@@ -1235,12 +1249,15 @@ fn fired(rule: &UserRule) -> Rule {
     )
 }
 
-/// `law`, fired by `rule`, as a guard reports it. A promoted rule the pack
-/// does not confirm still fires, with a reason that says it is unverified
-/// rather than the person's: a deny or an ask only takes a command away,
-/// so honouring an unconfirmed one never widens what the agent may run,
-/// while dropping it would let a slow, down or forged pack lift a deny.
+/// `law`, fired by `rule`, as a guard reports it. The call runs.
+/// An unconfirmed rule is the warning labelled `unverified-rule`.
+/// A confirmed deny, ask or warn is the warning labelled `user-rule`.
+/// The rule's own reason is kept, and the pattern it matched is named.
 fn reported(rule: &UserRule, mut law: Rule) -> Rule {
+    if !crate::guard_mode::is_strict() {
+        return advisory_reported(rule, law);
+    }
+
     if let Some(why) = unconfirmed(rule) {
         law.reason = format!(
             "unverified, not confirmed as the person's rule ({why}): {}",
@@ -1250,13 +1267,30 @@ fn reported(rule: &UserRule, mut law: Rule) -> Rule {
     law
 }
 
-/// Whether `rule` is an outbound-post denial, the only verdict
-/// `beforeMCPExecution` enforces.
-#[must_use]
-pub fn mcp_event_denies(event: &str, rule: &Rule) -> bool {
-    event == "beforeMCPExecution"
-        && rule.verdict == "deny"
-        && rule.pattern.starts_with("user-rule:")
+fn advisory_reported(rule: &UserRule, law: Rule) -> Rule {
+    let pattern = law.pattern;
+    let reason = law.reason;
+    if let Some(why) = unconfirmed(rule) {
+        return Rule {
+            pattern: "unverified-rule".into(),
+            verdict: "warn".into(),
+            reason: format!(
+                "unverified, not confirmed as the person's rule ({why}): {reason} (rule {pattern})"
+            ),
+        };
+    }
+    if matches!(law.verdict.as_str(), "deny" | "ask" | "block" | "warn") {
+        return Rule {
+            pattern: "user-rule".into(),
+            verdict: "warn".into(),
+            reason: format!("{reason} (rule {pattern})"),
+        };
+    }
+    Rule {
+        pattern,
+        verdict: law.verdict,
+        reason,
+    }
 }
 
 struct Post {
@@ -1275,20 +1309,22 @@ fn note_rules_read_error(err: &anyhow::Error) {
     eprintln!("ljos: {err:#}");
 }
 
-/// A GitHub write the rules cover, refused because the file could not be
-/// used. The reason names the file. The pattern keeps the MCP deny.
-fn github_write_blocked(err: &anyhow::Error) -> Rule {
+/// A GitHub write the rules cover, warned on because the file could not
+/// be used. The reason names the file.
+fn github_write_unchecked(err: &anyhow::Error) -> Rule {
     note_rules_read_error(err);
     Rule {
-        pattern: "user-rule:file".into(),
-        verdict: "deny".into(),
-        reason: format!("user rules could not be read ({err:#}), so this GitHub write is refused"),
+        pattern: "user-rule".into(),
+        verdict: "warn".into(),
+        reason: format!(
+            "user rules could not be read ({err:#}), so this GitHub write was not checked against them (rule user-rule:file)"
+        ),
     }
 }
 
 /// The person's allow that covers `line`, if any: a user rule with the
 /// verdict `allow` and the person's basis whose pattern matches a command
-/// of the line. It clears the seat's own asks and denies for that line.
+/// of the line. It clears the seat's own warnings for that line.
 /// The law in policyd is not read here and still judges the line.
 #[must_use]
 pub fn allows(line: &str) -> Option<UserRule> {
@@ -1311,6 +1347,10 @@ pub fn allows(line: &str) -> Option<UserRule> {
 /// The user-rule verdict for a shell line, if one fires.
 #[must_use]
 pub fn guard_line(line: &str) -> Option<Rule> {
+    if !crate::guard_mode::is_strict() {
+        return advisory_guard_line(line);
+    }
+
     if line.trim().is_empty() {
         return None;
     }
@@ -1321,6 +1361,40 @@ pub fn guard_line(line: &str) -> Option<Rule> {
                 return None;
             }
             return Some(github_write_blocked(&err));
+        }
+    };
+    if rules.is_empty() {
+        return None;
+    }
+    let (rows, argv): (Vec<&UserRule>, Vec<Rule>) = rules
+        .iter()
+        .filter_map(|rule| Some((rule, as_argv(rule)?)))
+        .unzip();
+    // The rule verdict_for gives a line nested too deep is no row.
+    let report = |law: &Rule| match argv.iter().position(|row| std::ptr::eq(row, law)) {
+        Some(at) => reported(rows[at], law.clone()),
+        None => law.clone(),
+    };
+    if let Some(hit) = super::verdict_for(&argv, line).filter(|rule| rule.verdict == "deny") {
+        return Some(report(hit));
+    }
+    if let Some(hit) = outbound(line, &rules) {
+        return Some(hit);
+    }
+    super::verdict_for(&argv, line).map(report)
+}
+
+pub fn advisory_guard_line(line: &str) -> Option<Rule> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let rules = match load() {
+        Ok(rules) => rules,
+        Err(err) => {
+            if posts_of(line).is_empty() {
+                return None;
+            }
+            return Some(github_write_unchecked(&err));
         }
     };
     if rules.is_empty() {
@@ -1380,12 +1454,33 @@ fn guard_mcp(
     command: Option<&str>,
     input: &Value,
 ) -> Option<Rule> {
+    if !crate::guard_mode::is_strict() {
+        return advisory_guard_mcp(tool, server, command, input);
+    }
+
     if !github_write(tool, server, command) && !cursor_http_mcp_write(tool, input) {
         return None;
     }
     let rules = match load() {
         Ok(rules) => rules,
         Err(err) => return Some(github_write_blocked(&err)),
+    };
+    let post = mcp_fields(input, tool);
+    rules.iter().find(|rule| post_hits(rule, &post)).map(fired)
+}
+
+fn advisory_guard_mcp(
+    tool: &str,
+    server: Option<&str>,
+    command: Option<&str>,
+    input: &Value,
+) -> Option<Rule> {
+    if !github_write(tool, server, command) && !cursor_http_mcp_write(tool, input) {
+        return None;
+    }
+    let rules = match load() {
+        Ok(rules) => rules,
+        Err(err) => return Some(github_write_unchecked(&err)),
     };
     let post = mcp_fields(input, tool);
     rules.iter().find(|rule| post_hits(rule, &post)).map(fired)
@@ -1839,6 +1934,8 @@ mod tests {
     /// them an agent's, so each is run again in a child that carries them.
     #[test]
     fn the_user_rule_tests_pass_under_a_runner_environment() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let runner: &[(&str, &str)] = &[
             ("CURSOR_CONVERSATION_ID", "0199a1b2-c3d4-e5f6-runner"),
             ("CURSOR_AGENT", "1"),
@@ -1848,12 +1945,12 @@ mod tests {
         ];
         for test in [
             "a_user_rule_is_surfaced_in_a_second_seat",
-            "the_guard_denies_a_mention_and_a_reply_and_allows_another_comment",
+            "the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment",
             "two_homes_with_different_rules_converge",
         ] {
             let test = format!("user_rules::tests::{test}");
             for env in [runner, &[("CURSOR_CONVERSATION_ID", "x")]] {
-                let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+                let mut cmd = crate::guard_mode::fixture_command(std::env::current_exe().unwrap());
                 cmd.args(["--exact", &test, "--test-threads=1"]);
                 for (key, value) in env {
                     cmd.env(key, value);
@@ -1869,6 +1966,8 @@ mod tests {
 
     #[test]
     fn a_user_rule_is_surfaced_in_a_second_seat() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (_lock, dir) = isolated();
         let written = alan();
         assert_eq!(written.author, "rohit");
@@ -1927,6 +2026,8 @@ mod tests {
 
     #[test]
     fn a_user_rule_does_not_decay_after_simulated_time() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (_lock, _dir) = isolated();
         let written = alan();
         let later = "2099-01-01T00:00:00Z";
@@ -1971,6 +2072,8 @@ mod tests {
 
     #[test]
     fn the_preface_stays_inside_its_budget_and_keeps_the_first_rule() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (_lock, _dir) = isolated();
         let first = "a".repeat(80);
         write_preference(&first, "first", &People::default(), &People::default()).unwrap();
@@ -1989,7 +2092,9 @@ mod tests {
     }
 
     #[test]
-    fn the_guard_denies_a_mention_and_a_reply_and_allows_another_comment() {
+    fn the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Advisory);
+
         let (_lock, _dir) = isolated();
         write_preference(
             "never post or reply to Alan (ocaisa)",
@@ -2005,15 +2110,17 @@ mod tests {
         );
         alan();
         let denied = super::super::static_guard(mention).expect("mention");
-        assert_eq!(denied.verdict, "deny");
-        assert!(denied.pattern.starts_with("user-rule:"), "{denied:?}");
+        assert_eq!(denied.verdict, "warn");
+        assert_eq!(denied.pattern, "user-rule");
+        assert!(denied.reason.contains("(rule user-rule:"), "{denied:?}");
         assert!(
             denied.reason.contains("ocaisa") || denied.reason.contains("Alan"),
             "{denied:?}"
         );
         let reply = "gh api --method POST repos/org/repo/issues/comments/7/replies -f body=seen -F in_reply_to_user=ocaisa";
         let denied = super::super::static_guard(reply).expect("reply");
-        assert_eq!(denied.verdict, "deny");
+        assert_eq!(denied.verdict, "warn");
+        assert_eq!(denied.pattern, "user-rule");
         let allowed = "gh pr comment 12 --body 'tests passed'";
         assert!(
             super::super::static_guard(allowed).is_none(),
@@ -2028,7 +2135,8 @@ mod tests {
         );
         let named =
             super::super::static_guard("gh pr comment 12 --body 'ask Alan to look'").expect("name");
-        assert_eq!(named.verdict, "deny");
+        assert_eq!(named.verdict, "warn");
+        assert_eq!(named.pattern, "user-rule");
         assert!(super::super::static_guard("gh api user/ocaisa").is_none());
         assert!(super::super::static_guard("echo please ask @ocaisa").is_none());
         let mcp = r#"{"hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa","owner":"org","repo":"repo"}}"#;
@@ -2047,11 +2155,13 @@ mod tests {
         )
         .unwrap();
         let out = super::super::hook_output_ruled(&cursor, "", Some(&verdict));
-        assert!(out.contains("\"permission\":\"deny\""), "{out}");
+        assert!(out.contains("\"permission\":\"allow\""), "{out}");
+        assert!(out.contains(&verdict.warning()), "{out}");
         let payload = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa"}}"#;
         let (out, code) = super::super::cursor_side_answer(payload, None).unwrap();
         assert_eq!(code, 0, "{out}");
-        assert!(out.contains("\"permission\":\"deny\""), "{out}");
+        assert!(out.contains("\"permission\":\"allow\""), "{out}");
+        assert!(out.contains("ljos: user-rule:"), "{out}");
         assert!(out.contains("ocaisa") || out.contains("Alan"), "{out}");
     }
 
@@ -2067,6 +2177,8 @@ mod tests {
     /// over the cap fail at once, without reading the bytes.
     #[test]
     fn a_rules_file_must_be_a_small_regular_file() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (_lock, _dir) = isolated();
         let path = rules_file();
         let _ = std::fs::remove_file(&path);
@@ -2105,17 +2217,20 @@ mod tests {
     }
 
     /// A zero-byte file, a blank file, and a dangling symlink are not an
-    /// empty rule list. A covered GitHub write is refused and the reason
-    /// names the path. A missing file and a real empty list do not.
+    /// empty rule list. A covered GitHub write is warned on and the reason
+    /// names the path. A missing file and a real empty list are not.
     #[test]
-    fn an_empty_rules_file_and_a_dangling_link_deny_a_github_write() {
+    fn an_empty_rules_file_and_a_dangling_link_warn_on_a_github_write() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Advisory);
+
         let (_lock, _dir) = isolated();
         let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
         let read_tool = r#"{"tool_name":"list_issues","mcp_server_name":"github","tool_input":{"owner":"org"}}"#;
         let path = rules_file();
         std::fs::write(&path, "").unwrap();
         let hit = guard_payload(benign).expect("empty file allowed a write");
-        assert_eq!(hit.verdict, "deny");
+        assert_eq!(hit.verdict, "warn");
+        assert_eq!(hit.pattern, "user-rule");
         assert!(
             hit.reason.contains(&path.display().to_string()),
             "{}",
@@ -2139,7 +2254,8 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(path.with_file_name("no-such-rules.json"), &path).unwrap();
         let hit = guard_payload(benign).expect("dangling link allowed a write");
-        assert_eq!(hit.verdict, "deny");
+        assert_eq!(hit.verdict, "warn");
+        assert_eq!(hit.pattern, "user-rule");
         assert!(
             hit.reason.contains(&path.display().to_string()),
             "{}",
@@ -2164,9 +2280,11 @@ mod tests {
     }
 
     /// A file that has parsed, then is emptied or cut off, is still the
-    /// last whole copy. A benign GitHub write is not refused.
+    /// last whole copy. A benign GitHub write is not warned on.
     #[test]
     fn a_rules_file_caught_empty_keeps_the_last_good_copy() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (_lock, _dir) = isolated();
         let path = rules_file();
         let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
@@ -2192,10 +2310,12 @@ mod tests {
         );
     }
 
-    /// A file that is present and cannot be used denies the GitHub writes
+    /// A file that is present and cannot be used warns on the GitHub writes
     /// the rules cover, and leaves reads and other MCP calls alone.
     #[test]
-    fn a_bad_rules_file_denies_github_writes_and_allows_other_calls() {
+    fn a_bad_rules_file_warns_on_github_writes_and_allows_other_calls() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Advisory);
+
         let (_lock, _dir) = isolated();
         let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
         let note = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"ljos_note","mcp_server_name":"ljos","command":"ljos-mcp","tool_input":{"text":"x"}}"#;
@@ -2215,8 +2335,8 @@ mod tests {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
             }
             let hit = guard_payload(benign).unwrap_or_else(|| panic!("{name}: allowed"));
-            assert_eq!(hit.verdict, "deny", "{name}");
-            assert!(hit.pattern.starts_with("user-rule:"), "{name}: {hit:?}");
+            assert_eq!(hit.verdict, "warn", "{name}");
+            assert_eq!(hit.pattern, "user-rule", "{name}: {hit:?}");
             assert!(
                 hit.reason.contains(&path.display().to_string()),
                 "{name}: {}",
@@ -2227,7 +2347,8 @@ mod tests {
             assert!(guard_payload(other).is_none(), "{name}: other MCP denied");
             let (out, code) = super::super::cursor_side_answer(benign, None).unwrap();
             assert_eq!(code, 0, "{name}: {out}");
-            assert!(out.contains("\"permission\":\"deny\""), "{name}: {out}");
+            assert!(out.contains("\"permission\":\"allow\""), "{name}: {out}");
+            assert!(out.contains("was not checked"), "{name}: {out}");
             let (out, code) = super::super::cursor_side_answer(note, None).unwrap();
             assert_eq!(code, 0, "{name}: {out}");
             assert_eq!(out, "{\"permission\":\"allow\"}\n", "{name}: {out}");
@@ -2235,7 +2356,8 @@ mod tests {
             assert_eq!(code, 0, "{name}: {out}");
             assert_eq!(out, "{\"permission\":\"allow\"}\n", "{name}: {out}");
             let shell = guard_line("gh pr comment 12 --body 'tests passed'").unwrap();
-            assert_eq!(shell.verdict, "deny", "{name}");
+            assert_eq!(shell.verdict, "warn", "{name}");
+            assert_eq!(shell.pattern, "user-rule", "{name}");
             assert!(
                 shell.reason.contains(&path.display().to_string()),
                 "{name}: {}",
@@ -2410,6 +2532,8 @@ mod tests {
     /// recorded for the lesson is cleared rather than kept for a label.
     #[test]
     fn a_pack_that_stops_answering_confirms_no_rule() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         if !crate::tool_installed("packsetd") {
             eprintln!("skipped: packsetd is not installed");
             return;
@@ -2538,6 +2662,8 @@ mod tests {
 
     #[test]
     fn promote_copies_a_lesson_and_refuses_anything_else() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (_lock, _dir) = isolated();
         let atom = serde_json::json!({
             "id": "lesson-ocaisa",
@@ -2643,6 +2769,8 @@ mod tests {
     /// still shown rather than dropped.
     #[test]
     fn a_runners_keep_of_a_held_user_rule_is_the_agents() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (_lock, _dir) = isolated();
         let mut row = alan();
         row.basis = None;
@@ -2683,6 +2811,8 @@ mod tests {
 
     #[test]
     fn held_user_rules_warn_and_do_not_fail_the_doctor() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let row = super::super::Habitat {
             name: "user rules",
             state: review_sentence(1),
@@ -2694,7 +2824,9 @@ mod tests {
     }
 
     #[test]
-    fn an_argv_user_rule_denies_in_the_static_guard() {
+    fn an_argv_user_rule_warns_in_the_static_guard() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Advisory);
+
         let (_lock, _dir) = isolated();
         write_argv(
             &Rule {
@@ -2706,16 +2838,23 @@ mod tests {
         )
         .unwrap();
         let denied = super::super::static_guard("gh pr comment 12 --body 'tests passed'").unwrap();
-        assert_eq!(denied.verdict, "deny");
-        assert_eq!(denied.pattern, "gh pr comment*");
+        assert_eq!(denied.verdict, "warn");
+        assert_eq!(denied.pattern, "user-rule");
+        assert!(
+            denied.reason.contains("(rule gh pr comment*)"),
+            "{denied:?}"
+        );
         assert!(super::super::static_guard("gh issue list").is_none());
     }
 
-    /// With no pack to confirm its lesson, a promoted rule still denies on
-    /// its pattern, on a mention and on an MCP post, and each reason says
-    /// it is unverified. A rule written as words keeps its own reason.
+    /// With no pack to confirm its lesson, a promoted rule still matches on
+    /// its pattern, on a mention and on an MCP post. Each is a warning
+    /// labelled `unverified-rule`, and the reason names the lesson. A rule
+    /// written as words keeps its own reason.
     #[test]
-    fn an_unconfirmed_promoted_rule_still_denies_as_unverified() {
+    fn an_unconfirmed_promoted_rule_warns_as_unverified() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Advisory);
+
         let (_lock, _dir) = isolated();
         let lesson = serde_json::json!({
             "id": "lesson-status", "kind": "lesson", "text": "Leave git status alone.",
@@ -2737,10 +2876,11 @@ mod tests {
                 .expect("mention"),
             guard_payload(mcp).expect("mcp"),
         ] {
-            assert_eq!(denied.verdict, "deny", "{denied:?}");
+            assert_eq!(denied.verdict, "warn", "{denied:?}");
+            assert_eq!(denied.pattern, "unverified-rule", "{denied:?}");
             assert!(
                 denied.reason.starts_with("unverified") && denied.reason.contains("lesson-status"),
-                "an unconfirmed rule's denial read as the person's: {denied:?}"
+                "an unconfirmed rule's warning read as the person's: {denied:?}"
             );
         }
         write_argv(
@@ -2753,7 +2893,8 @@ mod tests {
         )
         .unwrap();
         let denied = super::super::static_guard("git log").unwrap();
-        assert_eq!(denied.reason, "leave the log alone");
+        assert_eq!(denied.pattern, "user-rule");
+        assert_eq!(denied.reason, "leave the log alone (rule git log*)");
     }
 
     fn git_ok(dir: &std::path::Path, args: &[&str]) {
@@ -2964,6 +3105,8 @@ mod tests {
     /// every rule in plaintext on the first write.
     #[test]
     fn a_tracker_with_no_scope_gets_no_user_rules() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let homes = Homes::unscoped();
         homes.home(&homes.cfg_a);
         let before = head(&homes.a);
@@ -2985,6 +3128,8 @@ mod tests {
 
     #[test]
     fn user_rules_travel_sealed_to_the_scope() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let homes = Homes::new();
         homes.home(&homes.cfg_a);
         write_preference(
@@ -3020,6 +3165,8 @@ mod tests {
     /// machine's own is removed from the tracker when it seals.
     #[test]
     fn a_plaintext_rules_file_is_still_read_and_this_hosts_is_replaced() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let homes = Homes::new();
         homes.home(&homes.cfg_b);
         let old = write_preference(
@@ -3051,6 +3198,8 @@ mod tests {
 
     #[test]
     fn user_rule_sync_follows_tracker_git() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let homes = Homes::new();
         homes.home(&homes.cfg_a);
         write_preference(
@@ -3098,6 +3247,8 @@ mod tests {
 
     #[test]
     fn two_homes_with_different_rules_converge() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let homes = Homes::new();
         homes.home(&homes.cfg_a);
         let alan = write_preference(
@@ -3227,6 +3378,8 @@ mod tests {
 
     #[test]
     fn the_hook_shows_local_rules_when_the_tracker_does_not_answer() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (_lock, dir) = isolated();
         write_preference(
             "never post or reply to Alan (ocaisa)",
@@ -3275,5 +3428,283 @@ mod tests {
         );
         assert!(line.starts_with("User rules"), "{line}");
         assert!(line.contains("never post or reply to Alan"), "{line}");
+    }
+
+    #[test]
+    fn the_guard_denies_a_mention_and_a_reply_and_allows_another_comment() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
+        let (_lock, _dir) = isolated();
+        write_preference(
+            "never post or reply to Alan (ocaisa)",
+            "he asked not to be pinged",
+            &People::default(),
+            &People::default(),
+        )
+        .unwrap();
+        let mention = "gh pr comment 12 --body 'please ask @ocaisa'";
+        assert!(
+            super::super::static_guard(mention).is_none(),
+            "prose alone is not a deny"
+        );
+        alan();
+        let denied = super::super::static_guard(mention).expect("mention");
+        assert_eq!(denied.verdict, "deny");
+        assert!(denied.pattern.starts_with("user-rule:"), "{denied:?}");
+        assert!(
+            denied.reason.contains("ocaisa") || denied.reason.contains("Alan"),
+            "{denied:?}"
+        );
+        let reply = "gh api --method POST repos/org/repo/issues/comments/7/replies -f body=seen -F in_reply_to_user=ocaisa";
+        let denied = super::super::static_guard(reply).expect("reply");
+        assert_eq!(denied.verdict, "deny");
+        let allowed = "gh pr comment 12 --body 'tests passed'";
+        assert!(
+            super::super::static_guard(allowed).is_none(),
+            "unrelated comment"
+        );
+        assert!(super::super::static_guard("gh pr comment 12 --body 'see ocaisa'").is_none());
+        assert!(
+            super::super::static_guard("gh pr comment 12 --body 'please ask @ocaisa2'").is_none()
+        );
+        assert!(
+            super::super::static_guard("gh pr comment 12 --body 'alanine is a molecule'").is_none()
+        );
+        let named =
+            super::super::static_guard("gh pr comment 12 --body 'ask Alan to look'").expect("name");
+        assert_eq!(named.verdict, "deny");
+        assert!(super::super::static_guard("gh api user/ocaisa").is_none());
+        assert!(super::super::static_guard("echo please ask @ocaisa").is_none());
+        let mcp = r#"{"hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa","owner":"org","repo":"repo"}}"#;
+        assert!(guard_payload(mcp).is_some());
+        let mcp_reply = r#"{"tool_name":"add_reply_to_pull_request_comment","mcp_server_name":"github","tool_input":{"body":"seen","in_reply_to_user":"ocaisa"}}"#;
+        assert!(guard_payload(mcp_reply).is_some());
+        let mcp_ok = r#"{"tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
+        assert!(guard_payload(mcp_ok).is_none());
+        let mcp_read = r#"{"tool_name":"list_issues","mcp_server_name":"github","tool_input":{"body":"@ocaisa"}}"#;
+        assert!(guard_payload(mcp_read).is_none());
+        let cursor = super::super::hook_call(
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa"}}"#,
+        );
+        let verdict = guard_payload(
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa"}}"#,
+        )
+        .unwrap();
+        let out = super::super::hook_output_ruled(&cursor, "", Some(&verdict));
+        assert!(out.contains("\"permission\":\"deny\""), "{out}");
+        let payload = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa"}}"#;
+        let (out, code) = super::super::cursor_side_answer(payload, None).unwrap();
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("\"permission\":\"deny\""), "{out}");
+        assert!(out.contains("ocaisa") || out.contains("Alan"), "{out}");
+    }
+
+    #[test]
+    fn an_empty_rules_file_and_a_dangling_link_deny_a_github_write() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
+        let (_lock, _dir) = isolated();
+        let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
+        let read_tool = r#"{"tool_name":"list_issues","mcp_server_name":"github","tool_input":{"owner":"org"}}"#;
+        let path = rules_file();
+        std::fs::write(&path, "").unwrap();
+        let hit = guard_payload(benign).expect("empty file allowed a write");
+        assert_eq!(hit.verdict, "deny");
+        assert!(
+            hit.reason.contains(&path.display().to_string()),
+            "{}",
+            hit.reason
+        );
+        assert!(guard_payload(read_tool).is_none(), "a read was denied");
+        let shell = guard_line("gh pr comment 12 --body 'tests passed'").unwrap();
+        assert!(
+            shell.reason.contains(&path.display().to_string()),
+            "{}",
+            shell.reason
+        );
+        assert!(guard_line("gh issue list").is_none(), "a read was denied");
+        std::fs::write(&path, " \n").unwrap();
+        let hit = guard_payload(benign).expect("blank file allowed a write");
+        assert!(
+            hit.reason.contains(&path.display().to_string()),
+            "{}",
+            hit.reason
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(path.with_file_name("no-such-rules.json"), &path).unwrap();
+        let hit = guard_payload(benign).expect("dangling link allowed a write");
+        assert_eq!(hit.verdict, "deny");
+        assert!(
+            hit.reason.contains(&path.display().to_string()),
+            "{}",
+            hit.reason
+        );
+        let err = load().unwrap_err();
+        assert!(format!("{err:#}").contains("dangling"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains(&path.display().to_string()),
+            "{err:#}"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            guard_payload(benign).is_none(),
+            "a missing file denied a write"
+        );
+        std::fs::write(&path, "{\"rules\":[]}\n").unwrap();
+        assert!(
+            guard_payload(benign).is_none(),
+            "an empty rule list denied a write"
+        );
+    }
+
+    #[test]
+    fn a_bad_rules_file_denies_github_writes_and_allows_other_calls() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
+        let (_lock, _dir) = isolated();
+        let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
+        let note = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"ljos_note","mcp_server_name":"ljos","command":"ljos-mcp","tool_input":{"text":"x"}}"#;
+        let read_tool = r#"{"tool_name":"list_issues","mcp_server_name":"github","tool_input":{"owner":"org"}}"#;
+        let other = r#"{"tool_name":"add_issue_comment","mcp_server_name":"ljos","tool_input":{"body":"cc @ocaisa"}}"#;
+        let read_event = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeReadFile","file_path":"/etc/hostname"}"#;
+        let path = rules_file();
+        let cases: &[(&str, &str)] = &[
+            ("unreadable", "{\"rules\":[]}"),
+            ("malformed", "{\"rules\":["),
+            ("wrongtype", "{\"rules\":{\"id\":1}}"),
+        ];
+        for (name, body) in cases {
+            std::fs::write(&path, body).unwrap();
+            if *name == "unreadable" {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            }
+            let hit = guard_payload(benign).unwrap_or_else(|| panic!("{name}: allowed"));
+            assert_eq!(hit.verdict, "deny", "{name}");
+            assert!(hit.pattern.starts_with("user-rule:"), "{name}: {hit:?}");
+            assert!(
+                hit.reason.contains(&path.display().to_string()),
+                "{name}: {}",
+                hit.reason
+            );
+            assert!(guard_payload(note).is_none(), "{name}: note denied");
+            assert!(guard_payload(read_tool).is_none(), "{name}: read denied");
+            assert!(guard_payload(other).is_none(), "{name}: other MCP denied");
+            let (out, code) = super::super::cursor_side_answer(benign, None).unwrap();
+            assert_eq!(code, 0, "{name}: {out}");
+            assert!(out.contains("\"permission\":\"deny\""), "{name}: {out}");
+            let (out, code) = super::super::cursor_side_answer(note, None).unwrap();
+            assert_eq!(code, 0, "{name}: {out}");
+            assert_eq!(out, "{\"permission\":\"allow\"}\n", "{name}: {out}");
+            let (out, code) = super::super::cursor_side_answer(read_event, None).unwrap();
+            assert_eq!(code, 0, "{name}: {out}");
+            assert_eq!(out, "{\"permission\":\"allow\"}\n", "{name}: {out}");
+            let shell = guard_line("gh pr comment 12 --body 'tests passed'").unwrap();
+            assert_eq!(shell.verdict, "deny", "{name}");
+            assert!(
+                shell.reason.contains(&path.display().to_string()),
+                "{name}: {}",
+                shell.reason
+            );
+            assert!(guard_line("ls").is_none(), "{name}: ls denied");
+            assert!(
+                guard_line("gh issue list").is_none(),
+                "{name}: a GitHub read denied"
+            );
+            if *name == "unreadable" {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let hit = guard_payload(benign).expect("a directory denies");
+        assert!(hit.reason.contains("not a regular file"), "{}", hit.reason);
+        assert!(guard_payload(note).is_none());
+        let _ = std::fs::remove_dir(&path);
+
+        assert!(
+            guard_payload(benign).is_none(),
+            "a missing file allows a GitHub write"
+        );
+    }
+
+    #[test]
+    fn an_argv_user_rule_denies_in_the_static_guard() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
+        let (_lock, _dir) = isolated();
+        write_argv(
+            &Rule {
+                pattern: "gh pr comment*".into(),
+                verdict: "deny".into(),
+                reason: "no pull request comments from this seat".into(),
+            },
+            super::super::Basis::Person,
+        )
+        .unwrap();
+        let denied = super::super::static_guard("gh pr comment 12 --body 'tests passed'").unwrap();
+        assert_eq!(denied.verdict, "deny");
+        assert_eq!(denied.pattern, "gh pr comment*");
+        assert!(super::super::static_guard("gh issue list").is_none());
+    }
+
+    #[test]
+    fn an_unconfirmed_promoted_rule_still_denies_as_unverified() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
+        let (_lock, _dir) = isolated();
+        let lesson = serde_json::json!({
+            "id": "lesson-status", "kind": "lesson", "text": "Leave git status alone.",
+            "origin": "user-declared", "source": {"basis": "person"},
+        });
+        let mention = People {
+            handles: vec!["ocaisa".into()],
+            names: vec![],
+        };
+        promote_atom(&lesson, "fixture", &mention, &People::default()).unwrap();
+        let mut rows = read_all().unwrap();
+        rows[0].pattern = Some("git status*".into());
+        rows[0].verdict = Some("deny".into());
+        std::fs::write(rules_path().unwrap(), render_rules(&rows).unwrap()).unwrap();
+        let mcp = r#"{"tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa"}}"#;
+        for denied in [
+            super::super::static_guard("git status").expect("pattern"),
+            super::super::static_guard("gh pr comment 12 --body 'please ask @ocaisa'")
+                .expect("mention"),
+            guard_payload(mcp).expect("mcp"),
+        ] {
+            assert_eq!(denied.verdict, "deny", "{denied:?}");
+            assert!(
+                denied.reason.starts_with("unverified") && denied.reason.contains("lesson-status"),
+                "an unconfirmed rule's denial read as the person's: {denied:?}"
+            );
+        }
+        write_argv(
+            &Rule {
+                pattern: "git log*".into(),
+                verdict: "deny".into(),
+                reason: "leave the log alone".into(),
+            },
+            super::super::Basis::Person,
+        )
+        .unwrap();
+        let denied = super::super::static_guard("git log").unwrap();
+        assert_eq!(denied.reason, "leave the log alone");
+    }
+}
+
+pub fn mcp_event_denies(event: &str, rule: &Rule) -> bool {
+    event == "beforeMCPExecution"
+        && rule.verdict == "deny"
+        && rule.pattern.starts_with("user-rule:")
+}
+
+fn github_write_blocked(err: &anyhow::Error) -> Rule {
+    note_rules_read_error(err);
+    Rule {
+        pattern: "user-rule:file".into(),
+        verdict: "deny".into(),
+        reason: format!("user rules could not be read ({err:#}), so this GitHub write is refused"),
     }
 }

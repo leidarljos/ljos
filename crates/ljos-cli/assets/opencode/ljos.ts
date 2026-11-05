@@ -4,10 +4,10 @@
 // The seat's memories on each user prompt, argv law on each bash call, the
 // book on each edit and each git commit, and the session id in every shell
 // the agent opens. Each payload names the working directory. A bash call
-// waits on the gate: a missing binary, a timeout, a non-zero exit or bad
-// JSON refuses it rather than letting the command run. An edit is recorded
-// and is not refused when the hook cannot answer. The prompt and session
-// hooks have no opinion when it fails.
+// is not stopped by block-on-warning. That setting warns with the rule's
+// label, and the command runs. A warning, or the note that the gate did
+// not answer, joins the context the turn's next model call reads. The prompt and session hooks have no opinion when the
+// hook fails.
 import type { Plugin } from "@opencode-ai/plugin"
 
 const LJOS = process.env.LJOS_BIN ?? "{ljos}"
@@ -146,9 +146,7 @@ export const LjosSeat: Plugin = async ({ directory }) => {
   },
 
   // A throw here reaches the model as the tool's error and the command
-  // does not run. opencode cannot raise its approval prompt from a plugin,
-  // so an ask stops the command and tells the agent to ask the person.
-  // An edit is told to the seat and still runs when the hook cannot answer.
+  // does not run, so only the hook's deny throws.
   "tool.execute.before": async (input, output) => {
     remember(input.sessionID)
     const seat = seatTool(input.tool)
@@ -172,21 +170,33 @@ export const LjosSeat: Plugin = async ({ directory }) => {
       cwd: directory,
     })
     if (!seat.bash) return
-    if (!a.ok) {
+    if (process.env.LJOS_GUARD_MODE?.trim() === "strict") {
+      if (!a.ok) {
+        blocked.set(blockKey(input.sessionID, input.tool), "deny")
+        throw new Error(`ljos: refused, the gate did not answer: ${a.why}`)
+      }
+      const out = a.out
+      const verdict = out?.permissionDecision
+      if (verdict === "deny" || verdict === "ask") {
+        blocked.set(blockKey(input.sessionID, input.tool), verdict)
+      }
+      if (verdict === "deny") throw new Error(`ljos: denied: ${out.permissionDecisionReason}`)
+      if (verdict === "ask")
+        throw new Error(
+          `ljos: needs the person's approval: ${out.permissionDecisionReason}. ` +
+            `Ask them; do not retry until they say yes.`,
+        )
+      return
+    }
+    if (a.ok && a.out?.permissionDecision === "deny") {
       blocked.set(blockKey(input.sessionID, input.tool), "deny")
-      throw new Error(`ljos: refused, the gate did not answer: ${a.why}`)
+      throw new Error(`ljos: denied: ${a.out.permissionDecisionReason}`)
     }
-    const out = a.out
-    const verdict = out?.permissionDecision
-    if (verdict === "deny" || verdict === "ask") {
-      blocked.set(blockKey(input.sessionID, input.tool), verdict)
-    }
-    if (verdict === "deny") throw new Error(`ljos: denied: ${out.permissionDecisionReason}`)
-    if (verdict === "ask")
-      throw new Error(
-        `ljos: needs the person's approval: ${out.permissionDecisionReason}. ` +
-          `Ask them; do not retry until they say yes.`,
-      )
+    const said = a.ok
+      ? a.out?.additionalContext
+      : `ljos: the gate did not answer (${a.why}); the command ran unjudged`
+    const prior = held.get(input.sessionID)
+    if (said) held.set(input.sessionID, prior ? `${prior}\n${said}` : said)
   },
 
   // opencode puts the tool arguments on the input here and the tool's

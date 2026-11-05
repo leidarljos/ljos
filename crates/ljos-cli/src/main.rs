@@ -230,6 +230,8 @@ enum MeshCmd {
     Up,
     /// Log out, stop the tailscaled `mesh up` started, and remove its state.
     Down,
+    /// Print this node and the peers `tailscale status` reports, with their tags.
+    Status,
     /// Print the Headscale ACL policy `mesh.toml` implies.
     Acl {
         /// Other swarm ids, each given rules of its own.
@@ -313,7 +315,7 @@ enum Cmd {
         /// Prefer as this persona.
         #[arg(long = "as")]
         as_persona: Option<String>,
-        /// Also write a deny rule over this command pattern, with the preference as its reason, so the hook refuses what the preference forbids. Repeatable.
+        /// Also write a deny rule over this command pattern, with the preference as its reason, so the hook warns on what the preference forbids. Repeatable.
         #[arg(long, value_name = "PATTERN")]
         deny: Vec<String>,
         /// Also write an ask rule over this command pattern, with the preference as its reason. Repeatable.
@@ -891,13 +893,16 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["view", "about", "runner"])]
         retire: bool,
     },
-    /// Install a published release's binaries beside this ljos: fetched from the release, checked against its sha256 and its version, the old ones kept.
+    /// Install published releases beside this ljos. The ljos archive is checked against its sha256, then each other seat program comes from the repository that publishes it. A missing release or a bad download is a warning and the rest still move. The old binary is kept as NAME.bak-pre-VERSION.
     Upgrade {
-        /// The release version; the newest when absent.
+        /// The ljos release; the newest when absent. Other programs take their own latest release.
         version: Option<String>,
         /// Install here instead of beside the running ljos.
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Move this one program.
+        #[arg(long)]
+        only: Option<String>,
     },
     /// Classify one harness exit under the restart policy, and print the
     /// herdr line that would start the child again. This does not start it.
@@ -1028,18 +1033,19 @@ enum Cmd {
         #[arg(long = "as")]
         as_persona: Option<String>,
     },
-    /// Add a command guard rule: a glob over the command line and a verdict (deny, ask or allow).
+    /// Add a command rule. Matching calls warn by default; LJOS_GUARD_MODE=strict enforces deny and ask.
+    /// Strict asks use the person's native confirmation or explicit one-use/task consent.
     /// `--user` keeps it in the user config, shared by every agent and never reviewed. An allow
-    /// is the person's: written with `--user` at your own terminal, it clears the seat's asks
-    /// and denies for the lines it matches (policyd still judges them).
+    /// is the person's: written with `--user` at your own terminal, it clears the seat's
+    /// warnings for the lines it matches (policyd still reads them).
     Rule {
         /// A glob over the whole command line: `rm -rf *`, `*--force*`, `git push --force*`.
         pattern: String,
-        /// deny stops the action; ask hands it to the person; allow (with --user, at your
-        /// own terminal) clears the seat's asks and denies for the matching lines.
+        /// deny or ask labels the warning; allow (with --user, at your own terminal) clears
+        /// the seat's warnings for the matching lines.
         #[arg(long, default_value = "ask")]
         verdict: String,
-        /// The reason a stopped reader sees.
+        /// The reason a reader sees when the rule fires.
         #[arg(long)]
         why: String,
         /// Print the atom JSON. The default is one line: id, kind, due, text.
@@ -1055,11 +1061,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Record the person's explicit consent for one pending hook request.
-    Approve {
-        /// The request id printed by the hook. Approve only after the person agrees.
-        id: String,
-    },
+    /// Record explicit consent for a pending strict-mode request at the person's own terminal.
+    Approve { id: String },
     /// What the command guard says about a command, then what ljos remembers about it. Runs nothing.
     Policy {
         /// Exit 1 when the answer is a deny. Without this flag the exit stays 0.
@@ -1411,7 +1414,7 @@ enum Cmd {
         /// Where the cards are read from.
         #[arg(long, default_value = ".")]
         cards: PathBuf,
-        /// Sit even when the issue's blockers are open. Without it a blocked issue is refused before anything is claimed.
+        /// Accepted and ignored. A blocked issue is sat and labelled `blocked-by`.
         #[arg(long)]
         anyway: bool,
         /// The recipe this sitting copies before recall. Absent, a closed-set token in the title else sit. Held until finish or release.
@@ -1522,10 +1525,13 @@ fn write_ack(body: &serde_json::Value) -> String {
     }
 }
 
-/// Print a relay fault in the runner's contract and exit with its code.
-/// A prompt has no such deny; the caller then returns the error.
+/// Print a relay fault in the runner's field names, an allow with a
+/// note, and exit 0.
 fn exit_relay_fault(runner: &str, event: &str, what: &str) -> Result<()> {
-    eprintln!("ljos: the guard could not judge ({what}); the call is allowed");
+    if !ljos_cli::guard_mode::is_strict() {
+        advisory_exit_relay_fault(runner, event, what);
+    }
+    eprintln!("ljos: the guard could not judge ({what}); strict mode refuses the call");
     let Some((out, err, code)) = ljos_cli::runner_hooks::relay_fault_answer(runner, event, what)
     else {
         anyhow::bail!("hook: {what}");
@@ -1535,6 +1541,17 @@ fn exit_relay_fault(runner: &str, event: &str, what: &str) -> Result<()> {
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let _ = std::io::Write::flush(&mut std::io::stderr());
     std::process::exit(code);
+}
+
+fn advisory_exit_relay_fault(runner: &str, event: &str, what: &str) -> ! {
+    eprintln!("ljos: the guard could not judge ({what}); the call is allowed");
+    let (out, err, _) = ljos_cli::runner_hooks::relay_fault_answer(runner, event, what)
+        .expect("advisory relay fault has an answer");
+    print!("{out}");
+    eprint!("{err}");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    std::process::exit(0);
 }
 
 fn main() -> Result<()> {
@@ -1912,6 +1929,7 @@ fn run_command() -> Result<()> {
         Cmd::Mesh { cmd } => match cmd {
             MeshCmd::Up => println!("{}", ljos_cli::mesh::up()),
             MeshCmd::Down => println!("{}", ljos_cli::mesh::down()),
+            MeshCmd::Status => println!("{}", ljos_cli::mesh::status_text()),
             MeshCmd::Acl { swarms } => println!("{}", ljos_cli::mesh::acl(&swarms)?),
         },
         Cmd::Sync {
@@ -1965,11 +1983,9 @@ fn run_command() -> Result<()> {
             explain,
         } => {
             ljos_cli::log_recall("search", &query.join(" "));
-            // A rerank used to wait at least a minute, and a silent writer
-            // was asked again after that. The command budget covers the
-            // proof and the search once. A server call keeps the timeout
-            // it was given; this is the verb a person runs.
-            let _pack_clock = ljos_cli::arm_cmd_pack();
+            // A short budget. Past it the word ranking prints. The call
+            // does not sit until an outer timeout with nothing on screen.
+            let _pack_clock = ljos_cli::pack_link::PackClock::enter(ljos_cli::SEARCH_PACK_BUDGET);
             let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
             let day = match valid_at.as_deref().map(str::trim) {
                 Some("any") => None,
@@ -1995,8 +2011,9 @@ fn run_command() -> Result<()> {
             let mut hits =
                 match packset_search_as_of(&join(&query), fetch, as_of.as_deref(), rerank) {
                     Ok(hits) => hits,
-                    Err(err) if !dated && ljos_cli::is_pack_busy(&err) => {
-                        eprintln!("{}", ljos_cli::SITTING_WORDS_LINE.trim_end());
+                    Err(err) if !dated && ljos_cli::pack_memory_down(&err) => {
+                        eprintln!("{}", ljos_cli::pack_busy_sentence());
+                        eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
                         ljos_cli::search_by_words(&join(&query), fetch)
                     }
                     Err(err) => return Err(err),
@@ -2190,6 +2207,10 @@ fn run_command() -> Result<()> {
             print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
         }
         Cmd::Note { issue, text } => {
+            let pending = ljos_cli::retry_pending_claim(&issue);
+            if !pending.is_empty() {
+                print!("{pending}");
+            }
             let text = text.join(" ");
             // The tracker's own lock has no deadline. Wait as long as a
             // tracker commit waits, then say so. A second note once the
@@ -2578,10 +2599,10 @@ fn run_command() -> Result<()> {
             println!("{}", write_ack(&body));
             ljos_cli::refresh_agents();
         }
-        Cmd::Upgrade { version, dir } => {
+        Cmd::Upgrade { version, dir, only } => {
             print!(
                 "{}",
-                ljos_cli::upgrade::upgrade(version.as_deref(), dir.as_deref())?
+                ljos_cli::upgrade::upgrade(version.as_deref(), dir.as_deref(), only.as_deref())?
             );
         }
         Cmd::Supervise {
@@ -2792,6 +2813,10 @@ fn run_command() -> Result<()> {
             }
         }
         Cmd::Approve { id } => {
+            anyhow::ensure!(
+                ljos_cli::guard_mode::is_strict(),
+                "command consent requires LJOS_GUARD_MODE=strict"
+            );
             print!("{}", ljos_cli::approval::approve(&id)?);
         }
         Cmd::Policy { argv, fail_on_deny } => {
@@ -2874,9 +2899,7 @@ fn run_command() -> Result<()> {
                     // armed. Invalid text used to exit 1 with no output,
                     // which nine runners read as an allow.
                     if let Some(name) = runner.as_deref() {
-                        if ljos_cli::runner_hooks::is_runner(name)
-                            && ljos_cli::runner_hooks::relay_event_is_gate(event.as_deref())
-                        {
+                        if ljos_cli::runner_hooks::is_runner(name) {
                             return exit_relay_fault(
                                 name,
                                 event.as_deref().unwrap_or(""),
@@ -3153,7 +3176,12 @@ fn run_command() -> Result<()> {
             let tcb_rule = if unresolved_dir {
                 None
             } else if let Some(rule) = fast {
-                Some(rule)
+                // ljos's own rule warns. A named policyd config may still
+                // block the line, and that block is the verdict.
+                (!ljos_cli::guard_mode::is_strict() && !suspended && !argv.is_empty())
+                    .then(|| ljos_cli::policyd_block(&call.cue, dir))
+                    .flatten()
+                    .or(Some(rule))
             } else if suspended {
                 None
             } else if on_tool && !argv.is_empty() {
@@ -3174,9 +3202,13 @@ fn run_command() -> Result<()> {
                 ),
                 &call.cue,
             );
-            // A seat rule that denies this push still denies it. Otherwise
-            // the policyd ask (a force push) is the verdict, then the gate.
-            let verdict = if gated.as_ref().is_some_and(|rule| rule.verdict == "deny") {
+            // The call runs. One rule is its warning: the guard's, else the
+            // push gate's or a seat rule's. The cloud seat push rule is the
+            // one rule that stops it.
+            let verdict = if gated
+                .as_ref()
+                .is_some_and(|rule| rule.verdict == "deny" && rule.blocks())
+            {
                 gated.as_ref()
             } else {
                 tcb_rule.as_ref().or(gated.as_ref())
@@ -3332,11 +3364,9 @@ fn run_command() -> Result<()> {
                 // to say either.
                 "TurnEnd" => String::new(),
                 _ => {
-                    // The person's prompt is the chat's consent channel; the
-                    // grant goes first, ahead of the hook's deadline.
-                    // Only the person's own prompt grants: a subagent's
-                    // brief or an unattended run's prompt is an agent's
-                    // words in that channel. A tool call can run `ljos hook`
+                    // Only the person's own prompt is kept as theirs: a
+                    // subagent's brief or an unattended run's prompt is an
+                    // agent's words in that channel. A tool call can run `ljos hook`
                     // with a payload of its own; only a hook the runner
                     // itself spawned carries the person's prompt. What the
                     // hook saves from any prompt is labelled with whose it is.
@@ -3355,7 +3385,7 @@ fn run_command() -> Result<()> {
                     .flatten();
                     let person = spawner.is_some();
                     ljos_cli::capture::set_persons_prompt(person);
-                    let granted = person
+                    let granted = (person && ljos_cli::guard_mode::is_strict())
                         .then(|| {
                             ljos_cli::hook_timed("approve", || {
                                 ljos_cli::approval::approve_from_prompt(
@@ -3390,6 +3420,13 @@ fn run_command() -> Result<()> {
                             })
                         })
                         .flatten();
+                    if let Some(granted) = granted {
+                        ctx = if ctx.is_empty() {
+                            granted
+                        } else {
+                            format!("{granted}\n{ctx}")
+                        };
+                    }
                     if call.event == "UserPromptSubmit" {
                         ljos_cli::hook_timed("correction", || ljos_cli::store_correction(&call));
                     }
@@ -3428,13 +3465,6 @@ fn run_command() -> Result<()> {
                             format!("{line}\n{ctx}")
                         };
                     }
-                    if let Some(granted) = granted {
-                        ctx = if ctx.is_empty() {
-                            granted
-                        } else {
-                            format!("{granted}\n{ctx}")
-                        };
-                    }
                     if call.event == "UserPromptSubmit" {
                         let (mail, mail_ids) =
                             ljos_cli::hook_timed("mail", ljos_cli::mail::prompt_note);
@@ -3453,21 +3483,20 @@ fn run_command() -> Result<()> {
                     prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)
                 }
             };
-            // The book is kept here, after a deny has already been decided,
-            // so a tracker that does not answer cannot turn into a refusal.
+            // The book is kept here, after the answer is decided, so a
+            // tracker that does not answer cannot hold the call. A call a
+            // rule warned on runs, so it is booked too; a blocked call does
+            // not run and is not booked.
             // A Stop the audit held never reaches this line, except an agy
             // stop that is idle: that one is the session end and finishes.
             // A mid-loop agy stop, fullyIdle absent, does not finish.
             // The book is queued, not kept in this call: it waits on a lock
             // every seat shares, and a claim reads the whole tracker. A
             // gate's book is queued once its answer is out.
-            let ask = verdict
-                .filter(|rule| rule.verdict == "ask")
-                .map(|rule| rule.reason.clone());
             let agy_mid_loop = call.shape == ljos_cli::HookShape::Steps
                 && call.event == "Stop"
                 && !ljos_cli::stop_is_idle(&input);
-            let book = verdict.is_none() && !agy_mid_loop;
+            let book = !agy_mid_loop && !verdict.is_some_and(ljos_cli::Rule::blocks);
             let gate = ljos_cli::is_gate_event(&call.event);
             if book && !gate {
                 let extra = ljos_cli::hook_timed("bookkeep", || {
@@ -3485,10 +3514,23 @@ fn run_command() -> Result<()> {
                 ljos_cli::tcb_verdict_in(line, dir)
                     .or_else(|| ljos_cli::ruled_verdict(&rules, line))
             })
-            .unwrap_or_else(|| ljos_cli::approval::hook_output(&input, &call, &context, verdict));
+            .unwrap_or_else(|| {
+                if ljos_cli::guard_mode::is_strict() {
+                    ljos_cli::approval::hook_output(&input, &call, &context, verdict)
+                } else {
+                    ljos_cli::hook_output_ruled(&call, &context, verdict)
+                }
+            });
             ljos_cli::answer_gate(&output);
-            if let Some(reason) = ask {
-                ljos_cli::book_queue::enqueue_ask(&input, &call, &reason);
+            if ljos_cli::guard_mode::is_strict() {
+                if let Some(rule) = verdict.filter(|rule| rule.verdict == "ask") {
+                    ljos_cli::book_queue::enqueue_ask(&input, &call, &rule.reason);
+                }
+            }
+            if let Some(rule) = verdict {
+                let seat = std::env::var("LJOS_SEAT").unwrap_or_default();
+                let kind = if rule.blocks() { "refusal" } else { "warning" };
+                ljos_cli::digest::note_guard(kind, &seat, &rule.reason);
             }
             if book && gate {
                 ljos_cli::hook_timed("bookkeep", || {
@@ -3551,23 +3593,27 @@ fn run_command() -> Result<()> {
             if let Some(msg) = ljos_cli::hook_timed("consensus_refusal", || {
                 ljos_cli::panel_gate::settle_refusal(&id)
             }) {
-                let flags = ljos_cli::panel_gate::blind_lines_for(&id);
-                if json {
-                    let doc = serde_json::json!({
-                        "settled": false,
-                        "panel": {"settled": false, "refusal": msg, "blind": flags},
-                        "push_cite": {"issue": id, "stands": false, "refusal": msg},
-                        "provenance": provenance,
-                    });
-                    println!("{}", serde_json::to_string_pretty(&doc)?);
-                } else {
-                    print!("{provenance}");
-                    println!("{msg}");
-                    for line in flags {
-                        println!("blind design: {line}");
+                if ljos_cli::guard_mode::is_strict() {
+                    let flags = ljos_cli::panel_gate::blind_lines_for(&id);
+                    if json {
+                        let doc = serde_json::json!({
+                            "settled": false,
+                            "panel": {"settled": false, "refusal": msg, "blind": flags},
+                            "push_cite": {"issue": id, "stands": false, "refusal": msg},
+                            "provenance": provenance,
+                        });
+                        println!("{}", serde_json::to_string_pretty(&doc)?);
+                    } else {
+                        print!("{provenance}");
+                        println!("{msg}");
+                        for line in flags {
+                            println!("blind design: {line}");
+                        }
                     }
+                    std::process::exit(1);
+                } else {
+                    println!("ljos: session-authored: {msg}");
                 }
-                std::process::exit(1);
             }
             for line in ljos_cli::panel_gate::blind_lines_for(&id) {
                 println!("blind design: {line}");

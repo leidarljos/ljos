@@ -3,6 +3,9 @@
 //! lines against a seat with a local bare origin.
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -46,7 +49,7 @@ impl Drop for Guard {
 }
 
 fn sh_at(dir: &Path, script: &str) -> std::process::Output {
-    Command::new("sh")
+    guard_mode::command("sh")
         .current_dir(dir)
         .arg("-c")
         .arg(script)
@@ -75,7 +78,7 @@ fn sh_ok(dir: &Path, script: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = guard_mode::command("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -118,7 +121,7 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
     }
     let mut sums = String::new();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
-        let out = Command::new("sha256sum")
+        let out = guard_mode::command("sha256sum")
             .arg(rel.join(name))
             .output()
             .unwrap();
@@ -230,7 +233,7 @@ fn bare_repo(root: &Path, name: &str) -> (PathBuf, PathBuf) {
 }
 
 fn has_ref(origin: &Path, name: &str) -> bool {
-    let out = Command::new("git")
+    let out = guard_mode::command("git")
         .arg("-C")
         .arg(origin)
         .args(["show-ref"])
@@ -244,7 +247,7 @@ fn has_ref(origin: &Path, name: &str) -> bool {
 /// Every `core.hooksPath` git reads in `dir`, one `origin<TAB>value` line
 /// each. `scope` is `--system`, `--global` or `--local`, or `None` for all.
 fn hooks_paths(dir: &Path, scope: Option<&str>) -> String {
-    let out = Command::new("git")
+    let out = guard_mode::command("git")
         .arg("-C")
         .arg(dir)
         .arg("config")
@@ -656,7 +659,7 @@ fn send_pack_checks_the_destination_repository() {
 
 fn hook_push(repo: &Path, local: &str, remote: &str) -> std::process::Output {
     let refs = format!("refs/heads/develop {local} refs/heads/develop {remote}\n");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let mut child = guard_mode::command(env!("CARGO_BIN_EXE_ljos"))
         .current_dir(repo)
         .args(["git-hook", "pre-push", "origin", "origin"])
         .stdin(std::process::Stdio::piped())
@@ -815,7 +818,7 @@ fn a_pre_push_line_that_is_not_a_ref_is_refused() {
     let (_home, _xdg) = seat_env(root.path());
     clear_ids();
     let (_origin, repo) = bare_repo(root.path(), "seat");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let mut child = guard_mode::command(env!("CARGO_BIN_EXE_ljos"))
         .current_dir(&repo)
         .args(["git-hook", "pre-push"])
         .stdin(std::process::Stdio::piped())
@@ -833,4 +836,93 @@ fn a_pre_push_line_that_is_not_a_ref_is_refused() {
     let text = text_of(&out);
     assert!(!out.status.success(), "{text}");
     assert!(text.contains("cannot read"), "{text}");
+}
+
+#[test]
+fn advisory_a_commit_message_hook_is_refused_on_push() {
+    let _mode = guard_mode::advisory();
+
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (origin, repo) = bare_repo(root.path(), "seat");
+    let hooks = repo.join(".git/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    executable(
+        &hooks.join("commit-msg"),
+        "#!/bin/sh\nprintf '\\nCo-authored-by: Ada Lovelace <ada@example.com>\\n' >> \"$1\"\n",
+    );
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "note"]);
+    let body = git(&repo, &["log", "-1", "--format=%B"]);
+    assert!(
+        body.lines().any(|line| line.starts_with("Co-authored-by:")),
+        "{body}"
+    );
+    let bad = git(&repo, &["rev-parse", "HEAD"]);
+    let parent = git(&repo, &["rev-parse", "HEAD^"]);
+
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    ljos_cli::cloud::write_push_allowlist(&[origin.to_str().unwrap()], &[], &["develop"]).unwrap();
+
+    let hooked = hook_push(&repo, bad.trim(), parent.trim());
+    let hooked_text = text_of(&hooked);
+    assert!(hooked.status.success(), "{hooked_text}");
+    assert!(hooked_text.contains("machine-trailer"), "{hooked_text}");
+
+    sh_ok(
+        &repo,
+        "parent=$(git rev-parse HEAD^)\n\
+         tree=$(git rev-parse 'HEAD^{tree}')\n\
+         clean=$(git commit-tree \"$tree\" -p \"$parent\" -m note)\n\
+         git reset -q --hard \"$clean\"\n",
+    );
+    let clean = git(&repo, &["rev-parse", "HEAD"]);
+    sh_ok(&repo, "git push -q origin develop");
+    assert!(has_ref(&origin, "refs/heads/develop"));
+    let allowed = hook_push(&repo, clean.trim(), parent.trim());
+    let allowed_text = text_of(&allowed);
+    assert!(
+        !allowed_text.contains("message is refused"),
+        "{allowed_text}"
+    );
+
+    sh_ok(
+        &repo,
+        "parent=$(git rev-parse HEAD)\n\
+         tree=$(git rev-parse 'HEAD^{tree}')\n\
+         printf 'note\\nCo-authored-by: Ada Lovelace <ada@example.com>\\n' > msg\n\
+         bad=$(git commit-tree \"$tree\" -p \"$parent\" -F msg)\n\
+         git reset -q --hard \"$bad\"\n",
+    );
+    let glued = git(&repo, &["log", "-1", "--format=%B"]);
+    assert!(
+        glued.contains("Co-authored-by:"),
+        "the by line was not stored:\n{glued}"
+    );
+    assert!(
+        !glued.contains("\n\nCo-authored-by:"),
+        "a blank line slipped in:\n{glued}"
+    );
+    let glued_sha = git(&repo, &["rev-parse", "HEAD"]);
+    let tip = git(&repo, &["rev-parse", "HEAD^"]);
+    let glued_hook = hook_push(&repo, glued_sha.trim(), tip.trim());
+    let glued_text = text_of(&glued_hook);
+    assert!(
+        glued_hook.status.success() && glued_text.contains("machine-trailer"),
+        "a by line with no blank line was not labelled: {glued_text}"
+    );
+
+    sh_ok(
+        &repo,
+        "parent=$(git rev-parse HEAD^)\n\
+         tree=$(git rev-parse 'HEAD^{tree}')\n\
+         printf 'note\\n\\nTests: cargo test\\n' > msg\n\
+         ok=$(git commit-tree \"$tree\" -p \"$parent\" -F msg)\n\
+         git reset -q --hard \"$ok\"\n",
+    );
+    sh_ok(&repo, "git push -q origin develop");
+    assert!(has_ref(&origin, "refs/heads/develop"));
 }

@@ -3,6 +3,9 @@
 //! own session.
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -272,7 +275,7 @@ printf '%s' "$2" > "$d/$id.prompt"
             self.bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut cmd = Command::new(exe);
+        let mut cmd = guard_mode::command(exe);
         cmd.args(args)
             .current_dir(&self.bin)
             .env_clear()
@@ -746,7 +749,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         "{said}"
     );
 
-    let nested = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let nested = guard_mode::command(env!("CARGO_BIN_EXE_ljos"))
         .args([
             "panel",
             "run",
@@ -782,7 +785,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         "{said}"
     );
 
-    let spawned = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let spawned = guard_mode::command(env!("CARGO_BIN_EXE_ljos"))
         .args(["panel", "run", "demo-brief", "--designers", "3"])
         .current_dir(&world.bin)
         .env_clear()
@@ -1977,7 +1980,7 @@ fn a_call_record_no_hook_above_this_shell_left_names_no_session() {
     // stays its own unverified session.
     let world = World::new();
     let issue = "demo-forged-calls";
-    let mut sibling = Command::new("sleep").arg("30").spawn().unwrap();
+    let mut sibling = guard_mode::command("sleep").arg("30").spawn().unwrap();
     let elsewhere = ljos_cli::proc_tree::of(sibling.id()).unwrap();
     let a = [
         "vote",
@@ -2664,7 +2667,7 @@ fn signed_key(said: &str, voter: &str) -> String {
 }
 
 fn account_name() -> String {
-    let out = Command::new("id").arg("-un").output().unwrap();
+    let out = guard_mode::command("id").arg("-un").output().unwrap();
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
@@ -2998,4 +3001,446 @@ fn two_different_sessions_count_as_two_voices() {
         stdout.contains("counted ljosbot for ship, inky for ship"),
         "{said}"
     );
+}
+
+#[test]
+fn advisory_an_author_who_votes_is_refused() {
+    let _mode = guard_mode::advisory();
+
+    let world = World::new();
+    let filed = world.ljos(
+        "alice",
+        "sess-alice-0001",
+        &[
+            "file",
+            "design: cache",
+            "--parent",
+            "demo-vote",
+            "-p",
+            "demo",
+            "-t",
+            "task",
+        ],
+    );
+    let said = text(&filed);
+    assert!(filed.status.success(), "{said}");
+    assert!(
+        said.contains("candidate demo-d001 bound to session sess-alice-0001"),
+        "{said}"
+    );
+    let author = world.ljos(
+        "alice",
+        "sess-alice-0001",
+        &["vote", "demo-vote", "--for", "ship", "--used", "none"],
+    );
+    let said = text(&author);
+    assert!(author.status.success(), "{said}");
+    assert!(
+        said.contains("ljos: session-authored:") && said.contains("authored candidate"),
+        "{said}"
+    );
+    vote(&world, "bob", "sess-bob-0001", "demo-vote");
+    let out = world.ljos("bob", "sess-bob-0001", &["consensus", "demo-vote"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("refuses to settle"),
+        "{said}"
+    );
+}
+
+#[test]
+fn advisory_a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
+    let _mode = guard_mode::advisory();
+
+    let world = World::new();
+    std::fs::write(
+        world.state.join("issues.json"),
+        r#"{"parent-1":{"id":"parent-1","title":"parent","body":""},"child-a":{"id":"child-a","title":"child a","body":"","parent":"parent-1"},"child-b":{"id":"child-b","title":"child b","body":"","parent":"parent-1"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        world.state.join("children.json"),
+        r#"{"parent-1":[{"id":"child-a"},{"id":"child-b"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        world.state.join("notes.json"),
+        r#"{"child-a":[{"note":"candidate-sig: child-a alice sess-author-0001 n-author - ab cd"}]}"#,
+    )
+    .unwrap();
+    let author = world.ljos(
+        "alice",
+        "sess-author-0001",
+        &["vote", "child-b", "--for", "ship", "--used", "none"],
+    );
+    let said = text(&author);
+    assert!(author.status.success(), "{said}");
+    assert!(
+        said.contains("ljos: session-authored:") && said.contains("authored candidate"),
+        "{said}"
+    );
+    let first = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "ship", "--used", "none"],
+    );
+    assert!(first.status.success(), "{}", text(&first));
+    let second = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-b", "--for", "hold", "--used", "none"],
+    );
+    assert!(second.status.success(), "{}", text(&second));
+    let tally = world.ljos("saddle", "sess-reader-0001", &["vote", "child-b"]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("2 ballots count"), "{said}");
+    assert!(stdout.contains("alice  ship"), "{said}");
+    assert!(stdout.contains("saddle  hold"), "{said}");
+}
+
+#[test]
+fn advisory_a_family_only_ballot_blocks_a_second_cli_vote() {
+    let _mode = guard_mode::advisory();
+
+    let world = siblings();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[21; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-saddle-0001",
+        "n-saddle",
+    );
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&serde_json::json!({
+            "parent-1": [{"note": note}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let again = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "hold", "--used", "none"],
+    );
+    let said = text(&again);
+    assert!(again.status.success(), "{said}");
+    assert!(
+        said.contains("ljos: session-authored:")
+            && said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
+        "{said}"
+    );
+}
+
+#[test]
+fn advisory_a_family_only_ballot_blocks_a_second_mcp_vote() {
+    let _mode = guard_mode::advisory();
+
+    let world = siblings();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[22; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-mcp-0001",
+        "n-saddle",
+    );
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&serde_json::json!({
+            "parent-1": [{"note": note}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {
+        "name": "ljos_vote",
+        "arguments": {"issue": "child-a", "choice": "hold", "used": "none"}}});
+    let answers = world.mcp(
+        "saddle",
+        &[("CLAUDE_CODE_SESSION_ID", "sess-mcp-0001")],
+        &[call],
+    );
+    let found = answers
+        .iter()
+        .find(|a| a["id"] == 9)
+        .unwrap_or_else(|| panic!("no answer: {answers:?}"));
+    let said = found["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(found["result"]["isError"] != true, "{said}");
+    assert!(
+        said.contains("ljos: session-authored:")
+            && said.contains("already cast a ballot on child-a (sess-mcp-0001)"),
+        "{said}"
+    );
+}
+
+#[test]
+fn advisory_a_family_ballot_names_where_to_withdraw_over_cli() {
+    let _mode = guard_mode::advisory();
+
+    let world = siblings();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-saddle-0001",
+        "n-saddle",
+    );
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&serde_json::json!({
+            "parent-1": [{"note": note}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let refused = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "hold", "--used", "none"],
+    );
+    let said = text(&refused);
+    assert!(refused.status.success(), "{said}");
+    assert!(
+        said.contains("ljos: session-authored:")
+            && said.contains("`ljos vote child-a --withdraw --as saddle`"),
+        "{said}"
+    );
+    let withdrawn = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--withdraw"],
+    );
+    assert_withdraw_forecast_error(&withdrawn, "child-a", "saddle");
+    let recast = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "hold", "--used", "none"],
+    );
+    assert!(recast.status.success(), "{}", text(&recast));
+}
+
+#[test]
+fn advisory_a_family_ballot_names_where_to_withdraw_over_mcp() {
+    let _mode = guard_mode::advisory();
+
+    let world = siblings();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[24; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-mcp-0001",
+        "n-saddle",
+    );
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&serde_json::json!({
+            "parent-1": [{"note": note}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let refuse = serde_json::json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {
+        "name": "ljos_vote",
+        "arguments": {"issue": "child-a", "choice": "hold", "used": "none"}}});
+    let answers = world.mcp(
+        "saddle",
+        &[("CLAUDE_CODE_SESSION_ID", "sess-mcp-0001")],
+        &[refuse],
+    );
+    let found = answers
+        .iter()
+        .find(|a| a["id"] == 9)
+        .unwrap_or_else(|| panic!("no answer: {answers:?}"));
+    let said = found["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(found["result"]["isError"] != true, "{said}");
+    assert!(
+        said.contains("ljos: session-authored:")
+            && said.contains("`ljos vote child-a --withdraw --as saddle`"),
+        "{said}"
+    );
+    let withdraw = serde_json::json!({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {
+        "name": "ljos_vote",
+        "arguments": {"issue": "child-a", "withdraw": true}}});
+    let answers = world.mcp(
+        "saddle",
+        &[("CLAUDE_CODE_SESSION_ID", "sess-mcp-0001")],
+        &[withdraw],
+    );
+    let done = answers
+        .iter()
+        .find(|a| a["id"] == 10)
+        .unwrap_or_else(|| panic!("no answer: {answers:?}"));
+    let said = done["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(done["result"]["isError"] == true, "{done:?}");
+    assert!(said.contains("packset url missing"), "{done:?}");
+    let pass = serde_json::json!({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {
+        "name": "ljos_vote",
+        "arguments": {"issue": "child-a", "choice": "hold", "used": "none"}}});
+    let answers = world.mcp(
+        "saddle",
+        &[("CLAUDE_CODE_SESSION_ID", "sess-mcp-0001")],
+        &[pass],
+    );
+    let final_vote = answers
+        .iter()
+        .find(|a| a["id"] == 11)
+        .unwrap_or_else(|| panic!("no answer: {answers:?}"));
+    assert!(final_vote["result"]["isError"] != true, "{final_vote:?}");
+}
+
+#[test]
+fn advisory_a_withdrawal_on_another_issue_does_not_clear_a_family_ballot() {
+    let _mode = guard_mode::advisory();
+
+    let world = siblings();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[25; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-saddle-0001",
+        "n-saddle",
+    );
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&serde_json::json!({
+            "parent-1": [{"note": note}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let unrelated = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-b", "--withdraw"],
+    );
+    assert!(!unrelated.status.success(), "{}", text(&unrelated));
+    let again = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "hold", "--used", "none"],
+    );
+    let said = text(&again);
+    assert!(again.status.success(), "{said}");
+    assert!(
+        said.contains("ljos: session-authored:")
+            && said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
+        "{said}"
+    );
+}
+
+#[test]
+fn advisory_claude_subagents_voting_over_mcp_each_count() {
+    let _mode = guard_mode::advisory();
+
+    // One ljos-mcp answers the parent and both subagents. Only the hook
+    // payload names the agent; the call carries the tool use id.
+    let world = World::new();
+    let issue = "demo-mcp-subagents";
+    let parent = "5f0c8e2a-mcp-parent";
+    let env: &[(&str, &str)] = &[("CLAUDE_CODE_SESSION_ID", parent)];
+    for (tool_use, agent) in [
+        ("toolu_m1", "agent-m1"),
+        ("toolu_m2", "agent-m2"),
+        ("toolu_m4", "agent-m1"),
+    ] {
+        let hook = world.hook(
+            env,
+            &serde_json::json!({
+                "session_id": parent,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "mcp__plugin_ljos_ljos__ljos_vote",
+                "tool_use_id": tool_use,
+                "agent_id": agent,
+                "agent_type": "reviewer",
+                "tool_input": {"issue": issue, "choice": "ship"},
+            }),
+        );
+        assert!(hook.status.success(), "{}", text(&hook));
+        assert!(
+            hook.stdout.is_empty()
+                || !String::from_utf8_lossy(&hook.stdout).contains("permissionDecision\":\"deny"),
+            "{}",
+            text(&hook)
+        );
+    }
+    let vote = |id: u64, tool_use: &str, name: &str, choice: &str| {
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+            "name": "ljos_vote",
+            "arguments": {"issue": issue, "choice": choice, "used": "none", "as": name},
+            "_meta": {"claudecode/toolUseId": tool_use, "progressToken": id}}})
+    };
+    // A server answers a batch in any order; each call waits for the last.
+    let answers: Vec<serde_json::Value> = [
+        (3, "toolu_m1", "reviewer-a", "ship"),
+        (4, "toolu_m2", "reviewer-b", "ship"),
+        (5, "toolu_m3", "coordinator", "ship"),
+        (6, "toolu_m4", "reviewer-c", "hold"),
+        (7, "toolu_m1", "reviewer-d", "hold"),
+    ]
+    .iter()
+    .flat_map(|&(id, tool_use, name, choice)| {
+        world.mcp(name, env, &[vote(id, tool_use, name, choice)])
+    })
+    .collect();
+    let answer = |id: u64| {
+        let found = answers
+            .iter()
+            .find(|a| a["id"] == id)
+            .unwrap_or_else(|| panic!("no answer {id}: {answers:?}"));
+        let said = found["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        let said = serde_json::from_str::<serde_json::Value>(said)
+            .ok()
+            .and_then(|v| v["text"].as_str().map(str::to_string))
+            .unwrap_or_else(|| said.to_string());
+        (found["result"]["isError"] == true, said)
+    };
+    for (id, session) in [
+        (3, format!("{parent}:agent-m1")),
+        (4, format!("{parent}:agent-m2")),
+        (5, parent.to_string()),
+    ] {
+        let (error, said) = answer(id);
+        assert!(!error, "{said}");
+        assert!(said.contains(&format!("session {session}\n")), "{said}");
+    }
+    let (error, said) = answer(6);
+    assert!(!error, "{said}");
+    let (error, said) = answer(7);
+    assert!(!error, "{said}");
+    let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{}", text(&tally));
+    assert!(
+        stdout.contains("reviewer-c") && stdout.contains("reviewer-d"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("folded into one voice (same parent {parent}):")),
+        "{stdout}"
+    );
+    assert!(stdout.contains("counted reviewer-d"), "{stdout}");
 }

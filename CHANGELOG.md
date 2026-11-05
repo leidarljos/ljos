@@ -19,6 +19,48 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 - Verify extracted crate packages before publication.
 
 
+## 0.38.1 (2026-11-04)
+
+### Features
+
+- `ljos mesh status` prints each node the daemon reports, with its tags.
+  A node id may be a number or a string.
+  The example status document is not read by the command.
+- `ljos upgrade` installs each seat program from its own release.
+  One line names the old version and the new one, or `current`.
+  A missing release or a bad checksum is a warning.
+  The other programs still move.
+  `--only NAME` moves one program.
+  The old binary is kept as `NAME.bak-pre-VERSION`.
+  Intel macOS and aarch64 Linux use a published archive too.
+
+### Fixes
+
+- A lib test that edits the process environment holds `test_env_lock`.
+  The mock atom-read budget is this thread's, not a process variable.
+  A test waits for a condition inside a named deadline.
+- A tracker commit no longer stops when git still holds `index.lock`, including while a background push runs.
+  The write stays on disk, the line says the commit is deferred to the next write or push, and that next write or push commits it.
+  ljos does not remove an `index.lock` it did not create.
+  `ljos finish` warns when this machine's log cannot take a chunk, leaves the atoms in the pack, and names `ljos sync` as the command that seals the log whole.
+- An unverified user rule is a warning labelled unverified-rule, and the command runs.
+  A confirmed user-rule deny or ask is a warning labelled user-rule.
+  A missing verdict is a warning.
+  A cloud seat still cannot force-push, delete a remote ref, or push outside its allowlist.
+  A blocked issue is sat and labelled blocked-by.
+  A claim that misses its budget is labelled claim-pending and retried on note or finish.
+  A down memory pack or encoder is labelled memory-unavailable, and sitting and search continue.
+  A slow pack names memory pressure from the kernel and is not restarted for being slow.
+  Search prints a word ranking after a few seconds instead of hanging.
+  ljos file uses the checkout's project, or an explicit -p, and says which one and why.
+
+### Removals
+
+- A guarded call always runs and shows the rule's warning.
+  Approvals are removed.
+  block-on-warning no longer blocks. It warns with the rule's label, and the call runs.
+
+
 ## 0.38.0 (2026-11-03)
 
 ### Features
@@ -27,7 +69,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   `ljos mesh acl` prints its policy.
 - `policyd_config = "PATH"` in the user's or the seat's `ljos.toml` names a policyd config.
   The hook, `ljos policy`, `ljos doctor` and the guard shims then ask `ljos-policyd check --config PATH`.
-  With `block-on-warning true` in that config, a warned command becomes policyd's deny.
+  With `block-on-warning true` in that config, the warned command still runs. ljos warns with the rule's label. It does not block.
   A check that fails open still allows.
   It is off by default: with nothing named, `check` is asked as before and every warning stays a label.
 
@@ -86,7 +128,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   It used to show a bare `allow`.
 - ljos runs `rm -rf` and `find -delete` outside `/tmp`, and a force or mirror push, instead of refusing or asking.
   Each prints one `allow\twarn\tRULE\tWARNING` line and leaves a `warn` row in `$XDG_DATA_HOME/ljos/bypass.jsonl`, from the hook, `ljos policy`, the guard shim and the gate client alike.
-  An older `ljos-policyd` that still refuses or asks on those rules gets the same line, unless the person names a `policyd_config`, which keeps its deny.
+  An older `ljos-policyd` that still prints deny or prompt on those rules gets the same warning label. Naming a `policyd_config` with `block-on-warning true` does not block. It warns with the rule's label.
   The ask pack leaves a forced recursive delete of a home or system tree to the guard.
   A push that deletes a remote branch runs with `git-push-delete` instead of asking.
   A protected branch takes a force, mirror or delete push once the sitting's consensus settles, as it takes an ordinary push, and no later.
@@ -101,7 +143,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   A tool call's `ljos prefer --review --keep ID` runs with no warning, since the rule is kept as the agent's.
   It runs with `prefer-keep-faked-terminal` when run under `setsid`, `script` or `env -i`, as if from the person's terminal.
   That warning says the rule is kept as the agent's and stays unverified.
-  A `policyd_config` holding `block-on-warning true` reaches only the commands policyd warns on, so each of ljos's own labels turns into a deny only where policyd warns on the same command.
+  A `policyd_config` holding `block-on-warning true` reaches only the commands policyd warns on. ljos warns with its label there. It does not block.
 
 ### Documentation
 

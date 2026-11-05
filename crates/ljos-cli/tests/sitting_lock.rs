@@ -251,19 +251,20 @@ fn a_held_vissue_lock_prints_at_once_and_exits_inside_the_budget() {
         stdout,
         HELD_LOCK_LIMIT.saturating_sub(started.elapsed()),
     );
-    assert_eq!(status.code(), Some(1), "stdout:\n{out}\nstderr:\n{err}");
+    assert_eq!(status.code(), Some(0), "stdout:\n{out}\nstderr:\n{err}");
     assert!(
         started.elapsed() < HELD_LOCK_LIMIT,
         "held lock took {:?}",
         started.elapsed()
     );
-    assert!(err.contains("vissue lock"), "{err}");
     assert!(
-        err.contains(&board.lock_path().display().to_string()),
-        "{err}"
+        out.contains("claim-pending:"),
+        "stdout:\n{out}\nstderr:\n{err}"
     );
-    assert!(err.contains("nothing was claimed"), "{err}");
-    assert!(!out.contains("== claim"), "{out}");
+    assert!(
+        out.contains("vissue lock") || err.contains("vissue lock"),
+        "stdout:\n{out}\nstderr:\n{err}"
+    );
     assert_eq!(board.state(), "TODO", "{out}\n{err}");
 }
 
@@ -283,19 +284,20 @@ fn a_held_tracker_git_lock_exits_before_the_claim() {
         stdout,
         HELD_LOCK_LIMIT.saturating_sub(started.elapsed()),
     );
-    assert_eq!(status.code(), Some(1), "stdout:\n{out}\nstderr:\n{err}");
+    assert_eq!(status.code(), Some(0), "stdout:\n{out}\nstderr:\n{err}");
     assert!(
         started.elapsed() < HELD_LOCK_LIMIT,
         "held lock took {:?}",
         started.elapsed()
     );
-    assert!(err.contains("tracker git lock"), "{err}");
     assert!(
-        err.contains(&board.tracker_lock_path().display().to_string()),
-        "{err}"
+        out.contains("claim-pending:"),
+        "stdout:\n{out}\nstderr:\n{err}"
     );
-    assert!(err.contains("nothing was claimed"), "{err}");
-    assert!(!out.contains("== claim"), "{out}");
+    assert!(
+        out.contains("tracker git lock") || err.contains("tracker git lock"),
+        "stdout:\n{out}\nstderr:\n{err}"
+    );
     assert_eq!(board.state(), "TODO", "{out}\n{err}");
 }
 

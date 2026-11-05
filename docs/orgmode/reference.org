@@ -11,7 +11,7 @@
 | =calibrate -p PROJECT [--rounds N]= | consensus, pack | trust rows from the project's voting history (Dawid-Skene accuracy) |
 | =remember TEXT [--as PERSONA] [--transient\vert--standing]= | pack | one lesson, stored as written, origin =user-declared=; as a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the hook shows it from the next prompt it bears on; run under an agent runner it is an episode, kept and not a refresher until a review promotes it; =--transient= or =--standing= picks one either way |
 | =memories list\vert review\vert tui\vert prune= | pack | review the memories agents wrote on their own: =list= newest first with provenance, unreviewed agents' memories by default; =review= keeps, drops, edits or merges them; =tui= browses them; =prune= names duplicates and never-recalled memories and writes only with =--apply= |
-| =prefer TEXT [--deny PATTERN] [--ask PATTERN] [--user --why REASON]= | pack, user config | one standing preference, origin =user-declared=; each =--deny= or =--ask= also writes that rule with the preference as its reason, so the hook enforces it. =--user= writes a user rule instead, shared by every seat on this machine, never reviewed, and not also stored as a seat preference; =--why= is required with it. See [[*User rules][User rules]] |
+| =prefer TEXT [--deny PATTERN] [--ask PATTERN] [--user --why REASON]= | pack, user config | one standing preference, origin =user-declared=; each =--deny= or =--ask= also writes that rule with the preference as its reason, so the hook warns by it. =--user= writes a user rule instead, shared by every seat on this machine, never reviewed, and not also stored as a seat preference; =--why= is required with it. See [[*User rules][User rules]] |
 | =accept ID [--quote WORDS --at TIME --via SEAT]= | pack | raise one stored memory from L0 (=derived=) to =explicit=, or a proposal an older ljos left open, and record a =keep= review. Any caller can, and the memory keeps its origin. For a yes said in chat, =--quote= takes the person's words, =--at= the time they said them as a Request for Comments (RFC) 3339 timestamp, and =--via= the seat that carried them. All three go together, and the acceptance keeps them. A proposal whose text =remember= or =prefer= already wrote is not written again |
 | =forget ID [--why DEED]= | pack | tombstone a claim, naming the deed that withdrew it |
 | =retire-notes= | pack | tombstone the note memories an older =ljos note= wrote; runs once per seat, and the tracker copies stay |
@@ -33,7 +33,7 @@
 | =statusline= | pack | one line for a runner's status bar (Grok's =[ui.status_line]=, Claude Code's =statusLine=): the seat, the issue this conversation has claimed, the claims due; reads the runner's status JSON on stdin; each session's line is cached for fifteen seconds |
 | =ask NAME TEXT= | persona session | hands the persona a question or a task in its own pane, opening it (and resuming its session) when it is closed |
 | =supervise NAME --harness H --exit clean\vert crash --at SECONDS= | runner | classify one harness exit and print =restart=, =stop= or =give-up=, and on a restart the herdr line that would start the child. It prints the line and does not run it. =--restart= is =permanent= (the default), =transient= or =temporary=; three restarts inside sixty seconds give up |
-| =upgrade [VERSION] [--dir DIR]= | release | installs a published release beside the running =ljos=: the archive the release workflow built for the tag, checked against the sha256 published beside it, each binary an executable that names the version; the old ones kept as =NAME.bak-pre-VERSION=. The only way an agent moves the seat's binaries, which policyd keeps it from writing |
+| =upgrade [VERSION] [--dir DIR] [--only NAME]= | release | installs the ljos release beside the running =ljos=, then each other seat program from the repository that publishes it. The archive is checked against the sha256 published beside it, each binary is an executable that names the version, and the old one is kept as =NAME.bak-pre-VERSION=. One line a program: =NAME OLD NEW=, or =NAME VERSION current=. A missing release, a failed download or a checksum that does not match is a warning, and the other programs still move. =--only NAME= moves that one program. =VERSION= is the ljos release. This is how an agent moves the seat's binaries, which policyd keeps it from writing |
 | =playbook ISSUE NAME= | pack | bind a recipe to the issue and copy its full body; the name is a tracker =playbook:= note until finish or release |
 | =playbooks= | pack | the closed set sit, arena, land, company-panel, overnight, feature; pack latest per name, the built-in seed when missing |
 | =workflow ISSUE [--start NAME] [--round]= | tracker | a parent's workflow: stage, round and next step; =--start feature= notes =workflow: feature= and files the design child, =--round= files the next panel round once every child is closed |
@@ -49,20 +49,20 @@
 | =reopen ID= | tracker | put a finished or cancelled issue back to the state the close took it from, whoever closed it; a person has to be present; the close stays on the logbook with the reopen under it, and the caller does not take the claim |
 | =log --seat SEAT= | tracker | tracker commits by one seat. The subject is =chore(issues): ID VERB by SEAT= |
 | =usage --since YYYY-MM-DD= | tracker | how many tracker commits each seat made from that day on |
-| =digest [since TIME or last] [--json]= | tracker, deed, pack | one view of what each seat did, newest first: tickets filed, claimed and closed, votes, consensus, deeds, claims, guard refusals and rewrites, and memory. last continues from the previous run |
+| =digest [since TIME or last] [--json]= | tracker, deed, pack | one view of what each seat did, newest first: tickets filed, claimed and closed, votes, consensus, deeds, claims, guard warnings and rewrites, and memory. last continues from the previous run |
 | =send SEAT TEXT... [--group NAME] [--interrupt] [--issue ID]= | pack | write to one seat, or with =--group= to the other members of that group; =--interrupt= leads the next prompt; =--issue= threads the message on that vissue issue and the atom takes the issue's scope, so =ljos sync= carries it in that repository's sealed log |
 | =inbox [--all]= | pack | mail this seat has not read, then receipts on what it sent that it has not been shown; listing writes no receipt; =ljos hook --prompt= writes a receipt for each message it shows; a pack that does not answer is an error, and so is a writer that refuses kind =message=; =--all= includes mail already read |
 | =read ID= | pack | write a read receipt for one message; a second read writes nothing |
 | =reply ID TEXT... [--interrupt]= | pack | answer the sender, keep the issue, and carry =reply:ID= |
 | =group NAME [--add SEAT]... [--remove SEAT]...= | pack | list a group, or add and drop members; membership is atoms and travels in the sealed log |
-| =wake [SEAT] [--command CMD [--timeout S]\vert --webhook URL [--key-file F] [--key-env VAR]\vert --clear\vert --fire]= | machine | how mail wakes a seat that is idle: a shell line this machine runs with =LJOS_SEAT= set to the seat, or a URL it posts the envelope to (never the body); =send= and =reply= start it in its own session and do not wait on it; policyd judges a command when it is set and on every run, and a =deny= or an =ask= keeps it from running; =--fire= runs it now and prints what happened; alone, show the wake; kept in =~/.config/ljos/wake.toml= |
+| =wake [SEAT] [--command CMD [--timeout S]\vert --webhook URL [--key-file F] [--key-env VAR]\vert --clear\vert --fire]= | machine | how mail wakes a seat that is idle: a shell line this machine runs with =LJOS_SEAT= set to the seat, or a URL it posts the envelope to (never the body); =send= and =reply= start it in its own session and do not wait on it; policyd reads a command when it is set and on every run, and a rule that fires is a warning beside it while the command still runs, and block-on-warning warns with that label and the command runs. It does not block                                                                                                          |
 | =deed ID [--add ACCESSION]...= / =--remove ACCESSION --ticket ID= | tracker | cite with =--add=, or list; =--remove= drops one citation, appended to the ledger, and the heading is not rewritten |
 | =claims [ARGS]= | tracker | who has claimed what: =vissue claims= with its flags (=--by NAME=, =--json=) |
 | =recall ID= | tracker | the working set |
 | =vote ID [--for OPTION] [--confidence P] [--used ACCESSIONS\vert none] [--expect OPTION\vert JSON] [--as PERSONA] [--jev] [--withdraw]= | tracker | cast as this seat, never another, or read the tally; =--confidence= is a probability in (0, 1]; =--used= lists the deed accessions the ballot used, comma-separated, or =none=, and is required with =--for=; =--expect= records the forecast of the others on the same command; =--withdraw= takes back the ballot and its forecast, and the logbook keeps what it was. =--as NAME --jev= asks Jev for the persona's ballot: cast with the option's probability and a forecast at confidence 0.8 or above, noted and left for a subagent under it |
 | =predict ID --expect OPTION\vert JSON [--as PERSONA]= | pack | forecast the others' shares; two or more and =consensus= names the answer more popular than forecast (Prelec, doi:10.1038/nature21054) |
-| =rule PATTERN [--verdict deny\vert ask] --why TEXT [--user]= | pack, user config | argv law the hook and =policy= enforce: a glob, or a regular expression (=re:= or a =\b=, =\s= or =(a\vert b)= in it) anchored at the start, tried on the whole line and on each command it runs; [[*What a rule reads][What a rule reads]] lists which those are. =--why= is the reason a stopped reader sees. =--user= writes the law into the user config instead of the seat pack, shared by every seat and never reviewed |
-| =rules [--json]= | pack | the rules the hook and =policy= judge by: verdict, pattern and reason, deny first |
+| =rule PATTERN [--verdict deny\vert ask] --why TEXT [--user]= | pack, user config | argv law the hook and =policy= warn by, the verdict kept as a label: a glob, or a regular expression (=re:= or a =\b=, =\s= or =(a\vert b)= in it) anchored at the start, tried on the whole line and on each command it runs; [[*What a rule reads][What a rule reads]] lists which those are. =--why= is the reason the warning gives. =--user= writes the law into the user config instead of the seat pack, shared by every seat and never reviewed |
+| =rules [--json]= | pack | the rules the hook and =policy= warn by: verdict, pattern and reason, deny first |
 | =consensus ID [--compare]= | consensus, tracker | first what the seat ballots alone decide for the push check; then the settle under the pack's rows that apply to the issue, with every persona's anchor, as advice; an issue tagged =broad= runs bounded confidence; once six issues have an outcome, voters shown to err together are discounted; =--compare= adds the tracker's own settle, and so does a missing model crate; an issue with no ballots is refused before a settle runs; =--json= prints one JSON document, the seat tally at the top level and each reading under its own key |
 | =claim [ID] [--next] [--role ROLE] [--slack N] [--assignee NAME]= | claim graph | claim a session node. With =--next=, or with no id, it claims the first ready node in claimdag's order for the name, the way =claim ID= claims one; =--role= and =--slack= set the affinity and the depth slack. A busy refusal names what the name has still claimed |
 | =release ID [--assignee NAME]= | claim graph | hand the session node back unfinished: ready, generation moved; a node another conversation of this seat holds (a worker it started, or the one that started it) is released under that name |
@@ -231,7 +231,7 @@ A reinstall rewrites the hook scripts and leaves that file alone.
 The seat serves these over the Model Context Protocol (MCP).
 
 Writers: =ljos_sitting=, =ljos_finish=, =ljos_calibrate=, =ljos_persona=, =ljos_playbook=, =ljos_remember=, =ljos_prefer=, =ljos_forget=, =ljos_trust=,
-=ljos_learn=, =ljos_graded=, =ljos_island=, =ljos_deed=, =ljos_vote=, =ljos_predict=, =ljos_rule=, =ljos_request_approval=, =ljos_claim=,
+=ljos_learn=, =ljos_graded=, =ljos_island=, =ljos_deed=, =ljos_vote=, =ljos_predict=, =ljos_rule=, =ljos_claim=,
 =ljos_release=, =ljos_complete=, =ljos_consolidate=, =ljos_findings= (a reader without =remember=), =ljos_bump_plan= (a reader with =dry_run=), =ljos_handover=, =ljos_receive=, =ljos_send=, =ljos_read=, =ljos_reply=, =ljos_group=. Readers: =ljos_search= (with =as_of=), =ljos_conflicts=, =ljos_inbox=,
 =ljos_timeline=, =ljos_digest=, =ljos_due=, =ljos_habit= (a writer with a value), =ljos_evidence=, =ljos_current=, =ljos_recall=,
 =ljos_consensus=, =ljos_brief=, =ljos_personas=, =ljos_playbooks=, =ljos_cards=, =ljos_policy=, =ljos_doctor=. Resources:
@@ -240,7 +240,7 @@ Writers: =ljos_sitting=, =ljos_finish=, =ljos_calibrate=, =ljos_persona=, =ljos_
 when to call it.
 
 By default the server lists the core set, in this order: =ljos_rule=,
-=ljos_request_approval=, =ljos_prefer=, =ljos_remember=, =ljos_search=,
+=ljos_prefer=, =ljos_remember=, =ljos_search=,
 =ljos_start=, =ljos_guard_check=, =ljos_file=, =ljos_options=, =ljos_note=, =ljos_recall=,
 =ljos_sitting=, =ljos_finish=, =ljos_claim=, =ljos_release=, =ljos_send=,
 =ljos_inbox=, =ljos_reply=, =ljos_vote=, =ljos_consensus= and =ljos_doctor=.
@@ -291,7 +291,8 @@ persona whose =--runner= is that table's name reasons in that session
 (=ljos ask=, =vote --jev=). =hooks_named= names the key a hooks file of
 named hooks takes the seat's hooks under, each command told its event
 with =ljos hook --event=. A steps runner reads a permission answer that omits
-=decision= as a deny. The seat answers =allow= when no rule matches.
+=decision= as a deny, so the seat always answers =allow=, with the rule's warning
+when one matches.
 
 The pane script resumes a runner that exits non-zero, at most three times
 a minute, and leaves one that exits 0. =agents= names the directory the
@@ -314,9 +315,9 @@ the seat hook, or when Cursor's file carries every event.
 The hook reads a Cursor call off =cursor_version= in its stdin and answers
 in Cursor's fields: =permission= on a permission check, with =user_message= and
 =agent_message=; =additional_context= on a tool result; =followup_message=
-on a held stop. It still answers =allow= when there is no verdict, since
-Cursor blocks the command when the answer to a permission check is not JSON. An ask on
-=preToolUse=, which Cursor does not enforce, becomes a deny.
+on a held stop. It answers =allow= on every permission check, since
+Cursor blocks the command when the answer to a permission check is not JSON. A rule
+that fires is =allow= with its warning in =user_message= and =agent_message=.
 The IDE and the =agent= CLI read the same =~/.cursor/mcp.json=.
 
 A table with =shell = true= registers no server and no hook.
@@ -325,9 +326,10 @@ A table with =shell = true= registers no server and no hook.
 because a shell-only agent has no MCP client, so the env file
 names its seat. =--skills DIR= is where the skill goes.
 =ljos hook --prompt= reads stdin as the prompt.
+=ljos hook= and =ljos policy= exit 0 on a warning.
 =ljos hook --fail-on-deny= and =ljos policy --fail-on-deny=
-exit 1 when the answer is a deny. Without the flag the
-exit stays 0.
+exit 1 when the answer is a deny, which is the cloud seat push rule.
+Without the flag the exit stays 0.
 
 =[[tool]]= tables in the same file declare the tools a runner lives in.
 Two come as shapes, herdr and tmux. A table of the same name replaces one.
@@ -362,7 +364,8 @@ the session's record. The hook reads the runner's JSON on stdin
 (=hook_event_name=, =tool_input.command=, =prompt=) and answers
 ={"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}=,
 or nothing when the pack has nothing on the cue. On =PreToolUse= a TCB
-or pack deny is =permissionDecision= =deny= and blocks. Plain text on
+or pack rule is one warning line in =additionalContext=, and the call runs.
+The hook never answers =deny=, =ask= or =block=. Plain text on
 stdin is an argv line and answered in plain lines.
 
 | Event | The hook does |
@@ -373,7 +376,7 @@ stdin is an argv line and answered in plain lines.
 | =PostToolUseFailure= | searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share at least two content words with the cue, each once between compactions |
 | =PreCompact= | fires up to eight of the memories injected so far, drops all of them from the session's record so a later prompt can bring them back, and keeps a note naming the issue the conversation still has claimed, for the next delivery |
 | =SessionStart= | after a compaction (=source= =compact=), on a runner that takes its context, answers with that note; a fresh session hears one line. It says that ljos is on, the memory and due counts, the policy state, and up to three preferences |
-| =PreToolUse= | applies the TCB and pack rules to the command (matcher =Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch=); a deny blocks. It keeps the call's =agent_id= for each =ljos= line, and on a seat MCP tool (=^mcp__.+__ljos_.+$=) only notes a subagent's call, so the ballot binds the session plus that agent. A vissue write tool is refused by the same tracker write check, and the refusal names =ljos finish= |
+| =PreToolUse= | applies the TCB and pack rules to the command (matcher =Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch=); a rule is a warning and the call runs. It keeps the call's =agent_id= for each =ljos= line, and on a seat MCP tool (=^mcp__.+__ljos_.+$=) only notes a subagent's call, so the ballot binds the session plus that agent. A vissue write tool gets the same tracker write check's warning, which names =ljos finish= |
 | =Stop= | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then holds one turn for unread interrupt mail (=decision: block=, or =followup_message= in Cursor) and receipts it |
 | =SubagentStop= | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once |
 
@@ -404,31 +407,37 @@ wrappers (=sudo=, =doas=, =env=, =time=, =nohup=, =exec=, =command=,
 =chronic=, =unbuffer=, =watch=), =case= patterns and function
 definitions come off, and quotes, =$'...'= and escapes come off each
 word, so =git 'push'=, =$'git' push= and =git -c alias.p=push p= read as
-=git push=. A line nested more than eight deep is refused whole.
+=git push=. A line nested more than eight deep is warned on whole.
 
 A rule reads the line as written. It does not see a command whose name
 comes from a variable (=$g push=), a script run from a file, an alias or
 git alias defined in an earlier call, a recipe in a Makefile or justfile,
 or a call made from inside another language (=python -c=, =perl -e=). A
-rule stops an agent's mistakes; it is not a sandbox. For a push that
+rule warns an agent off its mistakes; it is not a sandbox. For a push that
 must never happen, protect the branch on the forge.
 
 * Checks ljos keeps
 
-policyd answers every command with one of four answers. ljos keeps two checks of its own,
-because only ljos knows the tracker and the sitting.
+policyd answers every command with one of three answers. ljos keeps two checks of its own,
+because only ljos knows the tracker and the sitting. No answer stops a command: ljos never
+refuses, asks or holds one. A cloud seat's push rule, below, is the one exception.
 
 | Answer | What happens |
 |---+---|
 | =allow= | the command runs |
-| =ask= | the runner's permission prompt, or =ljos approve= |
-| =deny= | the command does not run, and the reason says why |
+| =allow=, =warn=, rule, warning | the command runs, and the hook shows one line with the rule and its warning |
 | =rewrite= | the command runs in a fixed form |
 
+An older policyd that answers =deny= or =prompt= reads as =allow= with that rule's warning. The rule's
+verdict stays a label: =ljos rules= lists it, the book log and =ljos digest= count it, and a hook shows
+it as =warning: REASON (ljos rule `PATTERN`)=. A warning is the only thing between a runner and a
+destructive command. For a command that must never run, protect the branch on the forge, keep backups,
+and keep the runner where it cannot reach what it must not touch.
+
 On the wire, a rewrite is one line of three tab-separated fields: =allow=, =rewrite= and the new command.
-The new line runs only when the guard also allows it. The hook hands it back as the updated input for
-Claude Code, Codex, Grok Build and Cursor's =preToolUse=. A runner without that field gets a refusal that
-names the new command, so the old line never runs. The first rewrite runs the command through =uv run=.
+The new line runs only when the guard has no warning on it. The hook hands it back as the updated input for
+Claude Code, Codex, Grok Build and Cursor's =preToolUse=. A runner without that field runs the old line, with
+a warning that names the new command. The first rewrite runs the command through =uv run=.
 
 Each swap also shows a note naming both commands and leaves a row in
 =$XDG_DATA_HOME/ljos/rewrite.jsonl=. Set =rewrite = false= in a repository's
@@ -437,47 +446,53 @@ Each swap also shows a note naming both commands and leaves a row in
 If =ljos-policyd= is missing, slow or crashes, the command runs and ljos logs a warning.
 Nothing in ljos turns a fault into a refusal.
 
-Blocking on a warning is off by default.
-A warning is =allow=, the rule and one warning, and the command runs.
+By default a warning is =allow=, the rule and one warning, and the command runs.
+Blocking is opt-in.
 ljos asks =ljos-policyd check --config PATH -- COMMAND= when =policyd_config = "PATH"= is in the user's or the seat's =ljos.toml=, at the top or under =[gates]=; the seat's file wins, =""= names none, and a relative path is from that file's directory.
 A repository's =ljos.toml=, =.ljos/gates.toml= and =LJOS_CONFIG= do not name it.
-A config with =block-on-warning true= has policyd answer a warned command with =deny=, the same rule and warning, and exit 2, and ljos reports that deny as it reports any other.
+A config with =block-on-warning true= does not block. ljos warns with the rule's label, and the command runs.
+The hook does not deny the tool call, =ljos policy --fail-on-deny= does not exit 1 for that warning, and a guard shim does not stop the command.
+A static, seat, user or pack rule still warns.
+Without a named config, a =deny= or =prompt= from policyd reads as its warning, and the command runs.
 A check that fails open still allows.
 A named config that is not there fails open on every command, with no rule or warning.
 [[file:howto.org][How-to]] has the steps.
 
 A command that deletes or moves a tree holding the person's key directory, such as =rm -rf /=, =rm -rf ~= or =shutil.rmtree(os.path.expanduser('~'))=, runs with ljos's own label =uproots-person-key=.
 Its warning names the tree and the key directory, and the bypass log keeps it as a =warn= row.
-A config with =block-on-warning true= denies such a command where policyd warns on it too.
+A config with =block-on-warning true= warns with a label where policyd warns on the same command. It does not block.
 The same goes for a recursive delete outside =/tmp=.
 A command that changes the key directory, a file in it or the directory above it runs with =changes-person-key=.
 =changes-kept-prompt= labels a change to the runtime directory where the hook keeps the person's latest prompt, or to a file in it.
-One that writes any other file of the seat, an ljos binary, a hook or the file that registers one, the ljos config or an approval, runs with =writes-seat-file=.
+One that writes any other file of the seat, an ljos binary, a hook or the file that registers one or the ljos config, runs with =writes-seat-file=.
 Each warning names the word the command changes.
 A tool call's =ljos prefer --review --keep= keeps the rule as the agent's and names nothing.
 Under =setsid=, =script= or =env -i=, as if from the person's terminal, the call names =prefer-keep-faked-terminal=.
 The rule is still the agent's.
 
-The tracker write check refuses a command, or a file tool, that writes the tracker's files by hand. Ticket text is data.
+The tracker write check warns on a command, or a file tool, that writes the tracker's files by hand. Ticket text is data.
 A ticket body that names a path or a command is never read as one.
 
-The push check asks, and never denies, on a push onto a protected branch when the ticket of
+The push check warns on a push onto a protected branch when the ticket of
 the current sitting has no settled consensus. It covers =develop= and =main= unless
 =consensus_branches= in =ljos.toml= names others. With one active seat in =vissue.toml=, that seat's own vote
 settles it. This is solo mode. With two or more seats, the normal quorum applies.
+The =pre-push= git hook, once installed, still holds that push under a runner.
 
-Every other push rule is policyd's.
+Every other push rule is policyd's. Each runs the push.
 
 | Push | Answer |
 |---+---|
 | an ordinary push of a branch, a tag, or a lease push to a branch that is not protected | runs |
 | a lease push or a force push onto a protected branch | runs, named =git-force-push= |
 | deleting a remote branch | runs, named =git-push-delete= |
-| a push onto a protected branch, with no settled consensus on the sitting's ticket | asks |
-| rewriting published history | asks or denies, by policyd's table |
+| a push onto a protected branch, with no settled consensus on the sitting's ticket | warns |
+| rewriting published history | warns, by policyd's table |
 
-A cloud seat has one push rule. It may push the branches named in its =ljos.toml= and =develop=, with no force
-and no delete. Opening or merging a pull request is not refused. Branch protection on the remote does the rest.
+A cloud seat has one push rule. It may push the branches named in its =ljos.toml= and =develop=.
+A cloud seat cannot force push, delete a branch, or push to a branch outside its allowlist.
+Every other push from a cloud seat runs with a warning.
+Opening or merging a pull request is not refused. Branch protection on the remote does the rest.
 
 The remote is the one the command names, else the branch's upstream,
 else =origin=, read in the directory a =cd= or =git -C= before the push
@@ -677,3 +692,15 @@ Options:
   -h, --help  Print help
 #+end_src
 # END ljos-sample help
+
+* Command decision modes
+
+Command rules warn by default. To enforce deny rules and ask for command
+consent, launch the client and its hook/server processes with
+=LJOS_GUARD_MODE=strict=. In strict mode an ask uses native confirmation or
+an explicit one-use grant; eligible ordinary branch pushes can offer a
+human-selected task scope. In advisory mode no command-consent request is
+created or consumed. Git attribution and leak checks, shared hooks and
+cloud worker isolation remain enforced in both modes. Consent does not
+bypass those checks.
+

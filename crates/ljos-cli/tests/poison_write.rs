@@ -1,6 +1,9 @@
 //! Write-side regressions. A planted sentence must not become the person's words.
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 #[path = "common/runner.rs"]
 mod runner;
 #[path = "common/terminal.rs"]
@@ -151,7 +154,7 @@ impl Seat {
                 args,
             );
         }
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.seat_env(&mut cmd);
         cmd
@@ -171,7 +174,7 @@ impl Seat {
         bin: &str,
         args: &[&str],
     ) -> Command {
-        let mut cmd = Command::new(self.runner(name));
+        let mut cmd = guard_mode::command(self.runner(name));
         cmd.args(["-c", "\"$@\"; exit $?", name, "sh", "-c"])
             .arg(format!("{prefix} \"$0\" \"$@\"; exit $?"))
             .arg(bin)
@@ -202,7 +205,7 @@ impl Seat {
     /// `ljos hook` as the runner `name` spawns it: its own child, with no
     /// shell between them.
     fn hook_under(&self, name: &str) -> Command {
-        let mut cmd = Command::new(self.runner(name));
+        let mut cmd = guard_mode::command(self.runner(name));
         cmd.args(["-c", "\"$@\"; exit $?", name])
             .arg(env!("CARGO_BIN_EXE_ljos"))
             .arg("hook");
@@ -213,7 +216,7 @@ impl Seat {
     /// `ljos hook` as a runner that runs its hook command in `sh -c`
     /// spawns it, the way Claude Code does where `sh` is dash.
     fn hook_via_sh(&self, name: &str) -> Command {
-        let mut cmd = Command::new(self.runner(name));
+        let mut cmd = guard_mode::command(self.runner(name));
         cmd.args(["-c", "\"$@\"; exit $?", name, "/bin/sh", "-c"])
             .arg(format!("{} hook", env!("CARGO_BIN_EXE_ljos")));
         self.seat_env(&mut cmd);
@@ -398,7 +401,7 @@ fn a_runner_user_rule_of_a_plant_is_the_agents() {
 #[test]
 fn mcp_user_prefer_of_a_plant_is_the_agents() {
     let seat = Seat::new();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+    let mut child = guard_mode::command(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(seat.home.path())
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -806,7 +809,7 @@ fn a_hook_the_runner_did_not_spawn_keeps_nothing() {
     let seat = Seat::new();
     let plant = seat.home.path().join("plant.json");
     std::fs::write(&plant, &payload).unwrap();
-    let mut cmd = Command::new(seat.runner("claude"));
+    let mut cmd = guard_mode::command(seat.runner("claude"));
     cmd.args(["-c", "\"$@\"; exit $?", "claude", "/bin/sh", "-c"])
         .arg(format!(
             "{} hook < {}",
@@ -997,7 +1000,7 @@ fn mcp_remember(seat: &Seat, text: &str) -> serde_json::Value {
 }
 
 fn mcp_call(seat: &Seat, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+    let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos-mcp"));
     seat.seat_env(&mut cmd);
     cmd.env("LJOS_SEAT", "probe");
     mcp_call_with(cmd, tool, arguments)
@@ -1084,7 +1087,7 @@ const RULE_ARGS: [&str; 6] = ["rule", "*deploy-form*", "--verdict", "ask", "--wh
 
 /// `ljos ARGS` in the shape `mode`, with no runner above.
 fn shaped(seat: &Seat, mode: &str, args: &[&str]) -> std::process::Output {
-    let mut cmd = Command::new(terminal::PYTHON);
+    let mut cmd = guard_mode::command(terminal::PYTHON);
     cmd.args(terminal::shape(mode, env!("CARGO_BIN_EXE_ljos"), args));
     seat.seat_env(&mut cmd);
     cmd.output().unwrap()
@@ -1311,7 +1314,7 @@ open(b, "w").write("\n".join(old))
 
 /// Run `line` as a tool call of the runner `name` started with `env`.
 fn tool_call(seat: &Seat, name: &str, env: &[(&str, &str)], line: &str) -> std::process::Output {
-    let mut cmd = Command::new(seat.runner(name));
+    let mut cmd = guard_mode::command(seat.runner(name));
     cmd.args(["-c", "\"$@\"; exit $?", name, "sh", "-c", line]);
     seat.seat_env(&mut cmd);
     cmd.envs(env.iter().copied());
@@ -1657,7 +1660,7 @@ fn with_no_runner_above_nothing_is_the_persons_words() {
     plant_listed_unverified(&seat, "cli");
     let seat = Seat::new();
     forge_prompt(&seat, PLANT, forged);
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+    let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos-mcp"));
     seat.seat_env(&mut cmd);
     cmd.env("LJOS_SEAT", "probe")
         .env("LJOS_HARNESS_SESSION", forged);
@@ -1789,7 +1792,7 @@ fn mcp_under(seat: &Seat, r: &Runner) -> Command {
 fn hook_then_mcp(seat: &Seat, r: &Runner) -> Command {
     let payload = seat.home.path().join("hook.json");
     std::fs::write(&payload, recorded(seat, r.name, &r.hook.to_string())).unwrap();
-    let mut cmd = Command::new(seat.runner(r.name));
+    let mut cmd = guard_mode::command(seat.runner(r.name));
     cmd.args([
         "-c",
         "\"$1\" hook < \"$2\" > /dev/null; shift 2; \"$@\"; exit $?",
@@ -2038,7 +2041,7 @@ fn detach_keeps_nothing(seat: &Seat, name: &str, mode: &str, fake: &std::path::P
     .unwrap();
     let report = dir.join("report");
     let pref_status = dir.join("prefer.status");
-    let mut cmd = Command::new(seat.runner(name));
+    let mut cmd = guard_mode::command(seat.runner(name));
     cmd.arg(&run)
         .arg(env!("CARGO_BIN_EXE_ljos"))
         .arg(&pre)
@@ -2160,7 +2163,7 @@ fn a_runners_own_prompt_still_keeps_after_a_tool_call() {
             "\"$1\" hook < \"$2\" > \"$4\" 2> \"$5\"\n\"$1\" hook < \"$3\" > \"$6\" 2> \"$7\"\n",
         )
         .unwrap();
-        let mut cmd = Command::new(seat.runner(name));
+        let mut cmd = guard_mode::command(seat.runner(name));
         cmd.arg(&script)
             .arg(env!("CARGO_BIN_EXE_ljos"))
             .arg(&pre)
@@ -2213,7 +2216,7 @@ fn a_typed_prompt_on_claude_and_codex_still_stores_after_a_tool_call() {
         )
         .unwrap();
         let pref_err = dir.join("prefer.err");
-        let mut cmd = Command::new(seat.runner(name));
+        let mut cmd = guard_mode::command(seat.runner(name));
         cmd.arg(&script)
             .arg(env!("CARGO_BIN_EXE_ljos"))
             .arg(&pre)
@@ -2282,7 +2285,7 @@ mod chat_relay_approval_tests {
             let seat = Seat::new();
             pending(&seat);
             let command = if via_sh {
-                let mut command = Command::new(seat.runner(adapter));
+                let mut command = guard_mode::command(seat.runner(adapter));
                 command
                     .args(["-c", "\"$@\"; exit $?", adapter, "/bin/sh", "-c"])
                     .arg(format!(
@@ -2347,5 +2350,83 @@ mod chat_relay_approval_tests {
             let out = fed(command, &input.to_string());
             assert!(!approved(&seat), "{mode}: {}", text_of(&out));
         }
+    }
+}
+
+#[test]
+fn advisory_a_normalized_prompt_grants_consent_from_its_attested_runner() {
+    let _mode = guard_mode::advisory();
+
+    let adapter = "gemini";
+    for via_sh in [false, true] {
+        let seat = Seat::new();
+        pending(&seat);
+        let command = if via_sh {
+            let mut command = guard_mode::command(seat.runner(adapter));
+            command
+                .args(["-c", "\"$@\"; exit $?", adapter, "/bin/sh", "-c"])
+                .arg(format!(
+                    "{} hook --runner {adapter}",
+                    env!("CARGO_BIN_EXE_ljos")
+                ));
+            seat.seat_env(&mut command);
+            command
+        } else {
+            let mut command = seat.hook_under(adapter);
+            command.args(["--runner", adapter]);
+            command
+        };
+        let out = fed(command, &payload());
+        assert!(out.status.success(), "{}", text_of(&out));
+        assert!(approved(&seat), "via shell {via_sh}: {}", text_of(&out));
+    }
+}
+
+#[test]
+fn advisory_normalized_tool_subagent_and_unattended_prompts_grant_nothing() {
+    let _mode = guard_mode::advisory();
+
+    let adapter = "gemini";
+    for mode in [
+        "tool",
+        "wrong-runner",
+        "subagent",
+        "unattended",
+        "non-runner",
+    ] {
+        let seat = Seat::new();
+        pending(&seat);
+        let mut input: serde_json::Value = serde_json::from_str(&payload()).unwrap();
+        let mut command = match mode {
+            "tool" => seat.under(
+                adapter,
+                &[("GEMINI_SESSION_ID", RUNNER_SESSION)],
+                "",
+                &["hook", "--runner", adapter],
+            ),
+            "wrong-runner" => {
+                let mut command = seat.hook_under("codex");
+                command.args(["--runner", adapter]);
+                command
+            }
+            "non-runner" => {
+                let mut command = seat.hook_under("sshd");
+                command.args(["--runner", adapter]);
+                command
+            }
+            _ => {
+                let mut command = seat.hook_under(adapter);
+                command.args(["--runner", adapter]);
+                command
+            }
+        };
+        if mode == "subagent" {
+            input["agent_id"] = serde_json::json!("child-one");
+        }
+        if mode == "unattended" {
+            command.env("LJOS_UNATTENDED", "1");
+        }
+        let out = fed(command, &input.to_string());
+        assert!(!approved(&seat), "{mode}: {}", text_of(&out));
     }
 }

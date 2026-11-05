@@ -715,6 +715,9 @@ pub struct SessionBallot {
     mark: String,
     kept: bool,
     tree: Option<TreeHold>,
+    /// A session that already cast, or that filed a candidate. The ballot
+    /// is still recorded. The line is the label, not a refusal.
+    pub label: Option<String>,
 }
 
 impl SessionBallot {
@@ -766,6 +769,10 @@ fn held_choice(issue: &str, voter: &str) -> Option<String> {
 /// This voter already holds a ballot on `issue`, this process already
 /// holds that claim, or it authored a candidate tied to `issue`.
 pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
+    if !crate::guard_mode::is_strict() {
+        return advisory_claim_session_ballot(issue, voter);
+    }
+
     ballot_sig::begin_cast(issue);
     let claimed = ballot_sig::claimed_identity();
     let id = ballot_sig::identity();
@@ -797,6 +804,47 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
         mark,
         kept: false,
         tree: None,
+    };
+    ballot.tree = hold_tree(issue, &claimed, &CastTree::here())?;
+    Ok(ballot)
+}
+
+pub fn advisory_claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
+    ballot_sig::begin_cast(issue);
+    let claimed = ballot_sig::claimed_identity();
+    let id = ballot_sig::identity();
+    let key = session_key(&id.harness, &id.nonce);
+    let own = notes_on(issue);
+    let family = family_notes(issue);
+    let label = session_cast_refusal_on(issue, &key, voter, &own, &family);
+    if let Some(why) = &label {
+        eprintln!("ljos: session-authored: {why}");
+    }
+    if let Some(choice) = held_choice(issue, voter) {
+        ballot_sig::end_cast();
+        let why = label.unwrap_or_else(|| {
+            format!(
+                "{voter} already holds a ballot on {issue} for {choice}. Nothing was cast. {}",
+                replace_hint(issue, voter)
+            )
+        });
+        bail!("{why}");
+    }
+    let mark = format!("{}\n{voter}", issue.trim());
+    let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
+    if !held.insert(mark.clone()) {
+        ballot_sig::end_cast();
+        bail!(
+            "{voter} already cast a ballot on {issue} in this process. Nothing was cast. {}",
+            replace_hint(issue, voter)
+        );
+    }
+    drop(held);
+    let mut ballot = SessionBallot {
+        mark,
+        kept: false,
+        tree: None,
+        label,
     };
     ballot.tree = hold_tree(issue, &claimed, &CastTree::here())?;
     Ok(ballot)
@@ -1805,6 +1853,8 @@ mod tests {
 
     #[test]
     fn a_linked_ballot_folds_into_the_earlier_voice() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let k = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
         let first = ballot_sig::sign_bound(&k, "demo-tree", "alice", "ship", "sess-a", "-");
         let second = ballot_sig::sign_linked(
@@ -1866,6 +1916,8 @@ mod tests {
 
     #[test]
     fn one_connection_cannot_cast_again_by_naming_another_seat() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let key = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
         let ballot = ballot_sig::sign_bound(
             &key,
@@ -1958,6 +2010,8 @@ mod tests {
 
     #[test]
     fn a_choice_with_a_space_is_still_this_sessions_one_ballot() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         // The panel eval's unscored case on 7e21d3c: session spaced-1 cast
         // `beside binary` as seat-a, then `xdg home`, and both landed.
         let k = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
@@ -2002,6 +2056,8 @@ mod tests {
 
     #[test]
     fn five_personas_one_sand_session_count_as_the_first_ballot() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let session = "sand-subagent-fcdb9c57-9988-7d91-4311-9fc5e42f7529";
         let personas = ["academic", "transit", "safety", "cat-owner", "finance"];
         let mut notes = Vec::new();
@@ -2058,6 +2114,8 @@ mod tests {
 
     #[test]
     fn one_session_that_switches_seats_counts_the_latest_ballot() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let session = "sess-switch-0001";
         let notes = vec![
             note_of("bob", "hold", session),
@@ -2160,6 +2218,8 @@ mod tests {
 
     #[test]
     fn an_author_who_votes_is_refused_even_when_the_other_ballots_are_not_theirs() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let ballots = vec![
             seat("alice", "sess-alice-0001"),
             seat("bob", "sess-bob-0001"),
@@ -2212,6 +2272,8 @@ mod tests {
 
     #[test]
     fn unbound_ballots_are_left_alone() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let ballots = vec![
             BallotTrace {
                 voter: "alice".into(),
@@ -2291,7 +2353,7 @@ mod tests {
         let sibling =
             ballot_sig::sign_bound(&key, "rgpot-9ot3", "saddle", "ship", "sess-saddle", "-");
         assert!(session_cast_refusal(
-            "eOn-1stn",
+            "probe-1stn",
             "sess-saddle",
             "saddle",
             &[],
@@ -2300,7 +2362,7 @@ mod tests {
         .is_none());
         assert!(
             session_cast_refusal(
-                "eOn-1stn",
+                "probe-1stn",
                 "sess-saddle",
                 "saddle",
                 std::slice::from_ref(&sibling),
@@ -2309,9 +2371,9 @@ mod tests {
             .is_none(),
             "a signature for another issue does not verify here"
         );
-        let here = ballot_sig::sign_bound(&key, "eOn-1stn", "saddle", "ship", "sess-saddle", "-");
+        let here = ballot_sig::sign_bound(&key, "probe-1stn", "saddle", "ship", "sess-saddle", "-");
         let blocked = session_cast_refusal(
-            "eOn-1stn",
+            "probe-1stn",
             "sess-saddle",
             "saddle",
             std::slice::from_ref(&here),
@@ -2326,6 +2388,8 @@ mod tests {
 
     #[test]
     fn a_withdrawn_ballot_drops_out_of_the_tally_until_its_voter_casts_again() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let key = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
         let sig = ballot_sig::sign_bound(&key, "demo-w", "reviewer", "ship", "sess-r", "-");
         let authors = std::collections::BTreeSet::new();
@@ -2364,6 +2428,8 @@ mod tests {
 
     #[test]
     fn a_withdrawn_seat_ballot_does_not_decide_a_push() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
         let ship = ballot_sig::sign_bound(&key, "cite-1", "seat-a", "ship", "sess-a", "-");
         let hold = ballot_sig::sign_bound(&key, "cite-1", "seat-b", "hold", "sess-b", "-");

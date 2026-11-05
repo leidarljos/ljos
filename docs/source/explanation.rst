@@ -52,20 +52,26 @@ How a shell command is judged
 =============================
 
 Before an agent's shell command runs, the runner's hook hands it to ``ljos hook``. ``ljos hook``
-asks ``ljos-policyd`` and relays the answer. policyd is the one place that decides whether a
-command is dangerous. It is the trusted part. ljos is not.
+asks ``ljos-policyd`` and relays the answer. policyd is the one place that says whether a
+command is dangerous. It is the trusted part. ljos is not. By default neither stops the
+command: the answer is a label and a warning line, and the command runs.
+``block-on-warning`` does not block. It warns with the rule's label.
+A cloud seat's push rule, below, is the one exception.
 
 An earlier ljos ran nine checks of its own before it asked policyd. Each check came from a
 real incident, and each one refused work it should not have. A parser cannot stop a hostile
 process of the same user, and it can refuse a harmless command. So 0.35.0 drops those checks.
 Two remain, because only ljos knows the tracker and the sitting. They are described below.
 
-Four answers
-------------
+Three answers
+-------------
 
-policyd answers allow, ask, deny or rewrite. The first deny wins. An ask goes to the person. On
-runners that have a permission prompt, the hook answers ``ask`` and the runner shows its own prompt.
-The person approves or refuses there.
+policyd answers allow, warn or rewrite. A warning names the rule and says why, and the runner
+shows it as one line while the command runs. An older policyd that answers deny or prompt reads as
+the same warning. A policyd config that sets ``block-on-warning`` does not block. ljos warns with the rule's label.
+The command runs. A refusal that stalls a turn costs more than the mistake it stops, and a
+warning still reaches the person. It is also the only thing between a runner and the command,
+so keep backups and protect branches on the forge.
 
 It reads the command as a shell does. It looks through ``sh -c``, ``env``, ``timeout``, ``xargs`` and
 ``nohup``. It follows ``$cmd``, pipes and quotes. It does not run a shell, and it does not read the
@@ -79,7 +85,7 @@ The built-in law covers:
 - deletes: ``rm -rf`` outside the work tree and ``/tmp``, and recursive ``chmod`` or ``chown`` on system trees
 - shared history: a force push to ``main``, ``master``, ``develop`` or a protected branch
 - published refs: deleting a remote branch, ``git filter-branch``, ``git filter-repo``, ``git reflog expire``, and deleting a published ref
-- uncommitted work: ``git reset --hard``, ``git clean -f``, ``git checkout .`` and ``git stash clear``, as one ask
+- uncommitted work: ``git reset --hard``, ``git clean -f``, ``git checkout .`` and ``git stash clear``, as one warning
 - credentials: reading a named credential file, or sending one over the network
 - its own rules: writes to the hook files, the policy files and the ljos programs
 - mail: outbound mail whose From is not the person's own address
@@ -91,8 +97,8 @@ A recursive delete outside ``/tmp`` runs the same way under ``rm-rf-outside-tmp`
 Pushing with a credential
 -------------------------
 
-policyd refuses a token on the command line. A remote URL that carries a token is that same
-line, so the refusal is the same. The line is kept in shell history, and the token is visible
+policyd warns on a token on the command line. A remote URL that carries a token is that same
+line, so the warning is the same. The line is kept in shell history, and the token is visible
 in the process list.
 
 Push with a credential through GIT_ASKPASS or a git credential helper, never with a token in the URL or argv.
@@ -117,16 +123,16 @@ from a file. The git command names the helper. ``/path/to/helper``, ``USER`` and
 The rewrite
 -----------
 
-Some commands are not dangerous. They are wrong for this project. Refusing
-them costs a round trip, and the agent often retries the same line.
+Some commands are not dangerous. They are wrong for this project. A warning
+on them costs a round trip, and the agent often runs the same line again.
 
 So policyd can answer with the fixed command. The answer is one line: ``allow``, then ``rewrite``, then
 the new command, separated by tabs. Its first rewrite runs the command through ``uv run``.
 
-The new command runs only when the guard also allows it. Claude Code, Codex, Grok Build and
+The new command runs only when the guard has no warning on it. Claude Code, Codex, Grok Build and
 Cursor's ``preToolUse`` accept an updated command from the hook, and ljos hands the new line back
-through that field. A runner without that field gets a refusal that names the new command, so the
-old line never runs. policyd writes a log of what it denies.
+through that field. A runner without that field runs the old line, with a warning that names the
+new command. policyd writes a log of what it warns on.
 
 Each swap also shows a note naming both commands and keeps a row in
 ``$XDG_DATA_HOME/ljos/rewrite.jsonl``. A repository's ``rewrite = false`` runs its lines as written.
@@ -135,11 +141,12 @@ The two checks ljos keeps
 -------------------------
 
 - The tracker is written through ljos. A command, or a file tool, that writes the tracker's
-  files by hand is refused. Ticket text is data, so a ticket body that mentions a path or a
+  files by hand gets a warning. Ticket text is data, so a ticket body that mentions a path or a
   command is never read as one.
-- A push onto a protected branch asks when the ticket of the current sitting has no settled
-  consensus. It asks. It does not deny. With one active seat, that seat's own vote settles it.
-  With two or more, the normal quorum applies.
+- A push onto a protected branch warns when the ticket of the current sitting has no settled
+  consensus. The push runs. With one active seat, that seat's own vote settles it.
+  With two or more, the normal quorum applies. The ``pre-push`` git hook, once installed,
+  still holds that push under a runner.
 
 What fails open
 ---------------
@@ -152,9 +159,9 @@ What policyd is not
 -------------------
 
 policyd reads tool calls. It is not a sandbox. Code that runs as the same user, outside a tool
-call, can write what policyd would refuse. The files it guards are safer if they are owned by
-root. Treat it as a way to stop an agent's mistake, and use the operating system to stop an
-attacker.
+call, can write what policyd warns on, and a warned command still runs. The
+files it guards are safer if they are owned by root. Treat it as a way to flag an agent's
+mistake, and use the operating system to stop an attacker.
 
 Cloud seats
 -----------
@@ -410,3 +417,16 @@ produced. A claim graph says who holds what. A handover is one another seat can 
    :width: 100.0%
 .. |image4| image:: _static/handover.svg
    :width: 100.0%
+
+Command decision modes
+----------------------
+
+Command rules warn by default. To enforce deny rules and ask for command
+consent, launch the client and its hook/server processes with
+``LJOS_GUARD_MODE=strict``. In strict mode an ask uses native confirmation or
+an explicit one-use grant; eligible ordinary branch pushes can offer a
+human-selected task scope. In advisory mode no command-consent request is
+created or consumed. Git attribution and leak checks, shared hooks and
+cloud worker isolation remain enforced in both modes. Consent does not
+bypass those checks.
+

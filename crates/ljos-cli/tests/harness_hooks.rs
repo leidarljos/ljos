@@ -2,6 +2,9 @@
 //! case through `ljos vote`, which is the process that casts and tallies).
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -17,7 +20,7 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("/usr/bin/git")
+    let out = guard_mode::command("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -45,7 +48,7 @@ fn record_evidence(repo: &Path) {
 }
 
 fn head(dir: &Path) -> String {
-    let out = Command::new("/usr/bin/git")
+    let out = guard_mode::command("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "HEAD"])
@@ -321,7 +324,7 @@ fn run_ljos(
     extra: &[(&str, &str)],
 ) -> std::process::Output {
     let path = format!("{}:/usr/bin:/bin", hab.bin.display());
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
         .env("PATH", path)
@@ -708,7 +711,7 @@ else:
             .iter()
             .position(|a| *a == "--as")
             .map_or("sess-1", |i| args[i + 1]);
-        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        let out = guard_mode::command(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("PATH", &path)
@@ -736,7 +739,7 @@ else:
     let personas = ["", "alpha", "beta", "gamma", "delta"];
     for (i, persona) in personas.iter().enumerate() {
         let choice = if i < 3 { "A" } else { "B" };
-        let mut args = vec!["vote", "Rig-uw1n", "--for", choice, "--used", "none"];
+        let mut args = vec!["vote", "probe-uw1n", "--for", choice, "--used", "none"];
         if !persona.is_empty() {
             args.push("--as");
             args.push(persona);
@@ -745,7 +748,7 @@ else:
         assert!(ok, "vote {persona}: {stdout}\n{stderr}");
     }
     std::fs::remove_file(state.join("hide-notes")).unwrap();
-    let (ok, tally, stderr) = vote(&["vote", "Rig-uw1n"]);
+    let (ok, tally, stderr) = vote(&["vote", "probe-uw1n"]);
     assert!(ok, "{tally}\n{stderr}");
     assert!(tally.contains("1 ballot counts"), "{tally}");
     assert!(
@@ -753,7 +756,7 @@ else:
         "{tally}"
     );
     assert!(tally.contains("counted delta"), "{tally}");
-    let (ok, said, stderr) = vote(&["consensus", "Rig-uw1n", "--no-file", "--json"]);
+    let (ok, said, stderr) = vote(&["consensus", "probe-uw1n", "--no-file", "--json"]);
     assert!(ok, "{said}\n{stderr}");
     let logged = std::fs::read_to_string(&consensus_log).unwrap_or_default();
     assert!(logged.contains("--ballots"), "{logged}");
@@ -769,10 +772,10 @@ else:
     assert_eq!(rows.len(), 1, "{logged}");
     assert_eq!(rows[0]["agent"], "delta");
     assert_eq!(rows[0]["choice"], "B");
-    let (ok, stdout, stderr) = vote(&["vote", "Rig-uw2n", "--for", "A", "--used", "none"]);
+    let (ok, stdout, stderr) = vote(&["vote", "probe-uw2n", "--for", "A", "--used", "none"]);
     assert!(ok, "{stdout}\n{stderr}");
     let (ok, stdout, stderr) = vote(&[
-        "vote", "Rig-uw2n", "--for", "B", "--used", "none", "--as", "alpha",
+        "vote", "probe-uw2n", "--for", "B", "--used", "none", "--as", "alpha",
     ]);
     assert!(ok, "{stdout}\n{stderr}");
     assert!(
@@ -1059,5 +1062,587 @@ fn a_rewritten_lesson_closes_the_one_that_cited_an_amended_commit() {
     assert!(
         !listed.contains(&short_sha(&replaced)),
         "a lesson still cites the replaced commit: {listed}"
+    );
+}
+
+#[test]
+fn advisory_an_ask_is_an_allow_with_its_warning_for_each_harness() {
+    let _mode = guard_mode::advisory();
+
+    let (_dir, hab) = habitat();
+    record_evidence(&hab.repo);
+    sit(&hab);
+    let policyd = hab.bin.join("ljos-policyd");
+    script(
+        &hab.bin,
+        "ljos-policyd",
+        "#!/bin/sh\ncase \"$*\" in\n*reset*) printf 'prompt\\tgit-reset-hard\\n';;\n*) printf 'allow\\n';;\nesac\n",
+    );
+    let cwd = hab.repo.clone();
+    let env = [("POLICYD_BIN", policyd.to_str().unwrap())];
+    let line = "git reset --hard HEAD~1";
+    let command = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": line}
+    });
+    let mut codex_body = command.clone();
+    codex_body["turn_id"] = serde_json::json!("turn-1");
+    sit_as(
+        &hab,
+        &format!("probe-seat@{}", ljos_cli::session_tag("ask-cursor-tool")),
+    );
+    let runs = [
+        (
+            "claude",
+            &["hook"][..],
+            claude("PreToolUse", "ask-claude", &cwd, command.clone()),
+        ),
+        (
+            "codex",
+            &["hook"],
+            claude("PreToolUse", "ask-codex", &cwd, codex_body),
+        ),
+        (
+            "agy",
+            &["hook", "--event", "PreToolUse"],
+            serde_json::json!({
+                "conversationId": "ask-agy",
+                "cwd": cwd,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": line}}
+            })
+            .to_string(),
+        ),
+        (
+            "cursor shell",
+            &["hook"],
+            serde_json::json!({
+                "cursor_version": "2.4.0",
+                "hook_event_name": "beforeShellExecution",
+                "command": line,
+                "cwd": cwd,
+            })
+            .to_string(),
+        ),
+        (
+            "cursor tool",
+            &["hook"],
+            serde_json::json!({
+                "cursor_version": "2.4.0",
+                "conversation_id": "ask-cursor-tool",
+                "hook_event_name": "preToolUse",
+                "tool_name": "Shell",
+                "tool_input": {"command": line},
+                "cwd": cwd,
+            })
+            .to_string(),
+        ),
+        (
+            "gemini",
+            &["hook", "--runner", "gemini"],
+            serde_json::json!({
+                "hook_event_name": "BeforeTool",
+                "session_id": "ask-gemini",
+                "cwd": cwd,
+                "tool_name": "run_shell_command",
+                "tool_input": {"command": line}
+            })
+            .to_string(),
+        ),
+    ];
+    for (name, args, payload) in runs {
+        let out = ljos_cmd(&hab, args, &payload, &env);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{name}: {text}");
+        assert!(text.contains("warning: git-reset-hard"), "{name}: {text}");
+        for refusal in ["\"deny\"", "\"ask\"", "\"block\""] {
+            assert!(!text.contains(refusal), "{name}: {text}");
+        }
+    }
+}
+
+#[test]
+fn advisory_a_relative_workdir_resolves_and_a_normal_git_command_is_allowed() {
+    let _mode = guard_mode::advisory();
+
+    let (_dir, hab) = habitat();
+    sit(&hab);
+    let child = child_repo(&hab.repo);
+    let session = hab.repo.to_str().unwrap();
+    let forwarded = pretool(session, Some("path/to/git/repo"), NORMAL_GIT);
+    let out = hook_in(&hab, &forwarded, &hab.repo, &[]);
+    assert_ordinary(&out, &forwarded);
+    assert!(child.join(".git").is_dir());
+    let as_cwd = pretool("path/to/git/repo", None, NORMAL_GIT);
+    let out = hook_in(&hab, &as_cwd, &hab.repo, &[]);
+    assert_ordinary(&out, &as_cwd);
+}
+
+#[test]
+fn advisory_a_workdir_that_does_not_resolve_still_allows_the_command() {
+    let _mode = guard_mode::advisory();
+
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, hab) = habitat();
+    sit(&hab);
+    let session = hab.repo.to_str().unwrap();
+    let missing = hab.root.join("gone");
+    let looped = hab.root.join("loop-a");
+    std::os::unix::fs::symlink(hab.root.join("loop-b"), &looped).unwrap();
+    std::os::unix::fs::symlink(&looped, hab.root.join("loop-b")).unwrap();
+    let locked = hab.root.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let on = [("LJOS_GUARD", "on"), ("LJOS_OFF", "0")];
+    let payloads = [
+        pretool(session, Some("/path/to/git/repo"), NORMAL_GIT),
+        pretool(missing.to_str().unwrap(), None, NORMAL_GIT),
+        pretool(session, Some(looped.to_str().unwrap()), "echo hi"),
+        pretool(locked.to_str().unwrap(), None, "echo hi"),
+    ];
+    let denied: Vec<_> = payloads
+        .iter()
+        .map(|p| hook_in(&hab, p, &hab.repo, &on))
+        .collect();
+    let open = hook_in(
+        &hab,
+        &payloads[0],
+        &hab.repo,
+        &[on[0], on[1], ("LJOS_GUARD_FAIL_OPEN", "1")],
+    );
+    let prompt = claude(
+        "UserPromptSubmit",
+        "1",
+        &missing,
+        serde_json::json!({"prompt": "Fix the build"}),
+    );
+    let asked = hook_in(&hab, &prompt, &hab.repo, &on);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for (payload, out) in payloads.iter().zip(&denied) {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && !stdout.contains("\"permissionDecision\":\"deny\""),
+            "exit {}\nstdout:\n{stdout}\nstderr:\n{stderr}\npayload:\n{payload}",
+            out.status
+        );
+    }
+    assert_ordinary(&open, &payloads[0]);
+    assert!(
+        asked.status.success() && !String::from_utf8_lossy(&asked.stdout).contains("deny"),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&asked.stdout),
+        String::from_utf8_lossy(&asked.stderr)
+    );
+}
+
+#[test]
+fn advisory_payload_cwd_is_used_when_hook_process_runs_elsewhere() {
+    let _mode = guard_mode::advisory();
+
+    let (_dir, hab) = habitat();
+    let repo = std::fs::canonicalize(&hab.repo).unwrap();
+    script(
+        &hab.bin,
+        "ljos-policyd",
+        &format!(
+            "#!/bin/sh\n\
+             if [ \"$(/bin/pwd -P)\" = \"{}\" ]; then\n\
+             printf 'deny\\tpayload-cwd\\n'\n\
+             exit 2\n\
+             fi\n\
+             printf 'allow\\n'\n",
+            repo.display()
+        ),
+    );
+    let policyd = hab.bin.join("ljos-policyd");
+    let policyd = policyd.to_str().unwrap().to_string();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let payload = pretool(repo.to_str().unwrap(), None, "echo hi");
+    let out = hook_in(
+        &hab,
+        &payload,
+        elsewhere.path(),
+        &[
+            ("LJOS_GUARD", "on"),
+            ("LJOS_OFF", "0"),
+            ("POLICYD_BIN", policyd.as_str()),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "a guard warning exits 0\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let joined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(joined.contains("payload-cwd"), "{joined}");
+}
+
+#[test]
+fn advisory_an_unverified_user_rule_is_a_label_on_the_hook() {
+    let _mode = guard_mode::advisory();
+
+    let (_dir, hab) = habitat();
+    let line = "ssh -F /dev/null rg.terra 'notmuch search x'";
+    let bare = bash_hook(&hab, "echo hi");
+    let before = ljos_cmd(&hab, &["hook"], &bare, &[]);
+    let before_out = before.stdout.clone();
+
+    user_rules(
+        &hab,
+        &format!(
+            "{{\"rules\":[{}]}}\n",
+            rule_row(
+                "ur-notmuch",
+                "notmuch search*",
+                Some("deny"),
+                "agent",
+                "mail search stays local"
+            )
+        ),
+    );
+    let payload = bash_hook(&hab, line);
+    let out = ljos_cmd(&hab, &["hook"], &payload, &[]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("unverified-rule"), "{text}");
+    assert!(text.contains("notmuch search*"), "{text}");
+    assert!(!text.contains("approve "), "{text}");
+    assert!(!hab.run.join("ljos/approvals").exists(), "{text}");
+    assert!(!hab.home.join(".local/share/ljos/approvals").exists());
+
+    let codex = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "turn_id": "turn-notmuch",
+        "cwd": hab.repo,
+        "tool_name": "Bash",
+        "tool_input": {"command": line}
+    })
+    .to_string();
+    let codex_out = ljos_cmd(&hab, &["hook"], &codex, &[]);
+    let codex_text = String::from_utf8_lossy(&codex_out.stdout);
+    assert!(codex_text.contains("\"systemMessage\""), "{codex_text}");
+    assert!(codex_text.contains("unverified-rule"), "{codex_text}");
+
+    user_rules(
+        &hab,
+        &format!(
+            "{{\"rules\":[{}]}}\n",
+            rule_row(
+                "ur-notmuch",
+                "notmuch search*",
+                None,
+                "agent",
+                "mail search stays local"
+            )
+        ),
+    );
+    let missing = ljos_cmd(&hab, &["hook"], &payload, &[]);
+    let missing_text = String::from_utf8_lossy(&missing.stdout);
+    assert!(missing_text.contains("unverified-rule"), "{missing_text}");
+    assert!(
+        !missing_text.contains("\"permissionDecision\":\"deny\""),
+        "{missing_text}"
+    );
+
+    user_rules(
+        &hab,
+        &format!(
+            "{{\"rules\":[{}]}}\n",
+            rule_row(
+                "ur-notmuch",
+                "notmuch search*",
+                Some("deny"),
+                "person",
+                "mail search stays local"
+            )
+        ),
+    );
+    let confirmed = ljos_cmd(&hab, &["hook"], &payload, &[]);
+    let confirmed_text = String::from_utf8_lossy(&confirmed.stdout);
+    assert!(confirmed_text.contains("user-rule"), "{confirmed_text}");
+    assert!(
+        !confirmed_text.contains("unverified-rule"),
+        "{confirmed_text}"
+    );
+
+    let again = ljos_cmd(&hab, &["hook"], &bare, &[]);
+    assert_eq!(
+        again.stdout,
+        before_out,
+        "a command no rule matches changed\nbefore:\n{}\nafter:\n{}",
+        String::from_utf8_lossy(&before_out),
+        String::from_utf8_lossy(&again.stdout)
+    );
+}
+
+fn an_ask_is_an_allow_with_its_warning_for_each_harness() {
+    let (_dir, hab) = habitat();
+    record_evidence(&hab.repo);
+    sit(&hab);
+    let policyd = hab.bin.join("ljos-policyd");
+    script(
+        &hab.bin,
+        "ljos-policyd",
+        "#!/bin/sh\ncase \"$*\" in\n*reset*) printf 'prompt\\tgit-reset-hard\\n';;\n*) printf 'allow\\n';;\nesac\n",
+    );
+    let cwd = hab.repo.clone();
+    let env = [("POLICYD_BIN", policyd.to_str().unwrap())];
+    let line = "git reset --hard HEAD~1";
+    let command = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": line}
+    });
+    let mut codex_body = command.clone();
+    codex_body["turn_id"] = serde_json::json!("turn-1");
+    sit_as(
+        &hab,
+        &format!("probe-seat@{}", ljos_cli::session_tag("ask-cursor-tool")),
+    );
+    let runs = [
+        (
+            "claude",
+            &["hook"][..],
+            claude("PreToolUse", "ask-claude", &cwd, command.clone()),
+        ),
+        (
+            "codex",
+            &["hook"],
+            claude("PreToolUse", "ask-codex", &cwd, codex_body),
+        ),
+        (
+            "agy",
+            &["hook", "--event", "PreToolUse"],
+            serde_json::json!({
+                "conversationId": "ask-agy",
+                "cwd": cwd,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": line}}
+            })
+            .to_string(),
+        ),
+        (
+            "cursor shell",
+            &["hook"],
+            serde_json::json!({
+                "cursor_version": "2.4.0",
+                "hook_event_name": "beforeShellExecution",
+                "command": line,
+                "cwd": cwd,
+            })
+            .to_string(),
+        ),
+        (
+            "cursor tool",
+            &["hook"],
+            serde_json::json!({
+                "cursor_version": "2.4.0",
+                "conversation_id": "ask-cursor-tool",
+                "hook_event_name": "preToolUse",
+                "tool_name": "Shell",
+                "tool_input": {"command": line},
+                "cwd": cwd,
+            })
+            .to_string(),
+        ),
+        (
+            "gemini",
+            &["hook", "--runner", "gemini"],
+            serde_json::json!({
+                "hook_event_name": "BeforeTool",
+                "session_id": "ask-gemini",
+                "cwd": cwd,
+                "tool_name": "run_shell_command",
+                "tool_input": {"command": line}
+            })
+            .to_string(),
+        ),
+    ];
+    for (name, args, payload) in runs {
+        let out = ljos_cmd(&hab, args, &payload, &env);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{name}: {text}");
+        assert!(text.contains("warning: git-reset-hard"), "{name}: {text}");
+        for refusal in ["\"deny\"", "\"ask\"", "\"block\""] {
+            assert!(!text.contains(refusal), "{name}: {text}");
+        }
+    }
+}
+
+fn a_workdir_that_does_not_resolve_still_allows_the_command() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, hab) = habitat();
+    sit(&hab);
+    let session = hab.repo.to_str().unwrap();
+    let missing = hab.root.join("gone");
+    let looped = hab.root.join("loop-a");
+    std::os::unix::fs::symlink(hab.root.join("loop-b"), &looped).unwrap();
+    std::os::unix::fs::symlink(&looped, hab.root.join("loop-b")).unwrap();
+    let locked = hab.root.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let on = [("LJOS_GUARD", "on"), ("LJOS_OFF", "0")];
+    let payloads = [
+        pretool(session, Some("/path/to/git/repo"), NORMAL_GIT),
+        pretool(missing.to_str().unwrap(), None, NORMAL_GIT),
+        pretool(session, Some(looped.to_str().unwrap()), "echo hi"),
+        pretool(locked.to_str().unwrap(), None, "echo hi"),
+    ];
+    let denied: Vec<_> = payloads
+        .iter()
+        .map(|p| hook_in(&hab, p, &hab.repo, &on))
+        .collect();
+    let open = hook_in(
+        &hab,
+        &payloads[0],
+        &hab.repo,
+        &[on[0], on[1], ("LJOS_GUARD_FAIL_OPEN", "1")],
+    );
+    let prompt = claude(
+        "UserPromptSubmit",
+        "1",
+        &missing,
+        serde_json::json!({"prompt": "Fix the build"}),
+    );
+    let asked = hook_in(&hab, &prompt, &hab.repo, &on);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for (payload, out) in payloads.iter().zip(&denied) {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && !stdout.contains("\"permissionDecision\":\"deny\""),
+            "exit {}\nstdout:\n{stdout}\nstderr:\n{stderr}\npayload:\n{payload}",
+            out.status
+        );
+    }
+    assert_ordinary(&open, &payloads[0]);
+    assert!(
+        asked.status.success() && !String::from_utf8_lossy(&asked.stdout).contains("deny"),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&asked.stdout),
+        String::from_utf8_lossy(&asked.stderr)
+    );
+}
+
+fn user_rules(hab: &Habitat, rules: &str) {
+    let path = hab.home.join(".config/ljos/user-rules.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, rules).unwrap();
+}
+
+fn bash_hook(hab: &Habitat, line: &str) -> String {
+    claude(
+        "PreToolUse",
+        "rule-label",
+        &hab.repo,
+        serde_json::json!({"tool_name": "Bash", "tool_input": {"command": line}}),
+    )
+}
+
+fn rule_row(id: &str, pattern: &str, verdict: Option<&str>, basis: &str, reason: &str) -> String {
+    let verdict = match verdict {
+        Some(verdict) => format!(",\"verdict\":\"{verdict}\""),
+        None => String::new(),
+    };
+    format!(
+        r#"{{"id":"{id}","text":"{reason}","author":"ada","reason":"{reason}","pattern":"{pattern}"{verdict},"written_at":"2026-11-04T00:00:00Z","updated_at":"2026-11-04T00:00:00Z","basis":"{basis}"}}"#
+    )
+}
+
+fn an_unverified_user_rule_is_a_label_on_the_hook() {
+    let (_dir, hab) = habitat();
+    let line = "ssh -F /dev/null rg.terra 'notmuch search x'";
+    let bare = bash_hook(&hab, "echo hi");
+    let before = ljos_cmd(&hab, &["hook"], &bare, &[]);
+    let before_out = before.stdout.clone();
+
+    user_rules(
+        &hab,
+        &format!(
+            "{{\"rules\":[{}]}}\n",
+            rule_row(
+                "ur-notmuch",
+                "notmuch search*",
+                Some("deny"),
+                "agent",
+                "mail search stays local"
+            )
+        ),
+    );
+    let payload = bash_hook(&hab, line);
+    let out = ljos_cmd(&hab, &["hook"], &payload, &[]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("unverified-rule"), "{text}");
+    assert!(text.contains("notmuch search*"), "{text}");
+    assert!(!text.contains("approve "), "{text}");
+    assert!(!hab.run.join("ljos/approvals").exists(), "{text}");
+    assert!(!hab.home.join(".local/share/ljos/approvals").exists());
+
+    let codex = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "turn_id": "turn-notmuch",
+        "cwd": hab.repo,
+        "tool_name": "Bash",
+        "tool_input": {"command": line}
+    })
+    .to_string();
+    let codex_out = ljos_cmd(&hab, &["hook"], &codex, &[]);
+    let codex_text = String::from_utf8_lossy(&codex_out.stdout);
+    assert!(codex_text.contains("\"systemMessage\""), "{codex_text}");
+    assert!(codex_text.contains("unverified-rule"), "{codex_text}");
+
+    user_rules(
+        &hab,
+        &format!(
+            "{{\"rules\":[{}]}}\n",
+            rule_row(
+                "ur-notmuch",
+                "notmuch search*",
+                None,
+                "agent",
+                "mail search stays local"
+            )
+        ),
+    );
+    let missing = ljos_cmd(&hab, &["hook"], &payload, &[]);
+    let missing_text = String::from_utf8_lossy(&missing.stdout);
+    assert!(missing_text.contains("unverified-rule"), "{missing_text}");
+    assert!(
+        !missing_text.contains("\"permissionDecision\":\"deny\""),
+        "{missing_text}"
+    );
+
+    user_rules(
+        &hab,
+        &format!(
+            "{{\"rules\":[{}]}}\n",
+            rule_row(
+                "ur-notmuch",
+                "notmuch search*",
+                Some("deny"),
+                "person",
+                "mail search stays local"
+            )
+        ),
+    );
+    let confirmed = ljos_cmd(&hab, &["hook"], &payload, &[]);
+    let confirmed_text = String::from_utf8_lossy(&confirmed.stdout);
+    assert!(confirmed_text.contains("user-rule"), "{confirmed_text}");
+    assert!(
+        !confirmed_text.contains("unverified-rule"),
+        "{confirmed_text}"
+    );
+
+    let again = ljos_cmd(&hab, &["hook"], &bare, &[]);
+    assert_eq!(
+        again.stdout,
+        before_out,
+        "a command no rule matches changed\nbefore:\n{}\nafter:\n{}",
+        String::from_utf8_lossy(&before_out),
+        String::from_utf8_lossy(&again.stdout)
     );
 }

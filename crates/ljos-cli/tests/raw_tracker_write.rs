@@ -4,6 +4,9 @@
 //! allowed, and the `vissue` children ljos runs itself are not refused.
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -12,7 +15,7 @@ use std::process::{Command, Output, Stdio};
 /// `ljos ARGS` the way an agent runner's tool call runs it: a runner
 /// variable set and no controlling terminal, so no person is at it.
 fn as_agent(home: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -450,4 +453,587 @@ fn a_file_tool_write_of_issues_org_under_a_runner_is_refused() {
     let out = hook_payload(home.path(), payload);
     let said = text(&out);
     assert!(!said.contains("deny"), "README was refused:\n{said}");
+}
+
+#[test]
+fn advisory_a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
+    let _mode = guard_mode::advisory();
+
+    let home = tempfile::tempdir().unwrap();
+    for (line, instead) in [
+        (
+            r#"cd ~/Software && vissue create --parent ljos-gkq2 "a child""#,
+            r#"ljos file "TITLE" --parent ljos-gkq2"#,
+        ),
+        (r#"vissue q -p ljos "a ticket""#, "ljos file"),
+        ("vissue close ljos-ab12", "ljos finish ljos-ab12"),
+        (
+            "vissue cancel ljos-ab12",
+            "ljos finish ljos-ab12 --status cancelled",
+        ),
+        ("vissue claim ljos-ab12", "ljos sitting ljos-ab12"),
+        ("vissue release ljos-ab12", "ljos release ljos-ab12"),
+        (r#"vissue note ljos-ab12 "halfway""#, "ljos note ljos-ab12"),
+        ("vissue append ljos-ab12 --file r.md", "ljos note ljos-ab12"),
+        (
+            "vissue vote ljos-ab12 --for ship --used none 2>&1",
+            "ljos vote ljos-ab12 --for ship --used none`",
+        ),
+        ("/usr/local/bin/vissue refile ljos-ab12 tools", "ljos file"),
+        (
+            "VISSUE_AGENT=saddle vissue update ljos-ab12 -s done",
+            "ljos finish ljos-ab12",
+        ),
+        (
+            "vissue update ljos-ab12 -s STARTED",
+            "ljos sitting ljos-ab12",
+        ),
+        ("vissue update ljos-ab12 -t urgent", "ljos note ljos-ab12"),
+    ] {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(said.contains("\nwarning: "), "{line}:\n{said}");
+        assert!(
+            said.contains(&format!("Run `{instead}")),
+            "{line} did not name {instead}:\n{said}"
+        );
+        if instead.starts_with("ljos finish") {
+            assert!(
+                said.contains(&format!("Run `{instead}` instead.")),
+                "{line} still offers a close:\n{said}"
+            );
+            assert!(!said.contains("--close"), "{line}:\n{said}");
+        }
+    }
+}
+
+#[test]
+fn advisory_a_tracker_read_under_a_runner_stays_allowed() {
+    let _mode = guard_mode::advisory();
+
+    let home = tempfile::tempdir().unwrap();
+    for line in [
+        "vissue show ljos-ab12",
+        "vissue list -p ljos",
+        "vissue ready -p ljos",
+        "vissue tree ljos-gkq2",
+        "vissue whoami",
+        "vissue claims --by codex",
+        "vissue vote ljos-ab12",
+        "vissue vote ljos-ab12 --json",
+        "echo vissue close ljos-ab12",
+    ] {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(!said.contains("\nwarning: "), "{line}:\n{said}");
+    }
+}
+
+#[test]
+fn advisory_the_runner_hook_warns_on_a_raw_tracker_write() {
+    let _mode = guard_mode::advisory();
+
+    let home = tempfile::tempdir().unwrap();
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "raw-tracker-write-0001",
+        "cwd": home.path(),
+        "tool_name": "Bash",
+        "tool_input": {"command": "vissue close ljos-ab12"},
+    });
+    let mut hook = as_agent(home.path(), &["hook"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = hook.wait_with_output().unwrap();
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(!said.contains("permissionDecision"), "{said}");
+    assert!(said.contains("\"additionalContext\":\"warning: "), "{said}");
+    assert!(
+        said.contains("Run `ljos finish ljos-ab12` instead."),
+        "{said}"
+    );
+    assert!(!said.contains("--close"), "{said}");
+}
+
+#[test]
+fn advisory_an_indirect_tracker_write_under_a_runner_warns() {
+    let _mode = guard_mode::advisory();
+
+    let home = tempfile::tempdir().unwrap();
+    let lines = [
+        r#"python3 -c 'import subprocess; subprocess.run(["vissue","close","ljos-ab12"])'"#,
+        "perl -e 'system q(vissue close ljos-ab12)'",
+        r#"python3 -c 'open("issues.org","a").write("* x")'"#,
+        r#""$(command -v vissue)" close ljos-ab12"#,
+        "cp $(command -v vissue) /tmp/vi && /tmp/vi close ljos-ab12",
+        "sed -i 's/^\\* TODO/* DONE/' issues.org",
+        "perl -pi -e 's/^\\* TODO/* DONE/' issues.org",
+    ];
+    for line in lines {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(said.contains("\nwarning: "), "{line}:\n{said}");
+        let reason = said.split("warning:").nth(1).unwrap_or("");
+        assert!(
+            !reason.contains("--close"),
+            "{line} still names the close flag:\n{said}"
+        );
+    }
+}
+
+#[test]
+fn advisory_a_finish_close_under_a_runner_is_left_to_finish() {
+    let _mode = guard_mode::advisory();
+
+    let home = tempfile::tempdir().unwrap();
+    for line in [
+        "ljos finish ljos-ab12 --close",
+        "LJOS_SEAT=s ljos finish ljos-ab12 --close",
+    ] {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(!said.contains("\nwarning: "), "{line}:\n{said}");
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "finish-close-allow-0001",
+            "cwd": home.path(),
+            "tool_name": "Bash",
+            "tool_input": {"command": line},
+        });
+        let hooked = hook_payload(home.path(), payload);
+        let said = text(&hooked);
+        assert!(
+            hooked.status.success(),
+            "hook exited {:?} for {line}:\n{said}",
+            hooked.status
+        );
+        assert!(
+            !said.contains("warning: "),
+            "hook warned on {line}:\n{said}"
+        );
+    }
+}
+
+#[test]
+fn advisory_an_ordinary_interpreter_under_a_runner_stays_allowed() {
+    let _mode = guard_mode::advisory();
+
+    let home = tempfile::tempdir().unwrap();
+    for line in [
+        r#"python3 -c 'print(1)'"#,
+        "perl -e 'print 1'",
+        "echo vissue close ljos-ab12",
+    ] {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(!said.contains("\nwarning: "), "{line}:\n{said}");
+    }
+}
+
+#[test]
+fn advisory_a_vissue_mcp_write_under_a_runner_warns() {
+    let _mode = guard_mode::advisory();
+
+    let home = tempfile::tempdir().unwrap();
+    let cases = [
+        (
+            serde_json::json!({"id": "ljos-ab12", "state": "DONE"}),
+            "mcp__vissue__vissue_update",
+            "ljos finish ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__plugin_vissue_vissue__vissue_close",
+            "ljos finish ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__vissue__vissue_cancel",
+            "ljos finish ljos-ab12 --status cancelled",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__vissue__vissue_claim",
+            "ljos sitting ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "text": "halfway"}),
+            "mcp__vissue__vissue_note",
+            "ljos note ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "for": "yes"}),
+            "mcp__vissue__vissue_vote",
+            "ljos vote ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "parent": "ljos-gkq2"}),
+            "mcp__vissue__vissue_refile",
+            "ljos file",
+        ),
+        (
+            serde_json::json!({"parent": "ljos-gkq2", "title": "a child"}),
+            "mcp__vissue__vissue_create",
+            "ljos file",
+        ),
+    ];
+    for (input, tool, instead) in cases {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "vissue-mcp-write-0001",
+            "cwd": home.path(),
+            "tool_name": tool,
+            "tool_input": input,
+        });
+        let out = hook_payload(home.path(), payload);
+        let said = text(&out);
+        assert!(said.contains("warning: "), "{tool} had no warning:\n{said}");
+        assert!(!said.contains("\"deny\""), "{tool} was refused:\n{said}");
+        assert!(
+            said.contains(instead),
+            "{tool} did not name {instead}:\n{said}"
+        );
+        if instead.starts_with("ljos finish") {
+            assert!(!said.contains("--close"), "{tool}:\n{said}");
+        }
+    }
+    let cursor = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-vissue",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "vissue_update",
+        "mcp_server_name": "vissue",
+        "tool_input": {"id": "ljos-ab12", "state": "DONE"},
+    });
+    let out = hook_payload(home.path(), cursor);
+    let said = text(&out);
+    assert!(said.contains("\"permission\":\"allow\""), "{said}");
+    assert!(
+        said.contains("warning: "),
+        "cursor update had no warning:\n{said}"
+    );
+    assert!(said.contains("ljos finish ljos-ab12"), "{said}");
+    assert!(!said.contains("--close"), "{said}");
+}
+
+#[test]
+fn advisory_a_vissue_mcp_read_under_a_runner_stays_allowed() {
+    let _mode = guard_mode::advisory();
+
+    let home = tempfile::tempdir().unwrap();
+    for (tool, input) in [
+        (
+            "mcp__vissue__vissue_show",
+            serde_json::json!({"id": "ljos-ab12"}),
+        ),
+        (
+            "mcp__vissue__vissue_vote",
+            serde_json::json!({"id": "ljos-ab12"}),
+        ),
+    ] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "vissue-mcp-read-0001",
+            "cwd": home.path(),
+            "tool_name": tool,
+            "tool_input": input,
+        });
+        let out = hook_payload(home.path(), payload);
+        let said = text(&out);
+        assert!(!said.contains("warning: "), "{tool} warned:\n{said}");
+    }
+}
+
+#[test]
+fn advisory_a_file_tool_write_of_issues_org_under_a_runner_warns() {
+    let _mode = guard_mode::advisory();
+
+    let home = tempfile::tempdir().unwrap();
+    for (tool, path) in [
+        ("Write", "/tmp/tracker/Software/ljos/issues.org"),
+        ("Edit", "issues.org"),
+        ("MultiEdit", "/tmp/tracker/issues.org"),
+        ("apply_patch", "/tmp/tracker/issues.org"),
+    ] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "org-write-0001",
+            "cwd": home.path(),
+            "tool_name": tool,
+            "tool_input": {
+                "file_path": path,
+                "content": "* DONE x",
+                "new_string": "* DONE x",
+            },
+        });
+        let out = hook_payload(home.path(), payload);
+        let said = text(&out);
+        assert!(
+            said.contains("warning: "),
+            "{tool} {path} had no warning:\n{said}"
+        );
+        assert!(
+            !said.contains("\"deny\""),
+            "{tool} {path} was refused:\n{said}"
+        );
+        assert!(said.contains("ljos finish"), "{tool}:\n{said}");
+        assert!(!said.contains("--close"), "{tool}:\n{said}");
+    }
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "org-write-0002",
+        "cwd": home.path(),
+        "tool_name": "Write",
+        "tool_input": {"file_path": "/tmp/tracker/README.md", "content": "hello"},
+    });
+    let out = hook_payload(home.path(), payload);
+    let said = text(&out);
+    assert!(!said.contains("warning: "), "README warned:\n{said}");
+}
+
+fn a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
+    let home = tempfile::tempdir().unwrap();
+    for (line, instead) in [
+        (
+            r#"cd ~/Software && vissue create --parent ljos-gkq2 "a child""#,
+            r#"ljos file "TITLE" --parent ljos-gkq2"#,
+        ),
+        (r#"vissue q -p ljos "a ticket""#, "ljos file"),
+        ("vissue close ljos-ab12", "ljos finish ljos-ab12"),
+        (
+            "vissue cancel ljos-ab12",
+            "ljos finish ljos-ab12 --status cancelled",
+        ),
+        ("vissue claim ljos-ab12", "ljos sitting ljos-ab12"),
+        ("vissue release ljos-ab12", "ljos release ljos-ab12"),
+        (r#"vissue note ljos-ab12 "halfway""#, "ljos note ljos-ab12"),
+        ("vissue append ljos-ab12 --file r.md", "ljos note ljos-ab12"),
+        (
+            "vissue vote ljos-ab12 --for ship --used none 2>&1",
+            "ljos vote ljos-ab12 --for ship --used none`",
+        ),
+        ("/usr/local/bin/vissue refile ljos-ab12 tools", "ljos file"),
+        (
+            "VISSUE_AGENT=saddle vissue update ljos-ab12 -s done",
+            "ljos finish ljos-ab12",
+        ),
+        (
+            "vissue update ljos-ab12 -s STARTED",
+            "ljos sitting ljos-ab12",
+        ),
+        ("vissue update ljos-ab12 -t urgent", "ljos note ljos-ab12"),
+    ] {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(said.contains("\nwarning: "), "{line}:\n{said}");
+        assert!(
+            said.contains(&format!("Run `{instead}")),
+            "{line} did not name {instead}:\n{said}"
+        );
+        if instead.starts_with("ljos finish") {
+            assert!(
+                said.contains(&format!("Run `{instead}` instead.")),
+                "{line} still offers a close:\n{said}"
+            );
+            assert!(!said.contains("--close"), "{line}:\n{said}");
+        }
+    }
+}
+
+fn the_runner_hook_warns_on_a_raw_tracker_write() {
+    let home = tempfile::tempdir().unwrap();
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "raw-tracker-write-0001",
+        "cwd": home.path(),
+        "tool_name": "Bash",
+        "tool_input": {"command": "vissue close ljos-ab12"},
+    });
+    let mut hook = as_agent(home.path(), &["hook"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = hook.wait_with_output().unwrap();
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(!said.contains("permissionDecision"), "{said}");
+    assert!(said.contains("\"additionalContext\":\"warning: "), "{said}");
+    assert!(
+        said.contains("Run `ljos finish ljos-ab12` instead."),
+        "{said}"
+    );
+    assert!(!said.contains("--close"), "{said}");
+}
+
+fn an_indirect_tracker_write_under_a_runner_warns() {
+    let home = tempfile::tempdir().unwrap();
+    let lines = [
+        r#"python3 -c 'import subprocess; subprocess.run(["vissue","close","ljos-ab12"])'"#,
+        "perl -e 'system q(vissue close ljos-ab12)'",
+        r#"python3 -c 'open("issues.org","a").write("* x")'"#,
+        r#""$(command -v vissue)" close ljos-ab12"#,
+        "cp $(command -v vissue) /tmp/vi && /tmp/vi close ljos-ab12",
+        "sed -i 's/^\\* TODO/* DONE/' issues.org",
+        "perl -pi -e 's/^\\* TODO/* DONE/' issues.org",
+    ];
+    for line in lines {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(said.contains("\nwarning: "), "{line}:\n{said}");
+        let reason = said.split("warning:").nth(1).unwrap_or("");
+        assert!(
+            !reason.contains("--close"),
+            "{line} still names the close flag:\n{said}"
+        );
+    }
+}
+
+fn a_vissue_mcp_write_under_a_runner_warns() {
+    let home = tempfile::tempdir().unwrap();
+    let cases = [
+        (
+            serde_json::json!({"id": "ljos-ab12", "state": "DONE"}),
+            "mcp__vissue__vissue_update",
+            "ljos finish ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__plugin_vissue_vissue__vissue_close",
+            "ljos finish ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__vissue__vissue_cancel",
+            "ljos finish ljos-ab12 --status cancelled",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__vissue__vissue_claim",
+            "ljos sitting ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "text": "halfway"}),
+            "mcp__vissue__vissue_note",
+            "ljos note ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "for": "yes"}),
+            "mcp__vissue__vissue_vote",
+            "ljos vote ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "parent": "ljos-gkq2"}),
+            "mcp__vissue__vissue_refile",
+            "ljos file",
+        ),
+        (
+            serde_json::json!({"parent": "ljos-gkq2", "title": "a child"}),
+            "mcp__vissue__vissue_create",
+            "ljos file",
+        ),
+    ];
+    for (input, tool, instead) in cases {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "vissue-mcp-write-0001",
+            "cwd": home.path(),
+            "tool_name": tool,
+            "tool_input": input,
+        });
+        let out = hook_payload(home.path(), payload);
+        let said = text(&out);
+        assert!(said.contains("warning: "), "{tool} had no warning:\n{said}");
+        assert!(!said.contains("\"deny\""), "{tool} was refused:\n{said}");
+        assert!(
+            said.contains(instead),
+            "{tool} did not name {instead}:\n{said}"
+        );
+        if instead.starts_with("ljos finish") {
+            assert!(!said.contains("--close"), "{tool}:\n{said}");
+        }
+    }
+    let cursor = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-vissue",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "vissue_update",
+        "mcp_server_name": "vissue",
+        "tool_input": {"id": "ljos-ab12", "state": "DONE"},
+    });
+    let out = hook_payload(home.path(), cursor);
+    let said = text(&out);
+    assert!(said.contains("\"permission\":\"allow\""), "{said}");
+    assert!(
+        said.contains("warning: "),
+        "cursor update had no warning:\n{said}"
+    );
+    assert!(said.contains("ljos finish ljos-ab12"), "{said}");
+    assert!(!said.contains("--close"), "{said}");
+}
+
+fn a_file_tool_write_of_issues_org_under_a_runner_warns() {
+    let home = tempfile::tempdir().unwrap();
+    for (tool, path) in [
+        ("Write", "/tmp/tracker/Software/ljos/issues.org"),
+        ("Edit", "issues.org"),
+        ("MultiEdit", "/tmp/tracker/issues.org"),
+        ("apply_patch", "/tmp/tracker/issues.org"),
+    ] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "org-write-0001",
+            "cwd": home.path(),
+            "tool_name": tool,
+            "tool_input": {
+                "file_path": path,
+                "content": "* DONE x",
+                "new_string": "* DONE x",
+            },
+        });
+        let out = hook_payload(home.path(), payload);
+        let said = text(&out);
+        assert!(
+            said.contains("warning: "),
+            "{tool} {path} had no warning:\n{said}"
+        );
+        assert!(
+            !said.contains("\"deny\""),
+            "{tool} {path} was refused:\n{said}"
+        );
+        assert!(said.contains("ljos finish"), "{tool}:\n{said}");
+        assert!(!said.contains("--close"), "{tool}:\n{said}");
+    }
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "org-write-0002",
+        "cwd": home.path(),
+        "tool_name": "Write",
+        "tool_input": {"file_path": "/tmp/tracker/README.md", "content": "hello"},
+    });
+    let out = hook_payload(home.path(), payload);
+    let said = text(&out);
+    assert!(!said.contains("warning: "), "README warned:\n{said}");
 }

@@ -1,0 +1,1 @@
+Command rules warn by default. Set `LJOS_GUARD_MODE=strict` for deny rules, native confirmation and explicit one-use or eligible task-scoped command consent. Git attribution and leak checks, shared hooks and cloud worker isolation remain enforced in both modes.

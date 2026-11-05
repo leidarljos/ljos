@@ -231,19 +231,27 @@ answer for one command and runs nothing.
    rm -rf /usr/share/foo
    allow	warn	rm-rf-outside-tmp	a recursive delete reaches outside /tmp and /var/tmp
 
-There are four answers. ``allow`` runs the command. ``ask`` shows the runner's permission
-prompt, and you answer it. ``deny`` stops the command and names the rule. ``rewrite`` replaces
-the command with a fixed one and lets that one run.
-The answer is ``allow``, ``rewrite`` and the new command, separated by tabs.
+By default every command runs, and ljos never refuses, asks or holds one; a cloud seat's push
+rule is the one exception. There are three answers. ``allow`` runs the command. A warning runs it too, and shows one line that names the
+rule and says why. ``rewrite`` replaces the command with a fixed one and lets that one run.
+policyd answers ``allow``, or ``allow``, ``warn``, the rule and its warning, separated by tabs. An
+older policyd that answers ``deny`` or ``prompt`` reads as the same warning.
+``block-on-warning`` does not block. When your own ``ljos.toml`` names a policyd config that sets
+``block-on-warning true``, ljos warns with the rule's label. The command runs (see
+the how-to).
+A rewrite is ``allow``, ``rewrite`` and the new command, separated by tabs.
 Each rewrite leaves a note and a row in ``$XDG_DATA_HOME/ljos/rewrite.jsonl``. A repository's
 ``rewrite = false`` turns rewriting off there.
 An ``allow`` can carry a warning: ``allow``, ``warn``, the rule and the warning, separated by tabs.
 The command runs, and ljos keeps the label in ``$XDG_DATA_HOME/ljos/bypass.jsonl``.
 
-A force push runs with the ``git-force-push`` warning.
-An ordinary push of a branch runs.
-ljos answers ``ask`` for a push onto a protected branch when your sitting's ticket has no settled consensus.
-With one active seat, its own vote settles it.
+A warning is the only thing between a runner and a destructive command. Read it, and keep
+backups and branch protection on the remote.
+
+A force push runs with the ``git-force-push`` warning. An ordinary push of a branch runs with
+nothing to say. A push onto a protected branch also warns when the ticket of your sitting has
+no settled consensus. With one active seat, its own vote settles it. The ``pre-push`` git hook,
+once ``ljos git-hooks install`` has run, still holds that push under a runner.
 
 If ``ljos-policyd`` is missing or slow, the command runs and ljos logs a warning.
 ``ljos doctor`` shows the policy row.
@@ -306,3 +314,16 @@ Where next
 - :doc:`How-to <howto>`: wire the server into a runner, sign handovers, read the cards.
 - :doc:`Reference <reference>`: every verb and tool.
 - :doc:`Explanation <explanation>`: why it is built this way.
+
+Command decision modes
+----------------------
+
+Command rules warn by default. To enforce deny rules and ask for command
+consent, launch the client and its hook/server processes with
+``LJOS_GUARD_MODE=strict``. In strict mode an ask uses native confirmation or
+an explicit one-use grant; eligible ordinary branch pushes can offer a
+human-selected task scope. In advisory mode no command-consent request is
+created or consumed. Git attribution and leak checks, shared hooks and
+cloud worker isolation remain enforced in both modes. Consent does not
+bypass those checks.
+

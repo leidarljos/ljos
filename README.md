@@ -1,5 +1,15 @@
 # ljos
 
+
+Command rules warn by default. To enforce deny rules and ask for command
+consent, launch the client and its hook/server processes with
+`LJOS_GUARD_MODE=strict`. In strict mode an ask uses native confirmation or
+an explicit one-use grant; eligible ordinary branch pushes can offer a
+human-selected task scope. In advisory mode no command-consent request is
+created or consumed. Git attribution and leak checks, shared hooks and
+cloud worker isolation remain enforced in both modes. Consent does not
+bypass those checks.
+
 Claude Code, Codex, Cursor and other coding runners work on one person's repositories. A new session does not keep the last session's lessons. Two agents can claim the same work. Nobody can see who decided what.
 
 ljos is the command you install once on a machine. Each agent gets a seat on a tracker. The tracker is a git repository of tickets. A seat files a ticket and opens a sitting on it. A sitting claims that ticket and gathers the checks and memories for the task.
@@ -61,6 +71,17 @@ found, it still sets up the tracker, the pack writer and the deed store.
 The programs are `ljos`, `ljos-mcp`, `packset`, `vissue`, `deedar`, `claimdag`,
 `ljos-policyd` and `ljos-consensus`. `packset-embed` is the encoder for
 meaning-based search. `--no-embed` leaves it out, and search then matches words only.
+
+`ljos upgrade` moves each installed program to its latest published
+release.
+`ljos`, `ljos-mcp` and `ljos-hud` come from the ljos release.
+Each other program comes from the repository that publishes it.
+One line a program names the version it had and the version it has, or
+`current` when those are the same.
+A missing release, a failed download or a checksum that does not match
+is a warning, and the other programs still move.
+`ljos upgrade --only NAME` moves one program.
+The previous binary is kept as `NAME.bak-pre-VERSION`.
 
 To install by hand:
 
@@ -212,23 +233,31 @@ facts one at a time with `ljos timeline ISSUE`, `ljos claims` and `ljos log --se
 
 Before an agent's shell command runs, the runner's hook hands it to `ljos hook`.
 `ljos hook` asks `ljos-policyd` and relays the answer. policyd is the one place
-that decides whether a command is dangerous. ljos does not run a second set of
-command checks of its own.
+that says whether a command is dangerous. ljos does not run a second set of
+command checks of its own. By default nothing ljos answers stops a command: it never
+refuses, asks or holds one. A cloud seat's push rule, below, is the one exception.
 
-policyd gives one of four answers.
+policyd gives one of three answers.
 
 | Answer | What happens |
 |---|---|
 | allow | The command runs. |
-| ask | The runner shows its own permission prompt, and you answer. |
-| deny | The command does not run, and the reason names the rule. |
+| warn | The command runs, and the runner shows one line that names the rule and says why. |
 | rewrite | policyd returns a corrected command, and that one runs. |
+
+`block-on-warning` does not block. A `deny` or `prompt` from policyd, including one printed because a named `policyd_config` sets `block-on-warning true`, is a warning with that label.
+The command runs.
+The hook does not deny the tool call, and a guard shim does not stop it.
+
+> **Security:** a warning is the only thing between a runner and a destructive
+> command. Keep backups, protect branches on the forge, and keep a runner where it
+> cannot reach what it must not touch.
 
 policyd reads the command as a shell does. It looks through `sh -c`, `env`, `timeout`,
 `xargs` and `nohup`, through `$cmd` and pipes, and through quotes. It does not run a
-shell and does not read scripts. First deny wins.
+shell and does not read scripts. The first rule that fires is the warning.
 
-policyd refuses some of these commands and asks about the others.
+policyd warns on these commands.
 
 - `sudo`, and `curl` or `wget` piped to a shell, including decoded text piped to a shell.
 - `chmod` that sets setuid, and raw disk writes such as `dd of=/dev/sda` and `mkfs`.
@@ -259,24 +288,25 @@ policyd can answer with a fixed command. Its first rewrite runs the command thro
 `uv run`. The answer is one line of text: `allow`, then `rewrite`, then the new
 command, separated by tabs.
 
-The new command runs only when the guard also allows it. Claude Code, Codex, Grok Build
+The new command runs only when the guard has no warning on it. Claude Code, Codex, Grok Build
 and Cursor's `preToolUse` take it back from the hook and run it. A runner that has no
-field for this gets a refusal that names the new command, so the old line never runs.
+field for this runs the old line, with a warning that names the new command.
 Each swap also shows a note naming both commands and leaves a row in
 `$XDG_DATA_HOME/ljos/rewrite.jsonl`. Set `rewrite = false` in a repository's
 `ljos.toml` to run its lines as written. The log keeps a row for a swap it declined too.
-policyd keeps a log of what it denies.
+policyd keeps a log of what it warns on.
 
 ### The two checks ljos keeps
 
 Only ljos knows the tracker and the sitting, so it keeps two checks.
 
-- A command or file tool that writes the tracker's files by hand is refused.
+- A command or file tool that writes the tracker's files by hand gets a warning.
   Use `ljos file`, `ljos note`, `ljos vote` and `ljos finish`. Ticket text is data
   and is never read as a command.
-- A protected-branch push asks when the current sitting's ticket has no
-  settled consensus. It asks. It does not deny. With one active seat, that seat's own vote
+- A protected-branch push warns when the current sitting's ticket has no
+  settled consensus. The push runs. With one active seat, that seat's own vote
   is the consensus for the push check. With two or more seats, the normal quorum applies.
+  The `pre-push` git hook, once installed, still holds that push under a runner.
 
 If `ljos-policyd` is missing or slow, the command runs and ljos logs a warning.
 `ljos doctor` shows the policy row. `ljos policy -- COMMAND` prints the answer for
@@ -313,8 +343,11 @@ and counts as advice. When Jev does not answer, ljos uses the local answer.
 
 `ljos cloud up` puts a fresh machine on the shared tracker. `sh scripts/install.sh --cloud`
 does the same from a checkout. A cloud seat has one push rule. It may push the branches
-named in its `ljos.toml` and `develop`, with no force and no delete. Opening or merging a
-pull request is not refused.
+named in its `ljos.toml` and `develop`.
+A cloud seat cannot force push, delete a remote branch or tag, or push to a branch outside its allowlist.
+A local `git branch -d` or `git branch -D` runs and prints `allow\twarn\tgit-branch-delete`.
+Every other push from a cloud seat runs with a warning.
+Opening or merging a pull request is not refused.
 `ljos mesh up` joins the swarm's tailnet on a Headscale login server, and `ljos mesh down` leaves it.
 [docs/cloud-vm.md](docs/cloud-vm.md) has the environment file, the push mode and the mesh.
 
@@ -362,8 +395,8 @@ a transcript. `forget` retires a claim and keeps the record that it was held.
 
 ## The MCP server
 
-`ljos-mcp` serves the same verbs over stdio. By default it lists twenty-one core
-tools, guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
+`ljos-mcp` serves the same verbs over stdio. By default it lists twenty core
+tools, guard and memory first: `rule`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. Every listed tool costs its description and

@@ -72,6 +72,10 @@ fn cause() -> Option<crate::RunnerCause> {
 /// controlling terminal; a right answer lets this one line through.
 #[must_use]
 pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
+    if !crate::guard_mode::is_strict() {
+        return advisory_guard_line(line, cwd);
+    }
+
     if crate::user_rules::allows(line).is_some() {
         return None;
     }
@@ -99,6 +103,13 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             &why,
         ))),
     }
+}
+
+pub fn advisory_guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
+    if crate::user_rules::allows(line).is_some() {
+        return None;
+    }
+    judge_line(line, cwd)
 }
 
 fn judge_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
@@ -183,12 +194,29 @@ fn protected_branch_ask(calls: &[GitCall], line: &str) -> Option<Rule> {
 }
 
 fn protected_ask(dest: &str, branches: &[String]) -> String {
+    if !crate::guard_mode::is_strict() {
+        return advisory_protected_ask(dest, branches);
+    }
+
     let named: Vec<String> = branches
         .iter()
         .map(|branch| format!("`{branch}`"))
         .collect();
     format!(
         "`git push` may land on {dest}, and a push onto {} asks until the sitting's ticket \
+         has a settled consensus. One active seat settles on its own vote. Two or more seats \
+         use the ordinary quorum. Run `ljos consensus` on the ticket, then push again",
+        named.join(", ")
+    )
+}
+
+fn advisory_protected_ask(dest: &str, branches: &[String]) -> String {
+    let named: Vec<String> = branches
+        .iter()
+        .map(|branch| format!("`{branch}`"))
+        .collect();
+    format!(
+        "`git push` may land on {dest}, and a push onto {} warns until the sitting's ticket \
          has a settled consensus. One active seat settles on its own vote. Two or more seats \
          use the ordinary quorum. Run `ljos consensus` on the ticket, then push again",
         named.join(", ")
@@ -448,6 +476,8 @@ mod tests {
     /// both ways out, and drops the closing sentence a hard runner gets.
     #[test]
     fn a_mark_only_refusal_names_the_variable_and_the_ways_out() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let hard = no_sitting("push", "this conversation holds no live sitting");
         assert!(hard.ends_with(NOT_GATED), "{hard}");
         let marks = vec!["CURSOR_AGENT".to_string()];
@@ -494,6 +524,8 @@ mod tests {
 
     #[test]
     fn an_idle_gate_informs_and_fails_no_doctor() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let row = doctor_row(None);
         assert_eq!(crate::doctor_word(&row), "info", "{}", row.state);
         assert!(crate::healthy(&[row]));
@@ -596,6 +628,8 @@ mod tests {
     /// A gates file that does not parse asks. The push is not a hard denial.
     #[test]
     fn a_gates_file_that_does_not_parse_asks() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let out = crate::git_cmd()

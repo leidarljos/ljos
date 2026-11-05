@@ -2,6 +2,9 @@
 //! The owner's quoted yes is the grant. A hand edit is not.
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -103,7 +106,7 @@ impl World {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, ORG).unwrap();
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = guard_mode::command("git")
                 .arg("-C")
                 .arg(&tracker)
                 .args(args)
@@ -133,7 +136,7 @@ impl World {
     }
 
     fn ljos(&self, seat: &str, args: &[&str], runner: bool) -> std::process::Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
             .env("PATH", &self.path)
@@ -192,7 +195,7 @@ fn hook_line(w: &World, session: &str, line: &str) -> Output {
 }
 
 fn runner_cmd(w: &World, args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
         .env("PATH", &w.path)
@@ -713,6 +716,87 @@ fn a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
     let raw = hook_line(&w, "granted-close-raw", "vissue close proj-clerk");
     let said = text(&raw);
     assert!(!hook_allows(&raw), "raw close was allowed:\n{said}");
+    assert!(
+        said.contains("ljos finish proj-clerk"),
+        "raw close did not name finish:\n{said}"
+    );
+    assert!(
+        !said.contains("--close"),
+        "raw close named the flag:\n{said}"
+    );
+    assert_eq!(log_updates(&w, "proj-clerk"), 0, "a raw close wrote");
+}
+
+#[test]
+fn advisory_a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
+    let _mode = guard_mode::advisory();
+
+    let w = World::new();
+    for name in ["clerk", "s"] {
+        let out = w.ljos("clerk", &["seat", "add", name], false);
+        assert!(out.status.success(), "add {name}: {}", text(&out));
+    }
+    let quote = "yes s may close proj-own";
+    let at = "2026-10-29T00:00:00Z";
+    let granted = w.ljos(
+        "clerk",
+        &[
+            "seat",
+            "grant",
+            "s",
+            "close=proj-own",
+            "--quote",
+            quote,
+            "--at",
+            at,
+            "--via",
+            "clerk",
+        ],
+        false,
+    );
+    assert!(granted.status.success(), "grant: {}", text(&granted));
+
+    let line = "LJOS_SEAT=s ljos finish proj-own --close";
+    let judged = hook_line(&w, "granted-close-own", line);
+    let said = text(&judged);
+    assert!(hook_allows(&judged), "granted close was refused:\n{said}");
+
+    let closed = runner_finish(&w, "s", "proj-own");
+    let said = text(&closed);
+    assert!(closed.status.success(), "granted finish: {said}");
+    assert!(said.contains("standing grant allowed this close"), "{said}");
+    assert!(said.contains(quote), "{said}");
+    assert!(said.contains(at), "{said}");
+    assert!(said.contains("via: clerk"), "{said}");
+    let calls = std::fs::read_to_string(&w.log).unwrap();
+    assert!(
+        calls.contains("vissue note proj-own standing grant allowed this close"),
+        "{calls}"
+    );
+    assert!(calls.contains(quote), "{calls}");
+    assert!(calls.contains("vissue update proj-own -s DONE"), "{calls}");
+
+    let bare = "LJOS_SEAT=clerk ljos finish proj-clerk --close";
+    let judged = hook_line(&w, "granted-close-none", bare);
+    let said = text(&judged);
+    assert!(
+        hook_allows(&judged),
+        "ungranted close was refused before finish:\n{said}"
+    );
+    let refused = runner_finish(&w, "clerk", "proj-clerk");
+    let said = text(&refused);
+    assert!(!refused.status.success(), "ungranted close wrote: {said}");
+    assert!(said.contains("a person closes a ticket"), "{said}");
+    assert!(said.contains("ljos seat grant"), "{said}");
+    assert_eq!(log_updates(&w, "proj-clerk"), 0, "an ungranted close wrote");
+
+    let raw = hook_line(&w, "granted-close-raw", "vissue close proj-clerk");
+    let said = text(&raw);
+    assert!(hook_allows(&raw), "raw close was refused:\n{said}");
+    assert!(
+        said.contains("warning: "),
+        "raw close had no warning:\n{said}"
+    );
     assert!(
         said.contains("ljos finish proj-clerk"),
         "raw close did not name finish:\n{said}"

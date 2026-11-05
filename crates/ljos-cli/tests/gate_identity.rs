@@ -6,6 +6,9 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -74,7 +77,7 @@ impl Box_ {
                 c = card.display(),
             ),
         );
-        let init = Command::new("git")
+        let init = guard_mode::command("git")
             .args(["init", "-q"])
             .current_dir(&repo)
             .output()
@@ -93,7 +96,7 @@ impl Box_ {
     /// `PROGRAM ARGS` with this user's environment and `extra` on top.
     /// No conversation id unless `extra` names one.
     fn command(&self, program: &str, args: &[&str], extra: &[(&str, &str)]) -> Command {
-        let mut cmd = Command::new(program);
+        let mut cmd = guard_mode::command(program);
         cmd.args(args)
             .env_clear()
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
@@ -392,7 +395,7 @@ fn the_diag_repro_allows_a_without_its_id_in_the_hook_env() {
     const CONV_B: &str = "cursor-conv-0009bbbb";
     let home = Box_::new();
     home.card(&holder(CONV_A));
-    let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
+    let mut sleeper = guard_mode::command("sleep").arg("300").spawn().unwrap();
     let comm = exec_comm(&sleeper, "sleep");
     std::fs::create_dir_all(home.run.join("ljos")).unwrap();
     std::fs::write(
@@ -1312,7 +1315,7 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
 
     let mcp_call = |meta: Option<serde_json::Value>| -> (serde_json::Value, Child) {
         let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+        let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
             .env(
                 "PATH",
@@ -2061,7 +2064,7 @@ fn one_shot_bash_c_commit_from_unstamped_parent_is_allowed_when_sitting_is_live(
     );
 
     // Keep hold live as an active conversation shell would.
-    let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
+    let mut sleeper = guard_mode::command("sleep").arg("300").spawn().unwrap();
     let pid = sleeper.id();
     let hold = std::fs::read_dir(home.run.join("ljos"))
         .unwrap()
@@ -2477,7 +2480,7 @@ fn a_bare_mcp_sitting_is_not_bound_to_the_last_shell_that_ran_ljos() {
 
     let mcp_call = |meta: Option<serde_json::Value>| -> (serde_json::Value, Child) {
         let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+        let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
             .env(
                 "PATH",
@@ -2638,7 +2641,7 @@ fn rv_mcp_box(home: &Box_) -> String {
 /// call's answer.
 fn rv_mcp_call(home: &Box_, pack_url: &str, meta: Option<serde_json::Value>) -> serde_json::Value {
     let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+    let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env(
             "PATH",
@@ -2865,7 +2868,7 @@ fn two_conversations_can_check_one_bare_seat_record() {
     std::fs::create_dir_all(&fake_bin).unwrap();
     let fake_mcp = fake_bin.join("ljos-mcp");
     std::os::unix::fs::symlink("/bin/sleep", &fake_mcp).unwrap();
-    let mut sleeper = Command::new(&fake_mcp).arg("300").spawn().unwrap();
+    let mut sleeper = guard_mode::command(&fake_mcp).arg("300").spawn().unwrap();
     let pid = sleeper.id();
 
     for round in 0..32 {
@@ -2955,7 +2958,7 @@ fn two_conversations_racing_on_a_bare_seat_hold_adopts_at_most_one() {
     std::fs::create_dir_all(&fake_bin).unwrap();
     let fake_mcp = fake_bin.join("ljos-mcp");
     std::os::unix::fs::symlink("/bin/sleep", &fake_mcp).unwrap();
-    let mut sleeper = Command::new(&fake_mcp).arg("300").spawn().unwrap();
+    let mut sleeper = guard_mode::command(&fake_mcp).arg("300").spawn().unwrap();
     let pid = sleeper.id();
 
     for round in 0..32 {
@@ -3021,7 +3024,7 @@ fn two_conversations_racing_on_a_bare_seat_hold_adopts_at_most_one() {
 fn a_forged_bare_session_record_does_not_hand_z_a_bare_seat_sitting() {
     let home = Box_::new();
     home.card("inky");
-    let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
+    let mut sleeper = guard_mode::command("sleep").arg("300").spawn().unwrap();
     let comm = exec_comm(&sleeper, "sleep");
     std::fs::create_dir_all(home.run.join("ljos")).unwrap();
     let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
@@ -3138,11 +3141,11 @@ fn a_bare_mcp_sitting_answers_the_same_outside_a_cargo_test_runner() {
      -> (serde_json::Value, Child) {
         let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
         let mut cmd = if detached {
-            let mut c = Command::new("setsid");
+            let mut c = guard_mode::command("setsid");
             c.args(["-f", env!("CARGO_BIN_EXE_ljos-mcp")]);
             c
         } else {
-            Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+            guard_mode::command(env!("CARGO_BIN_EXE_ljos-mcp"))
         };
         cmd.env_clear()
             .env(
@@ -3528,7 +3531,7 @@ fn a_held_tmux_lock_does_not_stall_a_shell_hook() {
     std::fs::create_dir_all(&dir).unwrap();
     let lock = dir.join("tmux-sock.lock");
     let ready = home.run.join("locked");
-    let mut holder = Command::new("flock")
+    let mut holder = guard_mode::command("flock")
         .arg(&lock)
         .args(["sh", "-c", &format!("touch {}; sleep 25", ready.display())])
         .spawn()
@@ -3552,4 +3555,117 @@ fn a_held_tmux_lock_does_not_stall_a_shell_hook() {
         !said.contains("no verdict"),
         "the hook refused because it ran out of time while the lock was held:\n{said}"
     );
+}
+
+#[test]
+fn advisory_a_forged_sitting_record_with_another_conversations_tag_is_refused() {
+    let _mode = guard_mode::advisory();
+
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+
+    let write_cmd = format!("printf 'x' > {}/ljos/hold-zz", home.run.display());
+    let shell_payload = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "hook_event_name": "beforeShellExecution",
+        "conversation_id": CONV_Z,
+        "cwd": home.repo,
+        "command": write_cmd,
+    })
+    .to_string();
+    let said = home.hook_with(&shell_payload, &[]);
+    assert!(
+        said.contains("sitting-gate") && said.contains("\"permission\":\"allow\""),
+        "a shell write to a hold-* record under XDG_RUNTIME_DIR/ljos was not warned on:\n{said}"
+    );
+
+    let real = std::fs::read_dir(home.run.join("ljos"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("hold-"))
+        })
+        .unwrap();
+    let lines: Vec<String> = std::fs::read_to_string(&real)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    let mut forged = lines;
+    forged[0] = holder(CONV_Z);
+    let forged_path = home.run.join("ljos/hold-zz");
+    std::fs::write(&forged_path, forged.join("\n") + "\n").unwrap();
+    let said = home.hook(CONV_Z, MERGE, &[]);
+    assert!(
+        !said.contains("sitting-gate"),
+        "Z's merge names the open sitting instead of refusing:\n{said}"
+    );
+    let _ = std::fs::remove_file(&forged_path);
+}
+
+#[test]
+fn advisory_a_tool_command_that_writes_the_records_that_bind_a_conversation_warns() {
+    let _mode = guard_mode::advisory();
+
+    let home = Box_::new();
+    for name in [
+        "session-bare-inky",
+        "tmux-hook-conv",
+        "tmux-sock-abc",
+        "tmux-pane-abc-1",
+        "first-hook-conv",
+    ] {
+        let cmd = format!(
+            "printf '%s\\n' inky {} > {}/ljos/{name}",
+            holder(CONV_X),
+            home.run.display()
+        );
+        let payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "hook_event_name": "beforeShellExecution",
+            "conversation_id": CONV_Z,
+            "cwd": home.repo,
+            "command": cmd,
+        })
+        .to_string();
+        let said = home.hook_with(&payload, &[]);
+        assert!(
+            said.contains("sitting-gate") && said.contains("\"permission\":\"allow\""),
+            "a shell write to {name} was not warned on:\n{said}"
+        );
+    }
+}
+
+fn a_tool_command_that_writes_the_records_that_bind_a_conversation_warns() {
+    let home = Box_::new();
+    for name in [
+        "session-bare-inky",
+        "tmux-hook-conv",
+        "tmux-sock-abc",
+        "tmux-pane-abc-1",
+        "first-hook-conv",
+    ] {
+        let cmd = format!(
+            "printf '%s\\n' inky {} > {}/ljos/{name}",
+            holder(CONV_X),
+            home.run.display()
+        );
+        let payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "hook_event_name": "beforeShellExecution",
+            "conversation_id": CONV_Z,
+            "cwd": home.repo,
+            "command": cmd,
+        })
+        .to_string();
+        let said = home.hook_with(&payload, &[]);
+        assert!(
+            said.contains("sitting-gate") && said.contains("\"permission\":\"allow\""),
+            "a shell write to {name} was not warned on:\n{said}"
+        );
+    }
 }

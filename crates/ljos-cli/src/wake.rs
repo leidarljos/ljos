@@ -9,9 +9,11 @@
 //! recipient's runner.
 //!
 //! A command runs as `sh -c` with the recipient's seat in `LJOS_SEAT`, so
-//! `ljos inbox` in it reads the recipient's mail. It is judged by the same
+//! `ljos inbox` in it reads the recipient's mail. It is read by the same
 //! guard a tool call is, when it is set and again each time it runs, and a
-//! `deny` or an `ask` keeps it from running: nobody is there to ask.
+//! rule that fires is a warning beside it: the command still runs. The
+//! cloud seat push rule is the one refusal, and a wake does not run that
+//! command: nobody is there to land the push.
 //! A webhook gets only the envelope (seat, sender, message id, issue,
 //! interrupt), never the body, and its key is read from a file or an
 //! environment variable, never from `wake.toml`.
@@ -235,22 +237,33 @@ fn edit_table<T>(edit: impl FnOnce(&mut BTreeMap<String, Wake>) -> Result<(T, bo
     Ok(out)
 }
 
-/// The guard's verdict on a wake command: the seat's own guard, the
+/// The rule that fires on a wake command: the seat's own guard, the
 /// trusted computing base (the static check, which includes the commit,
-/// push, and merge gates), then the pack's rules and the ask pack.
-/// `None` lets it run.
+/// push, and merge gates), then the pack's rules and the ask pack. The
+/// command runs either way, unless the rule is the cloud seat push rule;
+/// `None` is no warning.
 #[must_use]
 pub fn judge(command: &str) -> Option<super::Rule> {
-    super::seat_guard(command)
-        .or_else(|| super::tcb_verdict(command))
-        .or_else(|| super::ruled_verdict(&super::rules_for_gate(), command))
+    match super::seat_guard(command) {
+        Some(rule) => super::policyd_block(command, None).or(Some(rule)),
+        None => super::tcb_verdict(command),
+    }
+    .or_else(|| super::ruled_verdict(&super::rules_for_gate(), command))
 }
 
-fn refusal(command: &str, rule: &super::Rule) -> String {
-    format!(
-        "the guard says {} on `{command}`: {} (rule: {}). A wake runs with nobody to ask, so it does not run",
-        rule.verdict, rule.reason, rule.pattern
-    )
+/// [`judge`] as the one warning line the wake shows, or nothing. A rule
+/// that [blocks](super::Rule::blocks) is the error that keeps the command
+/// from running.
+fn warning(command: &str) -> Result<String> {
+    match judge(command) {
+        Some(rule) if rule.blocks() => bail!(
+            "the guard says deny on `{command}`: {} (rule: {}). A wake runs with nobody to ask, so it does not run",
+            rule.reason,
+            rule.pattern
+        ),
+        Some(rule) => Ok(format!("{}\n", rule.warning())),
+        None => Ok(String::new()),
+    }
 }
 
 /// `https`, or `http` whose host is exactly `localhost`, an IPv4 loopback
@@ -284,19 +297,18 @@ fn http_host_is_loopback(host: Option<url::Host<&str>>) -> bool {
     }
 }
 
-/// Set a seat's wake command, after the guard passes it.
+/// Set a seat's wake command, with the guard's warning when a rule fires.
 ///
 /// # Errors
 ///
-/// The guard refuses the command, or `wake.toml` cannot be written.
+/// The command is empty, the cloud seat push rule blocks it, or
+/// `wake.toml` cannot be written.
 pub fn set_command(seat: &str, command: &str, timeout: Option<u64>) -> Result<String> {
     let command = command.trim();
     if command.is_empty() {
         bail!("wake: empty command");
     }
-    if let Some(rule) = judge(command) {
-        bail!("wake: {}", refusal(command, &rule));
-    }
+    let warned = warning(command).map_err(|why| anyhow::anyhow!("wake: {why}"))?;
     let next = Wake {
         command: Some(command.to_string()),
         timeout,
@@ -309,7 +321,10 @@ pub fn set_command(seat: &str, command: &str, timeout: Option<u64>) -> Result<St
         }
         Ok(((), changed))
     })?;
-    Ok(format!("wake {seat}: runs `{command}` {}\n", reaches(seat)))
+    Ok(format!(
+        "wake {seat}: runs `{command}` {}\n{warned}",
+        reaches(seat)
+    ))
 }
 
 /// Set a seat's webhook. The key stays in its file or variable.
@@ -629,9 +644,7 @@ fn webhook_key(wake: &Wake) -> Option<String> {
 }
 
 fn run_command(command: &str, event: &Event, timeout: Duration) -> Result<String> {
-    if let Some(rule) = judge(command) {
-        bail!("{}", refusal(command, &rule));
-    }
+    let warned = warning(command)?;
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c")
         .arg(command)
@@ -659,11 +672,12 @@ fn run_command(command: &str, event: &Event, timeout: Duration) -> Result<String
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(out) = std::fs::OpenOptions::new()
+    if let Ok(mut out) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
     {
+        let _ = out.write_all(warned.as_bytes());
         if let Ok(err) = out.try_clone() {
             cmd.stdout(out).stderr(err);
         }
@@ -730,7 +744,7 @@ fn post(url: &str, wake: &Wake, event: &Event, via: Option<&str>) -> Result<Stri
 ///
 /// # Errors
 ///
-/// The seat has no wake, the guard refuses its command, or the command or
+/// The seat has no wake, policyd blocks its command, or the command or
 /// the post fails.
 pub fn fire(event: &Event) -> Result<String> {
     let table = load();
@@ -813,7 +827,7 @@ mod tests {
             seat: "grok".into(),
             from: "saddle".into(),
             msg: "m1".into(),
-            issue: Some("Software-d9n6".into()),
+            issue: Some("probe-d9n6".into()),
             interrupt: true,
             commit: None,
         };
@@ -844,6 +858,8 @@ mod tests {
 
     #[test]
     fn http_is_loopback_only_and_an_attacker_suffix_is_refused() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         for url in [
             "http://localhost.attacker.invalid/hook",
             "http://127.0.0.1.attacker.invalid/hook",
@@ -1013,6 +1029,8 @@ mod tests {
 
     #[test]
     fn a_webhook_redirect_is_refused_and_not_followed() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (_lock, _dir) = isolated();
         let (target_port, target_rx) = serve_one();
         let redirect = std::net::TcpListener::bind("127.0.0.1:0").expect("redirect bind");
@@ -1130,6 +1148,8 @@ mod tests {
 
     #[test]
     fn set_webhook_refuses_to_overwrite_a_broken_wake_toml() {
+        let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
+
         let (_lock, _dir) = isolated();
         let wake_file = path();
         std::fs::create_dir_all(wake_file.parent().expect("wake dir")).expect("wake dir");
@@ -1225,7 +1245,7 @@ mod tests {
             seat: "ljosbot-review-def".into(),
             from: "inky".into(),
             msg: "m1".into(),
-            issue: Some("Software-d9n6".into()),
+            issue: Some("probe-d9n6".into()),
             interrupt: true,
             commit: None,
         };
@@ -1249,7 +1269,7 @@ mod tests {
         assert_eq!(v["seat"], "ljosbot-review-def");
         assert_eq!(v["from"], "inky");
         assert_eq!(v["msg"], "m1");
-        assert_eq!(v["issue"], "Software-d9n6");
+        assert_eq!(v["issue"], "probe-d9n6");
         assert_eq!(v["interrupt"], true);
         assert_eq!(v["read"], "LJOS_SEAT='ljosbot-review-def' ljos inbox");
         assert_eq!(v["via"], "ljosbot-review-");
@@ -1350,7 +1370,7 @@ mod tests {
             seat: seat.to_string(),
             from: "inky".into(),
             msg: "m1".into(),
-            issue: Some("Software-d9n6".into()),
+            issue: Some("probe-d9n6".into()),
             interrupt: false,
             commit: None,
         };

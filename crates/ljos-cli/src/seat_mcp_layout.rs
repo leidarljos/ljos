@@ -185,3 +185,29 @@ fn a_payload_command_that_is_not_the_seat_is_a_foreign_tool() {
     let hit = user_rules::guard_payload(&payload).expect("foreign command skipped the rule");
     assert_eq!(hit.verdict, "deny", "{hit:?}");
 }
+
+#[test]
+fn advisory_a_payload_command_that_is_not_the_seat_is_a_foreign_tool() {
+    let (_lock, dir) = review_env();
+    put(
+        &dir.path().join(".cursor/mcp.json"),
+        r#"{"mcpServers":{"github":{"command":"ljos-mcp","args":[]}}}"#,
+    );
+    put(
+        &dir.path().join("config/ljos/user-rules.json"),
+        r#"{"rules":[{"id":"ur-ocaisa","text":"never post or reply to Alan (ocaisa)","author":"rohit","reason":"he asked not to be pinged","deny_mention":{"handles":["ocaisa"],"names":["Alan"]},"deny_reply_to":{"handles":["ocaisa"],"names":["Alan"]},"written_at":"2026-10-25T00:00:00Z","updated_at":"2026-10-25T00:00:00Z","basis":"person"}]}"#,
+    );
+    let payload = serde_json::json!({
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "mcp__github__ljos_issue_comment",
+        "command": "github-mcp-server",
+        "tool_input": {"owner": "o", "repo": "r", "issue_number": 1, "body": "cc @ocaisa"},
+    })
+    .to_string();
+    let hit = user_rules::guard_payload(&payload).expect("foreign command skipped the rule");
+    assert_eq!(hit.verdict, "warn", "{hit:?}");
+    assert!(
+        hit.pattern == "user-rule" || hit.pattern == "unverified-rule",
+        "{hit:?}"
+    );
+}

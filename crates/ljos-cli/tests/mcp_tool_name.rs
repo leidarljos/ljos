@@ -3,6 +3,9 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -45,7 +48,7 @@ fn hab(name: &str) -> Hab {
     }
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let git = Command::new("git")
+    let git = guard_mode::command("git")
         .args(["init", "-q", "-b", "main"])
         .current_dir(&hab.repo)
         .status()
@@ -60,7 +63,7 @@ fn put(path: &Path, text: &str) {
 }
 
 fn hook(hab: &Hab, pack: Option<u16>) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -147,4 +150,48 @@ fn a_cloud_agent_github_write_meets_the_user_rule() {
         cloud.contains("\"deny\""),
         "MCP:add_issue_comment passed the rule: {cloud}"
     );
+}
+
+#[test]
+fn advisory_a_cloud_agent_github_write_meets_the_user_rule() {
+    let _mode = guard_mode::advisory();
+
+    let hab = hab("cloudmcp");
+    put(&rules_path(&hab), ALAN);
+    let payload = |tool: &str| {
+        serde_json::json!({
+            "cursor_version": "2.4.0",
+            "conversation_id": "c-cloud",
+            "hook_event_name": "preToolUse",
+            "tool_name": tool,
+            "tool_input": {"owner": "org", "repo": "repo", "issue_number": 7,
+                "body": "please ask @ocaisa"},
+            "cwd": hab.repo,
+            "tool_use_id": "t-cloud",
+        })
+        .to_string()
+    };
+    let (_, named) = call(
+        hook(&hab, None),
+        &payload("mcp__github__add_issue_comment"),
+        Duration::from_secs(5),
+    );
+    let named = String::from_utf8_lossy(&named.stdout).to_string();
+    assert!(warns(&named), "control: {named}");
+    let (_, cloud) = call(
+        hook(&hab, None),
+        &payload("MCP:add_issue_comment"),
+        Duration::from_secs(5),
+    );
+    let cloud = String::from_utf8_lossy(&cloud.stdout).to_string();
+    assert!(
+        warns(&cloud),
+        "MCP:add_issue_comment passed the rule: {cloud}"
+    );
+}
+
+fn warns(said: &str) -> bool {
+    said.contains("\"permission\":\"allow\"")
+        && (said.contains("ljos: user-rule:") || said.contains("ljos: unverified-rule:"))
+        && said.contains("never post")
 }

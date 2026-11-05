@@ -9,6 +9,9 @@
 //! `ljos hook --prompt` writes.
 
 ljos_test_boot::harness!();
+
+#[path = "common/guard_mode.rs"]
+mod guard_mode;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -32,7 +35,7 @@ struct Home {
 impl Home {
     /// One `ljos` run as `seat`, with only this home's environment.
     fn ljos(&self, seat: &str, args: &[&str], stdin: Option<&str>) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = guard_mode::command(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.env(&mut cmd);
         cmd.env("LJOS_SEAT", seat);
@@ -252,9 +255,9 @@ fn a_send_wakes_the_recipient_and_an_interrupt_holds_its_stop() {
         &[
             "send",
             RECIPIENT,
-            "Software-d9n6 is yours",
+            "probe-d9n6 is yours",
             "--issue",
-            "Software-d9n6",
+            "probe-d9n6",
         ],
         None,
     );
@@ -267,7 +270,7 @@ fn a_send_wakes_the_recipient_and_an_interrupt_holds_its_stop() {
     );
     let woke = wait_for(
         &home.dir.path().join("woke.0"),
-        "Software-d9n6 is yours",
+        "probe-d9n6 is yours",
         Duration::from_secs(20),
     );
     let log = std::fs::read_to_string(home.dir.path().join(".local/state/ljos/mail/wake.log"))
@@ -306,7 +309,7 @@ fn a_send_wakes_the_recipient_and_an_interrupt_holds_its_stop() {
     assert_eq!(answer["decision"], "block", "{answer}");
     let reason = answer["reason"].as_str().unwrap_or_default();
     assert!(reason.contains("stop the release, CI is red"), "{reason}");
-    assert!(!reason.contains("Software-d9n6 is yours"), "{reason}");
+    assert!(!reason.contains("probe-d9n6 is yours"), "{reason}");
     eprintln!("measure: Claude Code Stop answer: {answer}");
 
     let again = serde_json::json!({
@@ -700,4 +703,157 @@ fn two_seats_exchange_mail_and_the_prompt_writes_a_receipt() {
         1,
         "stop delivers the held note and writes the receipt: {pack}"
     );
+}
+
+#[test]
+fn advisory_a_send_wakes_the_recipient_and_an_interrupt_holds_its_stop() {
+    let _mode = guard_mode::advisory();
+
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
+    let (home, _daemon) = home();
+    // The recipient is known once it has written to the pack.
+    let joined = home.ljos(RECIPIENT, &["group", "crew", "--add", RECIPIENT], None);
+    assert!(joined.status.success(), "{}", text(&joined));
+
+    let missed = home.ljos(SENDER, &["send", "claude", "hello"], None);
+    assert!(!missed.status.success(), "{}", text(&missed));
+    assert!(
+        text(&missed).contains("Did you mean claude-review?"),
+        "{}",
+        text(&missed)
+    );
+
+    // A wake a rule fires on is set, with the rule's warning beside it.
+    let warned = home.ljos(
+        RECIPIENT,
+        &["wake", "--command", "kubectl delete namespace prod"],
+        None,
+    );
+    assert!(warned.status.success(), "{}", text(&warned));
+    assert!(
+        text(&warned).contains("runs `kubectl delete namespace prod`")
+            && text(&warned).contains("\nwarning: cluster-delete: "),
+        "{}",
+        text(&warned)
+    );
+
+    let script = home.dir.path().join("wake.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nljos inbox > \"$HOME/woke.tmp\" && mv \"$HOME/woke.tmp\" \"$HOME/woke.$LJOS_WAKE_INTERRUPT\"\n",
+    )
+    .expect("script");
+    let set = home.ljos(
+        RECIPIENT,
+        &["wake", "--command", &format!("sh {}", script.display())],
+        None,
+    );
+    assert!(set.status.success(), "{}", text(&set));
+
+    let started = Instant::now();
+    let sent = home.ljos(
+        SENDER,
+        &[
+            "send",
+            RECIPIENT,
+            "probe-d9n6 is yours",
+            "--issue",
+            "probe-d9n6",
+        ],
+        None,
+    );
+    let send_took = started.elapsed();
+    assert!(sent.status.success(), "{}", text(&sent));
+    assert!(
+        text(&sent).contains(&format!("waking {RECIPIENT}")),
+        "{}",
+        text(&sent)
+    );
+    let woke = wait_for(
+        &home.dir.path().join("woke.0"),
+        "probe-d9n6 is yours",
+        Duration::from_secs(20),
+    );
+    let log = std::fs::read_to_string(home.dir.path().join(".local/state/ljos/mail/wake.log"))
+        .unwrap_or_default();
+    let woke = woke.unwrap_or_else(|| panic!("the wake did not read the inbox: {log}"));
+    eprintln!(
+        "measure: send returned in {} ms; the recipient's wake read the message {} ms after send returned",
+        send_took.as_millis(),
+        woke.as_millis()
+    );
+
+    // An interrupt holds the stop of a running session once, in each
+    // runner's words.
+    let urgent = home.ljos(
+        SENDER,
+        &[
+            "send",
+            RECIPIENT,
+            "stop the release, CI is red",
+            "--interrupt",
+        ],
+        None,
+    );
+    assert!(urgent.status.success(), "{}", text(&urgent));
+    let claude_stop = serde_json::json!({
+        "hook_event_name": "Stop",
+        "session_id": "claude-1",
+        "cwd": home.dir.path(),
+        "stop_hook_active": false,
+    })
+    .to_string();
+    let held = home.ljos(RECIPIENT, &["hook"], Some(&claude_stop));
+    assert!(held.status.success(), "{}", text(&held));
+    let answer: Value =
+        serde_json::from_slice(&held.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&held)));
+    assert_eq!(answer["decision"], "block", "{answer}");
+    let reason = answer["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("stop the release, CI is red"), "{reason}");
+    assert!(!reason.contains("probe-d9n6 is yours"), "{reason}");
+    eprintln!("measure: Claude Code Stop answer: {answer}");
+
+    let again = serde_json::json!({
+        "hook_event_name": "Stop",
+        "session_id": "claude-2",
+        "cwd": home.dir.path(),
+        "stop_hook_active": false,
+    })
+    .to_string();
+    let quiet = home.ljos(RECIPIENT, &["hook"], Some(&again));
+    assert!(
+        !text(&quiet).contains("CI is red"),
+        "a delivered letter holds the stop again: {}",
+        text(&quiet)
+    );
+
+    let cursor = home.ljos(
+        SENDER,
+        &[
+            "send",
+            RECIPIENT,
+            "rebase is off, merge develop",
+            "--interrupt",
+        ],
+        None,
+    );
+    assert!(cursor.status.success(), "{}", text(&cursor));
+    let cursor_stop = serde_json::json!({
+        "hook_event_name": "stop",
+        "cursor_version": "3.2.0",
+        "conversation_id": "conv-9",
+        "generation_id": "gen-9",
+        "status": "completed",
+        "loop_count": 0,
+    })
+    .to_string();
+    let held = home.ljos(RECIPIENT, &["hook"], Some(&cursor_stop));
+    let answer: Value =
+        serde_json::from_slice(&held.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&held)));
+    let follow = answer["followup_message"].as_str().unwrap_or_default();
+    assert!(follow.contains("rebase is off, merge develop"), "{answer}");
+    eprintln!("measure: Cursor stop answer: {answer}");
 }
