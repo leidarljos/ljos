@@ -349,6 +349,9 @@ fn write_notes(input: &str, session: Option<&str>) -> Vec<String> {
     // names none. Skip before the post, one line, rather than collect a
     // refusal per fact.
     if crate::live_held_issue().is_none() {
+        for fact in &found {
+            crate::memory_port::keep_unattached(fact);
+        }
         say(
             &mut lines,
             format!("ljos extract: {}", crate::NOTE_WITHOUT_TICKET),

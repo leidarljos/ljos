@@ -234,6 +234,7 @@ fn write_fitted(
 ) -> Result<Value> {
     let text = atom["text"].as_str().unwrap_or("").trim().to_string();
     if text.is_empty() {
+        crate::memory_port::keep_empty("lesson");
         bail!("remember: empty text is not a claim");
     }
     let refused = (held && atom["kind"].as_str() != Some(packset_core::record::NOTE_KIND))
@@ -242,6 +243,7 @@ fn write_fitted(
     let Some(why) = refused else {
         return post(client, atom);
     };
+    crate::memory_port::keep_prose(&text, &why);
     let copies = crate::pack_copy::pack_copies(&text);
     if copies.is_empty() {
         return post(client, atom);
@@ -322,6 +324,7 @@ fn post_live(client: &PacksetClient, atom: Value) -> Result<Value> {
 /// copies do not answer.
 pub fn store_labelled(client: &PacksetClient, mut atom: Value) -> Result<Value> {
     if atom["text"].as_str().unwrap_or("").trim().is_empty() {
+        crate::memory_port::keep_empty("lesson");
         bail!("store: empty text is not a claim");
     }
     if atom
@@ -404,7 +407,11 @@ pub fn import_open(budget_ms: u64) -> Imported {
                 out.left += 1;
                 continue;
             }
-            Err(_) => rec.status = "refused".into(),
+            Err(err) => {
+                let text = rec.atom["text"].as_str().unwrap_or("");
+                crate::memory_port::keep_prose(text, &format!("legacy proposal: {err:#}"));
+                rec.status = "refused".into();
+            }
         }
         match append(&rec) {
             Ok(()) if rec.status == "stored" => out.stored += 1,

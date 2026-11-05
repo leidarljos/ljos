@@ -36,6 +36,44 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum MemoryCmd {
+    /// Write this seat's memories to a local file. The file is not sent.
+    Export {
+        /// Where the file is written.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Read a portable memory file into this seat's import slot.
+    Import {
+        /// The file to read.
+        path: PathBuf,
+        /// Machine name when the file does not carry one.
+        #[arg(long)]
+        source_machine: Option<String>,
+        /// Seat name when the file does not carry one.
+        #[arg(long)]
+        source_seat: Option<String>,
+    },
+    /// Map imported memories onto this seat's lessons.
+    Integrate {
+        /// One import. The id is the input digest, or a unique prefix of it.
+        import_id: Option<String>,
+        /// Every import in this seat's slot.
+        #[arg(long)]
+        all: bool,
+        /// Print the mappings and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List imports in this seat's slot.
+    Imports {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum MemCmd {
     /// List memories newest first with their provenance. Unreviewed agents' memories by default.
     List {
@@ -109,6 +147,42 @@ impl MemFilter {
             user: self.user,
         }
     }
+}
+
+fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
+    match cmd {
+        MemoryCmd::Export { out } => {
+            print!("{}", ljos_cli::memory_port::export_cmd(&out)?);
+        }
+        MemoryCmd::Import {
+            path,
+            source_machine,
+            source_seat,
+        } => {
+            print!(
+                "{}",
+                ljos_cli::memory_port::import_cmd(
+                    &path,
+                    source_machine.as_deref(),
+                    source_seat.as_deref(),
+                )?
+            );
+        }
+        MemoryCmd::Integrate {
+            import_id,
+            all,
+            dry_run,
+        } => {
+            print!(
+                "{}",
+                ljos_cli::memory_port::integrate_cmd(import_id.as_deref(), all, dry_run)?
+            );
+        }
+        MemoryCmd::Imports { json } => {
+            print!("{}", ljos_cli::memory_port::imports_cmd(json)?);
+        }
+    }
+    Ok(())
 }
 
 fn memories_cmd(cmd: MemCmd) -> Result<()> {
@@ -360,6 +434,11 @@ enum Cmd {
         #[arg(long, value_name = "ID", requires = "review")]
         keep: Option<String>,
     },
+    /// Copy memories to a file, or bring a file from another machine into this seat.
+    Memory {
+        #[command(subcommand)]
+        cmd: MemoryCmd,
+    },
     /// Review the memories agents wrote on their own: list, keep, edit, merge, drop, prune, or browse them in a terminal viewer.
     Memories {
         #[command(subcommand)]
@@ -408,6 +487,15 @@ enum Cmd {
         /// Open with what the score and the fraction mean, and what an empty answer means.
         #[arg(long)]
         explain: bool,
+        /// Only memories exported by this machine. Applied before the limit.
+        #[arg(long)]
+        source_machine: Option<String>,
+        /// Only memories from this source seat. Applied before the limit.
+        #[arg(long)]
+        source_seat: Option<String>,
+        /// Only this import. The id is the input digest. Applied before the limit.
+        #[arg(long)]
+        import_id: Option<String>,
     },
     /// Candidate contradictions from the geometry of the seat's memory: the lowest passes between single memories, read by the optional `landscape` habitat.
     Conflicts {
@@ -1545,6 +1633,8 @@ fn main() -> Result<()> {
     ljos_cli::hookd::admit();
     let ran = run_command();
     if let Err(e) = &ran {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        ljos_cli::memory_port::record_memory_error(&args, &format!("{e:#}"));
         if ljos_cli::is_pack_busy(e) {
             // A hook that still holds the error prints nothing. The runner
             // is not failed for a pack that did not answer in time.
@@ -1569,7 +1659,14 @@ fn run_command() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let cmd = Cli::parse().cmd;
+    let cmd = match Cli::try_parse() {
+        Ok(cli) => cli.cmd,
+        Err(err) => {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            ljos_cli::memory_port::record_memory_error(&args, &err.to_string());
+            err.exit();
+        }
+    };
     let mut sitting_budget = match &cmd {
         Cmd::Sitting { issue, .. } => {
             println!("sitting {issue}: checking blockers");
@@ -1890,6 +1987,7 @@ fn run_command() -> Result<()> {
             let yes = ljos_cli::quoted_yes::read(quote.as_deref(), at.as_deref(), via.as_deref())?;
             print!("{}", ljos_cli::admit::accept_on(&id, yes.as_ref())?);
         }
+        Cmd::Memory { cmd } => memory_cmd(cmd)?,
         Cmd::Memories { cmd } => memories_cmd(cmd)?,
         Cmd::RetireNotes => print!("{}", ljos_cli::note_retire::sweep()?),
         Cmd::Forget { id, why, json } => {
@@ -1962,6 +2060,9 @@ fn run_command() -> Result<()> {
             as_of,
             valid_at,
             explain,
+            source_machine,
+            source_seat,
+            import_id,
         } => {
             ljos_cli::log_recall("search", &query.join(" "));
             // A short budget. Past it the word ranking prints. The call
@@ -2001,6 +2102,14 @@ fn run_command() -> Result<()> {
                 };
             if let Some(day) = day {
                 hits.retain(|h| ljos_cli::valid_on(&h.entities, &day));
+            }
+            let filter = ljos_cli::memory_port::SourceFilter {
+                machine: source_machine,
+                seat: source_seat,
+                import_id,
+            };
+            if !dated || filter.active() {
+                ljos_cli::memory_port::merge_cli(&mut hits, &join(&query), limit as usize, &filter);
             }
             hits.truncate(limit as usize);
             print!("{}", format_hits(&hits, explain));

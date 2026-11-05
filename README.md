@@ -362,6 +362,10 @@ ljos seat grant SEAT close=ID[,ID...] [--ids-file PATH] --quote "..." --at ISO_T
 ljos offboard [--runner NAME] [--dry-run]
 ljos remember "the default fuse is CombMNZ"
 ljos prefer "CombMNZ over RRF"
+ljos memory export --out memories.jsonl
+ljos memory import memories.jsonl
+ljos memory integrate --all
+ljos memory imports
 ljos search fuse
 ljos island "rebuild the site"
 ljos due

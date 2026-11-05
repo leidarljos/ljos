@@ -42,6 +42,7 @@ pub mod mail;
 pub mod mailbox;
 mod memlock;
 pub mod memories;
+pub mod memory_port;
 pub mod mesh;
 pub mod note_queue;
 pub mod note_retire;
@@ -10300,38 +10301,43 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
         let client = pack()?;
         rows_read(&client, &client.workspace())
     })
-    .ok()?;
-    record_listed_origins(&atoms);
-    let seen = seen_ids(call.session.as_deref());
-    let rows: Vec<(Hit, String)> = atoms
-        .iter()
-        .filter_map(|atom| {
-            let hit = atom_as_hit(atom)?;
-            if UNREVIEWED_KINDS.contains(&hit.kind.as_str())
-                || !shown_on_prompt(&hit)
-                || hit.id.as_ref().is_some_and(|id| seen.contains(id))
-            {
-                return None;
+    .ok();
+    let mut hits = Vec::new();
+    if let Some(atoms) = atoms {
+        record_listed_origins(&atoms);
+        let seen = seen_ids(call.session.as_deref());
+        let rows: Vec<(Hit, String)> = atoms
+            .iter()
+            .filter_map(|atom| {
+                let hit = atom_as_hit(atom)?;
+                if UNREVIEWED_KINDS.contains(&hit.kind.as_str())
+                    || !shown_on_prompt(&hit)
+                    || hit.id.as_ref().is_some_and(|id| seen.contains(id))
+                {
+                    return None;
+                }
+                Some((hit, recall_body(atom)))
+            })
+            .collect();
+        if !rows.is_empty() {
+            let bodies: Vec<&str> = rows.iter().map(|(_, body)| body.as_str()).collect();
+            let mut scored = lexical_scores(&bodies, cue);
+            if !scored.is_empty() {
+                let top = scored
+                    .iter()
+                    .fold(0.0_f64, |top, (_, score)| top.max(*score));
+                scored.retain(|(_, score)| *score >= top * HOOK_SCORE_FLOOR);
+                scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                scored.truncate(limit.min(HOOK_MAX_MEMORIES));
+                hits = scored.into_iter().map(|(i, _)| rows[i].0.clone()).collect();
+                order_recalled(&mut hits, |h| h.ts.clone().unwrap_or_default());
             }
-            Some((hit, recall_body(atom)))
-        })
-        .collect();
-    if rows.is_empty() {
+        }
+    }
+    memory_port::append_recall(&mut hits, cue, limit.min(HOOK_MAX_MEMORIES));
+    if hits.is_empty() {
         return None;
     }
-    let bodies: Vec<&str> = rows.iter().map(|(_, body)| body.as_str()).collect();
-    let mut scored = lexical_scores(&bodies, cue);
-    if scored.is_empty() {
-        return None;
-    }
-    let top = scored
-        .iter()
-        .fold(0.0_f64, |top, (_, score)| top.max(*score));
-    scored.retain(|(_, score)| *score >= top * HOOK_SCORE_FLOOR);
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-    scored.truncate(limit.min(HOOK_MAX_MEMORIES));
-    let mut hits: Vec<Hit> = scored.into_iter().map(|(i, _)| rows[i].0.clone()).collect();
-    order_recalled(&mut hits, |h| h.ts.clone().unwrap_or_default());
     let now = now_utc();
     let lines: Vec<String> = hits.iter().map(|h| hit_line(h, &now)).collect();
     let ids: Vec<String> = hits.iter().filter_map(|h| h.id.clone()).collect();
@@ -13804,18 +13810,21 @@ fn relevant_atoms(client: &PacksetClient, cue: &str, limit: usize) -> Vec<Value>
 /// The score is the lexical match. Empty when the listing cannot be read.
 #[must_use]
 pub fn search_by_words(query: &str, limit: u32) -> Vec<Hit> {
-    let Ok(client) = pack() else {
-        return Vec::new();
+    let mut hits = if let Ok(client) = pack() {
+        word_ranked(&client, query, limit as usize)
+            .into_iter()
+            .filter_map(|(atom, score)| {
+                let mut hit = atom_as_hit(&atom)?;
+                hit.score = score;
+                hit.ts = written_at(&atom);
+                Some(hit)
+            })
+            .collect()
+    } else {
+        Vec::new()
     };
-    word_ranked(&client, query, limit as usize)
-        .into_iter()
-        .filter_map(|(atom, score)| {
-            let mut hit = atom_as_hit(&atom)?;
-            hit.score = score;
-            hit.ts = written_at(&atom);
-            Some(hit)
-        })
-        .collect()
+    memory_port::append_recall(&mut hits, query, limit as usize);
+    hits
 }
 
 /// [`packset_search_opts`] without the rerank, chosen by relevance, see
@@ -17851,6 +17860,7 @@ fn post_claim_horizon(
 ) -> Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
+        memory_port::keep_empty(label);
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
@@ -17889,6 +17899,7 @@ pub fn packset_write_agent(
 ) -> Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
+        memory_port::keep_empty(label);
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
@@ -18006,6 +18017,7 @@ pub fn mcp_claim_atom(
 ) -> Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
+        memory_port::keep_empty(label);
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
@@ -18131,6 +18143,7 @@ fn agent_sourced_atom(
 ) -> Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
+        memory_port::keep_empty(label);
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
@@ -18347,6 +18360,9 @@ pub(crate) fn queue_memory(
 ) -> Result<bool> {
     let text = text.trim();
     if !pack_copy::pack_copy_ok(text) {
+        let why = pack_copy::gate_refusal(text)
+            .unwrap_or_else(|| "the pack would refuse this copy".into());
+        memory_port::keep_prose(text, &why);
         bail!("queue: the pack would refuse this copy");
     }
     let at = std::time::SystemTime::now()
@@ -18386,7 +18402,15 @@ pub fn flush_note_queue() -> Result<note_queue::Drained> {
 fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
     let mut out = Vec::new();
     for note in notes {
-        for text in pack_copy::pack_copies(&note.text) {
+        let trimmed = note.text.trim();
+        let copies = pack_copy::pack_copies(&note.text);
+        let intact = copies.len() == 1 && copies.first().map(String::as_str) == Some(trimmed);
+        if !intact {
+            let why = pack_copy::gate_refusal(trimmed)
+                .unwrap_or_else(|| "the pack would refuse this copy".into());
+            memory_port::keep_prose(trimmed, &why);
+        }
+        for text in copies {
             let item = note_queue::Queued {
                 text,
                 ..note.clone()
@@ -18418,6 +18442,10 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
         // was said, on the ticket. Sending it now would put the working
         // note back in memory, which is what this queue stopped doing.
         if note.kind != "lesson" {
+            memory_port::keep_prose(
+                &note.text,
+                "a note is kept on the ticket, not in memory; this copy was dropped",
+            );
             return note_queue::Sent::Refused(
                 "a note is kept on the ticket, not in memory; this copy was dropped".into(),
             );
@@ -18425,7 +18453,10 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
         match post_queued_lesson(&client, note) {
             Ok(body) => note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string()),
             Err(e) if note_can_wait(&e) => note_queue::Sent::Wait(format!("{e:#}")),
-            Err(e) => note_queue::Sent::Refused(format!("{e:#}")),
+            Err(e) => {
+                memory_port::keep_prose(&note.text, &format!("{e:#}"));
+                note_queue::Sent::Refused(format!("{e:#}"))
+            }
         }
     })?;
     done.set_aside.splice(0..0, set_aside);
@@ -18540,6 +18571,7 @@ fn note_kind_unknown(err: &anyhow::Error) -> bool {
 pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
+        memory_port::keep_empty(label);
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
@@ -18573,9 +18605,11 @@ pub(crate) const NOTE_WITHOUT_TICKET: &str =
 pub fn packset_write_agent_note_tagged(text: &str, tags: &[String]) -> Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
+        memory_port::keep_empty("note");
         bail!("Remember: empty text is not a note");
     }
     let Some((issue, _)) = live_held_issue() else {
+        memory_port::keep_unattached(trimmed);
         bail!(NOTE_WITHOUT_TICKET);
     };
     let client = pack()?;
@@ -18706,6 +18740,7 @@ pub fn packset_write_scoped(
     let workspace = client.workspace();
     let trimmed = text.trim();
     if trimmed.is_empty() {
+        memory_port::keep_empty(label);
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
@@ -18767,6 +18802,7 @@ pub fn packset_write_as(
     };
     let trimmed = text.trim();
     if trimmed.is_empty() {
+        memory_port::keep_empty(label);
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
