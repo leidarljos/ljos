@@ -11,7 +11,6 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -187,48 +186,54 @@ struct Clock {
     depth: u32,
 }
 
-static CLOCK: Mutex<Option<Clock>> = Mutex::new(None);
+thread_local! {
+    static CLOCK: std::cell::RefCell<Option<Clock>> = const { std::cell::RefCell::new(None) };
+}
 
-/// Bound every pack socket call until this guard drops.
+/// Bound synchronous pack calls on this thread until this guard drops.
 /// A nested guard keeps the earlier deadline, so a hook's budget is not
 /// stretched by a later mail read.
-pub struct PackClock;
+pub struct PackClock {
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
 
 impl PackClock {
     #[must_use]
     pub fn enter(total: Duration) -> Self {
-        let mut slot = CLOCK.lock().unwrap_or_else(|p| p.into_inner());
-        match slot.as_mut() {
-            Some(clock) => clock.depth = clock.depth.saturating_add(1),
-            None => {
-                *slot = Some(Clock {
-                    deadline: Instant::now() + total,
-                    depth: 1,
-                });
+        CLOCK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            match slot.as_mut() {
+                Some(clock) => clock.depth = clock.depth.saturating_add(1),
+                None => {
+                    *slot = Some(Clock {
+                        deadline: Instant::now() + total,
+                        depth: 1,
+                    });
+                }
             }
+        });
+        Self {
+            _thread: std::marker::PhantomData,
         }
-        Self
     }
 }
 
 impl Drop for PackClock {
     fn drop(&mut self) {
-        let mut slot = CLOCK.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(clock) = slot.as_mut() {
-            clock.depth = clock.depth.saturating_sub(1);
-            if clock.depth == 0 {
-                *slot = None;
+        CLOCK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if let Some(clock) = slot.as_mut() {
+                clock.depth = clock.depth.saturating_sub(1);
+                if clock.depth == 0 {
+                    *slot = None;
+                }
             }
-        }
+        });
     }
 }
 
 fn clock_deadline() -> Option<Instant> {
-    CLOCK
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .as_ref()
-        .map(|clock| clock.deadline)
+    CLOCK.with(|slot| slot.borrow().as_ref().map(|clock| clock.deadline))
 }
 
 pub(crate) fn clock_armed() -> bool {
@@ -420,43 +425,63 @@ struct Raw {
 /// opens another socket. A consensus reading asks several times. Without
 /// the stop, each ask waited the whole budget and the command sat for the
 /// sum. Dropping the guard clears it, so a later call can try the pack again.
-static PACK_QUIET: AtomicBool = AtomicBool::new(false);
-static QUIET_HELD: AtomicUsize = AtomicUsize::new(0);
+struct QuietState {
+    depth: usize,
+    quiet: bool,
+}
 
-/// Remember one quiet pack for the reads this guard covers.
-pub struct QuietPack;
+thread_local! {
+    static QUIET: std::cell::RefCell<QuietState> = const {
+        std::cell::RefCell::new(QuietState { depth: 0, quiet: false })
+    };
+}
+
+/// Remember one quiet pack for the reads this guard covers on its thread.
+pub struct QuietPack {
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
 
 impl QuietPack {
     /// Start remembering a silent pack. The first guard of a pile drops a
     /// quiet read already seen, so the pile starts with a fresh try.
     #[must_use]
     pub fn enter() -> Self {
-        if QUIET_HELD.fetch_add(1, Ordering::AcqRel) == 0 {
-            PACK_QUIET.store(false, Ordering::Relaxed);
+        QUIET.with(|state| {
+            let mut state = state.borrow_mut();
+            if state.depth == 0 {
+                state.quiet = false;
+            }
+            state.depth = state.depth.saturating_add(1);
+        });
+        Self {
+            _thread: std::marker::PhantomData,
         }
-        Self
     }
 }
 
 impl Drop for QuietPack {
     fn drop(&mut self) {
-        if QUIET_HELD.fetch_sub(1, Ordering::AcqRel) == 1 {
-            PACK_QUIET.store(false, Ordering::Relaxed);
-        }
+        QUIET.with(|state| {
+            let mut state = state.borrow_mut();
+            state.depth = state.depth.saturating_sub(1);
+            if state.depth == 0 {
+                state.quiet = false;
+            }
+        });
     }
 }
 
 fn holding_quiet() -> bool {
-    QUIET_HELD.load(Ordering::Relaxed) > 0
+    QUIET.with(|state| state.borrow().depth > 0)
 }
 
 fn pack_quiet() -> bool {
-    holding_quiet() && PACK_QUIET.load(Ordering::Relaxed)
+    holding_quiet() && QUIET.with(|state| state.borrow().quiet)
 }
 
 fn mark_pack_quiet() {
     if holding_quiet() {
-        PACK_QUIET.store(true, Ordering::Relaxed);
+        QUIET.with(|state| state.borrow_mut().quiet = true);
     }
 }
 
@@ -1414,5 +1439,154 @@ mod tests {
         }
         foreign(url);
         assert_eq!(reads() - start, 5, "a call after the search reads again");
+    }
+    #[test]
+    fn a_spent_pack_clock_does_not_limit_another_thread() {
+        use super::{clock_deadline, clock_left, PackClock};
+        use std::time::Duration;
+
+        let _spent = PackClock::enter(Duration::ZERO);
+        let original = clock_deadline();
+        let other_has_time = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _other = PackClock::enter(Duration::from_secs(60));
+                    clock_left().is_some_and(|left| !left.is_zero())
+                })
+                .join()
+                .unwrap()
+        });
+        assert!(other_has_time, "another thread owns its call budget");
+        assert_eq!(clock_deadline(), original);
+        assert_eq!(clock_left(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn simultaneous_pack_calls_keep_their_own_deadlines() {
+        use super::{clock_deadline, clock_left, PackClock};
+        use std::sync::{Arc, Barrier};
+        use std::time::Duration;
+
+        let _healthy = PackClock::enter(Duration::from_secs(60));
+        let original = clock_deadline();
+        let barrier = Arc::new(Barrier::new(2));
+        let (other_spent, this_has_time) = std::thread::scope(|scope| {
+            let other_barrier = Arc::clone(&barrier);
+            let other = scope.spawn(move || {
+                let _spent = PackClock::enter(Duration::ZERO);
+                let spent = clock_left() == Some(Duration::ZERO);
+                other_barrier.wait();
+                other_barrier.wait();
+                spent
+            });
+            barrier.wait();
+            let has_time = clock_left().is_some_and(|left| !left.is_zero());
+            barrier.wait();
+            (other.join().unwrap(), has_time)
+        });
+        assert!(other_spent, "the other call owns its spent deadline");
+        assert!(this_has_time, "the healthy call keeps its deadline");
+        assert_eq!(clock_deadline(), original);
+    }
+
+    #[test]
+    fn nested_pack_clocks_keep_the_outer_deadline_until_the_last_drop() {
+        use super::{clock_armed, clock_deadline, PackClock};
+        use std::time::Duration;
+
+        assert!(!clock_armed());
+        let outer = PackClock::enter(Duration::ZERO);
+        let original = clock_deadline();
+        let inner = PackClock::enter(Duration::from_secs(60));
+        assert_eq!(clock_deadline(), original);
+        drop(outer);
+        assert_eq!(clock_deadline(), original);
+        drop(inner);
+        assert!(!clock_armed());
+    }
+
+    #[test]
+    fn a_quiet_pack_does_not_hide_another_threads_answer() {
+        use super::{holding_quiet, mark_pack_quiet, pack_quiet, QuietPack};
+
+        let _quiet = QuietPack::enter();
+        mark_pack_quiet();
+        let (other_held, other_quiet, other_own_quiet) = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let held = holding_quiet();
+                    let quiet = pack_quiet();
+                    let _own = QuietPack::enter();
+                    mark_pack_quiet();
+                    (held, quiet, pack_quiet())
+                })
+                .join()
+                .unwrap()
+        });
+        assert!(!other_held);
+        assert!(!other_quiet);
+        assert!(other_own_quiet);
+        assert!(pack_quiet(), "another thread's drop preserves this call");
+    }
+
+    #[test]
+    fn simultaneous_quiet_guards_keep_independent_state() {
+        use super::{mark_pack_quiet, pack_quiet, QuietPack};
+        use std::sync::{Arc, Barrier};
+
+        let _healthy = QuietPack::enter();
+        let barrier = Arc::new(Barrier::new(2));
+        let (other_quiet, this_quiet) = std::thread::scope(|scope| {
+            let other_barrier = Arc::clone(&barrier);
+            let other = scope.spawn(move || {
+                let _quiet = QuietPack::enter();
+                mark_pack_quiet();
+                other_barrier.wait();
+                other_barrier.wait();
+                pack_quiet()
+            });
+            barrier.wait();
+            let quiet = pack_quiet();
+            barrier.wait();
+            (other.join().unwrap(), quiet)
+        });
+        assert!(other_quiet);
+        assert!(!this_quiet, "the healthy call can still ask its writer");
+        assert!(!pack_quiet());
+    }
+
+    #[test]
+    fn nested_quiet_guards_clear_only_after_the_last_drop() {
+        use super::{holding_quiet, mark_pack_quiet, pack_quiet, QuietPack};
+
+        let outer = QuietPack::enter();
+        mark_pack_quiet();
+        let inner = QuietPack::enter();
+        assert!(pack_quiet());
+        drop(outer);
+        assert!(holding_quiet());
+        assert!(pack_quiet());
+        drop(inner);
+        assert!(!holding_quiet());
+        assert!(!pack_quiet());
+    }
+
+    #[test]
+    fn unwinding_a_pack_call_clears_its_clock_and_quiet_state() {
+        use super::{
+            clock_armed, holding_quiet, mark_pack_quiet, pack_quiet, PackClock, QuietPack,
+        };
+        use std::time::Duration;
+
+        let result = std::panic::catch_unwind(|| {
+            let _clock = PackClock::enter(Duration::ZERO);
+            let _quiet = QuietPack::enter();
+            mark_pack_quiet();
+            panic!("pack call fixture");
+        });
+        assert!(result.is_err());
+        assert!(!clock_armed());
+        assert!(!holding_quiet());
+        assert!(!pack_quiet());
     }
 }
