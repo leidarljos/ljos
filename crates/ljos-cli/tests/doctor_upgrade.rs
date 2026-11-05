@@ -285,14 +285,35 @@ fn the_mcp_server_refreshes_a_stale_skill_on_start() {
         .unwrap();
     let _stdin = child.stdin.take();
     let mut stderr = child.stderr.take().unwrap();
+    let observed_errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let collected_errors = std::sync::Arc::clone(&observed_errors);
+    let reader = std::thread::spawn(move || {
+        let mut bytes = [0_u8; 1024];
+        loop {
+            match stderr.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(count) => collected_errors.lock().unwrap().extend_from_slice(&bytes[..count]),
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => panic!("read MCP fixture stderr: {err}"),
+            }
+        }
+    });
     let started = Instant::now();
     let changed = loop {
-        if fs::read(&cursor).unwrap() != OLD_SKILL.as_bytes() {
+        let published = fs::read(&cursor).unwrap() != OLD_SKILL.as_bytes();
+        let notices = {
+            let bytes = observed_errors.lock().unwrap();
+            let err = String::from_utf8_lossy(&bytes);
+            err.contains("refreshed cursor:")
+                && err.contains("was edited by hand; ljos left it")
+        };
+        if published && notices {
             break true;
         }
         if let Some(status) = child.try_wait().unwrap() {
-            let mut err = String::new();
-            let _ = stderr.read_to_string(&mut err);
+            reader.join().unwrap();
+            let bytes = observed_errors.lock().unwrap();
+            let err = String::from_utf8_lossy(&bytes);
             panic!("ljos-mcp exited {status} before refreshing\n{err}");
         }
         if started.elapsed() > Duration::from_secs(20) {
@@ -302,8 +323,8 @@ fn the_mcp_server_refreshes_a_stale_skill_on_start() {
     };
     let _ = child.kill();
     let _ = child.wait();
-    let mut err = String::new();
-    let _ = stderr.read_to_string(&mut err);
+    reader.join().unwrap();
+    let err = String::from_utf8_lossy(&observed_errors.lock().unwrap()).into_owned();
     assert!(changed, "ljos-mcp did not refresh the skill\n{err}");
     assert!(err.contains("refreshed cursor:"), "{err}");
     assert!(err.contains("was edited by hand; ljos left it"), "{err}");
