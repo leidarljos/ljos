@@ -42,6 +42,8 @@ struct Job {
     session: String,
     #[serde(default)]
     payload_session: Option<String>,
+    #[serde(default)]
+    ask: Option<String>,
     owner: (u32, u64),
     ancestry: Vec<(u32, String)>,
     head: Option<String>,
@@ -65,14 +67,19 @@ pub fn book_later(raw: &str, call: &crate::HookCall) -> String {
     crate::bookkeep::recall_for(raw, call)
 }
 
+/// Queue an audit of a strict command ask. This records no consent or claim.
+pub fn enqueue_ask(raw: &str, call: &crate::HookCall, reason: &str) {
+    write_job(raw, call, Some(reason));
+}
+
 /// Queue the book for this call, and start a drainer when none runs.
 pub fn enqueue(raw: &str, call: &crate::HookCall) {
     if crate::bookkeep::books(&call.event) {
-        write_job(raw, call);
+        write_job(raw, call, None);
     }
 }
 
-fn write_job(raw: &str, call: &crate::HookCall) {
+fn write_job(raw: &str, call: &crate::HookCall, ask: Option<&str>) {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
@@ -88,6 +95,7 @@ fn write_job(raw: &str, call: &crate::HookCall) {
         cue: call.cue.clone(),
         session: crate::bookkeep::session_key(call),
         payload_session: call.session.clone(),
+        ask: ask.map(str::to_string),
         owner: crate::bookkeep::hook_owner(),
         ancestry: crate::ancestry(),
         head: head_now(&place),
@@ -491,7 +499,21 @@ pub fn apply(files: &[PathBuf]) -> i32 {
             session: Some(job.session.clone()),
             shape: crate::HookShape::default(),
         };
-        if !crate::bookkeep::observe_queued(&job.raw, &call) {
+        let done = match job.ask.as_deref() {
+            Some(reason) => {
+                match record_ask(&crate::runtime_dir().join("guard-asks.jsonl"), &job, reason) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        crate::bookkeep::log_line(&format!(
+                            "book queue: ask audit failed: {error}"
+                        ));
+                        false
+                    }
+                }
+            }
+            None => crate::bookkeep::observe_queued(&job.raw, &call),
+        };
+        if !done {
             break;
         }
         let _ = std::fs::remove_file(path);
@@ -505,6 +527,42 @@ pub fn apply(files: &[PathBuf]) -> i32 {
         }
     }
     0
+}
+
+/// Append a private audit record before an ask job leaves the queue.
+/// Retrying an interrupted append can repeat an audit; it never grants consent.
+fn record_ask(path: &Path, job: &Job, reason: &str) -> std::io::Result<()> {
+    let _durable = crate::bookkeep::durable_write();
+    let mut output = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = output.metadata()?;
+    // SAFETY: geteuid takes no pointer arguments and changes no process state.
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "ask audit requires a private regular file",
+        ));
+    }
+    let mut bytes = serde_json::to_vec(&serde_json::json!({
+        "event": "guard-ask",
+        "session": job.session,
+        "hook_event": job.event,
+        "command": job.cue,
+        "cwd": job.cwd,
+        "reason": reason,
+    }))
+    .map_err(std::io::Error::other)?;
+    bytes.push(b'\n');
+    output.write_all(&bytes)?;
+    output.sync_data()
 }
 
 #[cfg(test)]
@@ -566,5 +624,60 @@ mod tests {
         );
         assert_eq!(head_now(&wt).as_deref(), Some(sha.as_str()), "worktree");
         assert_eq!(head_now(Path::new("/")), None);
+    }
+
+    fn ask_job() -> Job {
+        serde_json::from_value(serde_json::json!({
+            "raw": "{}", "event": "PreToolUse", "cue": "echo probe",
+            "session": "probe-session", "owner": [0, 0], "ancestry": [],
+            "head": null, "cwd": "/probe", "env": [],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_older_job_has_no_ask_and_a_queued_ask_round_trips() {
+        let mut job = ask_job();
+        assert!(job.ask.is_none());
+        job.ask = Some("a command asks for consent".into());
+        let copy: Job = serde_json::from_slice(&serde_json::to_vec(&job).unwrap()).unwrap();
+        assert_eq!(copy.ask.as_deref(), Some("a command asks for consent"));
+        assert_eq!(copy.cue, job.cue);
+        assert_eq!(copy.session, job.session);
+    }
+
+    #[test]
+    fn a_queued_ask_is_durably_audited_without_recording_approval() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("asks.jsonl");
+        record_ask(&path, &ask_job(), "a command asks for consent").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        let value: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(value["event"], "guard-ask");
+        assert_eq!(value["session"], "probe-session");
+        assert_eq!(value["command"], "echo probe");
+        assert_eq!(value["reason"], "a command asks for consent");
+        assert!(value.get("approved").is_none());
+        assert!(value.get("for_task").is_none());
+        assert_eq!(path.metadata().unwrap().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn an_ask_audit_rejects_a_symlink_without_writing_its_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        let link = directory.path().join("asks.jsonl");
+        std::fs::write(&target, "unchanged").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(record_ask(&link, &ask_job(), "reason").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "unchanged");
+    }
+
+    #[test]
+    fn an_ask_audit_reports_an_unwritable_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(record_ask(directory.path(), &ask_job(), "reason").is_err());
+        assert!(directory.path().is_dir());
     }
 }

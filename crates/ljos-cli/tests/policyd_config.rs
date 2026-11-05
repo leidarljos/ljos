@@ -41,6 +41,7 @@ printf 'allow\twarn\t%s\t%s\n' "$rule" "$said"
 "#;
 
 const BLOCKS: &str = "block-on-warning true\n";
+const BLOCK_ON_WARNING_SET: &str = BLOCKS;
 
 /// A command run through a guard shim: the exit code, stderr, and whether
 /// its victim is still there.

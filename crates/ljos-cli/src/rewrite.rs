@@ -4,7 +4,8 @@
 //! LINE. The guard reads LINE again. A runner whose `PreToolUse` hook can
 //! replace the tool input gets LINE back as that input. A runner without
 //! that field, or a LINE the guard does not take as it stands, runs the
-//! original line with a warning that names LINE.
+//! original line with a warning that names LINE. In strict mode, an
+//! inexact, refused, or unsupported rewrite refuses the original call.
 //!
 //! The local table names a fix in a policyd warning it knows. That call
 //! runs as written, and the warning names the fix.
@@ -46,6 +47,8 @@ pub enum Outcome {
     Run(Rewrite),
     /// Run the call's own line, with this rule's warning.
     Warn(Rule),
+    /// Refuse the call in strict mode; the original line does not run.
+    Refuse(Rule),
 }
 
 /// The new line in a policyd rewrite answer, `allow\trewrite\tLINE`.
@@ -70,9 +73,32 @@ pub fn from_policyd(text: &str) -> Option<String> {
 
 /// Hold policyd's rewrite of `line`, which it judged as `script`. The
 /// script can differ from the line: a here-document body is taken out, or
-/// a continuation is joined. Then the rewrite is inexact, so the line
-/// runs as written with a warning that names the rewrite.
+/// a continuation is joined. An inexact rewrite warns in advisory mode
+/// and refuses the call in strict mode.
 pub(crate) fn hold_exact(line: &str, script: &str, command: String) -> Option<Rule> {
+    if crate::guard_mode::is_strict() {
+        strict_hold_exact(line, script, command)
+    } else {
+        advisory_hold_exact(line, script, command)
+    }
+}
+
+fn strict_hold_exact(line: &str, script: &str, command: String) -> Option<Rule> {
+    if script.trim() == line.trim() {
+        hold(line, command);
+        return None;
+    }
+    Some(Rule {
+        pattern: "ljos-policyd".into(),
+        verdict: "deny".into(),
+        reason: format!(
+            "{POLICYD_REASON} to `{command}`, but it judged a copy with its here-documents \
+             or continuations changed, so the new line is not exact. Neither line runs"
+        ),
+    })
+}
+
+fn advisory_hold_exact(line: &str, script: &str, command: String) -> Option<Rule> {
     if script.trim() == line.trim() {
         hold(line, command);
         return None;
@@ -158,6 +184,14 @@ pub fn local(code: &str, line: &str) -> Option<Rewrite> {
 /// Why the guard does not take `line` as it stands, or None when it
 /// does. `judge` reads a line as the guard would and holds a rewrite as
 /// [`crate::tcb_verdict_in`] does, so a line rewritten again is not taken.
+fn refusal_of(line: &str, judge: impl Fn(&str) -> Option<Rule>) -> Option<String> {
+    let _ = take_held(line);
+    if let Some(rule) = judge(line) {
+        return Some(format!("the guard refuses it: {}", rule.reason));
+    }
+    take_held(line).map(|again| format!("the guard rewrites it again, to `{again}`"))
+}
+
 fn doubt_on(line: &str, judge: impl Fn(&str) -> Option<Rule>) -> Option<String> {
     let _ = take_held(line);
     if let Some(rule) = judge(line) {
@@ -170,9 +204,64 @@ fn doubt_on(line: &str, judge: impl Fn(&str) -> Option<Rule>) -> Option<String> 
 /// it has none and the usual answer stands.
 ///
 /// A policyd rewrite runs only when the guard takes the new line as it
-/// stands. Otherwise the call's own line runs with a warning. A local fix
-/// is named in the policyd warning when the guard takes that line.
+/// stands. An unsuitable substitute warns in advisory mode and refuses
+/// in strict mode. Local fixes preserve the selected mode's decision.
 pub fn pick(
+    call: &HookCall,
+    verdict: Option<&Rule>,
+    judge: impl Fn(&str) -> Option<Rule>,
+) -> Option<Outcome> {
+    if crate::guard_mode::is_strict() {
+        strict_pick(call, verdict, judge)
+    } else {
+        advisory_pick(call, verdict, judge)
+    }
+}
+
+fn strict_pick(
+    call: &HookCall,
+    verdict: Option<&Rule>,
+    judge: impl Fn(&str) -> Option<Rule>,
+) -> Option<Outcome> {
+    if call.event != "PreToolUse" {
+        return None;
+    }
+    let held = take_held(&call.cue);
+    let line = call.cue.trim();
+    match verdict {
+        None => {
+            let command = held.filter(|command| command != line)?;
+            Some(match refusal_of(&command, judge) {
+                None => Outcome::Run(Rewrite {
+                    command,
+                    reason: POLICYD_REASON.to_string(),
+                }),
+                Some(why) => Outcome::Refuse(Rule {
+                    pattern: "ljos-policyd".into(),
+                    verdict: "deny".into(),
+                    reason: format!(
+                        "{POLICYD_REASON} to `{command}`, and {why}. Neither line runs"
+                    ),
+                }),
+            })
+        }
+        Some(rule) if rule.verdict == "deny" && rule.pattern == "ljos-policyd" => {
+            let code = rule.reason.split(':').next().unwrap_or("").trim();
+            let fix = local(code, line).filter(|fix| fix.command != line)?;
+            refusal_of(&fix.command, judge).is_none().then(|| {
+                let mut refused = rule.clone();
+                refused.reason = format!(
+                    "{}. Run `{}` instead: {}",
+                    rule.reason, fix.command, fix.reason
+                );
+                Outcome::Refuse(refused)
+            })
+        }
+        Some(_) => None,
+    }
+}
+
+fn advisory_pick(
     call: &HookCall,
     verdict: Option<&Rule>,
     judge: impl Fn(&str) -> Option<Rule>,
@@ -231,8 +320,8 @@ pub fn answer(
 
 /// [`answer`] for a known outcome. A warning is the usual allow with that
 /// line. A line to run is the updated input where the runner takes one. A
-/// runner that cannot take one runs the original line, with a warning
-/// that names the new one.
+/// runner that cannot take one warns in advisory mode and refuses in
+/// strict mode. Neither path records consent for a substitute command.
 #[must_use]
 pub fn answer_with(
     input: &str,
@@ -242,16 +331,43 @@ pub fn answer_with(
     relayed: bool,
 ) -> String {
     let warn = |rule: &Rule| crate::hook_output_ruled(call, context, Some(rule));
+    let refuse = |rule: &Rule| crate::approval::hook_output(input, call, context, Some(rule));
     match outcome {
+        Outcome::Refuse(rule) => {
+            if crate::guard_mode::is_strict() {
+                refuse(rule)
+            } else {
+                warn(rule)
+            }
+        }
         Outcome::Warn(rule) => warn(rule),
         Outcome::Run(fix) => (!relayed)
             .then(|| updated_input(input, call, context, fix))
             .flatten()
-            .unwrap_or_else(|| warn(&unchangeable(fix))),
+            .unwrap_or_else(|| {
+                if crate::guard_mode::is_strict() {
+                    refuse(&strict_unchangeable(fix))
+                } else {
+                    warn(&unchangeable(fix))
+                }
+            }),
     }
 }
 
-/// The warning for a runner whose hook cannot replace the command.
+/// The refusal for a strict runner whose hook cannot replace the command.
+fn strict_unchangeable(fix: &Rewrite) -> Rule {
+    Rule {
+        pattern: "ljos-policyd".into(),
+        verdict: "deny".into(),
+        reason: format!(
+            "{}. Run `{}` instead. This runner cannot take a new command, so the original \
+             line does not run",
+            fix.reason, fix.command
+        ),
+    }
+}
+
+/// The warning for an advisory runner whose hook cannot replace the command.
 fn unchangeable(fix: &Rewrite) -> Rule {
     Rule {
         pattern: "ljos-policyd".into(),
@@ -335,6 +451,29 @@ fn updated_input(input: &str, call: &HookCall, context: &str, fix: &Rewrite) -> 
 mod tests {
     use super::*;
     use crate::hook_call;
+
+    fn uv_refusal() -> Rule {
+        Rule {
+            pattern: "ljos-policyd".into(),
+            verdict: "deny".into(),
+            reason: crate::policyd_reason("python-requires-uv"),
+        }
+    }
+
+    fn local_refusal(input: &str) -> Value {
+        let call = hook_call(input);
+        let outcome = pick(&call, Some(&uv_refusal()), allow_all).expect("a fix");
+        assert!(matches!(outcome, Outcome::Refuse(_)), "{outcome:?}");
+        answer_json(input, &outcome, false)
+    }
+
+    fn decision(v: &Value) -> &str {
+        v["hookSpecificOutput"]["permissionDecision"]
+            .as_str()
+            .or_else(|| v["permission"].as_str())
+            .or_else(|| v["decision"].as_str())
+            .unwrap_or("")
+    }
 
     fn uv_warning() -> Rule {
         Rule {
