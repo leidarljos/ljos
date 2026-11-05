@@ -874,9 +874,8 @@ fn refuse_push_messages(refs: &str) -> Result<()> {
         for sha in listed {
             let body = commit_body(&sha)?;
             if message_refused(&body) {
-                let detail = format!(
-                    "machine-trailer: {sha} message carries a machine mark; the push runs"
-                );
+                let detail =
+                    format!("machine-trailer: {sha} message carries a machine mark; the push runs");
                 crate::memory_port::record_label("commit-message-warning", &detail, "labelled");
                 eprintln!("ljos: label commit-message-warning: {detail}");
             }
