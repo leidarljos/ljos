@@ -1356,7 +1356,8 @@ fn a_rewrite_of_the_exact_tracker_url_to_a_password_is_refused() {
     let said = ljos_cli::cloud::up(false).unwrap();
     std::env::remove_var("GIT_TRACE");
     assert!(
-        said.contains("to a URL with a password, so it was not cloned"),
+        said.contains("label tracker-location-warning")
+            && said.contains("to a URL with a password, so it was not cloned"),
         "{said}"
     );
     assert!(!said.contains("tied-token"), "{said}");

@@ -313,6 +313,8 @@ fn no_approval_file_is_minted_for_a_draft_the_checks_refuse() {
         MESSAGE.replace("text/plain", "text/html"),
     ] {
         let err = export(&draft(&bad), later, now()).unwrap_err();
+        let label = ljos_cli::policy_label::as_policy(&err).expect("label");
+        assert_eq!(label.label, "draft-warning");
         assert!(err.to_string().contains("checks"), "{bad}: {err}");
     }
     let unset = MailConfig::default();

@@ -2459,15 +2459,22 @@ fn ensure_tracker(
     }
     Ok(match clone_tracker(remote, dest, seat, token.as_ref()) {
         Ok(line) => (line, true),
-        Err(e) => (
-            format!(
-                "{}. This machine has no shared tracker. Set {} to a token that can push to {}, or add that repository to this environment",
-                hide(&format!("{e:#}"), remote),
-                crate::tracker_attach::TOKEN_VAR,
-                remote.shown
-            ),
-            false,
-        ),
+        Err(e) => {
+            let detail = if let Some(label) = crate::policy_label::as_policy(&e) {
+                format!("label {}: {}", label.label, label.detail)
+            } else {
+                format!("{e:#}")
+            };
+            (
+                format!(
+                    "{}. This machine has no shared tracker. Set {} to a token that can push to {}, or add that repository to this environment",
+                    hide(&detail, remote),
+                    crate::tracker_attach::TOKEN_VAR,
+                    remote.shown
+                ),
+                false,
+            )
+        }
     })
 }
 

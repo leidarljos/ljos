@@ -26798,7 +26798,10 @@ pub fn forecasts_from_json(raw: &str) -> Result<Vec<Forecast>> {
                         .or_else(|| value.as_str()?.parse::<f64>().ok())
                         .context("ballots: confidence must be a probability in (0, 1]")?;
                     if !probability.is_finite() || probability <= 0.0 || probability > 1.0 {
-                        bail!("ballots: confidence must be a probability in (0, 1]");
+                        return Err(policy_label::labelled(
+                            "decision-input-warning",
+                            "ballots: confidence must be a probability in (0, 1]",
+                        ));
                     }
                     Some(probability)
                 }
@@ -64894,11 +64897,26 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     #[test]
     fn invalid_tracker_confidence_is_not_silently_unscored() {
-        for confidence in ["0", "-0.1", "1.1", "\"NaN\"", "\"oops\"", "true", "[]"] {
+        for confidence in ["0", "-0.1", "1.1", "\"NaN\""] {
             let raw =
                 format!(r#"[{{"agent":"alice","choice":"accept","confidence":{confidence}}}]"#);
-            let error = super::forecasts_from_json(&raw).unwrap_err().to_string();
-            assert!(error.contains("probability in (0, 1]"), "{error}");
+            let err = super::forecasts_from_json(&raw).unwrap_err();
+            let label = super::policy_label::as_policy(&err).expect("label");
+            assert_eq!(label.label, "decision-input-warning");
+            assert!(
+                err.to_string().contains("probability in (0, 1]"),
+                "{confidence}: {err}"
+            );
+        }
+        for confidence in ["\"oops\"", "true", "[]"] {
+            let raw =
+                format!(r#"[{{"agent":"alice","choice":"accept","confidence":{confidence}}}]"#);
+            let err = super::forecasts_from_json(&raw).unwrap_err();
+            assert!(super::policy_label::as_policy(&err).is_none(), "{err}");
+            assert!(
+                err.to_string().contains("probability in (0, 1]"),
+                "{confidence}: {err}"
+            );
         }
     }
 

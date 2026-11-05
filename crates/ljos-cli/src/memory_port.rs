@@ -449,6 +449,39 @@ fn keep_empty_at(place: &Place, kind: &str) {
     let _ = write_if_absent(&path, &serde_json::to_vec_pretty(&row).unwrap_or_default());
 }
 
+/// A sync row the pack did not take. Search still finds the text.
+/// Nothing is posted.
+pub fn keep_rejected(text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let _ = write_kept(
+        &Place::current(),
+        text,
+        "lesson",
+        "materialisation-warning",
+        "the pack did not store this row",
+        "not-posted",
+    );
+}
+
+/// [`keep_rejected`] into a chosen slot. Tests use this.
+pub fn keep_rejected_at(place: &Place, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let _ = write_kept(
+        place,
+        text,
+        "lesson",
+        "materialisation-warning",
+        "the pack did not store this row",
+        "not-posted",
+    );
+}
+
 /// A note that names no ticket. It is stored here and not filed on one.
 pub fn keep_unattached(text: &str) {
     keep_unattached_at(&Place::current(), text);
@@ -2197,6 +2230,21 @@ mod tests {
         assert!(done.labels.iter().any(|label| label == "content-warning"));
         let found = selected(&here, "zircon", &SourceFilter::default(), false);
         assert_eq!(found[0].0.text, text);
+    }
+
+    #[test]
+    fn a_rejected_sync_row_stays_searchable_and_is_not_posted() {
+        let (_dir, target) = place("reject");
+        keep_rejected_at(&target, "the shared firing stays local");
+        let found = selected(&target, "firing", &SourceFilter::default(), false);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0.text, "the shared firing stays local");
+        assert!(found[0]
+            .0
+            .labels
+            .iter()
+            .any(|label| label == "materialisation-warning"));
+        assert_eq!(found[0].0.effect, "not-posted");
     }
 
     #[test]
