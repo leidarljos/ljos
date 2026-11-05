@@ -390,7 +390,7 @@ tools, guard and memory first: `rule`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. Every listed tool costs its description and
-schema on every session: 7,872 tokens for the core set against 17,788 for all
+schema on every session: 7,865 tokens for the core set against 17,781 for all
 fifty-two (o200k_base count of `initialize` instructions and the `tools/list`
 result). `LJOS_MCP_TOOLS=all` lists every tool. Cards are the resources
 `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, and the protocol is `ljos://protocol`.
