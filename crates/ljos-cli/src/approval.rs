@@ -743,6 +743,10 @@ fn hook_output_at(
     now: Result<u64>,
     granted: &mut bool,
 ) -> String {
+    if !crate::guard_mode::is_strict() {
+        *granted = false;
+        return hook_output_ruled(call, context, verdict);
+    }
     let Some(rule) = verdict.filter(|rule| rule.verdict == "ask") else {
         return hook_output_ruled(call, context, verdict);
     };
@@ -1802,6 +1806,57 @@ mod tests {
             .next()
             .unwrap()
             .into()
+    }
+
+    #[test]
+    fn advisory_command_output_does_not_create_a_consent_store() {
+        let _mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Advisory);
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let input = input(temp.path());
+        let mut granted = true;
+        let result = hook_output_at(
+            &input,
+            &hook_call(&input),
+            "fixture context",
+            Some(&ask()),
+            &root,
+            Ok(100),
+            &mut granted,
+        );
+        assert!(!root.exists());
+        assert!(!granted);
+        assert!(!crate::answer_denies(&result));
+        assert!(result.contains("fixture context"));
+        assert!(result.contains("A push needs consent."));
+        assert!(!result.contains("ljos approve"));
+    }
+
+    #[test]
+    fn advisory_command_output_leaves_an_existing_one_use_grant_unspent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let input = input(temp.path());
+        let id = request_id(&output(&input, &ask(), &root, 100));
+        Store::open(&root, 101).unwrap().approve(&id).unwrap();
+        {
+            let _mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Advisory);
+            let mut granted = false;
+            let result = hook_output_at(
+                &input,
+                &hook_call(&input),
+                "",
+                Some(&ask()),
+                &root,
+                Ok(102),
+                &mut granted,
+            );
+            assert!(!granted);
+            assert!(!crate::answer_denies(&result));
+            assert!(Store::open(&root, 102).unwrap().requests[0].approved);
+        }
+        assert!(output(&input, &ask(), &root, 103).is_empty());
+        assert!(Store::open(&root, 104).unwrap().requests.is_empty());
     }
 
     #[test]
