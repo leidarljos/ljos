@@ -18362,7 +18362,7 @@ pub(crate) fn queue_memory(
     if !pack_copy::pack_copy_ok(text) {
         let why = pack_copy::gate_refusal(text)
             .unwrap_or_else(|| "the pack would refuse this copy".into());
-        memory_port::keep_prose(text, &why);
+        memory_port::keep_prose(text, kind, &why);
         bail!("queue: the pack would refuse this copy");
     }
     let at = std::time::SystemTime::now()
@@ -18408,7 +18408,7 @@ fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
         if !intact {
             let why = pack_copy::gate_refusal(trimmed)
                 .unwrap_or_else(|| "the pack would refuse this copy".into());
-            memory_port::keep_prose(trimmed, &why);
+            memory_port::keep_prose(trimmed, &note.kind, &why);
         }
         for text in copies {
             let item = note_queue::Queued {
@@ -18444,6 +18444,7 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
         if note.kind != "lesson" {
             memory_port::keep_prose(
                 &note.text,
+                &note.kind,
                 "a note is kept on the ticket, not in memory; this copy was dropped",
             );
             return note_queue::Sent::Refused(
@@ -18454,7 +18455,7 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
             Ok(body) => note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string()),
             Err(e) if note_can_wait(&e) => note_queue::Sent::Wait(format!("{e:#}")),
             Err(e) => {
-                memory_port::keep_prose(&note.text, &format!("{e:#}"));
+                memory_port::keep_prose(&note.text, &note.kind, &format!("{e:#}"));
                 note_queue::Sent::Refused(format!("{e:#}"))
             }
         }

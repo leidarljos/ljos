@@ -452,21 +452,14 @@ pub fn label_for_gate(why: &str) -> &'static str {
 
 /// Keep `text` whole. A later search finds it even when the pack stored
 /// only a fitted copy, or stored nothing.
-pub fn keep_prose(text: &str, why: &str) {
+pub fn keep_prose(text: &str, kind: &str, why: &str) {
     let text = text.trim();
     if text.is_empty() {
-        keep_empty("prose");
+        keep_empty(kind);
         return;
     }
     let place = Place::current();
-    let _ = write_kept(
-        &place,
-        text,
-        "lesson",
-        label_for_gate(why),
-        why,
-        "stored-local",
-    );
+    let _ = write_kept(&place, text, kind, label_for_gate(why), why, "stored-local");
 }
 
 /// Record an empty write. The text stays empty. Nothing is invented.
@@ -1261,13 +1254,7 @@ fn overlap(text: &str, query: &str) -> f64 {
 }
 
 fn to_hit(row: &Row, score: f64) -> Hit {
-    let mut entities = row.entities.clone();
-    for label in &row.labels {
-        let tag = format!("seat:label:{label}");
-        if !entities.contains(&tag) {
-            entities.push(tag);
-        }
-    }
+    let entities = row.entities.clone();
     Hit {
         id: Some(row.id.clone()),
         text: row.text.clone(),

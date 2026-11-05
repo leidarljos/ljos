@@ -243,7 +243,8 @@ fn write_fitted(
     let Some(why) = refused else {
         return post(client, atom);
     };
-    crate::memory_port::keep_prose(&text, &why);
+    let kind = atom["kind"].as_str().unwrap_or("lesson");
+    crate::memory_port::keep_prose(&text, kind, &why);
     let copies = crate::pack_copy::pack_copies(&text);
     if copies.is_empty() {
         return post(client, atom);
@@ -409,7 +410,8 @@ pub fn import_open(budget_ms: u64) -> Imported {
             }
             Err(err) => {
                 let text = rec.atom["text"].as_str().unwrap_or("");
-                crate::memory_port::keep_prose(text, &format!("legacy proposal: {err:#}"));
+                let kind = rec.atom["kind"].as_str().unwrap_or("lesson");
+                crate::memory_port::keep_prose(text, kind, &format!("legacy proposal: {err:#}"));
                 rec.status = "refused".into();
             }
         }
