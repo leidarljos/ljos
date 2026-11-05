@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/ljos-cli", "crates/ljos-hud", "crates/ljos-test-boot"]
+members = [
+    "crates/ljos-cli",
+    "crates/ljos-hud",
+    "crates/ljos-test-boot",
+    "scripts/longmemeval_s_recall",
+]
 
 [workspace.package]
 version = "0.39.0"

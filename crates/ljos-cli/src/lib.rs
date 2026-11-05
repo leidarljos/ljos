@@ -21985,11 +21985,11 @@ impl Rule {
         format!("warning: {} (ljos rule `{}`)", self.reason, self.pattern)
     }
 
-    /// Whether this rule stops the call. Only the cloud seat push rule
+    /// Whether this rule stops the call. In advisory mode the cloud seat push rule
     /// does: a push to a branch outside the allowlist, a force push, or a
     /// remote branch or tag delete. A pack, seat, user or policyd rule,
     /// including one a `policyd_config` would have blocked, is a warning.
-    /// The call runs.
+    /// Strict mode also enforces deny and ask command decisions.
     #[must_use]
     pub fn blocks(&self) -> bool {
         cloud::refuses(self)
@@ -37680,12 +37680,16 @@ pub fn tracker_commit_lock(dir: &Path) -> CommitLock {
     tracker_lock_path(dir).map_or(CommitLock(None), |path| CommitLock::acquire(&path))
 }
 
-/// How long a background push's `flock -w` waits for `.ljos-commit.lock`,
-/// in whole seconds. This is the same wait [`tracker_lock_wait`] uses when
+/// How long a background push waits for `.ljos-commit.lock`, in whole
+/// seconds. This is the same wait [`tracker_lock_wait`] uses when
 /// `LJOS_TRACKER_LOCK_WAIT` is unset: long enough for a hook to finish a
 /// normal push, and short enough that a stuck lock does not hold the next
-/// seat. When the wait ends, the push runs without the lock.
+/// seat. When the wait ends, a contended spawn is refused.
 pub const TRACKER_FLOCK_WAIT_SECS: u64 = 20;
+
+/// Pause between non-blocking `flock(2)` tries while a background push
+/// waits for [`TRACKER_LOCK`].
+const FLOCK_POLL_MS: u64 = 200;
 
 /// How long a tracker write waits for another writer's commit lock before
 /// it says so and leaves the write uncommitted: `LJOS_TRACKER_LOCK_WAIT`
@@ -38531,22 +38535,89 @@ pub(crate) fn git_text_index_busy(said: &str) -> bool {
     said.contains("index.lock") || said.contains(".lock': File exists")
 }
 
-/// The shell a background tracker push runs. It holds [`TRACKER_LOCK`] for
-/// the whole `git push`, including a hook, with the same `flock` the
-/// in-process writers take. The wait is [`TRACKER_FLOCK_WAIT_SECS`]. A host
-/// without `flock`, or one whose lock is still held when that wait ends,
-/// still pushes.
-fn background_push_script(dir: &Path, remote: &str, branch: &str) -> String {
-    let script = tracker_push::push_script_explicit(remote, branch);
-    let Some(lock) = tracker_lock_path(dir) else {
-        return script;
-    };
-    let lock = tools::sh_quote(&lock.display().to_string());
-    let script = tools::sh_quote(&script);
-    let wait = TRACKER_FLOCK_WAIT_SECS;
-    format!(
-        "if command -v flock >/dev/null 2>&1; then flock -w {wait} -x {lock} sh -c {script} || sh -c {script}; else sh -c {script}; fi"
-    )
+/// `git push` as its own process. The child takes [`TRACKER_LOCK`] with
+/// `flock(2)` and keeps that descriptor across exec, so the lock covers the
+/// push and its hook and drops when git exits. macOS has the syscall and
+/// does not ship the `flock` command, which is why a shell `flock -w` held
+/// nothing there. The wait is [`TRACKER_FLOCK_WAIT_SECS`]. A lock that is
+/// still held when that wait ends refuses the spawn.
+fn spawn_background_push(
+    dir: &Path,
+    remote: &str,
+    branch: &str,
+    out: std::fs::File,
+) -> std::io::Result<std::process::Child> {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
+    let args = tracker_push::push_args_explicit(remote, branch);
+    let mut push = git_cmd();
+    push.current_dir(dir)
+        .args(&args)
+        .stdin(std::process::Stdio::null());
+    let err = out.try_clone()?;
+    push.stdout(out).stderr(err);
+    git_hooks::hook_child_env(&mut push);
+    tracker_publish_lock::inherit(&mut push);
+    let path = tracker_lock_path(dir).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "tracker commit lock path is unavailable",
+        )
+    })?;
+    let original = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    // The child's stdio setup cannot replace this ownership descriptor.
+    let fd = unsafe { libc::fcntl(original.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let lock = unsafe { std::fs::File::from_raw_fd(fd) };
+    drop(original);
+    // SAFETY: the child closure uses only descriptor and sleep syscalls.
+    // The owned file stays open until spawn returns; successful exec retains it.
+    unsafe {
+        push.pre_exec(move || hold_inherited_lock(fd, TRACKER_FLOCK_WAIT_SECS));
+    }
+    let spawned = push.spawn();
+    drop(push);
+    drop(lock);
+    spawned
+}
+
+/// Acquire the inherited commit lock and retain it through exec.
+/// Contention beyond the wait or a descriptor error refuses this spawn.
+///
+/// # Safety
+/// Called after fork and before exec with an owned inherited descriptor.
+/// This function must not allocate or acquire a Rust lock.
+unsafe fn hold_inherited_lock(fd: libc::c_int, wait_secs: u64) -> std::io::Result<()> {
+    let mut left_ms = wait_secs.saturating_mul(1_000);
+    loop {
+        if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) == 0 {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        let code = error.raw_os_error().unwrap_or(libc::EIO);
+        if code != libc::EWOULDBLOCK && code != libc::EAGAIN && code != libc::EINTR {
+            return Err(error);
+        }
+        if left_ms == 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EWOULDBLOCK));
+        }
+        let step = FLOCK_POLL_MS.min(left_ms);
+        let req = libc::timespec {
+            tv_sec: (step / 1_000) as libc::time_t,
+            tv_nsec: ((step % 1_000) * 1_000_000) as libc::c_long,
+        };
+        libc::nanosleep(&req, std::ptr::null_mut());
+        left_ms -= step;
+    }
 }
 
 /// How old an `index.lock` with no git in its checkout must be before ljos
@@ -39041,24 +39112,12 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
     // This push is the latest word on the remote; the exited logs before
     // it are not. A push still running keeps its log.
     prune_push_logs(Some(&log));
-    let err = out.try_clone();
     // Another seat's push is fetched and rebased, not merged and not forced.
-    // The first attempt is this script. A non-fast-forward comes back here
+    // The first attempt is this push. A non-fast-forward comes back here
     // and [`tracker_push::publish_explicit`] unions the org headings, then
     // retries to the same checked destination.
-    let script = background_push_script(dir, &destination.remote, &destination.branch);
-    let mut push = std::process::Command::new("sh");
-    push.current_dir(dir)
-        .args(["-c", &script])
-        .stdin(std::process::Stdio::null())
-        .stdout(out);
-    if let Ok(err) = err {
-        push.stderr(err);
-    }
-    git_hooks::hook_child_env(&mut push);
-    no_git_prompt(&mut push);
-    tracker_publish_lock::inherit(&mut push);
-    let mut child = match push.spawn() {
+    let mut child = match spawn_background_push(dir, &destination.remote, &destination.branch, out)
+    {
         Ok(c) => c,
         Err(e) => {
             return say(format!(
@@ -39067,7 +39126,6 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
         }
     };
     let root_key = publication.common_dir().to_string_lossy().into_owned();
-    drop(push);
     drop(publication);
     let _ = std::fs::write(push_root_record(&log), root_key);
     let _ = std::fs::write(push_child_record(&log), format!("{}\n", child.id()));
@@ -44626,25 +44684,51 @@ mod tests {
     /// The pause between polls. Twenty milliseconds is shorter than the
     /// thing being waited on, so the deadline is what bounds the test.
     const TEST_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+    /// `LJOS_TRACKER_PUSH_WAIT` when the push must still be inside its hook
+    /// at the moment the call returns.
+    const PUSH_BACKGROUND_AFTER_SECS: &str = "1";
+    /// `LJOS_TRACKER_PUSH_WAIT` once the hook has been released and the next
+    /// push should finish before the call returns.
+    const PUSH_FOREGROUND_WAIT_SECS: &str = "10";
+    /// How long a test keeps trying to take a tracker lock that the
+    /// background push is supposed to be holding. Taking it is a failure.
+    const LOCK_STILL_HELD: std::time::Duration = std::time::Duration::from_millis(200);
 
-    /// A background push nobody waits on stays a zombie. That is finished.
+    /// A background push nobody waits on stays a zombie of this process.
+    /// That is finished. `waitpid` reaps it on Linux and on macOS; reading
+    /// `/proc/<pid>/stat` does not, because macOS has no `/proc`.
     fn push_is_finished(pid: u32) -> bool {
+        let mut status: libc::c_int = 0;
+        // SAFETY: `WNOHANG` reaps only a child that has already exited.
+        let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if reaped == pid as libc::pid_t {
+            return true;
+        }
         let alive = std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .status()
             .map(|status| status.success())
             .unwrap_or(false);
-        if !alive {
-            return true;
-        }
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|stat| {
-                stat.rsplit(')')
-                    .next()
-                    .map(|rest| rest.trim().starts_with('Z'))
-            })
-            .unwrap_or(false)
+        !alive
+    }
+
+    /// A pre-push hook blocks on `gate` until the test writes a line.
+    fn blocking_hook(hook: &std::path::Path, body: &str) {
+        std::fs::write(hook, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn make_gate(path: &std::path::Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `name` is a NUL-terminated path. `mkfifo` creates the gate.
+        let rc = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo {}", path.display());
+    }
+
+    fn release_gate(path: &std::path::Path) {
+        std::fs::write(path, "go\n").unwrap();
     }
 
     /// Poll `ready` until it is true or `limit` has passed.
@@ -46229,9 +46313,15 @@ mod tests {
             git(&root, &["config", k, v]);
         }
         let hook = hooks.join("pre-push");
-        std::fs::write(&hook, "#!/bin/sh\nsleep 4\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let gate = dir.path().join("hook-gate");
+        let state = root.join("hook-state");
+        make_gate(&gate);
+        let held = format!(
+            "#!/bin/sh\necho running > \"{}\"\nread _ < \"{}\"\nexit 0\n",
+            state.display(),
+            gate.display()
+        );
+        blocking_hook(&hook, "#!/bin/sh\nexit 0\n");
         let issues = root.join("Software/probe/issues.org");
         let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-c3d4\n:END:\n";
         std::fs::write(&issues, heading).unwrap();
@@ -46241,22 +46331,29 @@ mod tests {
             &root,
             &["remote", "add", "origin", remote.to_str().unwrap()],
         );
-        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
         git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
-        std::fs::write(&hook, "#!/bin/sh\nsleep 4\n").unwrap();
+        blocking_hook(&hook, &held);
         std::env::set_var("VISSUE_ROOT", &root);
         std::env::set_var("VISSUE_NO_ROUTE", "1");
         std::env::remove_var("ISSUE_ROOT");
         std::env::remove_var("LJOS_TRACKER_GIT");
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "1");
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", PUSH_BACKGROUND_AFTER_SECS);
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
 
         std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
         let said = super::persist_tracker("probe-c3d4", "claimed");
-        assert!(said.contains("still running after 1s"), "{said}");
-        // The pre-push hook sleeps 4s. Returning while that process is
-        // still alive is the bound: a wall clock of a few seconds is eaten
-        // by git itself when the rest of the suite is also running git.
+        assert!(
+            said.contains(&format!(
+                "still running after {PUSH_BACKGROUND_AFTER_SECS}s"
+            )),
+            "{said}"
+        );
+        // The hook blocks on the gate. The call has already returned, and
+        // the push process is still the hook's parent.
+        assert!(
+            wait_until(TEST_WAIT, || state.is_file()),
+            "the pre-push hook did not start: {said}"
+        );
         let log = said
             .split("(log ")
             .nth(1)
@@ -46270,6 +46367,7 @@ mod tests {
             .expect("kill -0")
             .success();
         assert!(alive, "the pre-push hook had already exited: {said}");
+        release_gate(&gate);
 
         std::thread::sleep(std::time::Duration::from_secs(5));
         std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
@@ -46365,9 +46463,9 @@ mod tests {
             wait_until(TEST_WAIT, || push_is_finished(pid)),
             "the pre-push hook did not finish"
         );
-        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+        blocking_hook(&hook, "#!/bin/sh\nexit 0\n");
         std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "10");
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", PUSH_FOREGROUND_WAIT_SECS);
         let said = super::persist_tracker("probe-c3d4", "finished");
         assert!(said.contains("committed and pushed"), "{said}");
         for var in [
@@ -47213,7 +47311,10 @@ mod tests {
             git(&root, &["config", k, v]);
         }
         let hook = hooks.join("pre-push");
+        let gate = dir.path().join("hook-gate");
+        make_gate(&gate);
         let repo = root.display().to_string();
+        let gate_path = gate.display().to_string();
         let slow = format!(
             "#!/bin/sh\n\
              flag=\"{repo}/hook-once\"\n\
@@ -47221,14 +47322,12 @@ mod tests {
              echo once > \"$flag\"\n\
              : > \"{repo}/.git/index.lock\"\n\
              echo held > \"{repo}/hook-state\"\n\
-             sleep 5\n\
+             read _ < \"{gate_path}\"\n\
              if [ -f \"{repo}/.git/index.lock\" ]; then echo survived > \"{repo}/hook-state\"; fi\n\
              rm -f \"{repo}/.git/index.lock\"\n\
              exit 0\n"
         );
-        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        blocking_hook(&hook, "#!/bin/sh\nexit 0\n");
         let issues = root.join("Software/probe/issues.org");
         let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-lk11\n:END:\n";
         std::fs::write(&issues, heading).unwrap();
@@ -47239,30 +47338,51 @@ mod tests {
             &["remote", "add", "origin", remote.to_str().unwrap()],
         );
         git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
-        std::fs::write(&hook, &slow).unwrap();
+        blocking_hook(&hook, &slow);
         std::env::set_var("VISSUE_ROOT", &root);
         std::env::set_var("VISSUE_NO_ROUTE", "1");
         std::env::remove_var("ISSUE_ROOT");
         std::env::remove_var("LJOS_TRACKER_GIT");
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "1");
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", PUSH_BACKGROUND_AFTER_SECS);
         std::env::set_var("LJOS_SEAT", "saddle");
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
 
         std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
         let said = super::persist_tracker("probe-lk11", "claimed");
-        assert!(said.contains("still running after 1s"), "{said}");
         assert!(
-            super::tracker_commit_lock_by(
-                &root,
-                std::time::Instant::now() + std::time::Duration::from_millis(200)
-            )
-            .is_none(),
+            said.contains(&format!(
+                "still running after {PUSH_BACKGROUND_AFTER_SECS}s"
+            )),
+            "{said}"
+        );
+        let state = root.join("hook-state");
+        assert!(
+            wait_until(TEST_WAIT, || {
+                std::fs::read_to_string(&state)
+                    .map(|text| text.trim() == "held")
+                    .unwrap_or(false)
+            }),
+            "the pre-push hook did not take the index lock: {said}"
+        );
+        assert!(
+            super::tracker_commit_lock_by(&root, std::time::Instant::now() + LOCK_STILL_HELD)
+                .is_none(),
             "the background push does not hold the tracker lock: {said}"
         );
         assert!(
             root.join(".git/index.lock").is_file(),
             "the hook's index.lock was already gone"
         );
+        release_gate(&gate);
+        assert!(
+            wait_until(TEST_WAIT, || {
+                std::fs::read_to_string(&state)
+                    .map(|text| text.trim() == "survived")
+                    .unwrap_or(false)
+            }),
+            "the hook's index.lock did not survive until the hook looked"
+        );
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", PUSH_FOREGROUND_WAIT_SECS);
         std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
         let said = super::persist_tracker("probe-lk11", "finished");
         assert!(
@@ -75364,5 +75484,42 @@ impl std::ops::Deref for GuardReport {
 impl std::fmt::Display for GuardReport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.text)
+    }
+}
+
+#[cfg(test)]
+mod background_push_syscall_tests {
+    use super::*;
+    use std::os::unix::io::AsRawFd;
+
+    #[test]
+    fn an_invalid_commit_descriptor_is_an_error() {
+        let error = unsafe { hold_inherited_lock(-1, 0) }.unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[test]
+    fn a_contended_commit_descriptor_never_becomes_an_unlocked_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("commit-owner");
+        let first = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let second = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(first.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let error = unsafe { hold_inherited_lock(second.as_raw_fd(), 0) }.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_ne!(
+            unsafe { libc::fcntl(second.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
     }
 }

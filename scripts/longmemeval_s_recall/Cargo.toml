@@ -1,0 +1,18 @@
+[package]
+name = "longmemeval_s_recall"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Session recall of LongMemEval_S with the pack's lexical scorer and island order."
+
+[[bin]]
+name = "longmemeval_s_recall"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+packset-core = "0.17.0"
+serde_json.workspace = true
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["tls"] }

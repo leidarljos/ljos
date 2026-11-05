@@ -338,6 +338,28 @@ encodes with e5-large-v2. Activation flows to well-connected claims, and a
 question asks for something else. So the island is what the seat prints beside the hits for
 orientation, and what fires together after use. It is never the order the hits come in.
 
+``longmemeval_s_recall`` scored the public cleaned LongMemEval_S file on one CPU.
+From a checkout, invoke it as ``cargo run --release -p longmemeval_s_recall``.
+Read the program at ``scripts/longmemeval_s_recall``.
+The program keeps a download only after the pinned sha256 matches.
+A hit needs one evidence session inside the cutoff.
+Recall averages how much of the evidence set those same rows recovered.
+One, five and ten are the depths the log prints.
+Abstentions end in ``_abs`` and stay unscored.
+Scoring 470 questions took 71.881 seconds.
+The host was an Intel Xeon processor with 8 cores and MemTotal 49342768 kB.
+The log names ``packset_core 0.17.0`` and ljos commit 6fac806b5ab91106bdbbdf24429a191d5371f349.
+The two arm lines from eval.log follow.
+
+.. code:: text
+
+   arm bm25+ hit@1 0.848936 recall@1 0.549574 hit@5 0.959574 recall@5 0.909113 hit@10 0.982979 recall@10 0.949894
+   arm island hit@1 0.848936 recall@1 0.549574 hit@5 0.959574 recall@5 0.909113 hit@10 0.959574 recall@10 0.909113
+
+The arms agree at one and at five.
+Activation leaves an untouched session unranked, so the island trails at ten.
+This run loads no encoder, and neither a dense arm nor a fused arm appears.
+
 Time as data
 ------------
 

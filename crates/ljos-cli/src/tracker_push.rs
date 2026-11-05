@@ -207,11 +207,15 @@ fn git_push(dir: &Path, args: &[&str]) -> Output {
     git(dir, args)
 }
 
-/// One explicit push for a destination already approved by the caller.
-pub(crate) fn push_script_explicit(remote: &str, branch: &str) -> String {
-    let remote = crate::tools::sh_quote(remote);
-    let spec = crate::tools::sh_quote(&format!("HEAD:refs/heads/{branch}"));
-    format!("git push -q {remote} {spec}")
+/// Arguments for one explicit push. No `--force`: a rejected update is
+/// rebased and tried again by the caller.
+pub(crate) fn push_args_explicit(remote: &str, branch: &str) -> Vec<String> {
+    vec![
+        "push".to_string(),
+        "-q".to_string(),
+        remote.to_string(),
+        format!("HEAD:refs/heads/{branch}"),
+    ]
 }
 
 /// Whether git refused the update because the remote moved.
@@ -1483,11 +1487,19 @@ mod tests {
     }
 
     #[test]
-    fn the_push_script_does_not_force() {
-        let script = push_script_explicit("origin", "main");
-        assert!(!script.contains("force"), "{script}");
-        assert!(!script.contains(" -f "), "{script}");
-        assert!(script.contains("'HEAD:refs/heads/main'"), "{script}");
+    fn the_push_does_not_force() {
+        let args = push_args_explicit("origin", "main");
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--force" || arg == "-f" || arg.contains("force")),
+            "{args:?}"
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("HEAD:refs/heads/main"),
+            "{args:?}"
+        );
     }
 
     #[test]
