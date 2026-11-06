@@ -21,6 +21,22 @@ use std::time::{Duration, Instant};
 /// for that, which is enough for a cold store open on the suite's machines.
 const READY: Duration = Duration::from_secs(15);
 
+/// A script written in the same instant can still be busy to exec.
+fn spawn_ready(cmd: &mut Command, program: &Path) -> Child {
+    let mut last = String::new();
+    for _ in 0..8 {
+        match cmd.spawn() {
+            Ok(child) => return child,
+            Err(err) if err.raw_os_error() == Some(26) => {
+                last = err.to_string();
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(err) => panic!("spawn {}: {err}", program.display()),
+        }
+    }
+    panic!("spawn {}: {last}", program.display())
+}
+
 /// Pause between listens checks. The socket shows up when the writer
 /// binds; 50ms is the pause the old starts used, short of a spin and
 /// well inside [`READY`].
@@ -273,9 +289,7 @@ impl Builder {
             // writer also stops children it spawned.
             cmd.process_group(0);
         }
-        let child = cmd
-            .spawn()
-            .unwrap_or_else(|err| panic!("spawn {}: {err}", program.display()));
+        let child = spawn_ready(&mut cmd, &program);
         let pid = child.id();
         let slot = LIVE.claim(pid);
         track(pid);
