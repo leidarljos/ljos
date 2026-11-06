@@ -27236,13 +27236,19 @@ pub fn learn_record(
 ) -> Result<(Vec<Trust>, std::collections::BTreeMap<String, Standing>)> {
     let outcome = outcome.trim();
     if outcome.is_empty() {
-        bail!("learn: an outcome is required");
+        return Err(policy_label::labelled(
+            "decision-input-warning",
+            "learn: an outcome is required",
+        ));
     }
     let mut agents: Vec<&str> = ballots.iter().map(|(a, _)| a.as_str()).collect();
     agents.sort_unstable();
     agents.dedup();
     if agents.len() < 2 {
-        bail!("learn: fewer than two voters, nothing to weigh");
+        return Err(policy_label::labelled(
+            "decision-input-warning",
+            "learn: fewer than two voters, nothing to weigh",
+        ));
     }
     let mut next = records.clone();
     for (agent, choice) in ballots {
@@ -27536,20 +27542,32 @@ pub fn learn_shared(
     share: f64,
 ) -> Result<Vec<Trust>> {
     if !(beta > 0.0 && beta < 1.0) {
-        bail!("learn: beta {beta} is not in (0, 1)");
+        return Err(policy_label::labelled(
+            "decision-input-warning",
+            format!("learn: beta {beta} is not in (0, 1)"),
+        ));
     }
     if !(0.0..1.0).contains(&share) {
-        bail!("learn: share {share} is not in [0, 1)");
+        return Err(policy_label::labelled(
+            "decision-input-warning",
+            format!("learn: share {share} is not in [0, 1)"),
+        ));
     }
     let outcome = outcome.trim();
     if outcome.is_empty() {
-        bail!("learn: an outcome is required");
+        return Err(policy_label::labelled(
+            "decision-input-warning",
+            "learn: an outcome is required",
+        ));
     }
     let mut agents: Vec<&str> = ballots.iter().map(|(a, _)| a.as_str()).collect();
     agents.sort_unstable();
     agents.dedup();
     if agents.len() < 2 {
-        bail!("learn: fewer than two voters, nothing to weigh");
+        return Err(policy_label::labelled(
+            "decision-input-warning",
+            "learn: fewer than two voters, nothing to weigh",
+        ));
     }
     let refuted = |agent: &str| {
         ballots
@@ -47562,6 +47580,98 @@ mod tests {
             serde_json::json!({"kind": "trust", "from": "b", "to": "c", "weight": 0.5, "hits": 1.0, "misses": 1.0, "ts": "2026-09-12T01:00:00Z"}),
         ];
         assert_eq!(records_from_atoms(&atoms)["c"], (1.0, 3.0));
+    }
+
+    fn stops_before_a_record(err: anyhow::Error, sentence: &str) {
+        let label = policy_label::as_policy(&err).expect("a policy label exits 0");
+        assert_eq!(label.label, "decision-input-warning");
+        assert!(err.to_string().contains(sentence), "{err}");
+    }
+
+    #[test]
+    fn an_empty_outcome_does_not_store_a_record() {
+        let ballots = vec![
+            ("a".to_string(), "ship".to_string()),
+            ("b".to_string(), "hold".to_string()),
+        ];
+        let prior = std::collections::BTreeMap::from([("a".to_string(), (2.0, 1.0))]);
+        let err = learn_record(&ballots, "  ", &prior, &[]).unwrap_err();
+        stops_before_a_record(err, "an outcome is required");
+        assert_eq!(prior["a"], (2.0, 1.0));
+    }
+
+    #[test]
+    fn fewer_than_two_voters_do_not_store_a_record() {
+        let ballots = vec![("a".to_string(), "ship".to_string())];
+        let prior = std::collections::BTreeMap::from([("a".to_string(), (2.0, 1.0))]);
+        let err = learn_record(&ballots, "ship", &prior, &[]).unwrap_err();
+        stops_before_a_record(err, "fewer than two voters");
+        assert_eq!(prior["a"], (2.0, 1.0));
+    }
+
+    #[test]
+    fn a_beta_outside_the_range_does_not_store_a_record() {
+        let ballots = vec![
+            ("a".to_string(), "ship".to_string()),
+            ("b".to_string(), "hold".to_string()),
+        ];
+        let rows = vec![Trust {
+            from: "a".into(),
+            to: "b".into(),
+            weight: 0.4,
+            about: Vec::new(),
+        }];
+        let err = learn_shared(&ballots, "ship", &rows, 1.0, &[], 0.0).unwrap_err();
+        stops_before_a_record(err, "beta");
+        assert_eq!(rows[0].weight, 0.4);
+    }
+
+    #[test]
+    fn a_share_outside_the_range_does_not_store_a_record() {
+        let ballots = vec![
+            ("a".to_string(), "ship".to_string()),
+            ("b".to_string(), "hold".to_string()),
+        ];
+        let rows = vec![Trust {
+            from: "a".into(),
+            to: "b".into(),
+            weight: 0.4,
+            about: Vec::new(),
+        }];
+        let err = learn_shared(&ballots, "ship", &rows, 0.5, &[], 1.0).unwrap_err();
+        stops_before_a_record(err, "share");
+        assert_eq!(rows[0].weight, 0.4);
+    }
+
+    #[test]
+    fn an_empty_outcome_on_a_shared_learn_does_not_store_a_record() {
+        let ballots = vec![
+            ("a".to_string(), "ship".to_string()),
+            ("b".to_string(), "hold".to_string()),
+        ];
+        let rows = vec![Trust {
+            from: "a".into(),
+            to: "b".into(),
+            weight: 0.4,
+            about: Vec::new(),
+        }];
+        let err = learn_shared(&ballots, "  ", &rows, 0.5, &[], 0.0).unwrap_err();
+        stops_before_a_record(err, "an outcome is required");
+        assert_eq!(rows[0].weight, 0.4);
+    }
+
+    #[test]
+    fn fewer_than_two_voters_on_a_shared_learn_do_not_store_a_record() {
+        let ballots = vec![("a".to_string(), "ship".to_string())];
+        let rows = vec![Trust {
+            from: "a".into(),
+            to: "b".into(),
+            weight: 0.4,
+            about: Vec::new(),
+        }];
+        let err = learn_shared(&ballots, "ship", &rows, 0.5, &[], 0.0).unwrap_err();
+        stops_before_a_record(err, "fewer than two voters");
+        assert_eq!(rows[0].weight, 0.4);
     }
 
     #[test]
