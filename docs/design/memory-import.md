@@ -33,11 +33,11 @@ A listing shows that stored timestamp.
 It also shows the same instant in the process zone, from the system clock.
 A value that does not parse is shown raw and labelled `time-unparsed`.
 
-The export chooses which lessons go into that file.
-It leaves out another seat's lessons.
-It leaves out a lesson whose source carries a password, token, key, or environment field.
-It leaves out text the pack rejects as a credential or as an instruction.
-It does not write embeddings.
+That file's export chooses which lessons go into it.
+Another seat's lessons stay out.
+A lesson whose source carries a password, token, key, or environment field stays out.
+Text the pack rejects as a credential or as an instruction stays out.
+Embeddings are not written.
 
 Import labels each row `imported` and `unintegrated`.
 Integrate then labels the mapping.
@@ -58,7 +58,7 @@ Those filters run before the result limit cuts the list.
 With no filter, pack hits keep their order.
 Slot hits that share a query word are added after them.
 
-Search also returns a lesson the pack's prose check would split.
+Those hits also include a lesson the pack's prose check would split.
 The original is stored whole.
 The label is `prose-warning`, `oversize`, or `content-warning`, matching what the check reported.
 The fitted copies can still be posted.

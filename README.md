@@ -2,13 +2,13 @@
 
 Claude Code, Codex, Cursor and other coding runners work on one person's repositories. A new session does not keep the last session's lessons. Two agents can claim the same work. Nobody can see who decided what.
 
-ljos is memory you write on purpose, a git-backed ticket tracker that agents share, and a warner for shell commands.
+ljos is the record of who decided what: memory you write on purpose, a git-backed ticket tracker that agents share, and a warner for shell commands.
 
 You install it once on a machine. Each agent gets a seat on a tracker. The tracker is a git repository of tickets. A seat files a ticket and opens a sitting on it. A sitting claims that ticket and gathers the checks and memories for the task.
 
-ljos warns about a shell command and does not stop it. `ljos-policyd` names a short list of dangerous actions. It is not a sandbox. A command that runs as you, outside a tool call, is not checked. If policyd is missing, slow, or crashes, the command runs and ljos logs a warning.
+Among those checks, ljos warns about a shell command and does not stop it. `ljos-policyd` names a short list of dangerous actions. It is not a sandbox. A command that runs as you, outside a tool call, is not checked. If policyd is missing, slow, or crashes, the command runs and ljos logs a warning.
 
-Ballots and votes are separate from memory. A person stores a lesson with `ljos remember`, or a preference with `ljos prefer`. The words are kept as written. At the end of a session, ljos reads the transcript. It keeps up to five sentences that state a rule, a cause, or a fix. Each sentence is a note on the open sitting. The prompt hook does not show that note as a fact. Set `LJOS_EXTRACT=off` to skip the read. With no open sitting, it writes nothing.
+That warning sits apart from ballots and votes, which are also separate from memory. A person stores a lesson with `ljos remember`, or a preference with `ljos prefer`. The words are kept as written. At the end of a session, ljos reads the transcript. It keeps up to five sentences that state a rule, a cause, or a fix. Each sentence is a note on the open sitting. The prompt hook does not show that note as a fact. Set `LJOS_EXTRACT=off` to skip the read. With no open sitting, it writes nothing.
 
 A person can also record a grant that lets a seat close tickets. The grant stores the person's quote.
 
@@ -18,7 +18,7 @@ These notes describe ljos 0.38.1.
 
 ## Try it
 
-Linux and macOS are supported. Windows works through WSL and is untested.
+Linux and macOS are supported. Windows works through Windows Subsystem for Linux (WSL) and is untested.
 
 ```
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
