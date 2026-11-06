@@ -33,7 +33,7 @@ A listing shows that stored timestamp.
 It also shows the same instant in the process zone, from the system clock.
 A value that does not parse is shown raw and labelled `time-unparsed`.
 
-That file's export chooses which lessons go into it.
+A labelled value stays in the listing as raw text; export of that file chooses which lessons go into it.
 Another seat's lessons stay out.
 A lesson whose source carries a password, token, key, or environment field stays out.
 Text the pack rejects as a credential or as an instruction stays out.
@@ -58,7 +58,7 @@ Those filters run before the result limit cuts the list.
 With no filter, pack hits keep their order.
 Slot hits that share a query word are added after them.
 
-Those hits also include a lesson the pack's prose check would split.
+Slot hits also include a lesson the pack's prose check would split.
 The original is stored whole.
 The label is `prose-warning`, `oversize`, or `content-warning`, matching what the check reported.
 The fitted copies can still be posted.

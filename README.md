@@ -6,15 +6,13 @@ ljos is the record of who decided what: memory you write on purpose, a git-backe
 
 You install it once on a machine. Each agent gets a seat on a tracker. The tracker is a git repository of tickets. A seat files a ticket and opens a sitting on it. A sitting claims that ticket and gathers the checks and memories for the task.
 
-Among those checks, ljos warns about a shell command and does not stop it. `ljos-policyd` names a short list of dangerous actions. It is not a sandbox. A command that runs as you, outside a tool call, is not checked. If policyd is missing, slow, or crashes, the command runs and ljos logs a warning.
-
-That warning sits apart from ballots and votes, which are also separate from memory. A person stores a lesson with `ljos remember`, or a preference with `ljos prefer`. The words are kept as written. At the end of a session, ljos reads the transcript. It keeps up to five sentences that state a rule, a cause, or a fix. Each sentence is a note on the open sitting. The prompt hook does not show that note as a fact. Set `LJOS_EXTRACT=off` to skip the read. With no open sitting, it writes nothing.
+Checks from the sitting include a shell warning. ljos warns about a shell command and does not stop it. `ljos-policyd` names a short list of dangerous actions. It is not a sandbox. A command that runs as you, outside a tool call, is not checked. If policyd is missing, slow, or crashes, the command runs and ljos logs a warning. Warning lines sit apart from ballots and votes, which are also separate from memory. A person stores a lesson with `ljos remember`, or a preference with `ljos prefer`. The words are kept as written. At the end of a session, ljos reads the transcript. It keeps up to five sentences that state a rule, a cause, or a fix. Each sentence is a note on the open sitting. The prompt hook does not show that note as a fact. Set `LJOS_EXTRACT=off` to skip the read. With no open sitting, it writes nothing.
 
 A person can also record a grant that lets a seat close tickets. The grant stores the person's quote.
 
-<!-- [[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]] -->
+[//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
 These notes describe ljos 0.38.1.
-<!-- [[[end]]] -->
+[//]: # ([[[end]]])
 
 ## Try it
 
@@ -117,16 +115,14 @@ global git hooks back, stops the hook server and removes the ljos programs. Wher
 `ljos` was, it leaves a stub that answers every hook call with an allow, because a
 runner that loaded its hook list while ljos was installed keeps calling that path
 until it restarts. `--no-stub` leaves nothing, `--all` removes the other seat
-programs too, `--purge` removes the state, data and configuration directories.
-
-With the binary already deleted by hand, the release ships the same as a script:
+programs too, `--purge` removes the state, data and configuration directories. A hand-deleted binary still has the same uninstall script from the release:
 
 ```
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/uninstall.sh && sh uninstall.sh
 ```
 
 The seat's hooks fail open on every runner: a `ljos` that is missing, crashes or
-times out lets the call run, and a gate whose hook fails answers allow with a note
+times out lets the call run, and a hook that fails answers allow with a note
 that says why nothing judged the call.
 `scripts/fresh-install-check.sh` installs into an empty `HOME`. A full
 session runs next. Offboard runs after that session. The last check confirms that `HOME` is clean.
@@ -231,7 +227,7 @@ Before an agent's shell command runs, the runner's hook hands it to `ljos hook`.
 `ljos hook` asks `ljos-policyd` and relays the answer. policyd is the one place
 that says whether a command is dangerous. ljos does not run a second set of
 command checks of its own. By default nothing ljos answers stops a command: it never
-refuses, asks or holds one. A cloud seat's push rule, below, is the one exception.
+refuses or asks about one, and it never blocks one. A cloud seat's push rule, below, is the one exception.
 
 policyd gives one of three answers.
 
@@ -246,7 +242,7 @@ The command runs.
 The hook does not deny the tool call, and a guard shim does not stop it.
 
 > **Security:** a warning is the only thing between a runner and a destructive
-> command. Keep backups, protect branches on the forge, and keep a runner where it
+> command. Keep backups. Protect branches on the forge. Put the runner where it
 > cannot reach what it must not touch.
 
 policyd reads the command as a shell does. It looks through `sh -c`, `env`, `timeout`,
@@ -302,7 +298,7 @@ Only ljos knows the tracker and the sitting, so it keeps two checks.
 - A protected-branch push warns when the current sitting's ticket has no
   settled consensus. The push runs. With one active seat, that seat's own vote
   is the consensus for the push check. With two or more seats, the normal quorum applies.
-  The `pre-push` git hook, once installed, still holds that push under a runner.
+  The `pre-push` git hook, once installed, still keeps that push under a runner.
 
 If `ljos-policyd` is missing or slow, the command runs and ljos logs a warning.
 `ljos doctor` shows the policy row. `ljos policy -- COMMAND` prints the answer for
