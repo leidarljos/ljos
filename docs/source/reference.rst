@@ -798,7 +798,7 @@ Help text
 .. code:: text
 
    $ ljos --version
-   ljos 0.38.1
+   ljos 0.39.0
    $ ljos --help
    Memory, a work tracker and a command guard for coding runners
 

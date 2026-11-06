@@ -5,6 +5,17 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.39.0 (2026-11-06)
+
+### Features
+
+- The README says what ljos is in one sentence, that a shell warning does not stop the command, and where the tool-list token counts are measured.
+- `ljos memory export`, `import`, `integrate`, and `imports` keep a seat's lessons in a local file under the tracker.
+  A lesson the pack's prose check would split stays stored whole.
+  That check's label stays with that lesson.
+  A waiting note no longer stops later notes in the queue.
+
+
 ## 0.38.1 (2026-11-04)
 
 ### Features
