@@ -8022,6 +8022,81 @@ fn cursor_hooks_satisfy(cursor: &Path, claude: &Path) -> bool {
     hook_installed(cursor, &only) && claude_has_seat_hook(claude)
 }
 
+/// Grok's file is the memory hook when every Grok event runs the seat's
+/// hook from that file or from the Claude settings file. Onboard leaves
+/// out of Grok's file the events the Claude file already runs, since Grok
+/// reads both files and an event in both ran the hook twice; a doctor
+/// that read Grok's file alone then called the hook missing.
+fn grok_hooks_satisfy(grok: &Path, claude: &Path, events: &[String]) -> bool {
+    let served = claude_seat_events(claude);
+    let left: Vec<String> = events
+        .iter()
+        .filter(|event| !served.contains(event))
+        .cloned()
+        .collect();
+    left.is_empty() || hook_installed(grok, &left)
+}
+
+#[cfg(test)]
+mod grok_hooks_satisfy_tests {
+    use super::*;
+
+    fn seat_hook_file(events: &[&str]) -> String {
+        let groups: Vec<String> = events
+            .iter()
+            .map(|event| {
+                format!(
+                    "\"{event}\": [{{\"hooks\": [{{\"type\": \"command\", \"command\": \"/x/ljos hook\", \"timeout\": 10}}]}}]"
+                )
+            })
+            .collect();
+        format!("{{\"hooks\": {{{}}}}}\n", groups.join(", "))
+    }
+
+    #[test]
+    fn events_the_claude_file_runs_count_for_grok() {
+        let dir = tempfile::tempdir().unwrap();
+        let grok = dir.path().join("ljos.json");
+        let claude = dir.path().join("settings.json");
+        let events: Vec<String> = [
+            "UserPromptSubmit",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "PreToolUse",
+            "PreCompact",
+            "Stop",
+            "SessionEnd",
+            "SubagentStop",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        std::fs::write(
+            &claude,
+            seat_hook_file(&[
+                "UserPromptSubmit",
+                "PostToolUse",
+                "PreToolUse",
+                "PreCompact",
+                "Stop",
+                "SessionEnd",
+                "SubagentStop",
+            ]),
+        )
+        .unwrap();
+        std::fs::write(&grok, seat_hook_file(&["PostToolUseFailure"])).unwrap();
+        assert!(grok_hooks_satisfy(&grok, &claude, &events));
+        std::fs::write(&grok, "{\"hooks\": {}}\n").unwrap();
+        assert!(!grok_hooks_satisfy(&grok, &claude, &events));
+        // No Claude file: Grok's own file has to carry every event.
+        std::fs::remove_file(&claude).unwrap();
+        assert!(!grok_hooks_satisfy(&grok, &claude, &events));
+        let all: Vec<&str> = events.iter().map(String::as_str).collect();
+        std::fs::write(&grok, seat_hook_file(&all)).unwrap();
+        assert!(grok_hooks_satisfy(&grok, &claude, &events));
+    }
+}
+
 /// The ljos Cursor plugin under Cursor's plugins directory, when installed:
 /// a clone in `local/ljos`, or a marketplace or `/add-plugin` install in
 /// `cache/<marketplace>/ljos/<commit>`.
@@ -15091,6 +15166,11 @@ fn harness_rows() -> Vec<Habitat> {
                     None if h.hooks_format.as_deref() == Some("cursor") => {
                         cursor_hooks_satisfy(&path, &expand("~/.claude/settings.json"))
                     }
+                    None if h.name == "grok" => grok_hooks_satisfy(
+                        &path,
+                        &expand("~/.claude/settings.json"),
+                        &hook_events_of(h),
+                    ),
                     None => hook_installed(&path, &hook_events_of(h)),
                 };
                 rows.push(Habitat {
