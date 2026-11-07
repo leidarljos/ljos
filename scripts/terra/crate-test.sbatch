@@ -9,7 +9,11 @@
 #SBATCH --output=%x-%j.out
 # fmt, clippy and the tests of one Rust checkout on the build host:
 #   sbatch crate-test.sbatch ~/Git/Github/OmniPotentRPC/rgmin [cargo test args]
+# Several test filters follow a double dash: `-p ljos --lib -- tracker_push projected_card`.
 set -uo pipefail
+# A job inherits the submitting shell's PATH; a non-interactive one lacks the
+# user bins, and the tests shell age-keygen, git and tmux from there.
+export PATH="$HOME/.local/bin:$HOME/.local/pkgs/usr/bin:$HOME/.cargo/bin:$PATH"
 repo=${1:?repository path}; shift || true
 cd "$repo" || exit 1
 echo "== $(basename "$repo") $(git log --oneline -1 | cut -c1-70)"
