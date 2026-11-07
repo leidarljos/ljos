@@ -5,7 +5,9 @@
 //! a conflict, issue org files are merged field by field. Atom logs are
 //! re-exported by the `ljos-atoms` driver, which writes this machine's log
 //! again rather than keeping either side. A file that still has two
-//! headings with one `:ID:` is folded. Nothing is force-pushed.
+//! headings with one `:ID:` is folded. Nothing is force-pushed. A remote
+//! with several push URLs is pushed to each of them, so every extra push
+//! URL's branch is fetched and merged before the push as well.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -454,7 +456,65 @@ fn push_mirrors(dir: &Path) -> Result<(), String> {
 
 fn integrate(dir: &Path) -> Result<(), String> {
     let onto = rebase_target(dir);
-    integrate_from(dir, "origin", &onto)
+    integrate_from(dir, "origin", &onto)?;
+    integrate_extra_push_urls(dir)
+}
+
+/// Replay the branch of every push URL the upstream remote has beyond its
+/// fetch URL. `git push` sends to each push URL, and a branch on one of
+/// them moves on its own, so a push there stays rejected however often the
+/// fetch URL is replayed. Each extra URL's branch is fetched into
+/// `FETCH_HEAD` and merged, not rebased: the two URLs may hold histories
+/// that differ by far more than this seat's commits, and a rebase would
+/// rewrite the fetch URL's commits into a push the fetch URL then refuses.
+/// A URL the fetch cannot reach is left to the push to report.
+fn integrate_extra_push_urls(dir: &Path) -> Result<(), String> {
+    let Some(branch) = branch_name(dir) else {
+        return Ok(());
+    };
+    let remote = upstream_remote(dir);
+    let fetch_url = git_lines(dir, &["remote", "get-url", &remote])
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let spec = format!("refs/heads/{branch}");
+    for url in git_lines(dir, &["remote", "get-url", "--push", "--all", &remote]) {
+        if url == fetch_url {
+            continue;
+        }
+        let fetched = git(dir, &["fetch", "-q", &url, &spec]);
+        if !fetched.status.success() {
+            continue;
+        }
+        let _held = crate::tracker_commit_lock(dir);
+        merge_onto(dir, "FETCH_HEAD")?;
+        fold_orgs(dir)?;
+        refuse_markers(dir)?;
+    }
+    Ok(())
+}
+
+/// The remote the tracker branch pushes to: the upstream's remote, else
+/// `origin`.
+fn upstream_remote(dir: &Path) -> String {
+    crate::tracker_upstream(dir)
+        .and_then(|up| up.split_once('/').map(|(remote, _)| remote.to_string()))
+        .filter(|remote| !remote.is_empty())
+        .unwrap_or_else(|| "origin".to_string())
+}
+
+/// The non-empty lines a git command printed, or none when it failed.
+fn git_lines(dir: &Path, args: &[&str]) -> Vec<String> {
+    let out = git(dir, args);
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn integrate_from(dir: &Path, remote: &str, onto: &str) -> Result<(), String> {
@@ -1645,6 +1705,128 @@ note from b
         assert!(text.contains(":ID:         from-b"), "{text}");
         assert!(text.contains(":ID:         seed"), "{text}");
         assert!(!text.contains("<<<<<<<"), "{text}");
+    }
+
+    /// `origin` fetches one bare repository and pushes to it and to a second
+    /// one. Another clone moves the second one alone. A publish from the
+    /// first clone merges that branch and lands on both.
+    #[test]
+    fn a_second_push_url_that_moved_is_merged_before_the_push() {
+        let _env = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let origin = dir.path().join("origin.git");
+        let mirror = dir.path().join("mirror.git");
+        let a = dir.path().join("a");
+        let c = dir.path().join("c");
+        let run = |cwd: &Path, args: &[&str]| {
+            let out = crate::git_at(cwd)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} in {}: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        for bare in [&origin, &mirror] {
+            run(
+                dir.path(),
+                &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
+            );
+            run(bare, &["config", "receive.denyNonFastForwards", "true"]);
+        }
+        run(
+            dir.path(),
+            &["clone", "-q", origin.to_str().unwrap(), a.to_str().unwrap()],
+        );
+        run(
+            &a,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                origin.to_str().unwrap(),
+            ],
+        );
+        run(
+            &a,
+            &[
+                "remote",
+                "set-url",
+                "--add",
+                "--push",
+                "origin",
+                mirror.to_str().unwrap(),
+            ],
+        );
+        let seat_config = |cwd: &Path| {
+            for (key, value) in [
+                ("user.email", "seat@example.invalid"),
+                ("user.name", "seat"),
+                ("core.hooksPath", "/dev/null"),
+                ("commit.gpgsign", "false"),
+            ] {
+                run(cwd, &["config", key, value]);
+            }
+        };
+        seat_config(&a);
+        let preamble = "#+TITLE: probe\n\n";
+        let seed = heading("seed", "Seed");
+        std::fs::write(a.join("issues.org"), format!("{preamble}{seed}")).unwrap();
+        run(&a, &["add", "issues.org"]);
+        run(&a, &["commit", "-q", "-m", "seed"]);
+        run(&a, &["push", "-q", "-u", "origin", "HEAD"]);
+        run(
+            dir.path(),
+            &["clone", "-q", mirror.to_str().unwrap(), c.to_str().unwrap()],
+        );
+        seat_config(&c);
+        std::fs::write(
+            c.join("issues.org"),
+            format!("{preamble}{seed}{}", heading("from-c", "From C")),
+        )
+        .unwrap();
+        run(&c, &["add", "issues.org"]);
+        run(&c, &["commit", "-q", "-m", "from c"]);
+        run(&c, &["push", "-q"]);
+        std::fs::write(
+            a.join("issues.org"),
+            format!("{preamble}{seed}{}", heading("from-a", "From A")),
+        )
+        .unwrap();
+        run(&a, &["add", "issues.org"]);
+        run(&a, &["commit", "-q", "-m", "from a"]);
+        let published = publish(&a);
+        assert!(published.is_ok(), "publish: {published:?}");
+        for bare in [&origin, &mirror] {
+            let shown = crate::git_cmd()
+                .arg("-C")
+                .arg(bare)
+                .args(["show", "HEAD:issues.org"])
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&shown.stdout);
+            assert!(
+                text.contains(":ID:         from-a"),
+                "{}: {text}",
+                bare.display()
+            );
+            assert!(
+                text.contains(":ID:         from-c"),
+                "{}: {text}",
+                bare.display()
+            );
+            assert!(
+                text.contains(":ID:         seed"),
+                "{}: {text}",
+                bare.display()
+            );
+            assert!(!text.contains("<<<<<<<"), "{}: {text}", bare.display());
+        }
     }
 
     #[test]
