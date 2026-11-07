@@ -1,0 +1,1 @@
+`ljos doctor` counts an event the Claude settings file runs the seat hook on as served for Grok too, so a Grok file that onboard left with only the events Claude's file does not run no longer reads as "no memory hook".
