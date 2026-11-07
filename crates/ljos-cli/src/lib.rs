@@ -33172,11 +33172,102 @@ pub fn tracker_show_json(id: &str) -> Result<Value> {
         return card;
     }
     let layout = vissue_core::Layout::resolve(None, None).map_err(anyhow::Error::from)?;
-    let found = vissue_core::Router::load(layout)
-        .map_err(anyhow::Error::from)?
-        .find_by_id(id)
-        .map_err(anyhow::Error::from)?;
-    vissue_core::agent::show_json(&found.layout, id).map_err(anyhow::Error::from)
+    let root = layout.root().to_path_buf();
+    let router = vissue_core::Router::load(layout).map_err(anyhow::Error::from)?;
+    match router.find_by_id(id) {
+        Ok(found) => vissue_core::agent::show_json(&found.layout, id).map_err(anyhow::Error::from),
+        // Not in any tracker here: a board this repository projects may
+        // carry it in its mirror or its inbox, as `vissue show` answers.
+        Err(vissue_core::Error::IssueNotFound { .. }) => {
+            projected_card(&root, id).ok_or_else(|| anyhow::anyhow!("issue {id} not found"))
+        }
+        Err(e) => Err(anyhow::Error::from(e)),
+    }
+}
+
+/// The card of an id this tracker only projects: the heading as its
+/// board's mirror or inbox carries it, with the title its first line
+/// names, in the shape `vissue show --json` prints for one.
+fn projected_card(root: &Path, id: &str) -> Option<Value> {
+    let (board, org) = vissue_core::projection::find_in_mirrors(root, id)?;
+    let title = org_headline_title(org.lines().next().unwrap_or(""));
+    Some(serde_json::json!({
+        "id": id,
+        "title": title,
+        "projected": true,
+        "project": board.project,
+        "source": board.source,
+        "mirror": board.mirror,
+        "inbox": board.inbox,
+        "org": org,
+    }))
+}
+
+/// The title of `* TODO [#B] Title :tag:`: the headline without its
+/// stars, state, priority cookie and tags.
+fn org_headline_title(line: &str) -> String {
+    let mut rest = line.trim_start_matches('*').trim();
+    if let Some((state, after)) = rest.split_once(' ') {
+        if !state.is_empty() && state.chars().all(|c| c.is_ascii_uppercase()) {
+            rest = after.trim();
+        }
+    }
+    if rest.starts_with("[#") {
+        if let Some(end) = rest.find(']') {
+            rest = rest[end + 1..].trim();
+        }
+    }
+    if let Some((head, tags)) = rest.rsplit_once(' ') {
+        if tags.len() > 2 && tags.starts_with(':') && tags.ends_with(':') {
+            rest = head.trim();
+        }
+    }
+    rest.to_string()
+}
+
+#[cfg(test)]
+mod projected_card_tests {
+    use super::*;
+
+    #[test]
+    fn a_headline_gives_its_title_without_state_priority_or_tags() {
+        assert_eq!(
+            org_headline_title("* TODO [#B] terra seat hygiene: the bypass log :bug:ljos:"),
+            "terra seat hygiene: the bypass log"
+        );
+        assert_eq!(
+            org_headline_title("** DONE Folded already"),
+            "Folded already"
+        );
+        assert_eq!(org_headline_title("* Plain heading"), "Plain heading");
+        assert_eq!(
+            org_headline_title("* TODO [#A] 10:30 standup"),
+            "10:30 standup"
+        );
+    }
+
+    /// A board's inbox heading answers as a projected card with its title,
+    /// the way `vissue show --json` prints one.
+    #[test]
+    fn an_inbox_heading_is_a_projected_card() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Software/ljos")).unwrap();
+        std::fs::write(
+            dir.path().join("vissue.toml"),
+            "prefix = \"Issues\"\n\n[[projection.board]]\nproject = \"ljos\"\nsource = \"vault\"\nmirror = \"Software/ljos/issues-mirror.org\"\ninbox = \"Software/ljos/inbox.org\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Software/ljos/issues-mirror.org"),
+            "#+TITLE: vissue mirror\n\n* ljos\n** TODO [#A] Mirrored work :task:\n:PROPERTIES:\n:ID:         ljos-mirr\n:END:\n",
+        )
+        .unwrap();
+        let card = projected_card(dir.path(), "ljos-mirr").expect("the mirror answers");
+        assert_eq!(card["title"], "Mirrored work");
+        assert_eq!(card["projected"], true);
+        assert_eq!(card["project"], "ljos");
+        assert!(projected_card(dir.path(), "ljos-none").is_none());
+    }
 }
 
 /// The issue as the tracker crate reads it, or as `vissue show --json`
