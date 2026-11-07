@@ -1,0 +1,1 @@
+An issue a projected board carries in its mirror or inbox answers as a card with its title, so `ljos finish` on an issue filed into a board's inbox completes the sitting instead of failing with `not found` and leaving the claim node.

@@ -1,0 +1,1 @@
+A tracker remote with several push URLs has every extra push URL's branch fetched and merged before the push, so a branch that moved on a second URL no longer keeps the push rejected through every attempt.
