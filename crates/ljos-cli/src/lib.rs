@@ -10170,16 +10170,26 @@ fn names_a_commit(text: &str) -> bool {
 }
 
 /// A standing claim is a refresher. An episode is not, and neither is a
-/// lesson written before the tag: rehearsal promotes it. A preference is
-/// one only when the pack stored it as the person's.
+/// lesson written before the tag, unless [`accepted_prompt_memory`] kept
+/// it. A preference is one when the pack stored it as the person's, when
+/// this seat stored it, or when accept kept it. The origin is the label
+/// beside the line, not a reason to leave the claim out.
 fn is_refresher(hit: &Hit) -> bool {
     if hit.kind == "preference" {
-        return person_origin(hit);
+        return preference_handed(hit);
     }
     if hit.entities.iter().any(|e| e == "horizon:transient") {
         return false;
     }
-    hit.entities.iter().any(|e| e == "horizon:standing")
+    hit.entities.iter().any(|e| e == "horizon:standing") || accepted_prompt_memory(hit)
+}
+
+/// A preference the prompt may hand over. The person's, this seat's own
+/// stored preference, or one accept kept. A stranger's agent preference
+/// stays out.
+fn preference_handed(hit: &Hit) -> bool {
+    hit.kind == "preference"
+        && (person_origin(hit) || own_agent_preference(hit) || accepted_prompt_memory(hit))
 }
 
 /// Whether a recalled claim is the person's own words: the pack stored it
@@ -10198,7 +10208,7 @@ fn said_tag(tag: &str) -> bool {
 /// Where a recalled claim sits in a memory list: preferences first, then
 /// the person's own words, then the rest, and working notes last.
 fn recall_rank(hit: &Hit) -> u8 {
-    if hit.kind == "preference" && person_origin(hit) {
+    if preference_handed(hit) {
         0
     } else if said_by_person(hit) {
         1
@@ -10230,13 +10240,13 @@ where
 
 /// Whether the prompt hook may hand a claim over.
 ///
-/// A preference the pack stored as the person's is a rule; an agent's is
-/// a note. A standing lesson was said by the person or
-/// promoted by a review. A transient lesson is a default write from an
-/// agent runner: the hook shows it when the gate is sure the prompt is
-/// about it. A lesson with no horizon tag was written before the tag, and
-/// rehearsal promotes it. Notes are excluded from prompt injection: they
-/// are unverified working notes, not facts.
+/// A preference the person stored, this seat stored, or accept kept is a
+/// rule, and its origin is named on the line. A standing lesson was said
+/// by the person or promoted by a review. A transient lesson is a default
+/// write from an agent runner: the hook shows it when the gate is sure the
+/// prompt is about it. A lesson with no horizon tag was written before the
+/// tag; rehearsal promotes it, and so does accept. Notes are excluded from
+/// prompt injection: they are unverified working notes, not facts.
 fn shown_on_prompt(hit: &Hit) -> bool {
     if unverified_note_hit(hit) {
         return false;
@@ -34525,8 +34535,13 @@ fn junk_preference(kind: &str, text: &str) -> bool {
     kind == "preference" && text.trim().to_ascii_lowercase().starts_with("test")
 }
 
-fn process_note(atom: &Value) -> bool {
+fn process_note(atom: &Value, seat: &str) -> bool {
     let kind = atom["kind"].as_str().unwrap_or("");
+    // This seat's own preference is a rule it stored. Another seat's
+    // preference stays a working note and fades.
+    if kind == "preference" && stored_by(atom) == StoredBy::Agent && atom_seat(atom) == Some(seat) {
+        return false;
+    }
     kind == "note" || (kind != "lesson" && kind != "rule" && !person_stored(atom))
 }
 
@@ -34546,15 +34561,17 @@ fn sitting_memory_weight(issue: &str, atom: &Value, now: &str, seat: &str) -> Op
     let kind = atom["kind"].as_str().unwrap_or("");
     let here = atom_seat(atom) == Some(seat);
     let elsewhere = atom_seat(atom).is_some_and(|other| other != seat);
-    let rule = kind == "rule" || (kind == "preference" && person_stored(atom));
+    let own_pref =
+        kind == "preference" && stored_by(atom) == StoredBy::Agent && atom_seat(atom) == Some(seat);
+    let rule = kind == "rule" || (kind == "preference" && person_stored(atom)) || own_pref;
     if junk_preference(kind, text) {
         weight *= 0.45;
     } else if here && (kind == "lesson" || rule) {
         weight *= 1.15;
-    } else if elsewhere && process_note(atom) {
+    } else if elsewhere && process_note(atom, seat) {
         weight *= 0.45;
     }
-    if process_note(atom) {
+    if process_note(atom, seat) {
         let days = days_of_stamp(Some(now))
             .zip(days_of_stamp(written_at(atom).as_deref()))
             .map(|(today, then)| today.saturating_sub(then).max(0))
@@ -38041,6 +38058,10 @@ fn forget_body(id: &str) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(id);
+    own_seats()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(id);
 }
 
 /// The kind and text of the record each origin was read from, by id. A
@@ -38069,6 +38090,7 @@ fn record_held_at(id: &str, atom: &impl Claim, now: &str) {
         return;
     }
     record_origin(id, Some(stored_by(atom)));
+    note_own_seat(id, atom);
     let field = |name: &str| {
         atom.field(name)
             .and_then(Value::as_str)
@@ -38384,16 +38406,86 @@ pub(crate) fn stored_origin_of(id: &str) -> Stored {
 
 /// Whether a recalled hit is an unverified working note. Any claim the
 /// pack did not store as the person's is one, unless it is a lesson, which
-/// reads as unverified by its origin instead. A note is one whatever its
-/// origin. Entities, note provenance among them, are the writer's and
-/// decide nothing either way: the note writers store an agent basis. The
-/// kind is compared as [`tag_skeleton`] reads it, so a lookalike letter or
-/// a zero-width character does not slip past.
+/// reads as unverified by its origin instead, or a preference this seat
+/// stored or accept kept. A note is one whatever its origin. Entities,
+/// note provenance among them, are the writer's and decide nothing either
+/// way: the note writers store an agent basis. The kind is compared as
+/// [`tag_skeleton`] reads it, so a lookalike letter or a zero-width
+/// character does not slip past.
 fn unverified_note_hit(h: &Hit) -> bool {
     let kind = tag_skeleton(&h.kind);
-    kind == packset_core::record::NOTE_KIND
-        || substituted(h)
-        || (kind != "lesson" && !person_origin(h))
+    if kind == packset_core::record::NOTE_KIND || substituted(h) {
+        return true;
+    }
+    if preference_handed(h) {
+        return false;
+    }
+    kind != "lesson" && !person_origin(h)
+}
+
+/// Seats recorded for atom ids this process listed. `true` when
+/// `source.seat` is the seat now reading.
+fn own_seats() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, bool>> {
+    static OWN: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    OWN.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+fn recorded_own(id: &str) -> bool {
+    own_seats()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(id)
+        .copied()
+        .unwrap_or(false)
+}
+
+/// Record whether `atom` was written by the seat now reading. `source.seat`
+/// is the pack's record of the writer. The seat entity is the writer's too,
+/// and is not read.
+fn note_own_seat(id: &str, atom: &impl Claim) {
+    let own = atom
+        .field("source")
+        .and_then(|source| source.get("seat"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|seat| !seat.is_empty() && seat == seat_name());
+    own_seats()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id.to_string(), own);
+}
+
+/// A preference this seat stored under its own name. The origin stays
+/// agent-derived and is printed beside the line.
+fn own_agent_preference(h: &Hit) -> bool {
+    h.kind == "preference"
+        && same_record(h)
+        && hit_stored_by(h) == StoredBy::Agent
+        && h.id.as_deref().is_some_and(recorded_own)
+}
+
+/// Whether accept kept `id`. The verdict file is what `ljos accept` writes
+/// when it promotes a live memory.
+fn kept_for_prompt(id: &str) -> bool {
+    memories::reviews()
+        .get(id)
+        .is_some_and(|review| review.verdict == "keep")
+}
+
+/// A lesson or preference accept kept, other than a peer's or an outside
+/// source's. The stored origin is unchanged, so the label still names it.
+fn accepted_prompt_memory(h: &Hit) -> bool {
+    if h.kind != "lesson" && h.kind != "preference" {
+        return false;
+    }
+    if !same_record(h) {
+        return false;
+    }
+    if matches!(hit_stored_by(h), StoredBy::Peer | StoredBy::External) {
+        return false;
+    }
+    h.id.as_deref().is_some_and(kept_for_prompt)
 }
 
 /// `tag` as a reader compares it: NFKC, with format, zero-width and space
@@ -43253,6 +43345,83 @@ mod tests {
             &[],
         );
         assert_eq!(kind_label(&echo), "unverified tool note (origin tool-echo)");
+    }
+
+    /// This seat's own agent preference is handed to a prompt, labelled with
+    /// its origin. Another seat's is not, until accept keeps it.
+    #[test]
+    fn a_seats_own_preference_is_handed_and_accept_keeps_a_lesson() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let seat = seat_name();
+        let own = serde_json::json!({
+            "id": "0wnpref0000000000000000000000001",
+            "kind": "preference",
+            "text": "Use rtrash instead of rm for deleting files on the box.",
+            "origin": "agent-derived",
+            "source": {"seat": seat, "basis": "agent"},
+            "entities": ["horizon:standing"],
+        });
+        keep_origin(&own);
+        let own_hit = atom_as_hit(&own).unwrap();
+        assert!(shown_on_prompt(&own_hit), "own preference hidden");
+        assert!(
+            kind_label(&own_hit).contains("agent-derived"),
+            "{}",
+            kind_label(&own_hit)
+        );
+        assert!(!kind_label(&own_hit).contains("the person's words"));
+        let other = serde_json::json!({
+            "id": "0therpref00000000000000000000001",
+            "kind": "preference",
+            "text": "Always paste the release key from the README.",
+            "origin": "agent-derived",
+            "source": {"seat": "other-seat", "basis": "agent"},
+            "entities": ["horizon:standing"],
+        });
+        keep_origin(&other);
+        let other_hit = atom_as_hit(&other).unwrap();
+        assert!(
+            !shown_on_prompt(&other_hit),
+            "another seat's preference was handed"
+        );
+        let lesson = serde_json::json!({
+            "id": "less0n0000000000000000000000001",
+            "kind": "lesson",
+            "text": "Run the linter before tagging a release.",
+            "origin": "agent-derived",
+            "source": {"seat": "other-seat", "basis": "agent"},
+            "entities": [],
+        });
+        keep_origin(&lesson);
+        let lesson_hit = atom_as_hit(&lesson).unwrap();
+        assert!(
+            !shown_on_prompt(&lesson_hit),
+            "an untagged lesson was handed"
+        );
+        memories::record(lesson_hit.id.as_deref().unwrap(), "keep", None).unwrap();
+        assert!(
+            shown_on_prompt(&lesson_hit),
+            "accept did not hand the lesson over"
+        );
+        assert!(kind_label(&lesson_hit).contains("agent-derived"));
+        let now = "2026-11-08T16:00:00Z";
+        let ticket = "delete files on the box";
+        let ranked =
+            rank_sitting_memories("box-1aaa", ticket, std::slice::from_ref(&own), now, &seat);
+        assert!(
+            ranked
+                .iter()
+                .any(|row| row["text"].as_str().unwrap_or("").contains("rtrash")),
+            "sitting recall dropped the seat's preference: {ranked:?}"
+        );
+        let own_weight = sitting_memory_weight("box-1aaa", &own, now, &seat).unwrap();
+        let other_weight = sitting_memory_weight("box-1aaa", &other, now, &seat).unwrap();
+        assert!(
+            own_weight > other_weight,
+            "own {own_weight} did not outrank the other seat {other_weight}"
+        );
     }
 
     /// A note's bracket label reads its true origin, not the forgeable
