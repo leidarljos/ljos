@@ -2,8 +2,9 @@
 //!
 //! `ljos memory export` writes a file on this machine. It does not send it.
 //! `ljos memory import` stores that file under the seat tracker, then
-//! `ljos memory integrate` maps the rows onto this seat's lessons.
-//! Recall reads the slot when the pack does not have the row yet.
+//! `ljos memory integrate` posts the rows into this seat's pack, keeping
+//! their origin and horizon, and maps them onto this seat's lessons.
+//! Recall reads the pack, and the slot when the pack does not have the row yet.
 //!
 //! The file format is `ljos-memory-1`. A later format is kept byte for
 //! byte and labelled `format-unknown`. The version is the first one this
@@ -88,6 +89,9 @@ struct Row {
     kind: String,
     #[serde(default)]
     origin: String,
+    /// `source.basis` from the exported atom: `person` or `agent`.
+    #[serde(default)]
+    basis: String,
     #[serde(default)]
     labels: Vec<String>,
     #[serde(default)]
@@ -336,6 +340,22 @@ fn ensure_dir(path: &Path) -> Result<()> {
     }
 }
 
+/// `-` is stdout. Any other path is a file, including a file whose name is
+/// not exactly `-`.
+fn stdout_path(path: &Path) -> bool {
+    path == Path::new("-")
+}
+
+fn write_export_body(out: &Path, bytes: &[u8]) -> Result<()> {
+    if stdout_path(out) {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(bytes)?;
+        stdout.flush()?;
+        return Ok(());
+    }
+    write_private(out, bytes)
+}
+
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
@@ -430,6 +450,7 @@ fn keep_empty_at(place: &Place, kind: &str) {
         text: String::new(),
         kind: kind.to_string(),
         origin: String::new(),
+        basis: String::new(),
         labels: vec!["empty-input".into()],
         entities: Vec::new(),
         machine: place.machine.clone(),
@@ -512,6 +533,7 @@ fn write_kept(
         text: text.to_string(),
         kind: kind.to_string(),
         origin: "agent-derived".into(),
+        basis: crate::Basis::Agent.as_str().into(),
         labels: vec![label.into()],
         entities: vec![format!("seat:{}", place.seat)],
         machine: place.machine.clone(),
@@ -635,7 +657,7 @@ pub fn export_atoms(place: &Place, out: &Path, atoms: &[Value]) -> Result<usize>
     let mut body = lines.join("\n");
     body.push('\n');
     let bytes = body.into_bytes();
-    write_private(out, &bytes)?;
+    write_export_body(out, &bytes)?;
     let export_id = sha256_hex(&bytes);
     let copy = place
         .home
@@ -670,6 +692,7 @@ fn local_atoms(place: &Place) -> Vec<Value> {
                 "source": {
                     "seat": row.seat,
                     "machine": row.machine,
+                    "basis": row.basis,
                 },
             })
         })
@@ -794,6 +817,7 @@ fn raw_row(import_id: &str, index: usize, line: &str, label: &str) -> Row {
         text: line.to_string(),
         kind: "lesson".into(),
         origin: "peer".into(),
+        basis: String::new(),
         labels: vec!["imported".into(), "unintegrated".into(), label.into()],
         entities: Vec::new(),
         machine: String::new(),
@@ -840,6 +864,7 @@ fn row_from_value(import_id: &str, index: usize, value: &Value, text: &str) -> R
     if !at.is_empty() && parse_time(&at).is_none() {
         labels.push("time-unparsed".into());
     }
+    let basis = value["source"]["basis"].as_str().unwrap_or("").to_string();
     Row {
         id: format!("local:{import_id}:{index}:{content}"),
         text: text.to_string(),
@@ -849,8 +874,9 @@ fn row_from_value(import_id: &str, index: usize, value: &Value, text: &str) -> R
         } else {
             origin
         },
+        basis,
         labels,
-        entities: Vec::new(),
+        entities: string_list(&value["entities"]),
         machine,
         seat,
         import_id: import_id.to_string(),
@@ -861,6 +887,19 @@ fn row_from_value(import_id: &str, index: usize, value: &Value, text: &str) -> R
         diagnostic: String::new(),
         effect,
     }
+}
+
+fn string_list(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn stamp_entities(place: &Place, row: &mut Row) {
@@ -969,7 +1008,7 @@ fn import_bytes(
     if stop == Some(Stop::Indexed) {
         bail!("memory: stopped after index");
     }
-    materialise(&dir, &rows);
+    let _ = materialise(&dir, &rows);
     let manifest: Value = std::fs::read(&manifest_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -1012,22 +1051,68 @@ pub struct ImportDone {
     pub searchable: usize,
 }
 
-fn pack_url_set() -> bool {
-    std::env::var("PACKSET_URL")
-        .or_else(|_| std::env::var("INSIDE_MEMORY_URL"))
-        .ok()
-        .is_some_and(|url| !url.is_empty() && url != "off")
+/// The atom `row` becomes in this seat's pack. Origin and horizon stay as
+/// the export wrote them. An origin the pack does not know is `peer`, so
+/// a damaged file still has a label the writer accepts.
+fn atom_for_pack(row: &Row, workspace: &str) -> Value {
+    let origin = if packset_core::atom::known_origin(&row.origin) {
+        row.origin.clone()
+    } else {
+        crate::admit::ORIGIN_PEER.to_string()
+    };
+    let mut source = json!({
+        "imports": [{
+            "input_sha256": row.import_id,
+            "content_sha256": row.content_sha256,
+            "origin_hash": row.origin_hash,
+            "source_id": row.source_id,
+            "machine": row.machine,
+            "seat": row.seat,
+            "at": row.at,
+            "origin": row.origin,
+        }],
+        "machine": row.machine,
+        "seat": row.seat,
+    });
+    if !row.basis.is_empty() {
+        source["basis"] = Value::String(row.basis.clone());
+    }
+    json!({
+        "schema": "inside.atom/v1",
+        "kind": row.kind,
+        "text": row.text,
+        "origin": origin,
+        "entities": row.entities,
+        "source": source,
+        "workspace": workspace,
+    })
 }
 
-fn materialise(dir: &Path, rows: &[Row]) {
-    if !pack_url_set() {
-        return;
-    }
-    let client = match crate::pack() {
-        Ok(client) => client,
-        Err(_) => return,
+/// Whether `err` is a writer that answered and refused the atom. A writer
+/// that is not there is not a refusal: the slot still holds the row, and
+/// a later integrate posts it.
+fn writer_refused(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}");
+    text.split_whitespace().any(|word| {
+        let code = word.trim_end_matches(':');
+        code.parse::<u16>()
+            .ok()
+            .is_some_and(|code| (400..600).contains(&code))
+    })
+}
+
+/// Post `rows` into the pack. A row already posted, or one the file itself
+/// marked unsafe, is left as it is. Returns the refusals a writer that
+/// answered gave. A seat with no writer returns nothing.
+fn materialise(dir: &Path, rows: &[Row]) -> Vec<String> {
+    let Ok(client) = crate::pack() else {
+        return Vec::new();
     };
+    let mut refused = Vec::new();
     for row in rows {
+        if row.text.trim().is_empty() {
+            continue;
+        }
         if row.labels.iter().any(|label| {
             matches!(
                 label.as_str(),
@@ -1042,36 +1127,22 @@ fn materialise(dir: &Path, rows: &[Row]) {
         if mark.is_file() {
             continue;
         }
-        let mut source = json!({
-            "imports": [{
-                "input_sha256": row.import_id,
-                "content_sha256": row.content_sha256,
-                "origin_hash": row.origin_hash,
-                "source_id": row.source_id,
-                "machine": row.machine,
-                "seat": row.seat,
-                "at": row.at,
-                "origin": row.origin,
-            }],
-        });
-        source["basis"] = json!("agent");
-        let atom = json!({
-            "kind": row.kind,
-            "text": row.text,
-            "origin": "peer",
-            "level": "explicit",
-            "entities": row.entities,
-            "source": source,
-            "workspace": client.workspace(),
-        });
-        if let Ok(posted) = crate::admit::store_labelled(&client, atom) {
-            let id = posted["id"].as_str().unwrap_or("").to_string();
-            let _ = write_if_absent(
-                &mark,
-                &serde_json::to_vec(&json!({"pack_id": id, "row": row.id})).unwrap_or_default(),
-            );
+        let atom = atom_for_pack(row, &client.workspace());
+        match crate::admit::store_labelled(&client, atom) {
+            Ok(posted) => {
+                let id = posted["id"].as_str().unwrap_or("").to_string();
+                let _ = write_if_absent(
+                    &mark,
+                    &serde_json::to_vec(&json!({"pack_id": id, "row": row.id})).unwrap_or_default(),
+                );
+            }
+            Err(err) if writer_refused(&err) => {
+                refused.push(err.to_string());
+            }
+            Err(_) => {}
         }
     }
+    refused
 }
 
 /// Import the file at `path`.
@@ -1542,21 +1613,32 @@ fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<String
         "at": now_rfc3339(),
         "mappings": mappings,
     });
-    if !dry_run {
+    let mut out = format!("import {import_id}\n");
+    if dry_run {
+        out.push_str("dry-run\n");
+    } else {
         let path = slot_dir(place, import_id)
             .join("integration")
             .join(format!("{event_id}.json"));
         write_if_absent(&path, &serde_json::to_vec_pretty(&event)?)?;
-    }
-    let mut out = format!("import {import_id}\n");
-    if dry_run {
-        out.push_str("dry-run\n");
+        let posting: Vec<Row> = mine.into_iter().cloned().collect();
+        for note in materialise(&slot_dir(place, import_id), &posting) {
+            out.push_str(&format!("  not posted: {note}\n"));
+        }
     }
     for mapping in &mappings {
+        let text = rows
+            .iter()
+            .find(|row| row.id == mapping.row_id)
+            .map(|row| row.text.as_str())
+            .unwrap_or("");
         out.push_str(&format!(
             "  {} -> {} {} {}\n",
             mapping.row_id, mapping.canonical_id, mapping.relation, mapping.linked_id
         ));
+        if !text.is_empty() {
+            out.push_str(&format!("    {text}\n"));
+        }
     }
     Ok(out)
 }
@@ -1788,6 +1870,7 @@ fn store_label_row(place: &Place, label: &str, detail: &str, effect: &str) -> Re
         text,
         kind: "lesson".into(),
         origin: String::new(),
+        basis: String::new(),
         labels: vec![label.into()],
         entities: Vec::new(),
         machine: place.machine.clone(),
@@ -1825,6 +1908,7 @@ fn store_attempt(place: &Place, args: &[String], err: &str) -> Result<()> {
         text,
         kind: "lesson".into(),
         origin: String::new(),
+        basis: String::new(),
         labels: vec![label.into()],
         entities: Vec::new(),
         machine: place.machine.clone(),
@@ -1953,6 +2037,65 @@ mod tests {
         assert!(found
             .iter()
             .any(|(row, _)| row.text.contains("kiln at dusk")));
+    }
+
+    #[test]
+    fn a_dash_names_stdout_and_another_path_is_a_file() {
+        assert!(stdout_path(Path::new("-")));
+        assert!(!stdout_path(Path::new("mem.jsonl")));
+        assert!(!stdout_path(Path::new("./-")));
+    }
+
+    /// Import used to drop the horizon, so the other seat's hook never saw the lesson.
+    #[test]
+    fn an_import_keeps_origin_horizon_and_basis() {
+        let (_dir, here) = place("alfa");
+        let mut own = atom("a", "seat-alfa", "alfa fires the kiln at dusk");
+        own["origin"] = json!("user-declared");
+        own["entities"] = json!(["seat:seat-alfa", "horizon:standing"]);
+        own["source"]["basis"] = json!("person");
+        let out = here.home.join("out.jsonl");
+        let count = export_atoms(&here, &out, &[own]).unwrap();
+        assert_eq!(count, 1);
+        let body = std::fs::read(&out).unwrap();
+        let body_text = String::from_utf8_lossy(&body);
+        assert!(body_text.contains("horizon:standing"), "{body_text}");
+        let (_there_dir, there) = place("beta");
+        import_bytes(&there, &body, None, None, None).unwrap();
+        let found = selected(&there, "kiln", &SourceFilter::default(), false);
+        assert_eq!(found.len(), 1);
+        let row = &found[0].0;
+        assert_eq!(row.origin, "user-declared");
+        assert_eq!(row.basis, "person");
+        assert!(
+            row.entities.iter().any(|tag| tag == "horizon:standing"),
+            "{:?}",
+            row.entities
+        );
+        let packed = atom_for_pack(row, "seat-b");
+        assert_eq!(packed["origin"], "user-declared");
+        assert_eq!(packed["source"]["basis"], "person");
+        assert_eq!(packed["workspace"], "seat-b");
+        let tags = packed["entities"].as_array().unwrap();
+        assert!(tags.iter().any(|tag| tag == "horizon:standing"), "{packed}");
+    }
+
+    #[test]
+    fn integrate_names_the_text_it_maps() {
+        let (_dir, target) = place("text");
+        let bytes = header_and_row(
+            "host-a",
+            "seat-a",
+            "remember the zircon shelf",
+            "2026-03-01T15:00:00Z",
+        );
+        let done = import_bytes(&target, &bytes, None, None, None).unwrap();
+        let report = integrate(&target, Some(&done.import_id), false, false).unwrap();
+        assert!(report.contains("remember the zircon shelf"), "{report}");
+        assert!(
+            report.contains("new") || report.contains("exact"),
+            "{report}"
+        );
     }
 
     #[test]

@@ -10934,10 +10934,29 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     let now = now_utc();
     let lines: Vec<String> = rows.iter().map(|h| hit_line(h, &now)).collect();
     let mut ids: Vec<String> = rows.iter().filter_map(|h| h.id.clone()).collect();
-    ids.extend(pending);
     if lines.is_empty() {
+        // The pack search missed a row that import stored in the slot.
+        // The slot keeps the horizon the hook reads, so a matching prompt
+        // still hears it when the writer has not taken the post yet.
+        let mut brought = Vec::new();
+        memory_port::append_recall(&mut brought, cue, limit.min(HOOK_MAX_MEMORIES));
+        brought
+            .retain(|hit| !UNREVIEWED_KINDS.contains(&hit.kind.as_str()) && shown_on_prompt(hit));
+        if !brought.is_empty() {
+            let lines: Vec<String> = brought.iter().map(|h| hit_line(h, &now)).collect();
+            ids = brought.into_iter().filter_map(|h| h.id).collect();
+            ids.extend(pending);
+            let mut out = format!("{RECALL_HEADER}\n{}", lines.join("\n"));
+            if !nudge.is_empty() {
+                out.push('\n');
+                out.push_str(&nudge);
+            }
+            return (out, ids);
+        }
+        ids.extend(pending);
         return (nudge, ids);
     }
+    ids.extend(pending);
     let mut out = format!("{RECALL_HEADER}\n{}", lines.join("\n"));
     if !nudge.is_empty() {
         out.push('\n');
@@ -31245,24 +31264,12 @@ pub fn receive(
         for atom in &atoms {
             // The atoms arrive stamped with the sender's workspace; they join
             // this seat's, or the import lands in a workspace nobody reads.
+            // Origin and horizon stay: the hook reads them, and this satchel
+            // was signed by an accepted key. Relabelling the origin `peer`
+            // and dropping the horizon is what left the imported lessons
+            // out of the next prompt.
             let mut atom = atom.clone();
-            if let Some(map) = atom.as_object_mut() {
-                map.insert("workspace".into(), Value::String(workspace.clone()));
-                let mut entities: Vec<Value> = map
-                    .get("entities")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                if !entities.iter().any(|e| e.as_str() == Some(sender.as_str())) {
-                    entities.push(Value::String(sender.clone()));
-                }
-                map.insert("entities".into(), Value::Array(entities));
-                map.insert(
-                    "origin".into(),
-                    Value::String(admit::ORIGIN_PEER.to_string()),
-                );
-            }
-            strip_person_basis(&mut atom);
+            prepare_received_atom(&mut atom, &workspace, &sender);
             match admit::post_kept(&client, &atom) {
                 Ok(_) => kept += 1,
                 Err(e) => refused.push(e.to_string()),
@@ -31278,6 +31285,34 @@ pub fn receive(
         }
     }
     Ok(lines)
+}
+
+/// Retarget `atom` at `workspace` and record `sender`.
+///
+/// A known origin stays, and so do the horizon tags and `source.basis`.
+/// An origin the pack does not know becomes `peer`. The sender entity is
+/// added when the atom does not already carry it.
+pub(crate) fn prepare_received_atom(atom: &mut Value, workspace: &str, sender: &str) {
+    let Some(map) = atom.as_object_mut() else {
+        return;
+    };
+    map.insert("workspace".into(), Value::String(workspace.to_string()));
+    let mut entities: Vec<Value> = map
+        .get("entities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !sender.is_empty() && !entities.iter().any(|e| e.as_str() == Some(sender)) {
+        entities.push(Value::String(sender.to_string()));
+    }
+    map.insert("entities".into(), Value::Array(entities));
+    let origin = map.get("origin").and_then(Value::as_str).unwrap_or("");
+    if !packset_core::atom::known_origin(origin) {
+        map.insert(
+            "origin".into(),
+            Value::String(admit::ORIGIN_PEER.to_string()),
+        );
+    }
 }
 
 /// Every atom in a satchel's `data/atoms/*.jsonl`. A sealed
@@ -68640,6 +68675,29 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             next.display()
         );
         assert!(calls.contains(&want), "{calls}");
+    }
+
+    #[test]
+    fn a_received_atom_keeps_the_senders_origin_and_horizon() {
+        let mut atom = serde_json::json!({
+            "kind": "lesson",
+            "text": "Rebuild the docs site with zola before fixing the broken links.",
+            "origin": "agent-derived",
+            "entities": ["horizon:transient", "seat:alfa"],
+            "source": {"basis": "agent"},
+        });
+        prepare_received_atom(&mut atom, "seat-b", "from:abcdabcdabcd");
+        assert_eq!(atom["workspace"], "seat-b");
+        assert_eq!(atom["origin"], "agent-derived");
+        assert_eq!(atom["source"]["basis"], "agent");
+        let tags = atom["entities"].to_string();
+        assert!(tags.contains("horizon:transient"), "{atom}");
+        assert!(tags.contains("from:abcdabcdabcd"), "{atom}");
+        assert!(tags.contains("seat:alfa"), "{atom}");
+
+        let mut bare = serde_json::json!({"kind": "lesson", "text": "no origin"});
+        prepare_received_atom(&mut bare, "seat-b", "from:abcdabcdabcd");
+        assert_eq!(bare["origin"], "peer");
     }
 
     /// Run `f` with `dir` first on PATH. The previous PATH is put back when

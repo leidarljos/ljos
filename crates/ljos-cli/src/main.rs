@@ -39,7 +39,7 @@ struct Cli {
 enum MemoryCmd {
     /// Write this seat's memories to a local file. The file is not sent.
     Export {
-        /// Where the file is written.
+        /// Where the file is written. `-` writes the file to stdout.
         #[arg(long)]
         out: PathBuf,
     },
@@ -149,11 +149,19 @@ impl MemFilter {
     }
 }
 
+fn export_memories(out: &std::path::Path) -> Result<()> {
+    let said = ljos_cli::memory_port::export_cmd(out)?;
+    if out == std::path::Path::new("-") {
+        eprint!("{said}");
+    } else {
+        print!("{said}");
+    }
+    Ok(())
+}
+
 fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
     match cmd {
-        MemoryCmd::Export { out } => {
-            print!("{}", ljos_cli::memory_port::export_cmd(&out)?);
-        }
+        MemoryCmd::Export { out } => export_memories(&out)?,
         MemoryCmd::Import {
             path,
             source_machine,
@@ -444,6 +452,12 @@ enum Cmd {
         /// unverified. Pass with `--review`.
         #[arg(long, value_name = "ID", requires = "review")]
         keep: Option<String>,
+    },
+    /// Write this seat's memories to a file. The same as `ljos memory export`.
+    Export {
+        /// Where the file is written. `-` writes the file to stdout.
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Copy memories to a file, or bring a file from another machine into this seat.
     Memory {
@@ -2108,6 +2122,7 @@ fn run_command() -> Result<()> {
             let yes = ljos_cli::quoted_yes::read(quote.as_deref(), at.as_deref(), via.as_deref())?;
             print!("{}", ljos_cli::admit::accept_on(&id, yes.as_ref())?);
         }
+        Cmd::Export { out } => export_memories(&out)?,
         Cmd::Memory { cmd } => memory_cmd(cmd)?,
         Cmd::Memories { cmd } => memories_cmd(cmd)?,
         Cmd::RetireNotes => print!("{}", ljos_cli::note_retire::sweep()?),
