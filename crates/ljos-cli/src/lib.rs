@@ -66337,13 +66337,19 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     #[test]
     fn ballot_health_requires_both_evidence_and_confidence_arguments() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vissue");
-        for (help, missing) in [
+        // One path, rewritten in this process, is ETXTBSY in two ways: a
+        // sibling test's fork inherits the write descriptor until that child
+        // execs, and a later case truncates a stub the previous case is still
+        // executing. Each case gets its own path, published by rename after
+        // the writer has exited.
+        let cases = [
             ("--for OPTION --json", Some("--used, --confidence")),
             ("--for OPTION --used DEEDS", Some("--confidence")),
             ("--for OPTION --confidence P", Some("--used")),
             ("--for OPTION --used DEEDS --confidence P", None),
-        ] {
+        ];
+        for (i, (help, missing)) in cases.into_iter().enumerate() {
+            let path = dir.path().join(format!("vissue-{i}"));
             publish_exe(
                 &path,
                 &format!(
