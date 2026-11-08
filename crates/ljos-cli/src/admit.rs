@@ -471,6 +471,46 @@ fn promote_level(atom: &mut Value) {
     }
 }
 
+/// Make `atom` a standing explicit claim. The origin is left as stored,
+/// so a reader can still see where it came from. Accept is what the
+/// prompt hook reads as promotion: the horizon tag, and the keep verdict
+/// the caller records.
+fn stand_for_prompt(atom: &mut Value) {
+    promote_level(atom);
+    let mut entities = atom
+        .get("entities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let standing = entities
+        .iter()
+        .any(|entity| entity.as_str() == Some("horizon:standing"));
+    entities.retain(|entity| entity.as_str() != Some("horizon:transient"));
+    if !standing {
+        entities.push(Value::String("horizon:standing".to_string()));
+    }
+    atom["entities"] = Value::Array(entities);
+}
+
+/// Fields [`stand_for_prompt`] changes on `before`, or an empty object
+/// when the claim is already standing and explicit.
+fn prompt_fields(before: &Value) -> Value {
+    let mut after = before.clone();
+    stand_for_prompt(&mut after);
+    let mut fields = serde_json::Map::new();
+    if after.get("level") != before.get("level") {
+        if let Some(level) = after.get("level") {
+            fields.insert("level".to_string(), level.clone());
+        }
+    }
+    if after.get("entities") != before.get("entities") {
+        if let Some(entities) = after.get("entities") {
+            fields.insert("entities".to_string(), entities.clone());
+        }
+    }
+    Value::Object(fields)
+}
+
 /// The person's own text wrote the claim. An open proposal of those words
 /// is satisfied, so a later accept does not post a second atom.
 pub fn satisfy_text(text: &str) {
@@ -694,8 +734,9 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
         return Ok(accepted_line(&rec, &posted));
     }
     // A person accepting the proposal is the promotion off L0. The origin
-    // stays, so a reader can still see where the claim came from.
-    promote_level(&mut rec.atom);
+    // stays, so a reader can still see where the claim came from. The
+    // horizon becomes standing, which is what the prompt hook reads.
+    stand_for_prompt(&mut rec.atom);
     match post_kept(&client, &rec.atom) {
         Ok(posted) => {
             rec.status = "accepted".into();
@@ -745,13 +786,9 @@ fn accept_memory(id: &str, rec: Option<Record>, yes: Option<&Yes>) -> Result<Str
         .find(|a| a["id"].as_str() == Some(full.as_str()))
         .cloned()
         .unwrap_or_default();
-    let posted = if atom["level"].as_str() == Some(LEVEL_L0) {
-        update_fields(
-            &client,
-            &workspace,
-            &full,
-            serde_json::json!({"level": LEVEL_EXPLICIT}),
-        )?
+    let fields = prompt_fields(&atom);
+    let posted = if fields.as_object().is_some_and(|map| !map.is_empty()) {
+        update_fields(&client, &workspace, &full, fields)?
     } else {
         atom.clone()
     };
