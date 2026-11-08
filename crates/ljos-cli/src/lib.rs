@@ -63869,23 +63869,26 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     #[test]
     fn ballot_health_requires_both_evidence_and_confidence_arguments() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vissue");
-        for (help, missing) in [
+        // One path, rewritten in this process, is ETXTBSY in two ways: a
+        // sibling test's fork inherits the write descriptor until that child
+        // execs, and a later case truncates a stub the previous case is still
+        // executing. Each case gets its own path, published by rename after
+        // the writer has exited.
+        let cases = [
             ("--for OPTION --json", Some("--used, --confidence")),
             ("--for OPTION --used DEEDS", Some("--confidence")),
             ("--for OPTION --confidence P", Some("--used")),
             ("--for OPTION --used DEEDS --confidence P", None),
-        ] {
-            std::fs::write(
+        ];
+        for (i, (help, missing)) in cases.into_iter().enumerate() {
+            let path = dir.path().join(format!("vissue-{i}"));
+            publish_exe(
                 &path,
-                format!(
+                &format!(
                     "#!/bin/sh\n[ \"$*\" = 'vote --help' ] || exit 3\nprintf '%s\\n' '{help}'\n"
                 ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            );
             let result = super::check_vissue_ballot_protocol(&path);
             if let Some(missing) = missing {
                 let error = result.unwrap_err().to_string();
@@ -63904,15 +63907,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     #[test]
     fn ballot_health_refuses_a_failed_help_command() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vissue");
-        std::fs::write(
+        publish_exe(
             &path,
             "#!/bin/sh\necho '--used DEEDS --confidence P'\nexit 2\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let error = super::check_vissue_ballot_protocol(&path)
             .unwrap_err()
             .to_string();
