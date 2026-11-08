@@ -13001,6 +13001,108 @@ fn encoder_has_answered(status: &Value) -> bool {
         .is_some_and(|value| !value.is_null())
 }
 
+/// The command that drops a writer whose encoder child has died and starts
+/// another. `packset ensure` alone leaves a live writer where it is, and
+/// that writer is what kept the dead child.
+pub const ENCODER_RESTART_COMMAND: &str = "packset stop && packset ensure";
+
+/// The encoder row opens with this when the last dense call did not answer.
+pub const ENCODER_DEGRADED: &str = "recall is degraded";
+
+/// What a sitting and a recall print when the rows they show were ranked
+/// by words alone.
+pub const LEXICAL_ONLY_LINE: &str =
+    "lexical-only: packset-embed is not running, so these results match words alone\n";
+
+/// The headline clause for that row.
+const RECALL_DEGRADED_HEADLINE: &str = "Recall is degraded: ranking is lexical-only.";
+
+/// Marker that this seat already ran [`ENCODER_RESTART_COMMAND`] for the
+/// current outage. One attempt: repeating it would stop a shared writer
+/// on every recall while the child still exits.
+const ENCODER_RESTART_MARK: &str = "encoder-restart";
+
+/// The last dense call did not answer: the encoder was killed or it
+/// crashed. A missing field is an older writer, or one that has not
+/// called the encoder yet, and is not this failure.
+#[must_use]
+pub fn encoder_failed(status: &Value) -> bool {
+    status["embedder"]["answering"].as_bool() == Some(false)
+}
+
+/// Whether `status` says this ranking used words alone. A cold encoder
+/// (`available`, and no answer yet) is still loading, so it is not this.
+/// An older status with no embedder object says nothing.
+#[must_use]
+pub fn encoder_lexical(status: &Value) -> bool {
+    if encoder_failed(status) {
+        return true;
+    }
+    let embedder = &status["embedder"];
+    embedder.is_object()
+        && embedder["available"].as_bool() == Some(false)
+        && embedder.get("answering").is_none_or(Value::is_null)
+}
+
+pub(crate) fn encoder_degraded_state() -> String {
+    format!(
+        "{ENCODER_DEGRADED}: packset-embed is not running, so ranking is lexical-only. \
+         Run `{ENCODER_RESTART_COMMAND}`"
+    )
+}
+
+fn encoder_restart_mark() -> PathBuf {
+    runtime_dir().join(ENCODER_RESTART_MARK)
+}
+
+/// Drop the outage marker once a dense call has answered, so the next
+/// crash can ask for another restart.
+fn forget_encoder_restart(status: &Value) {
+    if status["embedder"]["answering"].as_bool() == Some(true) {
+        let _ = std::fs::remove_file(encoder_restart_mark());
+    }
+}
+
+fn read_encoder_status() -> Option<Value> {
+    let status = pack().ok().and_then(|client| client.status(None).ok())?;
+    forget_encoder_restart(&status);
+    Some(status)
+}
+
+/// Run [`ENCODER_RESTART_COMMAND`] once while the encoder is down. A hook
+/// is too short to stop the writer, and a temporary home has no writer of
+/// its own.
+fn restart_dead_encoder() {
+    if std::env::var_os("LJOS_IN_HOOK").is_some()
+        || bookkeep::ljos_is_off()
+        || bookkeep::temp_home().is_some()
+        || !on_path("packset")
+    {
+        return;
+    }
+    restart_dead_encoder_now();
+}
+
+/// The stop and the start. A unit test links this crate with `cfg(test)`
+/// and must not stop the seat's writer. The `ljos` binary an integration
+/// test runs is built without that cfg, so it does run them.
+#[cfg(not(test))]
+fn restart_dead_encoder_now() {
+    let mark = encoder_restart_mark();
+    if mark.is_file() {
+        return;
+    }
+    if let Some(dir) = mark.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&mark, b"");
+    let _ = run_captured("packset", &["stop"]);
+    let _ = run_captured("packset", &["ensure"]);
+}
+
+#[cfg(test)]
+fn restart_dead_encoder_now() {}
+
 /// Poll status until the encoder has answered or `bound` runs out. This
 /// does not list atoms: a listing after the first status can sit behind
 /// the model load. The caller has already listed them.
@@ -29148,14 +29250,20 @@ pub fn doctor_seat() -> Vec<Habitat> {
             Ok(status) => {
                 let available = status["embedder"]["available"].as_bool().unwrap_or(false);
                 let answering = status["embedder"]["answering"].as_bool();
+                if answering == Some(true) {
+                    forget_encoder_restart(&status);
+                }
                 Habitat {
                     name: "encoder",
                     state: if available {
                         "dense ballot on".to_string()
                     } else if answering == Some(false) {
-                        "packset-embed did not answer its last call (killed or crashed); \
-                         ranking is lexical until packsetd restarts it on the next search"
-                            .to_string()
+                        // The row used to say packsetd would restart the
+                        // child on the next search. That child is packsetd's,
+                        // and a failed call leaves `answering` false until a
+                        // later one succeeds. Name the command that replaces
+                        // the writer so the next search can start the child.
+                        encoder_degraded_state()
                     } else {
                         "off; search is lexical. The encoder is optional: packset-embed \
                          links ONNX Runtime 1.28; `cargo binstall --locked packset-embed` \
@@ -30039,7 +30147,8 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
 
 /// Rows a sitting opens without. With no encoder the pack ranks by words
 /// alone and `finish` declines to fire a weak island, so the loop still
-/// holds; `ljos doctor` reports them as `info`.
+/// holds. A binary that was never installed stays `info`. A child that
+/// died after answering once is [`ENCODER_DEGRADED`] and prints `warn`.
 const SITTING_DEGRADED: &[&str] = &["packset-embed", "encoder"];
 
 /// Tools a sitting opens without. `ljos claim` never asks them. Missing,
@@ -30202,6 +30311,11 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "search" && !row.ok {
         return "warn";
     }
+    // The encoder child died. Recall still runs, on words alone, and the
+    // seat still starts. The row names the command that replaces the writer.
+    if row.name == "encoder" && !row.ok && row.state.starts_with(ENCODER_DEGRADED) {
+        return "warn";
+    }
     // Older user rules awaiting confirmation are the same kind of warning.
     if row.name == "user rules" && !row.ok {
         return "warn";
@@ -30282,7 +30396,10 @@ pub fn doctor_summary(rows: &[Habitat]) -> String {
         .collect();
     let off = rows.iter().filter(|h| doctor_word(h) == "info").count();
     let words: Vec<(&str, &str)> = rows.iter().map(|h| (doctor_word(h), h.name)).collect();
-    summary_line(&down, &damaged, &working_parts(&words), off)
+    let degraded = rows
+        .iter()
+        .any(|h| h.name == "encoder" && !h.ok && h.state.starts_with(ENCODER_DEGRADED));
+    summary_line(&down, &damaged, &working_parts(&words), off, degraded)
 }
 
 /// The parts a ready line can name, each with the rows that answer for
@@ -30319,8 +30436,14 @@ fn and_list(names: &[&str]) -> String {
 /// [`STATE_LOG_ROWS`] names them, whose rows are not `ok`. A failing row
 /// whose log is in `damaged` is said once, as damaged. A damaged log
 /// whose row does not fail still keeps the line from saying ready.
-fn summary_line(down: &[&str], damaged: &[&str], working: &[&str], off: usize) -> String {
-    let mut line = summary_verdict(down, damaged, working);
+fn summary_line(
+    down: &[&str],
+    damaged: &[&str],
+    working: &[&str],
+    off: usize,
+    degraded: bool,
+) -> String {
+    let mut line = summary_verdict(down, damaged, working, degraded);
     if off > 0 {
         line.push_str(" Optional extras: `ljos doctor --all`.\n");
     } else {
@@ -30330,7 +30453,7 @@ fn summary_line(down: &[&str], damaged: &[&str], working: &[&str], off: usize) -
 }
 
 /// [`summary_line`] without the pointer to `ljos doctor --all`.
-fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str]) -> String {
+fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str], degraded: bool) -> String {
     let silent: Vec<&str> = down
         .iter()
         .copied()
@@ -30347,7 +30470,7 @@ fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str]) -> String 
         why.push(format!("{} {verb} damaged", and_list(damaged)));
     }
     let why = why.join(", and ");
-    if why.is_empty() {
+    let ready = if why.is_empty() {
         match working {
             [] => "ljos is ready.".to_string(),
             [one] => format!("ljos is ready: {one} works."),
@@ -30357,6 +30480,11 @@ fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str]) -> String 
         format!("ljos runs, but {why}.")
     } else {
         format!("ljos is not ready: {why}.")
+    };
+    if degraded {
+        format!("{RECALL_DEGRADED_HEADLINE} {ready}")
+    } else {
+        ready
     }
 }
 
@@ -30400,6 +30528,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
             let mut down = Vec::new();
             let mut words = Vec::new();
             let mut act = String::new();
+            let mut degraded = false;
             for l in lines {
                 let cols: Vec<&str> = l.splitn(3, '\t').collect();
                 if let [word, name, _] = cols.as_slice() {
@@ -30414,7 +30543,13 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     }
                     ["ok", _, _] => {}
                     [word, name, state] if said_elsewhere_in_sitting(word, name, state) => {}
-                    [word @ ("no" | "warn"), name, _] => {
+                    [word @ ("no" | "warn"), name, state] => {
+                        if *word == "warn"
+                            && *name == "encoder"
+                            && state.starts_with(ENCODER_DEGRADED)
+                        {
+                            degraded = true;
+                        }
                         if *word == "no" && (REQUIRED.contains(name) || *name == "pack") {
                             down.push(*name);
                         }
@@ -30429,7 +30564,12 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                 }
             }
             // The `without:` line carries the one pointer to the full rows.
-            out.push_str(&summary_verdict(&down, &[], &working_parts(&words)));
+            out.push_str(&summary_verdict(
+                &down,
+                &[],
+                &working_parts(&words),
+                degraded,
+            ));
             out.push('\n');
             out.push_str(&act);
         }
@@ -33971,6 +34111,11 @@ pub(crate) fn recall_memories_for_prompt(issue: &str) -> String {
 
 fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     let issue = issue.trim();
+    // A dead encoder stays lexical until the writer is replaced and the
+    // next search starts the child. Ask once, then read the rows.
+    if read_encoder_status().as_ref().is_some_and(encoder_failed) {
+        restart_dead_encoder();
+    }
     let mut woke = false;
     let mut ask = |what: &dyn Fn() -> Result<Vec<Hit>>| -> Result<Vec<Hit>> {
         match what() {
@@ -34038,13 +34183,11 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
             Err(_) => break,
         }
     }
-    Ok(recall_lines(
-        &own,
-        related,
-        &cues.join(" "),
-        &now_utc(),
-        include_notes,
-    ))
+    let mut out = recall_lines(&own, related, &cues.join(" "), &now_utc(), include_notes);
+    if read_encoder_status().as_ref().is_some_and(encoder_lexical) {
+        out.insert_str(0, LEXICAL_ONLY_LINE);
+    }
+    Ok(out)
 }
 
 /// The `cap` of `rows` most relevant to `cue`, in the order they came.
@@ -35405,6 +35548,12 @@ pub fn sitting_stream_started(
     piece.push_str(&format_doctor(&rows));
     if let Some(line) = sitting_without(&rows) {
         piece.push_str(&line);
+    }
+    if rows
+        .iter()
+        .any(|h| h.name == "encoder" && h.state.starts_with(ENCODER_DEGRADED))
+    {
+        restart_dead_encoder();
     }
     if rows
         .iter()
@@ -55856,7 +56005,7 @@ mod tests {
             };
             assert_eq!(failing(&rows), fails);
         }
-        let line = summary_line(&["note queue"], &[], &[], 0);
+        let line = summary_line(&["note queue"], &[], &[], 0, false);
         assert!(line.starts_with("ljos is not ready: note queue does not answer."));
     }
 
@@ -56783,6 +56932,36 @@ mod tests {
         assert!(!short.contains("tracker"), "{short}");
         assert!(!short.contains("encoder"), "{short}");
         assert!(format_doctor(&rows).contains("info\tencoder\t"));
+    }
+
+    #[test]
+    fn a_dead_encoder_warns_that_recall_is_degraded() {
+        let rows = vec![
+            habitat_row("pack", "answers", true),
+            habitat_row("tracker", "answers", true),
+            habitat_row("policy", "ljos-policyd 0.5.0 (phronesis)", true),
+            habitat_row("encoder", &encoder_degraded_state(), false),
+        ];
+        assert_eq!(doctor_word(&rows[3]), "warn");
+        assert!(healthy(&rows), "a dead encoder does not fail the seat");
+        let short = format_doctor_short(&rows);
+        assert!(
+            short.starts_with("Recall is degraded: ranking is lexical-only."),
+            "{short}"
+        );
+        assert!(short.contains("warn\tencoder\t"), "{short}");
+        assert!(short.contains(ENCODER_RESTART_COMMAND), "{short}");
+        assert!(short.contains("lexical-only"), "{short}");
+        let full = format!(
+            "== doctor\nok\tpack\tanswers\nwarn\tencoder\t{}\n{LEXICAL_ONLY_LINE}== claim\nclaimed Software-x for seat\n",
+            encoder_degraded_state()
+        );
+        let sat = compact_sitting(&full, "Software-x");
+        assert!(
+            sat.contains("Recall is degraded: ranking is lexical-only."),
+            "{sat}"
+        );
+        assert!(sat.contains(LEXICAL_ONLY_LINE.trim_end()), "{sat}");
     }
 
     #[test]
@@ -58017,7 +58196,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             (&["note queue"], &["the note queue"], 6),
         ];
         for (down, damaged, off) in cases {
-            let line = summary_line(down, damaged, all, off);
+            let line = summary_line(down, damaged, all, off, false);
             assert!(line.trim_end().chars().count() <= 100, "{line}");
             assert!(!line.contains("pack"), "{line}");
         }
@@ -60741,6 +60920,21 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             assert!(!super::encoder_cold(&status(warm.clone())), "{warm}");
         }
         assert!(!super::encoder_cold(&serde_json::json!({})));
+        let dead = status(serde_json::json!({
+            "available": false, "answering": false
+        }));
+        assert!(super::encoder_failed(&dead));
+        assert!(super::encoder_lexical(&dead));
+        let missing = status(serde_json::json!({
+            "available": false, "answering": null
+        }));
+        assert!(!super::encoder_failed(&missing));
+        assert!(super::encoder_lexical(&missing));
+        let cold = status(serde_json::json!({
+            "available": true, "answering": null
+        }));
+        assert!(!super::encoder_lexical(&cold));
+        assert!(!super::encoder_lexical(&serde_json::json!({})));
     }
 
     #[test]

@@ -1,0 +1,178 @@
+//! A writer whose encoder child has died: doctor warns, and recall asks
+//! `packset` to stop and start the writer again.
+
+ljos_test_boot::harness!();
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+#[path = "common/seat_root.rs"]
+mod seat_root;
+
+struct SeatHome(PathBuf);
+
+impl SeatHome {
+    fn new(name: &str) -> Self {
+        let dir = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp)
+            .join(format!("ljos-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("seat home");
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for SeatHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn content_length(head: &str) -> usize {
+    head.lines()
+        .find_map(|line| {
+            let rest = line
+                .strip_prefix("Content-Length:")
+                .or_else(|| line.strip_prefix("content-length:"))?;
+            rest.trim().parse().ok()
+        })
+        .unwrap_or(0)
+}
+
+/// A writer that answers, with the encoder child recorded as dead.
+fn dead_encoder() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut sock = conn;
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                let path = path.split('?').next().unwrap_or("/");
+                let cl = content_length(&head);
+                while buf.len() < head_end + cl {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let body = match path {
+                    "/health" => "packsetd ok".to_string(),
+                    "/v1/status" => {
+                        r#"{"embedder":{"available":false,"answering":false,"enabled":true,"binary":"/usr/bin/packset-embed"},"live":0,"live_cap":0}"#
+                            .to_string()
+                    }
+                    "/v1/atoms" => r#"{"atoms":[]}"#.to_string(),
+                    "/v1/search" => r#"{"hits":[],"engine":"linear"}"#.to_string(),
+                    _ => r#"{}"#.to_string(),
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            });
+        }
+    });
+    port.to_string()
+}
+
+fn executable(path: &Path, text: &str) {
+    std::fs::write(path, text).expect("script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
+
+fn run(home: &Path, path: &str, port: &str, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(args)
+        .env_clear()
+        .env("HOME", home)
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env("XDG_CACHE_HOME", home.join("cache"))
+        .env("XDG_STATE_HOME", home.join("state"))
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("PATH", path)
+        .env("PACKSET_PORT", port)
+        .env("PACKSET_HOME", home.join("pack"))
+        .env("PACKSET_TIMEOUT_MS", "2000")
+        .env("LJOS_NO_AUTOSTART", "1")
+        .output()
+        .expect("ljos")
+}
+
+#[test]
+fn a_missing_encoder_warns_and_recall_restarts_it() {
+    let home = SeatHome::new("encoder-degraded");
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin");
+    let marker = home.path().join("packset-calls");
+    executable(
+        &bin.join("packset"),
+        &format!("#!/bin/sh\necho \"$@\" >> '{}'\n", marker.display()),
+    );
+    executable(
+        &bin.join("vissue"),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'vissue 0.23.0' ;;\n  recall) echo recalled ;;\n  vote) echo '--used --confidence' ;;\n  *) echo '{}' ;;\nesac\nexit 0\n",
+    );
+    let port = dead_encoder();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let doctor = run(home.path(), &path, &port, &["doctor"]);
+    let text = String::from_utf8_lossy(&doctor.stdout);
+    let err = String::from_utf8_lossy(&doctor.stderr);
+    assert!(
+        text.contains("warn\tencoder\t"),
+        "doctor did not warn\nstdout:\n{text}\nstderr:\n{err}\nstatus: {}",
+        doctor.status
+    );
+    assert!(
+        text.contains("Recall is degraded: ranking is lexical-only."),
+        "{text}"
+    );
+    assert!(text.contains(ljos_cli::ENCODER_RESTART_COMMAND), "{text}");
+    assert!(
+        text.contains("lexical-only"),
+        "the warning does not say the ranking is lexical-only: {text}"
+    );
+    let before = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        !before.lines().any(|line| line.trim() == "stop"),
+        "doctor stopped the writer: {before}"
+    );
+
+    let recall = run(home.path(), &path, &port, &["recall", "Scratch-1"]);
+    let calls = std::fs::read_to_string(&marker).unwrap_or_default();
+    let said = String::from_utf8_lossy(&recall.stdout);
+    let recall_err = String::from_utf8_lossy(&recall.stderr);
+    assert!(
+        calls.lines().any(|line| line.trim() == "stop")
+            && calls.lines().any(|line| line.trim() == "ensure"),
+        "recall did not run `{cmd}`; calls: {calls:?}\nstdout:\n{said}\nstderr:\n{recall_err}",
+        cmd = ljos_cli::ENCODER_RESTART_COMMAND
+    );
+    assert!(
+        said.contains("lexical-only"),
+        "recall did not say the results are lexical-only\nstdout:\n{said}\nstderr:\n{recall_err}"
+    );
+}
