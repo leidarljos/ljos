@@ -142,6 +142,53 @@ fn memory_home() -> PathBuf {
     crate::note_queue::state_dir().join("memory")
 }
 
+/// The slot that takes a kept original: `home`, unless `home` sits in a
+/// tracker that names a sync scope (`.ljos/sync.toml` beside it). Such a
+/// tracker seals every atom it carries, so a plaintext original goes to
+/// the state directory's slot instead. Recall reads both slots.
+fn kept_home(home: &Path) -> PathBuf {
+    let scoped = home
+        .parent()
+        .is_some_and(|ljos_dir| ljos_dir.join("sync.toml").is_file());
+    if scoped {
+        crate::note_queue::state_dir().join("memory")
+    } else {
+        home.to_path_buf()
+    }
+}
+
+fn kept_dir(place: &Place) -> PathBuf {
+    kept_home(&place.home).join("kept")
+}
+
+#[cfg(test)]
+mod kept_home_tests {
+    use super::*;
+
+    #[test]
+    fn a_scoped_tracker_keeps_originals_out_of_its_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join(".ljos").join("memory");
+        std::fs::create_dir_all(&home).unwrap();
+        assert_eq!(kept_home(&home), home);
+        std::fs::write(
+            dir.path().join(".ljos").join("sync.toml"),
+            "name = \"surf\"\nrecipients = [\"age1example\"]\n",
+        )
+        .unwrap();
+        let elsewhere = kept_home(&home);
+        assert_ne!(elsewhere, home);
+        assert!(
+            !elsewhere.starts_with(dir.path()),
+            "{}",
+            elsewhere.display()
+        );
+        // The state directory's own slot is never scoped.
+        let state = crate::note_queue::state_dir().join("memory");
+        assert_eq!(kept_home(&state), state);
+    }
+}
+
 impl Place {
     /// The seat's tracker when `VISSUE_ROOT` or the vissue layout names one,
     /// otherwise the state directory. Recall reads the same directory.
@@ -442,10 +489,7 @@ fn keep_empty_at(place: &Place, kind: &str) {
         diagnostic: "empty text is not a claim".into(),
         effect: "failed".into(),
     };
-    let path = place
-        .home
-        .join("kept")
-        .join(format!("{}.json", row.content_sha256));
+    let path = kept_dir(place).join(format!("{}.json", row.content_sha256));
     let _ = write_if_absent(&path, &serde_json::to_vec_pretty(&row).unwrap_or_default());
 }
 
@@ -524,7 +568,7 @@ fn write_kept(
         diagnostic: why.to_string(),
         effect: effect.into(),
     };
-    let path = place.home.join("kept").join(format!("{digest}.json"));
+    let path = kept_dir(place).join(format!("{digest}.json"));
     write_if_absent(&path, &serde_json::to_vec_pretty(&row)?)?;
     Ok(())
 }
@@ -1174,11 +1218,16 @@ fn push_label(labels: &mut Vec<String>, label: &str) {
 }
 
 fn load_kept(place: &Place) -> Vec<Row> {
-    let dir = place.home.join("kept");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    entries
+    // The slot's own directory, and the state directory's when a scoped
+    // tracker sent its originals there.
+    let mut dirs = vec![place.home.join("kept")];
+    let scoped = kept_dir(place);
+    if !dirs.contains(&scoped) {
+        dirs.push(scoped);
+    }
+    dirs.iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
             let bytes = std::fs::read(entry.path()).ok()?;

@@ -1,0 +1,1 @@
+A kept original (a lesson the prose check would split, an empty write, an unattached note, a sync row the pack did not take) stays out of a tracker that names a sync scope: it is written to the state directory's memory slot instead, and recall reads both slots. A sealed tracker no longer carries those originals in clear.

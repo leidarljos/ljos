@@ -60,6 +60,7 @@ Slot hits that share a query word are added after them.
 
 Slot hits also include a lesson the pack's prose check would split.
 The original is stored whole.
+On a tracker that names a sync scope the original goes to the state directory's slot, not the tracker, and recall reads both slots.
 The label is `prose-warning`, `oversize`, or `content-warning`, matching what the check reported.
 The fitted copies can still be posted.
 The original remains one record.
