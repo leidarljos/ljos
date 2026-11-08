@@ -3597,14 +3597,16 @@ fn cursor_mcp_advice() -> String {
     }
 }
 
-fn on_cloud_vm() -> bool {
+pub(crate) fn on_cloud_vm() -> bool {
     let rt = runtime();
-    if agent_id().is_some() || rt.ci || rt.codespace {
+    if rt.cloud_id || rt.ci || rt.codespace {
         return true;
     }
-    // A desktop terminal sets the runner mark=1 and nothing else. The api
-    // socket is not enough either: doctor is often aimed at another home.
-    if rt.cursor_harness && rt.cloud_agent {
+    // A conversation id is set on a box seat under the editor harness.
+    // It does not make the machine a cloud VM, and `ljos cloud up` is
+    // the wrong next step there. A cloud agent id, CI, a codespace, the
+    // agent socket, or a seat the env file already marked, does.
+    if nonempty_var("CURSOR_AGENT_SOCKET").is_some() {
         return true;
     }
     cloud_env_file_seat()
@@ -3618,8 +3620,8 @@ fn runtime() -> Runtime {
     let cloud_id =
         nonempty_var("CURSOR_AGENT_ID").is_some() || nonempty_var("CLOUD_AGENT_ID").is_some();
     let api_socket = Path::new("/run/cursor/api.sock").exists();
-    // the runner mark=1 is the desktop agent terminal. The socket path and
-    // the conversation id are set on a cloud VM and are not that flag.
+    // the runner mark=1 is the desktop agent terminal. A conversation id
+    // is set there too, so it marks the editor harness and not a cloud VM.
     let cloud_agent = cloud_id
         || nonempty_var("CURSOR_AGENT_SOCKET").is_some()
         || nonempty_var("CURSOR_CONVERSATION_ID").is_some();
@@ -3646,7 +3648,6 @@ fn runtime() -> Runtime {
         cloud_id,
         api_socket,
         cursor_harness,
-        cloud_agent,
     }
 }
 
@@ -3657,7 +3658,6 @@ struct Runtime {
     cloud_id: bool,
     api_socket: bool,
     cursor_harness: bool,
-    cloud_agent: bool,
 }
 
 /// The value `true`, ignoring case and surrounding space.

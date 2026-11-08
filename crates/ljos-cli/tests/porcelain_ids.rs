@@ -1,7 +1,7 @@
-//! `ljos file` prints the status line, the file and the tracker lines on
-//! stdout, so `id=$(ljos file ...)` is not an id and `ljos sitting $id`
-//! is given the rest of that line. `-q` and `--porcelain` print only the
-//! new id. `ljos deed` does the same for an accession it records.
+//! `ljos file` prints the new id on stdout. The status line, the file and
+//! the tracker lines go to stderr, so `id=$(ljos file ...)` is the id.
+//! `-q` and `--porcelain` do the same. `ljos deed --porcelain` prints only
+//! an accession it records.
 
 ljos_test_boot::harness!();
 
@@ -104,28 +104,23 @@ fn assert_only_id(out: &Output, id: &str) {
 }
 
 #[test]
-fn a_plain_file_capture_is_not_an_id_sitting_can_take() {
+fn a_plain_file_capture_is_the_id() {
     let world = World::new();
     let filed = world.ljos(&["file", "title here", "--top", "-p", "papers"]);
-    let said = text(&filed);
-    assert!(filed.status.success(), "{said}");
-    let stdout = String::from_utf8_lossy(&filed.stdout);
+    assert_only_id(&filed, "papers-2jco");
+    let err = String::from_utf8_lossy(&filed.stderr);
     assert!(
-        stdout.contains("papers-2jco  TODO  [#A]  title here"),
-        "{said}"
+        err.contains("papers-2jco  TODO  [#A]  title here"),
+        "{}",
+        text(&filed)
     );
-    assert!(stdout.contains("file:"), "{said}");
-    assert!(stdout.contains("tracker"), "{said}");
-    let words: Vec<&str> = stdout.split_whitespace().collect();
-    let mut sit_args = Vec::with_capacity(words.len() + 1);
-    sit_args.push("sitting");
-    sit_args.extend(words);
-    let sitting = world.ljos(&sit_args);
+    assert!(err.contains("file:"), "{}", text(&filed));
+    let id = String::from_utf8_lossy(&filed.stdout);
+    let sitting = world.ljos(&["sitting", id.trim()]);
     let sit = text(&sitting);
-    assert!(!sitting.status.success(), "{sit}");
     assert!(
-        String::from_utf8_lossy(&sitting.stderr).contains("unexpected argument"),
-        "{sit}"
+        !String::from_utf8_lossy(&sitting.stderr).contains("unexpected argument"),
+        "sitting was not given the id alone: {sit}"
     );
 }
 

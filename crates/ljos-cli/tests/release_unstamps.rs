@@ -286,10 +286,14 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
         "a finish without a close hands the issue back:\n{org}"
     );
     assert!(
-        open.contains("no longer claimed by saddle@main; back to TODO"),
+        open.contains("sitting ended; ticket proj-eeee open for review"),
         "{open}"
     );
-    assert!(open.contains("stays open and nobody holds it"), "{open}");
+    assert!(
+        !open.contains("back to TODO"),
+        "finish must not read as the work being undone: {open}"
+    );
+    assert!(!open.contains("stays open and nobody holds it"), "{open}");
     assert!(!open.contains("--close"), "{open}");
     assert!(closed.contains("a person closes a ticket"), "{closed}");
     assert!(closed.contains("Nothing was written"), "{closed}");

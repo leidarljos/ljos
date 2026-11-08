@@ -84,6 +84,7 @@ pub mod undo;
 pub mod uninstall;
 pub mod upgrade;
 pub mod user_rules;
+mod verbatim;
 pub mod wake;
 
 #[cfg(test)]
@@ -9090,7 +9091,7 @@ pub fn session_end(session: Option<&str>) -> usize {
 
 /// A pack atom's id: 32 hex digits. The seen list also keeps named keys
 /// (`due-nudge`, `panel-open:...`), which are not memories.
-fn is_atom_id(s: &str) -> bool {
+pub(crate) fn is_atom_id(s: &str) -> bool {
     s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
@@ -13755,6 +13756,7 @@ fn packset_search_relevant(query: &str, limit: u32) -> Result<Vec<Hit>> {
         keep_search_origins(&client, &hits);
         Ok(hits)
     })?;
+    let hits = fold_verbatim(q, hits);
     count_recall(&hits);
     Ok(hits)
 }
@@ -17687,8 +17689,8 @@ fn post_or_reinforce(client: &PacksetClient, atom: &Value, prefix: &str) -> Resu
 /// carries origin `agent-derived` and its provenance in `source`, and
 /// `ljos memories review` keeps, edits, merges or drops it afterwards.
 /// The pack still refuses a secret. A claim past its sentence, word,
-/// grade or adverb limits is stored as shorter copies, with the pack's
-/// reason as a warning ([`admit::write_agent`]).
+/// grade or adverb limits is stored as typed, with the pack's reason as
+/// a warning ([`admit::write_agent`]).
 ///
 /// # Errors
 ///
@@ -29912,6 +29914,107 @@ fn shown_short(word: &str, name: &str) -> bool {
         || (word == "info" && READY_PARTS.iter().any(|(_, rows)| rows.contains(&name)))
 }
 
+/// Whether a doctor row tells a seat that is not a cloud seat to run
+/// `ljos cloud up`. That command installs a cloud seat. A box seat is
+/// told how to fix the harness, not how to become a cloud VM.
+fn cloud_only_advice(name: &str, state: &str) -> bool {
+    name == "mcp"
+        && state.contains("ljos cloud up")
+        && !cloud::cloud_seat()
+        && !cloud::on_cloud_vm()
+}
+
+/// The text of one memory in a sitting's island: a recall bullet
+/// (`- [kind] text`, the same lines [`recall_lines`] prints) or the old
+/// five-column island row. `None` for a heading or a status line.
+fn sitting_memory_text(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if let Some(rest) = trimmed.strip_prefix("- ") {
+        if let Some(rest) = rest.strip_prefix('[') {
+            if let Some((_, text)) = rest.split_once("] ") {
+                let text = text.trim();
+                if !text.is_empty() {
+                    return Some(text.to_string());
+                }
+            }
+        }
+    }
+    let cols: Vec<&str> = line.split('\t').collect();
+    if cols.len() == 5 && cols[0].parse::<f64>().is_ok() {
+        let text = cols[4].trim();
+        if !text.is_empty() {
+            return Some(text.to_string());
+        }
+    }
+    None
+}
+
+/// A line a sitting repeats while the seat has not changed: the doctor
+/// headline, an mcp warning, and the encoder line.
+fn is_status_line(line: &str) -> bool {
+    let line = line.trim();
+    if line.starts_with("ljos is ready")
+        || line.starts_with("ljos is not ready")
+        || line.starts_with("ljos runs, but")
+        || line.starts_with("encoder down:")
+        || line.starts_with("memory-unavailable:")
+        || line.contains("the encoder is down")
+    {
+        return true;
+    }
+    let mut cols = line.splitn(3, '\t');
+    let word = cols.next().unwrap_or("");
+    let name = cols.next().unwrap_or("");
+    matches!(word, "warn" | "no" | "info") && name == "mcp"
+}
+
+/// `block` with its status lines removed when `prior` is the same
+/// fingerprint. The fingerprint is those lines joined. A first sitting
+/// (`prior` is `None`) and a sitting whose status changed keep the lines.
+#[must_use]
+pub fn quiet_unchanged_status(block: &str, prior: Option<&str>) -> (String, String) {
+    let fingerprint = block
+        .lines()
+        .filter(|line| is_status_line(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if prior != Some(fingerprint.as_str()) {
+        return (block.to_string(), fingerprint);
+    }
+    let kept: Vec<&str> = block.lines().filter(|line| !is_status_line(line)).collect();
+    if kept.is_empty() {
+        return (String::new(), fingerprint);
+    }
+    let mut out = kept.join("\n");
+    if block.ends_with('\n') {
+        out.push('\n');
+    }
+    (out, fingerprint)
+}
+
+fn sitting_status_path() -> PathBuf {
+    runtime_dir().join("sitting-status")
+}
+
+/// Drop status lines this session already printed, unless they changed.
+fn suppress_repeated_status(block: &str) -> String {
+    if !block.lines().any(is_status_line) {
+        return block.to_string();
+    }
+    let session = runner_session_id().unwrap_or_else(|| "seat".to_string());
+    let path = sitting_status_path();
+    let prior = std::fs::read_to_string(&path).ok().and_then(|text| {
+        let (seen, rest) = text.split_once('\n')?;
+        (seen == session).then(|| rest.to_string())
+    });
+    let (out, fingerprint) = quiet_unchanged_status(block, prior.as_deref());
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, format!("{session}\n{fingerprint}"));
+    out
+}
+
 /// One section of a sitting's report, cut for [`compact_sitting`].
 fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut Vec<String>) {
     match name {
@@ -29933,7 +30036,10 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     }
                     ["ok", _, _] => {}
                     [word, name, state] if said_elsewhere_in_sitting(word, name, state) => {}
-                    [word @ ("no" | "warn"), name, _] => {
+                    [word @ ("no" | "warn"), name, state] => {
+                        if cloud_only_advice(name, state) {
+                            continue;
+                        }
                         if *word == "no" && (REQUIRED.contains(name) || *name == "pack") {
                             down.push(*name);
                         }
@@ -29954,10 +30060,12 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
         }
         "island" => {
             for l in lines {
-                let cols: Vec<&str> = l.split('\t').collect();
-                if cols.len() == 5 && cols[0].parse::<f64>().is_ok() && memories.len() < 5 {
-                    memories.push(cols[4].to_string());
-                } else if l.starts_with("weak island") || l.starts_with("ranked by words") {
+                if let Some(text) = sitting_memory_text(l) {
+                    memories.push(text);
+                } else if l.starts_with("weak island")
+                    || l.starts_with("ranked by words")
+                    || l.starts_with("recall:")
+                {
                     out.push_str(l);
                     out.push('\n');
                 }
@@ -30093,7 +30201,7 @@ pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String 
     let Some(first) = lines.next() else {
         return String::new();
     };
-    if let Some(head) = first.strip_prefix("== ") {
+    let raw = if let Some(head) = first.strip_prefix("== ") {
         let name = if head.starts_with("island") {
             "island"
         } else {
@@ -30102,15 +30210,16 @@ pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String 
         let body: Vec<&str> = lines.collect();
         let mut out = String::new();
         compact_section(name, &body, &mut out, memories);
-        return out;
-    }
-    if first.starts_with("tracker:")
+        out
+    } else if first.starts_with("tracker:")
         || first.starts_with("tracker git:")
         || first.starts_with("ranked by words")
     {
-        return compact_tracker_line(first);
-    }
-    String::new()
+        compact_tracker_line(first)
+    } else {
+        String::new()
+    };
+    suppress_repeated_status(&raw)
 }
 
 /// A tracker drift line as a compact sitting prints it: the counts alone.
@@ -31601,20 +31710,53 @@ pub fn packset_search_as_of(
     // cross-encoder's order stands under it. A dated search is left as
     // the writer returned it: the encoder's ballot describes the pack
     // now, and the signal read below asks for now.
-    if !rerank || stamp.is_some() {
-        count_recall(&found);
-        return Ok(found);
+    let historical = stamp.is_some();
+    if !rerank || historical {
+        return Ok(finish_search(q, found, historical));
     }
     let Some((leader, signal)) = search_with_signals(q, limit)
         .ok()
         .and_then(|rows| rows.into_iter().next())
     else {
-        count_recall(&found);
-        return Ok(found);
+        return Ok(finish_search(q, found, historical));
     };
     let ranked = pin_encoder_leader(found, leader, signal.rank);
-    count_recall(&ranked);
-    Ok(ranked)
+    Ok(finish_search(q, ranked, historical))
+}
+
+/// Verbatim memories the pack refused to rewrite, then one row per content
+/// hash. A dated search is the pack as it stood then, so today's local
+/// records stay out of it.
+fn finish_search(query: &str, hits: Vec<Hit>, historical: bool) -> Vec<Hit> {
+    let hits = if historical {
+        verbatim::dedup(hits)
+    } else {
+        fold_verbatim(query, hits)
+    };
+    count_recall(&hits);
+    hits
+}
+
+/// Local verbatim records that share a word with `query`, then one hit per
+/// content hash so a pack row and the same text kept locally are one line.
+fn fold_verbatim(query: &str, mut hits: Vec<Hit>) -> Vec<Hit> {
+    let asked = pack_words(query);
+    if !asked.is_empty() {
+        for atom in verbatim::records() {
+            let Some(text) = atom["text"].as_str() else {
+                continue;
+            };
+            if !pack_words(text).iter().any(|word| asked.contains(word)) {
+                continue;
+            }
+            let Some(mut hit) = atom_as_hit(&atom) else {
+                continue;
+            };
+            hit.score = 1.0;
+            hits.push(hit);
+        }
+    }
+    verbatim::dedup(hits)
 }
 
 /// One use per hit a search or a hook actually handed back. The pack's
@@ -34440,7 +34582,10 @@ pub fn open_blockers(issue: &str) -> Vec<String> {
 /// only these with a note has not found a memory of the work.
 const SITTING_WIDE: &[&str] = &["ljos", "seat", "sitting", "note", "ticket"];
 
-/// How many memories a sitting prints. Fewer when fewer clear the floor.
+/// How many memories the old island ranker printed. Fewer when fewer clear
+/// the floor. A sitting now uses [`recall_memories`]; the ranker stays for
+/// its tests.
+#[cfg(test)]
 const SITTING_RECALL_CAP: usize = 5;
 
 /// The least share of the ticket's own words a memory must cover.
@@ -34602,6 +34747,7 @@ fn sitting_memory_score(
 /// title weight as `1 + 1 = 2`. The ratio is fixed by that schema, not by
 /// the retrieval fixture. Repeating a term keeps those two votes rather
 /// than counting the same field twice.
+#[cfg(test)]
 fn sitting_query(ticket: &str) -> Vec<(String, f64)> {
     const BODY_WEIGHT: f64 = 1.0;
     const TITLE_WEIGHT: f64 = 2.0;
@@ -34623,6 +34769,7 @@ fn sitting_query(ticket: &str) -> Vec<(String, f64)> {
 
 /// Memories worth showing for a sitting, best first. BM25 uses term
 /// frequency, document length and IDF over this seat's eligible pack.
+#[cfg(test)]
 pub(crate) fn rank_sitting_memories(
     issue: &str,
     ticket: &str,
@@ -34674,7 +34821,8 @@ pub(crate) fn rank_sitting_memories(
         .collect()
 }
 
-/// The island lines a compact sitting reads as its memories.
+/// The island lines a compact sitting used to read as its memories.
+#[cfg(test)]
 fn format_sitting_recall(rows: &[Value]) -> String {
     let now = now_utc();
     let mut out = String::new();
@@ -34881,7 +35029,7 @@ pub fn sitting_stream_started(
 
     let mut piece = String::new();
     sections.heading(&mut piece, "due");
-    let (due, atoms) = match sitting_due_and_atoms(issue, &title) {
+    let (due, _atoms) = match sitting_due_and_atoms(issue, &title) {
         Ok(pair) => pair,
         Err(e) if is_pack_busy(&e) => {
             fell_back = true;
@@ -34898,9 +35046,14 @@ pub fn sitting_stream_started(
     // ticket is about. The lines a sitting shows are the memories that
     // share the ticket's own words. A search that does not answer in the
     // budget leaves those lines as they are and says so once.
-    let ticket = sitting_ticket_text(issue, &title);
-    let ranked = rank_sitting_memories(issue, &ticket, &atoms, &now_utc(), &seat_name());
-    piece.push_str(&format_sitting_recall(&ranked));
+    // The same list `ljos recall` prints: issue memories, then related
+    // hits, with the same caps. The island's own ranking is a different
+    // list and a sitting used to show fewer than recall.
+    match recall_memories_with(issue, true) {
+        Ok(text) => piece.push_str(&text),
+        Err(e) if is_pack_busy(&e) => fell_back = true,
+        Err(e) => piece.push_str(&format!("recall: {e:#}\n")),
+    }
     piece.push_str(words_line(&mut fell_back));
     emit_piece(&mut out, &mut emit, &piece);
 
@@ -35539,7 +35692,7 @@ fn finish_lesson(issue: &str, text: &str) -> String {
             .map(|line| format!("{line}\n"))
             .unwrap_or_default();
         Ok(format!(
-            "remembered the lesson as agent-derived, unreviewed (id {id}); search finds it now, and `ljos accept {id}` marks it reviewed\n{warned}"
+            "remembered the lesson as agent-derived, unreviewed (id {id}); search finds it now\n{warned}"
         ))
     })();
     match filed {
@@ -36052,7 +36205,23 @@ pub fn finish(
         }
     };
     let mut out = format!("completed the session node for {issue} as {status}\n");
+    // "back to TODO" is the tracker returning the heading to the state it
+    // had before the claim. The work was not undone: the sitting ended and
+    // the ticket stays open for a person to review.
+    let mut handed_back = true;
     for line in completed.lines().filter(|l| l.starts_with("tracker: ")) {
+        if line.contains("stays claimed") {
+            handed_back = false;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if line.contains("back to ")
+            || line.contains("its state stays")
+            || line.contains("nobody held it")
+        {
+            continue;
+        }
         out.push_str(line);
         out.push('\n');
     }
@@ -36134,14 +36303,8 @@ pub fn finish(
             out.push_str(note);
             out.push('\n');
         }
-    } else if person_present() {
-        out.push_str(&format!(
-            "the ticket {issue} stays open and nobody holds it; `ljos finish {issue} --close` closes it when the work is accepted\n"
-        ));
-    } else {
-        out.push_str(&format!(
-            "the ticket {issue} stays open and nobody holds it; a person closes it when the work is accepted\n"
-        ));
+    } else if handed_back {
+        out.push_str(&format!("sitting ended; ticket {issue} open for review\n"));
     }
     // A cloud seat's deeds leave with the tracker. A box writes nothing.
     let (deeds, deed_paths) = deedbag::on_finish(issue);
@@ -47668,6 +47831,8 @@ mod tests {
     #[test]
     fn a_reranked_search_keeps_the_encoder_s_first_hit() {
         let _env = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let _state = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
         let row = |id: &str, text: &str, rank: u32| {
             serde_json::json!({
                 "id": id, "text": text, "score": 2.0, "kind": "lesson",
@@ -51825,7 +51990,7 @@ mod tests {
             line.contains("remembered the lesson as agent-derived, unreviewed (id atom-0)"),
             "{line}"
         );
-        assert!(line.contains("`ljos accept atom-0`"), "{line}");
+        assert!(!line.contains("ljos accept"), "{line}");
         let live = stored.lock().unwrap().clone();
         assert_eq!(live.len(), 1, "{live:?}");
         assert_eq!(live[0]["origin"], admit::ORIGIN_AGENT, "{live:?}");
@@ -55222,6 +55387,127 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
     }
 
+    /// The doctor headline, the mcp warning and the encoder line are said
+    /// once. A later sitting with the same lines leaves them out. A change
+    /// in the headline brings them back.
+    #[test]
+    fn a_second_sitting_omits_status_that_did_not_change() {
+        let block = "\
+ljos is ready: memory works.
+encoder down: the pack ranks by words alone and a weak island is not fired
+warn\tmcp\twarning: ljos-mcp is old
+2 due
+box-1 is yours.
+";
+        let (first, fingerprint) = quiet_unchanged_status(block, None);
+        assert!(first.contains("ljos is ready"), "{first}");
+        assert!(first.contains("encoder down"), "{first}");
+        assert!(first.contains("warn\tmcp\t"), "{first}");
+        let (second, _) = quiet_unchanged_status(block, Some(&fingerprint));
+        assert!(!second.contains("ljos is ready"), "{second}");
+        assert!(!second.contains("encoder down"), "{second}");
+        assert!(!second.contains("warn\tmcp\t"), "{second}");
+        assert!(second.contains("2 due"), "{second}");
+        assert!(second.contains("is yours"), "{second}");
+        let changed = "\
+ljos is not ready: memory does not answer.
+encoder down: the pack ranks by words alone and a weak island is not fired
+2 due
+box-1 is yours.
+";
+        let (third, _) = quiet_unchanged_status(changed, Some(&fingerprint));
+        assert!(third.contains("ljos is not ready"), "{third}");
+        assert!(third.contains("encoder down"), "{third}");
+    }
+
+    /// `ljos cloud up` is cloud-only. A box seat's sitting does not print it.
+    #[test]
+    fn a_box_seat_is_not_told_to_run_cloud_up() {
+        let _g = env_guard();
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: under the env guard this test holds. The guard puts them back.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
+        }
+        for key in [
+            "CI",
+            "GITLAB_CI",
+            "GITHUB_ACTIONS",
+            "CURSOR_AGENT_ID",
+            "CURSOR_CONVERSATION_ID",
+            "CURSOR_AGENT_SOCKET",
+            "CODESPACES",
+            "CODESPACE_NAME",
+        ] {
+            // SAFETY: under the env guard this test holds.
+            unsafe { std::env::remove_var(key) };
+        }
+        let full =
+            "== doctor\nwarn\tmcp\twarning: ljos-mcp is not this install. Run `ljos cloud up`.\n";
+        let short = compact_sitting(full, "box-1");
+        assert!(
+            !short.contains("ljos cloud up"),
+            "a box seat was sent to cloud up: {short}"
+        );
+    }
+
+    /// A sitting shows the memories `ljos recall` shows, and the same number.
+    #[test]
+    fn a_sitting_lists_every_memory_recall_lists() {
+        let hits: Vec<Hit> = (0..4)
+            .map(|i| {
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("{:032x}", i + 1),
+                    "kind": "lesson",
+                    "text": format!("memory {i} about the ticket words"),
+                    "ts": "2026-11-01T00:00:00Z",
+                    "score": 1.0,
+                }))
+                .unwrap()
+            })
+            .collect();
+        let recall = recall_lines(
+            &hits,
+            Vec::new(),
+            "ticket words",
+            "2026-11-08T00:00:00Z",
+            true,
+        );
+        let bullets: Vec<String> = recall.lines().filter_map(sitting_memory_text).collect();
+        assert_eq!(bullets.len(), 4, "{recall}");
+        let full = format!("== island: Title\n{recall}\n== claim\nclaimed t for ada\n");
+        let short = compact_sitting(&full, "t");
+        let shown = short.lines().filter(|line| line.starts_with("- ")).count();
+        assert_eq!(shown, bullets.len(), "{short}");
+        for text in &bullets {
+            assert!(short.contains(text), "{text} missing from {short}");
+        }
+    }
+
+    #[test]
+    fn search_keeps_one_row_when_the_content_hash_matches() {
+        let hit = |text: &str| Hit {
+            id: Some(text.to_string()),
+            text: text.to_string(),
+            score: 1.0,
+            kind: "lesson".into(),
+            ts: None,
+            entities: Vec::new(),
+            ballots: None,
+            of: None,
+            rerank_score: None,
+        };
+        let out = verbatim::dedup(vec![
+            hit("same words"),
+            hit("same words"),
+            hit("other words"),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].text, "same words");
+        assert_eq!(out[1].text, "other words");
+    }
+
     /// The doctor of a sitting on a box that leaves `ljos-mcp` and
     /// `ljos-policyd` out, has an OOM kill within a day, and a tracker with
     /// unpushed commits and other seats' uncommitted edits.
@@ -56117,10 +56403,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(crate::note_queue::pending_in(tmp.path()).is_empty());
     }
 
-    /// An agent lesson of three sentences is stored as copies the atom gate accepts.
+    /// An agent lesson of three sentences is stored as typed. The pack's
+    /// sentence cap is a label, not a cut.
     #[test]
-    fn a_three_sentence_lesson_is_stored_as_copies_the_gate_accepts() {
+    fn a_three_sentence_lesson_is_stored_as_typed() {
         let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
         let texts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let (url, _) = serve_http({
             let texts = std::sync::Arc::clone(&texts);
@@ -56147,12 +56436,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         });
         let _url = PackUrl::set(&url);
         let three = "The parser kept the hyphen. The test pins it. The release ships it.";
-        packset_write_agent("Remember", three, None, Some(false)).unwrap();
-        let stored = texts.lock().unwrap().clone();
-        assert!(stored.len() > 1, "{stored:?}");
-        assert!(stored
-            .iter()
-            .all(|text| text != three && pack_copy::pack_copy_ok(text)));
+        let kept = packset_write_agent("Remember", three, None, Some(false)).unwrap();
+        assert_eq!(kept["text"], three);
+        assert!(
+            texts.lock().unwrap().is_empty(),
+            "the pack stored a cut copy: {:?}",
+            texts.lock().unwrap()
+        );
     }
 
     #[test]
@@ -65526,42 +65816,34 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         (url, stored)
     }
 
-    /// Length and grade are a warning, not a refusal. The person's prefer is
-    /// stored as written; the agent's, which the pack holds to its gate, as
-    /// shorter copies with the agent's labels and every word kept in order.
-    /// A third sentence is still more than one atom.
+    /// Length and grade are a warning, not a rewrite. The person's prefer
+    /// and the agent's remember are both stored as typed. The pack refuses
+    /// the agent's prose, so the seat keeps that one copy itself.
     #[test]
-    fn a_long_agent_claim_is_stored_in_copies_and_the_persons_as_written() {
+    fn a_long_agent_claim_is_stored_as_typed_and_the_persons_as_written() {
         let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
         let (url, stored) = serve_validating();
         let _url = PackUrl::set(&url);
         let grade = "The payments service retries webhooks three times with exponential backoff starting at two seconds.";
         let words = format!("{}end.", "word ".repeat(29));
-        let bare = |text: &str| -> Vec<String> {
-            text.split_whitespace()
-                .map(|word| word.trim_end_matches('.').to_string())
-                .collect()
-        };
         for text in [grade, words.as_str()] {
             stored.lock().unwrap().clear();
             let kept = packset_write_agent("Remember", text, None, Some(false))
                 .unwrap_or_else(|why| panic!("the agent's {text:?} was refused: {why:#}"));
+            assert_eq!(kept["text"], text, "{kept}");
             assert!(
                 kept["prose"]["warning"]
                     .as_str()
                     .is_some_and(|warning| !warning.is_empty()),
                 "{kept}"
             );
-            let copies: Vec<Value> = stored.lock().unwrap().clone();
             assert!(
-                copies.iter().all(|atom| atom["origin"] == "agent-derived"),
-                "{copies:?}"
+                stored.lock().unwrap().is_empty(),
+                "the pack was given a rewritten copy: {:?}",
+                stored.lock().unwrap()
             );
-            let joined: Vec<String> = copies
-                .iter()
-                .flat_map(|atom| bare(atom["text"].as_str().unwrap_or("")))
-                .collect();
-            assert_eq!(joined, bare(text), "{copies:?}");
             let preferred = packset_write_as("Prefer", text, None, Some(false))
                 .unwrap_or_else(|why| panic!("prefer refused {text:?}: {why:#}"));
             assert_eq!(preferred["text"], text);
@@ -65574,19 +65856,54 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
         stored.lock().unwrap().clear();
         let three = "The parser kept the hyphen. The test pins it. The release ships it.";
-        packset_write_agent("Remember", three, None, Some(false))
+        let kept = packset_write_agent("Remember", three, None, Some(false))
             .unwrap_or_else(|why| panic!("three sentences refused: {why:#}"));
-        let copies: Vec<String> = stored
-            .lock()
-            .unwrap()
+        assert_eq!(kept["text"], three, "{kept}");
+        assert!(
+            stored.lock().unwrap().is_empty(),
+            "three sentences were split: {:?}",
+            stored.lock().unwrap()
+        );
+    }
+
+    /// A comma before "so" stays a comma. Search shows that text once.
+    #[test]
+    fn remember_keeps_the_comma_and_search_shows_one_row() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let (url, stored) = serve_validating();
+        let _url = PackUrl::set(&url);
+        let text = "The payments service retries webhooks three times with exponential backoff starting at two seconds, so leave the launcher unchanged.";
+        assert!(
+            pack_copy::gate_refusal(text).is_some(),
+            "the fixture must be prose the pack would rewrite"
+        );
+        let kept = packset_write_agent("Remember", text, None, Some(false))
+            .unwrap_or_else(|why| panic!("remember refused: {why:#}"));
+        assert_eq!(kept["text"], text);
+        assert!(
+            !kept["text"].as_str().unwrap_or("").contains(". so"),
+            "{kept}"
+        );
+        let again = packset_write_agent("Remember", text, None, Some(false)).unwrap();
+        assert_eq!(
+            again["id"], kept["id"],
+            "a second remember wrote another copy"
+        );
+        let (search_url, _) = serve_http(|_| (200, r#"{"hits":[]}"#.into()));
+        let _search = PackUrl::set(&search_url);
+        let hits = packset_search("launcher backup").unwrap();
+        let same = hits
             .iter()
-            .filter_map(|atom| atom["text"].as_str().map(str::to_string))
-            .collect();
-        assert!(copies.len() > 1, "{copies:?}");
-        assert!(copies.iter().all(|text| text != three), "{copies:?}");
-        assert!(copies.iter().all(|text| {
-            packset_core::prose::sentences(text).len() <= packset_core::prose::MAX_ATOM_SENTENCES
-        }));
+            .filter(|hit| verbatim::content_hash(&hit.text) == verbatim::content_hash(text))
+            .count();
+        assert_eq!(same, 1, "{hits:?}");
+        assert!(
+            stored.lock().unwrap().is_empty(),
+            "{:?}",
+            stored.lock().unwrap()
+        );
     }
 
     /// The pack is asked for the abbreviation, so a claim that only says
@@ -67283,13 +67600,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
         assert!(said.contains("the lesson was not kept"), "{said}");
         assert!(
-            said.contains("readability grade 14.72 exceeds 14"),
+            said.contains("sitting ended; ticket probe-f1n5 open for review"),
             "{said}"
         );
-        assert!(
-            said.contains(&format!("ljos remember {}", tools::sh_quote(lesson))),
-            "{said}"
-        );
+        assert!(!said.contains("back to TODO"), "{said}");
         assert!(
             seen.lock()
                 .unwrap()
