@@ -4,11 +4,16 @@
 
 ljos_test_boot::harness!();
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+/// How long `ljos-mcp` is given to print a refresh line before the test
+/// stops it. A server that never prints and never exits would otherwise
+/// hold the suite.
+const MCP_REFRESH_LIMIT: Duration = Duration::from_secs(20);
 
 const OLD_SKILL: &str = "---\nname: ljos\ndescription: old\n---\n\n# The seat protocol\n\nold\n";
 
@@ -140,6 +145,41 @@ fn harnesses(home: &Home, cursor: &Path, antigravity: &Path) {
         ),
     )
     .unwrap();
+}
+
+/// Stderr through `line`, or through the child closing the pipe.
+///
+/// The skill file changes before the hand-edit line is written. Reading
+/// until that line, or until the process closes stderr, is the whole
+/// refresh; a poll of the file races the second write.
+fn stderr_until(child: &mut Child, stderr: impl Read + Send + 'static, line: &str) -> String {
+    let line = line.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut err = String::new();
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            match reader.read_line(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    err.push_str(&buf);
+                    if err.contains(&line) {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = tx.send(err);
+    });
+    match rx.recv_timeout(MCP_REFRESH_LIMIT) {
+        Ok(err) => err,
+        Err(_) => {
+            let _ = child.kill();
+            rx.recv().unwrap_or_default()
+        }
+    }
 }
 
 fn skill_lines(text: &str) -> Vec<&str> {
@@ -284,27 +324,10 @@ fn the_mcp_server_refreshes_a_stale_skill_on_start() {
         .spawn()
         .unwrap();
     let _stdin = child.stdin.take();
-    let mut stderr = child.stderr.take().unwrap();
-    let started = Instant::now();
-    let changed = loop {
-        if fs::read(&cursor).unwrap() != OLD_SKILL.as_bytes() {
-            break true;
-        }
-        if let Some(status) = child.try_wait().unwrap() {
-            let mut err = String::new();
-            let _ = stderr.read_to_string(&mut err);
-            panic!("ljos-mcp exited {status} before refreshing\n{err}");
-        }
-        if started.elapsed() > Duration::from_secs(20) {
-            break false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    let stderr = child.stderr.take().unwrap();
+    let err = stderr_until(&mut child, stderr, "was edited by hand; ljos left it");
     let _ = child.kill();
     let _ = child.wait();
-    let mut err = String::new();
-    let _ = stderr.read_to_string(&mut err);
-    assert!(changed, "ljos-mcp did not refresh the skill\n{err}");
     assert!(err.contains("refreshed cursor:"), "{err}");
     assert!(err.contains("was edited by hand; ljos left it"), "{err}");
     assert!(
@@ -547,28 +570,10 @@ fn the_mcp_server_refreshes_a_stale_env_on_start() {
         .spawn()
         .unwrap();
     let _stdin = child.stdin.take();
-    let mut stderr = child.stderr.take().unwrap();
-    let started = Instant::now();
-    let changed = loop {
-        if fs::read(&env_path).unwrap() != format!("{OLD_ENV}export BOX_NOTES=keep-me\n").as_bytes()
-        {
-            break true;
-        }
-        if let Some(status) = child.try_wait().unwrap() {
-            let mut err = String::new();
-            let _ = stderr.read_to_string(&mut err);
-            panic!("ljos-mcp exited {status} before refreshing\n{err}");
-        }
-        if started.elapsed() > Duration::from_secs(20) {
-            break false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    let stderr = child.stderr.take().unwrap();
+    let err = stderr_until(&mut child, stderr, "BOX_NOTES");
     let _ = child.kill();
     let _ = child.wait();
-    let mut err = String::new();
-    let _ = stderr.read_to_string(&mut err);
-    assert!(changed, "ljos-mcp did not refresh the env\n{err}");
     assert!(
         err.contains("refreshed example-host:") && err.contains("BOX_NOTES"),
         "{err}"
