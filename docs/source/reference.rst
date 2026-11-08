@@ -828,6 +828,8 @@ Crate              Carries
 Help text
 =========
 
+.. BEGIN ljos-sample help
+
 .. code:: text
 
    $ ljos --version
@@ -854,3 +856,5 @@ Help text
          --all   Print every row, the ones that answer included [alias: --verbose]
          --fix   Refresh runner skills and runner env files this ljos wrote, and replace a stale cloud guard rule file. A skill edited by hand, an env file ljos did not write, and a cloud guard file that is missing or not a known older version are left in place
      -h, --help  Print help
+
+.. END ljos-sample help
