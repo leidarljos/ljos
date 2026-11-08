@@ -20,5 +20,11 @@ echo "== $(basename "$repo") $(git log --oneline -1 | cut -c1-70)"
 git pull -q --ff-only 2>&1 | tail -1
 cargo fmt --all --check && echo FMT-CLEAN
 cargo clippy --workspace --all-targets -- -D warnings 2>&1 | grep -E "^(error|warning)" -A 8 | head -30
-cargo test --locked --workspace --no-fail-fast "$@" 2>&1 | grep -E "^(test result:|failures:|---- )|panicked|assertion|left:|right:|stalled|error(\[|:)" -A2 | head -60
+# The whole run goes to a log beside the job output; the summary below is
+# not capped, since a cap once hid the one verdict that mattered.
+log="crate-test-${SLURM_JOB_ID:-local}.log"
+cargo test --locked --workspace --no-fail-fast "$@" > "$log" 2>&1
+status=$?
+grep -E "^(test result:|failures:|---- )|panicked|assertion|left:|right:|stalled|error(\[|:)" -A2 "$log" | grep -v "0 passed; 0 failed"
+echo "cargo test exit=$status (full log: $log)"
 echo CRATE-TEST-DONE
