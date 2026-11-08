@@ -1769,6 +1769,8 @@ fn run_command() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    // Help, version and a missing argument exit here, before any write.
+    // A memory subcommand that clap cannot parse still records the error.
     let cmd = match Cli::try_parse() {
         Ok(cli) => cli.cmd,
         Err(err) => {
@@ -2206,7 +2208,9 @@ fn run_command() -> Result<()> {
                 None => Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
             };
             // Expired claims are dropped after the pack answers, so ask for
-            // more than the limit and cut to it once they are gone.
+            // more than the limit and cut to it once they are gone. A day
+            // filter is what drops them. With `--valid-at any` the fetch
+            // stays the printed limit.
             let fetch = if day.is_some() {
                 ljos_cli::valid_fetch(limit)
             } else {
@@ -2229,6 +2233,10 @@ fn run_command() -> Result<()> {
             if let Some(day) = day {
                 hits.retain(|h| ljos_cli::valid_on(&h.entities, &day));
             }
+            // Rank before the cut so another seat's higher score does not
+            // push this seat's rows out of the printed limit. The slot
+            // merge keeps those pack rows in front and appends its own.
+            ljos_cli::prefer_calling_seat(&mut hits);
             let filter = ljos_cli::memory_port::SourceFilter {
                 machine: source_machine,
                 seat: source_seat,
@@ -2236,6 +2244,9 @@ fn run_command() -> Result<()> {
             };
             if !dated || filter.active() {
                 ljos_cli::memory_port::merge_cli(&mut hits, &join(&query), limit as usize, &filter);
+            }
+            if filter.active() {
+                ljos_cli::prefer_calling_seat(&mut hits);
             }
             hits.truncate(limit as usize);
             print!("{}", format_hits(&hits, explain));

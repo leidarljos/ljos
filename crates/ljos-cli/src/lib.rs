@@ -10237,6 +10237,7 @@ fn said_tag(tag: &str) -> bool {
 
 /// Where a recalled claim sits in a memory list: preferences first, then
 /// the person's own words, then the rest, and working notes last.
+/// Another seat is ranked apart from this, in [`foreign_memory`].
 fn recall_rank(hit: &Hit) -> u8 {
     if preference_handed(hit) {
         0
@@ -10250,11 +10251,13 @@ fn recall_rank(hit: &Hit) -> u8 {
 }
 
 /// Put recalled claims in the order the prompt note reads them.
-/// Preferences keep the order they came in, the score's. Behind them come
-/// the person's words, then the other claims, then the working notes, each
-/// group oldest to newest by `when`, so what was learnt last is read last
-/// and nearest the action, and a later lesson that revises an earlier one
-/// reads as a revision.
+/// This seat's memories and the person's rules stay ahead of another
+/// seat's. Preferences keep the order they came in, the score's. Behind
+/// them come the person's words, then the other claims, then the working
+/// notes, each group oldest to newest by `when`, so what was learnt last
+/// is read last and nearest the action, and a later lesson that revises
+/// an earlier one reads as a revision. Another seat's claims follow, in
+/// that same order, and stay in the list.
 fn order_recalled<H, K>(rows: &mut [H], when: impl Fn(&Hit) -> K)
 where
     H: std::borrow::Borrow<Hit>,
@@ -10263,9 +10266,17 @@ where
     fn hit<H: std::borrow::Borrow<Hit>>(h: &H) -> &Hit {
         <H as std::borrow::Borrow<Hit>>::borrow(h)
     }
-    rows.sort_by_key(|h| recall_rank(hit(h)) != 0);
-    let split = rows.iter().filter(|h| recall_rank(hit(*h)) == 0).count();
-    rows[split..].sort_by_key(|h| (recall_rank(hit(h)), when(hit(h))));
+    let mine = seat_name();
+    let band = |h: &Hit| {
+        let foreign = u8::from(foreign_memory(h, &mine));
+        (foreign, recall_rank(h))
+    };
+    rows.sort_by_key(|h| band(hit(h)) != (0, 0));
+    let split = rows.iter().filter(|h| band(hit(*h)) == (0, 0)).count();
+    rows[split..].sort_by_key(|h| {
+        let h = hit(h);
+        (band(h), when(h))
+    });
 }
 
 /// Whether the prompt hook may hand a claim over.
@@ -10377,7 +10388,12 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
                     .iter()
                     .fold(0.0_f64, |top, (_, score)| top.max(*score));
                 scored.retain(|(_, score)| *score >= top * HOOK_SCORE_FLOOR);
-                scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let mine = seat_name();
+                scored.sort_by(|a, b| {
+                    u8::from(foreign_memory(&rows[a.0].0, &mine))
+                        .cmp(&u8::from(foreign_memory(&rows[b.0].0, &mine)))
+                        .then(b.1.total_cmp(&a.1))
+                });
                 scored.truncate(limit.min(HOOK_MAX_MEMORIES));
                 hits = scored.into_iter().map(|(i, _)| rows[i].0.clone()).collect();
                 order_recalled(&mut hits, |h| h.ts.clone().unwrap_or_default());
@@ -10385,6 +10401,7 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
         }
     }
     memory_port::append_recall(&mut hits, cue, limit.min(HOOK_MAX_MEMORIES));
+    order_recalled(&mut hits, |h| h.ts.clone().unwrap_or_default());
     if hits.is_empty() {
         return None;
     }
@@ -10570,10 +10587,11 @@ fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
 /// quartiles equal the median.
 pub const POOL_PER_SHOWN: usize = 4;
 
-/// Indices of `rows`, most relevant to `cue` first: the lexical match,
-/// which grades how much of the cue each row covers, then BM25 among rows
-/// that cover as much, then the fused score, which carries age, only to
-/// break an exact tie.
+/// Indices of `rows`, most relevant to `cue` first. This seat's memories
+/// and the person's rules come before another seat's. Within a seat the
+/// lexical match grades how much of the cue each row covers, then BM25
+/// among rows that cover as much, then the fused score, which carries
+/// age, only to break an exact tie. Another seat's row stays in the list.
 fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<usize> {
     let texts: Vec<&str> = rows.iter().map(|h| h.borrow().text.as_str()).collect();
     let docs: Vec<Tokens> = texts.iter().map(|text| match_token_stream(text)).collect();
@@ -10584,10 +10602,13 @@ fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<us
         .enumerate()
         .map(|(i, h)| (lexical[i], bm25[i], h.borrow().score))
         .collect();
+    let mine = seat_name();
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by(|&a, &b| {
         let (ka, kb) = (keys[a], keys[b]);
-        kb.0.total_cmp(&ka.0)
+        u8::from(foreign_memory(rows[a].borrow(), &mine))
+            .cmp(&u8::from(foreign_memory(rows[b].borrow(), &mine)))
+            .then(kb.0.total_cmp(&ka.0))
             .then(kb.1.total_cmp(&ka.1))
             .then(kb.2.total_cmp(&ka.2))
             .then(a.cmp(&b))
@@ -10898,7 +10919,9 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     }
     // The cap keeps the strongest, whatever their kind: a weak preference
     // that shares one word with the prompt does not push out the lesson
-    // the prompt repeats. Preferences are then read first.
+    // the prompt repeats. This seat and the person's rules fill the cap
+    // before another seat does. Preferences are then read first.
+    prefer_seat(&mut rows);
     let mut rows: Vec<&Hit> = rows
         .into_iter()
         .take(limit.min(HOOK_MAX_MEMORIES))
@@ -14000,7 +14023,9 @@ pub fn search_by_words(query: &str, limit: u32) -> Vec<Hit> {
     } else {
         Vec::new()
     };
+    prefer_calling_seat(&mut hits);
     memory_port::append_recall(&mut hits, query, limit as usize);
+    prefer_calling_seat(&mut hits);
     hits
 }
 
@@ -18574,6 +18599,8 @@ pub(crate) fn queue_memory(
                 .filter(|id| !id.is_empty())
                 .map(str::to_string)
                 .collect(),
+            seat: seat_name(),
+            home: String::new(),
         },
     )
 }
@@ -18647,7 +18674,14 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
             Ok(body) => note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string()),
             Err(e) if note_can_wait(&e) => note_queue::Sent::Wait(format!("{e:#}")),
             Err(e) => {
-                memory_port::keep_prose(&note.text, &note.kind, &format!("{e:#}"));
+                // A refused lesson is kept in this seat's memory slot.
+                // A lesson another seat queued stays that seat's, so the
+                // drainer does not take the copy.
+                let mine = seat_name();
+                let queued = note.seat.trim();
+                if queued.is_empty() || queued == mine {
+                    memory_port::keep_prose(&note.text, &note.kind, &format!("{e:#}"));
+                }
                 note_queue::Sent::Refused(format!("{e:#}"))
             }
         }
@@ -18656,9 +18690,34 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
     Ok(done)
 }
 
+/// The seat on a queued lesson is the one that wrote it, not the seat
+/// that sends the queue.
+fn stamp_queued_seat(atom: &mut Value, seat: &str) {
+    let seat = seat.trim();
+    if seat.is_empty() {
+        return;
+    }
+    let tag = format!("{SEAT_ENTITY}{seat}");
+    if let Some(entities) = atom.get_mut("entities").and_then(Value::as_array_mut) {
+        entities.retain(|entity| {
+            !entity
+                .as_str()
+                .is_some_and(|tag| tag.starts_with(SEAT_ENTITY))
+        });
+        entities.insert(0, Value::String(tag));
+    }
+    if let Some(source) = atom.get_mut("source").and_then(Value::as_object_mut) {
+        source.insert("seat".to_string(), Value::String(seat.to_string()));
+        if let Some(mesh) = source.get_mut("mesh").and_then(Value::as_object_mut) {
+            mesh.insert("seat".to_string(), Value::String(seat.to_string()));
+        }
+    }
+}
+
 fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Result<Value> {
     let text = note.text.trim();
     let mut atom = atom_body("lesson", text, &client.workspace());
+    stamp_queued_seat(&mut atom, &note.seat);
     stamp_issue(&mut atom, &note.issue);
     stamp_horizon(&mut atom, "lesson", text, Some(false));
     if !note.supersedes.is_empty() {
@@ -32246,18 +32305,24 @@ pub fn packset_search_as_of(
     // now, and the signal read below asks for now.
     if !rerank || stamp.is_some() {
         count_recall(&found);
-        return Ok(found);
+        return Ok(seat_ordered(found));
     }
     let Some((leader, signal)) = search_with_signals(q, limit)
         .ok()
         .and_then(|rows| rows.into_iter().next())
     else {
         count_recall(&found);
-        return Ok(found);
+        return Ok(seat_ordered(found));
     };
     let ranked = pin_encoder_leader(found, leader, signal.rank);
     count_recall(&ranked);
-    Ok(ranked)
+    Ok(seat_ordered(ranked))
+}
+
+/// This seat's rows and the person's rules ahead of another seat's.
+fn seat_ordered(mut hits: Vec<Hit>) -> Vec<Hit> {
+    prefer_calling_seat(&mut hits);
+    hits
 }
 
 /// One use per hit a search or a hook actually handed back. The pack's
@@ -39089,6 +39154,28 @@ pub fn other_seat(entities: &[String], mine: &str) -> Option<String> {
         .filter_map(|e| e.strip_prefix(SEAT_ENTITY))
         .find(|s| !s.is_empty() && *s != mine)
         .map(str::to_string)
+}
+
+/// Another seat's working memory. The person's rule stays with this seat
+/// even when a seat tag names someone else. A hit with no seat tag is
+/// this seat's. The hit is not dropped: a reader still sees it, labelled
+/// by [`other_seat`].
+fn foreign_memory(hit: &Hit, mine: &str) -> bool {
+    if person_origin(hit) {
+        return false;
+    }
+    other_seat(&hit.entities, mine).is_some()
+}
+
+/// This seat's memories and person-origin rules, then another seat's, each
+/// group in the order it arrived. Another seat's hit stays in the list.
+pub fn prefer_calling_seat(hits: &mut [Hit]) {
+    prefer_seat(hits);
+}
+
+fn prefer_seat<H: std::borrow::Borrow<Hit>>(rows: &mut [H]) {
+    let mine = seat_name();
+    rows.sort_by_key(|row| foreign_memory(row.borrow(), &mine));
 }
 
 /// The line a hit takes in injected context and in a brief: kind, age and,
@@ -51113,6 +51200,8 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
+        let tracker = home.path().join("tracker");
+        std::fs::create_dir_all(&tracker).unwrap();
         let _hold = HoldEnv::set(&[
             ("HOME", home.path().to_str().unwrap()),
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
@@ -51120,6 +51209,7 @@ mod tests {
             ("XDG_DATA_HOME", data.path().to_str().unwrap()),
             ("XDG_STATE_HOME", state.path().to_str().unwrap()),
             ("XDG_CACHE_HOME", cache.path().to_str().unwrap()),
+            ("VISSUE_ROOT", tracker.to_str().unwrap()),
         ]);
         let memory = "Push a tag with git push origin TAG; follow-tags skips lightweight tags.";
         let statuses = Arc::new(AtomicUsize::new(0));
@@ -57932,6 +58022,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 at: 1,
                 kind: "note".into(),
                 supersedes: Vec::new(),
+                seat: String::new(),
+                home: String::new(),
             },
         )
         .unwrap();
@@ -58004,6 +58096,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 at: 1,
                 kind: "note".into(),
                 supersedes: Vec::new(),
+                seat: String::new(),
+                home: String::new(),
             },
         )
         .unwrap();
@@ -58053,6 +58147,69 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(done.left, 0, "{done:?}");
         assert!(!done.refused.is_empty(), "{done:?}");
         assert!(crate::note_queue::pending_in(tmp.path()).is_empty());
+    }
+
+    /// A lesson another seat queued is kept under that seat when this one
+    /// drains the queue. The pack post carries that seat too.
+    #[test]
+    fn a_queued_lesson_keeps_the_seat_that_wrote_it() {
+        let _g = env_guard();
+        let posted = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let (url, _) = serve_http({
+            let posted = std::sync::Arc::clone(&posted);
+            move |req| {
+                if req.lines().next().unwrap_or("").contains("POST /v1/atoms") {
+                    *posted.lock().unwrap() = req.to_string();
+                }
+                (
+                    400,
+                    r#"{"error":"readability grade 18.24 exceeds 14"}"#.into(),
+                )
+            }
+        });
+        let _url = PackUrl::set(&url);
+        let writer = tempfile::tempdir().unwrap();
+        let drainer = tempfile::tempdir().unwrap();
+        let home = writer.path().join(".ljos").join("memory");
+        let _root = HoldEnv::set(&[("VISSUE_ROOT", drainer.path().to_str().unwrap())]);
+        let dir = tempfile::tempdir().unwrap();
+        let text = "Installed policy denies the launcher backup.";
+        crate::note_queue::push_in(
+            dir.path(),
+            crate::note_queue::Queued {
+                issue: "Scratch-1".into(),
+                text: text.into(),
+                workspace: "writer-pack".into(),
+                at: 1,
+                kind: "lesson".into(),
+                supersedes: Vec::new(),
+                seat: "fortranbot".into(),
+                home: home.display().to_string(),
+            },
+        )
+        .unwrap();
+        let done = super::flush_note_queue_in(dir.path()).unwrap();
+        assert!(done.kept.is_empty(), "{done:?}");
+        assert_eq!(done.left, 0, "{done:?}");
+        assert!(!done.refused.is_empty(), "{done:?}");
+        assert!(
+            !home.join("kept").exists(),
+            "a refused lesson was stored under a memory slot"
+        );
+        assert!(
+            !drainer
+                .path()
+                .join(".ljos")
+                .join("memory")
+                .join("kept")
+                .exists(),
+            "the draining seat stored the other seat's lesson"
+        );
+        let sent = posted.lock().unwrap().clone();
+        assert!(sent.contains(text), "{sent}");
+        assert!(sent.contains("seat:fortranbot"), "{sent}");
+        assert!(!sent.contains("seat:inky"), "{sent}");
+        assert!(sent.contains("writer-pack"), "{sent}");
     }
 
     /// An agent lesson of three sentences is stored as copies the atom gate accepts.
@@ -67233,6 +67390,97 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             hit_line(&rows[4], "2026-10-02T00:00:00.000Z"),
             "- [lesson, agent-derived, today] agent-old"
         );
+    }
+
+    /// This seat's lesson and a person-origin rule outrank other seats'
+    /// lessons. Those lessons stay in the list and name their seat.
+    #[test]
+    fn search_ranks_this_seat_and_person_rules_ahead_of_other_seats() {
+        let _g = env_guard();
+        let _seat = HoldEnv::set(&[("LJOS_SEAT", "ljosbot")]);
+        assert_eq!(seat_name(), "ljosbot");
+        let person_text = "Commit author and committer stay one person.";
+        keep_origin(&serde_json::json!({
+            "id": "person-rule",
+            "kind": "preference",
+            "text": person_text,
+            "origin": admit::ORIGIN_USER,
+            "source": {"basis": "person"},
+        }));
+        let hit = |id: &str, kind: &str, text: &str, seat: &str, score: f64| Hit {
+            id: Some(id.into()),
+            text: text.into(),
+            score,
+            kind: kind.into(),
+            ts: Some("2026-10-08T00:00:00.000Z".into()),
+            entities: vec![format!("{SEAT_ENTITY}{seat}")],
+            ballots: None,
+            of: None,
+            rerank_score: None,
+        };
+        let mut hits = vec![
+            hit(
+                "inky",
+                "lesson",
+                "Pin mutable audit snapshots before the commit.",
+                "inky",
+                0.99,
+            ),
+            hit(
+                "hlebot",
+                "lesson",
+                "Packet commits must have the author date equal the committer date.",
+                "hlebot",
+                0.98,
+            ),
+            hit(
+                "fortranbot",
+                "lesson",
+                "Soft tip remount packs a clean commit.",
+                "fortranbot",
+                0.97,
+            ),
+            hit(
+                "own-lesson",
+                "lesson",
+                "This seat writes the committer beside the author.",
+                "ljosbot",
+                0.2,
+            ),
+            hit("person-rule", "preference", person_text, "fortranbot", 0.1),
+        ];
+        let mut recalled = hits.clone();
+        order_recalled(&mut recalled, |h| h.ts.clone().unwrap_or_default());
+        let recalled_ids: Vec<&str> = recalled.iter().filter_map(|h| h.id.as_deref()).collect();
+        assert_eq!(recalled_ids[0], "person-rule", "{recalled_ids:?}");
+        assert_eq!(recalled_ids[1], "own-lesson", "{recalled_ids:?}");
+        assert_eq!(recalled_ids.len(), 5, "{recalled_ids:?}");
+        prefer_calling_seat(&mut hits);
+        let ids: Vec<&str> = hits.iter().filter_map(|h| h.id.as_deref()).collect();
+        assert_eq!(
+            ids,
+            ["own-lesson", "person-rule", "inky", "hlebot", "fortranbot"],
+            "{ids:?}"
+        );
+        let printed = format_hits(&hits, false);
+        assert!(printed.contains("(from inky)"), "{printed}");
+        assert!(printed.contains("(from hlebot)"), "{printed}");
+        assert!(printed.contains("(from fortranbot)"), "{printed}");
+        let own_line = printed
+            .lines()
+            .find(|line| line.contains("beside the author"))
+            .unwrap();
+        assert!(
+            !own_line.contains("(from "),
+            "this seat's lesson was labelled as another seat: {own_line}"
+        );
+        let mut ranked = hits.clone();
+        sort_by_relevance(&mut ranked, "commit author committer");
+        let ranked_ids: Vec<&str> = ranked.iter().filter_map(|h| h.id.as_deref()).collect();
+        let head: Vec<&str> = ranked_ids.iter().copied().take(2).collect();
+        assert!(head.contains(&"own-lesson"), "{ranked_ids:?}");
+        assert!(head.contains(&"person-rule"), "{ranked_ids:?}");
+        assert_eq!(ranked_ids.len(), 5, "{ranked_ids:?}");
     }
 
     /// With `LJOS_CAPTURE=off` a stated choice is left alone, and `nudge`
