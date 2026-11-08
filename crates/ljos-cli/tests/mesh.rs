@@ -65,7 +65,9 @@ printf '%s\n' "$*" >> "$FAKE_MESH/invocations"
 [ -n "$FAKE_HANG" ] && exec sleep "$FAKE_LIFE"
 case "$verb" in
 status)
-  if [ -f "$FAKE_MESH/node" ]; then
+  if [ -f "$FAKE_MESH/status.json" ]; then
+    cat "$FAKE_MESH/status.json"
+  elif [ -f "$FAKE_MESH/node" ]; then
     name=$(cat "$FAKE_MESH/node")
     case " $* " in
       *" --json "*) printf '{"BackendState":"Running","Self":{"HostName":"%s","TailscaleIPs":["100.64.0.8","fd7a:115c:a1e0::8"]},"Peer":{"peer1":{"HostName":"other-lane","TailscaleIPs":["100.64.0.9","fd7a:115c:a1e0::9"]}}}\n' "$name";;
@@ -887,4 +889,34 @@ fn a_write_on_the_mesh_carries_the_node_and_the_seat_it_claims() {
     }
     let crashed = remember("The release job tags the commit it built.");
     assert!(crashed["source"].get("mesh").is_none(), "{crashed}");
+}
+
+/// Tagged broker nodes come from the daemon's status document. The sample
+/// names one broker. The parser does not.
+#[test]
+fn mesh_status_shows_a_tagged_broker_from_the_status_document() {
+    let world = World::new();
+    one_line(&world.up(), "up");
+    let fixture = include_str!("../../../examples/mesh-status.json");
+    std::fs::write(world.path("fake/status.json"), fixture).unwrap();
+    let out = world.ljos(&["mesh", "status"]).output().unwrap();
+    let said = text_of(&out);
+    assert!(out.status.success(), "{said}");
+    for needle in [
+        "ag-example-abcdef",
+        "id 99",
+        "tag:example",
+        "100.64.0.99",
+        "fd7a:115c:a1e0::99",
+        "non-ephemeral",
+        "tag:swarm-example",
+    ] {
+        assert!(said.contains(needle), "{needle} missing\n{said}");
+    }
+    let logic =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/mesh.rs")).unwrap();
+    assert!(
+        !logic.contains("ag-example-abcdef") && !logic.contains("tag:example"),
+        "a broker belongs in the fixture, not in the parser"
+    );
 }

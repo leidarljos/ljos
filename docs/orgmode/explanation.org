@@ -2,7 +2,7 @@
 #+options: toc:nil num:nil
 
 # [[[cog import ljos_version as v; v.lines("This page describes ljos {version}.")]]]
-This page describes ljos 0.38.0.
+This page describes ljos 0.39.0.
 # [[[end]]]
 
 * One seat over the habitats
@@ -48,8 +48,8 @@ ticket, and the pack cites it in a memory. The deed store answers for it.
 Before an agent's shell command runs, the runner's hook hands it to =ljos hook=. =ljos hook=
 asks =ljos-policyd= and relays the answer. policyd is the one place that says whether a
 command is dangerous. It is the trusted part. ljos is not. By default neither stops the
-command: the answer is a label and a warning line, and the command runs. Blocking is the
-person's opt-in, made in policyd's own config, and then only policyd's deny stops a call.
+command: the answer is a label and a warning line, and the command runs.
+block-on-warning does not block. It warns with the rule's label.
 A cloud seat's push rule, below, is the one exception.
 
 An earlier ljos ran nine checks of its own before it asked policyd. Each check came from a
@@ -61,8 +61,8 @@ Two remain, because only ljos knows the tracker and the sitting. They are descri
 
 policyd answers allow, warn or rewrite. A warning names the rule and says why, and the runner
 shows it as one line while the command runs. An older policyd that answers deny or prompt reads as
-the same warning, unless the person's policyd config sets =block-on-warning=; then policyd's deny
-stands and the command does not run. A refusal that stalls a turn costs more than the mistake it stops, and a
+the same warning. A policyd config that sets =block-on-warning= does not block. ljos warns with the rule's label.
+The command runs. A refusal that stalls a turn costs more than the mistake it stops, and a
 warning still reaches the person. It is also the only thing between a runner and the command,
 so keep backups and protect branches on the forge.
 
@@ -316,6 +316,28 @@ The island lost as a ranking on LongMemEval_S. The fused arm on that run
 encodes with e5-large-v2. Activation flows to well-connected claims, and a
 question asks for something else. So the island is what the seat prints beside the hits for
 orientation, and what fires together after use. It is never the order the hits come in.
+
+=longmemeval_s_recall= scored the public cleaned LongMemEval_S file on one CPU.
+From a checkout, invoke it as =cargo run --release -p longmemeval_s_recall=.
+Read the program at =scripts/longmemeval_s_recall=.
+The program keeps a download only after the pinned sha256 matches.
+A hit needs one evidence session inside the cutoff.
+Recall averages how much of the evidence set those same rows recovered.
+One, five and ten are the depths the log prints.
+Abstentions end in =_abs= and stay unscored.
+Scoring 470 questions took 71.881 seconds.
+The host was an Intel Xeon processor with 8 cores and MemTotal 49342768 kB.
+The log names =packset_core 0.17.0= and ljos commit 6fac806b5ab91106bdbbdf24429a191d5371f349.
+The two arm lines from eval.log follow.
+
+#+begin_src text
+arm bm25+ hit@1 0.848936 recall@1 0.549574 hit@5 0.959574 recall@5 0.909113 hit@10 0.982979 recall@10 0.949894
+arm island hit@1 0.848936 recall@1 0.549574 hit@5 0.959574 recall@5 0.909113 hit@10 0.959574 recall@10 0.909113
+#+end_src
+
+The arms agree at one and at five.
+Activation leaves an untouched session unranked, so the island trails at ten.
+This run loads no encoder, and neither a dense arm nor a fused arm appears.
 
 ** Time as data
 

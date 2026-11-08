@@ -849,12 +849,18 @@ fn refuse_push_messages(refs: &str) -> Result<()> {
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() != 4 {
-            bail!("pre-push: cannot read `{line}`");
+            return Err(crate::policy_label::failed(
+                "effect-unavailable",
+                anyhow!("pre-push: cannot read `{line}`"),
+            ));
         }
         let local_sha = fields[1];
         let remote_sha = fields[3];
         if !is_object_name(local_sha) || !is_object_name(remote_sha) {
-            bail!("pre-push: cannot read `{line}`");
+            return Err(crate::policy_label::failed(
+                "effect-unavailable",
+                anyhow!("pre-push: cannot read `{line}`"),
+            ));
         }
         if is_zero_name(local_sha) {
             continue;
@@ -868,7 +874,10 @@ fn refuse_push_messages(refs: &str) -> Result<()> {
         for sha in listed {
             let body = commit_body(&sha)?;
             if message_refused(&body) {
-                bail!("pre-push: {sha} message is refused");
+                let detail =
+                    format!("machine-trailer: {sha} message carries a machine mark; the push runs");
+                crate::memory_port::record_label("commit-message-warning", &detail, "labelled");
+                eprintln!("ljos: label commit-message-warning: {detail}");
             }
         }
     }
@@ -1012,33 +1021,20 @@ fn dropped_refusal(name: &str) -> Option<String> {
 /// be refused, the person is asked for their passphrase on the
 /// controlling terminal; a right answer lets this one call through.
 fn gate(name: &str, refs: &str) -> Result<()> {
-    let Some(cause) = crate::runner_cause() else {
+    if crate::runner_cause().is_none() {
         return Ok(());
-    };
+    }
     let refused = match gate_runner(name, refs) {
         Ok(()) => return Ok(()),
         Err(refused) => refused,
     };
-    if cause == crate::RunnerCause::Hard {
-        return Err(refused);
+    // A sitting that has not settled is a label. The push or commit runs.
+    // The cloud seat push rule is judged on the shell line, not here.
+    eprintln!("ljos: sitting-gate: {refused:#}");
+    if let Some(why) = dropped_refusal(name) {
+        eprintln!("ljos: {why}");
     }
-    let verb = if name == "pre-push" { "push" } else { "commit" };
-    let marks = crate::runner_marks();
-    match crate::person_key::ask_person(&marks, &format!("git {verb}")) {
-        Ok(()) => Ok(()),
-        Err(why) => {
-            let detail = format!("{refused:#}");
-            let detail = detail.strip_prefix("sitting-gate: ").unwrap_or(&detail);
-            let text = crate::sitting_gate::for_marks(
-                detail,
-                &marks,
-                verb,
-                crate::person_key::is_set(),
-                &why,
-            );
-            Err(anyhow!("sitting-gate: {text}"))
-        }
-    }
+    Ok(())
 }
 
 fn gate_runner(name: &str, refs: &str) -> Result<()> {

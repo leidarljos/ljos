@@ -88,7 +88,7 @@ Smoke
 An allow prints nothing unless a prompt has already kept pack text or a rule warned, as the force push does.
 The bypass log keeps that label.
 A TCB rule is a warning too; the call runs.
-Under the person's ``block-on-warning``, policyd's block is a top-level ``decision`` of ``deny`` beside ``hookSpecificOutput``, and the build harness does not run the call.
+``block-on-warning`` does not block. It is a warning with the rule's label in ``hookSpecificOutput``. The build harness runs the call.
 
 Personas as the build harness agents
 ====================================

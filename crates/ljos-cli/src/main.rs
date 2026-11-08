@@ -36,6 +36,44 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum MemoryCmd {
+    /// Write this seat's memories to a local file. The file is not sent.
+    Export {
+        /// Where the file is written.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Read a portable memory file into this seat's import slot.
+    Import {
+        /// The file to read.
+        path: PathBuf,
+        /// Machine name when the file does not carry one.
+        #[arg(long)]
+        source_machine: Option<String>,
+        /// Seat name when the file does not carry one.
+        #[arg(long)]
+        source_seat: Option<String>,
+    },
+    /// Map imported memories onto this seat's lessons.
+    Integrate {
+        /// One import. The id is the input digest, or a unique prefix of it.
+        import_id: Option<String>,
+        /// Every import in this seat's slot.
+        #[arg(long)]
+        all: bool,
+        /// Print the mappings and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List imports in this seat's slot.
+    Imports {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum MemCmd {
     /// List memories newest first with their provenance. Unreviewed agents' memories by default.
     List {
@@ -109,6 +147,42 @@ impl MemFilter {
             user: self.user,
         }
     }
+}
+
+fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
+    match cmd {
+        MemoryCmd::Export { out } => {
+            print!("{}", ljos_cli::memory_port::export_cmd(&out)?);
+        }
+        MemoryCmd::Import {
+            path,
+            source_machine,
+            source_seat,
+        } => {
+            print!(
+                "{}",
+                ljos_cli::memory_port::import_cmd(
+                    &path,
+                    source_machine.as_deref(),
+                    source_seat.as_deref(),
+                )?
+            );
+        }
+        MemoryCmd::Integrate {
+            import_id,
+            all,
+            dry_run,
+        } => {
+            print!(
+                "{}",
+                ljos_cli::memory_port::integrate_cmd(import_id.as_deref(), all, dry_run)?
+            );
+        }
+        MemoryCmd::Imports { json } => {
+            print!("{}", ljos_cli::memory_port::imports_cmd(json)?);
+        }
+    }
+    Ok(())
 }
 
 fn memories_cmd(cmd: MemCmd) -> Result<()> {
@@ -241,6 +315,8 @@ enum MeshCmd {
     },
     /// Log out and stop the tailscaled `mesh up` started.
     Down,
+    /// Print this node and the peers `tailscale status` reports, with their tags.
+    Status,
     /// Print the Headscale ACL policy `mesh.toml` implies.
     Acl {
         /// Other swarm ids, each given rules of its own.
@@ -369,6 +445,11 @@ enum Cmd {
         #[arg(long, value_name = "ID", requires = "review")]
         keep: Option<String>,
     },
+    /// Copy memories to a file, or bring a file from another machine into this seat.
+    Memory {
+        #[command(subcommand)]
+        cmd: MemoryCmd,
+    },
     /// Review the memories agents wrote on their own: list, keep, edit, merge, drop, prune, or browse them in a terminal viewer.
     Memories {
         #[command(subcommand)]
@@ -417,6 +498,15 @@ enum Cmd {
         /// Open with what the score and the fraction mean, and what an empty answer means.
         #[arg(long)]
         explain: bool,
+        /// Only memories exported by this machine. Applied before the limit.
+        #[arg(long)]
+        source_machine: Option<String>,
+        /// Only memories from this source seat. Applied before the limit.
+        #[arg(long)]
+        source_seat: Option<String>,
+        /// Only this import. The id is the input digest. Applied before the limit.
+        #[arg(long)]
+        import_id: Option<String>,
     },
     /// Candidate contradictions from the geometry of the seat's memory: the lowest passes between single memories, read by the optional `landscape` habitat.
     Conflicts {
@@ -905,13 +995,16 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["view", "about", "runner"])]
         retire: bool,
     },
-    /// Install a published release's binaries beside this ljos: fetched from the release, checked against its sha256 and its version, the old ones kept.
+    /// Install published releases beside this ljos. The ljos archive is checked against its sha256, then each other seat program comes from the repository that publishes it. A missing release or a bad download is a warning and the rest still move. The old binary is kept as NAME.bak-pre-VERSION.
     Upgrade {
-        /// The release version; the newest when absent.
+        /// The ljos release; the newest when absent. Other programs take their own latest release.
         version: Option<String>,
         /// Install here instead of beside the running ljos.
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Move this one program.
+        #[arg(long)]
+        only: Option<String>,
     },
     /// Classify one harness exit under the restart policy, and print the
     /// herdr line that would start the child again. This does not start it.
@@ -1421,7 +1514,7 @@ enum Cmd {
         /// Where the cards are read from.
         #[arg(long, default_value = ".")]
         cards: PathBuf,
-        /// Sit even when the issue's blockers are open. Without it a blocked issue is refused before anything is claimed.
+        /// Accepted and ignored. A blocked issue is sat and labelled `blocked-by`.
         #[arg(long)]
         anyway: bool,
         /// The recipe this sitting copies before recall. Absent, a closed-set token in the title else sit. Held until finish or release.
@@ -1643,6 +1736,12 @@ fn main() -> Result<()> {
     ljos_cli::hookd::admit();
     let ran = run_command();
     if let Err(e) = &ran {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        ljos_cli::memory_port::record_memory_error(&args, &format!("{e:#}"));
+        if let Some(label) = ljos_cli::policy_label::as_policy(e) {
+            println!("label {}: {}", label.label, label.detail);
+            return Ok(());
+        }
         if ljos_cli::is_pack_busy(e) {
             // A hook that still holds the error prints nothing. The runner
             // is not failed for a pack that did not answer in time.
@@ -1667,7 +1766,14 @@ fn run_command() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let cmd = Cli::parse().cmd;
+    let cmd = match Cli::try_parse() {
+        Ok(cli) => cli.cmd,
+        Err(err) => {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            ljos_cli::memory_port::record_memory_error(&args, &err.to_string());
+            err.exit();
+        }
+    };
     let mut sitting_budget = match &cmd {
         Cmd::Sitting { issue, .. } => {
             println!("sitting {issue}: checking blockers");
@@ -1712,7 +1818,10 @@ fn run_command() -> Result<()> {
             | Cmd::Deed { .. }
     ) && ljos_cli::unseated_subagent()
     {
-        bail!("{}", ljos_cli::SUBAGENT_NO_SEAT);
+        return Err(ljos_cli::policy_label::labelled(
+            "seat-unresolved",
+            ljos_cli::SUBAGENT_NO_SEAT,
+        ));
     }
     // These act on the claims the hooks keep, and the hooks of the tool
     // calls before this one may still be queued.
@@ -1988,6 +2097,7 @@ fn run_command() -> Result<()> {
             let yes = ljos_cli::quoted_yes::read(quote.as_deref(), at.as_deref(), via.as_deref())?;
             print!("{}", ljos_cli::admit::accept_on(&id, yes.as_ref())?);
         }
+        Cmd::Memory { cmd } => memory_cmd(cmd)?,
         Cmd::Memories { cmd } => memories_cmd(cmd)?,
         Cmd::RetireNotes => print!("{}", ljos_cli::note_retire::sweep()?),
         Cmd::Forget { id, why, json } => {
@@ -2017,6 +2127,7 @@ fn run_command() -> Result<()> {
             })
             .write(),
             MeshCmd::Down => ljos_cli::mesh::down().write(),
+            MeshCmd::Status => println!("{}", ljos_cli::mesh::status_text()),
             MeshCmd::Acl { swarms } => println!("{}", ljos_cli::mesh::acl(&swarms)?),
         },
         Cmd::Sync {
@@ -2068,13 +2179,14 @@ fn run_command() -> Result<()> {
             as_of,
             valid_at,
             explain,
+            source_machine,
+            source_seat,
+            import_id,
         } => {
             ljos_cli::log_recall("search", &query.join(" "));
-            // A rerank used to wait at least a minute, and a silent writer
-            // was asked again after that. The command budget covers the
-            // proof and the search once. A server call keeps the timeout
-            // it was given; this is the verb a person runs.
-            let _pack_clock = ljos_cli::arm_cmd_pack();
+            // A short budget. Past it the word ranking prints. The call
+            // does not sit until an outer timeout with nothing on screen.
+            let _pack_clock = ljos_cli::pack_link::PackClock::enter(ljos_cli::SEARCH_PACK_BUDGET);
             let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
             let day = match valid_at.as_deref().map(str::trim) {
                 Some("any") => None,
@@ -2100,14 +2212,23 @@ fn run_command() -> Result<()> {
             let mut hits =
                 match packset_search_as_of(&join(&query), fetch, as_of.as_deref(), rerank) {
                     Ok(hits) => hits,
-                    Err(err) if !dated && ljos_cli::is_pack_busy(&err) => {
-                        eprintln!("{}", ljos_cli::SITTING_WORDS_LINE.trim_end());
+                    Err(err) if !dated && ljos_cli::pack_memory_down(&err) => {
+                        eprintln!("{}", ljos_cli::pack_busy_sentence());
+                        eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
                         ljos_cli::search_by_words(&join(&query), fetch)
                     }
                     Err(err) => return Err(err),
                 };
             if let Some(day) = day {
                 hits.retain(|h| ljos_cli::valid_on(&h.entities, &day));
+            }
+            let filter = ljos_cli::memory_port::SourceFilter {
+                machine: source_machine,
+                seat: source_seat,
+                import_id,
+            };
+            if !dated || filter.active() {
+                ljos_cli::memory_port::merge_cli(&mut hits, &join(&query), limit as usize, &filter);
             }
             hits.truncate(limit as usize);
             print!("{}", format_hits(&hits, explain));
@@ -2316,6 +2437,10 @@ fn run_command() -> Result<()> {
         }
         Cmd::Note { words } => {
             let (issue, text, inferred) = note_target(&words)?;
+            let pending = ljos_cli::retry_pending_claim(&issue);
+            if !pending.is_empty() {
+                print!("{pending}");
+            }
             // The tracker's own lock has no deadline. Wait as long as a
             // tracker commit waits, then say so. A second note once the
             // lock is free is the retry that used to be instant.
@@ -2706,10 +2831,10 @@ fn run_command() -> Result<()> {
             println!("{}", write_ack(&body));
             ljos_cli::refresh_agents();
         }
-        Cmd::Upgrade { version, dir } => {
+        Cmd::Upgrade { version, dir, only } => {
             print!(
                 "{}",
-                ljos_cli::upgrade::upgrade(version.as_deref(), dir.as_deref())?
+                ljos_cli::upgrade::upgrade(version.as_deref(), dir.as_deref(), only.as_deref())?
             );
         }
         Cmd::Supervise {
@@ -3281,8 +3406,8 @@ fn run_command() -> Result<()> {
                 &call.cue,
             );
             // The call runs. One rule is its warning: the guard's, else the
-            // push gate's or a seat rule's. policyd's block, under a named
-            // `policyd_config`, is the one rule that stops it.
+            // push gate's or a seat rule's. The cloud seat push rule is the
+            // one rule that stops it.
             let verdict = tcb_rule.as_ref().or(gated.as_ref());
             // A command the ask pack would have asked about runs because a
             // setting turned that class off: the bypass log keeps a row.
@@ -3636,23 +3761,7 @@ fn run_command() -> Result<()> {
             if let Some(msg) = ljos_cli::hook_timed("consensus_refusal", || {
                 ljos_cli::panel_gate::settle_refusal(&id)
             }) {
-                let flags = ljos_cli::panel_gate::blind_lines_for(&id);
-                if json {
-                    let doc = serde_json::json!({
-                        "settled": false,
-                        "panel": {"settled": false, "refusal": msg, "blind": flags},
-                        "push_cite": {"issue": id, "stands": false, "refusal": msg},
-                        "provenance": provenance,
-                    });
-                    println!("{}", serde_json::to_string_pretty(&doc)?);
-                } else {
-                    print!("{provenance}");
-                    println!("{msg}");
-                    for line in flags {
-                        println!("blind design: {line}");
-                    }
-                }
-                std::process::exit(1);
+                println!("ljos: session-authored: {msg}");
             }
             for line in ljos_cli::panel_gate::blind_lines_for(&id) {
                 println!("blind design: {line}");

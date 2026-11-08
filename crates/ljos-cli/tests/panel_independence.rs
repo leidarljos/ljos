@@ -412,7 +412,8 @@ fn a_choice_with_a_space_is_one_ballot_per_session() {
         &["vote", issue, "--for", "xdg home", "--used", "none"],
     );
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains("already cast") && said.contains("Nothing was cast"),
         "{said}"
@@ -515,7 +516,8 @@ fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
             ],
         );
         let said = text(&out);
-        assert!(!out.status.success(), "{persona}: {said}");
+        assert!(out.status.success(), "{persona}: {said}");
+        assert!(said.contains("label repeated-ballot"), "{persona}: {said}");
         assert!(
             said.contains("already cast")
                 && said.contains("Nothing was cast")
@@ -621,6 +623,11 @@ fn an_author_who_votes_is_labelled_and_the_settle_stands() {
         &["vote", "demo-vote", "--for", "ship", "--used", "none"],
     );
     assert_author_label(&world, &author, "demo-vote", "demo-d001");
+    let said = text(&author);
+    assert!(
+        said.contains("ljos: session-authored:") && said.contains("authored candidate"),
+        "{said}"
+    );
     vote(&world, "bob", "sess-bob-0001", "demo-vote");
     let out = world.ljos("bob", "sess-bob-0001", &["consensus", "demo-vote"]);
     let said = text(&out);
@@ -945,6 +952,11 @@ fn a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
         &["vote", "child-b", "--for", "ship", "--used", "none"],
     );
     assert_author_label(&world, &author, "child-b", "child-a");
+    let said = text(&author);
+    assert!(
+        said.contains("ljos: session-authored:") && said.contains("authored candidate"),
+        "{said}"
+    );
     let first = world.ljos(
         "saddle",
         "sess-saddle-0001",
@@ -1000,7 +1012,8 @@ fn one_session_casts_once_per_sibling_on_the_command_line() {
     assert!(sibling.status.success(), "{}", text(&sibling));
     let again = cast("child-a", "hold");
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
         "{said}"
@@ -1032,7 +1045,8 @@ fn one_session_casts_once_per_sibling_over_mcp() {
     let (error, said) = cast("child-b", "hold");
     assert!(!error, "a ballot on a sibling is another question: {said}");
     let (error, said) = cast("child-a", "hold");
-    assert!(error, "{said}");
+    assert!(!error, "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains("already cast a ballot on child-a (sess-mcp-0001)"),
         "{said}"
@@ -1065,9 +1079,10 @@ fn a_family_only_ballot_blocks_a_second_cli_vote() {
         &["vote", "child-a", "--for", "hold", "--used", "none"],
     );
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
     assert!(
-        said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
+        said.contains("ljos: session-authored:")
+            && said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
         "{said}"
     );
 }
@@ -1108,9 +1123,10 @@ fn a_family_only_ballot_blocks_a_second_mcp_vote() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(found["result"]["isError"] == true, "{said}");
+    assert!(found["result"]["isError"] != true, "{said}");
     assert!(
-        said.contains("already cast a ballot on child-a (sess-mcp-0001)"),
+        said.contains("ljos: session-authored:")
+            && said.contains("already cast a ballot on child-a (sess-mcp-0001)"),
         "{said}"
     );
 }
@@ -1141,9 +1157,10 @@ fn a_family_ballot_names_where_to_withdraw_over_cli() {
         &["vote", "child-a", "--for", "hold", "--used", "none"],
     );
     let said = text(&refused);
-    assert!(!refused.status.success(), "{said}");
+    assert!(refused.status.success(), "{said}");
     assert!(
-        said.contains("`ljos vote child-a --withdraw --as saddle`"),
+        said.contains("ljos: session-authored:")
+            && said.contains("`ljos vote child-a --withdraw --as saddle`"),
         "{said}"
     );
     let withdrawn = world.ljos(
@@ -1196,9 +1213,10 @@ fn a_family_ballot_names_where_to_withdraw_over_mcp() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(found["result"]["isError"] == true, "{said}");
+    assert!(found["result"]["isError"] != true, "{said}");
     assert!(
-        said.contains("`ljos vote child-a --withdraw --as saddle`"),
+        said.contains("ljos: session-authored:")
+            && said.contains("`ljos vote child-a --withdraw --as saddle`"),
         "{said}"
     );
     let withdraw = serde_json::json!({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {
@@ -1266,9 +1284,10 @@ fn a_withdrawal_on_another_issue_does_not_clear_a_family_ballot() {
         &["vote", "child-a", "--for", "hold", "--used", "none"],
     );
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
     assert!(
-        said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
+        said.contains("ljos: session-authored:")
+            && said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
         "{said}"
     );
 }
@@ -1572,7 +1591,8 @@ fn a_voter_holding_a_ballot_is_told_to_withdraw_then_cast() {
             ],
         );
         let said = text(&again);
-        assert!(!again.status.success(), "{said}");
+        assert!(again.status.success(), "{said}");
+        assert!(said.contains("label repeated-ballot"), "{said}");
         assert!(
             said.contains("Nothing was cast")
                 && said.contains("for ship")
@@ -1668,7 +1688,8 @@ fn options_appends_a_line_an_existing_issue_can_vote() {
     );
     let one = world.ljos("clerk", "sess-file-0001", &["options", &id, "age"]);
     let said = text(&one);
-    assert!(!one.status.success(), "{said}");
+    assert!(one.status.success(), "{said}");
+    assert!(said.contains("label panel-incomplete"), "{said}");
     assert!(said.contains("two or more"), "{said}");
     let many = world.ljos("clerk", "sess-file-0001", &["options", &id, "age,gpg"]);
     assert!(many.status.success(), "{}", text(&many));
@@ -1764,7 +1785,8 @@ fn runs_with_their_own_harness_ids_each_count_and_one_run_counts_once() {
         ],
     );
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains("already cast") && said.contains("Nothing was cast"),
         "{said}"
@@ -2124,7 +2146,8 @@ fn a_line_run_again_after_its_call_was_taken_is_already_cast() {
     );
     let again = world.ljos_env("reviewer-a", none, &args);
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains(&format!(
             "already cast a ballot on {issue} ({parent}:agent-r1)"
@@ -2163,7 +2186,8 @@ fn a_line_run_again_after_its_call_was_taken_is_already_cast() {
     );
     let again = world.ljos_env("reviewer-b", named, &args);
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
+    assert!(again.status.success(), "{said}");
+    assert!(said.contains("label repeated-ballot"), "{said}");
     assert!(
         said.contains(&format!(
             "already cast a ballot on {issue} ({parent}:agent-r2)"
@@ -2492,7 +2516,12 @@ fn claude_subagents_voting_over_mcp_each_count() {
             }),
         );
         assert!(hook.status.success(), "{}", text(&hook));
-        assert!(hook.stdout.is_empty(), "{}", text(&hook));
+        assert!(
+            hook.stdout.is_empty()
+                || !String::from_utf8_lossy(&hook.stdout).contains("permissionDecision\":\"deny"),
+            "{}",
+            text(&hook)
+        );
     }
     let vote = |id: u64, tool_use: &str, name: &str, choice: &str| {
         serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {

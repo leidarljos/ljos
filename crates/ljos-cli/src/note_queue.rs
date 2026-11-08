@@ -5,10 +5,12 @@
 //! pack. When the pack is off, not answering, or answers 401, the fitted
 //! copy waits here, one JSON line per copy, and the next note that reaches
 //! the pack, `ljos finish`, or the next session start sends it. `ljos
-//! doctor` only counts it. A refusal is not queued: the pack would refuse
-//! it again. A line left
-//! from before that rule is cut to what the pack takes, or dropped, on the
-//! next send. The queue holds one entry per issue, text, workspace, kind
+//! doctor` only counts it. A copy the pack would refuse is kept in the
+//! memory slot with its label and leaves the queue. A line left from
+//! before that rule is cut to what the pack takes on the next send, and
+//! the original stays in the slot. A note that has to wait stays queued.
+//! Later notes are still tried. The queue holds one entry per issue, text,
+//! workspace, kind
 //! and, for a lesson, the atoms it closes. packsetd answers an identical
 //! issue and text with the claim it already holds, so a resend after a
 //! lost answer stores nothing new.
@@ -55,8 +57,10 @@ pub enum Sent {
     /// The pack holds it, under this id.
     Kept(String),
     /// The pack refused it; the reason. The note leaves the queue.
+    /// The caller keeps the text in the memory slot.
     Refused(String),
-    /// The pack did not answer; the note and every later one wait.
+    /// The pack did not answer. The note stays queued. Later notes are
+    /// still tried, so one waiting row does not stall the rest.
     Wait(String),
 }
 
@@ -287,8 +291,8 @@ pub fn push_in(dir: &Path, note: Queued) -> Result<bool> {
 }
 
 /// Send each waiting note in `dir` through `send`, oldest first. A kept
-/// or refused note leaves the queue; the first one that has to wait stops
-/// the drain, and it and every later note stay, in order.
+/// or refused note leaves the queue. A note that has to wait stays, and
+/// the drain still tries every later note.
 ///
 /// # Errors
 ///
@@ -321,8 +325,9 @@ pub fn drain_in(dir: &Path, mut send: impl FnMut(&Queued) -> Sent) -> Result<Dra
                 finished.push(note);
             }
             Sent::Wait(why) => {
-                done.waiting_on = Some(why);
-                break;
+                if done.waiting_on.is_none() {
+                    done.waiting_on = Some(why);
+                }
             }
         }
     }
@@ -642,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn a_drain_keeps_order_and_stops_at_the_first_wait() {
+    fn a_drain_keeps_waiting_rows_and_tries_later_ones() {
         let dir = dir("order");
         for (issue, text) in [("p-1", "a"), ("p-2", "b"), ("p-3", "c"), ("p-4", "d")] {
             push_in(&dir, note(issue, text)).unwrap();
@@ -653,24 +658,34 @@ mod tests {
             match n.issue.as_str() {
                 "p-1" => Sent::Kept("id-1".into()),
                 "p-2" => Sent::Refused("too long".into()),
-                _ => Sent::Wait("connection refused".into()),
+                "p-3" => Sent::Wait("connection refused".into()),
+                _ => Sent::Kept("id-4".into()),
             }
         })
         .unwrap();
-        assert_eq!(seen, ["p-1", "p-2", "p-3"]);
-        assert_eq!(done.kept, [("p-1".to_string(), "id-1".to_string())]);
+        assert_eq!(seen, ["p-1", "p-2", "p-3", "p-4"]);
+        assert_eq!(
+            done.kept,
+            [
+                ("p-1".to_string(), "id-1".to_string()),
+                ("p-4".to_string(), "id-4".to_string())
+            ]
+        );
         assert_eq!(done.refused.len(), 1);
-        assert_eq!(done.left, 2);
+        assert_eq!(done.left, 1);
         let left: Vec<String> = pending_in(&dir).into_iter().map(|n| n.issue).collect();
-        assert_eq!(left, ["p-3", "p-4"]);
+        assert_eq!(left, ["p-3"]);
         let lines = drained_lines(&done);
-        assert!(lines.contains("sent 1 queued note(s): p-1 id-1"), "{lines}");
         assert!(
-            lines.contains("2 note(s) still queued (connection refused)"),
+            lines.contains("sent 2 queued note(s): p-1 id-1, p-4 id-4"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("1 note(s) still queued (connection refused)"),
             "{lines}"
         );
         let done = drain_in(&dir, |_| Sent::Kept("id".into())).unwrap();
-        assert_eq!(done.kept.len(), 2);
+        assert_eq!(done.kept.len(), 1);
         assert!(pending_in(&dir).is_empty());
         assert_eq!(
             drained_lines(&drain_in(&dir, |_| unreachable!()).unwrap()),

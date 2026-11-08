@@ -5,6 +5,145 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## Unreleased
+
+Develop's work since 0.38.0 that 0.39.0 did not ship. A guarded call still runs. `block-on-warning` does not block.
+
+### Features
+
+- `ljos recall` searches on an issue's tags as well as its id and its title.
+  A short title still shows the same number of related memories.
+  An issue with no tags, or tags the tracker does not return, is searched as before.
+- `ljos note TEXT...` notes on the issue the seat has claimed, and says which issue took it.
+  `ljos note ID TEXT...` still names the issue when the first word is an id that `vissue create` mints.
+  `ljos_note` does the same when the issue is omitted or blank.
+  A claim that was labelled claim-pending is retried on that note.
+- `ljos mesh up` joins the Headscale mesh and `ljos mesh down` leaves it.
+  The join takes a key file and a hostname, and it does not advertise tags.
+  Without a usable tunnel device the daemon runs in userspace mode.
+  A failed join prints one line and exits 0.
+  `ljos mesh status` still prints the nodes the daemon reports.
+
+### Fixes
+
+- `ljos release` and `ljos complete` fail at once on a blank id and say the id is empty.
+  The `ljos_release` and `ljos_complete` tools do the same, before they ask the claim graph.
+- A blank claim id now fails at once and says the id is empty.
+  Both `ljos claim ""` and the `ljos_claim` tool do this.
+  Only an omitted id claims the next ready node.
+- A slow claim graph now ends `ljos claim` with no id inside the sitting claim budget.
+- `ljos file` names the held issue it filed under, on stderr.
+  With no hold and no project named, it files in the checkout prefix that `vissue identity` prints.
+- A pack read keeps the budget of the thread that asked.
+  Another thread's spent pack clock no longer makes a live pack look unverified.
+- `ljos mesh down` sends SIGKILL after the grace only while the pid still names the tailscaled ljos started, or names no process at all.
+  On macOS, a process that writes to the pack runs `ps` once per tailscaled pid file to decide the `source.mesh` label, not once per write.
+  `ljos mesh up` says so when the tailscaled pid file has no start time, even when that tailscaled already answers.
+  `ljos mesh up` keeps a tailscaled whose start time cannot be read running and writes its pid alone.
+  Its line says that writes carry no `source.mesh` label and that `ljos mesh down` signals nothing.
+- `ljos mesh up` prints the node name, its mesh IPv4 and IPv6, and the name and addresses of each peer.
+  A node that is already up prints that same line.
+- `ljos cloud up` removes the pre-push hook and the `core.hooksPath` values an earlier `cloud up` set, and leaves any other hooks path alone.
+  On a cloud seat the shell guard warns and still runs the line.
+  It also warns on `--no-verify`, a `core.hooksPath` override and any gitconfig write.
+  It warns on a write to the push allowlist and on a write to a curl or wget config.
+- A vote finds where slots began by reading the tracker trees, so it no longer runs a pickaxe search over the whole history.
+  A partial read decides nothing for that vote, and the next vote continues the read.
+- A vote whose slot read cannot read a commit tree records the ballot under the protected label.
+  A later vote on a new commit continues that read from the rows already walked.
+- A session that filed a candidate can cast.
+  The ballot is stored with an `authored:` label and one warning line.
+  Consensus still names that authorship, and the settle outcome is unchanged.
+- A tracker push still says the remote was not reached when the seat locale is French.
+  The background push holds its lock with `flock(2)`, without the `flock` command, and sets `LC_ALL=C`.
+- Tracker git over ssh runs in batch mode.
+  An exit-128 error that did reach the remote is reported as a refused push.
+  A manual `ljos sync` in a checkout with no scope follows `LJOS_TRACKER_GIT`.
+  An empty `core.sshCommand` falls through to batch ssh.
+
+### Documentation
+
+- The notes say a hosted VM, the model, and the agent's branch prefix.
+- `AGENTS.md` lists the check commands.
+  It also says where the fragment, version-copy, doc-sample and identity rules live.
+- The cloud notes list a write to the push allowlist and a write to a curl or wget config with the other shell-guard warnings.
+- The pre-push hook refuses a pushed commit whose message carries a machine trailer.
+  The Stop hook hands unread interrupt mail to the session and keeps the turn going once.
+  A person at their own terminal is not checked.
+- The contributing notes state that the identity check compares author and committer dates as seconds since the epoch.
+  The date test reads those seconds with git log, so it runs on macOS.
+
+### Miscellaneous
+
+- `ljos recall` lists ten of an issue's own memories, the ones that match the issue, and says how many it left out.
+- The static check test reads the stand-in policyd marker before it judges the clock.
+  The clock bound is half that stand-in's sleep, so a call that reached the binary still fails it.
+- The cargo test job and a local run build the sibling tools with `scripts/sibling-tools.sh`.
+  These are vissue, claimdag, deedar, packset, packsetd and ljos-policyd.
+- A push to develop or main gets a continuous integration (CI) run that goes to the end.
+  A later push no longer cancels it while it waits.
+  The docs workflow does the same, and main's Pages deploys still run one at a time.
+  Once its SIGINT handler has reaped a writer, the packsetd test helper's drop sends no SIGKILL to that writer's pid.
+- CI installs the compiler rust-toolchain.toml names, and each workflow file keeps a single actions/checkout pin.
+- Tests keep the seat records they write in their own runtime directory, so a test run under a runner passes in any order.
+  The test puts `XDG_RUNTIME_DIR` back when it ends.
+- Runner session ids are read as `LJOS_SESSION_ID`, and other names with the old prefix are neutral too.
+  The blank-claim test's watchdog waits past the stalled claim graph and is cancelled when the test ends, so it never signals another test's pid.
+  The workflow check prints a YAML error once, looks up a step id inside its own job, and reads both yml and yaml workflow files.
+
+## 0.39.0 (2026-11-06)
+
+### Features
+
+- The README says what ljos is in one sentence, that a shell warning does not stop the command, and where the tool-list token counts are measured.
+- `ljos memory export`, `import`, `integrate`, and `imports` keep a seat's lessons in a local file under the tracker.
+  A lesson the pack's prose check would split stays stored whole.
+  That check's label stays with that lesson.
+  A waiting note no longer stops later notes in the queue.
+
+
+## 0.38.1 (2026-11-04)
+
+### Features
+
+- `ljos mesh status` prints each node the daemon reports, with its tags.
+  A node id may be a number or a string.
+  The example status document is not read by the command.
+- `ljos upgrade` installs each seat program from its own release.
+  One line names the old version and the new one, or `current`.
+  A missing release or a bad checksum is a warning.
+  The other programs still move.
+  `--only NAME` moves one program.
+  The old binary is kept as `NAME.bak-pre-VERSION`.
+  Intel macOS and aarch64 Linux use a published archive too.
+
+### Fixes
+
+- A lib test that edits the process environment holds `test_env_lock`.
+  The mock atom-read budget is this thread's, not a process variable.
+  A test waits for a condition inside a named deadline.
+- A tracker commit no longer stops when git still holds `index.lock`, including while a background push runs.
+  The write stays on disk, the line says the commit is deferred to the next write or push, and that next write or push commits it.
+  ljos does not remove an `index.lock` it did not create.
+  `ljos finish` warns when this machine's log cannot take a chunk, leaves the atoms in the pack, and names `ljos sync` as the command that seals the log whole.
+- An unverified user rule is a warning labelled unverified-rule, and the command runs.
+  A confirmed user-rule deny or ask is a warning labelled user-rule.
+  A missing verdict is a warning.
+  A cloud seat still cannot force-push, delete a remote ref, or push outside its allowlist.
+  A blocked issue is sat and labelled blocked-by.
+  A claim that misses its budget is labelled claim-pending and retried on note or finish.
+  A down memory pack or encoder is labelled memory-unavailable, and sitting and search continue.
+  A slow pack names memory pressure from the kernel and is not restarted for being slow.
+  Search prints a word ranking after a few seconds instead of hanging.
+  ljos file uses the checkout's project, or an explicit -p, and says which one and why.
+
+### Removals
+
+- A guarded call always runs and shows the rule's warning.
+  Approvals are removed.
+  block-on-warning no longer blocks. It warns with the rule's label, and the call runs.
+
+
 ## 0.38.0 (2026-11-03)
 
 ### Features
@@ -13,7 +152,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   `ljos mesh acl` prints its policy.
 - `policyd_config = "PATH"` in the user's or the seat's `ljos.toml` names a policyd config.
   The hook, `ljos policy`, `ljos doctor` and the guard shims then ask `ljos-policyd check --config PATH`.
-  With `block-on-warning true` in that config, a warned command becomes policyd's deny.
+  With `block-on-warning true` in that config, the warned command still runs. ljos warns with the rule's label. It does not block.
   A check that fails open still allows.
   It is off by default: with nothing named, `check` is asked as before and every warning stays a label.
 
@@ -72,7 +211,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   It used to show a bare `allow`.
 - ljos runs `rm -rf` and `find -delete` outside `/tmp`, and a force or mirror push, instead of refusing or asking.
   Each prints one `allow\twarn\tRULE\tWARNING` line and leaves a `warn` row in `$XDG_DATA_HOME/ljos/bypass.jsonl`, from the hook, `ljos policy`, the guard shim and the gate client alike.
-  An older `ljos-policyd` that still refuses or asks on those rules gets the same line, unless the person names a `policyd_config`, which keeps its deny.
+  An older `ljos-policyd` that still prints deny or prompt on those rules gets the same warning label. Naming a `policyd_config` with `block-on-warning true` does not block. It warns with the rule's label.
   The ask pack leaves a forced recursive delete of a home or system tree to the guard.
   A push that deletes a remote branch runs with `git-push-delete` instead of asking.
   A protected branch takes a force, mirror or delete push once the sitting's consensus settles, as it takes an ordinary push, and no later.
@@ -87,7 +226,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   A tool call's `ljos prefer --review --keep ID` runs with no warning, since the rule is kept as the agent's.
   It runs with `prefer-keep-faked-terminal` when run under `setsid`, `script` or `env -i`, as if from the person's terminal.
   That warning says the rule is kept as the agent's and stays unverified.
-  A `policyd_config` holding `block-on-warning true` reaches only the commands policyd warns on, so each of ljos's own labels turns into a deny only where policyd warns on the same command.
+  A `policyd_config` holding `block-on-warning true` reaches only the commands policyd warns on. ljos warns with its label there. It does not block.
 
 ### Documentation
 

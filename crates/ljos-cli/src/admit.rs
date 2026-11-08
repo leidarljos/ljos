@@ -234,7 +234,11 @@ fn write_fitted(
 ) -> Result<Value> {
     let text = atom["text"].as_str().unwrap_or("").trim().to_string();
     if text.is_empty() {
-        bail!("remember: empty text is not a claim");
+        crate::memory_port::keep_empty("lesson");
+        return Err(crate::policy_label::labelled(
+            "empty-input",
+            "remember: empty text is not a claim",
+        ));
     }
     let refused = (held && atom["kind"].as_str() != Some(packset_core::record::NOTE_KIND))
         .then(|| crate::pack_copy::gate_refusal(&text))
@@ -242,6 +246,8 @@ fn write_fitted(
     let Some(why) = refused else {
         return post(client, atom);
     };
+    let kind = atom["kind"].as_str().unwrap_or("lesson");
+    crate::memory_port::keep_prose(&text, kind, &why);
     let copies = crate::pack_copy::pack_copies(&text);
     if copies.is_empty() {
         return post(client, atom);
@@ -280,7 +286,11 @@ fn write_fitted(
 pub(crate) fn write_agent_one(client: &PacksetClient, mut atom: Value) -> Result<Value> {
     let text = atom["text"].as_str().unwrap_or("").trim();
     if text.is_empty() {
-        bail!("remember: empty text is not a claim");
+        crate::memory_port::keep_empty("lesson");
+        return Err(crate::policy_label::labelled(
+            "empty-input",
+            "remember: empty text is not a claim",
+        ));
     }
     stamp_origin(&mut atom, ORIGIN_AGENT);
     atom["source"]["basis"] = Value::String(crate::Basis::Agent.as_str().into());
@@ -322,7 +332,11 @@ fn post_live(client: &PacksetClient, atom: Value) -> Result<Value> {
 /// copies do not answer.
 pub fn store_labelled(client: &PacksetClient, mut atom: Value) -> Result<Value> {
     if atom["text"].as_str().unwrap_or("").trim().is_empty() {
-        bail!("store: empty text is not a claim");
+        crate::memory_port::keep_empty("lesson");
+        return Err(crate::policy_label::labelled(
+            "empty-input",
+            "store: empty text is not a claim",
+        ));
     }
     if atom
         .get("workspace")
@@ -404,7 +418,12 @@ pub fn import_open(budget_ms: u64) -> Imported {
                 out.left += 1;
                 continue;
             }
-            Err(_) => rec.status = "refused".into(),
+            Err(err) => {
+                let text = rec.atom["text"].as_str().unwrap_or("");
+                let kind = rec.atom["kind"].as_str().unwrap_or("lesson");
+                crate::memory_port::keep_prose(text, kind, &format!("legacy proposal: {err:#}"));
+                rec.status = "refused".into();
+            }
         }
         match append(&rec) {
             Ok(()) if rec.status == "stored" => out.stored += 1,

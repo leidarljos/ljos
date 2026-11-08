@@ -209,10 +209,10 @@ fn tools_list_answers_with_an_empty_home_and_no_tracker() {
     for id in [3, 4] {
         let call = by_id(id);
         assert!(call.get("error").is_none(), "{call}");
-        assert_eq!(call["result"]["isError"], true, "{call}");
+        assert_eq!(call["result"]["isError"], false, "{call}");
         let said = text(&call);
         assert!(
-            said.contains("no LJOS_SEAT"),
+            said.contains("label seat-unresolved") && said.contains("no LJOS_SEAT"),
             "id {id}: {said}\nstderr:\n{stderr}"
         );
     }

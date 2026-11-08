@@ -470,7 +470,7 @@ fn git_ok(repo: &Path, args: &[&str]) {
 /// private to the run. A protected push that is missing only that ballot
 /// warns that the sitting has no settled consensus, in `ljos policy` and
 /// in the hook, and the hook still allows it. A force, a delete and a
-/// the editor harness ref stay refused, in `ljos policy` and in the hook.
+/// cursor ref stay refused, in `ljos policy` and in the hook.
 #[test]
 fn a_cloud_seat_warns_on_a_protected_push_when_no_seat_has_voted() {
     let seat = Seat::new();
@@ -653,9 +653,10 @@ fn a_gates_file_that_does_not_parse_warns_and_holds_the_git_hook() {
     let out = seat.git_hook_push(&refs, &[]);
     let hooked = text_of(&out);
     assert!(
-        !out.status.success(),
-        "a malformed gates file let the hook through\n{hooked}"
+        out.status.success(),
+        "a malformed gates file is a label and the push runs\n{hooked}"
     );
+    assert!(hooked.contains("sitting-gate"), "{hooked}");
     assert!(hooked.contains("do not read"), "{hooked}");
     assert!(!hooked.contains("1 of the 2 seats"), "{hooked}");
 }
@@ -841,9 +842,10 @@ fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
         "protected push took {took:?}\n{said}"
     );
     assert!(
-        !out.status.success(),
-        "a stalled tracker let the protected push through\n{said}"
+        out.status.success(),
+        "a stalled tracker is a label and the push runs\n{said}"
     );
+    assert!(said.contains("sitting-gate"), "{said}");
     assert!(
         said.contains("the tracker was slow, so retry the push"),
         "protected push\n{said}"

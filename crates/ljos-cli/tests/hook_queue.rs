@@ -65,9 +65,12 @@ else:
     print("{}")
 "#;
 
-/// Whether an editor harness answer is an allow that carries a rule's warning.
+/// Whether a Cursor answer is an allow that carries a rule's warning.
 fn warns(said: &str) -> bool {
-    said.contains("\"permission\":\"allow\"") && said.contains("\"user_message\":\"warning: ")
+    said.contains("\"permission\":\"allow\"")
+        && (said.contains("\"user_message\":\"warning: ")
+            || said.contains("\"user_message\":\"ljos: user-rule:")
+            || said.contains("\"user_message\":\"ljos: unverified-rule:"))
 }
 
 struct Hab {

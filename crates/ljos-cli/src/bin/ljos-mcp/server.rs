@@ -130,7 +130,12 @@ fn listed(set: Option<&[String]>, name: &str) -> bool {
 /// arguments that do not parse.
 fn as_tool_error(e: McpError) -> Result<CallToolResponse, McpError> {
     if e.code == ErrorCode::INTERNAL_ERROR {
-        Ok(CallToolResult::error(vec![ContentBlock::text(e.message.to_string())]).into())
+        let text = e.message.to_string();
+        if text.starts_with("label ") {
+            Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
+        } else {
+            Ok(CallToolResult::error(vec![ContentBlock::text(text)]).into())
+        }
     } else {
         Err(e)
     }
@@ -973,8 +978,7 @@ pub struct SittingArgs {
     /// named after the client that connected, tagged with the runner's process.
     #[serde(default)]
     pub assignee: Option<String>,
-    /// Sit even when the issue's blockers are open. Without it a blocked
-    /// issue is refused before anything is claimed.
+    /// Accepted and ignored. A blocked issue is sat and labelled `blocked-by`.
     #[serde(default)]
     pub anyway: bool,
     /// The recipe this sitting copies before recall (`sit`, `arena`, `land`,
@@ -1240,6 +1244,9 @@ fn said(out: ljos_cli::Said) -> Json<Said> {
 /// A refusal. `call_tool` hands it to the model as a tool result with
 /// `isError`, so the model reads the reason.
 fn refused(e: anyhow::Error) -> McpError {
+    if let Some(label) = ljos_cli::policy_label::as_policy(&e) {
+        return McpError::internal_error(format!("label {}: {}", label.label, label.detail), None);
+    }
     let text = format!("{e:#}");
     // The pack's prose rule refuses a hard sentence; the seat that hit it
     // is told what passes, so the second try is not a guess.
@@ -1869,6 +1876,7 @@ impl LjosServer {
                     ljos_cli::ballot_voter("vote", args.as_persona.as_deref()).map_err(refused)?;
                 let cast = ljos_cli::panel_gate::claim_session_ballot(&args.issue, &who)
                     .map_err(refused)?;
+                let session_label = cast.label.clone();
                 let used = args.used.as_deref().unwrap_or("");
                 if used.is_empty() {
                     return Err(refused(anyhow::anyhow!(
@@ -1889,6 +1897,9 @@ impl LjosServer {
                 }
                 let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                 let mut said = habitat_as("vissue", &refs, Some(&who))?;
+                if let Some(why) = session_label {
+                    said.0.text = format!("ljos: session-authored: {why}\n{}", said.0.text);
+                }
                 cast.keep();
                 match ljos_cli::ballot_sig::sign_ballot(&args.issue, &who, c) {
                     Ok(line) => said.0.text.push_str(&line),
@@ -2255,11 +2266,7 @@ impl LjosServer {
         let ballots = ljos_cli::ballot_rows(&args.issue);
         ljos_cli::require_ballots(&args.issue, &ballots).map_err(refused)?;
         if let Some(msg) = ljos_cli::panel_gate::settle_refusal(&args.issue) {
-            let mut text = msg;
-            for line in ljos_cli::panel_gate::blind_lines_for(&args.issue) {
-                text.push_str(&format!("\nblind design: {line}"));
-            }
-            return Err(refused(anyhow::anyhow!(text)));
+            eprintln!("ljos: session-authored: {msg}");
         }
         let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
         // As the CLI: the model crate's settle, and the tracker's only on

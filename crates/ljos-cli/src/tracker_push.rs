@@ -63,7 +63,7 @@ const FOLD_COMMIT: &str = "chore(tracker): fold duplicate issue headings";
 pub(crate) fn push_checkout(start: &Path) -> Result<(), String> {
     let owned = repo_root(start);
     let dir = owned.as_path();
-    prepare_tracker(dir, false, true)?;
+    prepare_for_push(dir)?;
     let mut last = String::from("push refused");
     for _ in 0..ATTEMPTS {
         let out = push_once(dir);
@@ -97,7 +97,7 @@ pub(crate) fn push_checkout(start: &Path) -> Result<(), String> {
 pub(crate) fn publish(start: &Path) -> Result<(), String> {
     let owned = repo_root(start);
     let dir = owned.as_path();
-    prepare_tracker(dir, false, true)?;
+    prepare_for_push(dir)?;
     let mut last = String::from("push refused");
     for attempt in 0..ATTEMPTS {
         if attempt > 0 {
@@ -144,7 +144,7 @@ pub(crate) fn publish(start: &Path) -> Result<(), String> {
 pub(crate) fn publish_explicit(start: &Path, remote: &str, branch: &str) -> Result<(), String> {
     let owned = repo_root(start);
     let dir = owned.as_path();
-    prepare_tracker(dir, false, true)?;
+    prepare_for_push(dir)?;
     let onto = format!("{remote}/{branch}");
     let spec = format!("HEAD:refs/heads/{branch}");
     let mut last = String::from("push refused");
@@ -172,7 +172,7 @@ pub(crate) fn publish_explicit(start: &Path, remote: &str, branch: &str) -> Resu
             let _ = git(dir, &["merge", "--abort"]);
             return Err(last);
         }
-        let out = git(dir, &["push", "-q", remote, &spec]);
+        let out = git_push(dir, &["push", "-q", remote, &spec]);
         if out.status.success() {
             return Ok(());
         }
@@ -190,11 +190,47 @@ pub(crate) fn publish_explicit(start: &Path, remote: &str, branch: &str) -> Resu
     ))
 }
 
-/// One explicit push for a destination already approved by the caller.
-pub(crate) fn push_script_explicit(remote: &str, branch: &str) -> String {
-    let remote = crate::tools::sh_quote(remote);
-    let spec = crate::tools::sh_quote(&format!("HEAD:refs/heads/{branch}"));
-    format!("git push -q {remote} {spec}")
+/// Merge setup for a push. A deferred attributes commit is not a failed
+/// push: the file stays on disk and the next write commits it. Commits
+/// already made are still sent. Other setup errors stop the push.
+fn prepare_for_push(dir: &Path) -> Result<(), String> {
+    match prepare_tracker(dir, false, true) {
+        Ok(()) => {
+            land_deferred(dir);
+            Ok(())
+        }
+        Err(e) if crate::commit_was_deferred(&e) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Commit paths an earlier tracker write left on disk. Nothing to do when
+/// none are waiting. The caller does not already hold the tracker lock.
+fn land_deferred(dir: &Path) {
+    let _held = crate::tracker_commit_lock(dir);
+    let _ = crate::commit_paths(
+        dir,
+        &[],
+        "chore(tracker): commit writes deferred while git held the index",
+    );
+}
+
+/// `git push` while this process holds the tracker lock. A hook that runs
+/// git add then keeps other ljos writers on that lock instead of `index.lock`.
+fn git_push(dir: &Path, args: &[&str]) -> Output {
+    let _held = crate::tracker_commit_lock(dir);
+    git(dir, args)
+}
+
+/// Arguments for one explicit push. No `--force`: a rejected update is
+/// rebased and tried again by the caller.
+pub(crate) fn push_args_explicit(remote: &str, branch: &str) -> Vec<String> {
+    vec![
+        "push".to_string(),
+        "-q".to_string(),
+        remote.to_string(),
+        format!("HEAD:refs/heads/{branch}"),
+    ]
 }
 
 /// Whether git refused the update because the remote moved.
@@ -407,12 +443,14 @@ fn split_heading(text: &str) -> (String, Vec<(String, String)>, Vec<String>) {
 
 fn push_once(dir: &Path) -> Output {
     // Never `--force`. A rejected update is rebased and tried again.
+    // The push holds the tracker lock for the whole command, hook included,
+    // so a seat's next commit waits instead of meeting the hook on index.lock.
     if upstream_set(dir) {
-        git(dir, &["push", "-q"])
+        git_push(dir, &["push", "-q"])
     } else if let Some(branch) = branch_name(dir) {
-        git(dir, &["push", "-q", "-u", "origin", &branch])
+        git_push(dir, &["push", "-q", "-u", "origin", &branch])
     } else {
-        git(dir, &["push", "-q"])
+        git_push(dir, &["push", "-q"])
     }
 }
 
@@ -423,7 +461,7 @@ fn push_mirrors(dir: &Path) -> Result<(), String> {
     let mirrors = crate::tracker_mirrors(dir, &up).unwrap_or_default();
     for (remote, branch) in mirrors {
         let spec = format!("HEAD:refs/heads/{branch}");
-        let out = git(dir, &["push", "-q", &remote, &spec]);
+        let out = git_push(dir, &["push", "-q", &remote, &spec]);
         if !out.status.success() {
             return Err(format!(
                 "mirror {remote} refused: {}",
@@ -1092,6 +1130,31 @@ fn local_config(dir: &Path, key: &str) -> Option<String> {
 }
 
 fn commit_attributes(root: &Path) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..=crate::INDEX_LOCK_RETRY_STEPS {
+        if attempt > 0 {
+            std::thread::sleep(crate::index_lock_pause(attempt));
+        }
+        match stage_attributes(root) {
+            Ok(()) => return Ok(()),
+            Err(why) if crate::git_text_index_busy(&why) => {
+                if attempt == 0 {
+                    if let Some(orphan) = crate::orphaned_index_lock(root) {
+                        crate::note_deferred_paths(root, &[".gitattributes"]);
+                        return Err(orphan);
+                    }
+                }
+                last = why;
+            }
+            Err(why) => return Err(why),
+        }
+    }
+    crate::note_deferred_paths(root, &[".gitattributes"]);
+    let _ = last;
+    Err(crate::deferred_commit_line(".gitattributes"))
+}
+
+fn stage_attributes(root: &Path) -> Result<(), String> {
     let added = git(root, &["add", "--", ".gitattributes"]);
     if !added.status.success() {
         return Err(format!(
@@ -1455,11 +1518,19 @@ mod tests {
     }
 
     #[test]
-    fn the_push_script_does_not_force() {
-        let script = push_script_explicit("origin", "main");
-        assert!(!script.contains("force"), "{script}");
-        assert!(!script.contains(" -f "), "{script}");
-        assert!(script.contains("'HEAD:refs/heads/main'"), "{script}");
+    fn the_push_does_not_force() {
+        let args = push_args_explicit("origin", "main");
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--force" || arg == "-f" || arg.contains("force")),
+            "{args:?}"
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("HEAD:refs/heads/main"),
+            "{args:?}"
+        );
     }
 
     #[test]

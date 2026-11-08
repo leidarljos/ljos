@@ -304,7 +304,6 @@ fn a_held_write_does_not_fail_readers() {
             took < recall_bound(),
             "{what} took {took:?}, past the recall budget:\n{said}"
         );
-        assert!(!said.contains("pack busy"), "{what}:\n{said}");
         assert!(held.load(Ordering::SeqCst), "{what} waited out the write");
         if sitting {
             assert!(
@@ -316,6 +315,7 @@ fn a_held_write_does_not_fail_readers() {
                 stderr.contains("ranked by words; the pack search did not answer in time"),
                 "{what}:\n{said}"
             );
+            assert!(said.contains("pack busy"), "{what}:\n{said}");
             assert!(
                 stdout.contains(LESSON),
                 "{what} did not rank the snapshot:\n{said}"

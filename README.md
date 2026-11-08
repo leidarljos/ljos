@@ -2,32 +2,32 @@
 
 Coding runners work on one person's repositories. A new session does not keep the last session's lessons. Two agents can claim the same work. Nobody can see who decided what.
 
-ljos is the command you install once on a machine. Each agent gets a seat on a tracker. The tracker is a git repository of tickets. A seat files a ticket and opens a sitting on it. A sitting claims that ticket and gathers the checks and memories for the task.
+ljos is the record of who decided what: memory you write on purpose, a git-backed ticket tracker that agents share, and a warner for shell commands.
 
-Seats cast ballots, and `ljos consensus` settles them. With two or more active seats, a protected push needs votes from two model families. A model family is the model a seat's verified record names. A seat with no such record is a family of its own. One active seat settles that check with its own vote. A panel seats each persona the ticket speaks to. Each persona casts its own ballot.
+You install it once on a machine. Each agent gets a seat on a tracker. The tracker is a git repository of tickets. A seat files a ticket and opens a sitting on it. A sitting claims that ticket and gathers the checks and memories for the task.
 
-Ballots and votes are separate from memory. A person stores a lesson with `ljos remember`, or a preference with `ljos prefer`. The words are kept as written. At the end of a session, ljos reads the transcript. It keeps up to five sentences that state a rule, a cause, or a fix. Each sentence is a note on the open sitting. The prompt hook does not show that note as a fact. Set `LJOS_EXTRACT=off` to skip the read. With no open sitting, it writes nothing.
+Checks from the sitting include a shell warning. ljos warns about a shell command and does not stop it. `ljos-policyd` names a short list of dangerous actions. It is not a sandbox. A command that runs as you, outside a tool call, is not checked. If policyd is missing, slow, or crashes, the command runs and ljos logs a warning. Warning lines sit apart from ballots and votes, which are also separate from memory. A person stores a lesson with `ljos remember`, or a preference with `ljos prefer`. The words are kept as written. At the end of a session, ljos reads the transcript. It keeps up to five sentences that state a rule, a cause, or a fix. Each sentence is a note on the open sitting. The prompt hook does not show that note as a fact. Set `LJOS_EXTRACT=off` to skip the read. With no open sitting, it writes nothing.
 
 A person can also record a grant that lets a seat close tickets. The grant stores the person's quote.
 
-`ljos-policyd` checks a shell command against a short list of dangerous actions. It is not a sandbox. A command that runs as you, outside a tool call, is not checked. If policyd is missing, slow, or crashes, the command runs and ljos logs a warning.
-
-<!-- [[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]] -->
-These notes describe ljos 0.38.0.
-<!-- [[[end]]] -->
+[//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
+These notes describe ljos 0.39.0.
+[//]: # ([[[end]]])
 
 ## Try it
+
+Linux and macOS are supported. Windows works through Windows Subsystem for Linux (WSL) and is untested.
 
 ```
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 export PATH="$HOME/.local/bin:$PATH"
 ljos doctor
-ljos prefer "The lexical default is BM25+."
-ljos search lexical
+ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
+echo "how do I push the v0.32.0 tag?" | ljos hook --prompt --text
 ljos due
 ```
 
-The installer puts the programs in `~/.local/bin`. It sets up the tracker and the memory writer, then runs `ljos onboard`. `ljos doctor` names any part that does not answer. The preference is stored as written. `ljos search` prints what matches. `ljos due` lists what is ready to grade.
+The installer puts the programs in `~/.local/bin`. It sets up the tracker and the memory writer, then runs `ljos onboard`. `ljos doctor` names any part that does not answer. The preference is stored as written. The hook then prints that preference ahead of the prompt. `ljos due` lists what is ready to grade.
 
 ## What a seat does
 
@@ -61,6 +61,17 @@ found, it still sets up the tracker, the pack writer and the deed store.
 The programs are `ljos`, `ljos-mcp`, `packset`, `vissue`, `deedar`, `claimdag`,
 `ljos-policyd` and `ljos-consensus`. `packset-embed` is the encoder for
 meaning-based search. `--no-embed` leaves it out, and search then matches words only.
+
+`ljos upgrade` moves each installed program to its latest published
+release.
+`ljos`, `ljos-mcp` and `ljos-hud` come from the ljos release.
+Each other program comes from the repository that publishes it.
+One line a program names the version it had and the version it has, or
+`current` when those are the same.
+A missing release, a failed download or a checksum that does not match
+is a warning, and the other programs still move.
+`ljos upgrade --only NAME` moves one program.
+The previous binary is kept as `NAME.bak-pre-VERSION`.
 
 To install by hand:
 
@@ -104,9 +115,7 @@ global git hooks back, stops the hook server and removes the ljos programs. Wher
 `ljos` was, it leaves a stub that answers every hook call with an allow, because a
 runner that loaded its hook list while ljos was installed keeps calling that path
 until it restarts. `--no-stub` leaves nothing, `--all` removes the other seat
-programs too, `--purge` removes the state, data and configuration directories.
-
-With the binary already deleted by hand, the release ships the same as a script:
+programs too, `--purge` removes the state, data and configuration directories. A hand-deleted binary still has the same uninstall script from the release:
 
 ```
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/uninstall.sh && sh uninstall.sh
@@ -142,6 +151,8 @@ reviewed. A yes you said in chat is kept with the acceptance. The seat that hear
 
 Two agents, `alice` and `bob`, each name their seat with `LJOS_SEAT` on the command. Alice adds both seats. One shell can then file, claim, vote, note and read. That shell casts one ballot. Bob writes a note from this shell. His ballot has to come from his own runner.
 
+Seats cast ballots, and `ljos consensus` settles them. With two or more active seats, a protected push needs votes from two model families. A model family is the model a seat's verified record names. A seat with no such record is a family of its own. One active seat settles that check with its own vote. A panel seats each persona the ticket speaks to. Each persona casts its own ballot.
+
 ```
 LJOS_SEAT=alice ljos seat add alice
 LJOS_SEAT=alice ljos seat add bob
@@ -155,7 +166,9 @@ LJOS_SEAT=alice ljos consensus "$id"
 LJOS_SEAT=alice ljos digest
 ```
 
-A second claim on a held ticket is refused, and the refusal names the holder.
+A second claim on a held ticket prints `label claim-conflict:` and names the holder. The ticket stays with that holder.
+A close with open children prints `label children-open:` and leaves the parent open.
+A block that would loop prints `label graph-cycle:` and does not store the edge.
 A persona ballot records the casting seat, the parent session and the persona.
 Every ballot is recorded.
 Ballots count as one voice when they share a session id, a parent, a calling shell or the root session of one agent runner.
@@ -205,7 +218,7 @@ settles consensus for the push check. With two or more seats, the normal quorum 
 ### What happened
 
 `ljos digest` reads the tracker and says what the seats did:
-what each filed, claimed, voted on, noted and finished. Today you read the same
+what each filed, claimed, voted on, noted and finished. You read the same
 facts one at a time with `ljos timeline ISSUE`, `ljos claims` and `ljos log --seat NAME`.
 
 ## What policyd does
@@ -214,8 +227,8 @@ Before an agent's shell command runs, the runner's hook hands it to `ljos hook`.
 `ljos hook` asks `ljos-policyd` and relays the answer. policyd is the one place
 that says whether a command is dangerous. ljos does not run a second set of
 command checks of its own. By default nothing ljos answers stops a command: it never
-refuses, asks, or keeps one waiting. The cloud seat's push rule below refuses a
-force push, a branch delete, and a push outside its allowlist. The installed
+refuses or asks about one, and it never blocks one. The cloud seat's push rule below refuses a
+force push, a remote branch or tag delete, and a push outside its allowlist. A local branch delete runs and is labelled. The installed
 `pre-push` git hook refuses a protected push that has not cleared and a
 pushed commit whose message carries a machine trailer.
 
@@ -227,11 +240,9 @@ policyd gives one of three answers.
 | warn | The command runs, and the runner shows one line that names the rule and says why. |
 | rewrite | policyd returns a corrected command, and that one runs. |
 
-Blocking is opt-in. When your own `ljos.toml` names a `policyd_config` whose file
-sets `block-on-warning true`, policyd answers a warned command with `deny`. The hook
-denies the tool call, `ljos policy --fail-on-deny` exits 1, and a guard shim exits
-126. Without that line, a `deny` or `prompt` from an older policyd reads as the same
-warning.
+`block-on-warning` does not block. A `deny` or `prompt` from policyd, including one printed because a named `policyd_config` sets `block-on-warning true`, is a warning with that label.
+The command runs.
+The hook does not deny the tool call, and a guard shim does not stop it.
 
 > **Security:** a warning is the only thing between a runner and a destructive
 > command. Keep backups, protect branches on the forge, and keep a runner where it
@@ -308,8 +319,9 @@ commit's SHA on the held ticket. It never refuses a commit.
 
 ## Jev
 
-Jev is TypeSafe's hosted decision model. It is optional and off by default. Turn it on
-with `~/.config/ljos/jev.toml`. Without that file, ljos calls no model.
+Jev is an optional hosted model. It is off by default. The host named in
+`~/.config/ljos/jev.toml` runs it. Without that file, ljos calls no model.
+[What leaves the machine](docs/privacy.md) is the prompt and the candidate memories.
 
 When ljos calls the model, the model does not judge shell commands. Jev answers questions the seat
 would otherwise answer with word lists and one subagent per voter. Jev answers which memories, which ballots, and which claims:
@@ -328,12 +340,13 @@ and counts as advice. When Jev does not answer, ljos uses the local answer.
 `ljos cloud up` puts a fresh machine on the shared tracker. `sh scripts/install.sh --cloud`
 does the same from a checkout. A cloud seat has one push rule. It may push the branches
 named in its `ljos.toml` and `develop`.
-A cloud seat cannot force push, delete a branch, or push to a branch outside its allowlist.
+A cloud seat cannot force push, delete a remote branch or tag, or push to a branch outside its allowlist.
+A local `git branch -d` or `git branch -D` runs and prints `allow\twarn\tgit-branch-delete`.
 Every other push from a cloud seat runs with a warning.
 Opening or merging a pull request is not refused.
 `ljos mesh up` joins the Headscale mesh, and `ljos mesh down` leaves it.
 [docs/mesh.md](docs/mesh.md) has the key file, the login server and what a failed join prints.
-[docs/cloud-vm.md](docs/cloud-vm.md) has the environment file and the push mode.
+[docs/cloud-vm.md](docs/cloud-vm.md) has the environment file, the push mode and the mesh.
 
 ## Commands
 
@@ -356,6 +369,10 @@ ljos seat grant SEAT close=ID[,ID...] [--ids-file PATH] --quote "..." --at ISO_T
 ljos offboard [--runner NAME] [--dry-run]
 ljos remember "the default fuse is CombMNZ"
 ljos prefer "CombMNZ over RRF"
+ljos memory export --out memories.jsonl
+ljos memory import memories.jsonl
+ljos memory integrate --all
+ljos memory imports
 ljos search fuse
 ljos island "rebuild the site"
 ljos due
@@ -384,9 +401,9 @@ tools, guard and memory first: `rule`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. Every listed tool costs its description and
-schema on every session: 7,872 tokens for the core set against 17,788 for all
-fifty-two (o200k_base count of `initialize` instructions and the `tools/list`
-result). `LJOS_MCP_TOOLS=all` lists every tool. Cards are the resources
+schema on every session. `measurements/mcp-size.txt` records
+7,865 tokens for the core set against 17,781 for all fifty-two.
+`LJOS_MCP_TOOLS=all` lists every tool. Cards are the resources
 `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, and the protocol is `ljos://protocol`.
 
 ```json

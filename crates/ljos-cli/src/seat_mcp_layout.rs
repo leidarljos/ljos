@@ -183,5 +183,9 @@ fn a_payload_command_that_is_not_the_seat_is_a_foreign_tool() {
     })
     .to_string();
     let hit = user_rules::guard_payload(&payload).expect("foreign command skipped the rule");
-    assert_eq!(hit.verdict, "deny", "{hit:?}");
+    assert_eq!(hit.verdict, "warn", "{hit:?}");
+    assert!(
+        hit.pattern == "user-rule" || hit.pattern == "unverified-rule",
+        "{hit:?}"
+    );
 }

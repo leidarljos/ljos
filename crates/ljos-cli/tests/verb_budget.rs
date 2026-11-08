@@ -143,7 +143,7 @@ fn a_silent_pack_does_not_hold_a_search() {
             said.contains("ranked by words; the pack search did not answer in time"),
             "{said}"
         );
-        assert!(!said.contains("pack busy"), "{said}");
+        assert!(said.contains("pack busy"), "{said}");
     }
 }
 

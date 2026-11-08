@@ -418,13 +418,19 @@ pub fn scope_for_lesson(repo_scope: Option<String>) -> Option<String> {
 fn configured_default(scope: &Scope) -> Result<String> {
     let chosen = local().default_scope.unwrap_or_else(|| scope.name.clone());
     if !valid_scope_name(&chosen) {
-        bail!("sync: default_scope `{chosen}` is not a scope name; use [a-z0-9-]");
+        return Err(crate::policy_label::labelled(
+            "scope-warning",
+            format!("sync: default_scope `{chosen}` is not a scope name; use [a-z0-9-]"),
+        ));
     }
     if scope.scopes.contains_key(&chosen) {
-        bail!(
-            "sync: default_scope `{chosen}` names an extra scope; unscoped atoms stay on the primary scope `{}`",
-            scope.name
-        );
+        return Err(crate::policy_label::labelled(
+            "scope-warning",
+            format!(
+                "sync: default_scope `{chosen}` names an extra scope; unscoped atoms stay on the primary scope `{}`",
+                scope.name
+            ),
+        ));
     }
     Ok(chosen)
 }
@@ -787,7 +793,10 @@ fn scope_is_configured(scope: &Scope, name: &str) -> bool {
 /// `.ljos/sync.toml` does not parse.
 pub(crate) fn handover_recipients(scope_name: &str) -> Result<Vec<String>> {
     if !valid_scope_name(scope_name) {
-        bail!("handover: {scope_name:?} is not a scope name");
+        return Err(crate::policy_label::labelled(
+            "scope-warning",
+            format!("handover: {scope_name:?} is not a scope name"),
+        ));
     }
     for root in sync_roots().unwrap_or_default() {
         if let Some(scope) = scope_of_repo(&root)? {
@@ -800,9 +809,12 @@ pub(crate) fn handover_recipients(scope_name: &str) -> Result<Vec<String>> {
     if scope_name == CLOUD_SCOPE && read_identity(&cloud).is_some_and(|text| age_identity(&text)) {
         return Ok(vec![identity_recipient(&cloud)?]);
     }
-    bail!(
-        "handover: no tracker lists recipients for scope {scope_name}, so nothing was sealed; add them under [scopes] in .ljos/sync.toml"
-    )
+    Err(crate::policy_label::labelled(
+        "scope-warning",
+        format!(
+            "handover: no tracker lists recipients for scope {scope_name}, so nothing was sealed; add them under [scopes] in .ljos/sync.toml"
+        ),
+    ))
 }
 
 /// Seal `plain` to `recipients` at `out`.
@@ -860,7 +872,10 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
 /// the one returned.
 fn seal_bytes(plain: &str, recipients: &[String]) -> Result<Vec<u8>> {
     if recipients.is_empty() {
-        bail!("sync: the scope names no recipients; add this machine's `ljos sync --key` to .ljos/sync.toml");
+        return Err(crate::policy_label::labelled(
+            "scope-warning",
+            "sync: the scope names no recipients; add this machine's `ljos sync --key` to .ljos/sync.toml",
+        ));
     }
     let mut cmd = age_cmd();
     for r in recipients {
@@ -886,7 +901,10 @@ fn seal_bytes(plain: &str, recipients: &[String]) -> Result<Vec<u8>> {
         .join()
         .map_err(|_| anyhow::anyhow!("age: stdin writer"))?;
     if !done.status.success() {
-        bail!("age: {}", String::from_utf8_lossy(&done.stderr).trim());
+        return Err(crate::policy_label::failed(
+            "effect-unavailable",
+            anyhow::anyhow!("age: {}", String::from_utf8_lossy(&done.stderr).trim()),
+        ));
     }
     wrote?;
     Ok(done.stdout)
@@ -1180,14 +1198,20 @@ fn identity_recipient(identity: &Path) -> Result<String> {
         .output()
         .context("age-keygen not on PATH; install age")?;
     if !out.status.success() {
-        bail!(
-            "age-keygen -y: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        return Err(crate::policy_label::failed(
+            "effect-unavailable",
+            anyhow::anyhow!(
+                "age-keygen -y: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
     }
     let key = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if key.is_empty() {
-        bail!("age-keygen -y: no public key");
+        return Err(crate::policy_label::failed(
+            "effect-unavailable",
+            anyhow::anyhow!("age-keygen -y: no public key"),
+        ));
     }
     Ok(key)
 }
@@ -1196,7 +1220,12 @@ fn identity_recipient(identity: &Path) -> Result<String> {
 /// sealed to it and then failed to open. Any other key stays a skip.
 fn miss_report(host: &str, scope: &str, mine: &str, recipients: &[String]) -> Result<String> {
     if recipients.iter().any(|recipient| recipient == mine) {
-        bail!("sync: {host}'s {scope} log is sealed to this machine and did not open");
+        return Err(crate::policy_label::failed(
+            "effect-unavailable",
+            anyhow::anyhow!(
+                "sync: {host}'s {scope} log is sealed to this machine and did not open"
+            ),
+        ));
     }
     Ok(format!(
         "sync: {host}'s {scope} log is not sealed to this machine\n"
@@ -1356,7 +1385,10 @@ pub(crate) fn whole_export(
 ) -> Result<Vec<u8>> {
     let default = configured_default(scope)?;
     let Some(recipients) = scope.recipients_for(scope_name) else {
-        bail!("sync: scope `{scope_name}` is not named in .ljos/sync.toml");
+        return Err(crate::policy_label::labelled(
+            "scope-warning",
+            format!("sync: scope `{scope_name}` is not named in .ljos/sync.toml"),
+        ));
     };
     let body = log_lines(atoms, scope_name, &default, scope_name != scope.name);
     let plain = log_header(&host(), scope_name) + &body;
@@ -1379,7 +1411,10 @@ fn export_for_scope(
     default: &str,
 ) -> Result<String> {
     let Some(recipients) = scope.recipients_for(scope_name) else {
-        bail!("sync: scope `{scope_name}` is not named in .ljos/sync.toml");
+        return Err(crate::policy_label::labelled(
+            "scope-warning",
+            format!("sync: scope `{scope_name}` is not named in .ljos/sync.toml"),
+        ));
     };
     export_named_scope(root, &scope.name, scope_name, recipients, atoms, default)
 }
@@ -1725,8 +1760,10 @@ fn seal_ticket(
 
 /// Seal the atoms of `issue` in `scope_name` as one chunk over this
 /// host's log, or as the whole log when there is none yet. A log this
-/// machine cannot add a chunk to is left alone, and the line says that
-/// `ljos sync` seals it. The bool is whether a file was written.
+/// machine cannot add a chunk to is left alone. That is separate from a
+/// failed attributes stage: opening the log does not use the git index.
+/// The line is a warning and names `ljos sync`, which seals the log whole.
+/// The atoms stay in the pack. The bool is whether a file was written.
 fn seal_ticket_scope(
     root: &Path,
     primary_scope: &str,
@@ -1775,7 +1812,9 @@ fn seal_ticket_scope(
     let previous = read_beneath(root, &digest_rel)?;
     let left = |why: &str| {
         Ok((
-            format!("sync: {issue}: {why}; `ljos sync` seals the {scope_name} log whole\n"),
+            format!(
+                "sync: {issue}: warning: {why}; the atoms stay in the pack, and `ljos sync` seals the {scope_name} log whole\n"
+            ),
             false,
         ))
     };
@@ -1787,7 +1826,7 @@ fn seal_ticket_scope(
         recipients,
         previous.as_deref(),
     ) else {
-        return left("this machine's log is not one it can add a chunk to");
+        return left("this machine's log cannot take a chunk");
     };
     if log.view.stopped.is_some() {
         return left("a chunk of this machine's log did not read");
@@ -2613,7 +2652,12 @@ fn post_incoming(client: &crate::PacksetClient, workspace: &str, post: &[Value])
         crate::strip_person_basis(&mut atom);
         match crate::admit::post_kept(client, &atom) {
             Ok(_) => kept += 1,
-            Err(_) => refused += 1,
+            Err(_) => {
+                refused += 1;
+                if let Some(text) = atom["text"].as_str() {
+                    crate::memory_port::keep_rejected(text);
+                }
+            }
         }
     }
     (kept, refused)
@@ -3706,6 +3750,9 @@ fn adopt_pack(
             kept += 1;
         } else {
             refused += 1;
+            if let Some(text) = atom["text"].as_str() {
+                crate::memory_port::keep_rejected(text);
+            }
         }
     }
     let (moved, move_failed) = forget_tagged(&after, sender, |atom| {
@@ -3897,6 +3944,12 @@ fn report_commit(root: &Path, message: &str, push: bool, made: crate::PathCommit
                 landed: false,
             };
         }
+        crate::PathCommit::Deferred(why) => {
+            return CommitReport {
+                said: format!("sync: {why}\n"),
+                landed: false,
+            };
+        }
         crate::PathCommit::AlreadyIn => {
             return CommitReport {
                 said: if push {
@@ -4032,15 +4085,25 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
             }
             match log_committed_at(root, &log.age) {
                 Some(at) if host_is_quiet(at, now) => {}
-                Some(at) => bail!(
-                    "sync: {gone}'s {} log was committed {}; pass --force to adopt a host that may still be alive",
-                    log.scope_name,
-                    age_phrase(at, now)
-                ),
-                None => bail!(
-                    "sync: {gone}'s {} log has no commit time; pass --force to adopt a host that may still be alive",
-                    log.scope_name
-                ),
+                Some(at) => {
+                    return Err(crate::policy_label::labelled(
+                        "adoption-warning",
+                        format!(
+                            "sync: {gone}'s {} log was committed {}; pass --force to adopt a host that may still be alive",
+                            log.scope_name,
+                            age_phrase(at, now)
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(crate::policy_label::labelled(
+                        "adoption-warning",
+                        format!(
+                            "sync: {gone}'s {} log has no commit time; pass --force to adopt a host that may still be alive",
+                            log.scope_name
+                        ),
+                    ));
+                }
             }
         }
     }
@@ -5297,10 +5360,20 @@ fn commit_host(
     let paths: Vec<&str> = rels.iter().map(String::as_str).collect();
     let mut add = vec!["add", "-A", "--"];
     add.extend(&paths);
-    let added = git_within(root, &add, deadline)?;
+    let added = git_within_index(root, &add, deadline)?;
     if !git_succeeded(&added) {
         if let Some(orphan) = crate::orphaned_index_lock(root) {
+            drop(held);
+            crate::note_deferred_paths(root, &paths);
             bail!("sync: user rules: {orphan}");
+        }
+        if crate::git_text_index_busy(&one_line(&added)) {
+            drop(held);
+            crate::note_deferred_paths(root, &paths);
+            bail!(
+                "sync: user rules: {}",
+                crate::deferred_commit_line("the user rules")
+            );
         }
         bail!(
             "sync: user rules: could not stage {}: {}",
@@ -5318,16 +5391,53 @@ fn commit_host(
     let message = format!("chore(sync): {host} user rules");
     let mut commit = vec!["commit", "-q", "--only", "-m", message.as_str(), "--"];
     commit.extend(&paths);
-    let committed = git_within(root, &commit, deadline)?;
+    let committed = git_within_index(root, &commit, deadline)?;
     drop(held);
     if git_succeeded(&committed) {
         Ok(true)
+    } else if crate::git_text_index_busy(&one_line(&committed)) {
+        crate::note_deferred_paths(root, &paths);
+        bail!(
+            "sync: user rules: {}",
+            crate::deferred_commit_line("the user rules")
+        );
     } else {
         bail!("sync: user rules: commit refused: {}", one_line(&committed))
     }
 }
 
+/// [`git_within`], retried while git reports `index.lock`, without sleeping
+/// past `deadline`. A lock still held after that is the caller's to defer.
+fn git_within_index(
+    root: &Path,
+    args: &[&str],
+    deadline: std::time::Instant,
+) -> Result<std::process::Output> {
+    let mut attempt = 0;
+    loop {
+        let out = git_within(root, args, deadline)?;
+        if git_succeeded(&out) || !crate::git_text_index_busy(&one_line(&out)) {
+            return Ok(out);
+        }
+        attempt += 1;
+        if attempt > crate::INDEX_LOCK_RETRY_STEPS {
+            return Ok(out);
+        }
+        let pause = crate::index_lock_pause(attempt);
+        if deadline.saturating_duration_since(std::time::Instant::now()) <= pause {
+            return Ok(out);
+        }
+        std::thread::sleep(pause);
+    }
+}
+
 fn push_host(root: &Path, deadline: std::time::Instant) -> Result<()> {
+    let Some(_held) = crate::tracker_commit_lock_by(root, deadline) else {
+        bail!(
+            "sync: user rules: {}",
+            crate::deferred_commit_line("the user rules")
+        );
+    };
     let upstream = git(root, &["rev-parse", "--abbrev-ref", "@{upstream}"])
         .ok()
         .is_some_and(|out| out.status.success());
@@ -5551,11 +5661,23 @@ pub fn exchange_user_rules(
     if tracked(root, &plain) {
         rels.push(plain);
     }
-    let committed = commit_host(root, &rels, &name, deadline)?;
+    let committed = match commit_host(root, &rels, &name, deadline) {
+        Ok(done) => done,
+        Err(err) if crate::commit_was_deferred(&err.to_string()) => {
+            out.push_str(&format!("{err:#}\n"));
+            false
+        }
+        Err(err) => return Err(err),
+    };
     match mode {
         TrackerGit::Push if remote && (committed || commits_to_push(root)) => {
-            push_host(root, deadline)?;
-            out.push_str("sync: user rules: sealed and pushed\n");
+            match push_host(root, deadline) {
+                Ok(()) => out.push_str("sync: user rules: sealed and pushed\n"),
+                Err(err) if crate::commit_was_deferred(&err.to_string()) => {
+                    out.push_str(&format!("{err:#}\n"));
+                }
+                Err(err) => return Err(err),
+            }
         }
         TrackerGit::Commit if committed => {
             out.push_str(
@@ -9405,6 +9527,10 @@ mod tests {
         seed_cloud(&store);
         let err = adopt_in_repo(&fix.root, &scope_of(&fix.public), "gone", opts(false, true))
             .unwrap_err();
+        assert_eq!(
+            crate::policy_label::as_policy(&err).expect("label").label,
+            "adoption-warning"
+        );
         assert!(err.to_string().contains("--force"), "{err}");
         assert_eq!(ids(&store).len(), 7);
         let head = git(&fix.root, &["rev-parse", "HEAD"]).unwrap();
@@ -10057,6 +10183,10 @@ mod tests {
             None,
         );
         let err = adopt_in_repo(&root, &scope, "gone", opts(false, true)).unwrap_err();
+        assert_eq!(
+            crate::policy_label::as_policy(&err).expect("label").label,
+            "adoption-warning"
+        );
         assert!(err.to_string().contains("cloud"), "{err}");
         assert!(err.to_string().contains("--force"), "{err}");
         assert!(root.join(".ljos/atoms/gone.jsonl.age").is_file());
@@ -10309,9 +10439,12 @@ mod tests {
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
         .unwrap();
-        let err = export_all(dir.path(), &scope, &[atom("a", "box only", &[])])
-            .unwrap_err()
-            .to_string();
+        let err = export_all(dir.path(), &scope, &[atom("a", "box only", &[])]).unwrap_err();
+        assert_eq!(
+            crate::policy_label::as_policy(&err).expect("label").label,
+            "scope-warning"
+        );
+        let err = err.to_string();
         assert!(
             err.contains("default_scope") && err.contains("cloud"),
             "{err}"
@@ -10321,6 +10454,20 @@ mod tests {
             .to_string();
         assert!(named.contains("default_scope"), "{named}");
         assert!(!dir.path().join(".ljos").join("atoms").exists());
+    }
+
+    #[test]
+    fn a_bad_scope_name_seals_nothing() {
+        let err = handover_recipients("Not A Scope").unwrap_err();
+        assert_eq!(
+            crate::policy_label::as_policy(&err).expect("label").label,
+            "scope-warning"
+        );
+        let err = seal_bytes("plain row", &[]).unwrap_err();
+        assert_eq!(
+            crate::policy_label::as_policy(&err).expect("label").label,
+            "scope-warning"
+        );
     }
 
     #[test]

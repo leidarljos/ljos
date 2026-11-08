@@ -52,11 +52,11 @@ fn a_cursor_mcp_github_write_on_pre_tool_use_meets_the_user_rule() {
         .to_string()
     };
     let named = user_rules::guard_payload(&payload("mcp__github__add_issue_comment"));
-    assert_eq!(named.map(|r| r.verdict).as_deref(), Some("deny"), "control");
+    assert_eq!(named.map(|r| r.verdict).as_deref(), Some("warn"), "control");
     let cloud = user_rules::guard_payload(&payload("MCP:add_issue_comment"));
     assert_eq!(
         cloud.map(|r| r.verdict).as_deref(),
-        Some("deny"),
+        Some("warn"),
         "MCP:add_issue_comment reached no user rule"
     );
 }

@@ -145,19 +145,22 @@ fn an_open_blocker_leaves_the_ticket_off_the_ready_list() {
 
     let back = board.ljos(&["block", &board.b, "--on", &board.a]);
     let said = text(&back);
-    assert!(!back.status.success(), "{said}");
+    assert!(back.status.success(), "{said}");
+    assert!(said.contains("label graph-cycle"), "{said}");
     assert!(said.contains("cycle"), "{said}");
     assert_eq!(board.heading(&board.b).blocked_by(), Vec::<String>::new());
 
     let own = board.ljos(&["block", &board.c, "--on", &board.c]);
     let said = text(&own);
-    assert!(!own.status.success(), "{said}");
+    assert!(own.status.success(), "{said}");
+    assert!(said.contains("label graph-cycle"), "{said}");
     assert!(said.contains("cannot block itself"), "{said}");
 
     board.ok(&["block", &board.c, "--on", &board.a]);
     let around = board.ljos(&["block", &board.b, "--on", &board.c]);
     let said = text(&around);
-    assert!(!around.status.success(), "{said}");
+    assert!(around.status.success(), "{said}");
+    assert!(said.contains("label graph-cycle"), "{said}");
     assert!(said.contains("cycle"), "{said}");
 
     board.finish(&board.b);

@@ -380,8 +380,9 @@ pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> 
 }
 
 /// Whether `rule` is the one [`guard_line`] makes. It stays a refusal: a
-/// cloud seat cannot force push, delete a branch, or push to a branch
-/// outside its allowlist.
+/// cloud seat cannot force push, delete a remote branch or tag, or push
+/// to a branch outside its allowlist. A local `git branch -d` or `-D`
+/// is not this rule.
 pub(crate) fn refuses(rule: &crate::Rule) -> bool {
     rule.pattern == CURSOR_PUSH && rule.verdict == "deny"
 }
@@ -2466,15 +2467,22 @@ fn ensure_tracker(
     }
     Ok(match clone_tracker(remote, dest, seat, token.as_ref()) {
         Ok(line) => (line, true),
-        Err(e) => (
-            format!(
-                "{}. This machine has no shared tracker. Set {} to a token that can push to {}, or add that repository to this environment",
-                hide(&format!("{e:#}"), remote),
-                crate::tracker_attach::TOKEN_VAR,
-                remote.shown
-            ),
-            false,
-        ),
+        Err(e) => {
+            let detail = if let Some(label) = crate::policy_label::as_policy(&e) {
+                format!("label {}: {}", label.label, label.detail)
+            } else {
+                format!("{e:#}")
+            };
+            (
+                format!(
+                    "{}. This machine has no shared tracker. Set {} to a token that can push to {}, or add that repository to this environment",
+                    hide(&detail, remote),
+                    crate::tracker_attach::TOKEN_VAR,
+                    remote.shown
+                ),
+                false,
+            )
+        }
     })
 }
 

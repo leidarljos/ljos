@@ -4,10 +4,9 @@
 // The seat's memories on each user prompt, argv law on each bash call, the
 // book on each edit and each git commit, and the session id in every shell
 // the agent opens. Each payload names the working directory. A bash call
-// stops only on the hook's deny, which comes when the person's policyd
-// config sets block-on-warning. A warning, or the note that the gate did
-// not answer, joins the context the turn's next model call reads, and the
-// command runs. The prompt and session hooks have no opinion when the
+// is not stopped by block-on-warning. That setting warns with the rule's
+// label, and the command runs. A warning, or the note that the gate did
+// not answer, joins the context the turn's next model call reads. The prompt and session hooks have no opinion when the
 // hook fails.
 import type { Plugin } from "@opencode-ai/plugin"
 

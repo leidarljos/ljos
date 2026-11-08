@@ -62,21 +62,24 @@ def longmemeval_encoder() -> str:
 
 
 def check_longmemeval() -> None:
-    """The explanation's LongMemEval paragraph names the packset run's encoder."""
+    """One LongMemEval paragraph names the packset encoder, and others may record the CPU run."""
     name = longmemeval_encoder()
     for path in LONGMEMEVAL_FILES:
         text = path.read_text(encoding="utf-8")
         paragraphs = re.split(r"\n\s*\n", text)
         hits = [p for p in paragraphs if "LongMemEval" in p]
         rel = path.relative_to(ROOT)
-        if len(hits) != 1:
-            raise SystemExit(f"{rel}: expected one LongMemEval paragraph, found {len(hits)}")
-        paragraph = hits[0]
-        if name not in paragraph:
-            raise SystemExit(f"{rel}: LongMemEval paragraph does not name {name}")
-        for wrong in ("multilingual-e5", "bge-small"):
-            if wrong in paragraph:
-                raise SystemExit(f"{rel}: LongMemEval paragraph names {wrong}, not {name}")
+        if not hits:
+            raise SystemExit(f"{rel}: no LongMemEval paragraph")
+        named = [p for p in hits if name in p]
+        if len(named) != 1:
+            raise SystemExit(
+                f"{rel}: expected one LongMemEval paragraph naming {name}, found {len(named)}"
+            )
+        for paragraph in hits:
+            for wrong in ("multilingual-e5", "bge-small"):
+                if wrong in paragraph:
+                    raise SystemExit(f"{rel}: LongMemEval paragraph names {wrong}, not {name}")
 
 
 def find_ljos(build: bool) -> Path | None:

@@ -127,10 +127,14 @@ fn a_blank_id_fails_at_once_and_never_asks_the_claim_graph() {
 fn an_omitted_id_still_claims_the_next_ready_node() {
     let hab = Hab::new("0", "[]");
     let (out, _) = hab.claim(&[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!("{stdout}{stderr}");
+    assert!(out.status.success(), "{said}");
     assert!(
-        stderr.contains("nothing in the claim graph is ready"),
-        "{stderr}"
+        said.contains("label claim-conflict:")
+            && said.contains("nothing in the claim graph is ready"),
+        "{said}"
     );
     assert!(hab.calls().contains("claimdag ready"), "{}", hab.calls());
 }

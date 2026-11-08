@@ -296,7 +296,8 @@ fn a_scope_with_no_recipients_writes_no_atoms() {
         ],
     );
     let text = said(&out);
-    assert!(!out.status.success(), "{text}");
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("label scope-warning"), "{text}");
     assert!(
         text.contains("no tracker lists recipients for scope nowhere"),
         "{text}"

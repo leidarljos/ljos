@@ -67,6 +67,9 @@ impl Seat {
             .env("LJOS_HOLD", "rohit")
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
+            // A git checkout names its own project. This seat has none, so
+            // the hold and `vissue identity` decide where the ticket goes.
+            .current_dir(self.dir.path())
             .output()
             .unwrap()
     }

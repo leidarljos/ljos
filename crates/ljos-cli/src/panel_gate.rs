@@ -10,7 +10,7 @@
 //! A design candidate whose session had already read another candidate is
 //! flagged: the round was not blind.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -771,6 +771,9 @@ pub struct SessionBallot {
     /// Candidates this session filed. Labelled on the logbook once the
     /// ballot is kept.
     authored: Vec<String>,
+    /// A session that already cast, or that filed a candidate. The ballot
+    /// is still recorded. The line is the label, not a refusal.
+    pub label: Option<String>,
 }
 
 impl SessionBallot {
@@ -853,25 +856,35 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
     let key = session_key(&id.harness, &id.nonce);
     let own = notes_on(issue);
     let family = family_notes(issue);
-    if let Some(why) = session_cast_refusal_on(issue, &key, voter, &own, &family) {
-        ballot_sig::end_cast();
-        bail!("{why}");
+    let authored = authored_ids(&key, &own, &family);
+    let mut label = session_cast_refusal_on(issue, &key, voter, &own, &family);
+    if label.is_none() && !authored.is_empty() {
+        label = Some(authorship_warning(issue, &authored));
+    }
+    if let Some(why) = &label {
+        eprintln!("ljos: session-authored: {why}");
     }
     if let Some(choice) = held_choice(issue, voter) {
         ballot_sig::end_cast();
-        bail!(
-            "{voter} already holds a ballot on {issue} for {choice}. Nothing was cast. {}",
-            replace_hint(issue, voter)
-        );
+        let why = label.unwrap_or_else(|| {
+            format!(
+                "{voter} already holds a ballot on {issue} for {choice}. Nothing was cast. {}",
+                replace_hint(issue, voter)
+            )
+        });
+        return Err(crate::policy_label::labelled("repeated-ballot", why));
     }
     let mark = format!("{}\n{voter}", issue.trim());
     let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
     if !held.insert(mark.clone()) {
         ballot_sig::end_cast();
-        bail!(
-            "{voter} already cast a ballot on {issue} in this process. Nothing was cast. {}",
-            replace_hint(issue, voter)
-        );
+        return Err(crate::policy_label::labelled(
+            "repeated-ballot",
+            format!(
+                "{voter} already cast a ballot on {issue} in this process. Nothing was cast. {}",
+                replace_hint(issue, voter)
+            ),
+        ));
     }
     drop(held);
     let mut ballot = SessionBallot {
@@ -879,7 +892,8 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
         kept: false,
         tree: None,
         issue: issue.to_string(),
-        authored: authored_ids(&key, &own, &family),
+        authored,
+        label,
     };
     ballot.tree = hold_tree(issue, &claimed, &CastTree::here())?;
     Ok(ballot)

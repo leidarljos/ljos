@@ -5,7 +5,7 @@
  * Shells to `ljos hook` with the snake_case JSON it parses:
  *   before_agent_start -> UserPromptSubmit: the seat's memories as a hidden custom message
  *   tool_call (bash)   -> PreToolUse: a seat rule's warning is shown, and the command runs;
- *                         the hook's deny, under the person's block-on-warning, blocks it
+ *                         block-on-warning does not block; it warns with the rule's label
  *   session_shutdown   -> SessionEnd: the memories used in the session fire together
  *
  * The runner owns its conversation id. Ids inherited from a runner that

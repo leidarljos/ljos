@@ -937,8 +937,8 @@ fn a_commit_message_hook_is_refused_on_push() {
 
     let hooked = hook_push(&repo, bad.trim(), parent.trim());
     let hooked_text = text_of(&hooked);
-    assert!(!hooked.status.success(), "{hooked_text}");
-    assert!(hooked_text.contains("message is refused"), "{hooked_text}");
+    assert!(hooked.status.success(), "{hooked_text}");
+    assert!(hooked_text.contains("machine-trailer"), "{hooked_text}");
 
     sh_ok(
         &repo,
@@ -979,8 +979,8 @@ fn a_commit_message_hook_is_refused_on_push() {
     let glued_hook = hook_push(&repo, glued_sha.trim(), tip.trim());
     let glued_text = text_of(&glued_hook);
     assert!(
-        glued_text.contains("message is refused"),
-        "a by line with no blank line was allowed: {glued_text}"
+        glued_hook.status.success() && glued_text.contains("machine-trailer"),
+        "a by line with no blank line was not labelled: {glued_text}"
     );
 
     sh_ok(

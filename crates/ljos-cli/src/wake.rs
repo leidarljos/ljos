@@ -11,9 +11,9 @@
 //! A command runs as `sh -c` with the recipient's seat in `LJOS_SEAT`, so
 //! `ljos inbox` in it reads the recipient's mail. It is read by the same
 //! guard a tool call is, when it is set and again each time it runs, and a
-//! rule that fires is a warning beside it: the command still runs. A
-//! command policyd blocks, under the person's `block-on-warning`, does not
-//! run: nobody is there to ask.
+//! rule that fires is a warning beside it: the command still runs. The
+//! cloud seat push rule is the one refusal, and a wake does not run that
+//! command: nobody is there to land the push.
 //! A webhook gets only the envelope (seat, sender, message id, issue,
 //! interrupt), never the body, and its key is read from a file or an
 //! environment variable, never from `wake.toml`.
@@ -240,8 +240,8 @@ fn edit_table<T>(edit: impl FnOnce(&mut BTreeMap<String, Wake>) -> Result<(T, bo
 /// The rule that fires on a wake command: the seat's own guard, the
 /// trusted computing base (the static check, which includes the commit,
 /// push, and merge gates), then the pack's rules and the ask pack. The
-/// command runs either way, unless the rule is policyd's block; `None` is
-/// no warning.
+/// command runs either way, unless the rule is the cloud seat push rule;
+/// `None` is no warning.
 #[must_use]
 pub fn judge(command: &str) -> Option<super::Rule> {
     match super::seat_guard(command) {
@@ -301,8 +301,8 @@ fn http_host_is_loopback(host: Option<url::Host<&str>>) -> bool {
 ///
 /// # Errors
 ///
-/// The command is empty, policyd blocks it, or `wake.toml` cannot be
-/// written.
+/// The command is empty, the cloud seat push rule blocks it, or
+/// `wake.toml` cannot be written.
 pub fn set_command(seat: &str, command: &str, timeout: Option<u64>) -> Result<String> {
     let command = command.trim();
     if command.is_empty() {

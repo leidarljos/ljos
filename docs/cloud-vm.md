@@ -1,7 +1,7 @@
 # A fresh machine
 
 <!-- [[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]] -->
-These notes describe ljos 0.38.0.
+These notes describe ljos 0.39.0.
 <!-- [[[end]]] -->
 
 `ljos cloud up` installs the release binaries into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory first on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json`. The command is always the absolute path of `ljos-mcp`. A client that spawns servers with its own PATH never reads the edited profile, and it still starts this install. It clones `LJOS_TRACKER_REMOTE`. Run it again and it refreshes the clone and the MCP command, rewrites env-owned wake entries from `LJOS_WAKE_<SEAT>_URL`, and refreshes the scope `cloud` age identity from the named secret.
@@ -147,8 +147,9 @@ ljos slot ISSUE ridley-review --model model-a --run "$AGENT_ID" --key "$RUN_KEY"
 
 `ljos cloud up` writes the push allowlist the shell guard reads.
 
-The shell guard is a filter on commands as written. It has one push rule. A `git push` may update `develop` and the branches named in the seat's `ljos.toml`.
-A cloud seat cannot force push, delete a branch, or push to a branch outside its allowlist.
+The shell guard is a filter on commands as written. It holds one push rule. A `git push` may update `develop` and the branches named in the seat's `ljos.toml`.
+A cloud seat cannot force push, delete a remote branch or tag, or push to a branch outside its allowlist.
+A local `git branch -d` or `git branch -D` runs and prints `allow\twarn\tgit-branch-delete`.
 Every other push from a cloud seat runs with a warning.
 The source side of a refspec, a remote URL, an option's value and the body of a comment are never what is refused. Opening or merging a pull request is not refused. `gh`, `curl`, `wget` and HTTPie are not read, so a ref write through the GitHub API is left to the server. `git push origin develop` is allowed at the shell even when the remote is another repository. The branch name is all that line shows. A `git send-pack` written on the line is judged by its refs. A send-pack started inside a script is not read.
 

@@ -193,7 +193,7 @@ With a prefix wake, ``LJOS_SEAT`` is still the run seat that matched the prefix.
 ``LJOS_WAKE_FROM``, ``LJOS_WAKE_MSG``, ``LJOS_WAKE_ISSUE`` and ``LJOS_WAKE_INTERRUPT`` name the message, so a wake can ignore plain mail and act only on an interrupt.
 policyd reads the command when it is set and again on every run.
 A rule that fires is a warning line in the reply and in ``wake.log``, and the command still runs.
-Under the person's ``block-on-warning``, a command policyd blocks does not run, since nobody is there to ask.
+A command under ``block-on-warning`` warns with that label. It does not block, and the command runs.
 A command is stopped after 30 seconds; ``--timeout S`` changes that, and an agent run such as a resume command needs a longer one.
 Two sends close together start two wakes, so a wake that resumes a session holds a lock (``flock -n``) and leaves a running session to its ``Stop`` hook.
 
@@ -1055,13 +1055,13 @@ Check the seat
 
 .. [[[cog import ljos_version as v; v.lines("", "The block is the ``ljos`` row from that command on a scratch seat, taken from ljos {version}.", "")]]]
 
-The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.38.0.
+The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.39.0.
 
 .. [[[end]]]
 
 .. [[[cog import ljos_version as v; v.lines("", "``ljos --version`` printed ``ljos {version}``.", "")]]]
 
-``ljos --version`` printed ``ljos 0.38.0``.
+``ljos --version`` printed ``ljos 0.39.0``.
 
 .. [[[end]]]
 
@@ -1074,9 +1074,9 @@ The scratch ``PATH`` holds only this ``ljos``, so the sample does not show the o
 .. code:: text
 
    $ ljos --version
-   ljos 0.38.0
+   ljos 0.39.0
    $ ljos doctor --all
-   ok  ljos    /path/to/ljos  0.38.0  crates.io (cached) 0.38.0
+   ok  ljos    /path/to/ljos  0.39.0  crates.io (cached) 0.39.0
 
 .. END ljos-sample doctor
 

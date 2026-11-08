@@ -307,11 +307,17 @@ pub fn resolve(short: &str, all: &[Memory]) -> Result<String> {
     let hits: Vec<&Memory> = all.iter().filter(|m| m.id.starts_with(short)).collect();
     match hits.as_slice() {
         [one] => Ok(one.id.clone()),
-        [] => bail!("memories: no memory starts with {short}"),
-        _ => bail!(
-            "memories: {short} starts {} memories; give more of the id",
-            hits.len()
-        ),
+        [] => Err(crate::policy_label::labelled(
+            "review-input-warning",
+            format!("memories: no memory starts with {short}"),
+        )),
+        _ => Err(crate::policy_label::labelled(
+            "review-input-warning",
+            format!(
+                "memories: {short} starts {} memories; give more of the id",
+                hits.len()
+            ),
+        )),
     }
 }
 

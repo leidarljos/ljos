@@ -64,16 +64,25 @@ pub fn export(
         ("reachbook-hash", draft.reachbook_hash),
     ] {
         if value.is_empty() || value.len() > 200 || !value.bytes().all(|b| b.is_ascii_graphic()) {
-            bail!("export: {name} must be 1 to 200 printable characters with no space");
+            return Err(crate::policy_label::labelled(
+                "draft-warning",
+                format!("export: {name} must be 1 to 200 printable characters with no space"),
+            ));
         }
     }
     if expires <= now || expires - now > MAX_LIFETIME {
-        bail!("export: expires must be after now and at most 24 h out");
+        return Err(crate::policy_label::labelled(
+            "draft-warning",
+            "export: expires must be after now and at most 24 h out",
+        ));
     }
     let message = std::str::from_utf8(draft.message).context("export: the message is not UTF-8")?;
     refuse_hiding(message)?;
     let Some((headers, _)) = message.split_once("\n\n") else {
-        bail!("export: the message has no blank line between headers and body");
+        return Err(crate::policy_label::labelled(
+            "draft-warning",
+            "export: the message has no blank line between headers and body",
+        ));
     };
     let fields = super::checks::unfold(headers)
         .context("export: a header line is neither a field nor a continuation")?;
@@ -81,35 +90,56 @@ pub fn export(
         let mut values = fields.iter().filter(|(n, _)| n == name);
         match (values.next(), values.next()) {
             (Some((_, value)), None) => Ok(value),
-            _ => bail!(
-                "export: the message needs exactly one {name} header; the send path would add one"
-            ),
+            _ => Err(crate::policy_label::labelled(
+                "draft-warning",
+                format!(
+                    "export: the message needs exactly one {name} header; the send path would add one"
+                ),
+            )),
         }
     };
     if DateTime::parse_from_rfc2822(one("date")?).is_err() {
-        bail!("export: Date is not an RFC 5322 date-time");
+        return Err(crate::policy_label::labelled(
+            "draft-warning",
+            "export: Date is not an RFC 5322 date-time",
+        ));
     }
     if !is_msg_id(one("message-id")?) {
-        bail!("export: Message-ID is not an RFC 5322 msg-id such as <id@example.test>");
+        return Err(crate::policy_label::labelled(
+            "draft-warning",
+            "export: Message-ID is not an RFC 5322 msg-id such as <id@example.test>",
+        ));
     }
     if fields.iter().any(|(n, _)| n == "bcc") {
-        bail!("export: sendmail -t strips Bcc, so the sent bytes would not be H; use To or Cc");
+        return Err(crate::policy_label::labelled(
+            "draft-warning",
+            "export: sendmail -t strips Bcc, so the sent bytes would not be H; use To or Cc",
+        ));
     }
     if let Some((name, _)) = fields.iter().find(|(n, _)| n.starts_with("resent-")) {
-        bail!(
-            "export: {name} is refused: with a Resent- header sendmail -t sends to the Resent- recipients, not To and Cc"
-        );
+        return Err(crate::policy_label::labelled(
+            "draft-warning",
+            format!(
+                "export: {name} is refused: with a Resent- header sendmail -t sends to the Resent- recipients, not To and Cc"
+            ),
+        ));
     }
     let refused = super::checks::refusals(draft.message, config);
     if !refused.is_empty() {
-        bail!(
-            "export: the checks refuse this draft: {}",
-            refused.join("; ")
-        );
+        return Err(crate::policy_label::labelled(
+            "draft-warning",
+            format!(
+                "export: the checks refuse this draft: {}",
+                refused.join("; ")
+            ),
+        ));
     }
     let hash = hex::encode(Sha256::digest(draft.message));
     if draft.reachbook_hash != hash {
-        bail!("export: reachbook-hash is not the sha256 of the message, so the outbox holds other bytes");
+        return Err(crate::policy_label::labelled(
+            "draft-warning",
+            "export: reachbook-hash is not the sha256 of the message, so the outbox holds other bytes",
+        ));
     }
     let mut seed = [0u8; 16];
     std::fs::File::open("/dev/urandom")

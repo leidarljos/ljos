@@ -2741,7 +2741,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "ljos"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "ljos-hud"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "claimdag",
@@ -2811,6 +2811,17 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
+name = "longmemeval_s_recall"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "packset-core",
+ "serde_json",
+ "sha2 0.10.9",
+ "ureq",
+]
 
 [[package]]
 name = "loop9"

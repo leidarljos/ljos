@@ -719,9 +719,14 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
         .env("CURSOR_CONVERSATION_ID", "sand-subagent-002")
         .output()
         .unwrap();
-    let seat_err = String::from_utf8_lossy(&seat.stderr);
-    assert!(!seat.status.success(), "ljos seat named a subagent seat");
-    assert!(seat_err.contains("no seat of its own"), "{seat_err}");
+    let seat_said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&seat.stdout),
+        String::from_utf8_lossy(&seat.stderr)
+    );
+    assert!(seat.status.success(), "{seat_said}");
+    assert!(seat_said.contains("label seat-unresolved"), "{seat_said}");
+    assert!(seat_said.contains("no seat of its own"), "{seat_said}");
 }
 
 /// Re-running `ljos claim <parent>` from the same sand-sub conversation
@@ -1147,8 +1152,8 @@ fn owned_hooks_pass_post_rewrite_stdin_to_the_repo_hook() {
 }
 
 /// A `pre-push` stub that ends in `|| true` is named by doctor and
-/// `ljos git-hooks status`. The push goes out. Reinstall makes the
-/// refusal stop the push.
+/// `ljos git-hooks status`. The push goes out. Reinstall replaces the
+/// stub. The sitting gate is a label and the push still goes out.
 #[test]
 fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     let hab = Hab::new("repo");
@@ -1207,12 +1212,12 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     let blocked = push("HEAD:develop");
     let err = String::from_utf8_lossy(&blocked.stderr);
     assert!(
-        !blocked.status.success(),
-        "the hook let develop through: {err}"
+        blocked.status.success(),
+        "a sitting gate is a label and the push runs: {err}"
     );
     assert!(err.contains("sitting-gate"), "{err}");
     assert!(!err.contains("predates this gate"), "{err}");
-    assert!(!sent("develop"), "develop reached the remote: {err}");
+    assert!(sent("develop"), "develop did not reach the remote: {err}");
     assert!(hooks_row().starts_with("ok\t"), "{}", hooks_row());
 
     let path = hab.share.join("ljos/git-hooks/pre-push");
@@ -1231,6 +1236,21 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
          {end_mark}"
     );
     fs::write(&path, format!("{}{old}{}", &stub[..begin], &stub[end..])).unwrap();
+    // The current hook already sent develop. Git does not run pre-push
+    // when the remote has the commit, so drop that ref and send it again.
+    let dropped = Command::new("/usr/bin/git")
+        .arg("--git-dir")
+        .arg(&bare)
+        .args(["update-ref", "-d", "refs/heads/develop"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        dropped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dropped.stderr)
+    );
 
     let out = push("HEAD:develop");
     let err = String::from_utf8_lossy(&out.stderr);
@@ -1287,8 +1307,8 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     let again = push("HEAD:develop");
     let err = String::from_utf8_lossy(&again.stderr);
     assert!(
-        !again.status.success(),
-        "reinstall left the stale stub: {err}"
+        again.status.success(),
+        "a reinstalled gate is a label and the push runs: {err}"
     );
     assert!(err.contains("sitting-gate"), "{err}");
     assert!(!err.contains("predates this gate"), "{err}");
@@ -1300,10 +1320,10 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
-    assert_eq!(
+    assert_ne!(
         String::from_utf8_lossy(&remote.stdout).trim(),
         before,
-        "develop moved after reinstall: {err}"
+        "develop did not move after reinstall: {err}"
     );
     assert!(hooks_row().starts_with("ok\t"), "{}", hooks_row());
 }
