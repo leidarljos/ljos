@@ -714,8 +714,13 @@ fn accept_memory(id: &str, rec: Option<Record>, yes: Option<&Yes>) -> Result<Str
         .iter()
         .filter_map(crate::memories::Memory::of)
         .collect();
-    let full = crate::memories::resolve(id, &all)
-        .with_context(|| format!("accept: no open proposal or memory {id}"))?;
+    let full = match crate::memories::resolve(id, &all) {
+        Ok(full) => full,
+        Err(err) if err.to_string().contains("no memory starts with") => {
+            bail!("no memory {id}")
+        }
+        Err(err) => return Err(err).context(format!("accept: no open proposal or memory {id}")),
+    };
     let atom = atoms
         .iter()
         .find(|a| a["id"].as_str() == Some(full.as_str()))

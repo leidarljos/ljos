@@ -1516,6 +1516,9 @@ enum Cmd {
     },
 }
 
+/// The status clap uses when the arguments could not be read.
+const USAGE_STATUS: i32 = 2;
+
 /// Where a `ljos note` line goes, and whether the issue was inferred.
 ///
 /// A default mint is the issue. Any other vissue id is the issue when
@@ -1750,13 +1753,17 @@ fn run_command() -> Result<()> {
             if transient && standing {
                 bail!("remember: pass --transient or --standing, not both");
             }
+            let text = join(&text);
+            if text.trim().is_empty() {
+                eprintln!("remember: pass the text to store");
+                std::process::exit(USAGE_STATUS);
+            }
             ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
             // A silent pack is one command budget, then the usual busy line.
             // Asking again, or waiting out the thirty-second default, is
             // what held the first remember.
             let _pack_clock = ljos_cli::arm_cmd_pack();
             let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
-            let text = join(&text);
             // A paragraph or a session is several claims: each goes in on
             // its own, where the whole was refused at the pack's cap.
             let chunks = ljos_cli::claim_chunks(&text);

@@ -28886,13 +28886,15 @@ pub fn doctor_seat() -> Vec<Habitat> {
 }
 
 /// The directory claimdag would create, when its refusal says the seat has
-/// no work graph yet because nothing was ever claimed. A fresh host is not a
+/// no work graph yet because nothing was ever claimed. That is a missing
+/// directory, or a directory that holds no `work.bin`. A fresh host is not a
 /// fault: the sitting's first claim creates the graph.
 pub fn claim_graph_absent(said: &str) -> Option<String> {
     let rest = said.split("no work graph at ").nth(1)?;
     let (dir, why) = rest.split_once(": ")?;
-    why.starts_with("the directory does not exist")
-        .then(|| dir.trim().to_string())
+    let absent = why.starts_with("the directory does not exist")
+        || why.starts_with("the directory holds no work.bin");
+    absent.then(|| dir.trim().to_string())
 }
 
 /// Where the tracker root came from, in the order vissue decides it.
@@ -33687,6 +33689,15 @@ fn recall_down(err: &anyhow::Error) -> String {
     format!("\nMemory\n  (the pack did not answer: {msg})\n")
 }
 
+/// Whether the tracker answered that `issue` is not one of its tickets.
+///
+/// `vissue_core` says that as `issue {id} not found`. Any other refusal
+/// (a root that cannot be read, a file that does not parse) is not this.
+fn tracker_misses(err: &anyhow::Error, issue: &str) -> bool {
+    let missing = format!("issue {issue} not found");
+    err.chain().any(|cause| cause.to_string() == missing)
+}
+
 /// The issue's title, for a cue, from the tracker.
 fn issue_title(issue: &str) -> Result<String> {
     let v = tracker_show_json(issue)?;
@@ -34765,7 +34776,11 @@ pub fn sitting_stream_started(
             down.join(", ")
         );
     }
-    let title = issue_title(issue).unwrap_or_else(|_| issue.to_string());
+    let title = match issue_title(issue) {
+        Ok(title) => title,
+        Err(err) if tracker_misses(&err, issue) => bail!("issue {issue} not found"),
+        Err(_) => issue.to_string(),
+    };
     let blockers = open_blockers(issue);
     sitting_budget_left("the blocker check", budget.total)?;
     if !blockers.is_empty() && !anyway {
@@ -44811,6 +44826,11 @@ mod tests {
         let fresh = "claimdag failed (exit 1): no work graph at /h/claims: the directory does not exist, so nothing has been claimed on this seat. Set CLAIMDAG_DIR";
         assert_eq!(
             super::claim_graph_absent(fresh),
+            Some("/h/claims".to_string())
+        );
+        let empty = "claimdag failed (exit 1): no work graph at /h/claims: the directory holds no work.bin. Claim something to create it";
+        assert_eq!(
+            super::claim_graph_absent(empty),
             Some("/h/claims".to_string())
         );
         assert_eq!(
