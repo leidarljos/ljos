@@ -169,6 +169,8 @@ jobs:
           echo "${{ runner.temp }}/sibling-bin" >> "$GITHUB_PATH"
           export PATH="${{ runner.temp }}/sibling-bin:${PATH}"
           command -v age-keygen
+      - name: Sourcing sibling-tools puts the pins on PATH
+        run: bash scripts/sibling-source-check.sh "${{ runner.temp }}/sibling-bin"
       # A test that runs git in this checkout writes its .git/config, and
       # the next commit here runs hooks from a temp home that is gone.
       # Without --no-fail-fast one failing lib test stopped cargo before

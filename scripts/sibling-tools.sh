@@ -4,6 +4,14 @@
 #
 #   scripts/sibling-tools.sh DEST
 #
+# Source it to build or reuse the pins and put that directory on PATH:
+#
+#   source scripts/sibling-tools.sh [DEST]
+#
+# With no DEST, the directory is $LJOS_SIBLING_DEST, else
+# $XDG_CACHE_HOME/ljos/sibling-bin, else ~/.cache/ljos/sibling-bin.
+# Running the file still takes DEST and installs there.
+#
 # .github/sibling-pin names vissue, claimdag and deedar. packset, phronesis
 # and ljos-policyd are pinned below. Those three are not rows of the pin
 # file: the tests parse that file as exactly vissue, claimdag and deedar,
@@ -18,9 +26,35 @@
 # meson, ninja, pkg-config and capnp. age is not built here.
 # A DEST that already holds every binary at its pin is checked and left
 # as it is, so a restored CI cache does not compile again.
+
+# The file's own path. $0 is bash when this file is sourced, and the pin
+# would be read from //.github/sibling-pin.
+script_path=${BASH_SOURCE[0]:-$0}
+
+# Sourced: install or reuse the pins, then put that directory on PATH.
+# A failing install returns. It does not exit the shell that sourced this.
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    printf '%s\n' "usage: source scripts/sibling-tools.sh [DEST]"
+    return 0
+  fi
+  dest=${1:-${LJOS_SIBLING_DEST:-${XDG_CACHE_HOME:-$HOME/.cache}/ljos/sibling-bin}}
+  mkdir -p "$dest" || return $?
+  dest=$(CDPATH= cd -- "$dest" && pwd) || return $?
+  if ! "$script_path" "$dest"; then
+    return $?
+  fi
+  case ":${PATH}:" in
+    *":${dest}:"*) ;;
+    *) PATH="${dest}:${PATH}" ;;
+  esac
+  export PATH
+  return 0
+fi
+
 set -euo pipefail
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(CDPATH= cd -- "$(dirname "$script_path")/.." && pwd)
 pin=$root/.github/sibling-pin
 
 # The commit the cargo test job built for packset and packsetd.
