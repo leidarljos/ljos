@@ -161,6 +161,12 @@ fn kept_dir(place: &Place) -> PathBuf {
     kept_home(&place.home).join("kept")
 }
 
+/// The attempts slot follows the same rule: a labelled write that did not
+/// post is an original too, and stays out of a scoped tracker.
+fn attempts_dir(place: &Place) -> PathBuf {
+    kept_home(&place.home).join("attempts")
+}
+
 #[cfg(test)]
 mod kept_home_tests {
     use super::*;
@@ -1237,11 +1243,14 @@ fn load_kept(place: &Place) -> Vec<Row> {
 }
 
 fn load_attempts(place: &Place) -> Vec<Row> {
-    let dir = place.home.join("attempts");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    entries
+    let mut dirs = vec![place.home.join("attempts")];
+    let scoped = attempts_dir(place);
+    if !dirs.contains(&scoped) {
+        dirs.push(scoped);
+    }
+    dirs.iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
             let bytes = std::fs::read(entry.path()).ok()?;
@@ -1850,7 +1859,7 @@ fn store_label_row(place: &Place, label: &str, detail: &str, effect: &str) -> Re
         effect: effect.into(),
     };
     write_if_absent(
-        &place.home.join("attempts").join(format!("{digest}.json")),
+        &attempts_dir(place).join(format!("{digest}.json")),
         &serde_json::to_vec_pretty(&row)?,
     )?;
     Ok(())
@@ -1887,7 +1896,7 @@ fn store_attempt(place: &Place, args: &[String], err: &str) -> Result<()> {
         effect: "failed".into(),
     };
     write_if_absent(
-        &place.home.join("attempts").join(format!("{digest}.json")),
+        &attempts_dir(place).join(format!("{digest}.json")),
         &serde_json::to_vec_pretty(&row)?,
     )?;
     Ok(())
