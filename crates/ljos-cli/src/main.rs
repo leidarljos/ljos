@@ -626,7 +626,8 @@ enum Cmd {
     /// File work found while sitting: a child of the issue this
     /// conversation holds unless `--parent` names another or `--top` none,
     /// in the parent's project. `-p` naming another project files at its
-    /// top level, for a bug in a tool found mid-sitting. Prints the new id.
+    /// top level, for a bug in a tool found mid-sitting. Prints the new id
+    /// on stdout. The tracker's line and the commit line go to stderr.
     File {
         /// The issue's title.
         title: String,
@@ -663,7 +664,8 @@ enum Cmd {
         /// RFC 3339 time the ballots are due, with `--quorum`.
         #[arg(long, value_name = "RFC3339", requires = "quorum")]
         deadline: Option<String>,
-        /// Print only the new id. Everything else goes to stderr.
+        /// The id is already the only line on stdout. Kept for scripts
+        /// that pass it.
         #[arg(short = 'q', long = "porcelain")]
         porcelain: bool,
     },
@@ -2372,7 +2374,7 @@ fn run_command() -> Result<()> {
             options,
             quorum,
             deadline,
-            porcelain,
+            porcelain: _,
         } => {
             if let Some(d) = &deadline {
                 chrono::DateTime::parse_from_rfc3339(d.trim())
@@ -2441,14 +2443,13 @@ fn run_command() -> Result<()> {
                 Ok(said) => rest.push_str(&said),
                 Err(e) => eprintln!("ljos file: {e:#}"),
             }
-            if porcelain {
-                if !id.is_empty() {
-                    println!("{id}");
-                }
-                eprint!("{rest}");
-            } else {
-                print!("{rest}");
+            // The id is the only line on stdout, so `ID=$(ljos file ...)`
+            // captures the id the docs name. The tracker's own line and
+            // the commit line go to stderr. `--porcelain` is the same.
+            if !id.is_empty() {
+                println!("{id}");
             }
+            eprint!("{rest}");
         }
         Cmd::Options { issue, options } => {
             print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);

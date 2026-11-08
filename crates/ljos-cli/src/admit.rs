@@ -207,25 +207,23 @@ fn held_proposal_id(text: &str) -> Option<String> {
 
 /// Write `atom` as an agent's own memory, live at once, with origin
 /// `agent-derived`. Nothing waits for a person. A text the pack's prose
-/// gate would turn away is stored as shorter copies ([`write_fitted`]).
+/// gate would turn away is stored as typed, with the gate's reason as a
+/// label ([`write_fitted`]).
 ///
 /// # Errors
 ///
-/// An empty text, or the pack refusing the claim for a reason shorter
-/// copies do not answer: a secret, an instruction to the model, an unknown
-/// kind.
+/// An empty text, or the pack refusing the claim for a reason that is not
+/// the prose gate: a secret, an instruction to the model, an unknown kind.
 pub fn write_agent(client: &PacksetClient, atom: Value) -> Result<Value> {
     write_fitted(client, atom, true, write_agent_one)
 }
 
-/// Post `atom` with `post`: as written when the pack's prose gate takes it,
-/// else as the copies [`crate::pack_copy::pack_copies`] cuts, each with the
-/// same labels. The pack holds an agent's and a hook's claim (`held`) to
-/// its sentence, grade and adverb limits and keeps any other with a
-/// warning; here a limit is a warning, not a refusal. The answer is the
-/// last copy's, with the gate's reason as `prose.warning` and the number
-/// of copies as `copies`, so the caller says it in one line. A `note` is
-/// not held to the gate.
+/// Post `atom` with `post`, text unchanged. The pack holds an agent's and
+/// a hook's claim (`held`) to its sentence, grade and adverb limits and
+/// keeps any other with a warning. A limit is a warning, not a rewrite:
+/// the stored text is the text that was typed. When the pack refuses that
+/// prose, one local record keeps it and search shows that one row. A
+/// `note` is not held to the gate.
 fn write_fitted(
     client: &PacksetClient,
     atom: Value,
@@ -243,38 +241,47 @@ fn write_fitted(
     let refused = (held && atom["kind"].as_str() != Some(packset_core::record::NOTE_KIND))
         .then(|| crate::pack_copy::gate_refusal(&text))
         .flatten();
-    let Some(why) = refused else {
-        return post(client, atom);
-    };
-    let kind = atom["kind"].as_str().unwrap_or("lesson");
-    crate::memory_port::keep_prose(&text, kind, &why);
-    let copies = crate::pack_copy::pack_copies(&text);
-    if copies.is_empty() {
+    if packset_core::record::reject_unsafe(&text).is_err() {
         return post(client, atom);
     }
-    let mut last = None;
-    let mut first_err = None;
-    for copy in &copies {
-        let mut one = atom.clone();
-        one["text"] = Value::String(copy.clone());
-        match post(client, one) {
-            Ok(posted) => last = Some(posted),
-            Err(e) if crate::note_can_wait(&e) => return Err(e),
-            Err(e) => {
-                first_err.get_or_insert(e);
-            }
+    if let Some(why) = refused.as_deref() {
+        let kind = atom["kind"].as_str().unwrap_or("lesson");
+        crate::memory_port::keep_prose(&text, kind, why);
+    }
+    match post(client, atom.clone()) {
+        Ok(mut posted) => {
+            label_prose(&mut posted, refused.as_deref());
+            Ok(posted)
         }
+        Err(e) if refused.is_some() && !crate::note_can_wait(&e) => {
+            crate::verbatim::keep(&atom, refused.as_deref().unwrap_or(""))
+        }
+        Err(e) => Err(e),
     }
-    let Some(mut posted) = last else {
-        return Err(
-            first_err.unwrap_or_else(|| anyhow::anyhow!("remember: empty text is not a claim"))
-        );
+}
+
+/// Put `warning` on `posted` when the pack did not already name one.
+fn label_prose(posted: &mut Value, warning: Option<&str>) {
+    let Some(why) = warning.filter(|why| !why.is_empty()) else {
+        return;
     };
-    if posted.is_object() {
-        posted["prose"]["warning"] = Value::String(why);
-        posted["copies"] = Value::from(copies.len());
+    let Some(map) = posted.as_object_mut() else {
+        return;
+    };
+    let prose = map
+        .entry("prose".to_string())
+        .or_insert_with(|| Value::Object(Default::default()));
+    let Some(fields) = prose.as_object_mut() else {
+        return;
+    };
+    if fields
+        .get("warning")
+        .and_then(Value::as_str)
+        .is_some_and(|have| !have.is_empty())
+    {
+        return;
     }
-    Ok(posted)
+    fields.insert("warning".into(), Value::String(why.to_string()));
 }
 
 /// One agent atom, with no further split.
@@ -328,8 +335,8 @@ fn post_live(client: &PacksetClient, atom: Value) -> Result<Value> {
 ///
 /// # Errors
 ///
-/// An empty text, or the pack refusing the claim for a reason shorter
-/// copies do not answer.
+/// An empty text, or the pack refusing the claim for a reason other than
+/// its prose gate.
 pub fn store_labelled(client: &PacksetClient, mut atom: Value) -> Result<Value> {
     if atom["text"].as_str().unwrap_or("").trim().is_empty() {
         crate::memory_port::keep_empty("lesson");

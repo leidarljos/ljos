@@ -3816,6 +3816,17 @@ fn desktop_cursor_and_ci_values_choose_cloud_up() {
     );
 
     std::env::remove_var("CURSOR_AGENT");
+    std::env::set_var("CURSOR_CONVERSATION_ID", "0199a1b2-c3d4-e5f6-boxseat");
+    let conversation = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(
+        conversation.contains("ljos onboard --harness cursor"),
+        "{conversation}"
+    );
+    assert!(
+        !conversation.contains("ljos cloud up"),
+        "a conversation id on a box seat is not a cloud VM: {conversation}"
+    );
+    std::env::remove_var("CURSOR_CONVERSATION_ID");
     for (key, value) in [("GITHUB_ACTIONS", "false"), ("CI", "false")] {
         clear_agent_ids();
         std::env::set_var("HOME", &home);

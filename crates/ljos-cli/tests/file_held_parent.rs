@@ -102,6 +102,19 @@ fn a_held_issue_is_named_when_the_file_lands_under_it() {
 }
 
 #[test]
+fn file_prints_only_the_id_on_stdout() {
+    let seat = Seat::new("'vissue test'");
+    seat.hold("eb-stack-hqqx");
+    let out = seat.file(&["a tool bug"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}{err}");
+    assert_eq!(said, "ljos-new1\n", "{said:?}");
+    assert_eq!(said.lines().count(), 1, "{said:?}");
+    assert!(err.contains("eb-stack-hqqx"), "{err}");
+}
+
+#[test]
 fn porcelain_file_under_a_hold_prints_only_the_id() {
     let seat = Seat::new("'vissue test'");
     seat.hold("eb-stack-hqqx");
