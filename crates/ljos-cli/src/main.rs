@@ -1667,6 +1667,7 @@ fn run_command() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    // Help, version and a missing argument exit here, before any write.
     let cmd = Cli::parse().cmd;
     let mut sitting_budget = match &cmd {
         Cmd::Sitting { issue, .. } => {
@@ -2086,13 +2087,9 @@ fn run_command() -> Result<()> {
                 }
                 None => Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
             };
-            // Expired claims are dropped after the pack answers, so ask for
-            // more than the limit and cut to it once they are gone.
-            let fetch = if day.is_some() {
-                ljos_cli::valid_fetch(limit)
-            } else {
-                limit
-            };
+            // Ask for more than will be printed. Validity drops some, and
+            // this seat's rows are placed ahead of other seats before the cut.
+            let fetch = ljos_cli::valid_fetch(limit);
             // A dated search is the pack as it stood then. The live
             // snapshot is not that pack, so a busy writer stays a failure
             // there. A search of now ranks the snapshot by words instead.
@@ -2109,6 +2106,9 @@ fn run_command() -> Result<()> {
             if let Some(day) = day {
                 hits.retain(|h| ljos_cli::valid_on(&h.entities, &day));
             }
+            // Rank before the cut so another seat's higher score does not
+            // push this seat's rows out of the printed limit.
+            ljos_cli::prefer_calling_seat(&mut hits);
             hits.truncate(limit as usize);
             print!("{}", format_hits(&hits, explain));
         }

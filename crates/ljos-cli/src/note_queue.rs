@@ -9,9 +9,10 @@
 //! it again. A line left
 //! from before that rule is cut to what the pack takes, or dropped, on the
 //! next send. The queue holds one entry per issue, text, workspace, kind
-//! and, for a lesson, the atoms it closes. packsetd answers an identical
-//! issue and text with the claim it already holds, so a resend after a
-//! lost answer stores nothing new.
+//! and, for a lesson, the atoms it closes. The seat that queued the copy
+//! stays on the row, so a later seat does not take it. packsetd answers an
+//! identical issue and text with the claim it already holds, so a resend
+//! after a lost answer stores nothing new.
 
 use std::path::{Path, PathBuf};
 
@@ -38,6 +39,14 @@ pub struct Queued {
     /// that closes nothing. A line written before this field reads as empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supersedes: Vec<String>,
+    /// The seat that queued the copy. Empty on a line written before this
+    /// field. The seat that drains the queue does not replace it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub seat: String,
+    /// The memory slot (`<tracker>/.ljos/memory`) the copy belongs to.
+    /// Empty on a line written before this field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub home: String,
 }
 
 impl Queued {
@@ -47,6 +56,8 @@ impl Queued {
             && self.workspace == other.workspace
             && self.kind == other.kind
             && self.supersedes == other.supersedes
+            && self.seat == other.seat
+            && self.home == other.home
     }
 }
 
@@ -391,6 +402,8 @@ mod tests {
             at: 1,
             kind: "note".into(),
             supersedes: Vec::new(),
+            seat: String::new(),
+            home: String::new(),
         }
     }
 
@@ -416,6 +429,8 @@ mod tests {
         assert_eq!(pending[0].kind, "note");
         assert_eq!(pending[0].text, "one line");
         assert!(pending[0].supersedes.is_empty());
+        assert!(pending[0].seat.is_empty());
+        assert!(pending[0].home.is_empty());
     }
 
     #[test]
