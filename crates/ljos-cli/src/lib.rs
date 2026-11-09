@@ -10384,6 +10384,8 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
         if !rows.is_empty() {
             let bodies: Vec<&str> = rows.iter().map(|(_, body)| body.as_str()).collect();
             let mut scored = lexical_scores(&bodies, cue);
+            let distinctive = lexical_prompt_mask(&bodies, cue);
+            scored.retain(|(i, _)| distinctive[*i]);
             if !scored.is_empty() {
                 let top = scored
                     .iter()
@@ -10401,7 +10403,19 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
             }
         }
     }
+    let from_pack = hits.len();
     memory_port::append_recall(&mut hits, cue, limit.min(HOOK_MAX_MEMORIES));
+    if hits.len() > from_pack {
+        let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+        let ok = lexical_prompt_mask(&texts, cue);
+        let mut kept = Vec::new();
+        for (i, hit) in hits.into_iter().enumerate() {
+            if i < from_pack || ok[i] {
+                kept.push(hit);
+            }
+        }
+        hits = kept;
+    }
     order_recalled(&mut hits, |h| h.ts.clone().unwrap_or_default());
     if hits.is_empty() {
         return None;
@@ -10544,6 +10558,162 @@ fn cue_coverage(text: &str, cue: &str) -> f64 {
         .filter(|w| have.binary_search(w).is_ok())
         .count();
     shared as f64 / want.len() as f64
+}
+
+/// Words a release prompt shares with notes that are not about that
+/// release. They are left out of the lexical-only subject score, and one
+/// of them is not a rare term.
+const LEXICAL_GENERIC: &[&str] = &["push", "box", "release"];
+
+/// The normalised score a lexical-only prompt requires, on the scale of
+/// [`lexical_match_scores`]. Naming the subject with terms that are not
+/// generic scores from 0.5. A generic overlap stays under that.
+const LEXICAL_PROMPT_MIN: f64 = 0.5;
+
+/// A slug in at least this many memories is a repo name stamped on
+/// unrelated notes. It is weighted like a generic token.
+const LEXICAL_WIDE_SLUG: usize = 3;
+
+/// Whether `word` is one of [`LEXICAL_GENERIC`], including its plural.
+fn lexical_generic(word: &str) -> bool {
+    let word = word.to_lowercase();
+    let one = singular(&word);
+    LEXICAL_GENERIC.contains(&word.as_str()) || LEXICAL_GENERIC.contains(&one.as_str())
+}
+
+/// `text` with generic tokens replaced by spaces, so they do not carry
+/// the subject score. Separators stay, and a slug stays whole.
+fn blank_lexical_generic(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if word.is_empty() {
+            return;
+        }
+        if lexical_generic(word) {
+            out.extend(std::iter::repeat_n(' ', word.chars().count()));
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+/// Slugs in `text`, as [`pack_word_seq`] spells them.
+fn lexical_slugs(text: &str) -> std::collections::BTreeSet<String> {
+    pack_word_seq(text)
+        .filter(|word| word.contains('-') || word.contains('_'))
+        .collect()
+}
+
+/// `text` with `wide` slugs replaced by spaces.
+fn blank_wide_slugs(text: &str, wide: &std::collections::BTreeSet<String>) -> String {
+    if wide.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut String| {
+        if token.is_empty() {
+            return;
+        }
+        let key = singular(&token.to_lowercase());
+        if wide.contains(&key) {
+            out.extend(std::iter::repeat_n(' ', token.chars().count()));
+        } else {
+            out.push_str(token);
+        }
+        token.clear();
+    };
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '-' || c == '_' {
+            token.push(c);
+        } else {
+            flush(&mut token, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut token, &mut out);
+    out
+}
+
+/// Which of `texts` a lexical-only prompt may hand over.
+///
+/// The score is [`lexical_match_scores`] after generic tokens, and repo
+/// slugs that occur in many of `texts`, are weighted down to nothing.
+/// A lesson needs that score at [`LEXICAL_PROMPT_MIN`] and two shared
+/// non-stopword terms, or one rare term: a non-generic word, or a slug,
+/// that occurs in a single memory. A name that occurs in many memories
+/// is not that rare term. Nothing clears it and the prompt hears nothing.
+fn lexical_prompt_mask(texts: &[&str], cue: &str) -> Vec<bool> {
+    let n = texts.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let slug_sets: Vec<std::collections::BTreeSet<String>> =
+        texts.iter().copied().map(lexical_slugs).collect();
+    let mut slug_df: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for set in &slug_sets {
+        for slug in set {
+            *slug_df.entry(slug.clone()).or_default() += 1;
+        }
+    }
+    let wide: std::collections::BTreeSet<String> = slug_df
+        .iter()
+        .filter(|(_, df)| **df >= LEXICAL_WIDE_SLUG)
+        .map(|(slug, _)| slug.clone())
+        .collect();
+    let blanked: Vec<String> = texts
+        .iter()
+        .copied()
+        .map(|text| blank_lexical_generic(&blank_wide_slugs(text, &wide)))
+        .collect();
+    let blanked_cue = blank_lexical_generic(&blank_wide_slugs(cue, &wide));
+    let blanked_refs: Vec<&str> = blanked.iter().map(String::as_str).collect();
+    let scores = lexical_match_scores(&blanked_refs, &blanked_cue);
+    let sets: Vec<std::collections::BTreeSet<String>> = texts
+        .iter()
+        .copied()
+        .map(|text| prompt_words(text).iter().cloned().collect())
+        .collect();
+    let cue_words: Vec<String> = prompt_words(cue).iter().cloned().collect();
+    let word_df = |term: &str| sets.iter().filter(|set| set.contains(term)).count();
+    let cue_slugs = lexical_slugs(cue);
+    let cue_distinctive = cue_words
+        .iter()
+        .filter(|word| !lexical_generic(word))
+        .count();
+    let short = cue_distinctive <= 2;
+    (0..n)
+        .map(|i| {
+            let shared: Vec<&String> = cue_words
+                .iter()
+                .filter(|word| sets[i].contains(*word))
+                .collect();
+            let distinctive = shared.iter().filter(|word| !lexical_generic(word)).count();
+            let rare_word = shared
+                .iter()
+                .any(|word| !lexical_generic(word) && word_df(word) == 1);
+            let rare_slug = cue_slugs.iter().any(|slug| {
+                slug_sets[i].contains(slug)
+                    && slug_df.get(slug).copied().unwrap_or(0) == 1
+                    && !wide.contains(slug)
+            });
+            let rare = rare_word || rare_slug;
+            let enough = shared.len() >= 2 || (short && distinctive >= 1);
+            (scores[i] >= LEXICAL_PROMPT_MIN && enough && distinctive >= 1) || rare
+        })
+        .collect()
 }
 
 /// Lexical match of each text against `cue`, in the same order, on one
@@ -10858,11 +11028,26 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // the second stage, a few hundred milliseconds a prompt, is not
             // run. The count of the pack's ballots that named a hit is not
             // read: where many lessons tie on the words the pack scores,
-            // which of them a ballot keeps at its cut is arbitrary. The
-            // subject test and the lexical floor are the second scorer.
+            // which of them a ballot keeps at its cut is arbitrary. With
+            // no cosine the rank is lexical, so a lesson also has to clear
+            // [`lexical_prompt_mask`]: generic tokens and a repo name that
+            // sits in many memories do not carry it. The lexical floor is
+            // the other scorer.
+            let pool_keep: Vec<bool> = pool
+                .as_ref()
+                .map(|rows| {
+                    let texts: Vec<&str> = rows.iter().map(|h| h.text.as_str()).collect();
+                    lexical_prompt_mask(&texts, cue)
+                })
+                .unwrap_or_default();
             let could = |h: &Hit| {
+                let distinctive = pool.as_ref().is_some_and(|rows| {
+                    rows.iter()
+                        .position(|item| std::ptr::eq(item, h))
+                        .is_some_and(|i| pool_keep[i])
+                });
                 !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                    && names_the_subject(&h.text, cue)
+                    && distinctive
                     && shown_on_prompt(h)
                     && h.id.as_ref().is_none_or(|id| !seen.contains(id))
             };
@@ -10893,7 +11078,17 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // read the prompt and each claim together, and its order stands.
             let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
             let lexical = lexical_match_scores(&texts, cue);
-            let eligible: Vec<bool> = hits.iter().map(could).collect();
+            let prompt_ok = lexical_prompt_mask(&texts, cue);
+            let eligible: Vec<bool> = hits
+                .iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    prompt_ok[i]
+                        && !UNREVIEWED_KINDS.contains(&h.kind.as_str())
+                        && shown_on_prompt(h)
+                        && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+                })
+                .collect();
             let admitted = clears_lexical_floor(&lexical, &eligible);
             let mut rows: Vec<&Hit> = hits
                 .iter()
@@ -10942,6 +11137,17 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         memory_port::append_recall(&mut brought, cue, limit.min(HOOK_MAX_MEMORIES));
         brought
             .retain(|hit| !UNREVIEWED_KINDS.contains(&hit.kind.as_str()) && shown_on_prompt(hit));
+        if !brought.is_empty() {
+            let texts: Vec<&str> = brought.iter().map(|h| h.text.as_str()).collect();
+            let ok = lexical_prompt_mask(&texts, cue);
+            let mut kept = Vec::new();
+            for (hit, keep) in brought.into_iter().zip(ok) {
+                if keep {
+                    kept.push(hit);
+                }
+            }
+            brought = kept;
+        }
         if !brought.is_empty() {
             let lines: Vec<String> = brought.iter().map(|h| hit_line(h, &now)).collect();
             ids = brought.into_iter().filter_map(|h| h.id).collect();
@@ -51325,6 +51531,53 @@ mod tests {
         };
         let (note, _) = hook_note(&call, 5);
         assert!(note.contains("VITE_API_URL"), "{note}");
+    }
+
+    /// Generic tokens and a repeated repo name do not carry a lexical
+    /// prompt. The lesson that names the rare credential does.
+    #[test]
+    fn a_lexical_prompt_drops_generic_overlap_and_keeps_the_rare_term() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/hook_lexical_prompt.json"))
+                .unwrap();
+        let hits: Vec<serde_json::Value> = fixture["lessons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|lesson| {
+                serde_json::json!({
+                    "id": lesson["id"],
+                    "text": lesson["text"],
+                    "kind": "lesson",
+                    "score": 1.0,
+                    "ts": lesson["ts"],
+                    "entities": ["horizon:standing"],
+                    "ballots": 2,
+                    "of": 3
+                })
+            })
+            .collect();
+        let url = serve_signal_pack(serde_json::Value::Array(hits));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: fixture["prompt"].as_str().unwrap().into(),
+            session: Some("lexical-generic".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&call, 5);
+        assert!(note.contains(fixture["show"].as_str().unwrap()), "{note}");
+        for hidden in fixture["hide"].as_array().unwrap() {
+            let text = hidden.as_str().unwrap();
+            assert!(!note.contains(text), "{text}\n{note}");
+        }
     }
 
     /// A hit one scorer named carries a word no other hit has. Its BM25

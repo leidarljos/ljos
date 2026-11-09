@@ -1,0 +1,51 @@
+{
+  "prompt": "push the packset release from the box with GH_RELAY_PAT",
+  "show": "Set GH_RELAY_PAT before publishing.",
+  "hide": [
+    "The ttech-dashboard seat retries a push from the box when a release is waiting.",
+    "readcon-core keeps a credential in the box and expects a push at each release.",
+    "scrub.py pushes the cleaned tree from the box once the release is packed."
+  ],
+  "lessons": [
+    {
+      "id": "a1000000000000000000000000000001",
+      "text": "The ttech-dashboard seat retries a push from the box when a release is waiting.",
+      "ts": "2026-10-02T09:00:00.000Z"
+    },
+    {
+      "id": "a1000000000000000000000000000002",
+      "text": "readcon-core keeps a credential in the box and expects a push at each release.",
+      "ts": "2026-10-03T09:00:00.000Z"
+    },
+    {
+      "id": "a1000000000000000000000000000003",
+      "text": "scrub.py pushes the cleaned tree from the box once the release is packed.",
+      "ts": "2026-10-04T09:00:00.000Z"
+    },
+    {
+      "id": "a1000000000000000000000000000004",
+      "text": "Set GH_RELAY_PAT before publishing.",
+      "ts": "2026-10-05T09:00:00.000Z"
+    },
+    {
+      "id": "a1000000000000000000000000000005",
+      "text": "The packset checkout on this seat is the one the dashboard builds from.",
+      "ts": "2026-09-01T09:00:00.000Z"
+    },
+    {
+      "id": "a1000000000000000000000000000006",
+      "text": "Another packset checkout sits on the build seat for the dashboard.",
+      "ts": "2026-09-02T09:00:00.000Z"
+    },
+    {
+      "id": "a1000000000000000000000000000007",
+      "text": "The status page is checked every morning on the dashboard.",
+      "ts": "2026-09-03T09:00:00.000Z"
+    },
+    {
+      "id": "a1000000000000000000000000000008",
+      "text": "Rotate the credential before the quarter starts on the dashboard.",
+      "ts": "2026-09-04T09:00:00.000Z"
+    }
+  ]
+}

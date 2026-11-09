@@ -465,7 +465,7 @@ fn detaching_does_not_make_this_process_the_person() {
     assert!(hook.status.success(), "hook\n{}", text_of(&hook));
     let err = String::from_utf8_lossy(&hook.stderr);
     assert!(
-        err.contains("not kept as the person's"),
+        err.contains("came from a script rather than from the person"),
         "a detached hook was kept\n{}",
         text_of(&hook)
     );

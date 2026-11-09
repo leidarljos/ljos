@@ -797,7 +797,7 @@ fn a_hook_the_runner_did_not_spawn_keeps_nothing() {
         &payload,
     );
     assert!(
-        combined(&out).contains("not kept as the person's"),
+        combined(&out).contains("came from a script rather than from the person"),
         "{}",
         text_of(&out)
     );
@@ -816,7 +816,7 @@ fn a_hook_the_runner_did_not_spawn_keeps_nothing() {
     seat.seat_env(&mut cmd);
     let out = cmd.output().unwrap();
     assert!(
-        combined(&out).contains("not kept as the person's"),
+        combined(&out).contains("came from a script rather than from the person"),
         "{}",
         text_of(&out)
     );
@@ -830,7 +830,11 @@ fn a_hook_the_runner_did_not_spawn_keeps_nothing() {
     let mut nested = seat.hook_under("claude");
     nested.env("CLAUDECODE", "1");
     let out = fed(nested, &payload);
-    assert!(combined(&out).contains("CLAUDECODE"), "{}", text_of(&out));
+    assert!(
+        combined(&out).contains("isn't saved as their preference"),
+        "{}",
+        text_of(&out)
+    );
     assert_nothing_kept(&seat, "a runner inside a tool call");
 }
 
@@ -2094,7 +2098,7 @@ fn detach_keeps_nothing(seat: &Seat, name: &str, mode: &str, fake: &std::path::P
         "{who}: detached hook kept the plant: {kept}\n{hook_err}"
     );
     assert!(
-        hook_err.contains("not kept as the person's"),
+        hook_err.contains("came from a script rather than from the person"),
         "{who}: {hook_err}"
     );
     assert!(

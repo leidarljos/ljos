@@ -3610,8 +3610,13 @@ fn run_command() -> Result<()> {
                         && ljos_cli::capture::not_the_person(&input).is_none())
                     .then(|| match ljos_cli::proc_tree::hook_runner() {
                         Ok((runner, _)) => Some(runner),
-                        Err(why) => {
-                            eprintln!("ljos hook: this prompt is not kept as the person's: {why}.");
+                        Err(_why) => {
+                            // A label, not a refusal: the hook still answers.
+                            // The parent is a script or a shell, so this prompt
+                            // is not saved as the person's preference.
+                            eprintln!(
+                                "label script-prompt: this prompt came from a script rather than from the person, so it isn't saved as their preference."
+                            );
                             None
                         }
                     })
