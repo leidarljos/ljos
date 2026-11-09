@@ -103,8 +103,9 @@ pub const CARD_NAMES: &[&str] = &["USER.md", "MEMORY.md"];
 
 /// The sitting protocol: which store answers which question, the order of
 /// verbs before, during and after the work, and the refusals worth knowing.
-/// `ljos protocol` prints it, `ljos onboard` installs it as a skill, and the
-/// server serves it at `ljos://protocol`. Harness agnostic on purpose.
+/// `ljos protocol --full` prints it. `ljos protocol` prints the short form.
+/// `ljos onboard` installs this text as a skill, and the server serves it
+/// at `ljos://protocol`. Harness agnostic on purpose.
 pub const PROTOCOL: &str = include_str!("../doc/protocol.md");
 
 /// The skill file a harness loads: front matter, then the protocol.
@@ -122,6 +123,7 @@ a deed, a claim or a vote.\n---\n\n{}",
 
 /// The protocol with the sitting's section list filled in from
 /// [`SITTING_SECTIONS`], the same order `ljos sitting` prints.
+/// `ljos protocol --full` prints this. Skills and `ljos://protocol` use it.
 #[must_use]
 pub fn protocol_text() -> String {
     const MARK: &str = "@@SITTING_SECTIONS@@\n";
@@ -130,6 +132,67 @@ pub fn protocol_text() -> String {
         None => PROTOCOL.to_string(),
     }
 }
+
+/// The short protocol `ljos protocol` prints. A seat can read it at
+/// session start. The whole text is [`protocol_text`].
+#[must_use]
+pub fn protocol_brief() -> String {
+    PROTOCOL_BRIEF.to_string()
+}
+
+/// Steps a seat follows, and where the rest of the protocol is.
+const PROTOCOL_BRIEF: &str = "\
+# Seat protocol
+
+One seat. `ljos` is the command in front of the stores. `ljos-mcp` serves
+the same verbs. A verb that fails is a store not answering: run
+`ljos doctor` before you conclude anything.
+
+## Start
+
+Open the work with a sitting. It claims the issue and reads what the seat
+already knows:
+
+    ljos sitting ISSUE --assignee NAME
+
+A bot with no harness hooks calls `ljos start` with the repo or the issue
+and the task. That recalls and claims.
+
+## Note
+
+Keep the working notes on the issue as you go:
+
+    ljos note ISSUE \"what you just learned\"
+
+A note is not a memory. A claim from a file, a tool, or a page stays a note.
+
+## Remember
+
+Store a fact or a preference the person stated, in their words:
+
+    ljos remember \"the fact\"
+    ljos prefer \"the preference\"
+
+Search the pack before you answer from memory: `ljos search TOPIC`.
+
+## Finish
+
+Close the sitting when the work is done:
+
+    ljos finish ISSUE --lesson \"what held\"
+
+Finish takes the lesson, releases the claim, and syncs the tracker.
+
+## The rest
+
+This is the short form a seat reads at session start. The whole protocol,
+every store and every refusal, is:
+
+    ljos protocol --full
+
+`ljos onboard` installs that text as the ljos skill. The server serves it
+at `ljos://protocol`.
+";
 
 /// One step an onboarding took, or would take.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52076,6 +52139,28 @@ mod tests {
         assert_eq!(SITTING_DUE, 8);
         assert_eq!(SITTING_TIMELINE, 12);
         assert!(protocol_text().contains("+N more (ljos claims --mine)"));
+    }
+
+    /// The command a seat reads at session start is the short form. The
+    /// whole text, which skills and the server serve, stays behind `--full`.
+    #[test]
+    fn the_short_protocol_names_the_steps_and_the_full_text() {
+        let short = protocol_brief();
+        let lines = short.lines().count();
+        assert!(lines <= 60, "the short protocol is {lines} lines:\n{short}");
+        for step in [
+            "ljos sitting",
+            "ljos note",
+            "ljos remember",
+            "ljos finish",
+            "ljos protocol --full",
+        ] {
+            assert!(short.contains(step), "{step} missing:\n{short}");
+        }
+        let full = protocol_text();
+        assert!(full.lines().count() > lines, "the full text is not longer");
+        assert!(full.contains("# The seat protocol"));
+        assert!(full.contains("== blockers"));
     }
 
     /// `ljos protocol` numbers the sections `ljos sitting` prints, in that

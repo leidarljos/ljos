@@ -13,11 +13,11 @@ use ljos_cli::{
     onboard_to, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
     packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
     playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout,
-    protocol_text, read_campaign, receive, release, remember_findings, reopen, rows_about, run,
-    run_as, run_captured, settle_discount, sitting_close, sitting_stream_started, stop_hook_stdout,
-    timeline, topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed,
-    with_discount, write_outcome, write_persona_as, write_prediction, write_rule, write_trust,
-    Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
+    protocol_brief, protocol_text, read_campaign, receive, release, remember_findings, reopen,
+    rows_about, run, run_as, run_captured, settle_discount, sitting_close, sitting_stream_started,
+    stop_hook_stdout, timeline, topic_words, tracker_show_json, trim_num, trust_from_pack,
+    uncite_deed, with_discount, write_outcome, write_persona_as, write_prediction, write_rule,
+    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -1364,8 +1364,12 @@ enum Cmd {
         #[arg(long)]
         install_desktop: bool,
     },
-    /// Print the sitting protocol: which store answers what, and the order of verbs.
-    Protocol,
+    /// Print the short sitting protocol. `--full` prints every store and refusal.
+    Protocol {
+        /// Print the whole protocol instead of the short form.
+        #[arg(long)]
+        full: bool,
+    },
     /// The name this agent works under, the name its claims go under, and where each came from.
     /// `add` writes a seat into the tracker's vissue.toml. `grant` records a quoted yes to close.
     Seat {
@@ -3990,7 +3994,13 @@ fn run_command() -> Result<()> {
                 install_desktop,
             }));
         }
-        Cmd::Protocol => print!("{}", protocol_text()),
+        Cmd::Protocol { full } => {
+            if full {
+                print!("{}", protocol_text());
+            } else {
+                print!("{}", protocol_brief());
+            }
+        }
         Cmd::Seat { action } => match action {
             None => print!("{}", format_seat_command()),
             Some(SeatAction::Add { name }) => print!("{}", ljos_cli::seat_roster::add(&name)?),

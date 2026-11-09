@@ -403,9 +403,10 @@ The seat does not know the runners. It knows one thing every runner does: it con
 name. A new runner needs no table anywhere. ``ljos onboard --example`` lists the shapes ljos knows.
 A runner it does not know can be described once in a runners file under ``~/.config/ljos``.
 
-The agent is told how, in one text. ``ljos protocol`` prints it. ``ljos onboard`` installs the same text
-as a skill, and the server serves it at ``ljos://protocol``. It says which store answers which
-question, the order of verbs in a sitting, and the refusals.
+The agent is told how, in one text. ``ljos protocol`` prints the short form a seat reads at
+session start. ``ljos protocol --full`` prints the whole text. ``ljos onboard`` installs that
+text as a skill, and the server serves it at ``ljos://protocol``. It says which store answers
+which question, the order of verbs in a sitting, and the refusals.
 
 The pack's token
 ================

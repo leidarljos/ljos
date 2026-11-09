@@ -640,7 +640,7 @@ and =min_candidates= keep the prompt calls few. The log carries the
 * Give an agent the protocol without a runner
 
 #+begin_src console
-$ ljos protocol > instructions.md
+$ ljos protocol --full > instructions.md
 #+end_src
 
 The text is plain markdown: which store answers which question, the order

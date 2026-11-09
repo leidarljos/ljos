@@ -70,7 +70,8 @@ that row ``no`` and names the fix.
 ``doctor --all`` names each habitat and whether it answers. The seat works with the
 habitats it has; a missing one is reported, not guessed around. ``onboard``
 registers the server with an agent runner and installs the sitting protocol
-as its skill; ``ljos protocol`` prints that protocol for any other.
+as its skill; ``ljos protocol`` prints the short form, and ``ljos protocol --full``
+prints that protocol for any other.
 
 First minute
 ============

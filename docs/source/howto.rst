@@ -597,7 +597,7 @@ Give an agent the protocol without a runner
 
 .. code:: console
 
-   $ ljos protocol > instructions.md
+   $ ljos protocol --full > instructions.md
 
 The text is plain markdown: which store answers which question, the order
 of verbs before, during and after the work, and the refusals worth knowing.
