@@ -47,6 +47,16 @@ impl Seat {
         child.wait_with_output().expect("wait ljos")
     }
 
+    fn run_slot(&self, workspace: &str, root: &Path, args: &[&str]) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        cmd.args(args).current_dir(root);
+        self.env(&mut cmd, workspace, root);
+        cmd.env("PACKSET_URL", "off");
+        cmd.env_remove("PACKSET_PORT");
+        cmd.env_remove("PACKSET_HOME");
+        cmd.output().expect("ljos")
+    }
+
     fn env(&self, cmd: &mut Command, workspace: &str, root: &Path) {
         let home = self.home.path();
         cmd.env_clear()
@@ -219,4 +229,87 @@ fn export_import_integrate_round_trip_reaches_the_hook() {
         "recall did not find the imported lesson: {}",
         text(&recalled)
     );
+}
+
+/// Export from a scratch seat, import into a fresh seat, export again.
+/// The memory sets match: ids, kinds, text and entity labels.
+#[test]
+fn export_import_export_keeps_the_same_memory_set() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
+    let (seat, _daemon) = open_seat();
+    let from = tracker(seat.home.path(), "seat-a");
+    let into = tracker(seat.home.path(), "seat-b");
+    let lesson = "The kiln fires at dusk on the north bench.";
+    let preference = "Use the north bench for the kiln.";
+    let remembered = seat.run("round-a", &from, &["remember", lesson], None);
+    assert!(
+        remembered.status.success(),
+        "remember: {}",
+        text(&remembered)
+    );
+    let preferred = seat.run("round-a", &from, &["prefer", preference], None);
+    assert!(preferred.status.success(), "prefer: {}", text(&preferred));
+
+    let first = from.join("first.jsonl");
+    let exported = seat.run(
+        "round-a",
+        &from,
+        &["memory", "export", "--out", first.to_str().unwrap()],
+        None,
+    );
+    assert!(exported.status.success(), "export: {}", text(&exported));
+
+    let imported = seat.run_slot(
+        "round-b",
+        &into,
+        &["memory", "import", first.to_str().unwrap()],
+    );
+    assert!(imported.status.success(), "import: {}", text(&imported));
+
+    let second = into.join("second.jsonl");
+    let again = seat.run_slot(
+        "round-b",
+        &into,
+        &["memory", "export", "--out", second.to_str().unwrap()],
+    );
+    assert!(again.status.success(), "second export: {}", text(&again));
+    assert_eq!(
+        memory_set(&first),
+        memory_set(&second),
+        "first:\n{}\nsecond:\n{}",
+        std::fs::read_to_string(&first).unwrap(),
+        std::fs::read_to_string(&second).unwrap()
+    );
+}
+
+fn memory_set(path: &Path) -> std::collections::BTreeSet<(String, String, String, Vec<String>)> {
+    let body = std::fs::read_to_string(path).expect("export file");
+    let mut set = std::collections::BTreeSet::new();
+    for line in body.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("export line");
+        let Some(text) = value["text"].as_str() else {
+            continue;
+        };
+        let mut labels: Vec<String> = value["entities"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        labels.sort();
+        set.insert((
+            value["atom_id"].as_str().unwrap_or("").to_string(),
+            value["kind"].as_str().unwrap_or("").to_string(),
+            text.to_string(),
+            labels,
+        ));
+    }
+    set
 }

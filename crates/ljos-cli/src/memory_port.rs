@@ -564,8 +564,10 @@ fn secret_source(source: &Value) -> bool {
 
 fn owned_by_other(atom: &Value, seat: &str) -> bool {
     let named = atom["source"]["seat"].as_str().unwrap_or("").trim();
-    if !named.is_empty() && named != seat {
-        return true;
+    // A seat named on the atom is the owner. An imported copy names this
+    // seat there and may still carry the donor's seat tag in its entities.
+    if !named.is_empty() {
+        return named != seat;
     }
     let Some(entities) = atom["entities"].as_array() else {
         return false;
@@ -684,13 +686,20 @@ fn local_atoms(place: &Place) -> Vec<Value> {
         .into_iter()
         .map(|row| {
             json!({
-                "id": row.id,
+                "id": if row.source_id.is_empty() {
+                    row.id.clone()
+                } else {
+                    row.source_id.clone()
+                },
                 "kind": row.kind,
                 "text": row.text,
                 "origin": row.origin,
                 "entities": row.entities,
                 "source": {
-                    "seat": row.seat,
+                    // The seat that holds this copy. The donor stays on the
+                    // entities, so a later export is not dropped as foreign
+                    // and still carries the original labels.
+                    "seat": place.seat,
                     "machine": row.machine,
                     "basis": row.basis,
                 },
@@ -902,17 +911,13 @@ fn string_list(value: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn stamp_entities(place: &Place, row: &mut Row) {
-    let owner = format!("seat:{}", place.seat);
-    let source = format!(
-        "seat:import:{}:{}",
-        encode_name(&row.machine),
-        encode_name(&row.seat)
-    );
+fn stamp_entities_of(seat: &str, machine: &str, row: &mut Row) {
+    let owner = format!("seat:{seat}");
+    let source = format!("seat:import:{}:{}", encode_name(machine), encode_name(seat));
     if !row.entities.iter().any(|tag| tag == &owner) {
         row.entities.push(owner);
     }
-    if !row.machine.is_empty() && !row.entities.iter().any(|tag| tag == &source) {
+    if !machine.is_empty() && !row.entities.iter().any(|tag| tag == &source) {
         row.entities.push(source);
     }
     let mark = format!("seat:iid:{}", row.import_id);
@@ -992,10 +997,7 @@ fn import_bytes(
     if stop == Some(Stop::Receipt) {
         bail!("memory: stopped after receipt");
     }
-    let mut rows = parsed.rows;
-    for row in &mut rows {
-        stamp_entities(place, row);
-    }
+    let rows = parsed.rows;
     let index_path = dir.join("index.jsonl");
     if !index_path.is_file() {
         let mut body = String::new();
@@ -1055,6 +1057,11 @@ pub struct ImportDone {
 /// the export wrote them. An origin the pack does not know is `peer`, so
 /// a damaged file still has a label the writer accepts.
 fn atom_for_pack(row: &Row, workspace: &str) -> Value {
+    let seat = row.seat.clone();
+    let machine = row.machine.clone();
+    let mut stamped = row.clone();
+    stamp_entities_of(&seat, &machine, &mut stamped);
+    let row = &stamped;
     let origin = if packset_core::atom::known_origin(&row.origin) {
         row.origin.clone()
     } else {
@@ -2044,6 +2051,57 @@ mod tests {
         assert!(stdout_path(Path::new("-")));
         assert!(!stdout_path(Path::new("mem.jsonl")));
         assert!(!stdout_path(Path::new("./-")));
+    }
+
+    /// A fresh seat that imports an export and exports again carries the same
+    /// ids, kinds, text and entity labels. The header is this seat's own.
+    #[test]
+    fn an_export_round_trip_keeps_the_memory_set() {
+        let (_here_dir, here) = place("alfa");
+        let mut lesson = atom("a1", "seat-alfa", "alfa fires the kiln at dusk");
+        lesson["entities"] = json!(["seat:seat-alfa", "horizon:standing"]);
+        let mut pref = atom("b2", "seat-alfa", "use the north bench for the kiln");
+        pref["kind"] = json!("preference");
+        pref["entities"] = json!(["seat:seat-alfa", "horizon:standing"]);
+        let first = here.home.join("first.jsonl");
+        export_atoms(&here, &first, &[lesson, pref]).unwrap();
+        let bytes = std::fs::read(&first).unwrap();
+        let (_there_dir, there) = place("beta");
+        import_bytes(&there, &bytes, None, None, None).unwrap();
+        let second = there.home.join("second.jsonl");
+        export_atoms(&there, &second, &local_atoms(&there)).unwrap();
+        assert_eq!(memory_set(&first), memory_set(&second));
+    }
+
+    fn memory_set(
+        path: &std::path::Path,
+    ) -> std::collections::BTreeSet<(String, String, String, Vec<String>)> {
+        let body = std::fs::read_to_string(path).unwrap();
+        let mut set = std::collections::BTreeSet::new();
+        for line in body.lines() {
+            let value: Value = serde_json::from_str(line).unwrap();
+            let Some(text) = value["text"].as_str() else {
+                continue;
+            };
+            let mut labels: Vec<String> = value["entities"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            labels.sort();
+            set.insert((
+                value["atom_id"].as_str().unwrap_or("").to_string(),
+                value["kind"].as_str().unwrap_or("").to_string(),
+                text.to_string(),
+                labels,
+            ));
+        }
+        set
     }
 
     /// Import used to drop the horizon, so the other seat's hook never saw the lesson.
