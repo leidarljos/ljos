@@ -87,6 +87,7 @@ pub mod uninstall;
 pub mod upgrade;
 pub mod user_rules;
 mod verbatim;
+mod version_skew;
 pub mod wake;
 
 #[cfg(test)]
@@ -28532,6 +28533,7 @@ pub fn doctor() -> Vec<Habitat> {
     out.extend(runners);
     out.extend(jev::doctor_row());
     out.push(seat_binary_row());
+    out.extend(version_skew::rows());
     out.push(git_hooks::doctor_row());
     out.push(sitting_gate::doctor_row(
         std::env::current_dir().ok().as_deref(),
@@ -30772,6 +30774,10 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     }
     // A host with no terminal check says so. The seat still starts.
     if row.name == "person" && !row.ok {
+        return "warn";
+    }
+    // Two ljos binaries differ. The row is a label. The seat still starts.
+    if row.name == "version skew" {
         return "warn";
     }
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
@@ -36208,6 +36214,9 @@ pub fn sitting_stream_started(
     let mut piece = String::new();
     let rows = doctor_seat();
     sections.heading(&mut piece, "doctor");
+    if let Some(line) = version_skew::summary_line() {
+        piece.push_str(&line);
+    }
     piece.push_str(&format_doctor(&rows));
     if let Some(line) = sitting_without(&rows) {
         piece.push_str(&line);
