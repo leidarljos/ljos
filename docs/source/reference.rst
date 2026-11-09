@@ -268,7 +268,14 @@ finds each at once. ``ljos accept ID`` raises a memory from L0 to
 ``explicit`` and records a ``keep`` review; the origin stays. A proposal an
 older ljos left open in ``proposals.jsonl`` is stored once by the next
 ``SessionStart`` or prompt hook, with the origin and level it was filed
-under. An atom taken by ``receive --import`` or by ``sync`` has origin
+under. ``ljos proposals`` lists the open rows the pack does not already
+hold, then any refused row. A refused row quotes the sentence the pack
+measured, after the count and the limit, trimmed to about 80 characters,
+as in ``sentence has 33 words; limit 29: "git push needs to run inside..."``.
+The last line counts the open rows, for example ``70 open: 52 new, 18 already in pack (`--status in-pack` to list them)``.
+``--status in-pack`` lists the ones whose text and kind already match a pack atom.
+``ljos proposals --settle`` writes ``already-in-pack`` and the time on those rows, prints one line per id and a total, and deletes nothing.
+A second run writes nothing. An atom taken by ``receive --import`` or by ``sync`` has origin
 ``peer``, whatever origin the sender wrote.
 
 The claim graph records the held ticket too: a tracker id maps to one node

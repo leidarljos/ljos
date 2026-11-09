@@ -557,7 +557,7 @@ pub struct Stale {
     pub why: String,
 }
 
-fn fold(text: &str) -> String {
+pub(crate) fn fold(text: &str) -> String {
     text.to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { ' ' })
@@ -565,6 +565,13 @@ fn fold(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Kind plus folded words. A later memory with this key is a duplicate,
+/// and the writer's rule keeps one atom when the text and kind match.
+#[must_use]
+pub fn lesson_key(kind: &str, text: &str) -> String {
+    format!("{kind}\n{}", fold(text))
 }
 
 /// Memories a prune would drop: a later one with the same words (the

@@ -767,42 +767,251 @@ fn proposal_id(text: &str, seat: &str) -> String {
 }
 
 /// The latest proposal per id, filtered by seat and status. A row that
-/// names no seat is `seat unknown`.
+/// names no seat is `seat unknown`. With no status, open rows the pack
+/// does not already hold come first, then refused rows, then one count
+/// line. `--status in-pack` lists the rows the pack already holds.
 #[must_use]
 pub fn list_proposals(seat: Option<&str>, status: Option<&str>) -> String {
+    let held = live_atoms().unwrap_or_default();
     let want_seat = seat.map(str::trim).filter(|s| !s.is_empty());
     let want_status = status.map(str::trim).filter(|s| !s.is_empty());
     let mut rows: Vec<Record> = read_latest().into_values().collect();
+    rows.retain(|rec| want_seat.is_none_or(|seat| seat_matches(rec, seat)));
     rows.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut out = String::new();
-    for rec in rows {
-        let shown = if rec.seat.trim().is_empty() {
-            "seat unknown".to_string()
-        } else {
-            format!("seat {}", rec.seat)
-        };
-        if let Some(seat) = want_seat {
-            let unknown = seat == "unknown" || seat == "seat unknown";
-            if unknown {
-                if !rec.seat.trim().is_empty() {
-                    continue;
-                }
-            } else if rec.seat != seat {
+    if rows.is_empty() {
+        return "no proposals\n".to_string();
+    }
+    if let Some(status) = want_status {
+        let mut out = String::new();
+        for rec in &rows {
+            if !status_selected(rec, status, &held) {
                 continue;
             }
+            out.push_str(&proposal_line(rec, &held));
         }
-        if let Some(status) = want_status {
-            if rec.status != status {
-                continue;
+        if out.is_empty() {
+            out.push_str("no proposals\n");
+        }
+        return out;
+    }
+    let mut fresh = String::new();
+    let mut refused = String::new();
+    let mut open_n = 0usize;
+    let mut new_n = 0usize;
+    let mut pack_n = 0usize;
+    for rec in &rows {
+        let open = matches!(rec.status.as_str(), "open" | "proposed");
+        if open {
+            open_n += 1;
+            if atom_in_pack(rec, &held) {
+                pack_n += 1;
+            } else {
+                new_n += 1;
+                fresh.push_str(&proposal_line(rec, &held));
             }
+        } else if rec.status == "refused" {
+            refused.push_str(&proposal_line(rec, &held));
         }
-        let text = rec.text.replace('\n', " ");
-        out.push_str(&format!("{}  {}  {shown}  {text}\n", rec.id, rec.status));
     }
-    if out.is_empty() {
-        out.push_str("no proposals\n");
-    }
+    let mut out = fresh;
+    out.push_str(&refused);
+    out.push_str(&format!(
+        "{open_n} open: {new_n} new, {pack_n} already in pack (`--status in-pack` to list them)\n"
+    ));
     out
+}
+
+/// Write `already-in-pack` and the time on each open row whose atom is
+/// already a pack entry. A row already settled is left as it is. Nothing
+/// is deleted. One line per id that changed, then the count.
+///
+/// # Errors
+///
+/// The proposals log could not be written.
+pub fn settle_proposals(seat: Option<&str>) -> Result<String> {
+    let held = live_atoms().unwrap_or_default();
+    let want_seat = seat.map(str::trim).filter(|s| !s.is_empty());
+    let _g = gate();
+    let mut rows: Vec<Record> = read_latest().into_values().collect();
+    rows.retain(|rec| want_seat.is_none_or(|seat| seat_matches(rec, seat)));
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut lines = Vec::new();
+    for mut rec in rows {
+        if !matches!(rec.status.as_str(), "open" | "proposed") || !atom_in_pack(&rec, &held) {
+            continue;
+        }
+        let id = rec.id.clone();
+        note_outcome(&mut rec, "already-in-pack", "")?;
+        lines.push(format!("already in pack {id}"));
+    }
+    let n = lines.len();
+    lines.push(format!("settled {n}"));
+    Ok(format!("{}\n", lines.join("\n")))
+}
+
+/// Live atoms, when the pack answers. `None` is a pack that does not, so a
+/// list still prints and does not pretend a row is already held.
+fn live_atoms() -> Option<Vec<Value>> {
+    let client = crate::pack().ok()?;
+    crate::atoms_lean(&client, &client.workspace()).ok()
+}
+
+fn proposal_kind(rec: &Record) -> String {
+    if !rec.kind.trim().is_empty() {
+        return rec.kind.trim().to_string();
+    }
+    rec.atom["kind"]
+        .as_str()
+        .unwrap_or("lesson")
+        .trim()
+        .to_string()
+}
+
+fn proposal_text(rec: &Record) -> String {
+    let text = rec.text.trim();
+    if !text.is_empty() {
+        return text.to_string();
+    }
+    rec.atom["text"].as_str().unwrap_or("").trim().to_string()
+}
+
+/// The writer's duplicate rule: one atom when the folded text and the kind
+/// match. Accept reports that row as already in pack, and so does the list.
+fn atom_in_pack(rec: &Record, held: &[Value]) -> bool {
+    let kind = proposal_kind(rec);
+    let text = proposal_text(rec);
+    if text.is_empty() || kind.is_empty() {
+        return false;
+    }
+    let key = crate::memories::lesson_key(&kind, &text);
+    held.iter().any(|atom| {
+        let held_kind = atom["kind"].as_str().unwrap_or("").trim();
+        if held_kind != kind {
+            return false;
+        }
+        let same = |words: &str| crate::memories::lesson_key(held_kind, words) == key;
+        same(atom["text"].as_str().unwrap_or(""))
+            || atom["aliases"]
+                .as_array()
+                .is_some_and(|aliases| aliases.iter().filter_map(Value::as_str).any(same))
+    })
+}
+
+fn seat_matches(rec: &Record, seat: &str) -> bool {
+    if seat == "unknown" || seat == "seat unknown" {
+        rec.seat.trim().is_empty()
+    } else {
+        rec.seat == seat
+    }
+}
+
+fn wants_in_pack(status: &str) -> bool {
+    status == "in-pack" || status == "already in pack"
+}
+
+fn status_selected(rec: &Record, status: &str, held: &[Value]) -> bool {
+    if wants_in_pack(status) {
+        return rec.status == "already-in-pack"
+            || (matches!(rec.status.as_str(), "open" | "proposed") && atom_in_pack(rec, held));
+    }
+    rec.status == status
+}
+
+fn display_status(rec: &Record, held: &[Value]) -> String {
+    if rec.status == "already-in-pack"
+        || (matches!(rec.status.as_str(), "open" | "proposed") && atom_in_pack(rec, held))
+    {
+        "already in pack".to_string()
+    } else {
+        rec.status.clone()
+    }
+}
+
+fn proposal_line(rec: &Record, held: &[Value]) -> String {
+    let seat = if rec.seat.trim().is_empty() {
+        "seat unknown".to_string()
+    } else {
+        format!("seat {}", rec.seat)
+    };
+    let text = if rec.status == "refused" && !rec.reason.is_empty() {
+        refusal_clause(&proposal_text(rec), &rec.reason)
+    } else {
+        proposal_text(rec).replace('\n', " ")
+    };
+    format!(
+        "{}  {}  {seat}  {text}\n",
+        rec.id,
+        display_status(rec, held)
+    )
+}
+
+/// How many characters of the offending sentence a refusal quotes.
+const QUOTE_CHARS: usize = 80;
+
+/// The refusal a person can act on. A sentence past the word limit names
+/// the count, the limit and the sentence, trimmed to about 80 characters.
+fn refusal_clause(text: &str, why: &str) -> String {
+    let quote = trim_quote(&offending_sentence(text, why));
+    if quote.is_empty() {
+        return why.to_string();
+    }
+    if let Some((words, limit)) = word_limit(why) {
+        format!("sentence has {words} words; limit {limit}: \"{quote}\"")
+    } else {
+        format!("{why}: \"{quote}\"")
+    }
+}
+
+fn word_limit(why: &str) -> Option<(usize, usize)> {
+    let words = number_before(why, " words")?;
+    let limit = number_after(why, "the limit is ")?;
+    Some((words, limit))
+}
+
+fn offending_sentence(text: &str, why: &str) -> String {
+    let parts = packset_core::prose::sentences(text);
+    if let Some(n) = number_after(why, "atom sentence ") {
+        if let Some(sentence) = n.checked_sub(1).and_then(|i| parts.get(i)) {
+            return sentence.trim().to_string();
+        }
+    }
+    if parts.len() == 1 {
+        return parts[0].trim().to_string();
+    }
+    text.trim().to_string()
+}
+
+fn trim_quote(text: &str) -> String {
+    let text = text.trim();
+    if text.chars().count() <= QUOTE_CHARS {
+        return text.to_string();
+    }
+    let keep = QUOTE_CHARS - 3;
+    let mut out: String = text.chars().take(keep).collect();
+    if let Some(space) = out.rfind(' ') {
+        if space > keep / 2 {
+            out.truncate(space);
+        }
+    }
+    out.push_str("...");
+    out
+}
+
+fn number_before(text: &str, marker: &str) -> Option<usize> {
+    let at = text.find(marker)?;
+    let head = text[..at].trim_end();
+    let digits: String = head
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.chars().rev().collect::<String>().parse().ok()
+}
+
+fn number_after(text: &str, marker: &str) -> Option<usize> {
+    let rest = text.split(marker).nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 /// [`accept`], recording the person's words the acceptance rests on.
@@ -852,7 +1061,16 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
             let stored = rec.stored.clone().unwrap_or_default();
             return accept_memory(&stored, Some(rec), yes);
         }
-        "open" | "proposed" | "refused" => {}
+        "open" | "proposed" | "refused" => {
+            if matches!(rec.status.as_str(), "open" | "proposed") {
+                if let Some(held) = live_atoms() {
+                    if atom_in_pack(&rec, &held) {
+                        note_outcome(&mut rec, "already-in-pack", "")?;
+                        return Ok(format!("already in pack {id}\n"));
+                    }
+                }
+            }
+        }
         _ => return Ok(format!("not found {id}\n")),
     }
     if let Some(why) = crate::pack_copy::gate_refusal(&rec.text) {
@@ -860,7 +1078,10 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
             rec.reason.clone_from(&why);
             note_outcome(&mut rec, "refused", &why)?;
         }
-        return Ok(format!("refused {id}: {why}\n"));
+        return Ok(format!(
+            "refused {id}: {}\n",
+            refusal_clause(&rec.text, &why)
+        ));
     }
     let client = crate::pack()?;
     if rec.remote {
@@ -887,7 +1108,10 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
                     let why =
                         crate::server_reason(&format!("{e:#}")).unwrap_or_else(|| format!("{e:#}"));
                     note_outcome(&mut rec, "refused", &why)?;
-                    return Ok(format!("refused {id}: {why}\n"));
+                    return Ok(format!(
+                        "refused {id}: {}\n",
+                        refusal_clause(&rec.text, &why)
+                    ));
                 }
                 return Err(e).with_context(|| format!("accept: POST /v1/atoms failed for {id}"));
             };

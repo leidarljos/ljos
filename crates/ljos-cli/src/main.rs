@@ -469,16 +469,19 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MemCmd,
     },
-    /// List lesson proposals, one line each: id, status, seat, text. A row with no seat says seat unknown.
+    /// List lesson proposals. Open rows the pack does not already hold come first, then refused rows, then a count of how many open rows are new and how many are already in pack. A refused row quotes the sentence.
     Proposals {
         /// Only proposals filed by this seat. `unknown` is a row that names none.
         #[arg(long)]
         seat: Option<String>,
-        /// Only proposals with this status: open, accepted, refused, already-in-pack.
+        /// Only proposals with this status: open, accepted, refused, already-in-pack. `in-pack` lists rows the pack already holds.
         #[arg(long)]
         status: Option<String>,
+        /// Record already-in-pack, and the time, on each open row the pack already holds. A second run writes nothing and deletes nothing.
+        #[arg(long)]
+        settle: bool,
     },
-    /// Accept stored memories or proposals. One id or prefix, or several. One result line each: accepted, already in pack, not found, or refused by the pack.
+    /// Accept stored memories or proposals. One id or prefix, or several. One result line each: accepted, already in pack, not found, or refused by the pack. A readability refusal quotes the sentence, after the value and the limit.
     Accept {
         /// Ids or prefixes. Each one gets its own result line.
         #[arg(required = true)]
@@ -2141,11 +2144,19 @@ fn run_command() -> Result<()> {
                 }
             }
         }
-        Cmd::Proposals { seat, status } => {
-            print!(
-                "{}",
-                ljos_cli::admit::list_proposals(seat.as_deref(), status.as_deref())
-            );
+        Cmd::Proposals {
+            seat,
+            status,
+            settle,
+        } => {
+            if settle {
+                print!("{}", ljos_cli::admit::settle_proposals(seat.as_deref())?);
+            } else {
+                print!(
+                    "{}",
+                    ljos_cli::admit::list_proposals(seat.as_deref(), status.as_deref())
+                );
+            }
         }
         Cmd::Accept {
             ids,
