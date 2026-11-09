@@ -532,6 +532,9 @@ enum Cmd {
         /// Only this import. The id is the input digest. Applied before the limit.
         #[arg(long)]
         import_id: Option<String>,
+        /// Print JSON. The ranking is a field, and the mode line is left off stderr.
+        #[arg(long)]
+        json: bool,
     },
     /// Candidate contradictions from the geometry of the seat's memory: the lowest passes between single memories, read by the optional `landscape` habitat.
     Conflicts {
@@ -899,7 +902,12 @@ enum Cmd {
         args: Vec<String>,
     },
     /// The working set for an issue: plan, its inputs' deeds, its own citations.
-    Recall { issue: String },
+    Recall {
+        issue: String,
+        /// Print JSON. The ranking is a field, and the mode line is left off stderr.
+        #[arg(long)]
+        json: bool,
+    },
     /// Release claims idle past a window and mail each seat. A dry run without --apply.
     Reap {
         /// How long a claim may sit with no claim or tracker commit: 6h, 90m, 2d.
@@ -2234,15 +2242,13 @@ fn run_command() -> Result<()> {
             source_machine,
             source_seat,
             import_id,
+            json,
         } => {
             ljos_cli::log_recall("search", &query.join(" "));
             // A short budget. Past it the word ranking prints. The call
             // does not sit until an outer timeout with nothing on screen.
             let _pack_clock = ljos_cli::pack_link::PackClock::enter(ljos_cli::SEARCH_PACK_BUDGET);
             let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
-            // Read before the search spends the budget. Empty when the
-            // encoder is ranking or the pack did not say.
-            let lexical = ljos_cli::lexical_ranking_label();
             let day = match valid_at.as_deref().map(str::trim) {
                 Some("any") => None,
                 Some(d) => {
@@ -2296,7 +2302,15 @@ fn run_command() -> Result<()> {
             }
             hits.truncate(limit as usize);
             ljos_cli::note_lookups(&hits);
-            print!("{lexical}{}", format_hits(&hits, explain));
+            let ranking = ljos_cli::ranking_now();
+            if json {
+                print!("{}", ljos_cli::search_json(&hits, ranking.as_ref()));
+            } else {
+                if let Some(ranking) = ranking.as_ref() {
+                    eprint!("{}", ljos_cli::ranking_line(ranking));
+                }
+                print!("{}", format_hits(&hits, explain));
+            }
         }
         Cmd::Evidence { args } => {
             if args.len() == 1 {
@@ -2657,12 +2671,21 @@ fn run_command() -> Result<()> {
             argv.extend(mapped.iter().map(String::as_str));
             run("vissue", &argv)?;
         }
-        Cmd::Recall { issue } => {
+        Cmd::Recall { issue, json } => {
             ljos_cli::log_recall("recall", &issue);
             let said = ljos_cli::tracker_recall(&issue)?;
             eprint!("{}", said.stderr);
-            print!("{}", said.stdout);
-            print!("{}", ljos_cli::recall_memories(&issue)?);
+            let memories = ljos_cli::recall_memories(&issue)?;
+            let ranking = ljos_cli::ranking_now();
+            if json {
+                print!("{}", ljos_cli::recall_json(&memories, ranking.as_ref()));
+            } else {
+                if let Some(ranking) = ranking.as_ref() {
+                    eprint!("{}", ljos_cli::ranking_line(ranking));
+                }
+                print!("{}", said.stdout);
+                print!("{memories}");
+            }
         }
         Cmd::Reap { idle, apply } => {
             print!(

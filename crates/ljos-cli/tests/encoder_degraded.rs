@@ -146,8 +146,10 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
         "doctor did not warn\nstdout:\n{text}\nstderr:\n{err}\nstatus: {}",
         doctor.status
     );
-    assert!(text.contains("word-matching only"), "{text}");
-    assert!(!text.contains("ljos is ready"), "{text}");
+    assert!(
+        text.contains("ranking is lexical: encoder unavailable; `ljos doctor --all` for why"),
+        "{text}"
+    );
     assert!(text.contains(ljos_cli::ENCODER_RESTART_COMMAND), "{text}");
     assert!(
         text.contains("lexical-only"),
@@ -170,13 +172,54 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
         cmd = ljos_cli::ENCODER_RESTART_COMMAND
     );
     assert!(
-        said.contains("ranking is lexical"),
-        "recall did not say the ranking is lexical\nstdout:\n{said}\nstderr:\n{recall_err}"
+        !said.contains("ranking is lexical"),
+        "the mode line belongs on stderr\nstdout:\n{said}"
     );
     assert!(
-        recall.status.success(),
-        "a lexical label must not fail recall\nstdout:\n{said}\nstderr:\n{recall_err}"
+        recall_err.contains("ranking is lexical: encoder unavailable"),
+        "recall did not name the ranking\nstderr:\n{recall_err}\nstdout:\n{said}"
     );
+
+    let search = run(home.path(), &path, &port, &["search", "fuse"]);
+    let search_out = String::from_utf8_lossy(&search.stdout);
+    let search_err = String::from_utf8_lossy(&search.stderr);
+    assert!(
+        search_err.contains("ranking is lexical: encoder unavailable"),
+        "search did not name the ranking\nstderr:\n{search_err}\nstdout:\n{search_out}"
+    );
+    assert!(
+        !search_out.contains("ranking is lexical"),
+        "search put the mode on stdout:\n{search_out}"
+    );
+
+    let as_json = run(home.path(), &path, &port, &["search", "--json", "fuse"]);
+    let json_out = String::from_utf8_lossy(&as_json.stdout);
+    let json_err = String::from_utf8_lossy(&as_json.stderr);
+    assert!(
+        !json_err.contains("ranking is lexical"),
+        "json search still printed the mode line:\n{json_err}"
+    );
+    let doc: serde_json::Value = serde_json::from_str(json_out.trim())
+        .unwrap_or_else(|err| panic!("search json did not parse ({err}): {json_out}"));
+    assert_eq!(doc["ranking"], "lexical", "{doc}");
+    assert_eq!(doc["reason"], "encoder unavailable", "{doc}");
+
+    let recall_json = run(
+        home.path(),
+        &path,
+        &port,
+        &["recall", "--json", "Scratch-1"],
+    );
+    let recall_body = String::from_utf8_lossy(&recall_json.stdout);
+    let recall_json_err = String::from_utf8_lossy(&recall_json.stderr);
+    assert!(
+        !recall_json_err.contains("ranking is lexical"),
+        "json recall still printed the mode line:\n{recall_json_err}"
+    );
+    let recalled: serde_json::Value = serde_json::from_str(recall_body.trim())
+        .unwrap_or_else(|err| panic!("recall json did not parse ({err}): {recall_body}"));
+    assert_eq!(recalled["ranking"], "lexical", "{recalled}");
+    assert_eq!(recalled["reason"], "encoder unavailable", "{recalled}");
 }
 
 /// `packset-embed` exits with a loader line. Doctor must not read
@@ -215,56 +258,6 @@ fn a_loader_error_is_not_the_encoder_version() {
     assert!(
         !text.contains("ahead of crates.io"),
         "doctor compared a loader token with crates.io\n{text}"
-    );
-}
-
-/// The encoder binary does not start and the writer says the last call
-/// failed. Doctor, search and recall label that, and each still exits 0.
-#[test]
-fn a_dead_encoder_labels_word_matching_and_lexical_ranking() {
-    let (home, path, port) = failing_encoder_seat("encoder-lexical");
-    let doctor = run(home.path(), &path, &port, &["doctor"]);
-    let text = String::from_utf8_lossy(&doctor.stdout);
-    let err = String::from_utf8_lossy(&doctor.stderr);
-    assert!(
-        doctor.status.success(),
-        "doctor failed\nstdout:\n{text}\nstderr:\n{err}"
-    );
-    assert!(text.contains("ljos works"), "{text}");
-    assert!(text.contains("recall is word-matching only"), "{text}");
-    assert!(text.contains(ljos_cli::ENCODER_RESTART_COMMAND), "{text}");
-    assert!(!text.contains("ljos is ready"), "{text}");
-
-    let search = run(home.path(), &path, &port, &["search", "glibc"]);
-    let search_out = String::from_utf8_lossy(&search.stdout);
-    let search_err = String::from_utf8_lossy(&search.stderr);
-    assert!(
-        search.status.success(),
-        "search failed\nstdout:\n{search_out}\nstderr:\n{search_err}"
-    );
-    assert!(
-        search_out.starts_with(ljos_cli::LEXICAL_ONLY_LINE),
-        "search did not label lexical ranking\nstdout:\n{search_out}\nstderr:\n{search_err}"
-    );
-    assert_eq!(
-        search_out
-            .lines()
-            .filter(|line| line.contains("ranking is lexical"))
-            .count(),
-        1,
-        "{search_out}"
-    );
-
-    let recall = run(home.path(), &path, &port, &["recall", "Scratch-1"]);
-    let recall_out = String::from_utf8_lossy(&recall.stdout);
-    let recall_err = String::from_utf8_lossy(&recall.stderr);
-    assert!(
-        recall.status.success(),
-        "recall failed\nstdout:\n{recall_out}\nstderr:\n{recall_err}"
-    );
-    assert!(
-        recall_out.contains(ljos_cli::LEXICAL_ONLY_LINE.trim_end()),
-        "recall did not label lexical ranking\nstdout:\n{recall_out}\nstderr:\n{recall_err}"
     );
 }
 

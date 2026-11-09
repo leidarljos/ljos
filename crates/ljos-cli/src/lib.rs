@@ -13332,10 +13332,78 @@ pub const ENCODER_RESTART_COMMAND: &str = "packset stop && packset ensure";
 /// The encoder row opens with this when the last dense call did not answer.
 pub const ENCODER_DEGRADED: &str = "recall is degraded";
 
-/// One line `ljos search` and `ljos recall` print when the encoder cannot
-/// rank. The hits still print; the line is a label, not a refusal.
+/// What a sitting and a recall print when the rows they show were ranked
+/// by words alone.
 pub const LEXICAL_ONLY_LINE: &str =
-    "ranking is lexical: the encoder is unavailable, so these results match words alone\n";
+    "lexical-only: packset-embed is not running, so these results match words alone\n";
+
+/// How a search or a recall ranked, from the writer's encoder status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ranking {
+    /// `semantic` when the encoder answered, `lexical` when it did not.
+    pub mode: &'static str,
+    /// Set when [`Self::mode`] is `lexical`.
+    pub reason: &'static str,
+}
+
+/// The ranking the pack will use now. `None` when the writer did not answer.
+#[must_use]
+pub fn ranking_now() -> Option<Ranking> {
+    let status = read_encoder_status()?;
+    Some(if encoder_failed(&status) || encoder_lexical(&status) {
+        Ranking {
+            mode: "lexical",
+            reason: "encoder unavailable",
+        }
+    } else {
+        Ranking {
+            mode: "semantic",
+            reason: "",
+        }
+    })
+}
+
+/// One line for stderr: `ranking is semantic` or `ranking is lexical: <reason>`.
+#[must_use]
+pub fn ranking_line(ranking: &Ranking) -> String {
+    if ranking.mode == "lexical" {
+        format!("ranking is lexical: {}\n", ranking.reason)
+    } else {
+        "ranking is semantic\n".to_string()
+    }
+}
+
+/// Search hits as JSON, with the ranking the pack used.
+#[must_use]
+pub fn search_json(hits: &[Hit], ranking: Option<&Ranking>) -> String {
+    let rows: Vec<Value> = hits
+        .iter()
+        .map(|hit| {
+            serde_json::json!({
+                "id": hit.id,
+                "kind": hit.kind,
+                "text": hit.text,
+                "score": hit.score,
+            })
+        })
+        .collect();
+    ranking_doc(ranking, serde_json::json!({ "hits": rows }))
+}
+
+/// Recall text as JSON, with the ranking the pack used.
+#[must_use]
+pub fn recall_json(text: &str, ranking: Option<&Ranking>) -> String {
+    ranking_doc(ranking, serde_json::json!({ "text": text }))
+}
+
+fn ranking_doc(ranking: Option<&Ranking>, mut doc: Value) -> String {
+    let mode = ranking.map(|row| row.mode).unwrap_or("semantic");
+    doc["ranking"] = Value::String(mode.to_string());
+    if let Some(ranking) = ranking.filter(|row| row.mode == "lexical") {
+        doc["reason"] = Value::String(ranking.reason.to_string());
+    }
+    format!("{}\n", serde_json::to_string(&doc).unwrap_or_default())
+}
 
 /// Marker that this seat already ran [`ENCODER_RESTART_COMMAND`] for the
 /// current outage. One attempt: repeating it would stop a shared writer
@@ -13369,26 +13437,6 @@ pub(crate) fn encoder_degraded_state() -> String {
         "{ENCODER_DEGRADED}: packset-embed is not running, so ranking is lexical-only. \
          Run `{ENCODER_RESTART_COMMAND}`"
     )
-}
-
-/// That label when the pack says the encoder is down or missing, else
-/// empty. A cold encoder that is still loading is not this, and a pack
-/// that does not answer is not guessed at.
-#[must_use]
-pub fn lexical_ranking_label() -> &'static str {
-    if read_encoder_status().is_some_and(|status| encoder_lexical(&status)) {
-        LEXICAL_ONLY_LINE
-    } else {
-        ""
-    }
-}
-
-fn label_lexical(mut out: String) -> String {
-    let line = lexical_ranking_label();
-    if !line.is_empty() && !out.starts_with(line) {
-        out.insert_str(0, line);
-    }
-    out
 }
 
 fn encoder_restart_mark() -> PathBuf {
@@ -30913,6 +30961,10 @@ fn summary_line(
     degraded: bool,
 ) -> String {
     let mut line = summary_verdict(down, damaged, working, degraded);
+    if degraded {
+        line.push('\n');
+        return line;
+    }
     if off > 0 {
         line.push_str(" Optional extras: `ljos doctor --all`.\n");
     } else {
@@ -30939,18 +30991,6 @@ fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str], degraded: 
         why.push(format!("{} {verb} damaged", and_list(damaged)));
     }
     let why = why.join(", and ");
-    // A dead encoder is not "ljos is ready". The seat still runs; recall
-    // matches words, and the line names the command that replaces the writer.
-    if degraded && why.is_empty() {
-        let works = match working {
-            [] => "ljos works".to_string(),
-            [one] => format!("ljos works: {one} works"),
-            parts => format!("ljos works: {} work", and_list(parts)),
-        };
-        return format!(
-            "{works}, but recall is word-matching only. Run `{ENCODER_RESTART_COMMAND}`."
-        );
-    }
     let verdict = if why.is_empty() {
         match working {
             [] => "ljos is ready.".to_string(),
@@ -30963,9 +31003,18 @@ fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str], degraded: 
         format!("ljos is not ready: {why}.")
     };
     if degraded {
-        format!("{verdict} Recall is word-matching only. Run `{ENCODER_RESTART_COMMAND}`.")
+        lexical_ready(verdict)
     } else {
         verdict
+    }
+}
+
+/// The ready sentence, with the lexical label in place of the final period.
+fn lexical_ready(ready: String) -> String {
+    const NOTE: &str = " (ranking is lexical: encoder unavailable; `ljos doctor --all` for why)";
+    match ready.strip_suffix('.') {
+        Some(body) => format!("{body}{NOTE}"),
+        None => format!("{ready}{NOTE}"),
     }
 }
 
@@ -31044,7 +31093,6 @@ fn is_status_line(line: &str) -> bool {
     if line.starts_with("ljos is ready")
         || line.starts_with("ljos is not ready")
         || line.starts_with("ljos runs, but")
-        || line.starts_with("ljos works")
         || line.starts_with("encoder down:")
         || line.starts_with("memory-unavailable:")
         || line.contains("the encoder is down")
@@ -34749,7 +34797,13 @@ pub fn recall_memories(issue: &str) -> Result<String> {
 pub(crate) fn recall_memories_for_prompt(issue: &str) -> String {
     let _clock = arm_cmd_pack();
     match recall_memories_with(issue, false) {
-        Ok(text) => text,
+        Ok(text) => {
+            if read_encoder_status().as_ref().is_some_and(encoder_lexical) {
+                format!("{LEXICAL_ONLY_LINE}{text}")
+            } else {
+                text
+            }
+        }
         Err(err) if is_pack_busy(&err) => String::new(),
         Err(err) => recall_down(&err),
     }
@@ -34825,14 +34879,17 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
         match ask(&|| packset_search_relevant(cue, pool)) {
             Ok(hits) => related.extend(hits),
             Err(err) if is_pack_busy(&err) => return Err(err),
-            Err(e) if own.is_empty() && related.is_empty() => {
-                return Ok(label_lexical(recall_down(&e)))
-            }
+            Err(e) if own.is_empty() && related.is_empty() => return Ok(recall_down(&e)),
             Err(_) => break,
         }
     }
-    let out = recall_lines(&own, related, &cues.join(" "), &now_utc(), include_notes);
-    Ok(label_lexical(out))
+    Ok(recall_lines(
+        &own,
+        related,
+        &cues.join(" "),
+        &now_utc(),
+        include_notes,
+    ))
 }
 
 /// The `cap` of `rows` most relevant to `cue`, in the order they came.
@@ -57882,12 +57939,10 @@ mod tests {
         let short = format_doctor_short(&rows);
         assert!(
             short.starts_with(
-                "ljos works: memory, tracker and command guard work, but recall is word-matching only. \
-                 Run `packset stop && packset ensure`."
+                "ljos is ready: memory, tracker and command guard work (ranking is lexical: encoder unavailable; `ljos doctor --all` for why)"
             ),
             "{short}"
         );
-        assert!(!short.contains("ljos is ready"), "{short}");
         assert!(short.contains("warn\tencoder\t"), "{short}");
         assert!(short.contains(ENCODER_RESTART_COMMAND), "{short}");
         assert!(short.contains("lexical-only"), "{short}");
@@ -57898,11 +57953,10 @@ mod tests {
         let sat = compact_sitting(&full, "Software-x");
         assert!(
             sat.contains(
-                "ljos works: memory works, but recall is word-matching only. Run `packset stop && packset ensure`."
+                "ljos is ready: memory works (ranking is lexical: encoder unavailable; `ljos doctor --all` for why)"
             ),
             "{sat}"
         );
-        assert!(!sat.contains("ljos is ready"), "{sat}");
         assert!(sat.contains(LEXICAL_ONLY_LINE.trim_end()), "{sat}");
     }
 
@@ -57949,7 +58003,7 @@ mod tests {
         ];
         let short = format_doctor_short(&rows);
         assert!(
-            short.contains("ljos works") && short.contains("recall is word-matching only"),
+            short.contains("ljos is ready") && short.contains("ranking is lexical"),
             "{short}"
         );
         assert!(
@@ -57957,7 +58011,6 @@ mod tests {
             "{short}"
         );
         assert!(!short.contains("ahead of"), "{short}");
-        assert!(!short.contains("ljos is ready"), "{short}");
     }
 
     #[test]
