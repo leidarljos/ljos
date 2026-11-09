@@ -73,6 +73,16 @@ struct Record {
     /// them instead of the person typing in a terminal of their own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     grant: Option<Yes>,
+    /// The seat that filed the proposal. Empty on a row written before
+    /// seats were recorded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    seat: String,
+    /// When the latest outcome was written, RFC 3339.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    at: String,
+    /// The pack's reason, when the outcome is `refused`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    reason: String,
     atom: Value,
 }
 
@@ -685,6 +695,116 @@ pub fn accept(id: &str) -> Result<String> {
     accept_on(id, None)
 }
 
+/// Accept each id or prefix. One result line per id: `accepted`,
+/// `already in pack`, `not found`, or `refused` with the pack's reason.
+/// A refusal names the measured value and the limit. One id does not
+/// stop the rest.
+#[must_use]
+pub fn accept_ids(ids: &[String], yes: Option<&crate::quoted_yes::Yes>) -> String {
+    let mut out = String::new();
+    for id in ids {
+        let line = match accept_on(id, yes) {
+            Ok(line) => line,
+            Err(err) => format!("refused {}: {err:#}\n", id.trim()),
+        };
+        if line.ends_with('\n') {
+            out.push_str(&line);
+        } else {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// File an open proposal from this seat. The row names the seat, so a
+/// later list can count proposals per seat.
+///
+/// # Errors
+///
+/// The text is empty, or the proposal log cannot be written.
+pub fn file_open(text: &str, kind: &str) -> Result<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("proposals: empty text is not a proposal");
+    }
+    let kind = if kind.trim().is_empty() {
+        "lesson"
+    } else {
+        kind.trim()
+    };
+    let seat = crate::seat_name();
+    let id = proposal_id(text, &seat);
+    let rec = Record {
+        id: id.clone(),
+        status: "open".into(),
+        remote: false,
+        remote_id: None,
+        stored: None,
+        text: text.to_string(),
+        kind: kind.to_string(),
+        origin: ORIGIN_AGENT.into(),
+        grant: None,
+        seat,
+        at: crate::now_utc(),
+        reason: String::new(),
+        atom: serde_json::json!({
+            "kind": kind,
+            "text": text,
+            "origin": ORIGIN_AGENT,
+            "level": LEVEL_L0,
+            "source": {"seat": crate::seat_name(), "basis": "agent"},
+        }),
+    };
+    append(&rec)?;
+    Ok(format!("{id}\n"))
+}
+
+fn proposal_id(text: &str, seat: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{seat}\n{text}").as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).take(16).collect()
+}
+
+/// The latest proposal per id, filtered by seat and status. A row that
+/// names no seat is `seat unknown`.
+#[must_use]
+pub fn list_proposals(seat: Option<&str>, status: Option<&str>) -> String {
+    let want_seat = seat.map(str::trim).filter(|s| !s.is_empty());
+    let want_status = status.map(str::trim).filter(|s| !s.is_empty());
+    let mut rows: Vec<Record> = read_latest().into_values().collect();
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut out = String::new();
+    for rec in rows {
+        let shown = if rec.seat.trim().is_empty() {
+            "seat unknown".to_string()
+        } else {
+            format!("seat {}", rec.seat)
+        };
+        if let Some(seat) = want_seat {
+            let unknown = seat == "unknown" || seat == "seat unknown";
+            if unknown {
+                if !rec.seat.trim().is_empty() {
+                    continue;
+                }
+            } else if rec.seat != seat {
+                continue;
+            }
+        }
+        if let Some(status) = want_status {
+            if rec.status != status {
+                continue;
+            }
+        }
+        let text = rec.text.replace('\n', " ");
+        out.push_str(&format!("{}  {}  {shown}  {text}\n", rec.id, rec.status));
+    }
+    if out.is_empty() {
+        out.push_str("no proposals\n");
+    }
+    out
+}
+
 /// [`accept`], recording the person's words the acceptance rests on.
 ///
 /// `id` names a live memory, or a proposal row: an open one is stored
@@ -707,37 +827,47 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
         bail!("accept: an id is required");
     }
     let rows = read_latest();
-    let pending: Vec<String> = rows
-        .values()
-        .filter(|r| matches!(r.status.as_str(), "open" | "stored" | "refused"))
-        .map(|r| r.id.clone())
-        .collect();
-    let id = crate::resolve_short_id("accept", id, &pending)?;
+    let known: Vec<String> = rows.keys().cloned().collect();
+    let id = match crate::resolve_short_id("accept", id, &known) {
+        Ok(id) => id,
+        Err(err) => return Ok(format!("not found {id}: {err:#}\n")),
+    };
     let id = id.as_str();
     let Some(mut rec) = rows.get(id).cloned() else {
-        return accept_memory(id, None, yes);
+        return match accept_memory(id, None, yes) {
+            Ok(line) => Ok(line),
+            Err(err) if err.to_string().contains("no memory") => Ok(format!("not found {id}\n")),
+            Err(err) => Err(err),
+        };
     };
     rec.grant = yes.cloned();
     match rec.status.as_str() {
         "satisfied" => {
             close_remote(&rec);
-            return Ok(format!("{id} was already written by remember or prefer\n"));
+            note_outcome(&mut rec, "already-in-pack", "")?;
+            return Ok(format!("already in pack {id}\n"));
         }
-        "accepted" => return Ok(format!("{id} is already in the pack\n")),
+        "accepted" | "already-in-pack" => return Ok(format!("already in pack {id}\n")),
         "stored" => {
             let stored = rec.stored.clone().unwrap_or_default();
             return accept_memory(&stored, Some(rec), yes);
         }
-        "open" | "refused" => {}
-        _ => bail!("accept: no open proposal {id}"),
+        "open" | "proposed" | "refused" => {}
+        _ => return Ok(format!("not found {id}\n")),
+    }
+    if let Some(why) = crate::pack_copy::gate_refusal(&rec.text) {
+        if rec.status != "refused" || rec.reason != why {
+            rec.reason.clone_from(&why);
+            note_outcome(&mut rec, "refused", &why)?;
+        }
+        return Ok(format!("refused {id}: {why}\n"));
     }
     let client = crate::pack()?;
     if rec.remote {
         let remote_id = rec.remote_id.clone().unwrap_or_else(|| rec.id.clone());
         let workspace = workspace_of(&client, &rec);
         let posted = accept_on_writer(&client, &workspace, &remote_id)?;
-        rec.status = "accepted".into();
-        append(&rec)?;
+        note_outcome(&mut rec, "accepted", "")?;
         return Ok(accepted_line(&rec, &posted));
     }
     // A person accepting the proposal is the promotion off L0. The origin
@@ -746,14 +876,19 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
     stand_for_prompt(&mut rec.atom);
     match post_kept(&client, &rec.atom) {
         Ok(posted) => {
-            rec.status = "accepted".into();
             rec.stored = posted["id"].as_str().map(str::to_string);
-            append(&rec)?;
+            note_outcome(&mut rec, "accepted", "")?;
             Ok(accepted_line(&rec, &posted))
         }
         Err(e) => {
             let text = e.to_string();
             let Some(remote_id) = held_proposal_id(&text) else {
+                if !crate::note_can_wait(&e) {
+                    let why =
+                        crate::server_reason(&format!("{e:#}")).unwrap_or_else(|| format!("{e:#}"));
+                    note_outcome(&mut rec, "refused", &why)?;
+                    return Ok(format!("refused {id}: {why}\n"));
+                }
                 return Err(e).with_context(|| format!("accept: POST /v1/atoms failed for {id}"));
             };
             // Filed while this writer was not holding, or the post is the
@@ -762,11 +897,22 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
             let posted = accept_on_writer(&client, &workspace, &remote_id)?;
             rec.remote = true;
             rec.remote_id = Some(remote_id);
-            rec.status = "accepted".into();
-            append(&rec)?;
+            note_outcome(&mut rec, "accepted", "")?;
             Ok(accepted_line(&rec, &posted))
         }
     }
+}
+
+/// Record `status` on `rec` and the time, when it changed. A repeat of the
+/// same outcome writes nothing.
+fn note_outcome(rec: &mut Record, status: &str, reason: &str) -> Result<()> {
+    if rec.status == status && rec.reason == reason && !rec.at.is_empty() {
+        return Ok(());
+    }
+    rec.status = status.to_string();
+    rec.reason = reason.to_string();
+    rec.at = crate::now_utc();
+    append(rec)
 }
 
 /// Accept live memory `id`, a whole id or the start of one: raise its level
@@ -810,12 +956,18 @@ fn accept_memory(id: &str, rec: Option<Record>, yes: Option<&Yes>) -> Result<Str
         kind: atom["kind"].as_str().unwrap_or("lesson").to_string(),
         origin: atom["origin"].as_str().unwrap_or("").to_string(),
         grant: None,
+        seat: atom["source"]["seat"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        at: String::new(),
+        reason: String::new(),
         atom,
     });
-    rec.status = "accepted".into();
     rec.stored = Some(full);
     rec.grant = yes.cloned();
-    append(&rec)?;
+    note_outcome(&mut rec, "accepted", "")?;
     Ok(accepted_line(&rec, &posted))
 }
 
@@ -835,6 +987,9 @@ mod tests {
             kind: "lesson".into(),
             origin: ORIGIN_AGENT.into(),
             grant: None,
+            seat: String::new(),
+            at: String::new(),
+            reason: String::new(),
             atom: serde_json::json!({"text": "use uv for python envs"}),
         }
     }

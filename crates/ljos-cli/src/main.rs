@@ -469,9 +469,20 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MemCmd,
     },
-    /// Accept a stored memory, or a proposal an older ljos filed: its level rises to explicit and the review keeps it. Search finds the memory before and after.
+    /// List lesson proposals, one line each: id, status, seat, text. A row with no seat says seat unknown.
+    Proposals {
+        /// Only proposals filed by this seat. `unknown` is a row that names none.
+        #[arg(long)]
+        seat: Option<String>,
+        /// Only proposals with this status: open, accepted, refused, already-in-pack.
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Accept stored memories or proposals. One id or prefix, or several. One result line each: accepted, already in pack, not found, or refused by the pack.
     Accept {
-        id: String,
+        /// Ids or prefixes. Each one gets its own result line.
+        #[arg(required = true)]
+        ids: Vec<String>,
         /// The person's own words accepting this lesson, as they said them. Needs --at and --via, and takes the place of a terminal of the person's own.
         #[arg(long)]
         quote: Option<String>,
@@ -2122,9 +2133,20 @@ fn run_command() -> Result<()> {
                 }
             }
         }
-        Cmd::Accept { id, quote, at, via } => {
+        Cmd::Proposals { seat, status } => {
+            print!(
+                "{}",
+                ljos_cli::admit::list_proposals(seat.as_deref(), status.as_deref())
+            );
+        }
+        Cmd::Accept {
+            ids,
+            quote,
+            at,
+            via,
+        } => {
             let yes = ljos_cli::quoted_yes::read(quote.as_deref(), at.as_deref(), via.as_deref())?;
-            print!("{}", ljos_cli::admit::accept_on(&id, yes.as_ref())?);
+            print!("{}", ljos_cli::admit::accept_ids(&ids, yes.as_ref()));
         }
         Cmd::Export { out } => export_memories(&out)?,
         Cmd::Memory { cmd } => memory_cmd(cmd)?,
