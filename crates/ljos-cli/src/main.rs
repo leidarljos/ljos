@@ -2214,6 +2214,9 @@ fn run_command() -> Result<()> {
             // does not sit until an outer timeout with nothing on screen.
             let _pack_clock = ljos_cli::pack_link::PackClock::enter(ljos_cli::SEARCH_PACK_BUDGET);
             let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
+            // Read before the search spends the budget. Empty when the
+            // encoder is ranking or the pack did not say.
+            let lexical = ljos_cli::lexical_ranking_label();
             let day = match valid_at.as_deref().map(str::trim) {
                 Some("any") => None,
                 Some(d) => {
@@ -2266,7 +2269,7 @@ fn run_command() -> Result<()> {
                 ljos_cli::prefer_calling_seat(&mut hits);
             }
             hits.truncate(limit as usize);
-            print!("{}", format_hits(&hits, explain));
+            print!("{lexical}{}", format_hits(&hits, explain));
         }
         Cmd::Evidence { args } => {
             if args.len() == 1 {

@@ -146,10 +146,8 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
         "doctor did not warn\nstdout:\n{text}\nstderr:\n{err}\nstatus: {}",
         doctor.status
     );
-    assert!(
-        text.contains("Recall is degraded: ranking is lexical-only."),
-        "{text}"
-    );
+    assert!(text.contains("word-matching only"), "{text}");
+    assert!(!text.contains("ljos is ready"), "{text}");
     assert!(text.contains(ljos_cli::ENCODER_RESTART_COMMAND), "{text}");
     assert!(
         text.contains("lexical-only"),
@@ -172,7 +170,138 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
         cmd = ljos_cli::ENCODER_RESTART_COMMAND
     );
     assert!(
-        said.contains("lexical-only"),
-        "recall did not say the results are lexical-only\nstdout:\n{said}\nstderr:\n{recall_err}"
+        said.contains("ranking is lexical"),
+        "recall did not say the ranking is lexical\nstdout:\n{said}\nstderr:\n{recall_err}"
     );
+    assert!(
+        recall.status.success(),
+        "a lexical label must not fail recall\nstdout:\n{said}\nstderr:\n{recall_err}"
+    );
+}
+
+/// `packset-embed` exits with a loader line. Doctor must not read
+/// `GLIBCXX_3.4.34` as the crate version.
+#[test]
+fn a_loader_error_is_not_the_encoder_version() {
+    let (home, path, port) = failing_encoder_seat("encoder-loader");
+    let doctor = run(home.path(), &path, &port, &["doctor", "--all"]);
+    let text = String::from_utf8_lossy(&doctor.stdout);
+    let err = String::from_utf8_lossy(&doctor.stderr);
+    assert!(
+        doctor.status.success(),
+        "a broken encoder must not fail doctor\nstdout:\n{text}\nstderr:\n{err}"
+    );
+    let row = text
+        .lines()
+        .find(|line| line.split('\t').nth(1) == Some("packset-embed"))
+        .unwrap_or_else(|| panic!("no packset-embed row\n{text}"));
+    let mut cols = row.splitn(3, '\t');
+    let word = cols.next().unwrap_or("");
+    let _name = cols.next();
+    let state = cols.next().unwrap_or("");
+    assert_eq!(word, "warn", "{row}");
+    assert!(
+        state.starts_with("not runnable: \""),
+        "the encoder was not reported as not runnable: {state}"
+    );
+    assert!(
+        state.contains("version GLIBCXX_3.4.34 not found"),
+        "the first error line was not quoted: {state}"
+    );
+    assert!(
+        !state.contains("crates.io") && !state.contains("ahead"),
+        "the loader token was read as a version: {state}"
+    );
+    assert!(
+        !text.contains("ahead of crates.io"),
+        "doctor compared a loader token with crates.io\n{text}"
+    );
+}
+
+/// The encoder binary does not start and the writer says the last call
+/// failed. Doctor, search and recall label that, and each still exits 0.
+#[test]
+fn a_dead_encoder_labels_word_matching_and_lexical_ranking() {
+    let (home, path, port) = failing_encoder_seat("encoder-lexical");
+    let doctor = run(home.path(), &path, &port, &["doctor"]);
+    let text = String::from_utf8_lossy(&doctor.stdout);
+    let err = String::from_utf8_lossy(&doctor.stderr);
+    assert!(
+        doctor.status.success(),
+        "doctor failed\nstdout:\n{text}\nstderr:\n{err}"
+    );
+    assert!(text.contains("ljos works"), "{text}");
+    assert!(text.contains("recall is word-matching only"), "{text}");
+    assert!(text.contains(ljos_cli::ENCODER_RESTART_COMMAND), "{text}");
+    assert!(!text.contains("ljos is ready"), "{text}");
+
+    let search = run(home.path(), &path, &port, &["search", "glibc"]);
+    let search_out = String::from_utf8_lossy(&search.stdout);
+    let search_err = String::from_utf8_lossy(&search.stderr);
+    assert!(
+        search.status.success(),
+        "search failed\nstdout:\n{search_out}\nstderr:\n{search_err}"
+    );
+    assert!(
+        search_out.starts_with(ljos_cli::LEXICAL_ONLY_LINE),
+        "search did not label lexical ranking\nstdout:\n{search_out}\nstderr:\n{search_err}"
+    );
+    assert_eq!(
+        search_out
+            .lines()
+            .filter(|line| line.contains("ranking is lexical"))
+            .count(),
+        1,
+        "{search_out}"
+    );
+
+    let recall = run(home.path(), &path, &port, &["recall", "Scratch-1"]);
+    let recall_out = String::from_utf8_lossy(&recall.stdout);
+    let recall_err = String::from_utf8_lossy(&recall.stderr);
+    assert!(
+        recall.status.success(),
+        "recall failed\nstdout:\n{recall_out}\nstderr:\n{recall_err}"
+    );
+    assert!(
+        recall_out.contains(ljos_cli::LEXICAL_ONLY_LINE.trim_end()),
+        "recall did not label lexical ranking\nstdout:\n{recall_out}\nstderr:\n{recall_err}"
+    );
+}
+
+fn failing_encoder_seat(name: &str) -> (SeatHome, String, String) {
+    let home = SeatHome::new(name);
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin");
+    let stub = r#"#!/bin/sh
+name=$(basename "$0")
+if [ "$1" = --version ]; then
+  echo "$name 99.0.0"
+fi
+exit 0
+"#;
+    for bin_name in [
+        "ljos",
+        "ljos-mcp",
+        "ljos-policyd",
+        "deedar",
+        "claimdag",
+        "packset",
+        "packsetd",
+    ] {
+        executable(&bin.join(bin_name), stub);
+    }
+    executable(&bin.join("curl"), "#!/bin/sh\nexit 1\n");
+    executable(
+        &bin.join("vissue"),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'vissue 99.0.0' ;;\n  recall) echo recalled ;;\n  vote) echo '--used --confidence' ;;\n  identity) echo 'vissue 99.0.0 root=/t' ;;\n  *) echo ok ;;\nesac\nexit 0\n",
+    );
+    // Stdout is version-shaped on purpose. A parser that ignores the exit
+    // status, or that reads the loader line, reports 3.4.34.
+    executable(
+        &bin.join("packset-embed"),
+        "#!/bin/sh\nprintf '%s\\n' 'packset-embed 3.4.34'\nprintf '%s\\n' 'version GLIBCXX_3.4.34 not found (required by packset-embed)' >&2\nexit 1\n",
+    );
+    let port = dead_encoder();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    (home, path, port)
 }

@@ -13062,13 +13062,10 @@ pub const ENCODER_RESTART_COMMAND: &str = "packset stop && packset ensure";
 /// The encoder row opens with this when the last dense call did not answer.
 pub const ENCODER_DEGRADED: &str = "recall is degraded";
 
-/// What a sitting and a recall print when the rows they show were ranked
-/// by words alone.
+/// One line `ljos search` and `ljos recall` print when the encoder cannot
+/// rank. The hits still print; the line is a label, not a refusal.
 pub const LEXICAL_ONLY_LINE: &str =
-    "lexical-only: packset-embed is not running, so these results match words alone\n";
-
-/// The headline clause for that row.
-const RECALL_DEGRADED_HEADLINE: &str = "Recall is degraded: ranking is lexical-only.";
+    "ranking is lexical: the encoder is unavailable, so these results match words alone\n";
 
 /// Marker that this seat already ran [`ENCODER_RESTART_COMMAND`] for the
 /// current outage. One attempt: repeating it would stop a shared writer
@@ -13102,6 +13099,26 @@ pub(crate) fn encoder_degraded_state() -> String {
         "{ENCODER_DEGRADED}: packset-embed is not running, so ranking is lexical-only. \
          Run `{ENCODER_RESTART_COMMAND}`"
     )
+}
+
+/// That label when the pack says the encoder is down or missing, else
+/// empty. A cold encoder that is still loading is not this, and a pack
+/// that does not answer is not guessed at.
+#[must_use]
+pub fn lexical_ranking_label() -> &'static str {
+    if read_encoder_status().is_some_and(|status| encoder_lexical(&status)) {
+        LEXICAL_ONLY_LINE
+    } else {
+        ""
+    }
+}
+
+fn label_lexical(mut out: String) -> String {
+    let line = lexical_ranking_label();
+    if !line.is_empty() && !out.starts_with(line) {
+        out.insert_str(0, line);
+    }
+    out
 }
 
 fn encoder_restart_mark() -> PathBuf {
@@ -28061,20 +28078,80 @@ pub fn parse_semver(text: &str) -> Option<&str> {
     None
 }
 
-fn bin_version(bin: &str) -> Option<String> {
+/// Semver from a `--version` line whose first word is `bin`.
+///
+/// `packset-embed 0.17.4` matches, and so does a build note after the
+/// number. A loader line does not, including `version GLIBCXX_3.4.34 not
+/// found (required by packset-embed)`: that token is not the program's
+/// version, and the line does not open with the program's name.
+fn version_named(bin: &str, stdout: &str) -> Option<String> {
+    let line = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let mut words = line.split_whitespace();
+    if words.next() != Some(bin) {
+        return None;
+    }
+    let rest = words.collect::<Vec<_>>().join(" ");
+    parse_semver(&rest).map(str::to_string)
+}
+
+/// What `--version` actually reported. `error` is the program's first
+/// line when the run did not exit 0 with a line that names `bin`.
+struct ProbedVersion {
+    version: Option<String>,
+    error: Option<String>,
+}
+
+fn first_output_line(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!flat.is_empty()).then_some(flat)
+}
+
+fn probe_version(bin: &str) -> ProbedVersion {
     use std::process::Command;
-    let path = which::which(bin).ok()?;
+    let Some(path) = which::which(bin).ok() else {
+        return ProbedVersion {
+            version: None,
+            error: None,
+        };
+    };
     // A binary that does not implement --version, or never exits, used to
     // hold doctor for as long as it sat. Every seat binary gets the same
     // short wait, and a grandchild it leaves on the pipe is stopped with it.
     let mut cmd = Command::new(&path);
     cmd.arg("--version");
-    let said = output_within(cmd, None, SEAT_ANSWER_BUDGET).ok()?;
+    let Ok(said) = output_within(cmd, None, SEAT_ANSWER_BUDGET) else {
+        return ProbedVersion {
+            version: None,
+            error: None,
+        };
+    };
     let stdout = String::from_utf8_lossy(&said.stdout);
     let stderr = String::from_utf8_lossy(&said.stderr);
-    parse_semver(&stdout)
-        .or_else(|| parse_semver(&stderr))
-        .map(str::to_string)
+    // Exit 0 and a line that names the program. Stderr is not a version:
+    // a dynamic linker writes GLIBCXX_3.4.34 there when the binary cannot
+    // start, and that token is not the release.
+    if said.status.success() {
+        if let Some(version) = version_named(bin, &stdout) {
+            return ProbedVersion {
+                version: Some(version),
+                error: None,
+            };
+        }
+    }
+    ProbedVersion {
+        version: None,
+        error: first_output_line(&stderr).or_else(|| first_output_line(&stdout)),
+    }
+}
+
+/// `packset-embed` is on `PATH` and did not print its version. The row
+/// quotes the loader line when there is one.
+fn encoder_not_runnable(line: Option<&str>) -> String {
+    match line.map(str::trim).filter(|l| !l.is_empty()) {
+        Some(line) => format!("not runnable: \"{line}\""),
+        None => "not runnable".to_string(),
+    }
 }
 
 /// A day, in seconds: how long a crates.io answer is kept on disk.
@@ -29246,7 +29323,18 @@ pub fn doctor_seat() -> Vec<Habitat> {
     let mut out = Vec::new();
     for (bin, crate_name) in SEAT_BINS {
         let found = which::which(bin).ok();
-        let have = found.as_ref().and_then(|_| bin_version(bin));
+        let probed = found.as_ref().map(|_| probe_version(bin));
+        let have = probed.as_ref().and_then(|p| p.version.clone());
+        // The encoder's loader error is not a version. A binary that does
+        // not start is named here, and the seat still ranks by words.
+        if *bin == "packset-embed" && found.is_some() && have.is_none() {
+            out.push(Habitat {
+                name: bin,
+                state: encoder_not_runnable(probed.as_ref().and_then(|p| p.error.as_deref())),
+                ok: false,
+            });
+            continue;
+        }
         let latest = crate_version_for(crate_name, have.as_deref());
         let ballot_protocol = found
             .as_deref()
@@ -30406,6 +30494,11 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "encoder" && !row.ok && row.state.starts_with(ENCODER_DEGRADED) {
         return "warn";
     }
+    // The binary is on PATH and did not start. Same warning: the loader
+    // line is quoted, and doctor does not fail the seat for it.
+    if row.name == "packset-embed" && row.state.starts_with("not runnable") {
+        return "warn";
+    }
     // Older user rules awaiting confirmation are the same kind of warning.
     if row.name == "user rules" && !row.ok {
         return "warn";
@@ -30486,10 +30579,23 @@ pub fn doctor_summary(rows: &[Habitat]) -> String {
         .collect();
     let off = rows.iter().filter(|h| doctor_word(h) == "info").count();
     let words: Vec<(&str, &str)> = rows.iter().map(|h| (doctor_word(h), h.name)).collect();
-    let degraded = rows
-        .iter()
-        .any(|h| h.name == "encoder" && !h.ok && h.state.starts_with(ENCODER_DEGRADED));
-    summary_line(&down, &damaged, &working_parts(&words), off, degraded)
+    summary_line(
+        &down,
+        &damaged,
+        &working_parts(&words),
+        off,
+        recall_word_matching(rows),
+    )
+}
+
+/// The encoder crashed, or `packset-embed` does not start. Recall still
+/// runs on words, so the headline says that instead of calling the seat
+/// ready.
+fn recall_word_matching(rows: &[Habitat]) -> bool {
+    rows.iter().any(|h| {
+        (h.name == "encoder" && !h.ok && h.state.starts_with(ENCODER_DEGRADED))
+            || (h.name == "packset-embed" && h.state.starts_with("not runnable"))
+    })
 }
 
 /// The parts a ready line can name, each with the rows that answer for
@@ -30560,7 +30666,19 @@ fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str], degraded: 
         why.push(format!("{} {verb} damaged", and_list(damaged)));
     }
     let why = why.join(", and ");
-    let ready = if why.is_empty() {
+    // A dead encoder is not "ljos is ready". The seat still runs; recall
+    // matches words, and the line names the command that replaces the writer.
+    if degraded && why.is_empty() {
+        let works = match working {
+            [] => "ljos works".to_string(),
+            [one] => format!("ljos works: {one} works"),
+            parts => format!("ljos works: {} work", and_list(parts)),
+        };
+        return format!(
+            "{works}, but recall is word-matching only. Run `{ENCODER_RESTART_COMMAND}`."
+        );
+    }
+    let verdict = if why.is_empty() {
         match working {
             [] => "ljos is ready.".to_string(),
             [one] => format!("ljos is ready: {one} works."),
@@ -30572,9 +30690,9 @@ fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str], degraded: 
         format!("ljos is not ready: {why}.")
     };
     if degraded {
-        format!("{RECALL_DEGRADED_HEADLINE} {ready}")
+        format!("{verdict} Recall is word-matching only. Run `{ENCODER_RESTART_COMMAND}`.")
     } else {
-        ready
+        verdict
     }
 }
 
@@ -30653,6 +30771,7 @@ fn is_status_line(line: &str) -> bool {
     if line.starts_with("ljos is ready")
         || line.starts_with("ljos is not ready")
         || line.starts_with("ljos runs, but")
+        || line.starts_with("ljos works")
         || line.starts_with("encoder down:")
         || line.starts_with("memory-unavailable:")
         || line.contains("the encoder is down")
@@ -30739,8 +30858,8 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                             continue;
                         }
                         if *word == "warn"
-                            && *name == "encoder"
-                            && state.starts_with(ENCODER_DEGRADED)
+                            && ((*name == "encoder" && state.starts_with(ENCODER_DEGRADED))
+                                || (*name == "packset-embed" && state.starts_with("not runnable")))
                         {
                             degraded = true;
                         }
@@ -34427,15 +34546,14 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
         match ask(&|| packset_search_relevant(cue, pool)) {
             Ok(hits) => related.extend(hits),
             Err(err) if is_pack_busy(&err) => return Err(err),
-            Err(e) if own.is_empty() && related.is_empty() => return Ok(recall_down(&e)),
+            Err(e) if own.is_empty() && related.is_empty() => {
+                return Ok(label_lexical(recall_down(&e)))
+            }
             Err(_) => break,
         }
     }
-    let mut out = recall_lines(&own, related, &cues.join(" "), &now_utc(), include_notes);
-    if read_encoder_status().as_ref().is_some_and(encoder_lexical) {
-        out.insert_str(0, LEXICAL_ONLY_LINE);
-    }
-    Ok(out)
+    let out = recall_lines(&own, related, &cues.join(" "), &now_utc(), include_notes);
+    Ok(label_lexical(out))
 }
 
 /// The `cap` of `rows` most relevant to `cue`, in the order they came.
@@ -57401,9 +57519,13 @@ mod tests {
         assert!(healthy(&rows), "a dead encoder does not fail the seat");
         let short = format_doctor_short(&rows);
         assert!(
-            short.starts_with("Recall is degraded: ranking is lexical-only."),
+            short.starts_with(
+                "ljos works: memory, tracker and command guard work, but recall is word-matching only. \
+                 Run `packset stop && packset ensure`."
+            ),
             "{short}"
         );
+        assert!(!short.contains("ljos is ready"), "{short}");
         assert!(short.contains("warn\tencoder\t"), "{short}");
         assert!(short.contains(ENCODER_RESTART_COMMAND), "{short}");
         assert!(short.contains("lexical-only"), "{short}");
@@ -57413,10 +57535,67 @@ mod tests {
         );
         let sat = compact_sitting(&full, "Software-x");
         assert!(
-            sat.contains("Recall is degraded: ranking is lexical-only."),
+            sat.contains(
+                "ljos works: memory works, but recall is word-matching only. Run `packset stop && packset ensure`."
+            ),
             "{sat}"
         );
+        assert!(!sat.contains("ljos is ready"), "{sat}");
         assert!(sat.contains(LEXICAL_ONLY_LINE.trim_end()), "{sat}");
+    }
+
+    #[test]
+    fn a_loader_line_is_not_an_encoder_version() {
+        assert_eq!(
+            super::version_named("packset-embed", "packset-embed 0.17.4\n"),
+            Some("0.17.4".to_string())
+        );
+        assert_eq!(
+            super::version_named("packset-embed", "packset-embed 0.17.4 (abc123)\n"),
+            Some("0.17.4".to_string())
+        );
+        assert_eq!(
+            super::version_named("ljos-policyd", "ljos-policyd 0.7.0 (phronesis)\n"),
+            Some("0.7.0".to_string())
+        );
+        let loader = "version GLIBCXX_3.4.34 not found (required by /usr/bin/packset-embed)\n";
+        assert_eq!(super::version_named("packset-embed", loader), None);
+        assert_eq!(super::version_named("packset-embed", "3.4.34\n"), None);
+        assert_eq!(
+            super::version_named("ljos", "ljos-mcp 0.39.0\n"),
+            None,
+            "a longer name is not this program"
+        );
+        assert_eq!(
+            super::encoder_not_runnable(Some(
+                "version GLIBCXX_3.4.34 not found (required by packset-embed)"
+            )),
+            "not runnable: \"version GLIBCXX_3.4.34 not found (required by packset-embed)\""
+        );
+        let broken = Habitat {
+            name: "packset-embed",
+            state: super::encoder_not_runnable(Some("version GLIBCXX_3.4.34 not found")),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&broken), "warn");
+        assert!(healthy(std::slice::from_ref(&broken)));
+        let rows = vec![
+            habitat_row("pack", "answers", true),
+            habitat_row("tracker", "answers", true),
+            habitat_row("policy", "ljos-policyd 0.5.0 (phronesis)", true),
+            broken,
+        ];
+        let short = format_doctor_short(&rows);
+        assert!(
+            short.contains("ljos works") && short.contains("recall is word-matching only"),
+            "{short}"
+        );
+        assert!(
+            short.contains("version GLIBCXX_3.4.34 not found"),
+            "{short}"
+        );
+        assert!(!short.contains("ahead of"), "{short}");
+        assert!(!short.contains("ljos is ready"), "{short}");
     }
 
     #[test]
