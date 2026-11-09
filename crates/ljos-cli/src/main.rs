@@ -3519,6 +3519,8 @@ fn run_command() -> Result<()> {
             // stdout, so each held note goes out on the next tool result.
             // Stop additionalContext starts another round, so that runner
             // does not print a held note on Stop. PreToolUse / argv only decide.
+            // Printed after the recalled lessons, once. A label, not a refusal.
+            let mut origin_note: Option<String> = None;
             let mut context = match call.event.as_str() {
                 "PreToolUse" | "argv" => {
                     // A seat verb about to run resets the work count.
@@ -3656,21 +3658,23 @@ fn run_command() -> Result<()> {
                     if call.event == "UserPromptSubmit" {
                         ljos_cli::capture::forget_latest_prompt();
                     }
-                    let spawner = (call.event == "UserPromptSubmit"
-                        && ljos_cli::capture::not_the_person(&input).is_none())
-                    .then(|| match ljos_cli::proc_tree::hook_runner() {
-                        Ok((runner, _)) => Some(runner),
-                        Err(_why) => {
-                            // A label, not a refusal: the hook still answers.
-                            // The parent is a script or a shell, so this prompt
-                            // is not saved as the person's preference.
-                            eprintln!(
-                                "label script-prompt: this prompt came from a script rather than from the person, so it isn't saved as their preference."
-                            );
+                    let spawner = if call.event == "UserPromptSubmit" {
+                        if let Some(why) = ljos_cli::capture::not_the_person(&input) {
+                            origin_note = Some(ljos_cli::proc_tree::prompt_not_person_label(why));
                             None
+                        } else {
+                            match ljos_cli::proc_tree::hook_runner() {
+                                Ok((runner, _)) => Some(runner),
+                                Err(why) => {
+                                    origin_note =
+                                        Some(ljos_cli::proc_tree::prompt_origin_label(&why));
+                                    None
+                                }
+                            }
                         }
-                    })
-                    .flatten();
+                    } else {
+                        None
+                    };
                     let person = spawner.is_some();
                     ljos_cli::capture::set_persons_prompt(person);
                     if person {
@@ -3787,6 +3791,9 @@ fn run_command() -> Result<()> {
             })
             .unwrap_or_else(|| ljos_cli::hook_output_ruled(&call, &context, verdict));
             ljos_cli::answer_gate(&output);
+            if let Some(note) = origin_note {
+                eprintln!("{note}");
+            }
             if let Some(rule) = verdict {
                 let seat = std::env::var("LJOS_SEAT").unwrap_or_default();
                 let kind = if rule.blocks() { "refusal" } else { "warning" };

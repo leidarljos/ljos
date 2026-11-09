@@ -797,7 +797,7 @@ fn a_hook_the_runner_did_not_spawn_keeps_nothing() {
         &payload,
     );
     assert!(
-        combined(&out).contains("came from a script rather than from the person"),
+        combined(&out).contains("not stored as the person's words"),
         "{}",
         text_of(&out)
     );
@@ -816,7 +816,7 @@ fn a_hook_the_runner_did_not_spawn_keeps_nothing() {
     seat.seat_env(&mut cmd);
     let out = cmd.output().unwrap();
     assert!(
-        combined(&out).contains("came from a script rather than from the person"),
+        combined(&out).contains("not stored as the person's words"),
         "{}",
         text_of(&out)
     );
@@ -831,7 +831,7 @@ fn a_hook_the_runner_did_not_spawn_keeps_nothing() {
     nested.env("CLAUDECODE", "1");
     let out = fed(nested, &payload);
     assert!(
-        combined(&out).contains("isn't saved as their preference"),
+        combined(&out).contains("not stored as the person's words"),
         "{}",
         text_of(&out)
     );
@@ -2098,7 +2098,7 @@ fn detach_keeps_nothing(seat: &Seat, name: &str, mode: &str, fake: &std::path::P
         "{who}: detached hook kept the plant: {kept}\n{hook_err}"
     );
     assert!(
-        hook_err.contains("came from a script rather than from the person"),
+        hook_err.contains("not stored as the person's words"),
         "{who}: {hook_err}"
     );
     assert!(

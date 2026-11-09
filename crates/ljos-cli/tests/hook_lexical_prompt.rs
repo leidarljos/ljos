@@ -196,17 +196,30 @@ fn a_lexical_prompt_keeps_the_distinctive_lesson_and_drops_the_generic_ones() {
             "an unrelated lesson was injected: {text}\nstdout:\n{stdout}"
         );
     }
-    assert!(
-        stderr.contains("came from a script rather than from the person"),
-        "stderr:\n{stderr}"
+    assert_eq!(
+        stderr.matches("label prompt-origin:").count(),
+        1,
+        "the label should be printed once\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("isn't saved as their preference"),
+        stderr.contains("not stored as the person's words"),
         "stderr:\n{stderr}"
     );
+    assert!(stderr.contains("not a known runner"), "stderr:\n{stderr}");
     assert!(
         !stderr.contains("not a runner's own program"),
         "stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("label prompt-origin:"),
+        "the label belongs after the lessons, not in them\nstdout:\n{stdout}"
+    );
+    let lesson_at = stdout.find(show).expect("lesson");
+    let combined = format!("{stdout}{stderr}");
+    let label_at = combined.find("label prompt-origin:").expect("label");
+    assert!(
+        lesson_at < label_at,
+        "lessons should stay first\n{combined}"
     );
     assert!(
         !stderr.to_ascii_lowercase().contains("refus"),

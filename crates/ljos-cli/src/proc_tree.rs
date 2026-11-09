@@ -1928,6 +1928,57 @@ pub fn hook_runner() -> Result<(Proc, &'static str), String> {
     Ok((parent.clone(), runner))
 }
 
+/// The one line a prompt hook prints when the prompt is not stored as the
+/// person's words. The decision is [`hook_runner`]'s; only the words change.
+#[must_use]
+pub fn prompt_origin_label(why: &str) -> String {
+    let named = |prefix: &str| -> Option<&str> {
+        why.strip_prefix(prefix)
+            .and_then(|rest| rest.split(" (pid ").next())
+            .filter(|name| !name.is_empty())
+    };
+    if why.contains("not a runner's own program") {
+        let name = named("its parent, ").unwrap_or("unknown");
+        return format!(
+            "label prompt-origin: not stored as the person's words (parent process is `{name}`, not a known runner)"
+        );
+    }
+    if why.contains("cannot be read") {
+        let name = named("the environment ").unwrap_or("the parent");
+        return format!(
+            "label prompt-origin: not stored as the person's words (the environment of `{name}` cannot be read)"
+        );
+    }
+    if why.contains("was started with") {
+        return "label prompt-origin: not stored as the person's words (the parent was started inside a tool call)".into();
+    }
+    if why.contains("runs under") {
+        return "label prompt-origin: not stored as the person's words (the parent runs inside another runner)".into();
+    }
+    if why.contains("descends from a recorded tool call")
+        || why.contains("shares a recorded tool call")
+    {
+        return "label prompt-origin: not stored as the person's words (the parent is inside a recorded tool call)".into();
+    }
+    if why.contains("no parent") {
+        return "label prompt-origin: not stored as the person's words (there is no parent process)".into();
+    }
+    "label prompt-origin: not stored as the person's words (the parent is not a known runner)"
+        .into()
+}
+
+/// The same label when the payload itself is not the person's prompt.
+#[must_use]
+pub fn prompt_not_person_label(why: &str) -> String {
+    let reason = match why {
+        "LJOS_UNATTENDED is set" => "this session is unattended",
+        "a subagent's brief" => "this is a subagent brief",
+        "another thread's prompt" => "this prompt is from another thread",
+        other => other,
+    };
+    format!("label prompt-origin: not stored as the person's words ({reason})")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2612,6 +2663,27 @@ mod tests {
     fn a_hook_this_test_runs_has_no_runner() {
         let why = hook_runner().unwrap_err();
         assert!(why.contains("not a runner's own program"), "{why}");
+    }
+
+    #[test]
+    fn a_prompt_origin_label_names_the_parent_and_says_nothing_is_wrong() {
+        let why = "its parent, timeout (pid 9), is not a runner's own program: a shell, an interpreter or ssh ran it, so a tool call may have";
+        let line = prompt_origin_label(why);
+        assert_eq!(
+            line,
+            "label prompt-origin: not stored as the person's words (parent process is `timeout`, not a known runner)"
+        );
+        assert!(!line.contains("runner's own program"), "{line}");
+        let unread = prompt_origin_label(
+            "the environment timeout (pid 9) was started with cannot be read, so a tool call's stamp would be hidden",
+        );
+        assert!(unread.starts_with("label prompt-origin:"), "{unread}");
+        assert!(unread.contains("cannot be read"), "{unread}");
+        let brief = prompt_not_person_label("a subagent's brief");
+        assert_eq!(
+            brief,
+            "label prompt-origin: not stored as the person's words (this is a subagent brief)"
+        );
     }
 
     fn named(pid: u32, comm: &str) -> Proc {

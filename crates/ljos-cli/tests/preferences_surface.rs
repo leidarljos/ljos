@@ -293,8 +293,13 @@ fn a_bot_seat_preference_is_injected_on_a_fresh_prompt() {
         note.contains("agent-derived"),
         "the origin was not named beside the preference:\n{note}"
     );
+    let lesson = note
+        .lines()
+        .filter(|line| !line.contains("label prompt-origin:"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        !note.contains("the person's words"),
+        !lesson.contains("the person's words"),
         "an agent preference was labelled as the person's:\n{note}"
     );
 }
