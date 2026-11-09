@@ -15,8 +15,8 @@ use ljos_cli::{
     age_of, announce_seat, atom_label, brief, bump_plan, calibrate, cards, claim, complete,
     conflicts, consensus_steps_for, copy_playbook, doctor, due_page, finish, forecasts_from_json,
     format_change, format_consolidation, graded, habit, habits, handover_scoped, identity_or_seat,
-    island_entities, kind_label, learn_and_write, learn_reading, now_utc, on_path, other_seat,
-    pack, packset_consolidate, packset_forget, packset_island_as, packset_search_as_of,
+    island_entities, kind_label, learn_and_write, learn_reading, note_lookups, now_utc, on_path,
+    other_seat, pack, packset_consolidate, packset_forget, packset_island_as, packset_search_as_of,
     panel_steps, parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory,
     predictions_of, protocol_text, read_campaign, receive, release, remember_findings,
     resolve_assignee, rows_about, run_captured, runner_pid, search_reading, seat_name,
@@ -1575,6 +1575,7 @@ impl LjosServer {
     ) -> Result<Json<SearchPage>, McpError> {
         let hits =
             packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false).map_err(refused)?;
+        note_lookups(&hits);
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
         let reading = search_reading(hits.len()).to_string();

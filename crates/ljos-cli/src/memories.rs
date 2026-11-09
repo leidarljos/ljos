@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -60,8 +60,13 @@ pub struct Memory {
     /// RFC 3339 UTC, the write's time.
     pub at: String,
     pub reason: Option<String>,
-    /// Times recall graded it recalled.
+    /// Times a prompt or `ljos recall` handed it over, plus graded review reps.
     pub recalls: u64,
+    /// Times `ljos search` or the search tool handed it over.
+    pub lookups: u64,
+    /// Uses recorded before a search and a recall were counted apart.
+    /// The file is not rewritten: the two cannot be told apart in it.
+    pub earlier: u64,
     /// The last verdict on it, if any.
     pub verdict: Option<String>,
     /// Later wordings of the same lesson that reinforced it.
@@ -122,6 +127,8 @@ impl Memory {
             at,
             reason: src["reason"].as_str().map(str::to_string),
             recalls: atom["review"]["reps"].as_u64().unwrap_or(0),
+            lookups: 0,
+            earlier: 0,
             verdict: None,
             aliases: aliases_of(atom).map(str::to_string).collect(),
         })
@@ -223,37 +230,66 @@ impl Filter {
     }
 }
 
-/// Times search or the hook handed each atom back. The pack's `review.reps`
-/// moves only when a review is graded. This count is the uses, and it does
-/// not rewrite the atom.
+/// Uses recorded before a search and a recall were counted apart.
+/// Left as written. A new recall goes to [`recall_counts_path`] and a
+/// search to [`lookup_counts_path`].
 #[must_use]
 pub fn recall_uses_path() -> PathBuf {
-    reviews_path()
-        .parent()
-        .map(|dir| dir.join("recall-uses.json"))
-        .unwrap_or_else(|| PathBuf::from("recall-uses.json"))
+    state_file("recall-uses.json")
 }
 
-/// Uses recorded for each atom id.
+/// Recalls from a prompt or `ljos recall`, one per atom id.
 #[must_use]
-pub fn recall_uses() -> BTreeMap<String, u64> {
-    let Ok(text) = std::fs::read_to_string(recall_uses_path()) else {
+pub fn recall_counts_path() -> PathBuf {
+    state_file("recalls.json")
+}
+
+/// Lookups from `ljos search` or the search tool, one per atom id.
+#[must_use]
+pub fn lookup_counts_path() -> PathBuf {
+    state_file("lookups.json")
+}
+
+fn state_file(name: &str) -> PathBuf {
+    reviews_path()
+        .parent()
+        .map(|dir| dir.join(name))
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+fn read_counts(path: &Path) -> BTreeMap<String, u64> {
+    let Ok(text) = std::fs::read_to_string(path) else {
         return BTreeMap::new();
     };
     serde_json::from_str(&text).unwrap_or_default()
 }
 
-/// Count one recall of each id. A pack that is down still records the use
-/// locally, so the next `ljos memories list` shows it.
-pub fn bump_recalls(ids: &[String]) {
+/// The mixed uses still in [`recall_uses_path`].
+#[must_use]
+pub fn recall_uses() -> BTreeMap<String, u64> {
+    read_counts(&recall_uses_path())
+}
+
+/// Recalls recorded since search and recall were counted apart.
+#[must_use]
+pub fn recall_counts() -> BTreeMap<String, u64> {
+    read_counts(&recall_counts_path())
+}
+
+/// Lookups recorded since search and recall were counted apart.
+#[must_use]
+pub fn lookup_counts() -> BTreeMap<String, u64> {
+    read_counts(&lookup_counts_path())
+}
+
+fn bump_counts(path: &Path, ids: &[String]) {
     if ids.is_empty() {
         return;
     }
-    let path = recall_uses_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let mut uses = recall_uses();
+    let mut uses = read_counts(path);
     for id in ids {
         if id.is_empty() {
             continue;
@@ -265,11 +301,39 @@ pub fn bump_recalls(ids: &[String]) {
     }
 }
 
+/// Count one recall of each id. A pack that is down still records it
+/// locally, so the next `ljos memories list` shows it. A search is
+/// [`bump_lookups`], not a recall.
+pub fn bump_recalls(ids: &[String]) {
+    bump_counts(&recall_counts_path(), ids);
+}
+
+/// Count one lookup of each id a search handed back.
+pub fn bump_lookups(ids: &[String]) {
+    bump_counts(&lookup_counts_path(), ids);
+}
+
+/// How a listing names the two counts. An older mixed total is labelled
+/// and left as it stands.
+#[must_use]
+pub fn use_label(m: &Memory) -> String {
+    let mut line = format!("recalled {}x  looked up {}x", m.recalls, m.lookups);
+    if m.earlier > 0 {
+        line.push_str(&format!(
+            "  earlier {}x (recall and lookup were one count)",
+            m.earlier
+        ));
+    }
+    line
+}
+
 /// The memories in `atoms` that `filter` admits, newest first, each with
 /// its last verdict from `reviews`.
 #[must_use]
 pub fn list(atoms: &[Value], reviews: &BTreeMap<String, Review>, filter: &Filter) -> Vec<Memory> {
-    let uses = recall_uses();
+    let recalls = recall_counts();
+    let lookups = lookup_counts();
+    let earlier = recall_uses();
     let mut out: Vec<Memory> = atoms
         .iter()
         .filter_map(Memory::of)
@@ -277,7 +341,9 @@ pub fn list(atoms: &[Value], reviews: &BTreeMap<String, Review>, filter: &Filter
             m.verdict = reviews.get(&m.id).map(|r| r.verdict.clone());
             m.recalls = m
                 .recalls
-                .saturating_add(uses.get(&m.id).copied().unwrap_or(0));
+                .saturating_add(recalls.get(&m.id).copied().unwrap_or(0));
+            m.lookups = lookups.get(&m.id).copied().unwrap_or(0);
+            m.earlier = earlier.get(&m.id).copied().unwrap_or(0);
             m
         })
         .filter(|m| filter.admits(m))
@@ -454,13 +520,13 @@ pub fn merge(ids: &[String], text: Option<&str>, all: &[Memory]) -> Result<Strin
 pub fn describe(m: &Memory) -> String {
     let mut out = format!("{}  {}  {}\n", m.short_id(), m.kind, m.text);
     out.push_str(&format!(
-        "    seat {}  harness {}  session {}  at {}  origin {}  recalled {}x{}\n",
+        "    seat {}  harness {}  session {}  at {}  origin {}  {}{}\n",
         dash(&m.seat),
         dash(&m.harness),
         dash(&m.session),
         dash(&m.at),
         m.origin,
-        m.recalls,
+        use_label(m),
         m.verdict
             .as_deref()
             .map(|v| format!("  verdict {v}"))
@@ -538,7 +604,7 @@ pub fn stale(all: &[Memory], days: i64, today: &str) -> Vec<Stale> {
             if dropped.contains(&m.id) || m.verdict.as_deref() == Some("keep") {
                 continue;
             }
-            if m.recalls == 0 && !m.at.is_empty() && m.day() < cutoff.as_str() {
+            if m.recalls == 0 && m.earlier == 0 && !m.at.is_empty() && m.day() < cutoff.as_str() {
                 out.push(Stale {
                     id: m.id.clone(),
                     text: m.text.clone(),
@@ -892,11 +958,11 @@ pub fn render(view: &View, width: usize, height: usize) -> Vec<String> {
             ));
             out.push(clip(
                 &format!(
-                    "at {}  origin {}  recalled {}x  why: {}",
+                    "at {}  origin {}  why: {}  {}",
                     dash(&m.at),
                     m.origin,
-                    m.recalls,
-                    m.reason.as_deref().unwrap_or("-")
+                    m.reason.as_deref().unwrap_or("-"),
+                    use_label(m)
                 ),
                 width,
             ));
@@ -1570,13 +1636,26 @@ mod tests {
         )];
         let before = list(&atoms, &BTreeMap::new(), &Filter::default());
         assert_eq!(before[0].recalls, 0);
+        assert_eq!(before[0].lookups, 0);
+        bump_lookups(&["a1aaaaaaaaaaaaaa".into()]);
+        let looked = list(&atoms, &BTreeMap::new(), &Filter::default());
+        assert_eq!(looked[0].recalls, 0);
+        assert_eq!(looked[0].lookups, 1);
         bump_recalls(&["a1aaaaaaaaaaaaaa".into()]);
         let after = list(&atoms, &BTreeMap::new(), &Filter::default());
         assert_eq!(after[0].recalls, 1);
+        assert_eq!(after[0].lookups, 1);
+        let said = describe(&after[0]);
+        assert!(said.contains("recalled 1x"), "{said}");
+        assert!(said.contains("looked up 1x"), "{said}");
+        std::fs::write(recall_uses_path(), r#"{"a1aaaaaaaaaaaaaa":4}"#).unwrap();
+        let mixed = list(&atoms, &BTreeMap::new(), &Filter::default());
+        assert_eq!(mixed[0].earlier, 4);
+        assert_eq!(mixed[0].recalls, 1);
+        let said = describe(&mixed[0]);
         assert!(
-            describe(&after[0]).contains("recalled 1x"),
-            "{}",
-            describe(&after[0])
+            said.contains("earlier 4x (recall and lookup were one count)"),
+            "{said}"
         );
         std::env::remove_var("XDG_STATE_HOME");
     }

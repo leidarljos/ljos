@@ -2273,6 +2273,7 @@ fn run_command() -> Result<()> {
                 ljos_cli::prefer_calling_seat(&mut hits);
             }
             hits.truncate(limit as usize);
+            ljos_cli::note_lookups(&hits);
             print!("{lexical}{}", format_hits(&hits, explain));
         }
         Cmd::Evidence { args } => {

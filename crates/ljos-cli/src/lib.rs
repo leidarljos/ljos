@@ -10951,6 +10951,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             recalled
         };
         if let Some((text, mut ids)) = recalled {
+            memories::bump_recalls(&ids);
             ids.extend(pending);
             let out = if nudge.is_empty() {
                 text
@@ -11214,6 +11215,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         if !brought.is_empty() {
             let lines: Vec<String> = brought.iter().map(|h| hit_line(h, &now)).collect();
             ids = brought.into_iter().filter_map(|h| h.id).collect();
+            memories::bump_recalls(&ids);
             ids.extend(pending);
             let mut out = format!("{RECALL_HEADER}\n{}", lines.join("\n"));
             if !nudge.is_empty() {
@@ -11225,6 +11227,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         ids.extend(pending);
         return (nudge, ids);
     }
+    memories::bump_recalls(&ids);
     ids.extend(pending);
     let mut out = format!("{RECALL_HEADER}\n{}", lines.join("\n"));
     if !nudge.is_empty() {
@@ -11293,8 +11296,8 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
 }
 
 /// [`judged_prompt`] over `hits` already found for `cue`, searching the
-/// pack only when none are given. The hits a caller hands over are
-/// counted as recalled, as the search here would count them.
+/// pack only when none are given. A search does not count as a recall.
+/// The memories the prompt is handed are counted where the note is built.
 fn judged_prompt_over(
     call: &HookCall,
     cue: &str,
@@ -11309,10 +11312,7 @@ fn judged_prompt_over(
     }
     let seen = seen_ids(call.session.as_deref());
     let hits = match hits {
-        Some(hits) => {
-            count_recall(&hits);
-            hits
-        }
+        Some(hits) => hits,
         None => hook_timed("judge_search", || packset_search_relevant(cue, RERANK_POOL)).ok()?,
     };
     let pool: Vec<Hit> = hits
@@ -14351,7 +14351,6 @@ fn packset_search_relevant(query: &str, limit: u32) -> Result<Vec<Hit>> {
         Ok(hits)
     })?;
     let hits = fold_verbatim(q, hits);
-    count_recall(&hits);
     Ok(hits)
 }
 
@@ -14424,7 +14423,6 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
         keep_search_origins(&client, &hits);
         Ok((hits, ran))
     })?;
-    count_recall(&hits);
     Ok((hits, ran))
 }
 
@@ -32860,7 +32858,6 @@ fn finish_search(query: &str, mut hits: Vec<Hit>, historical: bool) -> Vec<Hit> 
         fold_verbatim(query, hits)
     };
     prefer_calling_seat(&mut hits);
-    count_recall(&hits);
     hits
 }
 
@@ -32886,15 +32883,22 @@ fn fold_verbatim(query: &str, mut hits: Vec<Hit>) -> Vec<Hit> {
     verbatim::dedup(hits)
 }
 
-/// One use per hit a search or a hook actually handed back. The pack's
-/// review clock is left where it is; grading would reschedule the claim.
-fn count_recall(hits: &[Hit]) {
-    let ids: Vec<String> = hits
-        .iter()
+fn hit_ids(hits: &[Hit]) -> Vec<String> {
+    hits.iter()
         .filter_map(|hit| hit.id.clone())
         .filter(|id| !id.is_empty())
-        .collect();
-    memories::bump_recalls(&ids);
+        .collect()
+}
+
+/// One recall per memory a prompt or `ljos recall` handed over. A search
+/// is [`note_lookups`]. The pack's review clock is left where it is.
+pub fn note_recalls(hits: &[Hit]) {
+    memories::bump_recalls(&hit_ids(hits));
+}
+
+/// One lookup per hit a search handed back. It is not a recall.
+pub fn note_lookups(hits: &[Hit]) {
+    memories::bump_lookups(&hit_ids(hits));
 }
 
 /// Keep `leader` at the front when `rank` is [`DENSE_ALONE_RANK`]: the
@@ -34916,8 +34920,15 @@ fn recall_lines(
     {
         return String::new();
     }
+    let mut recalled_ids = Vec::new();
+    let mut note_shown = |h: &Hit| {
+        if let Some(id) = h.id.clone().filter(|id| !id.is_empty()) {
+            recalled_ids.push(id);
+        }
+    };
     let mut out = String::from("\nMemory\n");
     for h in most_relevant(&own_facts, cue, ISSUE_MEMORY_CAP) {
+        note_shown(h);
         out.push_str("  ");
         out.push_str(&hit_line(h, now));
         out.push('\n');
@@ -34933,6 +34944,7 @@ fn recall_lines(
             out.push_str("  related:\n");
         }
         for h in &related_facts {
+            note_shown(h);
             out.push_str("  ");
             out.push_str(&hit_line(h, now));
             out.push('\n');
@@ -34943,6 +34955,7 @@ fn recall_lines(
     if !own_notes.is_empty() || !related_notes.is_empty() {
         out.push_str("  unverified logbook notes:\n");
         for h in most_relevant(&own_notes, cue, ISSUE_MEMORY_CAP) {
+            note_shown(h);
             out.push_str("  ");
             out.push_str(&hit_line(h, now));
             out.push('\n');
@@ -34954,11 +34967,13 @@ fn recall_lines(
             ));
         }
         for h in &related_notes {
+            note_shown(h);
             out.push_str("  ");
             out.push_str(&hit_line(h, now));
             out.push('\n');
         }
     }
+    memories::bump_recalls(&recalled_ids);
     out
 }
 

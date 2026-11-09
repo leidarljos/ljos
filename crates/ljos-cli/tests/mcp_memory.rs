@@ -260,5 +260,6 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
         String::from_utf8_lossy(&searched.stderr)
     );
     let (shown, err) = list();
-    assert!(shown.contains("recalled 1x"), "{shown}\n{err}");
+    assert!(shown.contains("recalled 0x"), "{shown}\n{err}");
+    assert!(shown.contains("looked up 1x"), "{shown}\n{err}");
 }
