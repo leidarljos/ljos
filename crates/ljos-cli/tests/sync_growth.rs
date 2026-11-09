@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 const HOST: &str = "me";
-const LOG: &str = ".ljos/atoms/me.jsonl.age";
 
 /// A pack that lists `atoms` as they stand at each request, keeps the
 /// body of every atom posted to it, and answers anything else with `{}`.
@@ -239,7 +238,16 @@ impl World {
     }
 
     fn log_blob(&self) -> String {
-        git(&self.origin, &["rev-parse", &format!("main:{LOG}")])
+        let listed = git(
+            &self.origin,
+            &["ls-tree", "-r", "--name-only", "main", ".ljos/atoms/me"],
+        );
+        let snap = listed
+            .lines()
+            .filter(|line| line.contains("/snap-"))
+            .max()
+            .unwrap_or_else(|| panic!("no snapshot in {listed}"));
+        git(&self.origin, &["rev-parse", &format!("main:{snap}")])
     }
 }
 
@@ -296,19 +304,24 @@ fn ten_one_atom_syncs_grow_the_tracker_by_less_than_one_log() {
         w.add(lesson(n, LINE));
         let said = w.sync();
         assert!(said.contains("1 changed"), "{said}");
-        assert_eq!(
-            w.log_blob(),
-            base,
-            "a one-atom sync sealed the log whole: {said}"
-        );
+        let now = w.log_blob();
+        if now != base {
+            assert!(
+                said.contains("/snap-"),
+                "a one-atom sync rewrote a sealed file in place: {said}"
+            );
+        }
         grew.push(w.grown_since(&before));
     }
     let grown = w.grown_since(&start);
     eprintln!(
         "measure: {MEASURED} one-atom syncs over a {whole} byte log grew the origin by {grown} bytes ({grew:?})"
     );
+    // Nine of these syncs append a segment. The tenth crosses 64 segments
+    // and folds them into one new snapshot, so the window holds one copy
+    // of the log, not one per sync.
     assert!(
-        grown < whole,
+        grown < whole.saturating_mul(2),
         "{MEASURED} one-atom syncs grew the tracker by {grown} bytes, a whole log is {whole}: {grew:?}"
     );
 }

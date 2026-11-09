@@ -28600,6 +28600,13 @@ pub fn doctor() -> Vec<Habitat> {
             ok: false,
         });
     }
+    if let Some(state) = sync::atoms_doctor_state() {
+        out.push(Habitat {
+            name: "atoms",
+            state,
+            ok: true,
+        });
+    }
     out
 }
 
@@ -31048,6 +31055,7 @@ pub fn format_doctor_short(rows: &[Habitat]) -> String {
 fn shown_short(word: &str, name: &str) -> bool {
     matches!(word, "no" | "warn")
         || name == "sitting gate"
+        || name == "atoms"
         || (word == "info" && READY_PARTS.iter().any(|(_, rows)| rows.contains(&name)))
 }
 
@@ -70740,7 +70748,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         run(&root, "git", &["add", "."]);
         run(&root, "git", &["commit", "-q", "-m", "seed"]);
         let host = sync::host();
-        let log = root.join(format!(".ljos/atoms/{host}.jsonl.age"));
+        let log = root.join(format!(".ljos/atoms/{host}/snap-0.jsonl.age"));
         let base = std::fs::read(&log).unwrap();
         let ticket: Vec<Value> = (0..3)
             .map(|n| {
@@ -70794,7 +70802,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             std::fs::read(&log).unwrap() == base,
             "finish sealed the whole log again: {said}"
         );
-        let chunk = root.join(format!(".ljos/atoms/{host}.chunks/1.age"));
+        let chunk = std::fs::read_dir(root.join(format!(".ljos/atoms/{host}")))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.file_name().to_string_lossy().starts_with("seg-"))
+            .map(|entry| entry.path())
+            .expect("the ticket was not sealed as a segment");
         let opened = run(
             dir.path(),
             "age",

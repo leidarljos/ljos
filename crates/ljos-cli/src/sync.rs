@@ -6,7 +6,11 @@
 //! optional `[scopes]` entries add named scopes with their own recipients.
 //! Every machine writes only its own log for each configured scope under
 //! `.ljos/atoms/`, so two machines never touch one file and git never has to
-//! merge a log. A log carries the machine's live atoms of that scope without
+//! merge a log. A log is a snapshot sealed once (`<host>/snap-<seq>.jsonl.age`)
+//! and append-only segments sealed once (`<host>/seg-<seq>-<hash>.jsonl.age`).
+//! An unchanged plaintext writes nothing: the check is a hash of the plaintext
+//! kept beside the ciphertext, not the ciphertext. A log carries the machine's
+//! live atoms of that scope without
 //! their vectors; the receiving pack encodes them again. An atom's scope is
 //! its `scope:NAME` entity. An atom with none stays on the primary scope.
 //! A machine `default_scope` that names an extra scope is refused, so an
@@ -535,10 +539,46 @@ const CHUNK_HEADER: &str = "ljos_chunk";
 /// that carries the key beside others is an atom.
 const CHUNK_DROP: &str = "ljos_drop";
 
-/// The most chunks a log is read with, as every reader since chunks came
-/// in stops there. [`place_chunk`] keeps a log far below it and folds
-/// chunks before it would write one past it.
+/// The most chunks a legacy log is read with. A log past this is folded
+/// into a snapshot instead of growing another segment.
 const MAX_CHUNKS: u32 = 64;
+
+/// Segments kept beside one snapshot. The next change past this folds them
+/// into a new snapshot. A normal sync does not fold before then.
+const SEGMENT_LIMIT: usize = 64;
+
+/// The key of a segment's first line. A segment holds the atoms added,
+/// changed or dropped since the snapshot, and the line names the host,
+/// the scope, the segment's number and the snapshot it applies over.
+/// [`split_header`] does not read this key.
+const SEG_HEADER: &str = "ljos_seg";
+
+thread_local! {
+    /// Set for the `ljos sync --compact` call. A normal sync leaves it false,
+    /// so segments are not folded early.
+    static SYNC_COMPACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Hold compaction on for the rest of this call. Dropping it turns it off,
+/// including when the call returns early.
+pub struct CompactHold;
+
+impl Drop for CompactHold {
+    fn drop(&mut self) {
+        SYNC_COMPACT.with(|flag| flag.set(false));
+    }
+}
+
+/// `ljos sync --compact` folds segments into one snapshot on this call.
+#[must_use]
+pub fn compact_for_this_call() -> CompactHold {
+    SYNC_COMPACT.with(|flag| flag.set(true));
+    CompactHold
+}
+
+fn compact_requested() -> bool {
+    SYNC_COMPACT.with(std::cell::Cell::get)
+}
 
 fn chunk_header(host: &str, scope_name: &str, base: &str, n: u32) -> String {
     format!(
@@ -609,24 +649,19 @@ fn chunk_lines(body: &str) -> Option<Vec<ChunkLine>> {
 struct LogView {
     /// The atoms, one line each, in the order [`log_lines`] writes them.
     body: String,
-    /// Chunks 1, 2 and on as they were read, in order.
-    chunks: Vec<ReadChunk>,
-    /// Why the chunk after the last one read was left unread, when one is
+    /// Chunks applied, when the log is still a legacy base plus chunks.
+    chunks_read: u32,
+    /// Segments applied after the snapshot.
+    segments_read: u32,
+    /// Why the piece after the last one read was left unread, when one is
     /// there.
     stopped: Option<String>,
-}
-
-/// One chunk as read: its plaintext bytes, header included, and the line
-/// it leaves under each id it names, None for a drop.
-struct ReadChunk {
-    bytes: usize,
-    lines: BTreeMap<String, Option<String>>,
 }
 
 impl LogView {
     /// The number of the last chunk read.
     fn applied(&self) -> u32 {
-        u32::try_from(self.chunks.len()).unwrap_or(u32::MAX)
+        self.chunks_read
     }
 
     /// What import and adopt print about a chunk left unread at `label`.
@@ -661,11 +696,9 @@ fn read_chunks(
 ) -> LogView {
     let base = blob_digest(base);
     let mut lines: Option<BTreeMap<String, String>> = None;
-    let mut chunks = Vec::new();
+    let mut chunks_read = 0u32;
     let stopped = loop {
-        let n = u32::try_from(chunks.len())
-            .unwrap_or(u32::MAX)
-            .saturating_add(1);
+        let n = chunks_read.saturating_add(1);
         let sealed = match fetch(n) {
             Ok(Some(sealed)) => sealed,
             Ok(None) => break None,
@@ -704,23 +737,17 @@ fn read_chunks(
                 ))
             }
         };
-        let mut read = BTreeMap::new();
         for change in changes {
             match change {
                 ChunkLine::Put(id, line) => {
-                    map.insert(id.clone(), line.clone());
-                    read.insert(id, Some(line));
+                    map.insert(id, line);
                 }
                 ChunkLine::Drop(id) => {
                     map.remove(&id);
-                    read.insert(id, None);
                 }
             }
         }
-        chunks.push(ReadChunk {
-            bytes: plain.len(),
-            lines: read,
-        });
+        chunks_read += 1;
     };
     let body = match lines {
         Some(map) => map.values().map(|line| format!("{line}\n")).collect(),
@@ -728,7 +755,8 @@ fn read_chunks(
     };
     LogView {
         body,
-        chunks,
+        chunks_read,
+        segments_read: 0,
         stopped,
     }
 }
@@ -1427,240 +1455,590 @@ fn export_named_scope(
     atoms: &[Value],
     default: &str,
 ) -> Result<String> {
-    let host = host();
     let explicit_only = scope_name != primary_scope;
     let body = log_lines(atoms, scope_name, default, explicit_only);
     let count = body.lines().count();
-    let plain = log_header(&host, scope_name) + &body;
-    let [log_rel, digest_rel] = host_log_rels_for_scope(&host, primary_scope, scope_name);
-    let digest = export_digest(root, &log_rel, &plain, recipients);
-    let previous = read_beneath(root, &digest_rel)?;
-    let unchanged = format!("sync: {count} {scope_name} atoms unchanged since the last export\n");
-    if previous.as_deref() == Some(digest.as_bytes()) {
-        return Ok(unchanged);
-    }
-    if !age_on_path() {
-        return Ok(age_missing_line());
-    }
+    let stored = store_log(root, primary_scope, scope_name, recipients, &body)?;
     let recipients_said = format!(
         "sealed to {} recipient{}",
         recipients.len(),
         if recipients.len() == 1 { "" } else { "s" }
     );
-    let plan = plan_log_write(
-        root,
-        &log_rel,
-        &host,
-        scope_name,
-        &body,
-        recipients,
-        previous.as_deref(),
-    );
-    let said = match plan {
-        LogWrite::Clean { applied } => {
-            remove_chunks(root, &log_rel, applied)?;
-            unchanged
+    Ok(match stored {
+        StoreOut::MissingAge => age_missing_line(),
+        StoreOut::Unchanged => {
+            format!("sync: {count} {scope_name} atoms unchanged since the last export\n")
         }
-        LogWrite::Chunk {
-            n,
-            plain: chunk,
-            changes,
-        } => {
-            let sealed = match seal_bytes(&chunk, recipients) {
-                Ok(sealed) => sealed,
-                Err(err) if age_missing(&err) => return Ok(age_missing_line()),
-                Err(err) => return Err(err),
-            };
-            remove_chunks(root, &log_rel, n - 1)?;
-            let rel = chunk_rel(&log_rel, n);
-            write_beneath(root, &rel, &sealed)?;
-            format!("sync: exported {count} {scope_name} atoms, {changes} changed, to {rel}, {recipients_said}\n")
+        StoreOut::Migrated { rel } => {
+            format!("sync: migrated {count} {scope_name} atoms into {rel}\n")
         }
-        LogWrite::Whole => {
-            let sealed = match seal_bytes(&plain, recipients) {
-                Ok(sealed) => sealed,
-                Err(err) if age_missing(&err) => return Ok(age_missing_line()),
-                Err(err) => return Err(err),
-            };
-            write_beneath(root, &log_rel, &sealed)?;
-            remove_chunks(root, &log_rel, 0)?;
-            format!("sync: exported {count} {scope_name} atoms to {log_rel}, {recipients_said}\n")
+        StoreOut::Wrote { rel, changes } => {
+            if changes == 0 {
+                format!("sync: exported {count} {scope_name} atoms to {rel}, {recipients_said}\n")
+            } else {
+                format!("sync: exported {count} {scope_name} atoms, {changes} changed, to {rel}, {recipients_said}\n")
+            }
         }
-    };
-    let digest = export_digest(root, &log_rel, &plain, recipients);
-    write_beneath(root, &digest_rel, digest.as_bytes())?;
-    Ok(said)
+    })
 }
 
-/// How an export writes a log whose digest no longer matches.
-enum LogWrite {
-    /// Seal the whole log as a new base and remove its chunks.
-    Whole,
-    /// Seal `plain` as chunk `n` over the base: the atoms that changed,
-    /// with the chunks from `n` on that [`place_chunk`] folded into it.
-    /// Chunk files from `n` on are removed first.
-    Chunk {
-        n: u32,
-        plain: String,
+/// What [`store_log`] did. An unchanged plaintext writes no file.
+enum StoreOut {
+    MissingAge,
+    Unchanged,
+    /// The legacy single file was copied, byte for byte, into `rel`.
+    Migrated {
+        rel: String,
+    },
+    /// One new sealed file was written. `changes` is 0 for a first snapshot.
+    Wrote {
+        rel: String,
         changes: usize,
     },
-    /// The log already reads as these atoms. Chunk files past `applied`,
-    /// which the read left unread, are removed.
-    Clean { applied: u32 },
 }
 
-/// How to write `body`, this host's atoms of `scope_name`, into the log
-/// at `log_rel`. `previous` is the digest the last export left.
-///
-/// A chunk is written only over a log this ljos wrote to the same
-/// recipients and this machine can open: a digest with three fields
-/// whose recipients match, and a base whose header names this host and
-/// scope. Anything else is sealed whole. That covers the first sync
-/// after upgrading from a single-file ljos, a changed recipient list,
-/// and a base replaced by a key this machine does not hold. The atoms
-/// are diffed against the log as a reader sees it, so a chunk left
-/// unread is carried again in the new one.
-///
-/// [`place_chunk`] picks the chunk's number and seals the log whole only
-/// once the chunks would come to half the base. It counts from the files
-/// alone, so any machine that writes the same atoms over the same log
-/// folds on the same sync.
-fn plan_log_write(
-    root: &Path,
-    log_rel: &str,
+/// The directory a host's snapshot and segments live in.
+fn log_stem_dir(log_rel: &str) -> String {
+    log_rel
+        .strip_suffix(".jsonl.age")
+        .unwrap_or(log_rel)
+        .to_string()
+}
+
+fn plain_hash_rel(stem: &str) -> String {
+    format!("{stem}/plain.sha256")
+}
+
+fn snap_file_rel(stem: &str, seq: u32) -> String {
+    format!("{stem}/snap-{seq}.jsonl.age")
+}
+
+fn seg_file_rel(stem: &str, seq: u32, hash8: &str) -> String {
+    format!("{stem}/seg-{seq}-{hash8}.jsonl.age")
+}
+
+fn hash8_of(bytes: &[u8]) -> String {
+    blob_digest(bytes)
+        .trim_start_matches("sha256:")
+        .chars()
+        .take(8)
+        .collect()
+}
+
+#[derive(Clone)]
+struct SealedPiece {
+    seq: u32,
+    snap: bool,
+    rel: String,
+}
+
+fn sealed_pieces(root: &Path, stem: &str) -> Vec<SealedPiece> {
+    let mut out = Vec::new();
+    for name in list_beneath(root, stem).unwrap_or_default() {
+        let rel = format!("{stem}/{name}");
+        if let Some(rest) = name
+            .strip_prefix("snap-")
+            .and_then(|rest| rest.strip_suffix(".jsonl.age"))
+        {
+            if let Ok(seq) = rest.parse::<u32>() {
+                out.push(SealedPiece {
+                    seq,
+                    snap: true,
+                    rel,
+                });
+            }
+        } else if let Some(rest) = name.strip_prefix("seg-") {
+            let rest = rest.strip_suffix(".jsonl.age").unwrap_or(rest);
+            if let Some((seq, _)) = rest.split_once('-') {
+                if let Ok(seq) = seq.parse::<u32>() {
+                    out.push(SealedPiece {
+                        seq,
+                        snap: false,
+                        rel,
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by_key(|piece| (piece.seq, !piece.snap));
+    out
+}
+
+fn seg_header(host: &str, scope_name: &str, seq: u32, over: u32) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({ SEG_HEADER: seq, "host": host, "scope": scope_name, "over": over })
+    )
+}
+
+/// Copy `log_rel` and its chunks into the snapshot directory without
+/// sealing them again. The ciphertext bytes are unchanged, so git keeps
+/// the blobs it already has. Returns the snapshot path when it copied.
+fn migrate_legacy(root: &Path, log_rel: &str) -> Result<Option<String>> {
+    let Some(bytes) = read_beneath(root, log_rel)? else {
+        return Ok(None);
+    };
+    let stem = log_stem_dir(log_rel);
+    let pieces = sealed_pieces(root, &stem);
+    if pieces.iter().any(|piece| piece.snap) {
+        if pieces.iter().any(|piece| {
+            piece.snap && read_beneath(root, &piece.rel).ok().flatten().as_deref() == Some(&bytes)
+        }) {
+            remove_beneath(root, log_rel)?;
+            remove_chunks(root, log_rel, 0)?;
+        }
+        return Ok(None);
+    }
+    let snap = snap_file_rel(&stem, 0);
+    write_beneath(root, &snap, &bytes)?;
+    for n in 1..=MAX_CHUNKS {
+        let Some(chunk) = read_beneath(root, &chunk_rel(log_rel, n))? else {
+            break;
+        };
+        let dest = seg_file_rel(&stem, n, &hash8_of(&chunk));
+        write_beneath(root, &dest, &chunk)?;
+    }
+    remove_beneath(root, log_rel)?;
+    remove_chunks(root, log_rel, 0)?;
+    Ok(Some(snap))
+}
+
+fn plaintext_matches(root: &Path, stem: &str, plain: &str) -> bool {
+    let want = format!("{}\n", blob_digest(plain.as_bytes()));
+    read_beneath(root, &plain_hash_rel(stem))
+        .ok()
+        .flatten()
+        .is_some_and(|have| have == want.as_bytes())
+}
+
+fn write_plain_hash(root: &Path, stem: &str, plain: &str) -> Result<()> {
+    let line = format!("{}\n", blob_digest(plain.as_bytes()));
+    write_beneath(root, &plain_hash_rel(stem), line.as_bytes())
+}
+
+/// The atom lines of `host`'s `scope_name` log: the legacy file and its
+/// chunks when no snapshot has been written, otherwise the newest snapshot
+/// and the segments after it, in sequence order. A segment that does not
+/// open ends the read. The same last-line-wins rule as [`read_chunks`].
+fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Result<LogView> {
+    let stem = log_stem_dir(log_rel);
+    let pieces = sealed_pieces(root, &stem);
+    let identities = identities_for_open(scope_name);
+    if let Some(snap) = pieces
+        .iter()
+        .filter(|piece| piece.snap)
+        .max_by_key(|p| p.seq)
+    {
+        let Some(bytes) = read_beneath(root, &snap.rel)? else {
+            return Ok(LogView {
+                body: String::new(),
+                chunks_read: 0,
+                segments_read: 0,
+                stopped: Some(format!("{} could not be read", snap.rel)),
+            });
+        };
+        let body = match open_log(root, &bytes, host, scope_name, &snap.rel)? {
+            Opened::Atoms(body) => body,
+            Opened::Miss => {
+                return Ok(LogView {
+                    body: String::new(),
+                    chunks_read: 0,
+                    segments_read: 0,
+                    stopped: Some(format!("{} is not sealed to this machine", snap.rel)),
+                });
+            }
+            Opened::Refused(line) | Opened::Hidden { line, .. } => {
+                return Ok(LogView {
+                    body: String::new(),
+                    chunks_read: 0,
+                    segments_read: 0,
+                    stopped: Some(line.trim().to_string()),
+                });
+            }
+        };
+        return apply_segments(
+            &body,
+            host,
+            scope_name,
+            &identities,
+            pieces
+                .iter()
+                .filter(|piece| !piece.snap && piece.seq > snap.seq),
+            |rel| read_beneath(root, rel),
+        );
+    }
+    let Some(bytes) = read_beneath(root, log_rel)? else {
+        return Ok(LogView {
+            body: String::new(),
+            chunks_read: 0,
+            segments_read: 0,
+            stopped: None,
+        });
+    };
+    match open_log(root, &bytes, host, scope_name, log_rel)? {
+        Opened::Atoms(body) => Ok(read_chunks(
+            &body,
+            &bytes,
+            host,
+            scope_name,
+            &identities,
+            |n| read_beneath(root, &chunk_rel(log_rel, n)),
+        )),
+        Opened::Miss => Ok(LogView {
+            body: String::new(),
+            chunks_read: 0,
+            segments_read: 0,
+            stopped: Some(format!("{log_rel} is not sealed to this machine")),
+        }),
+        Opened::Refused(line) | Opened::Hidden { line, .. } => Ok(LogView {
+            body: String::new(),
+            chunks_read: 0,
+            segments_read: 0,
+            stopped: Some(line.trim().to_string()),
+        }),
+    }
+}
+
+fn apply_segments<'a>(
+    body: &str,
     host: &str,
     scope_name: &str,
-    body: &str,
-    recipients: &[String],
-    previous: Option<&[u8]>,
-) -> LogWrite {
-    let Some(OwnLog {
-        base,
-        base_len,
-        view,
-    }) = open_own_log(root, log_rel, host, scope_name, recipients, previous)
-    else {
-        return LogWrite::Whole;
+    identities: &[PathBuf],
+    pieces: impl Iterator<Item = &'a SealedPiece>,
+    mut fetch: impl FnMut(&str) -> Result<Option<Vec<u8>>>,
+) -> Result<LogView> {
+    let mut lines = lines_by_id(body);
+    let mut stopped = None;
+    let mut applied = 0u32;
+    for piece in pieces {
+        let sealed = match fetch(&piece.rel) {
+            Ok(Some(sealed)) => sealed,
+            Ok(None) => {
+                stopped = Some(format!("{} could not be read", piece.rel));
+                break;
+            }
+            Err(err) => {
+                stopped = Some(format!(
+                    "{} could not be read ({})",
+                    piece.rel,
+                    err.to_string().replace('\n', " ")
+                ));
+                break;
+            }
+        };
+        let plain = match open_sealed_bytes(&sealed, identities) {
+            Ok(Some(plain)) => plain,
+            Ok(None) => {
+                stopped = Some(format!("{} is not sealed to this machine", piece.rel));
+                break;
+            }
+            Err(err) => {
+                stopped = Some(format!(
+                    "{} did not open ({})",
+                    piece.rel,
+                    err.to_string().replace('\n', " ")
+                ));
+                break;
+            }
+        };
+        let (first, rest) = plain.split_once('\n').unwrap_or((plain.as_str(), ""));
+        if !segment_header_ok(first, host, scope_name, piece.seq) {
+            stopped = Some(format!("{} names another log or number", piece.rel));
+            break;
+        }
+        let Some(changes) = chunk_lines(rest) else {
+            stopped = Some(format!(
+                "{} holds a line that is neither an atom nor a drop",
+                piece.rel
+            ));
+            break;
+        };
+        let Some(map) = lines.take().or_else(|| lines_by_id(body)) else {
+            stopped = Some(format!(
+                "{} names atoms by id, and the snapshot does not",
+                piece.rel
+            ));
+            break;
+        };
+        lines = Some(map);
+        let map = lines.as_mut().expect("just inserted");
+        for change in changes {
+            match change {
+                ChunkLine::Put(id, line) => {
+                    map.insert(id, line);
+                }
+                ChunkLine::Drop(id) => {
+                    map.remove(&id);
+                }
+            }
+        }
+        applied += 1;
+    }
+    let body = match lines {
+        Some(map) => map.values().map(|line| format!("{line}\n")).collect(),
+        None => body.to_string(),
     };
-    let (Some(had), Some(has)) = (lines_by_id(&view.body), lines_by_id(body)) else {
-        return LogWrite::Whole;
+    Ok(LogView {
+        body,
+        chunks_read: 0,
+        segments_read: applied,
+        stopped,
+    })
+}
+
+fn segment_header_ok(first: &str, host: &str, scope_name: &str, seq: u32) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(first) else {
+        return false;
     };
+    if value["host"].as_str() != Some(host) || value["scope"].as_str() != Some(scope_name) {
+        return false;
+    }
+    if value.get(SEG_HEADER).is_some() {
+        return value[SEG_HEADER].as_u64() == Some(u64::from(seq));
+    }
+    // A chunk copied on migration keeps its old header. The host and scope
+    // are the check; the ciphertext digest in that header is not read.
+    value.get(CHUNK_HEADER).is_some()
+}
+
+fn atom_changes(
+    had: &BTreeMap<String, String>,
+    has: &BTreeMap<String, String>,
+) -> BTreeMap<String, Option<String>> {
     let mut changes: BTreeMap<String, Option<String>> = had
         .keys()
         .filter(|id| !has.contains_key(*id))
         .map(|id| (id.clone(), None))
         .collect();
     for (id, line) in has {
-        if had.get(&id) != Some(&line) {
-            changes.insert(id, Some(line));
+        if had.get(id) != Some(line) {
+            changes.insert(id.clone(), Some(line.clone()));
         }
     }
-    if changes.is_empty() {
-        return LogWrite::Clean {
-            applied: view.applied(),
-        };
-    }
-    let count = changes.len();
-    let over = blob_digest(&base);
-    match place_chunk(&view, base_len, changes, |n| {
-        chunk_header(host, scope_name, &over, n)
-    }) {
-        Some((n, plain)) => LogWrite::Chunk {
-            n,
-            plain,
-            changes: count,
-        },
-        None => LogWrite::Whole,
+    changes
+}
+
+fn seal_or_missing(plain: &str, recipients: &[String]) -> Result<Option<Vec<u8>>> {
+    match seal_bytes(plain, recipients) {
+        Ok(sealed) => Ok(Some(sealed)),
+        Err(err) if age_missing(&err) => Ok(None),
+        Err(err) => Err(err),
     }
 }
 
-/// Where `changes`, the lines by id that differ from `view` with None
-/// for a drop, are sealed over a base of `base_len` plaintext bytes: the
-/// chunk's number and its plaintext under `header`. None when the log is
-/// to be sealed whole.
-///
-/// The new chunk folds into the chunk before it, its lines winning,
-/// while its plaintext comes to at least half of that chunk's, and so on
-/// down. Folding into the base is a whole seal. Half is the doubling of
-/// the logarithmic method: every chunk kept is under half the one before
-/// it, so a base of B plaintext bytes carries fewer than log2(B / h)
-/// chunks, h being one chunk header's 126 or so bytes. That is 17 over a
-/// 16 MB base, inside the [`MAX_CHUNKS`] a reader opens. A sealed line is
-/// sealed again only when a fold lands on its chunk. A fold of other atoms
-/// leaves that chunk at least half again as large, so a line is resealed
-/// at most log1.5(B / h) times before the base takes it.
-fn place_chunk(
-    view: &LogView,
-    base_len: usize,
-    mut changes: BTreeMap<String, Option<String>>,
-    header: impl Fn(u32) -> String,
-) -> Option<(u32, String)> {
-    let mut n = view.applied().saturating_add(1);
-    loop {
-        let mut plain = header(n);
-        for (id, line) in &changes {
-            match line {
-                Some(line) => plain.push_str(line),
-                None => plain.push_str(&serde_json::json!({ CHUNK_DROP: id }).to_string()),
-            }
-            plain.push('\n');
-        }
-        let index = usize::try_from(n).ok()?;
-        let before = match index.checked_sub(2) {
-            Some(at) => view.chunks.get(at)?.bytes,
-            None => base_len,
-        };
-        if n <= MAX_CHUNKS && plain.len().saturating_mul(2) < before {
-            return Some((n, plain));
-        }
-        let mut folded = view.chunks.get(index.checked_sub(2)?)?.lines.clone();
-        folded.append(&mut changes);
-        changes = folded;
-        n -= 1;
+fn remove_pieces(root: &Path, pieces: &[SealedPiece]) -> Result<()> {
+    for piece in pieces {
+        remove_beneath(root, &piece.rel)?;
     }
+    Ok(())
 }
 
-/// This host's log of `scope_name`, as a reader sees it, when a chunk may
-/// be written over it.
-struct OwnLog {
-    /// The sealed base.
-    base: Vec<u8>,
-    /// The plaintext bytes of the base, header included.
-    base_len: usize,
-    view: LogView,
-}
-
-/// The log at `log_rel` when this ljos wrote it to the same recipients
-/// and this machine can open it: a digest with three fields whose
-/// recipients match, and a base whose header names this host and scope.
-fn open_own_log(
+/// Write `body`, this host's atoms of `scope_name`, without sealing a blob
+/// again. The plaintext hash beside the log decides. A match writes
+/// nothing. A legacy `<stem>.jsonl.age` is copied once into `snap-0` and
+/// removed. Later atoms go into one new segment. At [`SEGMENT_LIMIT`]
+/// segments, or when [`compact_for_this_call`] is held, the segments fold
+/// into one new snapshot and the folded files are removed in the same write.
+fn store_log(
     root: &Path,
-    log_rel: &str,
-    host: &str,
+    primary_scope: &str,
     scope_name: &str,
     recipients: &[String],
-    previous: Option<&[u8]>,
-) -> Option<OwnLog> {
-    let previous = previous.and_then(|bytes| std::str::from_utf8(bytes).ok());
-    let fields: Vec<&str> = previous.unwrap_or("").split_whitespace().collect();
-    if fields.len() != 3 || fields[1] != crate::work_id(&recipients.join(",")) {
-        return None;
+    body: &str,
+) -> Result<StoreOut> {
+    let host = host();
+    let [log_rel, _] = host_log_rels_for_scope(&host, primary_scope, scope_name);
+    let stem = log_stem_dir(&log_rel);
+    let plain = log_header(&host, scope_name) + body;
+    let compact = compact_requested();
+    if plaintext_matches(root, &stem, &plain) && read_beneath(root, &log_rel)?.is_none() {
+        let pieces = sealed_pieces(root, &stem);
+        let segs = pieces.iter().filter(|piece| !piece.snap).count();
+        if !compact || segs == 0 {
+            return Ok(StoreOut::Unchanged);
+        }
     }
-    let base = read_beneath(root, log_rel).ok()??;
-    let identities = identities_for_open(scope_name);
-    let opened = open_sealed_bytes(&base, &identities).ok()??;
-    let (named_host, named_scope, base_body) = split_header(&opened)?;
-    if named_host != host || named_scope != scope_name {
-        return None;
+    if !age_on_path() {
+        return Ok(StoreOut::MissingAge);
     }
-    let view = read_chunks(base_body, &base, host, scope_name, &identities, |n| {
-        read_beneath(root, &chunk_rel(log_rel, n))
-    });
-    Some(OwnLog {
-        base_len: opened.len(),
-        base,
-        view,
+    let migrated = migrate_legacy(root, &log_rel)?;
+    if plaintext_matches(root, &stem, &plain) {
+        if migrated.is_some() {
+            write_plain_hash(root, &stem, &plain)?;
+            remember_digest(root, &log_rel, &plain, recipients)?;
+            return Ok(StoreOut::Migrated {
+                rel: migrated.unwrap_or_else(|| snap_file_rel(&stem, 0)),
+            });
+        }
+        let pieces = sealed_pieces(root, &stem);
+        let segs = pieces.iter().filter(|piece| !piece.snap).count();
+        if !compact || segs == 0 {
+            return Ok(StoreOut::Unchanged);
+        }
+    }
+    let view = read_log_view(root, &log_rel, &host, scope_name)?;
+    let (Some(had), Some(has)) = (lines_by_id(&view.body), lines_by_id(body)) else {
+        return seal_snapshot(
+            root,
+            &stem,
+            &plain,
+            recipients,
+            &sealed_pieces(root, &stem),
+            0,
+        );
+    };
+    let changes = atom_changes(&had, &has);
+    let pieces = sealed_pieces(root, &stem);
+    let snap_seq = pieces
+        .iter()
+        .filter(|piece| piece.snap)
+        .map(|piece| piece.seq)
+        .max();
+    let segs = pieces.iter().filter(|piece| !piece.snap).count();
+    if changes.is_empty() && view.stopped.is_none() && !(compact && segs > 0) {
+        write_plain_hash(root, &stem, &plain)?;
+        return Ok(match migrated {
+            Some(rel) => StoreOut::Migrated { rel },
+            None => StoreOut::Unchanged,
+        });
+    }
+    if snap_seq.is_none() || compact || segs >= SEGMENT_LIMIT {
+        return seal_snapshot(root, &stem, &plain, recipients, &pieces, changes.len());
+    }
+    if view.stopped.is_some() {
+        let good = last_good_seq(snap_seq.unwrap_or(0), &pieces, view.segments_read);
+        let stale: Vec<SealedPiece> = pieces
+            .iter()
+            .filter(|piece| !piece.snap && piece.seq > good)
+            .cloned()
+            .collect();
+        remove_pieces(root, &stale)?;
+    }
+    let seq = pieces.iter().map(|piece| piece.seq).max().unwrap_or(0) + 1;
+    let over = snap_seq.unwrap_or(0);
+    let mut segment = seg_header(&host, scope_name, seq, over);
+    for (id, line) in &changes {
+        match line {
+            Some(line) => segment.push_str(line),
+            None => segment.push_str(&serde_json::json!({ CHUNK_DROP: id }).to_string()),
+        }
+        segment.push('\n');
+    }
+    let Some(sealed) = seal_or_missing(&segment, recipients)? else {
+        return Ok(StoreOut::MissingAge);
+    };
+    let rel = seg_file_rel(&stem, seq, &hash8_of(segment.as_bytes()));
+    write_beneath(root, &rel, &sealed)?;
+    write_plain_hash(root, &stem, &plain)?;
+    remember_digest(root, &log_rel, &plain, recipients)?;
+    Ok(StoreOut::Wrote {
+        rel,
+        changes: changes.len(),
     })
+}
+
+fn remember_digest(root: &Path, log_rel: &str, plain: &str, recipients: &[String]) -> Result<()> {
+    let Some(stem) = log_rel.strip_suffix(".jsonl.age") else {
+        return Ok(());
+    };
+    let digest = export_digest(root, log_rel, plain, recipients);
+    write_beneath(root, &format!("{stem}.digest"), digest.as_bytes())
+}
+
+/// The sequence of the last segment [`read_log_view`] applied, or `snap`
+/// when none was.
+fn last_good_seq(snap: u32, pieces: &[SealedPiece], applied: u32) -> u32 {
+    pieces
+        .iter()
+        .filter(|piece| !piece.snap && piece.seq > snap)
+        .take(usize::try_from(applied).unwrap_or(usize::MAX))
+        .map(|piece| piece.seq)
+        .last()
+        .unwrap_or(snap)
+}
+
+fn seal_snapshot(
+    root: &Path,
+    stem: &str,
+    plain: &str,
+    recipients: &[String],
+    pieces: &[SealedPiece],
+    changes: usize,
+) -> Result<StoreOut> {
+    let seq = pieces
+        .iter()
+        .map(|piece| piece.seq)
+        .max()
+        .map_or(0, |n| n + 1);
+    // A first snapshot is seq 0 when nothing is stored yet.
+    let seq = if pieces.is_empty() { 0 } else { seq };
+    let Some(sealed) = seal_or_missing(plain, recipients)? else {
+        return Ok(StoreOut::MissingAge);
+    };
+    let rel = snap_file_rel(stem, seq);
+    write_beneath(root, &rel, &sealed)?;
+    remove_pieces(root, pieces)?;
+    write_plain_hash(root, stem, plain)?;
+    remember_digest(root, &format!("{stem}.jsonl.age"), plain, recipients)?;
+    Ok(StoreOut::Wrote { rel, changes })
+}
+
+/// Snapshot sequence, segment count and sealed bytes of this machine's log,
+/// for the doctor. None when this machine has not sealed a log here.
+pub(crate) fn atoms_layout_line(root: &Path, scope: &Scope) -> Option<String> {
+    let me = host();
+    let mut parts = Vec::new();
+    for named in scope.all_scopes() {
+        let [log_rel, _] = host_log_rels_for_scope(&me, &scope.name, named.name);
+        let stem = log_stem_dir(&log_rel);
+        let pieces = sealed_pieces(root, &stem);
+        let legacy = read_beneath(root, &log_rel).ok().flatten();
+        if pieces.is_empty() && legacy.is_none() {
+            continue;
+        }
+        let snap = pieces
+            .iter()
+            .filter(|piece| piece.snap)
+            .map(|piece| piece.seq)
+            .max();
+        let segs = pieces.iter().filter(|piece| !piece.snap).count();
+        let mut bytes = legacy.as_ref().map_or(0, Vec::len);
+        for piece in &pieces {
+            if let Some(file) = read_beneath(root, &piece.rel).ok().flatten() {
+                bytes += file.len();
+            }
+        }
+        let snap = snap.map_or_else(|| "none".to_string(), |seq| seq.to_string());
+        let segments = if segs == 1 { "segment" } else { "segments" };
+        parts.push(format!(
+            "{} snap {snap}, {segs} {segments}, {bytes} bytes",
+            named.name
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
+/// The doctor line for this machine's sealed logs, across the trackers it
+/// shares. None when none is sealed.
+pub(crate) fn atoms_doctor_state() -> Option<String> {
+    let mut said = Vec::new();
+    for root in sync_roots().unwrap_or_default() {
+        let Ok(Some(scope)) = scope_of_repo(&root) else {
+            continue;
+        };
+        if let Some(line) = atoms_layout_line(&root, &scope) {
+            said.push(line);
+        }
+    }
+    if said.is_empty() {
+        None
+    } else {
+        Some(said.join("; "))
+    }
 }
 
 /// Seal the atoms of `issue` alone into this machine's log in each
@@ -1774,119 +2152,68 @@ fn seal_ticket_scope(
     default: &str,
 ) -> Result<(String, bool)> {
     let host = host();
-    let body = log_lines(atoms, scope_name, default, scope_name != primary_scope);
-    let Some(has) = lines_by_id(&body) else {
+    let ticket = log_lines(atoms, scope_name, default, scope_name != primary_scope);
+    let Some(has) = lines_by_id(&ticket) else {
         bail!("sync: two atoms of {issue} share an id");
     };
     if has.is_empty() {
         return Ok((String::new(), false));
     }
-    let [log_rel, digest_rel] = host_log_rels_for_scope(&host, primary_scope, scope_name);
+    let [log_rel, _] = host_log_rels_for_scope(&host, primary_scope, scope_name);
     let recipients_said = format!(
         "sealed to {} recipient{}",
         recipients.len(),
         if recipients.len() == 1 { "" } else { "s" }
     );
-    let seal = |plain: &str| match seal_bytes(plain, recipients) {
-        Ok(sealed) => Ok(Some(sealed)),
-        Err(err) if age_missing(&err) => Ok(None),
-        Err(err) => Err(err),
-    };
-    if read_beneath(root, &log_rel)?.is_none() {
-        let plain = log_header(&host, scope_name) + &body;
-        let Some(sealed) = seal(&plain)? else {
-            return Ok((age_missing_line(), false));
+    let view = read_log_view(root, &log_rel, &host, scope_name)?;
+    let desired = if view.body.is_empty() {
+        ticket
+    } else {
+        let Some(mut lines) = lines_by_id(&view.body) else {
+            return Ok((
+                format!(
+                    "sync: {issue}: warning: this machine's log does not name its atoms by id; the atoms stay in the pack, and `ljos sync` seals the {scope_name} log whole\n"
+                ),
+                false,
+            ));
         };
-        write_beneath(root, &log_rel, &sealed)?;
-        remove_chunks(root, &log_rel, 0)?;
-        let digest = export_digest(root, &log_rel, &plain, recipients);
-        write_beneath(root, &digest_rel, digest.as_bytes())?;
-        return Ok((
-            format!(
-                "sync: sealed {} {scope_name} atoms of {issue} to {log_rel}, {recipients_said}\n",
-                has.len()
-            ),
-            true,
-        ));
-    }
-    let previous = read_beneath(root, &digest_rel)?;
-    let left = |why: &str| {
-        Ok((
-            format!(
-                "sync: {issue}: warning: {why}; the atoms stay in the pack, and `ljos sync` seals the {scope_name} log whole\n"
-            ),
-            false,
-        ))
-    };
-    let Some(log) = open_own_log(
-        root,
-        &log_rel,
-        &host,
-        scope_name,
-        recipients,
-        previous.as_deref(),
-    ) else {
-        return left("this machine's log cannot take a chunk");
-    };
-    if log.view.stopped.is_some() {
-        return left("a chunk of this machine's log did not read");
-    }
-    let Some(mut lines) = lines_by_id(&log.view.body) else {
-        return left("this machine's log does not name its atoms by id");
-    };
-    let mut changes: BTreeMap<String, Option<String>> = BTreeMap::new();
-    for (id, line) in &has {
-        if lines.get(id) != Some(line) {
+        for (id, line) in &has {
             lines.insert(id.clone(), line.clone());
-            changes.insert(id.clone(), Some(line.clone()));
         }
-    }
-    let gone: Vec<String> = lines
-        .iter()
-        .filter(|(id, line)| {
-            !has.contains_key(*id)
-                && serde_json::from_str::<Value>(line).is_ok_and(|atom| atom_issue(&atom) == issue)
-        })
-        .map(|(id, _)| id.clone())
-        .collect();
-    for id in gone {
-        lines.remove(&id);
-        changes.insert(id, None);
-    }
-    if changes.is_empty() {
-        return Ok((
+        let gone: Vec<String> = lines
+            .iter()
+            .filter(|(id, line)| {
+                !has.contains_key(*id)
+                    && serde_json::from_str::<Value>(line)
+                        .is_ok_and(|atom| atom_issue(&atom) == issue)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in gone {
+            lines.remove(&id);
+        }
+        lines.values().map(|line| format!("{line}\n")).collect()
+    };
+    let stored = store_log(root, primary_scope, scope_name, recipients, &desired)?;
+    Ok(match stored {
+        StoreOut::MissingAge => (age_missing_line(), false),
+        StoreOut::Unchanged | StoreOut::Migrated { .. } => (
             format!(
                 "sync: the {scope_name} log already holds the {} atoms of {issue}\n",
                 has.len()
             ),
-            false,
-        ));
-    }
-    let count = changes.len();
-    let over = blob_digest(&log.base);
-    let Some((n, plain)) = place_chunk(&log.view, log.base_len, changes, |n| {
-        chunk_header(&host, scope_name, &over, n)
-    }) else {
-        return left("this machine's log is due to be sealed whole");
-    };
-    let Some(sealed) = seal(&plain)? else {
-        return Ok((age_missing_line(), false));
-    };
-    remove_chunks(root, &log_rel, n - 1)?;
-    let rel = chunk_rel(&log_rel, n);
-    write_beneath(root, &rel, &sealed)?;
-    let reads: String = lines.values().map(|line| format!("{line}\n")).collect();
-    let digest = export_digest(
-        root,
-        &log_rel,
-        &(log_header(&host, scope_name) + &reads),
-        recipients,
-    );
-    write_beneath(root, &digest_rel, digest.as_bytes())?;
-    Ok((
-        format!("sync: sealed {count} {scope_name} atoms of {issue} to {rel}, {recipients_said}\n"),
-        true,
-    ))
+            matches!(stored, StoreOut::Migrated { .. }),
+        ),
+        StoreOut::Wrote { rel, changes } => {
+            let n = if changes == 0 { has.len() } else { changes };
+            (
+                format!(
+                    "sync: sealed {n} {scope_name} atoms of {issue} to {rel}, {recipients_said}\n"
+                ),
+                true,
+            )
+        }
+    })
 }
 
 /// Remove the chunk files of `log_rel` past the first `keep`, and with
@@ -2296,15 +2623,27 @@ fn extra_scope_of_host_file(name: &str, host: &str) -> Option<String> {
     let scope_name = rest
         .strip_suffix(".jsonl.age")
         .or_else(|| rest.strip_suffix(".digest"))
-        .or_else(|| rest.strip_suffix(".chunks"))?;
-    (!scope_name.is_empty() && !scope_name.contains('+')).then(|| scope_name.to_string())
+        .or_else(|| rest.strip_suffix(".chunks"))
+        .unwrap_or(rest);
+    (!scope_name.is_empty() && !scope_name.contains('+') && !scope_name.contains('/'))
+        .then(|| scope_name.to_string())
+}
+
+fn remove_tree_beneath(root: &Path, rel: &str) -> Result<()> {
+    for name in list_beneath(root, rel).unwrap_or_default() {
+        remove_beneath(root, &format!("{rel}/{name}"))?;
+    }
+    remove_dir_beneath(root, rel)
 }
 
 fn drop_stale_scope_files(root: &Path, scope: &Scope) {
     for rel in stale_scope_rels(root, scope) {
-        let _ = match rel.strip_suffix(".chunks") {
-            Some(stem) => remove_chunks(root, &format!("{stem}.jsonl.age"), 0),
-            None => remove_beneath(root, &rel),
+        let _ = if let Some(stem) = rel.strip_suffix(".chunks") {
+            remove_chunks(root, &format!("{stem}.jsonl.age"), 0)
+        } else if !rel.contains('.') {
+            remove_tree_beneath(root, &rel)
+        } else {
+            remove_beneath(root, &rel)
         };
     }
 }
@@ -2415,7 +2754,12 @@ fn any_log_file(root: &Path) -> bool {
     list_beneath(root, ".ljos/atoms")
         .unwrap_or_default()
         .iter()
-        .any(|name| name.ends_with(".jsonl.age"))
+        .any(|name| {
+            name.ends_with(".jsonl.age")
+                || sealed_pieces(root, &format!(".ljos/atoms/{name}"))
+                    .iter()
+                    .any(|piece| piece.snap)
+        })
 }
 
 struct ImportJob {
@@ -2450,7 +2794,22 @@ fn listed_logs(root: &Path, scope: &Scope, me: &str) -> Result<ListedLogs> {
     let mut logs = Vec::new();
     let mut out = String::new();
     let mut seen = BTreeSet::new();
-    let mut paths: Vec<PathBuf> = list_beneath(root, ".ljos/atoms")?
+    let mut names = list_beneath(root, ".ljos/atoms")?;
+    names.extend(
+        names
+            .clone()
+            .into_iter()
+            .filter(|name| {
+                !name.ends_with(".jsonl.age")
+                    && !name.ends_with(".digest")
+                    && !name.ends_with(".chunks")
+                    && sealed_pieces(root, &format!(".ljos/atoms/{name}"))
+                        .iter()
+                        .any(|piece| piece.snap)
+            })
+            .map(|name| format!("{name}.jsonl.age")),
+    );
+    let mut paths: Vec<PathBuf> = names
         .into_iter()
         .filter(|name| name.ends_with(".jsonl.age"))
         .map(|name| log_dir(root).join(name))
@@ -2515,33 +2874,11 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
             });
             continue;
         }
-        let identities = identities_for_open(&log.scope_name);
-        let Some(bytes) = read_beneath(root, &log.rel)? else {
-            continue;
-        };
-        match open_log(root, &bytes, &log.host, &log.scope_name, &log.rel)? {
-            Opened::Atoms(base_body) => {
-                let view = read_chunks(
-                    &base_body,
-                    &bytes,
-                    &log.host,
-                    &log.scope_name,
-                    &identities,
-                    |n| read_beneath(root, &chunk_rel(&log.rel, n)),
-                );
-                out.push_str(&view.stopped_line(&log.rel));
-                jobs.push(ImportJob {
-                    host: log.host,
-                    scope_name: log.scope_name,
-                    plain: view.body,
-                });
-            }
-            Opened::Refused(line) | Opened::Hidden { line, .. } => out.push_str(&line),
-            Opened::Miss => {
-                // The log's own recipients. A cloud log lists different
-                // keys than the primary, and a miss is an error only
-                // when one of those keys is an identity this log was
-                // tried with.
+        let view = read_log_view(root, &log.rel, &log.host, &log.scope_name)?;
+        if view.body.is_empty() && view.stopped.is_some() {
+            let line = view.stopped.clone().unwrap_or_default();
+            if line.contains("not sealed to this machine") {
+                let identities = identities_for_open(&log.scope_name);
                 let recipients = scope.recipients_for(&log.scope_name).unwrap_or(&[]);
                 let mut skip = format!(
                     "sync: {}'s {} log is not sealed to this machine\n",
@@ -2551,8 +2888,6 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
                     let key = match mine.entry(identity.clone()) {
                         std::collections::btree_map::Entry::Occupied(known) => known.get().clone(),
                         std::collections::btree_map::Entry::Vacant(slot) => {
-                            // A keygen miss is not a recipient we know.
-                            // Aborting here dropped every later host.
                             match identity_recipient(identity) {
                                 Ok(key) => {
                                     slot.insert(key.clone());
@@ -2565,8 +2900,28 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
                     skip = miss_report(&log.host, &log.scope_name, &key, recipients)?;
                 }
                 out.push_str(&skip);
+            } else if !line.is_empty() {
+                out.push_str(&line);
+                if !line.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            continue;
+        }
+        if view.body.is_empty() && view.stopped.is_none() {
+            let stem = log_stem_dir(&log.rel);
+            let present = read_beneath(root, &log.rel)?.is_some()
+                || sealed_pieces(root, &stem).iter().any(|piece| piece.snap);
+            if !present {
+                continue;
             }
         }
+        out.push_str(&view.stopped_line(&log.rel));
+        jobs.push(ImportJob {
+            host: log.host,
+            scope_name: log.scope_name,
+            plain: view.body,
+        });
     }
     for (scope_name, host) in remembered_hosts(root)? {
         if host == me || scope_is_configured(scope, &scope_name) {
@@ -2671,7 +3026,7 @@ fn adopted_hosts(root: &Path, me: &str) -> BTreeSet<String> {
     adopted_stems(root)
         .into_iter()
         .filter(|stem| log_stem_host(stem).is_some_and(|host| host != me))
-        .filter(|stem| !in_head(root, &format!(".ljos/atoms/{stem}.jsonl.age")))
+        .filter(|stem| !stem_still_tracked(root, stem))
         .collect()
 }
 
@@ -2751,6 +3106,7 @@ fn bad_log_name(host: &str, scope_name: &str) -> Option<String> {
     None
 }
 
+#[cfg(test)]
 fn host_log_rels(host: &str) -> [String; 2] {
     let host = machine_name(host);
     [
@@ -3344,10 +3700,25 @@ fn headed_in_history(root: &Path, scope_name: &str, host: &str) -> Headed {
         return Headed::No;
     }
     let mut hidden = None;
-    for rel in [
+    let mut rels = vec![
         format!(".ljos/atoms/{host}.jsonl.age"),
         format!(".ljos/atoms/{host}+{scope_name}.jsonl.age"),
+    ];
+    // Snapshots after the legacy path, so a header already found there
+    // stays the one this walk reports. The pin list is not reordered.
+    for stem in [
+        format!(".ljos/atoms/{host}"),
+        format!(".ljos/atoms/{host}+{scope_name}"),
     ] {
+        let mut snaps: Vec<String> = sealed_pieces(root, &stem)
+            .into_iter()
+            .filter(|piece| piece.snap)
+            .map(|piece| piece.rel)
+            .collect();
+        snaps.sort();
+        rels.extend(snaps);
+    }
+    for rel in rels {
         match history_of_log_is_headed(root, &rel, &identities, host, scope_name) {
             Ok(true) => return Headed::Yes,
             Ok(false) => {}
@@ -3625,6 +3996,25 @@ fn legacy_pinned(root: &Path, scope_name: &str, host: &str, bytes: &[u8]) -> Res
         .any(|line| line == digest))
 }
 
+/// The legacy file, or the oldest snapshot when the legacy file has been
+/// copied aside. The bytes are what a pin names. A copied snapshot has the
+/// same bytes, so a pin taken before the copy still matches, in the same
+/// order.
+fn current_sealed(root: &Path, log_rel: &str) -> Result<Option<Vec<u8>>> {
+    if let Some(bytes) = read_beneath(root, log_rel)? {
+        return Ok(Some(bytes));
+    }
+    let stem = log_stem_dir(log_rel);
+    let snap = sealed_pieces(root, &stem)
+        .into_iter()
+        .filter(|piece| piece.snap)
+        .min_by_key(|piece| piece.seq);
+    match snap {
+        Some(piece) => read_beneath(root, &piece.rel),
+        None => Ok(None),
+    }
+}
+
 fn sealed_bytes(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
     if !tracked_modes_are_regular(root, rel) {
         bail!("sync: {rel} is not a regular file; the log was kept");
@@ -3808,6 +4198,14 @@ fn adopt_commit_subject(subject: &str, host: &str) -> bool {
 /// The host a log stem names. `gone` is the primary file. `gone+cloud` is
 /// host `gone` and the extra scope `cloud`. A `+` with nothing on one side
 /// is not a file this crate writes.
+/// The log is still in HEAD when either the legacy file or the snapshot
+/// directory is. A migration deletes the legacy file and must not look
+/// like the host was adopted.
+fn stem_still_tracked(root: &Path, stem: &str) -> bool {
+    in_head(root, &format!(".ljos/atoms/{stem}.jsonl.age"))
+        || in_head(root, &format!(".ljos/atoms/{stem}/plain.sha256"))
+}
+
 fn log_stem_host(stem: &str) -> Option<&str> {
     match stem.split_once('+') {
         Some((host, extra)) if !host.is_empty() && !extra.is_empty() => Some(host),
@@ -4232,6 +4630,16 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
                 .into_iter()
                 .filter(|rel| in_head(root, rel)),
         );
+        let stem = log_stem_dir(&log.age);
+        drop_rels.extend(
+            sealed_pieces(root, &stem)
+                .into_iter()
+                .map(|piece| piece.rel),
+        );
+        let hash = plain_hash_rel(&stem);
+        if in_head(root, &hash) || read_beneath(root, &hash).ok().flatten().is_some() {
+            drop_rels.push(hash);
+        }
     }
     // One subject for every scope file. Import matches the host, the
     // first word, and reads a `host+scope` path in this commit as that
@@ -4246,17 +4654,11 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
             }
         }
         let mut stage = drop_rels;
-        let mine: Vec<String> = if scope.scopes.is_empty() {
-            let [log, digest] = host_log_rels(&me);
-            let chunks = chunk_dir_rel(&log);
-            vec![log, digest, chunks]
-        } else {
-            scope
-                .all_scopes()
-                .into_iter()
-                .flat_map(|named| host_log_paths(&me, &scope.name, named.name))
-                .collect()
-        };
+        let mine: Vec<String> = scope
+            .all_scopes()
+            .into_iter()
+            .flat_map(|named| host_log_paths(&me, &scope.name, named.name))
+            .collect();
         for rel in mine {
             if stageable_path(root, &rel) {
                 stage.push(rel);
@@ -4434,23 +4836,24 @@ fn commits_to_push(root: &Path) -> bool {
 /// not even a commit already waiting.
 fn commit_log(root: &Path, scope: &str, push: bool) -> String {
     let host = host();
-    let log = format!(".ljos/atoms/{host}.jsonl.age");
-    let mut files = vec![log.clone(), format!(".ljos/atoms/{host}.digest")];
-    let chunks = chunk_dir_rel(&log);
-    if stageable_path(root, &chunks) {
-        files.push(chunks);
-    }
-    let files: Vec<&str> = files.iter().map(String::as_str).collect();
+    let files = host_log_paths(&host, scope, scope);
+    let files: Vec<&str> = files
+        .iter()
+        .filter(|rel| stageable_path(root, rel))
+        .map(String::as_str)
+        .collect();
     let message = format!("chore(sync): {host} {scope} atoms");
     commit_files(root, &files, &message, push)
 }
 
-/// The paths a commit of `host`'s log of `scope_name` stages: the sealed
-/// base, its digest, and its chunk directory.
-fn host_log_paths(host: &str, primary_scope: &str, scope_name: &str) -> [String; 3] {
+/// The paths a commit of `host`'s log of `scope_name` stages: the legacy
+/// file (so a migration's deletion is committed), its digest, its old
+/// chunk directory, and the snapshot directory.
+fn host_log_paths(host: &str, primary_scope: &str, scope_name: &str) -> Vec<String> {
     let [log, digest] = host_log_rels_for_scope(host, primary_scope, scope_name);
     let chunks = chunk_dir_rel(&log);
-    [log, digest, chunks]
+    let stem = log_stem_dir(&log);
+    vec![log, digest, chunks, stem]
 }
 
 fn commit_logs(root: &Path, scope: &Scope, push: bool) -> String {
@@ -4585,7 +4988,9 @@ pub(crate) fn push_sealed_log() -> Result<()> {
 /// envelope. A refused push still leaves the commit here, and the next
 /// push sends it. `None` when no tracker checkout holds the log.
 pub(crate) fn log_commit() -> Option<String> {
-    let spec = format!("HEAD:.ljos/atoms/{}.jsonl.age", host());
+    let host = host();
+    let legacy = format!("HEAD:.ljos/atoms/{host}.jsonl.age");
+    let hash = format!("HEAD:.ljos/atoms/{host}/plain.sha256");
     for root in &configured_roots() {
         let Some(out) = git(root, &["rev-parse", "HEAD"]).ok() else {
             continue;
@@ -4597,7 +5002,9 @@ pub(crate) fn log_commit() -> Option<String> {
         if sha.is_empty() {
             continue;
         }
-        if git(root, &["cat-file", "-e", &spec]).is_ok_and(|o| o.status.success()) {
+        if git(root, &["cat-file", "-e", &legacy]).is_ok_and(|o| o.status.success())
+            || git(root, &["cat-file", "-e", &hash]).is_ok_and(|o| o.status.success())
+        {
             return Some(sha);
         }
     }
@@ -4835,7 +5242,7 @@ fn legacy_hints(root: &Path) -> Result<LegacyHints> {
         if !log.configured {
             continue;
         }
-        let Some(bytes) = read_beneath(root, &log.rel)? else {
+        let Some(bytes) = current_sealed(root, &log.rel)? else {
             continue;
         };
         match open_log_inner(root, &bytes, &log.host, &log.scope_name, &log.rel, false) {
@@ -4925,7 +5332,7 @@ fn adopt_legacy_in_repo(root: &Path, scope: &Scope, host: &str) -> Result<String
     let base = state_base();
     let mut out = String::new();
     for log in logs_of_host(scope, host) {
-        let Some(bytes) = read_beneath(root, &log.age)? else {
+        let Some(bytes) = current_sealed(root, &log.age)? else {
             continue;
         };
         let said = |what: &str| format!("sync: {host}'s {} log {what}\n", log.scope_name);
@@ -6491,7 +6898,7 @@ mod tests {
         export_for_scope(dir.path(), &scope, "cloud", &atoms, "example-host").unwrap();
         let host = host();
         let [cloud_rel, _] = host_log_rels_for_scope(&host, &scope.name, "cloud");
-        let cloud_text = std::fs::read_to_string(dir.path().join(cloud_rel)).unwrap();
+        let cloud_text = snap_text(dir.path(), &cloud_rel);
         assert!(
             cloud_text.contains("cloud only"),
             "cloud file lost the cloud atom: {cloud_text}"
@@ -6501,7 +6908,7 @@ mod tests {
             "cloud file leaked a example-host atom: {cloud_text}"
         );
         let [grok_rel, _] = host_log_rels_for_scope(&host, &scope.name, "example-host");
-        let grok_text = std::fs::read_to_string(dir.path().join(grok_rel)).unwrap();
+        let grok_text = snap_text(dir.path(), &grok_rel);
         assert!(grok_text.contains("box only"), "{grok_text}");
         assert!(!grok_text.contains("cloud only"), "{grok_text}");
     }
@@ -7897,7 +8304,7 @@ mod tests {
             "{said}"
         );
         assert_eq!(posted_texts(&posted), vec!["from the gone host"]);
-        let mine = atoms.join(format!("{}+cloud.jsonl.age", host()));
+        let mine = sealed_path(&root, &format!(".ljos/atoms/{}+cloud.jsonl.age", host()));
         let kept = open_identities(&mine, &identities_for_open(CLOUD_SCOPE))
             .unwrap()
             .unwrap_or_default();
@@ -8005,7 +8412,7 @@ mod tests {
         let exported = sync_repo_in_passing(false, true).unwrap();
         let shared = git(&remote, &["ls-tree", "-r", "--name-only", "main"]);
         assert!(
-            shared.contains(".ljos/atoms/cursor-seat-a+cloud.jsonl.age"),
+            shared.contains(".ljos/atoms/cursor-seat-a+cloud/snap-"),
             "{exported}\n{shared}"
         );
 
@@ -8198,7 +8605,7 @@ mod tests {
             "{said}"
         );
         assert_eq!(posted_texts(&posted), vec!["from the primary log"]);
-        let mine = atoms.join(format!("{}.jsonl.age", host()));
+        let mine = sealed_path(&root, &format!(".ljos/atoms/{}.jsonl.age", host()));
         let kept = open_identities(&mine, &identities_for_open("example-host"))
             .unwrap()
             .unwrap_or_default();
@@ -8792,7 +9199,7 @@ mod tests {
         let private_log = log_plaintext(&live, "private", "private");
         assert_eq!(private_log.lines().count(), 1, "{private_log}");
         assert!(!private_log.contains("ljos-b"), "{private_log}");
-        let mine = log_dir(&fix.root).join(format!("{}.jsonl.age", host()));
+        let mine = sealed_path(&fix.root, &format!(".ljos/atoms/{}.jsonl.age", host()));
         let opened = open(&mine, &identity_path()).unwrap().unwrap();
         let atoms = opened
             .lines()
@@ -8833,7 +9240,7 @@ mod tests {
         assert!(!in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
         let changed = git(&fix.root, &["show", "--name-only", "--format=", "HEAD"]).unwrap();
         let changed = String::from_utf8_lossy(&changed.stdout);
-        let rel = ".ljos/atoms/bad-host.jsonl.age";
+        let rel = ".ljos/atoms/bad-host/snap-0.jsonl.age";
         assert!(changed.lines().any(|line| line == rel), "{changed}");
         let sealed = head_blob(&fix.root, rel).unwrap();
         let opened = open_sealed_bytes(&sealed, &[identity_path()])
@@ -9024,7 +9431,19 @@ mod tests {
         }
 
         fn base_blob(&self) -> String {
-            self.git(&["rev-parse", &format!("HEAD:{}", self.log_rel)])
+            let rel = self.snap_rel();
+            self.git(&["rev-parse", &format!("HEAD:{rel}")])
+        }
+
+        fn snap_rel(&self) -> String {
+            let stem = log_stem_dir(&self.log_rel);
+            let listed = self.git(&["ls-tree", "-r", "--name-only", "HEAD", &stem]);
+            listed
+                .lines()
+                .filter(|line| line.contains("/snap-"))
+                .max_by_key(|line| snap_seq(line))
+                .unwrap_or_else(|| panic!("no snapshot in {listed}"))
+                .to_string()
         }
 
         /// Bytes of every blob reachable from HEAD and not from `since`.
@@ -9048,9 +9467,42 @@ mod tests {
         }
 
         fn chunk(&self, n: u32) -> PathBuf {
-            let stem = self.log_rel.strip_suffix(".jsonl.age").unwrap();
-            self.root.join(format!("{stem}.chunks/{n}.age"))
+            let stem = log_stem_dir(&self.log_rel);
+            let segs: Vec<_> = sealed_pieces(&self.root, &stem)
+                .into_iter()
+                .filter(|piece| !piece.snap)
+                .collect();
+            if let Some(piece) = segs.get(usize::try_from(n - 1).unwrap_or(0)) {
+                return self.root.join(&piece.rel);
+            }
+            let old = self.log_rel.strip_suffix(".jsonl.age").unwrap();
+            self.root.join(format!("{old}.chunks/{n}.age"))
         }
+    }
+
+    fn snap_seq(rel: &str) -> u32 {
+        rel.split("snap-")
+            .nth(1)
+            .and_then(|rest| rest.split('.').next())
+            .and_then(|seq| seq.parse().ok())
+            .unwrap_or(0)
+    }
+
+    fn snap_text(root: &Path, log_rel: &str) -> String {
+        let path = sealed_path(root, log_rel);
+        String::from_utf8(std::fs::read(&path).unwrap()).unwrap()
+    }
+
+    fn sealed_path(root: &Path, log_rel: &str) -> PathBuf {
+        let stem = log_stem_dir(log_rel);
+        if let Some(piece) = sealed_pieces(root, &stem)
+            .into_iter()
+            .filter(|piece| piece.snap)
+            .max_by_key(|piece| piece.seq)
+        {
+            return root.join(piece.rel);
+        }
+        root.join(log_rel)
     }
 
     /// Twenty syncs that each add one note to a log of 1500 leave its base
@@ -9170,7 +9622,7 @@ mod tests {
         );
         write_beneath(&fix.root, &digest_rel, older.as_bytes()).unwrap();
         commit_log(&fix.root, "example-host", false);
-        let single = fix.base_blob();
+        let single = fix.git(&["rev-parse", &format!("HEAD:{}", fix.log_rel)]);
         let (view, out) = fix.peer_view();
         assert_eq!(
             view,
@@ -9181,20 +9633,21 @@ mod tests {
         atoms.push(note(200));
         fix.sync(&atoms);
         let migrated = fix.base_blob();
-        assert_ne!(
-            migrated, single,
-            "the first write did not seal the log whole"
+        assert_eq!(migrated, single, "the legacy ciphertext was sealed again");
+        assert!(
+            !fix.root.join(&fix.log_rel).exists(),
+            "the legacy path was left in place"
         );
-        assert!(!fix.chunk(1).exists(), "the first write left a chunk");
+        assert!(fix.chunk(1).is_file(), "the new atom was not a segment");
 
         atoms.push(note(201));
         fix.sync(&atoms);
         assert_eq!(
             fix.base_blob(),
             migrated,
-            "the second write sealed the log whole"
+            "the second write sealed the snapshot again"
         );
-        assert!(fix.chunk(1).is_file(), "the second write left no chunk");
+        assert!(fix.chunk(2).is_file(), "the second write left no segment");
         let (view, out) = fix.peer_view();
         assert_eq!(
             view,
@@ -9232,10 +9685,16 @@ mod tests {
             log_lines(&before, "example-host", "example-host", false),
             "{out}"
         );
-        assert!(out.contains("chunk 2 did not open"), "{out}");
+        assert!(out.contains("did not open"), "{out}");
 
         let said = fix.sync(&atoms);
-        assert!(said.contains("chunks/2.age"), "{said}");
+        assert!(
+            said.contains("unchanged since the last export"),
+            "an unchanged plaintext rewrote the cut segment: {said}"
+        );
+        atoms.push(note(204));
+        let said = fix.sync(&atoms);
+        assert!(said.contains("seg-"), "{said}");
         let (view, out) = fix.peer_view();
         assert_eq!(
             view,
@@ -9259,27 +9718,31 @@ mod tests {
         let mut atoms: Vec<Value> = (0..300).map(note).collect();
         fix.sync(&atoms);
         let base = fix.base_blob();
-        let base_len = (log_header(&host(), "example-host") + &lines(&atoms)).len();
-        let over = blob_digest(&std::fs::read(fix.root.join(&fix.log_rel)).unwrap());
-        let header_len = chunk_header(&host(), "example-host", &over, 1).len();
-        let most = (base_len / header_len).ilog2() as usize;
-        for n in 1..=MAX_CHUNKS as usize + 1 {
+        for n in 1..=SEGMENT_LIMIT {
             atoms.push(note(300 + n));
             let said = fix.sync(&atoms);
             assert_eq!(
                 fix.base_blob(),
                 base,
-                "sync {n} sealed the log whole: {said}"
+                "sync {n} sealed the snapshot again: {said}"
             );
-            let held = chunk_files(&fix.root, &fix.log_rel);
             assert!(
-                (1..=most).contains(&held.len()),
-                "sync {n} left {} chunks, outside 1 to {most}: {held:?}",
-                held.len()
+                fix.chunk(u32::try_from(n).unwrap()).is_file(),
+                "sync {n} wrote no segment: {said}"
             );
             let (view, out) = fix.peer_view();
             assert_eq!(view, lines(&atoms), "sync {n}: {out}");
         }
+        atoms.push(note(300 + SEGMENT_LIMIT + 1));
+        let said = fix.sync(&atoms);
+        assert_ne!(
+            fix.base_blob(),
+            base,
+            "the sync past {SEGMENT_LIMIT} segments did not fold: {said}"
+        );
+        assert!(!fix.chunk(1).is_file(), "the fold left a segment: {said}");
+        let (view, out) = fix.peer_view();
+        assert_eq!(view, lines(&atoms), "{out}");
     }
 
     /// A log an older ljos left at 64 one-note chunks, the most a reader
@@ -9294,32 +9757,31 @@ mod tests {
         let mut atoms: Vec<Value> = (0..300).map(note).collect();
         fix.sync(&atoms);
         let base = fix.base_blob();
-        let over = blob_digest(&std::fs::read(fix.root.join(&fix.log_rel)).unwrap());
+        let stem = log_stem_dir(&fix.log_rel);
         for n in 1..=MAX_CHUNKS {
             let added = note(300 + n as usize);
-            let plain = chunk_header(&host(), "example-host", &over, n)
-                + &lines(std::slice::from_ref(&added));
+            let plain =
+                seg_header(&host(), "example-host", n, 0) + &lines(std::slice::from_ref(&added));
             let sealed = seal_bytes(&plain, std::slice::from_ref(&fix.public)).unwrap();
-            write_beneath(&fix.root, &chunk_rel(&fix.log_rel, n), &sealed).unwrap();
+            write_beneath(
+                &fix.root,
+                &seg_file_rel(&stem, n, &hash8_of(plain.as_bytes())),
+                &sealed,
+            )
+            .unwrap();
             atoms.push(added);
         }
-        let [_, digest_rel] = host_log_rels_for_scope(&host(), "example-host", "example-host");
-        let digest = export_digest(
-            &fix.root,
-            &fix.log_rel,
-            &(log_header(&host(), "example-host") + &lines(&atoms)),
-            std::slice::from_ref(&fix.public),
-        );
-        write_beneath(&fix.root, &digest_rel, digest.as_bytes()).unwrap();
-        commit_log(&fix.root, "example-host", false);
         let (view, out) = fix.peer_view();
         assert_eq!(view, lines(&atoms), "{out}");
 
         atoms.push(note(400));
         let said = fix.sync(&atoms);
-        assert_eq!(fix.base_blob(), base, "the 65th chunk sealed the log whole");
-        assert!(said.contains("chunks/1.age"), "{said}");
-        assert!(!fix.chunk(2).exists(), "the chunks did not fold: {said}");
+        assert_ne!(
+            fix.base_blob(),
+            base,
+            "64 segments and one more note did not fold: {said}"
+        );
+        assert!(!fix.chunk(1).exists(), "the fold left a segment: {said}");
         let (view, out) = fix.peer_view();
         assert_eq!(view, lines(&atoms), "{out}");
     }
@@ -9349,9 +9811,13 @@ mod tests {
             *slot = atom(&format!("a{n:05}"), &text, &[]);
         }
         fix.sync(&atoms);
-        let second = fix.base_blob();
-        assert_ne!(second, first, "a chunk the size of the base was written");
-        assert!(!fix.chunk(1).exists(), "the whole seal left chunks");
+        assert_eq!(
+            fix.base_blob(),
+            first,
+            "a large change sealed the snapshot again"
+        );
+        assert!(fix.chunk(1).is_file());
+        assert!(fix.chunk(2).is_file());
         let (view, out) = fix.peer_view();
         assert_eq!(
             view,
@@ -9361,8 +9827,8 @@ mod tests {
 
         atoms.push(note(20));
         fix.sync(&atoms);
-        assert_eq!(fix.base_blob(), second);
-        assert!(fix.chunk(1).is_file());
+        assert_eq!(fix.base_blob(), first);
+        assert!(fix.chunk(3).is_file());
         let (view, out) = fix.peer_view();
         assert_eq!(
             view,
@@ -10298,13 +10764,13 @@ mod tests {
         assert!(!said.contains("default_scope"), "{said}");
         let host = host();
         let [cloud_rel, _] = host_log_rels_for_scope(&host, "example-host", "cloud");
-        let cloud = std::fs::read_to_string(root.join(cloud_rel)).unwrap();
+        let cloud = snap_text(&root, &cloud_rel);
         assert!(cloud.contains("The VM kept a fact."), "{cloud}");
         assert!(cloud.contains("The VM prefers short logs."), "{cloud}");
         assert!(cloud.contains("The VM learned a lesson."), "{cloud}");
         assert!(!cloud.contains("The box kept a fact."), "{cloud}");
         let [primary_rel, _] = host_log_rels_for_scope(&host, "example-host", "example-host");
-        let primary = std::fs::read_to_string(root.join(primary_rel)).unwrap();
+        let primary = snap_text(&root, &primary_rel);
         assert!(primary.contains("The box kept a fact."), "{primary}");
         assert!(!primary.contains("The VM kept a fact."), "{primary}");
         assert!(!primary.contains("The VM learned a lesson."), "{primary}");
@@ -10371,22 +10837,22 @@ mod tests {
         assert!(!said.contains("default_scope"), "{said}");
         let host = host();
         let [cloud_rel, _] = host_log_rels_for_scope(&host, "example-host", "cloud");
-        let cloud = std::fs::read_to_string(root.join(cloud_rel)).unwrap();
+        let cloud = snap_text(&root, &cloud_rel);
         assert!(cloud.contains("cloud only"), "{cloud}");
         assert!(!cloud.contains("box only"), "{cloud}");
         assert!(!cloud.contains("named box"), "{cloud}");
         assert!(!cloud.contains("lesson on the primary"), "{cloud}");
         let [primary_rel, _] = host_log_rels_for_scope(&host, "example-host", "example-host");
-        let primary = std::fs::read_to_string(root.join(primary_rel)).unwrap();
+        let primary = snap_text(&root, &primary_rel);
         assert!(primary.contains("box only"), "{primary}");
         assert!(primary.contains("named box"), "{primary}");
         assert!(primary.contains("lesson on the primary"), "{primary}");
         assert!(!primary.contains("cloud only"), "{primary}");
     }
 
-    /// The digest names the sealed file as well as the atoms. A log that a
-    /// merge replaced under the same atoms is sealed again, and a digest
-    /// with the two fields an older ljos wrote is sealed over once.
+    /// The plaintext hash, not the ciphertext, decides a repeat. Replacing
+    /// the sealed bytes under the same atoms writes nothing, and an older
+    /// two-field digest does not seal the log again once that hash is stored.
     #[test]
     fn a_log_replaced_under_the_same_atoms_is_sealed_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -10404,24 +10870,30 @@ mod tests {
             said.contains("sync: exported 1 example-host atoms"),
             "{said}"
         );
-        let sealed = std::fs::read(root.join(&log_rel)).unwrap();
+        let sealed = snap_text(&root, &log_rel);
         let said = run();
         assert!(said.contains("unchanged since the last export"), "{said}");
-        std::fs::write(root.join(&log_rel), "another seal\n").unwrap();
+        let stem = log_stem_dir(&log_rel);
+        let snap = sealed_pieces(&root, &stem)
+            .into_iter()
+            .find(|piece| piece.snap)
+            .unwrap();
+        std::fs::write(root.join(&snap.rel), "another seal\n").unwrap();
         let said = run();
         assert!(
-            said.contains("sync: exported 1 example-host atoms"),
-            "a replaced log was left as found: {said}"
+            said.contains("unchanged since the last export"),
+            "a replaced ciphertext of the same atoms was sealed again: {said}"
         );
-        assert_eq!(std::fs::read(root.join(&log_rel)).unwrap(), sealed);
-        let plain = String::from_utf8(sealed).unwrap();
-        let older = format!("{} {}\n", crate::work_id(&plain), crate::work_id("age1box"));
+        assert_eq!(
+            std::fs::read_to_string(root.join(&snap.rel)).unwrap(),
+            "another seal\n"
+        );
+        let older = format!(
+            "{} {}\n",
+            crate::work_id(&sealed),
+            crate::work_id("age1box")
+        );
         std::fs::write(root.join(&digest_rel), older).unwrap();
-        let said = run();
-        assert!(
-            said.contains("sync: exported 1 example-host atoms"),
-            "{said}"
-        );
         let said = run();
         assert!(said.contains("unchanged since the last export"), "{said}");
     }
@@ -10544,7 +11016,7 @@ mod tests {
         let me = host();
         let [primary_rel, _] = host_log_rels_for_scope(&me, "example-host", "example-host");
         let [cloud_rel, _] = host_log_rels_for_scope(&me, "example-host", "cloud");
-        let primary = std::fs::read_to_string(root.join(&primary_rel)).unwrap();
+        let primary = snap_text(&root, &primary_rel);
         assert!(primary.contains("box only"), "{primary}");
         assert!(
             !root.join(&cloud_rel).exists(),
@@ -10553,7 +11025,7 @@ mod tests {
         let committed = commit_if_sealed_scopes(&root, &scope, &said, false);
         assert!(committed.contains("committed"), "{committed}");
         let tracked = git(&["ls-files"]);
-        assert!(tracked.contains(&format!("{me}.jsonl.age")), "{tracked}");
+        assert!(tracked.contains(&format!("{me}/snap-")), "{tracked}");
         assert!(!tracked.contains("+cloud"), "{tracked}");
     }
 
@@ -11560,14 +12032,21 @@ mod tests {
         let scope = fix.scope();
         export_named(&fix.root, &scope, "example-host", &atoms).unwrap();
         let [rel, digest] = host_log_rels(&host());
-        git_ok(&fix.root, &["add", &rel, &digest]);
+        let stem = log_stem_dir(&rel);
+        git_ok(&fix.root, &["add", &stem, &digest]);
         git_ok(&fix.root, &["commit", "-q", "-m", "this host's log"]);
         git_ok(&fix.root, &["push", "-q"]);
         let canary = fix.dir.join("canary");
         std::fs::write(&canary, "CANARY outside the tracker\n").unwrap();
         git_ok(&fix.peer, &["pull", "-q", "--ff-only"]);
-        std::fs::remove_file(fix.peer.join(&rel)).unwrap();
-        std::os::unix::fs::symlink(&canary, fix.peer.join(&rel)).unwrap();
+        let trap = fix.peer.join(&rel);
+        if trap.exists() {
+            std::fs::remove_file(&trap).unwrap();
+        }
+        if let Some(parent) = trap.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::os::unix::fs::symlink(&canary, &trap).unwrap();
         fix.push(&[]);
         fix.pull();
         assert!(std::fs::symlink_metadata(fix.root.join(&rel))

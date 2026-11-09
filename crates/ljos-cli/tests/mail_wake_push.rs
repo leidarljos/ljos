@@ -420,8 +420,31 @@ fn wake_log(home: &Path) -> String {
     std::fs::read_to_string(home.join(".local/state/ljos/mail/wake.log")).unwrap_or_default()
 }
 
+fn log_in_commit(host: &str) -> String {
+    format!(".ljos/atoms/{host}/plain.sha256")
+}
+
 fn open_log(world: &World, host: &str) -> String {
-    let spec = format!("HEAD:.ljos/atoms/{host}.jsonl.age");
+    let listed = Command::new("git")
+        .arg("--git-dir")
+        .arg(&world.origin)
+        .args([
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "HEAD",
+            &format!(".ljos/atoms/{host}"),
+        ])
+        .env("GIT_CONFIG_GLOBAL", &world.gitconfig)
+        .env("GIT_CONFIG_SYSTEM", &world.gitconfig)
+        .output()
+        .expect("git ls-tree");
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    let snap = listed
+        .lines()
+        .find(|line| line.contains("/snap-"))
+        .unwrap_or_else(|| panic!("no snapshot for {host} in {listed}"));
+    let spec = format!("HEAD:{snap}");
     let show = Command::new("git")
         .arg("--git-dir")
         .arg(&world.origin)
@@ -464,7 +487,7 @@ fn script(home: &Path) -> PathBuf {
     let path = home.join("wake.sh");
     write_exe(
         &path,
-        "#!/bin/sh\nset -e\nhost=\"${LJOS_TEST_HOSTNAME:-$HOSTNAME}\"\nif [ -z \"$host\" ]; then\n  host=$(/usr/bin/hostname)\nfi\nprintf '%s\\n' \"$host\" > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\ngit --git-dir \"$ORIGIN\" cat-file -e \"HEAD:.ljos/atoms/${host}.jsonl.age\"\nprintf '%s\\n' \"$host\" > \"$HOME/woke\"\n",
+        "#!/bin/sh\nset -e\nhost=\"${LJOS_TEST_HOSTNAME:-$HOSTNAME}\"\nif [ -z \"$host\" ]; then\n  host=$(/usr/bin/hostname)\nfi\nprintf '%s\\n' \"$host\" > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\ngit --git-dir \"$ORIGIN\" cat-file -e \"HEAD:.ljos/atoms/${host}/plain.sha256\" || git --git-dir \"$ORIGIN\" cat-file -e \"HEAD:.ljos/atoms/${host}.jsonl.age\"\nprintf '%s\\n' \"$host\" > \"$HOME/woke\"\n",
     );
     path
 }
@@ -491,7 +514,7 @@ fn assert_commit_holds(world: &World, home: &Path, repo: &Path, host: &str) {
         &[
             "cat-file",
             "-e",
-            &format!("{commit}:.ljos/atoms/{host}.jsonl.age"),
+            &format!("{commit}:{}", log_in_commit(host)),
         ],
     );
 }

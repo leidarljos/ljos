@@ -574,6 +574,9 @@ enum Cmd {
         /// Read HOST's logs from before the scope header: pin the blobs filed under HOST now, and import only those bytes as HOST's until HOST writes a headed log.
         #[arg(long, value_name = "HOST", conflicts_with_all = ["key", "import", "export", "adopt"])]
         adopt_legacy: Option<String>,
+        /// Fold this machine's atom segments into one snapshot. A sync without this writes a segment only, and leaves every sealed file as it is.
+        #[arg(long, conflicts_with_all = ["key", "adopt", "adopt_legacy"])]
+        compact: bool,
     },
     /// Re-export this machine's atoms over a conflicted tracker log. git calls
     /// this as the `ljos-atoms` merge driver (`%A` then `%P`).
@@ -2209,6 +2212,7 @@ fn run_command() -> Result<()> {
             force,
             dry_run,
             adopt_legacy,
+            compact,
         } => {
             if let Some(host) = adopt {
                 print!("{}", ljos_cli::sync::adopt(&host, force, dry_run)?);
@@ -2217,6 +2221,7 @@ fn run_command() -> Result<()> {
             } else if key {
                 println!("{}", ljos_cli::sync::public_key()?);
             } else {
+                let _compact = compact.then(ljos_cli::sync::compact_for_this_call);
                 let both = !import && !export;
                 print!(
                     "{}",
