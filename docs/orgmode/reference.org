@@ -151,7 +151,14 @@ as in =sentence has 33 words; limit 29: "git push needs to run inside..."=.
 The last line counts the open rows, for example =70 open: 52 new, 18 already in pack (`--status in-pack` to list them)=.
 =--status in-pack= lists the ones whose text and kind already match a pack atom.
 =ljos proposals --settle= writes =already-in-pack= and the time on those rows, prints one line per id and a total, and deletes nothing.
-A second run writes nothing. An atom taken by =receive --import= or by =sync= has origin
+A second run writes nothing.
+=ljos proposals amend ID --text TEXT= records a revised text, keeps the original, and runs the same readability check without accepting.
+=--text -= reads the text from stdin.
+A pass prints =ok ID: passes (ready for ljos accept)=.
+A miss prints =refused ID: sentence has 33 words; 33 vs limit 29: "..."=.
+=ljos accept= stores the latest amended text and marks the atom =provenance:amended=.
+Accepting a refused proposal again, with no amendment since, prints =refused ID: unchanged since last refusal at TIME; amend it with ljos proposals amend= and does not run the check again.
+=ljos proposals --status refused= quotes the sentence and gives that amend hint. An atom taken by =receive --import= or by =sync= has origin
 =peer=, whatever origin the sender wrote.
 
 The claim graph records the held ticket too: a tracker id maps to one node

@@ -83,7 +83,19 @@ struct Record {
     /// The pack's reason, when the outcome is `refused`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     reason: String,
+    /// A revised text. The original `text` stays. Absent until
+    /// `ljos proposals amend`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    amendment: Option<Amendment>,
     atom: Value,
+}
+
+/// A revised proposal text, who wrote it, and when.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Amendment {
+    text: String,
+    seat: String,
+    at: String,
 }
 
 fn gate() -> std::sync::MutexGuard<'static, ()> {
@@ -748,6 +760,7 @@ pub fn file_open(text: &str, kind: &str) -> Result<String> {
         seat,
         at: crate::now_utc(),
         reason: String::new(),
+        amendment: None,
         atom: serde_json::json!({
             "kind": kind,
             "text": text,
@@ -764,6 +777,123 @@ fn proposal_id(text: &str, seat: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(format!("{seat}\n{text}").as_bytes());
     digest.iter().map(|b| format!("{b:02x}")).take(16).collect()
+}
+
+/// Record a revised text on proposal `id` and run the readability check
+/// accept uses. The original text stays on the row. Nothing is accepted.
+///
+/// # Errors
+///
+/// The text is empty, or the proposal log cannot be written.
+pub fn amend_proposal(id: &str, text: &str) -> Result<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("proposals: empty text is not an amendment");
+    }
+    let _g = gate();
+    let id = id.trim();
+    if id.is_empty() {
+        bail!("proposals: an id is required");
+    }
+    let rows = read_latest();
+    let known: Vec<String> = rows.keys().cloned().collect();
+    let id = match crate::resolve_short_id("proposals", id, &known) {
+        Ok(id) => id,
+        Err(err) => return Ok(format!("not found {id}: {err:#}\n")),
+    };
+    let id = id.as_str();
+    let Some(mut rec) = rows.get(id).cloned() else {
+        return Ok(format!("not found {id}\n"));
+    };
+    if !matches!(rec.status.as_str(), "open" | "proposed" | "refused") {
+        return Ok(format!("already in pack {id}\n"));
+    }
+    rec.amendment = Some(Amendment {
+        text: text.to_string(),
+        seat: crate::seat_name(),
+        at: crate::now_utc(),
+    });
+    rec.atom["text"] = Value::String(text.to_string());
+    if let Some(why) = crate::pack_copy::gate_refusal(text) {
+        rec.status = "refused".to_string();
+        rec.reason = why.clone();
+        rec.at = crate::now_utc();
+        append(&rec)?;
+        return Ok(amend_refusal(id, text, &why));
+    }
+    rec.status = "open".to_string();
+    rec.reason.clear();
+    rec.at = crate::now_utc();
+    append(&rec)?;
+    Ok(format!("ok {id}: passes (ready for ljos accept)\n"))
+}
+
+/// `refused <id>: <reason>; <value> vs limit <limit>: "<sentence>"`.
+fn amend_refusal(id: &str, text: &str, why: &str) -> String {
+    let quote = trim_quote(&offending_sentence(text, why));
+    let (reason, value, limit) = measured(why);
+    match (value, limit) {
+        (Some(value), Some(limit)) if !quote.is_empty() => {
+            format!("refused {id}: {reason}; {value} vs limit {limit}: \"{quote}\"\n")
+        }
+        _ if !quote.is_empty() => format!("refused {id}: {why}: \"{quote}\"\n"),
+        _ => format!("refused {id}: {why}\n"),
+    }
+}
+
+fn measured(why: &str) -> (String, Option<String>, Option<String>) {
+    if let Some((words, limit)) = word_limit(why) {
+        return (
+            format!("sentence has {words} words"),
+            Some(words.to_string()),
+            Some(limit.to_string()),
+        );
+    }
+    if let Some(rest) = why.split("readability grade ").nth(1) {
+        let mut parts = rest.split_whitespace();
+        let grade = parts.next().unwrap_or("");
+        if parts.next() == Some("exceeds") {
+            let limit = parts
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.');
+            if !grade.is_empty() && !limit.is_empty() {
+                return (
+                    format!("readability grade {grade} exceeds {limit}"),
+                    Some(grade.to_string()),
+                    Some(limit.to_string()),
+                );
+            }
+        }
+    }
+    if let (Some(n), Some(limit)) = (
+        number_before(why, " sentences"),
+        number_after(why, "at most "),
+    ) {
+        return (
+            format!("atom has {n} sentences"),
+            Some(n.to_string()),
+            Some(limit.to_string()),
+        );
+    }
+    if let Some(rest) = why.split("adverb ratio ").nth(1) {
+        let mut parts = rest.split_whitespace();
+        let ratio = parts.next().unwrap_or("");
+        if parts.next() == Some("exceeds") {
+            let limit = parts
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.');
+            if !ratio.is_empty() && !limit.is_empty() {
+                return (
+                    format!("adverb ratio {ratio} exceeds {limit}"),
+                    Some(ratio.to_string()),
+                    Some(limit.to_string()),
+                );
+            }
+        }
+    }
+    (why.to_string(), None, None)
 }
 
 /// The latest proposal per id, filtered by seat and status. A row that
@@ -868,11 +998,37 @@ fn proposal_kind(rec: &Record) -> String {
 }
 
 fn proposal_text(rec: &Record) -> String {
+    if let Some(text) = rec
+        .amendment
+        .as_ref()
+        .map(|amendment| amendment.text.trim())
+        .filter(|text| !text.is_empty())
+    {
+        return text.to_string();
+    }
     let text = rec.text.trim();
     if !text.is_empty() {
         return text.to_string();
     }
     rec.atom["text"].as_str().unwrap_or("").trim().to_string()
+}
+
+/// Put the text accept will store onto the atom. An amended proposal
+/// carries `provenance:amended`, which a reader of the pack can see.
+fn stamp_current(rec: &mut Record) {
+    let text = proposal_text(rec);
+    rec.atom["text"] = Value::String(text);
+    if rec.amendment.is_some() {
+        crate::add_entities(&mut rec.atom, ["provenance:amended".to_string()]);
+    }
+}
+
+/// Whether an amendment was written after the refusal. A refusal of that
+/// same amendment is not a newer one.
+fn amended_since_refusal(rec: &Record) -> bool {
+    rec.amendment
+        .as_ref()
+        .is_some_and(|amendment| amendment.at > rec.at)
 }
 
 /// The writer's duplicate rule: one atom when the folded text and the kind
@@ -934,7 +1090,10 @@ fn proposal_line(rec: &Record, held: &[Value]) -> String {
         format!("seat {}", rec.seat)
     };
     let text = if rec.status == "refused" && !rec.reason.is_empty() {
-        refusal_clause(&proposal_text(rec), &rec.reason)
+        format!(
+            "{}  amend it with ljos proposals amend",
+            refusal_clause(&proposal_text(rec), &rec.reason)
+        )
     } else {
         proposal_text(rec).replace('\n', " ")
     };
@@ -1061,7 +1220,18 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
             let stored = rec.stored.clone().unwrap_or_default();
             return accept_memory(&stored, Some(rec), yes);
         }
+        "refused" if !amended_since_refusal(&rec) => {
+            let when = if rec.at.is_empty() {
+                "unknown"
+            } else {
+                rec.at.as_str()
+            };
+            return Ok(format!(
+                "refused {id}: unchanged since last refusal at {when}; amend it with ljos proposals amend\n"
+            ));
+        }
         "open" | "proposed" | "refused" => {
+            stamp_current(&mut rec);
             if matches!(rec.status.as_str(), "open" | "proposed") {
                 if let Some(held) = live_atoms() {
                     if atom_in_pack(&rec, &held) {
@@ -1073,15 +1243,13 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
         }
         _ => return Ok(format!("not found {id}\n")),
     }
-    if let Some(why) = crate::pack_copy::gate_refusal(&rec.text) {
+    let text = proposal_text(&rec);
+    if let Some(why) = crate::pack_copy::gate_refusal(&text) {
         if rec.status != "refused" || rec.reason != why {
             rec.reason.clone_from(&why);
             note_outcome(&mut rec, "refused", &why)?;
         }
-        return Ok(format!(
-            "refused {id}: {}\n",
-            refusal_clause(&rec.text, &why)
-        ));
+        return Ok(format!("refused {id}: {}\n", refusal_clause(&text, &why)));
     }
     let client = crate::pack()?;
     if rec.remote {
@@ -1102,15 +1270,15 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
             Ok(accepted_line(&rec, &posted))
         }
         Err(e) => {
-            let text = e.to_string();
-            let Some(remote_id) = held_proposal_id(&text) else {
+            let err_text = e.to_string();
+            let Some(remote_id) = held_proposal_id(&err_text) else {
                 if !crate::note_can_wait(&e) {
                     let why =
                         crate::server_reason(&format!("{e:#}")).unwrap_or_else(|| format!("{e:#}"));
                     note_outcome(&mut rec, "refused", &why)?;
                     return Ok(format!(
                         "refused {id}: {}\n",
-                        refusal_clause(&rec.text, &why)
+                        refusal_clause(&proposal_text(&rec), &why)
                     ));
                 }
                 return Err(e).with_context(|| format!("accept: POST /v1/atoms failed for {id}"));
@@ -1187,6 +1355,7 @@ fn accept_memory(id: &str, rec: Option<Record>, yes: Option<&Yes>) -> Result<Str
             .to_string(),
         at: String::new(),
         reason: String::new(),
+        amendment: None,
         atom,
     });
     rec.stored = Some(full);
@@ -1214,6 +1383,7 @@ mod tests {
             seat: String::new(),
             at: String::new(),
             reason: String::new(),
+            amendment: None,
             atom: serde_json::json!({"text": "use uv for python envs"}),
         }
     }

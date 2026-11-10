@@ -3604,7 +3604,7 @@ impl rmcp::Service<rmcp::RoleServer> for LjosService {
         rmcp::Service::handle_notification(&self.0, notification, context).await
     }
 
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         rmcp::Service::<rmcp::RoleServer>::get_info(&self.0)
     }
 
@@ -3616,8 +3616,8 @@ impl rmcp::Service<rmcp::RoleServer> for LjosService {
 #[tool_handler]
 #[prompt_handler(router = Self::prompt_router())]
 impl ServerHandler for LjosServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()

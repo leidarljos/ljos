@@ -224,9 +224,13 @@ fn a_readability_refusal_quotes_the_sentence() {
         .lines()
         .find(|line| line.starts_with("refused fd17ee67"))
         .unwrap_or_else(|| panic!("{refused}"));
-    assert!(line.contains("sentence has 33 words; limit 29:"), "{line}");
-    let quote = quote_of(line);
-    assert!(quote.starts_with("git push needs to run inside"), "{quote}");
-    assert!(quote.ends_with("..."), "{quote}");
-    assert!(quote.chars().count() <= 80, "{quote}");
+    assert!(line.contains("unchanged since last refusal"), "{line}");
+    assert!(
+        line.contains("amend it with ljos proposals amend"),
+        "{line}"
+    );
+    assert!(
+        !line.contains("sentence has 33 words"),
+        "the check ran again: {line}"
+    );
 }

@@ -375,6 +375,18 @@ enum SeatAction {
 }
 
 #[derive(Subcommand)]
+enum ProposalCmd {
+    /// Record a revised text on a proposal and run the readability checks, without accepting it. The original text stays.
+    Amend {
+        /// Id or prefix of the proposal.
+        id: String,
+        /// The revised text. `-` reads it from stdin.
+        #[arg(long, value_name = "TEXT")]
+        text: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Remember one lesson. It is stored at once, from any caller. Typed by
     /// the person, it is theirs. Under a runner, words from the person's
@@ -469,8 +481,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MemCmd,
     },
-    /// List lesson proposals. Open rows the pack does not already hold come first, then refused rows, then a count of how many open rows are new and how many are already in pack. A refused row quotes the sentence.
+    /// List lesson proposals. Open rows the pack does not already hold come first, then refused rows, then a count of how many open rows are new and how many are already in pack. A refused row quotes the sentence and names `ljos proposals amend`.
     Proposals {
+        #[command(subcommand)]
+        cmd: Option<ProposalCmd>,
         /// Only proposals filed by this seat. `unknown` is a row that names none.
         #[arg(long)]
         seat: Option<String>,
@@ -2148,11 +2162,21 @@ fn run_command() -> Result<()> {
             }
         }
         Cmd::Proposals {
+            cmd,
             seat,
             status,
             settle,
         } => {
-            if settle {
+            if let Some(ProposalCmd::Amend { id, text }) = cmd {
+                let text = if text == "-" {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    buf
+                } else {
+                    text
+                };
+                print!("{}", ljos_cli::admit::amend_proposal(&id, &text)?);
+            } else if settle {
                 print!("{}", ljos_cli::admit::settle_proposals(seat.as_deref())?);
             } else {
                 print!(
