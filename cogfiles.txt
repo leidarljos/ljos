@@ -8,3 +8,4 @@ docs/source/explanation.rst
 docs/source/howto.rst
 docs/cloud-vm.md
 scripts/ljos_version.py
+CITATION.cff

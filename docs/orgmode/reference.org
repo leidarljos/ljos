@@ -675,6 +675,11 @@ falls below 0.01.
 | =ljos-mcp= | the MCP server |
 | =ljos-consensus= | DeGroot and Friedkin-Johnsen settles, Seldon export (separate repository) |
 
+* Cite
+
+=CITATION.cff= at the repository root names leiðarljós (ljos),
+its author and this version.
+
 * Help text
 
 =ljos --help= groups commands under Start, Daily, Tracker, Memory,

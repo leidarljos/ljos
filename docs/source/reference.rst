@@ -839,6 +839,12 @@ Crate              Carries
 ``ljos-consensus`` DeGroot and Friedkin-Johnsen settles, Seldon export (separate repository)
 ================== =========================================================================
 
+Cite
+====
+
+``CITATION.cff`` at the repository root names leiðarljós (ljos),
+its author and this version.
+
 Help text
 =========
 

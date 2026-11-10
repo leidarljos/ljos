@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it using this metadata.
+type: software
+title: "leiðarljós (ljos)"
+authors:
+  - family-names: Goswami
+    given-names: Rohit
+license: MIT
+repository-code: https://github.com/leidarljos/ljos
+# [[[cog import ljos_version as v; v.lines('version: "{version}"')]]]
+version: "0.40.0"
+# [[[end]]]
