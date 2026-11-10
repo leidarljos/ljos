@@ -49,6 +49,15 @@ the tracker commits each change.
 The command harness runs a hook only after you trust it. Open ``/hooks`` in the command harness and trust each ljos hook.
 Trust it again after an upgrade rewrites one.
 
+The hooks fail open on every runner. A ``ljos`` that is missing, crashes or times out lets the call run.
+A check whose hook fails answers allow, with a note that says why nothing judged the call.
+
+``ljos upgrade`` moves each installed program to its latest published release.
+``ljos``, ``ljos-mcp`` and ``ljos-hud`` come from the ljos release, and each other program from the repository that publishes it.
+Each line names the version a program had and the version it has, or ``current`` when those are the same.
+A missing release, a failed download or a checksum that does not match is a warning, and the other programs still move.
+``ljos upgrade --only NAME`` moves one program, and the previous binary is kept as ``NAME.bak-pre-VERSION``.
+
 1. The memory loop
 ==================
 
@@ -94,9 +103,18 @@ needs a project, so the first ticket creates one.
 One seat holds a ticket at a time. If bob claims it now, the claim is refused and the
 refusal names alice. Bob files or claims another ticket. To help on this one, bob writes a
 note or sends alice a message.
+The refusal prints ``label claim-conflict:`` and names the holder.
+A close with open children prints ``label children-open:`` and leaves the parent open.
+A block that would loop prints ``label graph-cycle:`` and does not store the edge.
 
 Both seats vote, each from its own runner. A seat votes once on a ticket. ljos refuses a second
 ballot from one shell, whatever session id the second ballot names.
+Ballots count as one voice when they share a session id, a parent, a calling shell or the root session of one agent runner.
+A subagent of that root session counts with its parent.
+When those ballots disagree, the latest one is that voice.
+A seat ballot is its own voice only when the cast has no shell, no agent runner and no earlier row.
+``ljos consensus`` names the ballots it folded and why.
+A persona ballot records the casting seat, the parent session and the persona.
 
 .. code:: console
 
@@ -111,6 +129,8 @@ ballot from one shell, whatever session id the second ballot names.
 ``ljos consensus`` reads the trust rows in the pack. It settles the votes with the
 consensus crate. With no rows, every voter weighs the same. ``--no-file`` makes the command
 read only. Without it, a blocking objection with a reason is filed on the ticket.
+With two or more active seats, a protected push needs votes from two model families.
+A model family is the model a seat's verified record names, and a seat with no such record is a family of its own.
 
 Now the seats leave notes and read each other's.
 
@@ -184,6 +204,8 @@ Finish
 ``ljos finish`` hands the claim back and stores the lesson, labelled agent-derived and
 unreviewed. Search finds it at once, and ``ljos accept ID`` marks it reviewed. Completing a
 claim node does not close the ticket. A person does, when the work is accepted.
+A yes the person said in chat is kept with the acceptance.
+The seat that heard it runs ``ljos accept ID --quote "..." --at TIME --via SEAT``, and the acceptance keeps those words.
 
 3. Seats and grants
 ===================
