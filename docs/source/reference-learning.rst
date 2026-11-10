@@ -1,0 +1,117 @@
+:description: How trust rows move after an outcome, and the settings that bound them.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
+
+==================
+The learning rules
+==================
+
+
+``learn`` adds the outcome to each voter's record of hits and misses. A
+voter's accuracy is read off its record and shrunk toward the panel's
+pooled accuracy by empirical Bayes (Efron and Morris,
+doi:10.1080/01621459.1975.10479864). The prior weakens as the records
+spread beyond binomial noise; the first outcome leaves every voter alike,
+and a long record keeps the differences it shows.
+
+The weight every other voter gives a voter is the log odds of that
+accuracy, Nitzan and Paroush's weight (doi:10.2307/2526438); the best
+voter weighs one and none weighs less than 0.01. A panel with nobody above
+chance weighs every voter 0.01. Rows are written complete, so the settle
+sees the whole graph, and each carries its voter's record. ``learn`` also
+writes an ``outcome`` atom, the issue and the option it closed on.
+
+``--rule hedge`` runs the multiplicative weights rule of Hedge
+(doi:10.1006/jcss.1997.1504) instead. Every voter whose ballot the outcome
+refuted shrinks in every other voter's row by ``beta`` (default 0.5),
+floored at 0.01. A vindicated voter keeps its weight, and a missing row
+starts at 1.
+
+``consensus`` reads each issue's ballots beside the option it closed on once
+six issues have an outcome, and asks ``ljos-consensus correlation`` how far
+the voters share their mistakes. A pair counts only when its correlation
+passes the one-sided test of independence at five percent. A voter's
+inbound weight in the settle is multiplied by
+``1 / (1 + the sum of its counted correlations)`` (``settle --discount-of``);
+exact clones count as one voice under it if their record has a hit and a
+miss, and a looser cluster as more than one. A line before the settle
+names the outcomes read, the independent voices the panel has and each
+voter discounted. Nothing is passed or printed when no pair counts.
+
+The settle also weighs each model family as one voter. A ballot's family
+is the model its verified slot records, else the model a judge ballot
+(``judge:MODEL``) names, else the runner its persona runs on. A label that
+contains a family name a panel rotates, such as ``opus`` or ``codex``, is
+that family; any other label is its own. Ballots that name none share
+one ``unknown`` family; they are not one family each. Each of a family's
+*k* voters keeps ``1/k`` of its inbound weight, the share ``correlation``
+gives *k* exact clones, multiplied into any correlation discount. Ten
+unlabelled ballots then weigh as one voter
+beside two ballots from two labelled families. Under one family, or with
+one ballot per family, nothing is passed. When a family holds more than
+one ballot, a line before the settle names the ballots, the families and
+each family's count; ``--json`` carries ``families``, with ``voices`` the
+number of families and ``of`` the voters in each. The tracker's settle
+weighs no family. The push check counts families on its own terms: there
+a seat with no slot is a family of its own, so two standing seats clear
+a protected push.
+
+A row carries the domains it is scoped to. An unscoped row applies to
+every issue; a scoped row applies when one of its domains is a word of the
+issue's title. ``learn`` writes its rows scoped to the entities of the island
+the issue's title activates, eight at most, so a voter refuted on one topic
+keeps its standing on the rest; a scoped learn starts from the unscoped row
+when it has none of its own and leaves the unscoped row standing. When
+both apply, the scoped row is the one the settle sees. ``--share S`` then lifts
+every row by ``S`` of its distance to one, the fixed-share rule of Herbster
+and Warmuth (doi:10.1023/A:1007424614876). A voter refuted long ago is not
+held down forever, and the best voter can change. The default is zero,
+plain Hedge. An outcome also
+moves the anchor of every persona it refuted toward one by ``1 - beta`` of
+the gap: a persona that keeps being wrong listens more.
+
+A persona is a ``persona`` atom: a name, an anchor in [0, 1], a view, and the
+domains it speaks to. ``consensus`` passes the anchor of each persona on the
+ballot to both settles as ``--susceptibility-of``, and gives every other voter
+on that ballot, the seat included, an anchor of 0.5. A ballot with no
+persona settles as plain DeGroot. At 1 a persona keeps none of its
+ballot. An anchor below 0.5 settles at 0.5: under Friedkin-Johnsen with
+equal trust, the share of its ballot a voter keeps is its weight, and a
+stubborn voter pulls the rest toward it (Acemoglu, Como, Fagnani and
+Ozdaglar, doi:10.1287/moor.1120.0570). A persona at 0 would count as two
+seats and tie a 2-to-1 vote on its own. Trust rows still weigh voters as
+they say. Before the default, the seat sat at 1, so any anchored persona
+took the whole settle. The settle prints in words: the shares, who leads
+and by how much, polarization, each voter's influence, the share of its
+own ballot each voter keeps. Above the settle, ``consensus`` prints what the
+seat ballots decide: the option every seat ballot names and the
+seat ballots it counted, or why it decides nothing, with the persona and
+judge ballots it left out. This is what the push check reads. With one active seat in ``vissue.toml``, that
+seat's own vote settles it. This is solo mode. The settle below is advice and decides no push.
+When trust rows exist, the standing beside the settle names the voters on
+this issue; the other names in the rows are counted, and ``--json`` lists
+them.
+``consensus ID --json`` prints one JSON document, and nothing else on
+stdout. The seat tally stays at the top level under ``push_cite``, with the
+keys it already uses (``issue``, ``pusher``, ``stands``, and ``choice`` with
+``counted``, or ``refusal``). The model crate's settle is under ``settle``.
+``surprising`` and ``reputation`` are present when those readings ran.
+``consensus ID --compare`` also runs ``vissue consensus``, the tracker's
+settle, and that output is under ``tracker`` in the same document. The
+tracker also runs when ``ljos-consensus`` is not installed. Without
+``--compare``, and with the model crate installed, the document has no
+``tracker`` key. An issue with no ballots is refused before any settle
+runs, in the command and in the MCP tool, and the message says how to
+cast one (``ljos vote ID --for OPTION``, or ``ljos panel ID``).
+A vissue with ``--file-dissent`` files dissent children only under
+that flag; an older one files them on every run.
+
+A ballot's ``--confidence`` is recorded and weighs no settle and no seat
+tally. ``consensus`` says on how many ballots it was stated. ``learn ID --outcome OPTION`` scores it once the outcome is known: Brier and log score
+and calibration per voter.
+
+Without an outcome, ``calibrate`` estimates each voter's accuracy from the
+project's issues with two or more ballots, by expectation maximisation
+over the items' hidden answers (Dawid and Skene, doi:10.2307/2346806). It
+then writes the log odds of each accuracy as the weight every other voter
+gives that voter. The most reliable voter weighs one, and no weight
+falls below 0.01.

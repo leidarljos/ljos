@@ -44,8 +44,8 @@ VERSION_LINE = re.compile(r"ljos (\d+\.\d+\.\d+)\Z")
 SAMPLE_FILES = (
     ROOT / "docs/orgmode/howto-check.org",
     ROOT / "docs/source/howto-check.rst",
-    ROOT / "docs/orgmode/reference.org",
-    ROOT / "docs/source/reference.rst",
+    ROOT / "docs/orgmode/reference-help.org",
+    ROOT / "docs/source/reference-help.rst",
 )
 LONGMEMEVAL_FILES = (
     ROOT / "docs/orgmode/explanation.org",
@@ -289,8 +289,8 @@ def rewritten(doctor: str, help_text: str) -> dict[Path, str]:
     mapping = {
         ROOT / "docs/orgmode/howto-check.org": ("# BEGIN ljos-sample doctor", "# END ljos-sample doctor", doctor_org),
         ROOT / "docs/source/howto-check.rst": (".. BEGIN ljos-sample doctor", ".. END ljos-sample doctor", doctor_rst),
-        ROOT / "docs/orgmode/reference.org": ("# BEGIN ljos-sample help", "# END ljos-sample help", help_org),
-        ROOT / "docs/source/reference.rst": (".. BEGIN ljos-sample help", ".. END ljos-sample help", help_rst),
+        ROOT / "docs/orgmode/reference-help.org": ("# BEGIN ljos-sample help", "# END ljos-sample help", help_org),
+        ROOT / "docs/source/reference-help.rst": (".. BEGIN ljos-sample help", ".. END ljos-sample help", help_rst),
     }
     for path, (begin, end, body) in mapping.items():
         out[path] = replace_region(path.read_text(encoding="utf-8"), begin, end, body)

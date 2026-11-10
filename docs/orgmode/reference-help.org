@@ -1,0 +1,40 @@
+#+title: Help text
+#+description: What the ljos help command prints, taken from this version.
+#+options: toc:nil num:nil
+
+=ljos --help= groups commands under Start, Daily, Tracker, Memory,
+Coordination and Admin.
+The first group is what a new seat needs.
+A command a runner or git calls, and other rarely typed commands, stay
+off that list.
+They still run.
+=ljos help --all= lists every command.
+
+# BEGIN ljos-sample help
+#+begin_src text
+$ ljos --version
+ljos 0.40.0
+$ ljos --help
+Memory, a work tracker and a command guard for coding runners
+
+Usage: ljos <COMMAND>
+
+Start:
+  doctor       Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer or the note queue is damaged
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+Start with `ljos doctor`, `ljos prefer "..."`, `ljos policy -- COMMAND` and `ljos onboard`. `ljos protocol` explains the rest. `ljos help --all` lists every command.
+$ ljos doctor --help
+Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer or the note queue is damaged
+
+Usage: ljos doctor [OPTIONS]
+
+Options:
+      --all   Print every row, the ones that answer included [alias: --verbose]
+      --fix   Refresh runner skills and runner env files this ljos wrote, and replace a stale cloud guard rule file. A skill edited by hand, an env file ljos did not write, and a cloud guard file that is missing or not a known older version are left in place
+  -h, --help  Print help
+#+end_src
+# END ljos-sample help
