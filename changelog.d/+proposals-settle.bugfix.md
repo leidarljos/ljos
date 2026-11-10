@@ -1,1 +1,0 @@
-`ljos proposals` marks an open proposal whose text and kind already match a pack atom as already in pack, and counts those rows. `--settle` records that outcome and the time. A readability refusal quotes the sentence.

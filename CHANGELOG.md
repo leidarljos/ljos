@@ -5,7 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
-## Unreleased
+## 0.40.0 (2026-11-10)
 
 Develop's work since 0.38.0 that 0.39.0 did not ship. A guarded call still runs. `block-on-warning` does not block.
 
@@ -60,6 +60,38 @@ Develop's work since 0.38.0 that 0.39.0 did not ship. A guarded call still runs.
   An exit-128 error that did reach the remote is reported as a refused push.
   A manual `ljos sync` in a checkout with no scope follows `LJOS_TRACKER_GIT`.
   An empty `core.sshCommand` falls through to batch ssh.
+- `ljos accept` takes several ids and prints one line each: accepted, already in pack, not found, or refused with the pack's measured value and limit.
+  The outcome is written on the proposal, with the time. A new proposal names the seat that filed it, and `ljos proposals` lists and filters them.
+- `ljos sync` seals a changed atom into a new segment and leaves every sealed file as it was. An unchanged plaintext writes nothing. The check is a hash of the plaintext, not the ciphertext.
+- `ljos doctor` reads an encoder version only from a successful `--version` line that names the program.
+  A `packset-embed` that does not start is reported as not runnable, with its first error line, so a loader token such as GLIBCXX_3.4.34 is not the version.
+- A first sitting creates the claim graph when the directory holds no snapshot.
+  A sitting on an issue the tracker does not hold exits with that issue missing.
+  An empty remember and an accept of an unknown id each exit with one line.
+- A prompt ranked by words alone injects a lesson only when it shares two non-stopword terms at the lexical score line, or one rare term.
+  Generic tokens such as push, box and release, and a repo slug that sits in many memories, do not carry that match.
+  A prompt that arrived from a script is labelled as not saved as the person's preference, and the hook still answers.
+- A prompt the hook does not store as the person's words is one plain label, printed once after the recalled lessons.
+  Nothing is refused, and the decision is the same.
+- Plain `ljos doctor` says when ranking is lexical, and still exits 0.
+  `ljos search` and `ljos recall` name the ranking on stderr, or as a JSON field with `--json`.
+- Import keeps the exported id, and a later export of that import lists the same ids, kinds, text and entity labels.
+- A preference this seat stored reaches the next prompt and sitting it bears on, with its origin named beside the line.
+  `ljos accept` keeps that memory and makes it standing, so the hook shows it.
+- `ljos proposals amend` records a revised text and runs the readability check without accepting. `ljos accept` stores that text, and a repeat of an unchanged refusal does not check it again.
+- `ljos proposals` marks an open proposal whose text and kind already match a pack atom as already in pack, and counts those rows. `--settle` records that outcome and the time. A readability refusal quotes the sentence.
+- `ljos protocol` prints a short form a seat can read at session start.
+  `ljos protocol --full` prints the whole protocol. Skills and `ljos://protocol` still carry the whole text.
+- A sitting prints its doctor headline, mcp warning and encoder line once per session, and again only when that text changes.
+  A seat that is not a cloud seat is not told to run `ljos cloud up`.
+  A sitting lists the same memories as `ljos recall`.
+  `ljos finish` says the sitting ended and the ticket is open for review.
+  `ljos file` prints the new id on stdout and the rest on stderr.
+  `ljos remember` stores the text as typed, and search shows one row for that text.
+- A search hit is a lookup. Only a memory handed to a prompt or to `ljos recall` counts as recalled.
+  A listing shows the two counts apart. An older mixed total is labelled and left as it was written.
+- `ljos doctor` names each ljos whose version differs from the one the hooks run, and says to put the new binary first on PATH or point LJOS_BIN at it.
+  A sitting says so in one line. A hook stays quiet. Nothing is rewritten.
 
 ### Documentation
 

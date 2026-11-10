@@ -11,7 +11,7 @@ Checks from the sitting include a shell warning. ljos warns about a shell comman
 A person can also record a grant that lets a seat close tickets. The grant stores the person's quote.
 
 [//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
-These notes describe ljos 0.39.0.
+These notes describe ljos 0.40.0.
 [//]: # ([[[end]]])
 
 ## Try it

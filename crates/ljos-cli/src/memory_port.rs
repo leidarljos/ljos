@@ -1973,7 +1973,7 @@ mod tests {
             "machine": machine,
             "seat": seat,
             "exported_at": at,
-            "exporter_revision": "0.39.0",
+            "exporter_revision": "0.40.0",
         });
         let row = json!({
             "format": FORMAT,
