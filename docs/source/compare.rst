@@ -1,10 +1,10 @@
 :description: ljos sits between agent memory and git-backed trackers for agents. The first table sets it beside memory tools that run a model: Mem0, Letta and Zep.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-.. _how-ljos-compares-1:
-
+=================
 How ljos compares
 =================
+
 
 ljos sits between agent memory and git-backed trackers for agents. The
 first table sets it beside memory tools that run a model: Mem0, Letta and
@@ -19,7 +19,7 @@ compares designs, not scores. ljos's own numbers are on
 :doc:`What ljos does <introduction>`.
 
 Against model-driven memory
----------------------------
+===========================
 
 =================================== ====================================================== =========================================================== ================================================== =======================================================
 \                                   ljos                                                   `Mem0 <https://docs.mem0.ai/open-source/overview>`__        `Letta <https://docs.letta.com/concepts/memgpt>`__ `Zep / Graphiti <https://github.com/getzep/graphiti>`__
@@ -36,7 +36,7 @@ Licence                             MIT                                         
 =================================== ====================================================== =========================================================== ================================================== =======================================================
 
 Against file and git tools
---------------------------
+==========================
 
 =================================== =================================================== =================================================================== =============================================== ================================================
 \                                   ljos                                                `Basic Memory <https://github.com/basicmachines-co/basic-memory>`__ `beads <https://github.com/steveyegge/beads>`__ `git-bug <https://github.com/git-bug/git-bug>`__
@@ -55,7 +55,7 @@ Licence                             MIT                                         
 =================================== =================================================== =================================================================== =============================================== ================================================
 
 Where each one is ahead
------------------------
+=======================
 
 - **Mem0** extracts facts from a conversation nobody said to remember, then
   adds, updates or deletes them (`add <https://docs.mem0.ai/core-concepts/memory-operations/add>`__).
@@ -80,7 +80,7 @@ Where each one is ahead
   ljos keeps its tracker in a separate repository and has no bridges.
 
 What only ljos does here
-------------------------
+========================
 
 Of the seven tools in the table, ljos is the one whose docs describe all
 three of these together:
@@ -92,7 +92,7 @@ three of these together:
 - A handover the receiving machine checks before it imports.
 
 Pick by job
------------
+===========
 
 ===================================================================== ============
 You want                                                              Look at
@@ -106,7 +106,7 @@ two or more agents on one tracker, voting, with memory a person wrote ljos
 ===================================================================== ============
 
 Sources
--------
+=======
 
 Read on 2026-11-10.
 

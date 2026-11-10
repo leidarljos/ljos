@@ -1,14 +1,12 @@
 #+title: What ljos does
 #+options: toc:nil num:nil
 
-* What ljos does
-
 ljos gives coding agents what a new session does not keep: memory a
 person wrote on purpose, one tracker in git that every agent shares, and
 a record of who decided what. It calls no model. Each store is a file a
 person can open.
 
-** Features
+* Features
 
 - *Memory written on purpose.* =ljos remember= and =ljos prefer= store
   one claim as written. No model reads the transcript to pick facts. A
@@ -38,7 +36,7 @@ person can open.
   Codex, Cursor, Grok, OpenCode, Windsurf, Antigravity, Hermes, omp and a
   plain shell.
 
-** Measured
+* Measured
 
 Every number below comes from a file in this repository or in packset,
 the memory writer ljos drives. Each file names the machine, the method and
@@ -67,7 +65,7 @@ and the same input. No row compares ljos with another memory tool on a
 shared benchmark: =hook-latency.txt= says so in its =third-party= line.
 [[file:compare.org][How ljos compares]] sets the designs side by side instead.
 
-** What it does not do
+* What it does not do
 
 - It does not read a conversation to find facts nobody said to remember.
   [[https://docs.mem0.ai/core-concepts/memory-operations/add][Mem0]] sends

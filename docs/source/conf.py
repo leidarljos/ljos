@@ -76,18 +76,11 @@ copybutton_prompt_text = r"\$ "
 copybutton_prompt_is_regexp = True
 
 
-# Org page titles. The clipped h1 uses these. The visible headings stay the
-# sections the org file already had, so the sidebar and the breadcrumb do not move.
+# Org page titles. Each page but the index exports its #+title as its own
+# first heading (docs/scripts/export_org_to_rst.sh). The index keeps the hero
+# at its top, so it gets the clipped h1, with its sections shifted down a level.
 _PAGE_TITLE = {
     "index": "ljos",
-    "getting-started": "Getting started",
-    "howto": "How-to",
-    "grok-build": "Build harness",
-    "integration": "Integration",
-    "architecture": "Architecture",
-    "reference": "Reference",
-    "explanation": "Explanation",
-    "seat": "In the seat",
 }
 _OPEN_HEADING = re.compile(r"<h([1-6])((?:\s[^>]*)?)>", re.IGNORECASE)
 _CLOSE_HEADING = re.compile(r"</h([1-6])>", re.IGNORECASE)

@@ -1,8 +1,6 @@
 #+title: How ljos compares
 #+options: toc:t num:nil
 
-* How ljos compares
-
 ljos sits between agent memory and git-backed trackers for agents. The
 first table sets it beside memory tools that run a model: Mem0, Letta and
 Zep. The second sets it beside tools that keep plain files or git: Basic
@@ -15,7 +13,7 @@ No shared benchmark covers both memory and coordination, so this page
 compares designs, not scores. ljos's own numbers are on
 [[file:introduction.org][What ljos does]].
 
-** Against model-driven memory
+* Against model-driven memory
 
 | | ljos | [[https://docs.mem0.ai/open-source/overview][Mem0]] | [[https://docs.letta.com/concepts/memgpt][Letta]] | [[https://github.com/getzep/graphiti][Zep / Graphiti]] |
 |---+---+---+---+---|
@@ -29,7 +27,7 @@ compares designs, not scores. ljos's own numbers are on
 | Model Context Protocol (MCP) server | yes, 20 core tools | guides per coding agent | not documented | not documented |
 | Licence | MIT | Apache-2.0 | Apache-2.0 | Apache-2.0 |
 
-** Against file and git tools
+* Against file and git tools
 
 | | ljos | [[https://github.com/basicmachines-co/basic-memory][Basic Memory]] | [[https://github.com/steveyegge/beads][beads]] | [[https://github.com/git-bug/git-bug][git-bug]] |
 |---+---+---+---+---|
@@ -45,7 +43,7 @@ compares designs, not scores. ljos's own numbers are on
 | Model Context Protocol (MCP) server | yes, 20 core tools | yes | yes: =beads-mcp= | not documented |
 | Licence | MIT | AGPL-3.0 | MIT | GPL-3.0 |
 
-** Where each one is ahead
+* Where each one is ahead
 
 - *Mem0* extracts facts from a conversation nobody said to remember, then
   adds, updates or deletes them ([[https://docs.mem0.ai/core-concepts/memory-operations/add][add]]).
@@ -69,7 +67,7 @@ compares designs, not scores. ljos's own numbers are on
   them to other trackers ([[https://github.com/git-bug/git-bug][README]]).
   ljos keeps its tracker in a separate repository and has no bridges.
 
-** What only ljos does here
+* What only ljos does here
 
 Of the seven tools in the table, ljos is the one whose docs describe all
 three of these together:
@@ -80,7 +78,7 @@ three of these together:
   and no model.
 - A handover the receiving machine checks before it imports.
 
-** Pick by job
+* Pick by job
 
 | You want | Look at |
 |---+---|
@@ -91,7 +89,7 @@ three of these together:
 | bugs that travel with the code in git | git-bug |
 | two or more agents on one tracker, voting, with memory a person wrote | ljos |
 
-** Sources
+* Sources
 
 Read on 2026-11-10.
 

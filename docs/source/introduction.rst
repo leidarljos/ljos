@@ -1,10 +1,10 @@
 :description: ljos gives coding agents what a new session does not keep: memory a person wrote on purpose, one tracker in git that every agent shares, and a record of who decided what. It calls no model.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-.. _what-ljos-does-1:
-
+==============
 What ljos does
 ==============
+
 
 ljos gives coding agents what a new session does not keep: memory a
 person wrote on purpose, one tracker in git that every agent shares, and
@@ -12,7 +12,7 @@ a record of who decided what. It calls no model. Each store is a file a
 person can open.
 
 Features
---------
+========
 
 - **Memory written on purpose.** ``ljos remember`` and ``ljos prefer`` store
   one claim as written. No model reads the transcript to pick facts. A
@@ -43,7 +43,7 @@ Features
   plain shell.
 
 Measured
---------
+========
 
 Every number below comes from a file in this repository or in packset,
 the memory writer ljos drives. Each file names the machine, the method and
@@ -75,7 +75,7 @@ shared benchmark: ``hook-latency.txt`` says so in its ``third-party`` line.
 :doc:`How ljos compares <compare>` sets the designs side by side instead.
 
 What it does not do
--------------------
+===================
 
 - It does not read a conversation to find facts nobody said to remember.
   `Mem0 <https://docs.mem0.ai/core-concepts/memory-operations/add>`__ sends
