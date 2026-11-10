@@ -108,8 +108,8 @@ fn each_force_push_sample_is_what_the_hook_prints() {
             r#"{"hookSpecificOutput""#,
             &[
                 "README.md",
-                "docs/source/howto.rst",
-                "docs/orgmode/howto.org",
+                "docs/source/howto-recall.rst",
+                "docs/orgmode/howto-recall.org",
             ][..],
         ),
         (

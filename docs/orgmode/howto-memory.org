@@ -1,0 +1,61 @@
+#+title: Keep memory current
+#+description: Keep the cards, record a number that is measured again and again, and retire a memory with its reason.
+#+options: toc:nil num:nil
+
+* Keep the cards
+
+Cards are two files a person writes: =USER.md= and =MEMORY.md=. The seat
+reads them and never writes them; =ljos cards= prints them. The pack is
+where the seat writes.
+
+* Keep a number
+
+A number the seat measures again and again, a benchmark score, a hook
+latency, a count of open tickets, is a habit. A reading is one verb.
+The one below is an example:
+
+#+begin_src console
+$ ljos habit mab-cr-all 0.535 --unit acc --every 7d --source example-0000
+7b1c...	habit	due 2026-09-26T10:00:00.000Z	habit mab-cr-all stands at 0.535 acc (example-0000).
+$ ljos habit mab-cr-all 0.579 --unit acc --every 7d --source example-0001
+9e0a...	habit	due 2026-10-03T09:12:41.000Z	habit mab-cr-all stands at 0.579 acc (example-0001).
+was 0.535 acc (8 days ago), now closed
+$ ljos habit
+mab-cr-all	0.579 acc	+0.044 since 0.535 (8 days ago)	today	next reading in 7 days	example-0001
+#+end_src
+
+The second reading supersedes the first, so the pack keeps one live value
+a habit and =ljos search mab-cr-all --as-of 2026-09-15= still answers
+what it stood at then. The cadence is the reading's review clock: when a
+week passes with no new reading, =ljos due= lists the habit and the hook
+says so once a session. The sheet a paper's table is written from is the
+pack, and it is dated.
+
+* Close what a later lesson replaced
+
+#+begin_src console
+$ ljos consolidate
+closes 3f9c…  The default fuse is Borda.
+    for 51ee…  The default fuse is CombMNZ.
+1 of 97 live memories would close; `ljos consolidate --apply` closes them
+$ ljos consolidate --apply
+closes 3f9c…  The default fuse is Borda.
+    for 51ee…  The default fuse is CombMNZ.
+1 of 97 live memories closed
+#+end_src
+
+A write closes the earlier claim it rewrites on arrival (same opening
+words, a new object; a correction; an explicit supersedes). A pack written
+before that rule, or filled by a handover, has pairs the rule never saw;
+=consolidate= reports them, =--apply= closes them. The closed claim keeps
+its window: =ljos search --as-of= finds it at the time it was live.
+
+* Retire a claim with its reason
+
+#+begin_src console
+$ ljos forget 3f9c... --why deed-review-2026-09
+#+end_src
+
+The pack tombstones the claim and records the deed that withdrew it.
+Disagreeing with a claim is not showing it wrong; a retraction names its
+evidence.

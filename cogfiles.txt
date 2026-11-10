@@ -2,10 +2,10 @@ Cargo.toml
 README.md
 docs/orgmode/getting-started.org
 docs/orgmode/explanation.org
-docs/orgmode/howto.org
+docs/orgmode/howto-check.org
 docs/source/getting-started.rst
 docs/source/explanation.rst
-docs/source/howto.rst
+docs/source/howto-check.rst
 docs/cloud-vm.md
 scripts/ljos_version.py
 CITATION.cff

@@ -19,10 +19,21 @@ import sys
 from pathlib import Path
 
 # The pages a site has are the org files it has, index aside, in a fixed order.
+# A page named PARENT-TASK belongs to PARENT, which lists it in a toctree of its
+# own, so the index toctree leaves it out.
 _ORG = Path(__file__).resolve().parents[1] / "orgmode"
 _ORDER = ["getting-started", "howto", "reference", "explanation", "architecture"]
+PARENTS = ("howto", "reference")
+
+
+def _parent(stem: str) -> str | None:
+    return next((p for p in PARENTS if stem.startswith(p + "-")), None)
+
+
 PAGES = [p for p in _ORDER if (_ORG / f"{p}.org").is_file()] + sorted(
-    q.stem for q in _ORG.glob("*.org") if q.stem not in _ORDER and q.stem != "index"
+    q.stem
+    for q in _ORG.glob("*.org")
+    if q.stem not in _ORDER and q.stem != "index" and _parent(q.stem) is None
 )
 
 TOCTREE = """
@@ -158,6 +169,20 @@ def restore_toctree(index: Path) -> None:
     print("index.rst: toctree restored")
 
 
+def unlisted_children(source: Path) -> list[str]:
+    """Child pages their parent's toctree does not list. Sphinx would orphan them."""
+    out = []
+    for org in sorted(_ORG.glob("*.org")):
+        parent = _parent(org.stem)
+        if parent is None:
+            continue
+        rst = source / f"{parent}.rst"
+        text = rst.read_text(encoding="utf-8") if rst.is_file() else ""
+        if ".. toctree::" not in text or f"\n   {org.stem}\n" not in text:
+            out.append(f"{org.stem} (parent {parent})")
+    return out
+
+
 def bracket_leading_lines(path: Path) -> list[tuple[int, str]]:
     return [
         (number, line)
@@ -182,6 +207,11 @@ def main() -> int:
     missing = [page for page in PAGES if not (source / f"{page}.rst").is_file()]
     if missing:
         print(f"missing exported pages: {', '.join(missing)}", file=sys.stderr)
+        return 1
+
+    unlisted = unlisted_children(source)
+    if unlisted:
+        print(f"pages missing from their parent's toctree: {', '.join(unlisted)}", file=sys.stderr)
         return 1
 
     failed = False

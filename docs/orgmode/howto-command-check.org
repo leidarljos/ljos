@@ -1,0 +1,131 @@
+#+title: Read the command check
+#+description: What the command check warns on, the rewrite, block-on-warning, and which branches the push check covers.
+#+options: toc:nil num:nil
+
+* Read what the command check warns on
+
+Run =ljos policy -- COMMAND= to see one answer. =ljos-policyd= parses the
+command as a shell would. It looks through =sh -c=,
+=env=, =timeout=, =xargs= and =nohup=, through =$cmd=, pipes and quotes. It
+does not run a shell and does not read scripts. The first rule that fires
+is the warning, and the command runs.
+
+It warns on these commands:
+
+- =sudo=, and =curl= or =wget= into a shell, decoded text included.
+- =chmod= that sets setuid, and raw disk writes such as =dd of=/dev/sda= and =mkfs=.
+- =rm -rf= outside the work tree and =/tmp=, and recursive =chmod= or =chown= on system trees.
+- a force push to =main=, =master=, =develop= or a protected branch, and deleting a remote branch.
+- =git filter-branch=, =git filter-repo=, =git reflog expire=, and deleting a published ref.
+- throwing away uncommitted work with =git reset --hard=, =git clean -f=, =git checkout .= or =git stash clear=.
+- reading a named credential file, or sending one over the network.
+- writes to the hook files, the policy files and the ljos programs.
+- outbound mail whose From is not your own address.
+
+Each warning is one line, =allow\twarn\tRULE\tWARNING=, and the label is
+kept in =$XDG_DATA_HOME/ljos/bypass.jsonl=.
+
+ljos keeps two checks of its own, because only ljos knows the tracker and the sitting:
+
+- ljos warns on a hand edit of the tracker's files, from a command or a
+  file tool. Use =ljos file=, =ljos note=, =ljos vote= and =ljos finish=.
+- A protected-branch push warns when the current sitting's ticket has no
+  settled consensus. The push runs. The =pre-push= git hook, once
+  installed, refuses that push under a runner.
+
+* Let policyd fix a command
+
+policyd can answer a command with a fixed one instead of a warning.
+The answer is one line of three tab-separated fields: =allow=, =rewrite= and the new command.
+The first rewrite runs a command through =uv run=.
+
+The new line runs only when the guard has no warning on it. The terminal harness, the command harness, the build harness and
+the editor harness's =preToolUse= take it through the hook's updated input. Other runners run the old line,
+with a warning that names the new command. =ljos policy -- COMMAND=
+prints the answer without running anything, so you can see a rewrite before an agent meets it.
+
+Each swap also shows a note naming both commands and leaves a row in
+=$XDG_DATA_HOME/ljos/rewrite.jsonl=. Set =rewrite = false= in a repository's
+=ljos.toml= to run its lines as written. The log keeps a row for a swap it declined too.
+
+* block-on-warning warns with a label
+
+block-on-warning does not block.
+policyd answers a command it warns about with =allow=, the rule and one warning, and the command runs.
+The warning is a label.
+ljos stops nothing on it.
+
+ljos adds a label of its own the same way.
+A command that deletes or moves a tree holding your key directory, such as =rm -rf /=, =rm -rf ~= or =shutil.rmtree(os.path.expanduser('~'))=, runs with =uproots-person-key=.
+Its warning names the tree and the key directory, and the bypass log keeps the label beside policyd's.
+A command that changes the key directory, a file in it or the directory above it, such as =rm -rf ~/.config=, runs with =changes-person-key=.
+A change to the runtime directory where the hook keeps your latest prompt runs with =changes-kept-prompt=.
+A write to any other seat file, such as a hook or an ljos binary, runs with =writes-seat-file=.
+
+#+begin_src console
+$ ljos policy -- rm -rf /
+rm -rf /
+allow	warn	uproots-person-key	the command deletes /, a tree that holds the person's key directory /home/you/.config/ljos
+allow	warn	rm-rf-outside-tmp	a recursive delete reaches outside /tmp and /var/tmp
+#+end_src
+
+Name a policyd config in your own =ljos.toml= and put one line in that config. That line does not block. It warns with the rule's label:
+
+#+begin_src toml
+# ~/.config/ljos/ljos.toml, or ~/.config/ljos/seats/SEAT/ljos.toml
+policyd_config = "policyd.conf"
+#+end_src
+
+#+begin_src text
+# ~/.config/ljos/policyd.conf
+block-on-warning true
+#+end_src
+
+ljos then passes that file every time it asks policyd, as =ljos-policyd check --config PATH -- COMMAND=: the hook, =ljos policy=, =ljos doctor= and the guard shims alike.
+With that line, the call is allowed. ljos warns with the rule's label. It does not block.
+An =ljos-policyd= that does not read the line, 0.7.0 among them, leaves its warnings as labels.
+The line reaches only the commands policyd warns on.
+A command policyd allows with no warning runs, whatever label ljos gives it.
+ljos's own labels stay warnings where policyd warns on the same command. They do not become a block.
+policyd warns on =rm -rf /=, for one.
+Those labels are =uproots-person-key=, =changes-person-key=, =changes-kept-prompt=, =writes-seat-file=, =prefer-keep-faked-terminal= and =git-push-delete=.
+=mv ~ /tmp/x= gets no warning from policyd, so it still runs with the label.
+
+#+begin_src console
+$ ljos policy -- sudo true
+sudo true
+warning: sudo: a privilege runner is on the command (ljos rule `ljos-policyd`)
+#+end_src
+
+=policyd_config= is read from the user's =ljos.toml= and then the seat's, at the top of the file or under =[gates]=.
+The seat's file wins, and =policyd_config = ""= there names none.
+A relative path is from the directory of the file that names it.
+A repository's =ljos.toml=, =.ljos/gates.toml= and =LJOS_CONFIG= do not name it, since a runner can write them.
+
+A check that fails open still allows.
+A named config that is not there is one: policyd answers every command with =allow= and =fail-open=, without a rule or a warning, and the command runs.
+With no =policyd_config=, ljos asks =check= exactly as it did before, and every warning stays a label.
+
+* Choose which branches the push check covers
+
+ljos keeps one push check. A push onto a protected branch warns when the ticket of your
+sitting has no settled consensus. The push runs either way. It covers =develop= and =main=
+unless =consensus_branches= in =ljos.toml= names others. The user and seat files set the list.
+The repository's =ljos.toml=, =LJOS_CONFIG= and =.ljos/gates.toml= only add branches to it.
+
+#+begin_src toml
+# ljos.toml
+consensus_branches = ["main", "release"]
+#+end_src
+
+Everything else that concerns a push is policyd's. An ordinary push of a branch runs, and so does a
+lease push to a feature branch.
+A lease push or a force push onto a protected branch runs too, with the =git-force-push= warning, and the bypass log keeps the label.
+=main=, =master= and =develop= are always protected, and =protected_branches= adds more.
+Deleting a remote branch runs with the =git-push-delete= warning, and the bypass log keeps the label.
+On a protected branch each warns on the same consensus as an ordinary push, and nothing more.
+
+With one active seat in =vissue.toml=, that seat's own vote settles consensus for the check.
+This is solo mode. With two or more seats, the normal quorum applies.
+The =pre-push= git hook, once installed, still holds that push under a runner.
+For a push that must never happen, protect the branch on the forge as well.

@@ -43,19 +43,19 @@
         "rule": "em-dash-overuse",
         "value": "*",
         "files": [
-          "docs/build/howto.html"
+          "docs/build/howto*.html"
         ],
         "createdAt": "2026-10-18T19:55:09.350Z",
-        "reason": "The doubled hyphens on this page are command flags inside code. The page has no em dash."
+        "reason": "The doubled hyphens on these pages are command flags inside code. The pages have no em dash."
       },
       {
         "rule": "em-dash-overuse",
         "value": "*",
         "files": [
-          "docs/build/reference.html"
+          "docs/build/reference*.html"
         ],
         "createdAt": "2026-10-18T19:55:09.352Z",
-        "reason": "The doubled hyphens on this page are command flags inside code. The page has no em dash."
+        "reason": "The doubled hyphens on these pages are command flags inside code. The pages have no em dash."
       },
       {
         "rule": "cream-palette",

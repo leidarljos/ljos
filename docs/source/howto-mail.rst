@@ -1,0 +1,84 @@
+:description: Write to another seat, read the inbox, and wake an idle seat when mail reaches it.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
+
+=======================
+Send mail between seats
+=======================
+
+
+Write to another seat
+=====================
+
+Seats on one pack write to each other as pack atoms. ``ljos sync`` carries
+those atoms in the sealed log, so a seat on another machine sees them
+after a sync.
+
+.. code:: console
+
+   $ ljos group ops --add alice --add bob
+   $ ljos send bob "the build is red" --issue acme-4 --interrupt
+   $ ljos inbox
+   $ ljos read ID
+   $ ljos reply ID "looking"
+
+``ljos send SEAT TEXT`` writes to one seat. ``ljos send --group NAME TEXT``
+writes to the other members. ``--interrupt`` puts the message ahead of the
+others on the next prompt. ``--issue ID`` threads it on that vissue issue,
+and a reply keeps the issue. ``ljos inbox`` lists what this seat has not
+read, and writes no receipt. A pack that does not answer is an error.
+A writer that refuses kind ``message`` is an error too: the command exits
+non-zero, names packset 0.13.0, and does not print an empty inbox.
+``ljos send`` names the packset version that keeps mail. ``ljos read ID``
+writes one receipt. ``ljos reply ID TEXT`` writes back to the sender.
+
+``ljos hook --prompt`` shows unread mail at the start of the next prompt,
+at most eight messages and interrupts first, and writes one receipt for
+each message it shows. The rest stay unread. The receipt atom's text is
+four lines, ``read ID``, ``by SEAT``, ``at STAMP`` and ``msg ID``. The sender's
+next inbox prints that receipt once, as the message id, the reader and
+the stamp, and a second prompt writes nothing. Shown there is read.
+A shell writes the receipt before the hook exits. The editor harness holds the note
+on the prompt and writes the receipt when it is delivered: ``postToolUse``
+puts the note in ``additional_context``, and a turn with no tool puts it
+in ``followup_message`` on ``Stop``.
+A shell seat has no hook, so it polls ``ljos inbox`` and reads with
+``ljos read``.
+
+Wake a seat when mail reaches it
+================================
+
+Mail waits until the recipient's next prompt, and an idle agent has no next prompt.
+A seat names how to wake it, and ``ljos send`` starts that wake after the message is written.
+The sender does not wait on it and needs to know nothing about the recipient's runner.
+
+.. code:: console
+
+   $ LJOS_SEAT=seat-a ljos wake --timeout 1800 --command 'cd ~/src/app && flock -n /tmp/seat-a.lock runner -p --resume SESSION "Read your ljos mail and act on it."'
+   $ LJOS_SEAT=seat-b ljos wake --timeout 1800 --command 'cd ~/src/app && runner exec resume --last "Read your ljos mail and act on it."'
+   $ LJOS_SEAT=seat-c ljos wake --timeout 1800 --command 'cd ~/src/app && agent -p --resume=CHAT_ID "Read your ljos mail and act on it."'
+   $ LJOS_SEAT=example-host ljos wake --webhook https://example.invalid/webhook/ID --key-file ~/.config/ljos/example-host.key
+   $ ljos wake seat-a --fire
+
+A command runs under ``sh -c`` with ``LJOS_SEAT`` set to the recipient, so ``ljos inbox`` in it reads the right mail.
+With a prefix wake, ``LJOS_SEAT`` is still the run seat that matched the prefix.
+``LJOS_WAKE_FROM``, ``LJOS_WAKE_MSG``, ``LJOS_WAKE_ISSUE`` and ``LJOS_WAKE_INTERRUPT`` name the message, so a wake can ignore plain mail and act only on an interrupt.
+policyd reads the command when it is set and again on every run.
+A rule that fires is a warning line in the reply and in ``wake.log``, and the command still runs.
+A command under ``block-on-warning`` warns with that label. It does not block, and the command runs.
+A command is stopped after 30 seconds; ``--timeout S`` changes that, and an agent run such as a resume command needs a longer one.
+Two sends close together start two wakes, so a wake that resumes a session holds a lock (``flock -n``) and leaves a running session to its ``Stop`` hook.
+
+A webhook gets the envelope as JSON: the seat, the sender, the message id, the issue, the interrupt flag, and ``via`` when a prefix matched.
+The body stays in the pack, and the woken agent reads it with ``ljos inbox``.
+The key is read from ``--key-file`` or the variable ``--key-env`` names, and never written to ``wake.toml``.
+A key is a prefix only when it ends in one trailing ``-`` after a non-empty stem; names such as ``-``, ``--`` and ``a--`` are exact names.
+A Example Host wakes this way: make a routine with a webhook trigger, copy its URL and sender key from the routine's panel, and save the key in a file only you can read.
+
+A wake that fails or runs past its timeout is a line in ``~/.local/state/ljos/mail/wake.log``, and the message is still in the pack.
+``ljos wake SEAT --fire`` runs the wake now and prints what happened.
+
+A session that is still working needs no wake.
+When it is about to stop, its ``Stop`` hook holds the turn once for unread interrupt mail.
+The terminal, command and build harnesses get ``decision: block`` with the mail as the reason, and the editor harness gets a ``followup_message``.
+Each letter is receipted once it is delivered, so the next stop is not held for it again.
+Plain mail waits for the next prompt or the wake.

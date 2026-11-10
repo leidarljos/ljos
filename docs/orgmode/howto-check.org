@@ -1,0 +1,34 @@
+#+title: Check the seat
+#+description: Read what ljos doctor prints, which rows fail, and when it exits 1.
+#+options: toc:nil num:nil
+
+=ljos doctor= prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer or the note queue is damaged.
+=ljos doctor --all= prints every row.
+# [[[cog import ljos_version as v; v.lines("The block is the =ljos= row from that command on a scratch seat, taken from ljos {version}.")]]]
+The block is the =ljos= row from that command on a scratch seat, taken from ljos 0.40.0.
+# [[[end]]]
+# [[[cog import ljos_version as v; v.lines("=ljos --version= printed =ljos {version}=.")]]]
+=ljos --version= printed =ljos 0.40.0=.
+# [[[end]]]
+The scratch seat's day cache already holds that version, so the row says =crates.io (cached)= and neither =behind= nor =ahead of=.
+The path stands in for the binary.
+The scratch =PATH= holds only this =ljos=, so the sample does not show the other seat binaries.
+# BEGIN ljos-sample doctor
+#+begin_src text
+$ ljos --version
+ljos 0.40.0
+$ ljos doctor --all
+ok	ljos	/path/to/ljos  0.40.0  crates.io (cached) 0.40.0
+#+end_src
+# END ljos-sample doctor
+
+Exit 1 when the tracker, the deed store, or the pack does not answer. The
+tracker row names how many commits origin lacks, and fails when that count
+sits through the push wait. It also fails when another remote of the
+tracker has a different head of the branch, as of the last fetch: two
+seats pushing to two remotes each read only their own writes. A sitting's own tracker push goes to
+every remote that carries the branch. A missing
+claim graph is reported and is not a failure: the first claim creates it.
+A seat nobody named is a derived seat, and a derived seat is a seat. The =seat source= row says where the name came from.
+A damaged note queue is a =no= row and fails: it holds lessons the pack has not taken.
+An empty or missing log of either is whole.

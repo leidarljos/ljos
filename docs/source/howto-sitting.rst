@@ -1,0 +1,127 @@
+:description: Open a sitting, end it with a lesson, and hold a done claim that sits beside a failing test.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
+
+============
+Sit an issue
+============
+
+
+Start a sitting, and end one
+============================
+
+.. code:: console
+
+   $ ljos sitting proj-1a2b
+   == doctor
+   ok  vissue  ...
+   ok  seat    alice, holding as alice (from LJOS_SEAT)
+   == cards
+   == due
+   unreviewed  conclusion  3f9c... The lexical default is BM25+.
+   1 due; 4 scheduled, next at 2026-09-13T09:12:00Z
+   == island: Ship the fuse change?
+   1.000   seed    ab8c... 3 weeks ago CombMNZ over RRF for fusing two ballots.
+   == blockers
+   none open; the issue is workable
+   == playbook
+   sit
+   A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook sit` or `ljos playbook ISSUE sit`). The sitting prints this body before recall and holds the name until finish or release.
+   ...
+   == recall
+   ...
+   == timeline
+   timeline of proj-1a2b: Ship the fuse change?
+   2026-08-30  13 days ago     tracker created
+   ...
+   == reclaim
+   no claim quiet longer than 900s
+   == claim
+   gen=2
+
+One verb, in the protocol's order; it stops at the first store that does
+not answer and claims nothing. ``--playbook NAME`` copies a recipe
+(``sit``, ``arena``, ``land``, ``company-panel``, ``overnight``, ``feature``) into the
+playbook section before recall; absent a name, a closed-set token in the
+title else ``sit``. The name is a tracker ``playbook:`` note until finish or
+release. ``ljos panel`` refuses until one is bound. The ``start_a_sitting`` prompt
+gives the same order to a runner that prefers single tools. A claim
+refused as busy names the issue you still hold; ``ljos complete`` finishes it
+and ``ljos release`` hands it back.
+
+.. code:: console
+
+   $ ljos finish proj-1a2b --lesson "CombMNZ held on turns. RRF lost two points." --outcome ship
+   completed the session node for proj-1a2b as done
+   remembered the lesson (id 51778929) as agent-derived; the hook shows it from the next prompt, and `ljos memories review` prunes it
+   fired the island for "Ship the fuse change?": 8 memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.
+   Learned. 6 trust rows rewritten. ... persona anchors moved. The outcome is kept: once 6 issues have one, ljos consensus discounts voters who err together. ... No stated probability, so there is no Brier score. A hard vote is not a claim of certainty.
+   the ticket proj-1a2b stays open and nobody holds it; a person closes it when the work is accepted
+
+Memories, a no vote, and a child
+================================
+
+A seat remembers with no sitting open. ``--as NAME`` stores the lesson in
+the set ``persona-NAME``. Each persona's brief then carries that persona's
+lesson, and the lists are not the same.
+
+.. code:: console
+
+   $ ljos remember --as release-engineer "Cut a release only after the changelog names the search index."
+   21e499e4b8487a3abc7ff7479e9da102    lesson  due 2026-11-02T14:29:43.738Z    Cut a release only after the changelog names the search index.
+   standing: the hook shows it from the next prompt it bears on
+   $ ljos remember --as docs-reader "A newcomer looks for the search index in the notes."
+   bac3e6e51514703c76672d163cc38cde    lesson  due 2026-11-02T14:29:43.770Z    A newcomer looks for the search index in the notes.
+   standing: the hook shows it from the next prompt it bears on
+   $ ljos brief release-engineer demo-0gmm
+   What you remembered yourself:
+   - [lesson, agent-derived, today] Cut a release only after the changelog names the search index.
+   $ ljos brief docs-reader demo-0gmm
+   What you remembered yourself:
+   - [lesson, agent-derived, today] A newcomer looks for the search index in the notes.
+
+A no vote has to name an open child. ``ljos file --parent`` links it in the
+tracker. The parent stays open while that child is open. After the child
+is closed, withdraw the no ballot and vote again, then ``ljos consensus``.
+
+.. code:: console
+
+   $ ljos vote demo-0gmm --against "the notes omit the index" --used none --as perf-reviewer
+   Error: vote: a no ballot on demo-0gmm has to name a child ticket. `ljos file --parent demo-0gmm "TITLE"` files one, then `ljos vote demo-0gmm --against REASON --child ID` links it. Nothing was cast
+   $ ljos file "Name the search index in the notes" --parent demo-0gmm
+   demo-1zcv  TODO  [#C]  Name the search index in the notes
+   $ ljos vote demo-0gmm --against "the notes omit the index" --used none --as perf-reviewer --child demo-1zcv
+   recorded on the tracker: perf-reviewer for no on demo-0gmm
+   no ballot linked to child demo-1zcv. demo-0gmm stays open while demo-1zcv is open. After `ljos finish demo-1zcv --close`, replace the ballot: `ljos vote demo-0gmm --withdraw --as perf-reviewer` then `ljos vote demo-0gmm --for OPTION --used none --as perf-reviewer`, then `ljos consensus demo-0gmm`.
+
+Hold a done claim beside a red test
+===================================
+
+``Stop`` also blocks one turn, with no model in the loop, when the
+conversation has no issue and the turn used tools without touching
+the seat. The agent is told to file an issue and sit. The next stop of
+that same turn goes through.
+
+With Jev on, the ``Stop`` and ``SubagentStop`` hooks audit the turn once
+before the agent stops. The audit reads four parts of the turn, bounded
+to a few thousand tokens:
+
+- the person's last request
+- the shell commands the turn ran since that request
+- the latest test output, or the last output when no test ran
+- the final message from the agent
+
+Jev answers three questions about it:
+
+=================== ==========================================================================
+question            blocks the stop at
+=================== ==========================================================================
+``claims_complete`` 0.9 or above, with ``tests_green`` 0.1 or under and a test run in the turn
+``tests_green``     (with the above)
+``deferral``        0.9 or above
+=================== ==========================================================================
+
+Whether a test ran is decided in code, from the command line. A held
+agent gets the reason and one more round; its second attempt to stop is
+never audited, so it cannot loop. A final message under 80 characters is
+not sent. The cuts sit in ``jev.rs`` beside the questions. A stop costs
+about 3,000 input tokens, or $0.00013.

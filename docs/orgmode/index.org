@@ -87,7 +87,7 @@ $ ljos due
 * Where to go next
 
 - [[file:getting-started.org][Getting started]]: a ten-minute tutorial with memory, two seats on one ticket, a vote and offboard.
-- [[file:howto.org][How-to guides]]: one task a section, from hooks and onboarding to handover, trust and sync.
+- [[file:howto.org][How-to guides]]: one task a page, from hooks and onboarding to handover, trust and sync.
 - [[file:integration.org][Integration]] and [[file:grok-build.org][Grok Build]]: the runners ljos sits in.
 - [[file:explanation.org][Explanation]] and [[file:architecture.org][Architecture]]: why the design is what it is.
 - [[file:compare.org][How ljos compares]]: the other memory tools and agent trackers.
