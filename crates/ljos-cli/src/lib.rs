@@ -1421,12 +1421,20 @@ fn same_binary(a: &Path, b: &Path) -> bool {
 }
 
 pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan {
-    server_command_plan_in(server, who, None)
+    server_command_plan_in(server, who, None, false)
 }
 
 /// [`server_command_plan`] for a client that searches `search` for a bare
 /// command instead of this process's PATH.
-fn server_command_plan_in(server: &Path, who: &str, search: Option<&str>) -> ServerCommandPlan {
+///
+/// `dry` names the path the entry would carry and writes nothing. The verb
+/// is "would write" then, and "wrote" once the entry is stored.
+fn server_command_plan_in(
+    server: &Path,
+    who: &str,
+    search: Option<&str>,
+    dry: bool,
+) -> ServerCommandPlan {
     let (found, path) = match search {
         Some(dirs) => (
             which::which_in(MCP_SERVER_COMMAND, Some(dirs), "/"),
@@ -1434,6 +1442,8 @@ fn server_command_plan_in(server: &Path, who: &str, search: Option<&str>) -> Ser
         ),
         None => (which::which(MCP_SERVER_COMMAND), "PATH".to_string()),
     };
+    // A dry run writes no file, so the note must not say the path was written.
+    let verb = if dry { "would write" } else { "wrote" };
     match found {
         Ok(found) if same_binary(&found, server) => ServerCommandPlan {
             command: MCP_SERVER_COMMAND.to_string(),
@@ -1442,7 +1452,7 @@ fn server_command_plan_in(server: &Path, who: &str, search: Option<&str>) -> Ser
         Ok(found) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "{path} resolves {MCP_SERVER_COMMAND} to {}, so {who} wrote {}",
+                "{path} resolves {MCP_SERVER_COMMAND} to {}, so {who} {verb} {}",
                 found.display(),
                 server.display()
             )),
@@ -1450,7 +1460,7 @@ fn server_command_plan_in(server: &Path, who: &str, search: Option<&str>) -> Ser
         Err(_) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "{path} does not resolve {MCP_SERVER_COMMAND}, so {who} wrote {}",
+                "{path} does not resolve {MCP_SERVER_COMMAND}, so {who} {verb} {}",
                 server.display()
             )),
         },
@@ -1481,8 +1491,12 @@ pub fn exec_server(args: &[std::ffi::OsString]) -> anyhow::Error {
 
 /// The MCP server entry any runner that reads JSON accepts.
 pub fn server_entry() -> Result<Value> {
+    server_entry_in(false)
+}
+
+fn server_entry_in(dry: bool) -> Result<Value> {
     let server = server_path()?;
-    let plan = server_command_plan(&server, "onboard");
+    let plan = server_command_plan_in(&server, "onboard", None, dry);
     // `--harness json` prints this value alone on stdout so it parses.
     // The reason for an absolute path goes to stderr.
     if let Some(note) = &plan.note {
@@ -6192,7 +6206,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         };
     }
-    let plan = server_command_plan_in(server, "onboard", h.launch_path());
+    let plan = server_command_plan_in(server, "onboard", h.launch_path(), dry);
     match is_registered(h, server) {
         Some(true) => {
             let healed = heal_registered(h, server, &plan.command, dry);
@@ -7196,7 +7210,7 @@ fn onboard_in_at_inner(
     if harness == "json" {
         return Ok(vec![Step {
             what: "json".into(),
-            detail: serde_json::to_string_pretty(&server_entry()?)?,
+            detail: serde_json::to_string_pretty(&server_entry_in(dry)?)?,
             ok: true,
         }]);
     }
@@ -55376,11 +55390,12 @@ mod tests {
         std::fs::write(&server, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
         let elsewhere = empty.to_str().unwrap();
-        let plan = super::server_command_plan_in(&server, "onboard", Some(elsewhere));
+        let plan = super::server_command_plan_in(&server, "onboard", Some(elsewhere), false);
         assert_eq!(plan.command, server.display().to_string());
         let note = plan.note.unwrap_or_default();
         assert!(note.contains(elsewhere), "{note}");
-        let plan = super::server_command_plan_in(&server, "onboard", bin.to_str());
+        assert!(note.contains("wrote"), "{note}");
+        let plan = super::server_command_plan_in(&server, "onboard", bin.to_str(), false);
         assert_eq!(plan.command, super::MCP_SERVER_COMMAND);
     }
 

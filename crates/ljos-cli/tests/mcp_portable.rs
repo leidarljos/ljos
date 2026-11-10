@@ -468,3 +468,66 @@ fn onboard_does_not_rewrite_a_sibling_goose_command() {
         stale.replacen("/home/otherbox/.cargo/bin/ljos-mcp", "ljos-mcp", 1)
     );
 }
+
+fn tree(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        let Ok(read) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.display().to_string());
+            }
+        }
+    }
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// A dry run names each path it would write and leaves the tree as it was.
+#[test]
+fn onboard_dry_run_says_would_write_and_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    let ljos = bin.join("ljos");
+    let server = bin.join("ljos-mcp");
+
+    let before = tree(&home);
+    let out = onboard_with_path(
+        &ljos,
+        &home,
+        "/usr/bin:/bin",
+        &["onboard", "--harness", "json", "--dry-run"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    let note = format!("would write {}", server.display());
+    assert!(err.contains(&note), "stderr: {err}");
+    assert!(!err.contains("wrote"), "stderr: {err}");
+    let pasted: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        pasted["mcpServers"]["ljos"]["command"],
+        server.display().to_string()
+    );
+    assert_eq!(tree(&home), before, "json dry run wrote a file");
+
+    let out = onboard_with_path(
+        &ljos,
+        &home,
+        "/usr/bin:/bin",
+        &["onboard", "--harness", "cursor", "--dry-run"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let text = said(&out);
+    assert!(text.contains("would write"), "{text}");
+    assert!(!text.contains("wrote"), "{text}");
+    assert_eq!(tree(&home), before, "cursor dry run wrote a file");
+    assert!(!home.join(".cursor/mcp.json").exists());
+}
