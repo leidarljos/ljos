@@ -8,6 +8,9 @@ says what the seat is; this page says what it plugs into and why.
 
 * The seat among FOSS memory systems
 
+[[file:compare.org][How ljos compares]] has the feature table against beads,
+Mem0, Letta, Zep, Basic Memory and git-bug, with a link to each tool's docs.
+
 Agent memory systems in the literature and on the market do one of a few
 jobs. The seat integrates with them rather than re-running them:
 

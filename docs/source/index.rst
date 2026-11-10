@@ -1,4 +1,4 @@
-:description: One seat over five habitats and argv law. It owns none of them. A seat is one agent, or one person, working a tracker. Five habitats answer five questions for it. Cards are what the human froze.
+:description: ljos is memory, a shared tracker and a vote for coding agents. A person writes what the agents should remember. Every agent files and claims work on one git repository of tickets.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
 .. raw:: html
@@ -23,55 +23,46 @@
      </div>
    </div>
 
-One seat over five habitats and argv law. It owns none of them.
-A seat is one agent, or one person, working a tracker. Five habitats
-answer five questions for it. Cards are what the human froze. The pack
-keeps what the seat has learned. The deed store records what the work
-produced. The tracker says what the work is and who agrees, and the
-claim graph shows who is working on what right now. The judging of
-shell commands is not a store: ``ljos-policyd`` warns on the dangerous
-ones before they run, seat rules warn on more, the command runs either
-way unless the person turns on blocking, and ``ljos policy -- COMMAND`` prints the answer for one command. ``ljos`` is the one command and the one Model
-Context Protocol (MCP) server over those habitats. It adds three loops
-the habitats do not have alone: memory that is reviewed and forgotten
-on a clock, agreement that weighs voters by who turned out right, and
-a handover another seat can check and import. Seats on one pack also
-write to each other with ``ljos send``; the atoms travel in the sealed sync log.
+ljos is memory, a shared tracker and a vote for coding agents. A
+person writes what the agents should remember. Every agent files and
+claims work on one git repository of tickets. When agents disagree, they
+vote, and ljos settles the vote. It calls no model, and every store is a
+file a person can open.
 
-Everything is a file a person can open: Org headings, JSON lines, a
-content-addressed store, a Cap'n Proto snapshot. No model is required to
-run any of it, and any model or agent runner that can call a command or an
-MCP tool can sit in the seat.
+|image1|
 
-.. image:: _static/seat.svg
-   :width: 100.0%
+What it has done
+================
+
+============ ==============================================================================================================================================
+7,901 tokens for the 20 core Model Context Protocol (MCP) tools, against 17,855 for all 52
+196.3 ms     warm prompt hook median on a pack of 10,000 lessons, down from 602.5 ms
+0 of 186     near-topic lesson pairs merged by the duplicate check
+0.949        recall@5 in packset's LongMemEval\ :sub:`S` session retrieval run, BM25+ fused with e5-large-v2, 470 questions; retrieval, not answer accuracy
+2,293        tests passed on the 0.40.0 release commit, 0 failed
+10 runners   with an onboarding shape: Claude Code, Codex, Cursor, Grok, OpenCode, Windsurf, Antigravity, Hermes, omp, shell
+MIT          licence; Rust; Linux and macOS
+============ ==============================================================================================================================================
+
+:doc:`What ljos does <introduction>` lists each feature and the file
+that measured each number. :doc:`How ljos compares <compare>` sets it
+beside beads, Mem0, Letta, Zep, Basic Memory and git-bug.
 
 Install
 =======
 
 .. code:: console
 
-   $ cargo binstall --locked ljos packset deedar-cli claimdag-cli vissue-cli vissue-mcp ljos-policyd ljos-consensus
-   $ packset ensure
+   $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+   $ export PATH="$HOME/.local/bin:$PATH"
    $ ljos doctor
-   $ ljos onboard --harness json
+   ljos is ready: memory and command guard work. Optional extras: `ljos doctor --all`.
 
-``ljos`` provides ``ljos`` and ``ljos-mcp``. ``packset`` provides ``packset`` and the
-writer ``packsetd``. ``packset-embed`` is the encoder for meaning-based search; without it ``packsetd`` matches words only. ``scripts/install.sh`` installs the same set and the encoder (``--no-embed`` leaves it out) with checksums and onboards each runner it finds. ``deedar-cli`` provides ``deedar``. ``claimdag-cli`` provides
-``claimdag``. ``vissue-cli`` provides ``vissue``, and ``vissue-mcp`` the tracker server. ``ljos-consensus`` provides
-``ljos-consensus``, which ``ljos consensus`` runs. ``ljos-policyd`` is the command
-check. Those are the binaries the tutorial calls. Each comes prebuilt from
-its GitHub release; ``cargo install`` takes the same names and builds from
-source with Rust 1.89 or newer. An older Rust fails on several crates and can
-install an ``ljos-policyd`` older than 0.5.0 without a word; ``ljos doctor`` marks
-that row ``no`` and names the fix.
-
-``doctor`` says whether ljos is ready and lists the habitats that need action;
-``doctor --all`` names each habitat and whether it answers. The seat works with the
-habitats it has; a missing one is reported, not guessed around. ``onboard``
-registers the server with an agent runner and installs the sitting protocol
-as its skill; ``ljos protocol`` prints the short form, and ``ljos protocol --full``
-prints that protocol for any other.
+The installer checks each download against its published SHA-256 sum.
+It then runs ``ljos onboard`` for each coding runner it finds. When ``ljos doctor``
+prints ``ljos is ready``, you are done. A row it prints instead names the
+part that needs action. :doc:`Getting started <getting-started>` has
+the install by hand and what each program is.
 
 First minute
 ============
@@ -86,19 +77,57 @@ First minute
    $ ljos due
    0 due; 1 scheduled, next at 2026-09-26T23:27:31.528Z
 
-The :doc:`tutorial <getting-started>` runs all three loops on a scratch
-tracker in about ten minutes.
+Where to go next
+================
+
+- :doc:`Getting started <getting-started>`: a ten-minute tutorial with memory, two seats on one ticket, a vote and offboard.
+- :doc:`How-to guides <howto>`: one task a section, from hooks and onboarding to handover, trust and sync.
+- :doc:`Integration <integration>` and :doc:`Grok Build <grok-build>`: the runners ljos sits in.
+- :doc:`Explanation <explanation>` and :doc:`Architecture <architecture>`: why the design is what it is.
+- :doc:`How ljos compares <compare>`: the other memory tools and agent trackers.
+- :doc:`Reference <reference>`: every verb, server tool and variable.
+
+Community
+=========
+
+- Questions and bugs: `GitHub issues <https://github.com/leidarljos/ljos/issues>`__.
+- Changes: `CONTRIBUTING.md <https://github.com/leidarljos/ljos/blob/develop/CONTRIBUTING.md>`__.
+- Releases: `GitHub releases <https://github.com/leidarljos/ljos/releases>`__ and `CHANGELOG.md <https://github.com/leidarljos/ljos/blob/develop/CHANGELOG.md>`__.
+- The other leiðarljós programs: `github.com/leidarljos <https://github.com/leidarljos>`__.
 
 .. toctree::
    :maxdepth: 1
-   :caption: Guides
+   :caption: Start
    :hidden:
 
+   introduction
    getting-started
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Use
+   :hidden:
+
    howto
-   grok-build
    integration
-   architecture
-   reference
+   grok-build
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Understand
+   :hidden:
+
    explanation
+   architecture
+   compare
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Reference
+   :hidden:
+
+   reference
    seat
+
+.. |image1| image:: _static/seat.svg
+   :width: 100.0%

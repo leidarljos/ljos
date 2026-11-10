@@ -1,18 +1,38 @@
 # ljos
 
-Coding runners work on one person's repositories. A new session does not keep the last session's lessons. Two agents can claim the same work. Nobody can see who decided what.
-
-ljos is the record of who decided what: memory you write on purpose, a git-backed ticket tracker that agents share, and a warner for shell commands.
-
-You install it once on a machine. Each agent gets a seat on a tracker. The tracker is a git repository of tickets. A seat files a ticket and opens a sitting on it. A sitting claims that ticket and gathers the checks and memories for the task.
-
-Checks from the sitting include a shell warning. ljos warns about a shell command and does not stop it. `ljos-policyd` names a short list of dangerous actions. It is not a sandbox. A command that runs as you, outside a tool call, is not checked. If policyd is missing, slow, or crashes, the command runs and ljos logs a warning. Warning lines sit apart from ballots and votes, which are also separate from memory. A person stores a lesson with `ljos remember`, or a preference with `ljos prefer`. The words are kept as written. At the end of a session, ljos reads the transcript. It keeps up to five sentences that state a rule, a cause, or a fix. Each sentence is a note on the open sitting. The prompt hook does not show that note as a fact. Set `LJOS_EXTRACT=off` to skip the read. With no open sitting, it writes nothing.
-
-A person can also record a grant that lets a seat close tickets. The grant stores the person's quote.
+ljos is memory, a shared tracker and a vote for coding agents.
+A person writes what the agents should remember.
+The prompt hook hands it back when a prompt bears on it.
+Agents file and claim work in one git repository of tickets.
+A held ticket refuses a second claim.
+When agents disagree, they vote, and ljos settles the vote.
+It calls no model, and every store is a file a person can open.
 
 [//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
 These notes describe ljos 0.40.0.
 [//]: # ([[[end]]])
+
+## What it has done
+
+- 7,901 tokens for the 20 core Model Context Protocol (MCP) tools, against 17,855 for all 52 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
+- 196.3 ms warm prompt hook median on 10,000 live lessons, down from 602.5 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt)).
+- The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
+- Recall by ticket tags: labelled memories shown, median 0 before and 5 after; wall median 99.1 ms before, 99.5 ms after ([measurements/recall-tags.txt](measurements/recall-tags.txt)).
+- packset, the memory writer, on LongMemEval_S session retrieval over 470 questions: recall@5 0.914 with BM25+ alone, 0.949 with BM25+ fused with e5-large-v2 ([packset explanation](https://leidarljos.github.io/packset/explanation.html)).
+- 2,293 tests passed, 0 failed, 2 ignored on the 0.40.0 release commit ([CI run 42801686714](https://github.com/leidarljos/ljos/actions/runs/42801686714)).
+
+The LongMemEval_S line scores retrieval, not answer accuracy.
+[What ljos does](https://leidarljos.github.io/ljos/introduction.html) lists every measured number with its method.
+
+## How it compares
+
+- Memory: ljos, beads and Basic Memory keep what was written. Mem0 runs a model over what it ingests by default.
+- Tickets: ljos and beads let an agent claim a ticket. git-bug keeps issues inside git.
+- Votes: ljos records a ballot per agent and settles them. The docs of the other four describe no vote.
+- Stores: ljos uses Org files and JSON lines in git, beads uses Dolt, Mem0 uses Qdrant and SQLite, Basic Memory uses Markdown files, and git-bug uses git objects.
+- Licences: ljos and beads are `MIT`, Mem0 is `Apache-2.0`, Basic Memory is `AGPL-3.0`, git-bug is `GPL-3.0`.
+
+[How ljos compares](https://leidarljos.github.io/ljos/compare.html) has the full table, Letta and Zep, and a link to each tool's own docs.
 
 ## Try it
 
@@ -90,7 +110,7 @@ inside a checkout of another project. A later `git add -A` commits a tracker lef
 there. Onboard names the checkout. It asks for a `VISSUE_ROOT` outside the checkout.
 A path the checkout already ignores is fine.
 
-Once the checkout path is fine, the command harness runs a hook only after you trust it. Open `/hooks` in the command harness and trust each
+A path outside the checkout still needs the hooks trusted. Claude Code runs a hook only after you trust it: open `/hooks` there and trust each
 ljos hook after `ljos onboard`, and again after an upgrade.
 
 ## Take it off
@@ -221,101 +241,19 @@ settles consensus for the push check. With two or more seats, the normal quorum 
 what each filed, claimed, voted on, noted and finished. You read the same
 facts one at a time with `ljos timeline ISSUE`, `ljos claims` and `ljos log --seat NAME`.
 
-## What policyd does
+## The command check
 
-Before an agent's shell command runs, the runner's hook hands it to `ljos hook`.
-`ljos hook` asks `ljos-policyd` and relays the answer. policyd is the one place
-that says whether a command is dangerous. ljos does not run a second set of
-command checks of its own. By default nothing ljos answers stops a command: it never
-refuses or asks about one, and it never blocks one. The cloud seat's push rule below refuses a
-force push, a remote branch or tag delete, and a push outside its allowlist. A local branch delete runs and is labelled. The installed
-`pre-push` git hook refuses a protected push that has not cleared and a
-pushed commit whose message carries a machine trailer.
-
-policyd gives one of three answers.
-
-| Answer | What happens |
-|---|---|
-| allow | The command runs. |
-| warn | The command runs, and the runner shows one line that names the rule and says why. |
-| rewrite | policyd returns a corrected command, and that one runs. |
-
-`block-on-warning` does not block. A `deny` or `prompt` from policyd, including one printed because a named `policyd_config` sets `block-on-warning true`, is a warning with that label.
-The command runs.
-The hook does not deny the tool call, and a guard shim does not stop it.
-
-> **Security:** a warning is the only thing between a runner and a destructive
-> command. Keep backups, protect branches on the forge, and keep a runner where it
-> cannot reach what it must not touch.
-
-policyd reads the command as a shell does. It looks through `sh -c`, `env`, `timeout`,
-`xargs` and `nohup`, through `$cmd` and pipes, and through quotes. It does not run a
-shell and does not read scripts. The first rule that fires is the warning.
-
-policyd warns on these commands.
-
-- `sudo`, and `curl` or `wget` piped to a shell, including decoded text piped to a shell.
-- `chmod` that sets setuid, and raw disk writes such as `dd of=/dev/sda` and `mkfs`.
-- `rm -rf` outside the work tree and `/tmp`, and recursive `chmod` or `chown` on system trees.
-- a force push to `main`, `master`, `develop` or a protected branch, and deleting a remote branch.
-- `git filter-branch`, `git filter-repo`, `git reflog expire`, and deleting a published ref.
-- throwing away uncommitted work with `git reset --hard`, `git clean -f`, `git checkout .` or `git stash clear`.
-- reading a named credential file, or sending one over the network.
-- writes to the hook files, the policy files and the ljos programs.
-- outbound mail whose From is not your own address.
-
-A recursive delete outside `/tmp` runs all the same, and so do a force push, deleting a remote branch and a write to the hook files, the policy files or the ljos programs.
-It prints the rule and its warning on one line, `allow\twarn\tRULE\tWARNING`, and keeps the label in `$XDG_DATA_HOME/ljos/bypass.jsonl`.
-
-A lease push to a feature branch is allowed. An ordinary push of a branch is allowed.
-
-The hook hands the runner this answer for `git push --force` on a topic branch.
-The push runs:
+Before an agent's shell command runs, the runner's hook hands it to `ljos hook`, which asks `ljos-policyd`.
+policyd answers allow, warn or rewrite.
+A warning names the rule and the command runs; ljos is not a sandbox.
+`ljos policy -- COMMAND` prints the answer for one command without running it.
+The hook hands the runner this answer for `git push --force` on a topic branch, and the push runs:
 
 ```
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"allow\twarn\tgit-force-push\ta force push rewrites a published branch"}}
 ```
 
-### The rewrite
-
-Some commands are not dangerous, only wrong for this project.
-policyd can answer with a fixed command. Its first rewrite runs the command through
-`uv run`. The answer is one line of text: `allow`, then `rewrite`, then the new
-command, separated by tabs.
-
-The new command runs only when the guard has no warning on it. The terminal harness, the command harness, the build harness
-and the editor harness's `preToolUse` take it back from the hook and run it. A runner that has no
-field for this runs the old line, with a warning that names the new command.
-Each swap also shows a note naming both commands and leaves a row in
-`$XDG_DATA_HOME/ljos/rewrite.jsonl`. Set `rewrite = false` in a repository's
-`ljos.toml` to run its lines as written. The log keeps a row for a swap it declined too.
-policyd keeps a log of what it warns on.
-
-### The two checks ljos keeps
-
-Only ljos knows the tracker and the sitting, so it keeps two checks.
-
-- A command or file tool that writes the tracker's files by hand gets a warning.
-  Use `ljos file`, `ljos note`, `ljos vote` and `ljos finish`. Ticket text is data
-  and is never read as a command.
-- A protected-branch push warns when the current sitting's ticket has no
-  settled consensus. The push runs. With one active seat, that seat's own vote
-  is the consensus for the push check. With two or more seats, the normal quorum applies.
-  The `pre-push` git hook, once installed, refuses that push under a runner.
-
-If `ljos-policyd` is missing or slow, the command runs and ljos logs a warning.
-`ljos doctor` shows the policy row. `ljos policy -- COMMAND` prints the answer for
-one command without running it:
-
-```
-$ ljos policy -- rm -rf /usr/share/foo
-rm -rf /usr/share/foo
-allow	warn	rm-rf-outside-tmp	a recursive delete reaches outside /tmp and /var/tmp
-```
-
-The command check is separate from the git hook. A git hook books the work. `ljos git-hooks install` adds a post-commit hook. On the
-first commit, it opens the sitting or names the one already open, and it notes the
-commit's SHA on the held ticket. It never refuses a commit.
+The [how-to guide](https://leidarljos.github.io/ljos/howto.html) lists the rules, the rewrite and the two checks ljos keeps for the tracker.
 
 ## Jev
 
@@ -434,7 +372,9 @@ The site is <https://leidarljos.github.io>. The crate docs are at
 
 | Page | Answer |
 |---|---|
+| [What ljos does](https://leidarljos.github.io/ljos/introduction.html) | Features and every measured number |
 | [Getting started](https://leidarljos.github.io/ljos/getting-started.html) | Install, two seats on one ticket, offboard |
 | [How-to](https://leidarljos.github.io/ljos/howto.html) | Hooks, onboarding, handover, trust |
 | [Reference](https://leidarljos.github.io/ljos/reference.html) | Every verb, tool and variable |
 | [Explanation](https://leidarljos.github.io/ljos/explanation.html) | The reason for the design |
+| [How ljos compares](https://leidarljos.github.io/ljos/compare.html) | beads, Mem0, Letta, Zep, Basic Memory, git-bug |
