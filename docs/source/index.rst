@@ -61,8 +61,15 @@ Install
 The installer checks each download against its published SHA-256 sum.
 It then runs ``ljos onboard`` for each coding runner it finds. When ``ljos doctor``
 prints ``ljos is ready``, you are done. A row it prints instead names the
-part that needs action. :doc:`Getting started <getting-started>` has
-the install by hand and what each program is.
+part that needs action. To install by hand instead:
+
+.. code:: console
+
+   $ cargo binstall --locked ljos packset deedar-cli claimdag-cli vissue-cli vissue-mcp ljos-policyd ljos-consensus
+   $ ljos onboard
+   $ ljos doctor
+
+:doc:`Getting started <getting-started>` says what each program is.
 
 First minute
 ============
