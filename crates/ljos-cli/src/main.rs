@@ -1,7 +1,9 @@
 //! `ljos`: one seat over the habitats. Each habitat keeps its own crate.
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+
+mod help_groups;
 use ljos_cli::{
     age_of, begin_sitting_preclaim, brief, bump_plan, calibrate, cards, claim, claim_next,
     cli_assignee, compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook,
@@ -28,7 +30,9 @@ use std::path::PathBuf;
     version,
     about = "Memory, a work tracker and a command guard for coding runners",
     after_help = "Start with `ljos doctor`, `ljos prefer \"...\"`, `ljos policy -- COMMAND` and \
-                  `ljos onboard`. `ljos protocol` explains the rest."
+                  `ljos onboard`. `ljos protocol` explains the rest. \
+                  `ljos help --all` lists every command.",
+    disable_help_subcommand = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -511,6 +515,7 @@ enum Cmd {
         via: Option<String>,
     },
     /// Retire the note memories an older `ljos note` wrote. Runs once per seat; the tracker copies stay.
+    #[command(hide = true)]
     RetireNotes,
     /// Retire one memory by id. The record stays, marked retired.
     Forget {
@@ -594,6 +599,7 @@ enum Cmd {
     },
     /// Re-export this machine's atoms over a conflicted tracker log. git calls
     /// this as the `ljos-atoms` merge driver (`%A` then `%P`).
+    #[command(hide = true)]
     MergeAtoms {
         /// The file git keeps (`%A`).
         current: PathBuf,
@@ -725,6 +731,7 @@ enum Cmd {
         options: String,
     },
     /// Open a panel for a decision prompt: file or reuse the issue, sit it, and start one headless member per brief.
+    #[command(hide = true)]
     OpenPanel {
         /// The prompt, already written to a file so the hook can return.
         #[arg(long)]
@@ -1063,6 +1070,7 @@ enum Cmd {
     },
     /// Classify one harness exit under the restart policy, and print the
     /// herdr line that would start the child again. This does not start it.
+    #[command(hide = true)]
     Supervise {
         /// The child's name. The herdr agent is `persona-NAME`.
         name: String,
@@ -1114,6 +1122,7 @@ enum Cmd {
         dry_run: bool,
     },
     /// One line for a runner's status bar (the build harness's [ui.status_line], the terminal harness's statusLine): the seat, the issue held, what is due. Reads the runner's status JSON on stdin.
+    #[command(hide = true)]
     Statusline,
     /// Bind a playbook to an issue and copy its recipe into the working set, before personas enter.
     Playbook {
@@ -1227,6 +1236,7 @@ enum Cmd {
     },
     /// The hook a coding runner calls before it acts: hook JSON or plain text on stdin,
     /// the memories it bears on and the guard's verdict out. `--prompt --text` prints them plainly.
+    #[command(hide = true)]
     Hook {
         /// Most memories to inject per call; each is injected once between compactions.
         #[arg(long, default_value_t = 5)]
@@ -1280,6 +1290,7 @@ enum Cmd {
         finish_session: Option<std::path::PathBuf>,
     },
     /// Run the ljos part of one git hook. The block `ljos git-hooks install` appends calls this.
+    #[command(hide = true)]
     GitHook {
         /// Hook name, for example `post-commit`.
         name: String,
@@ -1347,6 +1358,7 @@ enum Cmd {
     /// run's seat, the model asked for, the run id and the run's public
     /// key, under this seat's pinned key. Written before the run's first
     /// ballot.
+    #[command(hide = true)]
     Slot {
         /// The issue the run is launched for.
         issue: String,
@@ -1515,8 +1527,10 @@ enum Cmd {
         judge: bool,
     },
     /// Score the judge log against outcomes: accuracy and calibration per decision.
+    #[command(hide = true)]
     JudgeScore,
     /// Put an eb-stack bundle's modules on the tracker: one child issue per module under the parent, blockers along the dependency edges, the same ids on every run. `vissue ready` then lists what a seat can build now.
+    #[command(hide = true)]
     BumpPlan {
         /// The bundle directory: `locks/default.lock.json` and `package.sbom.cdx.json` inside it.
         bundle: PathBuf,
@@ -1534,6 +1548,7 @@ enum Cmd {
         dry_run: bool,
     },
     /// The typed findings of an eb-stack campaign state file, one per line; `--remember` writes one lesson per finding a person or a seat resolved, and `--issue` cites the state file on the issue.
+    #[command(hide = true)]
     Findings {
         /// The campaign state file (`campaign.json`).
         state: PathBuf,
@@ -1665,6 +1680,15 @@ enum Cmd {
         /// `record` (the default): each voter's hits and misses so far as log-odds weights. `hedge`: refuted voters shrink by --beta, with --share recovery.
         #[arg(long, default_value = "record")]
         rule: String,
+    },
+    /// Print this message, or the help of one command. `--all` lists every command.
+    Help {
+        /// List every command, including those left off the short list.
+        #[arg(long)]
+        all: bool,
+        /// The command to explain. Further words name a nested command.
+        #[arg(value_name = "COMMAND")]
+        command: Vec<String>,
     },
 }
 
@@ -1820,7 +1844,42 @@ fn main() -> Result<()> {
     ran
 }
 
+/// True when the only argument is the help flag. A subcommand's own
+/// `--help`, and `ljos help`, are left for clap.
+fn root_help_only() -> bool {
+    let mut args = std::env::args_os().skip(1);
+    let Some(first) = args.next() else {
+        return false;
+    };
+    (first == "--help" || first == "-h") && args.next().is_none()
+}
+
+/// `ljos help`, and `ljos help --all`. A named command prints that
+/// command's own help, hidden or not.
+fn show_help(all: bool, topic: &[String]) -> Result<()> {
+    let mut cmd = Cli::command();
+    cmd.build();
+    if topic.is_empty() {
+        print!("{}", help_groups::render(&cmd, all));
+        return Ok(());
+    }
+    let mut current = &cmd;
+    for (i, name) in topic.iter().enumerate() {
+        current = current
+            .find_subcommand(name)
+            .with_context(|| format!("help: no command {}", topic[..=i].join(" ")))?;
+    }
+    current.clone().print_help()?;
+    println!();
+    Ok(())
+}
+
 fn run_command() -> Result<()> {
+    // `--help` exits before the seat is read. `ljos help` is a command.
+    if root_help_only() {
+        print!("{}", help_groups::render(&Cli::command(), false));
+        return Ok(());
+    }
     ljos_cli::load_seat_env();
     ljos_cli::normalize_tracker_env();
     // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
@@ -1859,7 +1918,8 @@ fn run_command() -> Result<()> {
         | Cmd::Record { .. }
         | Cmd::Onboard { .. }
         | Cmd::Offboard { .. }
-        | Cmd::Uninstall { .. } => {}
+        | Cmd::Uninstall { .. }
+        | Cmd::Help { .. } => {}
         _ => {
             ljos_cli::runner_skills::refresh_on_new_version();
             ljos_cli::runner_env::refresh_on_new_version();
@@ -1912,6 +1972,7 @@ fn run_command() -> Result<()> {
         }
     };
     match cmd {
+        Cmd::Help { all, command } => show_help(all, &command)?,
         Cmd::Remember {
             text,
             as_persona,
@@ -4578,4 +4639,76 @@ fn prompt_as_text(limit: usize) -> Result<()> {
         std::process::exit(out.status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod help_list {
+    use super::*;
+
+    fn command_lines(help: &str) -> Vec<&str> {
+        help.lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("  ")?;
+                if rest.starts_with('-') || rest.starts_with(' ') {
+                    return None;
+                }
+                rest.split_whitespace().next()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_command_is_in_one_group() {
+        // A test thread's stack is 2 MiB. Building this command tree needs
+        // the 8 MiB a normal `ljos` process gets.
+        let ran = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(every_command_is_in_one_group_inner)
+            .expect("spawn");
+        ran.join().expect("the help check panicked");
+    }
+
+    fn every_command_is_in_one_group_inner() {
+        let cmd = Cli::command();
+        help_groups::groups_match(&cmd).unwrap_or_else(|err| panic!("{err}"));
+        let short = help_groups::render(&cmd, false);
+        let all = help_groups::render(&cmd, true);
+        for heading in [
+            "Start:",
+            "Daily:",
+            "Tracker:",
+            "Memory:",
+            "Coordination:",
+            "Admin:",
+        ] {
+            assert!(short.contains(heading), "{heading} missing\n{short}");
+        }
+        let start = short.find("Start:").expect("Start");
+        let daily = short.find("Daily:").expect("Daily");
+        assert!(start < daily);
+        let first = command_lines(&short[start..daily]);
+        assert_eq!(
+            first,
+            [
+                "doctor", "onboard", "protocol", "prefer", "remember", "search", "sitting",
+                "finish", "due", "help",
+            ]
+        );
+        let admin = short.find("Admin:").expect("Admin");
+        assert_eq!(
+            command_lines(&short[admin..]).first().copied(),
+            Some("policy")
+        );
+        for name in ["merge-org", "hook", "bump-plan", "retire-notes", "slot"] {
+            assert!(
+                !command_lines(&short).contains(&name),
+                "{name} is on the short list"
+            );
+            assert!(
+                command_lines(&all).contains(&name),
+                "{name} is missing from help --all"
+            );
+        }
+        assert!(short.contains("`ljos help --all` lists every command."));
+    }
 }

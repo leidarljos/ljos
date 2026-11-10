@@ -842,6 +842,14 @@ Crate              Carries
 Help text
 =========
 
+``ljos --help`` groups commands under Start, Daily, Tracker, Memory,
+Coordination and Admin.
+The first group is what a new seat needs.
+A command a runner or git calls, and other rarely typed commands, stay
+off that list.
+They still run.
+``ljos help --all`` lists every command.
+
 .. BEGIN ljos-sample help
 
 .. code:: text
@@ -853,14 +861,14 @@ Help text
 
    Usage: ljos <COMMAND>
 
-   Commands:
-     doctor        Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer or the note queue is damaged
+   Start:
+     doctor       Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer or the note queue is damaged
 
    Options:
      -h, --help     Print help
      -V, --version  Print version
 
-   Start with `ljos doctor`, `ljos prefer "..."`, `ljos policy -- COMMAND` and `ljos onboard`. `ljos protocol` explains the rest.
+   Start with `ljos doctor`, `ljos prefer "..."`, `ljos policy -- COMMAND` and `ljos onboard`. `ljos protocol` explains the rest. `ljos help --all` lists every command.
    $ ljos doctor --help
    Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer or the note queue is damaged
 

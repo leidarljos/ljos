@@ -219,19 +219,29 @@ def command_column(line: str) -> int | None:
 
 
 def help_excerpt(text: str) -> str:
-    """Usage, the doctor command, and the options. Not the whole command list."""
+    """Usage, the heading over doctor, that command, and the options."""
     lines = text.splitlines()
     try:
-        commands_at = lines.index("Commands:")
         options_at = lines.index("Options:")
     except ValueError as exc:
-        raise SystemExit("ljos --help has no Commands or Options section") from exc
-    head = lines[:commands_at]
+        raise SystemExit("ljos --help has no Options section") from exc
+    try:
+        usage_at = next(i for i, line in enumerate(lines) if line.startswith("Usage:"))
+    except StopIteration as exc:
+        raise SystemExit("ljos --help has no Usage line") from exc
+    head = lines[: usage_at + 1]
     doctor: list[str] = []
-    i = commands_at + 1
+    heading: list[str] = []
+    i = usage_at + 1
     while i < options_at:
         if lines[i].strip().startswith("doctor"):
             column = command_column(lines[i])
+            if (
+                i > 0
+                and lines[i - 1].rstrip().endswith(":")
+                and command_column(lines[i - 1]) is None
+            ):
+                heading = [lines[i - 1]]
             doctor.append(lines[i])
             i += 1
             while i < options_at:
@@ -243,7 +253,7 @@ def help_excerpt(text: str) -> str:
         i += 1
     if not doctor:
         raise SystemExit("ljos --help has no doctor line")
-    body = head + ["Commands:"] + doctor + [""] + lines[options_at:]
+    body = head + [""] + heading + doctor + [""] + lines[options_at:]
     return "\n".join(body).rstrip()
 
 
