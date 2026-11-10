@@ -275,6 +275,55 @@ impl Drop for Machine {
     }
 }
 
+/// `--no-embed` is the one-command install: the seat programs are copied,
+/// the encoder is not, and the script says search matches words.
+/// A flagless run still copies the encoder.
+#[test]
+fn no_embed_leaves_the_encoder_out_and_the_default_still_installs_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+    script(&progs, "packset-embed", "#!/bin/sh\nexit 0\n");
+
+    let lexical = dir.path().join("lexical");
+    let text = install(&lexical, &progs, "/usr/bin:/bin", &[]);
+    assert!(
+        text.contains("Search matches words. The encoder is not installed."),
+        "{text}"
+    );
+    assert!(lexical.join(".local/bin/ljos").is_file(), "{text}");
+    assert!(
+        !lexical.join(".local/bin/packset-embed").exists(),
+        "the one-command install copied the encoder:\n{text}"
+    );
+
+    let full = dir.path().join("full");
+    std::fs::create_dir_all(&full).unwrap();
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(full.join(".local/bin"))
+        .args(["--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &full)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let said = said(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        full.join(".local/bin/packset-embed").is_file(),
+        "a flagless install left the encoder out:\n{said}"
+    );
+    assert!(!said.contains("The encoder is not installed."), "{said}");
+    assert!(said.contains("Encoder model ready."), "{said}");
+}
+
 /// With no coding tool on the machine, install.sh still runs `ljos onboard`
 /// for the seat: it makes the tracker and names it in vissue's config, the
 /// deed store and the host key, and starts the memory writer. A sitting on

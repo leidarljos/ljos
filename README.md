@@ -39,7 +39,7 @@ The LongMemEval_S line scores retrieval, not answer accuracy.
 Linux and macOS are supported. Windows works through Windows Subsystem for Linux (WSL) and is untested.
 
 ```
-curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
 export PATH="$HOME/.local/bin:$PATH"
 ljos doctor
 ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
@@ -48,6 +48,7 @@ ljos due
 ```
 
 The installer puts the programs in `~/.local/bin`. It sets up the tracker and the memory writer, then runs `ljos onboard`. `ljos doctor` names any part that does not answer. The preference is stored as written. The hook then prints that preference ahead of the prompt. `ljos due` lists what is ready to grade.
+No encoder is downloaded, and search matches words.
 
 ## What a seat does
 
@@ -65,10 +66,21 @@ Consensus is a [separate program](https://github.com/leidarljos/consensus).
 
 ## Install
 
+One command fetches the release programs.
+It checks each published SHA-256 sum.
+It sets up the tracker, the pack writer and the deed store.
+Search matches words.
+No encoder is downloaded.
+
 ```
-curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
 export PATH="$HOME/.local/bin:$PATH"
+ljos doctor
 ```
+
+`sh install.sh` with no flag still installs the encoder.
+The encoder fetches its model on first use.
+`--with-embed` does the same.
 
 The programs go to `~/.local/bin`. The installer checks each download against
 its published SHA-256 sum. It also checks the build attestation when `gh` 2.49

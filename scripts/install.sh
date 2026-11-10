@@ -4,6 +4,15 @@
 # `ljos onboard` for every coding runner found on this machine. With none
 # found, the tracker, the memory writer and the deed store are still set up.
 #
+# One command for a new machine. It fetches the release assets, checks
+# each SHA-256, and sets up the tracker and memory. Search matches words.
+# The encoder is not downloaded:
+#
+#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
+#
+# With no flag the encoder is installed, as before. It fetches a model on
+# first use. `--with-embed` is that same install.
+#
 #   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 #
 # Each ljos release attaches this script as the asset install.sh, from
@@ -451,6 +460,12 @@ if [ -f "$TMP/attested" ]; then
     line="$line."
   fi
   say "$line"
+fi
+
+# `--cloud` leaves the encoder to `ljos cloud up`.
+# This line is the install that skips the encoder.
+if [ "$WITH_EMBED" = 0 ] && [ "$CLOUD" = 0 ]; then
+  say "Search matches words. The encoder is not installed."
 fi
 
 # A shell opened after the install finds the programs: each profile gets
