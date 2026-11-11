@@ -330,7 +330,8 @@ jobs:
           if-no-files-found: error
   release:
     needs: [build, encoder]
-    runs-on: ubuntu-latest
+    # The resolute runner cannot resolve the Ubuntu archive.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
