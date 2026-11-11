@@ -44,7 +44,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Use a reachable Ubuntu mirror
-        run: sh .github/scripts/apt-mirror.sh
+        run: sudo timeout -k 5 90 bash .github/scripts/apt-mirror.sh
       - run: sudo apt-get install -y --no-install-recommends pandoc
       - run: bash docs/scripts/export_org_to_rst.sh
       - run: python -m pip install -q -r docs/requirements.txt

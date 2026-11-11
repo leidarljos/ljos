@@ -90,7 +90,7 @@ jobs:
       # ljos-hud links libwayland-client through pkg-config.
       - name: Use a reachable Ubuntu mirror
         if: runner.os == 'Linux'
-        run: sh .github/scripts/apt-mirror.sh
+        run: sudo timeout -k 5 90 bash .github/scripts/apt-mirror.sh
       - name: Build tools
         if: runner.os == 'Linux'
         run: sudo apt-get install -y --no-install-recommends pkg-config libwayland-dev
@@ -211,7 +211,7 @@ jobs:
         run: |
           set -eu
           if [ "${RUNNER_OS}" = "Linux" ]; then
-            sh "${{ runner.temp }}/ljos/.github/scripts/apt-mirror.sh"
+            sudo timeout -k 5 90 bash "${{ runner.temp }}/ljos/.github/scripts/apt-mirror.sh"
             sudo apt-get install -y --no-install-recommends build-essential cmake python3 protobuf-compiler pkg-config libssl-dev
             protoc=/usr/bin/protoc
           else

@@ -145,7 +145,7 @@ jobs:
       # The identity gate tests start a one-shot runner under zsh -c.
       # The hook queue test reads each call's peak RSS from GNU time.
       - name: Use a reachable Ubuntu mirror
-        run: sh .github/scripts/apt-mirror.sh
+        run: sudo timeout -k 5 90 bash .github/scripts/apt-mirror.sh
       - name: Install age, tmux, notmuch and time
         run: sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh
       # vissue, claimdag and deedar are named in .github/sibling-pin.
