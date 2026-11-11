@@ -4159,16 +4159,23 @@ fn named_var(key: &str) -> Option<String> {
 /// not one of these. A record that only says `seat` is kept here so the
 /// disagreement line can name the conversation id that did not resolve.
 fn conversation_derived_seat() -> Option<String> {
+    let recorded = seat_from_session_records();
     if let Some(seat) = ANNOUNCED
         .get()
         .filter(|seat| !omitted_actor_name(&seat.seat))
     {
-        return Some(seat.seat.clone());
+        // The record under this conversation id is that conversation. The
+        // client name belongs to this process, and a record that names
+        // another seat is not that client.
+        let same = recorded.as_ref().is_none_or(|row| row.seat == seat.seat);
+        if same {
+            return Some(seat.seat.clone());
+        }
     }
     if let Some(seat) = mapped_box_seat() {
         return Some(seat);
     }
-    if let Some(seat) = seat_from_session_records() {
+    if let Some(seat) = recorded {
         return Some(seat.seat);
     }
     if let Some(seat) = seat_from_runner_env() {
@@ -19252,6 +19259,11 @@ fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
 }
 
 fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
+    // Nothing was queued. Creating the directory here is what left
+    // note-queue.lock behind a read, a dry run, onboard and doctor.
+    if !note_queue::queue_exists(dir) {
+        return Ok(note_queue::Drained::default());
+    }
     let set_aside = note_queue::tidy_in(dir, fit_queued)?;
     if note_queue::pending_in(dir).is_empty() {
         return Ok(note_queue::Drained {
@@ -65627,6 +65639,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn an_unresolved_seat_warning_names_the_conversation() {
         let _env = env_guard();
         let rt = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
         let id = "bc-unmapped-0000-4000-8000-000000000099";
         let path = rt
             .path()
@@ -65634,20 +65647,21 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             .join(format!("session-{}", super::session_tag(id)));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, format!("seat\nseat\nids\t{id}\n")).unwrap();
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
-            std::env::set_var("CURSOR_CONVERSATION_ID", id);
-            std::env::set_var("LJOS_SEAT", "papers");
-        }
-        let line = super::seat_disagreement_line().expect("one warning");
+        let line = super::with_env_mutation(|| {
+            unsafe {
+                std::env::set_var("XDG_RUNTIME_DIR", rt.path());
+                std::env::set_var("XDG_CONFIG_HOME", config.path());
+                std::env::set_var("CURSOR_CONVERSATION_ID", id);
+                std::env::set_var("LJOS_SEAT", "papers");
+                std::env::remove_var("VISSUE_AGENT");
+            }
+            with_config_home(config.path(), super::seat_disagreement_line)
+        });
+        let line = line.expect("one warning");
         assert!(line.contains(id), "{line}");
         assert!(!line.contains("this conversation's seat is seat"), "{line}");
         assert!(line.contains("writing as papers"), "{line}");
-        unsafe {
-            std::env::remove_var("CURSOR_CONVERSATION_ID");
-            std::env::remove_var("LJOS_SEAT");
-            std::env::remove_var("XDG_RUNTIME_DIR");
-        }
+        assert!(!line.contains("acme-cli"), "{line}");
     }
 
     #[test]

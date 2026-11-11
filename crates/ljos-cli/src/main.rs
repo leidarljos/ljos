@@ -1887,6 +1887,30 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// A queued lesson may go out on this command. Reads, dry runs, onboard,
+/// offboard, uninstall and doctor do not create the queue or its lock,
+/// and they do not rewrite a queue that is already there.
+fn queued_lesson_may_go(cmd: &Cmd) -> bool {
+    !matches!(
+        cmd,
+        Cmd::Remember { .. }
+            | Cmd::Hook { .. }
+            | Cmd::Help { .. }
+            | Cmd::Doctor { .. }
+            | Cmd::Record { .. }
+            | Cmd::Onboard { .. }
+            | Cmd::Offboard { .. }
+            | Cmd::Uninstall { .. }
+            | Cmd::Sync { dry_run: true, .. }
+            | Cmd::Panel { dry_run: true, .. }
+            | Cmd::Agents { dry_run: true, .. }
+            | Cmd::BumpPlan { dry_run: true, .. }
+            | Cmd::Memory {
+                cmd: MemoryCmd::Integrate { dry_run: true, .. },
+            }
+    )
+}
+
 fn run_command() -> Result<()> {
     // `--help` exits before the seat is read. `ljos help` is a command.
     if root_help_only() {
@@ -1911,12 +1935,11 @@ fn run_command() -> Result<()> {
         }
     };
     // A lesson left while the pack was busy goes out on the next call
-    // that is not itself a remember still waiting on that pack. `ljos
-    // hook` keeps its own budget and does not spend it on the queue.
-    if !matches!(
-        cmd,
-        Cmd::Remember { .. } | Cmd::Hook { .. } | Cmd::Help { .. }
-    ) {
+    // that writes. A read, a dry run, onboard, offboard, uninstall and
+    // doctor leave the queue where it is and do not create its lock.
+    // `ljos hook` keeps its own budget. Remember is still waiting on the
+    // pack, so it does not send the queue it may be about to fill.
+    if queued_lesson_may_go(&cmd) {
         ljos_cli::flush_queued_lessons();
     }
     let mut sitting_budget = match &cmd {

@@ -114,6 +114,16 @@ fn queue_file(dir: &Path) -> PathBuf {
     dir.join("note-queue.jsonl")
 }
 
+/// Whether `dir` already holds the queue file. A missing directory or a
+/// missing file is false, and neither this nor a later read creates them.
+pub(crate) fn queue_exists(dir: &Path) -> bool {
+    let path = queue_file(dir);
+    let Ok((opened, name)) = crate::open_state_dir(&path) else {
+        return false;
+    };
+    crate::open_regular_at(&opened, &name, &path, libc::O_RDONLY, 0).is_ok()
+}
+
 fn lock_file(dir: &Path) -> PathBuf {
     dir.join("note-queue.lock")
 }
@@ -244,9 +254,14 @@ fn write(dir: &Path, notes: &[Queued], unread: &[u8]) -> Result<Option<SetAside>
 }
 
 /// The notes waiting in `dir`, oldest first.
+///
+/// A read does not create `dir` or `note-queue.lock`. The directory and
+/// the lock appear when a lesson is queued, after the pack stays busy.
 #[must_use]
 pub fn pending_in(dir: &Path) -> Vec<Queued> {
-    let _held = lock(dir);
+    if !queue_exists(dir) {
+        return Vec::new();
+    }
     read(dir)
 }
 
@@ -419,6 +434,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_read_does_not_create_the_queue_dir_or_the_lock() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/note-queue")
+            .join("absent-read");
+        let _ = std::fs::remove_dir_all(&root);
+        let missing = root.join("ljos");
+        assert!(pending_in(&missing).is_empty());
+        assert!(!missing.exists(), "a read created {}", missing.display());
+        assert!(!lock_file(&missing).exists());
+        let present = dir("empty-read");
+        assert!(pending_in(&present).is_empty());
+        assert!(!lock_file(&present).exists());
     }
 
     #[test]
