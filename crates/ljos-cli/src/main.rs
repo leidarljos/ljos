@@ -46,6 +46,9 @@ enum MemoryCmd {
         /// Where the file is written. `-` writes the file to stdout.
         #[arg(long)]
         out: PathBuf,
+        /// Machine name in the file. The default is `LJOS_SYNC_HOST` when that is set, then the hostname.
+        #[arg(long)]
+        machine: Option<String>,
     },
     /// Read a portable memory file into this seat's import slot.
     Import {
@@ -57,6 +60,9 @@ enum MemoryCmd {
         /// Seat name when the file does not carry one.
         #[arg(long)]
         source_seat: Option<String>,
+        /// Machine stored for this import, in place of the one the file names. The file bytes are not changed.
+        #[arg(long)]
+        as_machine: Option<String>,
     },
     /// Map imported memories onto this seat's lessons.
     Integrate {
@@ -153,8 +159,8 @@ impl MemFilter {
     }
 }
 
-fn export_memories(out: &std::path::Path) -> Result<()> {
-    let said = ljos_cli::memory_port::export_cmd(out)?;
+fn export_memories(out: &std::path::Path, machine: Option<&str>) -> Result<()> {
+    let said = ljos_cli::memory_port::export_cmd(out, machine)?;
     if out == std::path::Path::new("-") {
         eprint!("{said}");
     } else {
@@ -165,11 +171,12 @@ fn export_memories(out: &std::path::Path) -> Result<()> {
 
 fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
     match cmd {
-        MemoryCmd::Export { out } => export_memories(&out)?,
+        MemoryCmd::Export { out, machine } => export_memories(&out, machine.as_deref())?,
         MemoryCmd::Import {
             path,
             source_machine,
             source_seat,
+            as_machine,
         } => {
             print!(
                 "{}",
@@ -177,6 +184,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
                     &path,
                     source_machine.as_deref(),
                     source_seat.as_deref(),
+                    as_machine.as_deref(),
                 )?
             );
         }
@@ -474,6 +482,9 @@ enum Cmd {
         /// Where the file is written. `-` writes the file to stdout.
         #[arg(long)]
         out: PathBuf,
+        /// Machine name in the file. The default is `LJOS_SYNC_HOST` when that is set, then the hostname.
+        #[arg(long)]
+        machine: Option<String>,
     },
     /// Copy memories to a file, or bring a file from another machine into this seat.
     Memory {
@@ -2308,7 +2319,7 @@ fn run_command() -> Result<()> {
             let yes = ljos_cli::quoted_yes::read(quote.as_deref(), at.as_deref(), via.as_deref())?;
             print!("{}", ljos_cli::admit::accept_ids(&ids, yes.as_ref()));
         }
-        Cmd::Export { out } => export_memories(&out)?,
+        Cmd::Export { out, machine } => export_memories(&out, machine.as_deref())?,
         Cmd::Memory { cmd } => memory_cmd(cmd)?,
         Cmd::Memories { cmd } => memories_cmd(cmd)?,
         Cmd::RetireNotes => print!("{}", ljos_cli::note_retire::sweep()?),

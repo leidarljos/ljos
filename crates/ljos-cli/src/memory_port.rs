@@ -698,8 +698,32 @@ pub fn export_atoms(place: &Place, out: &Path, atoms: &[Value]) -> Result<usize>
     Ok(count)
 }
 
-pub fn export_cmd(out: &Path) -> Result<String> {
-    let place = Place::current();
+/// Machine name for an export header. `--machine` wins, then
+/// `LJOS_SYNC_HOST` when that is set and not empty, then the hostname.
+fn chosen_machine(flag: Option<&str>, sync_host: Option<&str>) -> String {
+    let pick = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(name) = pick(flag) {
+        return name;
+    }
+    if let Some(name) = pick(sync_host) {
+        return name;
+    }
+    machine_name()
+}
+
+fn export_machine(flag: Option<&str>) -> String {
+    let sync = std::env::var("LJOS_SYNC_HOST").ok();
+    chosen_machine(flag, sync.as_deref())
+}
+
+pub fn export_cmd(out: &Path, machine: Option<&str>) -> Result<String> {
+    let mut place = Place::current();
+    place.machine = export_machine(machine);
     let mut atoms = Vec::new();
     if let Ok(live) = crate::memories::live_atoms() {
         atoms.extend(live);
@@ -768,9 +792,20 @@ fn parse_payload(
     import_id: &str,
     override_machine: Option<&str>,
     override_seat: Option<&str>,
+    as_machine: Option<&str>,
 ) -> ParsedFile {
     let text = String::from_utf8_lossy(bytes);
-    let mut machine = override_machine.unwrap_or("").to_string();
+    // `--as-machine` replaces the header's machine for this import. The
+    // payload bytes are not rewritten, so the import id stays their digest.
+    let forced = as_machine
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+    let mut machine = if let Some(name) = forced.clone() {
+        name
+    } else {
+        override_machine.unwrap_or("").to_string()
+    };
     let mut seat = override_seat.unwrap_or("").to_string();
     let mut exported_at = String::new();
     let mut labels = Vec::new();
@@ -833,7 +868,7 @@ fn parse_payload(
     labels.sort();
     labels.dedup();
     for row in &mut rows {
-        if row.machine.is_empty() {
+        if forced.is_some() || row.machine.is_empty() {
             row.machine.clone_from(&machine);
         }
         if row.seat.is_empty() {
@@ -972,6 +1007,7 @@ fn import_bytes(
     bytes: &[u8],
     source_machine: Option<&str>,
     source_seat: Option<&str>,
+    as_machine: Option<&str>,
     stop: Option<Stop>,
 ) -> Result<ImportDone> {
     let _held = lock_home(&place.home);
@@ -987,7 +1023,7 @@ fn import_bytes(
     } else {
         write_private(&payload, bytes)?;
     }
-    let parsed = parse_payload(bytes, &import_id, source_machine, source_seat);
+    let parsed = parse_payload(bytes, &import_id, source_machine, source_seat, as_machine);
     let manifest_path = dir.join("manifest.json");
     if !manifest_path.is_file() {
         let (shown, time_labels) = if parsed.exported_at.is_empty() {
@@ -1200,6 +1236,7 @@ pub fn import_path(
     path: &Path,
     source_machine: Option<&str>,
     source_seat: Option<&str>,
+    as_machine: Option<&str>,
 ) -> Result<ImportDone> {
     if path
         .symlink_metadata()
@@ -1210,16 +1247,17 @@ pub fn import_path(
     }
     let bytes =
         std::fs::read(path).with_context(|| format!("memory: cannot read {}", path.display()))?;
-    import_bytes(place, &bytes, source_machine, source_seat, None)
+    import_bytes(place, &bytes, source_machine, source_seat, as_machine, None)
 }
 
 pub fn import_cmd(
     path: &Path,
     source_machine: Option<&str>,
     source_seat: Option<&str>,
+    as_machine: Option<&str>,
 ) -> Result<String> {
     let place = Place::current();
-    let done = import_path(&place, path, source_machine, source_seat)?;
+    let done = import_path(&place, path, source_machine, source_seat, as_machine)?;
     Ok(format!(
         "imported {} rows {} labels {}\n",
         done.import_id,
@@ -2108,7 +2146,7 @@ mod tests {
         assert!(!body.contains("\"embedding\""));
         assert!(body.lines().next().unwrap().contains(FORMAT));
         let (_there_dir, there) = place("beta");
-        let done = import_bytes(&there, body.as_bytes(), None, None, None).unwrap();
+        let done = import_bytes(&there, body.as_bytes(), None, None, None, None).unwrap();
         assert_eq!(done.rows, 2);
         let found = selected(&there, "kiln", &SourceFilter::default(), false);
         assert!(found
@@ -2137,12 +2175,12 @@ mod tests {
         export_atoms(&here, &first, &[lesson, pref]).unwrap();
         let bytes = std::fs::read(&first).unwrap();
         let (_same_dir, same) = place("alfa");
-        import_bytes(&same, &bytes, None, None, None).unwrap();
+        import_bytes(&same, &bytes, None, None, None, None).unwrap();
         let second = same.home.join("second.jsonl");
         export_atoms(&same, &second, &local_atoms(&same)).unwrap();
         assert_eq!(memory_set(&first), memory_set(&second));
         let (_there_dir, there) = place("beta");
-        import_bytes(&there, &bytes, None, None, None).unwrap();
+        import_bytes(&there, &bytes, None, None, None, None).unwrap();
         let third = there.home.join("third.jsonl");
         export_atoms(&there, &third, &local_atoms(&there)).unwrap();
         assert!(
@@ -2198,7 +2236,7 @@ mod tests {
         let body_text = String::from_utf8_lossy(&body);
         assert!(body_text.contains("horizon:standing"), "{body_text}");
         let (_there_dir, there) = place("beta");
-        import_bytes(&there, &body, None, None, None).unwrap();
+        import_bytes(&there, &body, None, None, None, None).unwrap();
         let found = selected(&there, "kiln", &SourceFilter::default(), false);
         assert_eq!(found.len(), 1);
         let row = &found[0].0;
@@ -2226,7 +2264,7 @@ mod tests {
             "remember the zircon shelf",
             "2026-03-01T15:00:00Z",
         );
-        let done = import_bytes(&target, &bytes, None, None, None).unwrap();
+        let done = import_bytes(&target, &bytes, None, None, None, None).unwrap();
         let report = integrate(&target, Some(&done.import_id), false, false).unwrap();
         assert!(report.contains("remember the zircon shelf"), "{report}");
         assert!(
@@ -2251,9 +2289,9 @@ mod tests {
             "2099-06-01T00:00:00+00:00",
         );
         let skew = header_and_row("other-host", "séat", "a later firing", "not-a-time");
-        let a = import_bytes(&target, &early, None, None, None).unwrap();
-        let b = import_bytes(&target, &late, None, None, None).unwrap();
-        let c = import_bytes(&target, &skew, None, None, None).unwrap();
+        let a = import_bytes(&target, &early, None, None, None, None).unwrap();
+        let b = import_bytes(&target, &late, None, None, None, None).unwrap();
+        let c = import_bytes(&target, &skew, None, None, None, None).unwrap();
         assert_ne!(a.import_id, b.import_id);
         assert!(c.labels.iter().any(|label| label == "time-unparsed"));
         let filter = SourceFilter {
@@ -2279,7 +2317,7 @@ mod tests {
             "remember the zircon shelf",
             "2026-03-01T15:00:00Z",
         );
-        let done = import_bytes(&target, &bytes, None, None, None).unwrap();
+        let done = import_bytes(&target, &bytes, None, None, None, None).unwrap();
         assert!(done.labels.iter().any(|label| label == "imported"));
         let found = selected(&target, "zircon", &SourceFilter::default(), false);
         assert_eq!(found.len(), 1);
@@ -2347,14 +2385,14 @@ mod tests {
             "2026-01-05T00:00:00Z",
             "src-a",
         );
-        import_bytes(&target, &first, None, None, None).unwrap();
-        let same_id = import_bytes(&target, &same, None, None, None)
+        import_bytes(&target, &first, None, None, None, None).unwrap();
+        let same_id = import_bytes(&target, &same, None, None, None, None)
             .unwrap()
             .import_id;
-        import_bytes(&target, &near, None, None, None).unwrap();
-        import_bytes(&target, &conflict_base, None, None, None).unwrap();
-        import_bytes(&target, &conflict, None, None, None).unwrap();
-        import_bytes(&target, &version, None, None, None).unwrap();
+        import_bytes(&target, &near, None, None, None, None).unwrap();
+        import_bytes(&target, &conflict_base, None, None, None, None).unwrap();
+        import_bytes(&target, &conflict, None, None, None, None).unwrap();
+        import_bytes(&target, &version, None, None, None, None).unwrap();
         let report = integrate(&target, None, true, false).unwrap();
         assert!(report.contains("exact"), "{report}");
         assert!(report.contains("near-duplicate"), "{report}");
@@ -2378,11 +2416,11 @@ mod tests {
         let (_dir, target) = place("once");
         let bytes = header_and_row("host-a", "seat-a", "one firing", "2026-02-02T00:00:00Z");
         for stop in [Stop::Payload, Stop::Receipt, Stop::Indexed] {
-            let err = import_bytes(&target, &bytes, None, None, Some(stop)).unwrap_err();
+            let err = import_bytes(&target, &bytes, None, None, None, Some(stop)).unwrap_err();
             assert!(err.to_string().contains("stopped"), "{err}");
         }
-        let done = import_bytes(&target, &bytes, None, None, None).unwrap();
-        let again = import_bytes(&target, &bytes, None, None, None).unwrap();
+        let done = import_bytes(&target, &bytes, None, None, None, None).unwrap();
+        let again = import_bytes(&target, &bytes, None, None, None, None).unwrap();
         assert_eq!(done.import_id, again.import_id);
         let slot = slot_dir(&target, &done.import_id);
         let receipts = std::fs::read_dir(slot.join("receipts")).unwrap().count();
@@ -2404,8 +2442,8 @@ mod tests {
         let place_b = target.clone();
         let left = bytes.clone();
         let right = bytes.clone();
-        let a = std::thread::spawn(move || import_bytes(&place_a, &left, None, None, None));
-        let b = std::thread::spawn(move || import_bytes(&place_b, &right, None, None, None));
+        let a = std::thread::spawn(move || import_bytes(&place_a, &left, None, None, None, None));
+        let b = std::thread::spawn(move || import_bytes(&place_b, &right, None, None, None, None));
         let a = a.join().unwrap().unwrap();
         let b = b.join().unwrap().unwrap();
         assert_eq!(a.import_id, b.import_id);
@@ -2419,7 +2457,7 @@ mod tests {
     fn dry_run_changes_no_file() {
         let (_dir, target) = place("dry");
         let bytes = header_and_row("host-a", "seat-a", "dry firing", "2026-02-02T00:00:00Z");
-        let done = import_bytes(&target, &bytes, None, None, None).unwrap();
+        let done = import_bytes(&target, &bytes, None, None, None, None).unwrap();
         let before = snapshot(&target.home);
         let report = integrate(&target, Some(&done.import_id), false, true).unwrap();
         assert!(report.contains("dry-run"));
@@ -2484,7 +2522,7 @@ mod tests {
     fn malformed_and_unknown_formats_stay_searchable() {
         let (_dir, target) = place("bad");
         let bytes = b"this is not json but it mentions zircon\n{\"text\": \n";
-        let done = import_bytes(&target, bytes, Some("host"), Some("seat"), None).unwrap();
+        let done = import_bytes(&target, bytes, Some("host"), Some("seat"), None, None).unwrap();
         assert!(done
             .labels
             .iter()
@@ -2506,7 +2544,7 @@ mod tests {
         let count = export_atoms(&here, &out, &[row]).unwrap();
         assert_eq!(count, 0);
         let bytes = header_and_row("host", "seat", text, "2026-01-01T00:00:00Z");
-        let done = import_bytes(&here, &bytes, None, None, None).unwrap();
+        let done = import_bytes(&here, &bytes, None, None, None, None).unwrap();
         assert!(done.labels.iter().any(|label| label == "content-warning"));
         let found = selected(&here, "zircon", &SourceFilter::default(), false);
         assert_eq!(found[0].0.text, text);
@@ -2768,6 +2806,62 @@ mod tests {
     }
 
     #[test]
+    fn export_machine_prefers_the_flag_then_the_sync_host() {
+        assert_eq!(chosen_machine(None, Some("lane-a")), "lane-a");
+        assert_eq!(chosen_machine(Some("lane-c"), Some("lane-a")), "lane-c");
+        assert_eq!(chosen_machine(Some("  "), Some("lane-a")), "lane-a");
+        assert_eq!(chosen_machine(None, Some("   ")), machine_name());
+        assert_eq!(chosen_machine(None, None), machine_name());
+        let (_dir, mut here) = place("host");
+        here.machine = chosen_machine(None, Some("lane-a"));
+        let out = here.home.join("out.jsonl");
+        export_atoms(
+            &here,
+            &out,
+            &[atom("a", "seat-host", "the lane names itself")],
+        )
+        .unwrap();
+        let header: Value = serde_json::from_str(
+            std::fs::read_to_string(&out)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(header["machine"], "lane-a");
+    }
+
+    #[test]
+    fn as_machine_replaces_the_header_and_keeps_the_digest() {
+        let (_dir, target) = place("lane");
+        let bytes = header_and_row(
+            "cursor",
+            "seat-a",
+            "the lane keeps its kiln",
+            "2026-03-01T00:00:00Z",
+        );
+        let id = sha256_hex(&bytes);
+        let done =
+            import_bytes(&target, &bytes, Some("ignored"), None, Some("lane-b"), None).unwrap();
+        assert_eq!(done.import_id, id);
+        let slot = slot_dir(&target, &id);
+        assert_eq!(std::fs::read(slot.join("payload.jsonl")).unwrap(), bytes);
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(slot.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["source_machine"], "lane-b");
+        let index = std::fs::read_to_string(slot.join("index.jsonl")).unwrap();
+        let row: Row = serde_json::from_str(index.lines().next().unwrap()).unwrap();
+        assert_eq!(row.machine, "lane-b");
+        let views = import_views(&target);
+        assert_eq!(views.len(), 1);
+        assert_eq!(
+            format!("{}/{}", views[0].source_machine, views[0].source_seat),
+            "lane-b/seat-a"
+        );
+    }
+
+    #[test]
     fn a_filter_runs_before_the_limit() {
         let (_dir, target) = place("limit");
         for (n, word) in [(1, "alpha"), (2, "beta"), (3, "gamma")] {
@@ -2777,7 +2871,7 @@ mod tests {
                 &format!("lesson {word}"),
                 "2026-01-01T00:00:00Z",
             );
-            import_bytes(&target, &bytes, None, None, None).unwrap();
+            import_bytes(&target, &bytes, None, None, None, None).unwrap();
         }
         let filter = SourceFilter {
             machine: None,
