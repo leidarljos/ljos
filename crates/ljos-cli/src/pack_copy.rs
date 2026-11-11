@@ -11,6 +11,32 @@
 
 use serde_json::{Map, Value};
 
+/// Whether `text` is a secret, an instruction to the model, or text a
+/// reader cannot see. Packset 0.17.6 stores those and labels them. ljos
+/// still keeps them out of an export, a split, and an alias. The words
+/// are the ones a refusal used to carry, so a caller that matches them
+/// still matches.
+pub(crate) fn reject_unsafe(text: &str) -> Result<(), String> {
+    let flagged = packset_core::record::flags(text);
+    if flagged
+        .iter()
+        .any(|(label, _)| *label == packset_core::record::INVISIBLE_UNICODE)
+    {
+        return Err("invisible unicode is rejected".into());
+    }
+    match packset_core::record::secret_kind(text) {
+        Some(kind) if kind == packset_core::record::GENERIC_SECRET => {
+            Err("credential-shaped text is rejected".into())
+        }
+        Some(kind) => Err(format!("credential-shaped text is rejected ({kind})")),
+        None if packset_core::record::looks_like_injection(text) => Err(
+            "text that instructs the model reading it is rejected; write the claim it stands for"
+                .into(),
+        ),
+        None => Ok(()),
+    }
+}
+
 /// Whether `text` passes the pack's atom gate as an agent lesson and as a note.
 #[must_use]
 pub fn pack_copy_ok(text: &str) -> bool {
@@ -65,7 +91,7 @@ pub fn gate_refusal(text: &str) -> Option<String> {
 #[must_use]
 pub fn pack_copies(text: &str) -> Vec<String> {
     let trimmed = text.trim();
-    if trimmed.is_empty() || packset_core::record::reject_unsafe(trimmed).is_err() {
+    if trimmed.is_empty() || reject_unsafe(trimmed).is_err() {
         return Vec::new();
     }
     if pack_copy_ok(trimmed) {
@@ -111,7 +137,7 @@ const SPLITS: &[&str] = &["; ", ", and ", ", but ", ", or ", " and ", " but ", "
 
 fn shrink_clause(text: &str, depth: usize) -> Vec<String> {
     let text = text.trim();
-    if text.is_empty() || packset_core::record::reject_unsafe(text).is_err() {
+    if text.is_empty() || reject_unsafe(text).is_err() {
         return Vec::new();
     }
     if pack_copy_ok(text) {

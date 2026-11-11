@@ -733,7 +733,7 @@ pub fn reinforce_held(client: &crate::pack_link::PacksetClient, atom: &Value) ->
     let text = atom["text"].as_str()?.trim();
     let new = atom.as_object()?;
     // An alias skips the pack's secret check on `text`; the post makes it.
-    packset_core::record::reject_unsafe(text).ok()?;
+    crate::pack_copy::reject_unsafe(text).ok()?;
     let ws = atom["workspace"]
         .as_str()
         .map_or_else(|| client.workspace(), str::to_string);

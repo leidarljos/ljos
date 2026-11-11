@@ -674,7 +674,7 @@ fn export_row(atom: &Value, place: &Place, exported_at: &str) -> Option<Value> {
     if owned_by_other(atom, &place.seat) {
         return None;
     }
-    if packset_core::record::reject_unsafe(text).is_err() {
+    if crate::pack_copy::reject_unsafe(text).is_err() {
         return None;
     }
     let source = atom.get("source").cloned().unwrap_or_else(|| json!({}));
@@ -971,7 +971,7 @@ fn row_from_value(import_id: &str, index: usize, value: &Value, text: &str) -> R
     let origin = value["origin"].as_str().unwrap_or("").to_string();
     let mut labels = vec!["imported".into(), "unintegrated".into()];
     let mut effect = "stored-local".to_string();
-    if let Err(err) = packset_core::record::reject_unsafe(text) {
+    if let Err(err) = crate::pack_copy::reject_unsafe(text) {
         labels.push("content-warning".into());
         effect = format!("stored-local; {err}");
     }
@@ -1135,7 +1135,7 @@ fn import_bytes(
     if stop == Some(Stop::Indexed) {
         bail!("memory: stopped after index");
     }
-    let _ = materialise(&dir, &rows);
+    materialise(&dir, &rows)?;
     let manifest: Value = std::fs::read(&manifest_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -1236,9 +1236,10 @@ fn writer_refused(err: &anyhow::Error) -> bool {
 /// Post `rows` into the pack. A row already posted, or one the file itself
 /// marked unsafe, is left as it is. Returns the refusals a writer that
 /// answered gave. A seat with no writer returns nothing.
-fn materialise(dir: &Path, rows: &[Row]) -> Vec<String> {
+fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
+    let _deadline = crate::pack_link::CommandDeadline::enter(crate::IMPORT_ADMISSION);
     let Ok(client) = crate::pack() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut refused = Vec::new();
     for row in rows {
@@ -1268,13 +1269,16 @@ fn materialise(dir: &Path, rows: &[Row]) -> Vec<String> {
                     &serde_json::to_vec(&json!({"pack_id": id, "row": row.id})).unwrap_or_default(),
                 );
             }
+            Err(err) if crate::is_write_shed(&err) || crate::is_deadline_miss(&err) => {
+                return Err(err);
+            }
             Err(err) if writer_refused(&err) => {
                 refused.push(err.to_string());
             }
             Err(_) => {}
         }
     }
-    refused
+    Ok(refused)
 }
 
 /// Import the file at `path`.
@@ -1494,6 +1498,7 @@ fn to_hit(row: &Row, score: f64) -> Hit {
         ballots: None,
         of: None,
         rerank_score: None,
+        labels: Vec::new(),
     }
 }
 
@@ -1788,7 +1793,7 @@ fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<String
             .join(format!("{event_id}.json"));
         write_if_absent(&path, &serde_json::to_vec_pretty(&event)?)?;
         let posting: Vec<Row> = mine.into_iter().cloned().collect();
-        for note in materialise(&slot_dir(place, import_id), &posting) {
+        for note in materialise(&slot_dir(place, import_id), &posting)? {
             out.push_str(&format!("  not posted: {note}\n"));
         }
     }
@@ -2709,6 +2714,7 @@ mod tests {
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         }];
         let before = hits.clone();
         let (_dir, target) = place("quiet");

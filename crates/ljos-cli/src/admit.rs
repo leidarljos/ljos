@@ -263,7 +263,7 @@ fn write_fitted(
     let refused = (held && atom["kind"].as_str() != Some(packset_core::record::NOTE_KIND))
         .then(|| crate::pack_copy::gate_refusal(&text))
         .flatten();
-    if packset_core::record::reject_unsafe(&text).is_err() {
+    if crate::pack_copy::reject_unsafe(&text).is_err() {
         return post(client, atom);
     }
     if let Some(why) = refused.as_deref() {
@@ -396,7 +396,10 @@ pub fn store_labelled(client: &PacksetClient, mut atom: Value) -> Result<Value> 
     atom["level"] = Value::String(admission_level(&origin).to_string());
     // The pack's `validate` asks with the hold on: its prose gate is for
     // what an agent or a hook writes, whether the writer holds or not.
-    let held = packset_core::atom::needs_accept(&origin, atom["hook"] == Value::Bool(true), true);
+    // Packset used to export this as `needs_accept(origin, hook, hold)`
+    // with the hold forced on. A hook write and an agent-derived write
+    // are the ones the prose gate reads before the post.
+    let held = atom["hook"] == Value::Bool(true) || origin == ORIGIN_AGENT;
     write_fitted(client, atom, held, post_live)
 }
 
@@ -425,6 +428,7 @@ pub struct Imported {
 /// answer ends the call; the rows left stay open for the next one. Once
 /// none is left, a marker beside the file spares later calls the read.
 pub fn import_open(budget_ms: u64) -> Imported {
+    let _deadline = crate::pack_link::CommandDeadline::enter(crate::IMPORT_ADMISSION);
     let marker = imported_path();
     if marker.exists() || !proposals_path().exists() {
         return Imported::default();

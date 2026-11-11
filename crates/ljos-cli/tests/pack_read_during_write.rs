@@ -315,7 +315,7 @@ fn a_held_write_does_not_fail_readers() {
                 stderr.contains("ranked by words; the pack search did not answer in time"),
                 "{what}:\n{said}"
             );
-            assert!(said.contains("pack busy"), "{what}:\n{said}");
+            assert!(said.contains("packsetd busy"), "{what}:\n{said}");
             assert!(
                 stdout.contains(LESSON),
                 "{what} did not rank the snapshot:\n{said}"

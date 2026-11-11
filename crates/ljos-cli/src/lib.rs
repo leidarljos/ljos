@@ -406,13 +406,15 @@ pub fn statusline(input: &str) -> String {
     if let Some(issue) = held_issue() {
         parts.push(issue);
     }
-    let due = with_pack_timeout(300, || -> Result<usize> {
+    let due = with_pack_timeout(300, || -> Result<(usize, Option<String>)> {
         let client = pack()?;
         let atoms = atoms_lean(&client, &client.workspace())?;
-        Ok(due_of(&atoms, &now_utc()).len())
+        let line = client.admission_line();
+        Ok((due_of(&atoms, &now_utc()).len(), line))
     });
     parts.push(match due {
-        Ok(n) => format!("{n} due"),
+        Ok((n, Some(line))) => format!("{n} due · {line}"),
+        Ok((n, None)) => format!("{n} due"),
         Err(_) => "pack down".to_string(),
     });
     let line = parts.join(" · ");
@@ -10976,6 +10978,7 @@ fn atom_as_hit(atom: &impl Claim) -> Option<Hit> {
         ballots: None,
         of: None,
         rerank_score: None,
+        labels: Vec::new(),
     })
 }
 
@@ -16961,6 +16964,19 @@ const REMEMBER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs
 /// One line when a pack call runs out of time. Exit [`PACK_BUSY_EXIT`].
 pub const PACK_BUSY_LINE: &str = "pack busy, try again";
 
+/// A write the writer shed for the whole budget. Exit [`PACK_BUSY_EXIT`].
+pub const PACK_SHED_LINE: &str = "packsetd busy, retrying later";
+
+/// A read the writer shed. The command prints this and stops. It does
+/// not exit [`PACK_BUSY_EXIT`] and it does not queue the read.
+pub const PACK_READ_BUSY_LINE: &str = "packsetd busy";
+
+/// The writer answered 408. The request did not run, and it is not retried.
+pub const PACK_DEADLINE_LINE: &str = "the deadline passed before this request ran";
+
+/// How long one import post may wait for a busy writer.
+pub const IMPORT_ADMISSION: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A health check this slow is the box, not a dead writer. Two seconds
 /// is inside [`SEARCH_PACK_BUDGET`], so doctor and search agree.
 const PACK_SLOW_HEALTH: std::time::Duration = std::time::Duration::from_secs(2);
@@ -17074,6 +17090,9 @@ fn writer_port_down(err: &anyhow::Error) -> bool {
 fn writer_slow(err: &anyhow::Error) -> bool {
     is_pack_busy(err)
         || writer_busy(err)
+        || is_read_shed(err)
+        || is_write_shed(err)
+        || is_deadline_miss(err)
         || format!("{err:#}")
             .to_ascii_lowercase()
             .contains("timed out")
@@ -17146,6 +17165,41 @@ pub fn arm_hook_pack() -> pack_link::PackClock {
 #[must_use]
 pub fn arm_cmd_pack() -> pack_link::PackClock {
     pack_link::PackClock::enter(pack_call_budget())
+}
+
+fn unavailable_line<'a>(cause: &'a (dyn std::error::Error + 'static)) -> Option<&'a str> {
+    match cause.downcast_ref::<packset_client::Error>() {
+        Some(packset_client::Error::Unavailable(text)) => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+/// A read the writer shed with 503 after the read budget.
+#[must_use]
+pub fn is_read_shed(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| unavailable_line(cause) == Some(PACK_READ_BUSY_LINE))
+}
+
+/// A write the writer shed with 503 after the write budget.
+#[must_use]
+pub fn is_write_shed(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| unavailable_line(cause) == Some(PACK_SHED_LINE))
+}
+
+/// The writer answered 408. The request did not run.
+#[must_use]
+pub fn is_deadline_miss(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| unavailable_line(cause) == Some(PACK_DEADLINE_LINE))
+}
+
+/// The pack answered and will not take another blind try: it shed the
+/// call, or the deadline passed.
+#[must_use]
+pub fn pack_settled(err: &anyhow::Error) -> bool {
+    is_pack_busy(err) || is_read_shed(err) || is_write_shed(err) || is_deadline_miss(err)
 }
 
 fn timeout_cause(cause: &(dyn std::error::Error + 'static)) -> bool {
@@ -17255,6 +17309,11 @@ fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
     // asking again, is what turned one timeout into a minute.
     if pack_link::clock_armed() {
         return match op() {
+            // A shed or a passed deadline already used its budget. Folding
+            // it into [`PackBusy`] would hide the line the command prints.
+            Err(err) if is_read_shed(&err) || is_write_shed(&err) || is_deadline_miss(&err) => {
+                Err(err)
+            }
             Err(err) if is_pack_busy(&err) || writer_busy(&err) => Err(pack_busy_err()),
             other => other,
         };
@@ -18054,51 +18113,23 @@ fn listed_of<T: Listed>(
     // A runner kills PreToolUse at 10s and then ignores the hook, which
     // drops a deny. Inside a hook the listing stops at 2s so the local
     // gate still runs. Outside a hook the caller's PACKSET_TIMEOUT_MS
-    // still bounds it. A writer that answers busy is asked again until
-    // that deadline, under a [`PackClock`] too, while time remains. A
-    // timeout is [`PackBusy`]. The clock is the command's shared budget.
-    // A thread bound, from `with_pack_timeout` or a wall budget, shortens
-    // this one read and does not raise the clock.
+    // still bounds it. A writer that answers busy is asked again for
+    // `Retry-After`, with jitter, inside the read budget. A timeout is
+    // [`PackBusy`]. A shed read is one plain line. The clock is the
+    // command's shared budget. A thread bound, from `with_pack_timeout`
+    // or a wall budget, shortens this one read and does not raise the clock.
     let armed = pack_link::clock_armed();
     let slice = if armed {
         pack_call_budget().min(pack_timeout())
     } else {
         pack_timeout().min(atoms_timeout())
     };
-    let deadline = std::time::Instant::now() + slice;
-    let mut wait = BUSY_WAIT;
-    let mut tries = 0;
-    let answered = loop {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if armed && left.is_zero() {
-            return Err(pack_busy_err());
-        }
-        let answer = client.roundtrip(
-            "GET",
-            "/v1/atoms",
-            &query,
-            None,
-            token,
-            left.max(std::time::Duration::from_millis(1)),
-        );
-        match answer {
-            Ok(answer)
-                if answer.status == 503
-                    && tries < BUSY_TRIES
-                    && std::time::Instant::now() + wait < deadline
-                    && pack_link::clock_left().is_none_or(|left| wait < left) =>
-            {
-                tries += 1;
-                std::thread::sleep(wait);
-                wait *= 3;
-            }
-            other => break other,
-        }
-    };
-    let answered = match answered {
+    let answered = match client.roundtrip("GET", "/v1/atoms", &query, None, token, slice) {
         Err(err) if armed && pack_link::error_is_timeout(&err) => return Err(pack_busy_err()),
+        Err(err) if matches!(err, packset_client::Error::Unavailable(_)) => {
+            return Err(anyhow::Error::from(err));
+        }
         Err(err) => return Err(anyhow::Error::from(err).context(url)),
-        Ok(answer) if armed && answer.status == 503 => return Err(pack_busy_err()),
         Ok(answer) => answer,
     };
     if !(200..300).contains(&answered.status) {
@@ -19587,6 +19618,7 @@ fn remember_slice(
 /// The pack refused the text, or it was still busy after the tries. A
 /// busy failure has the lesson queued when the queue could take it.
 pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) -> Result<Value> {
+    let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
     let started = std::time::Instant::now();
     let mut backoff = REMEMBER_BACKOFF;
     let mut last = None;
@@ -19603,7 +19635,13 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
         };
         match result {
             Ok(body) => return Ok(body),
-            Err(err) if is_pack_busy(&err) || writer_busy(&err) || writer_slow(&err) => {
+            Err(err) if is_deadline_miss(&err) => return Err(err),
+            Err(err)
+                if is_pack_busy(&err)
+                    || is_write_shed(&err)
+                    || writer_busy(&err)
+                    || writer_slow(&err) =>
+            {
                 last = Some(err);
                 let after = REMEMBER_TRIES - index - 1;
                 if after == 0 {
@@ -30176,12 +30214,17 @@ pub fn doctor_seat() -> Vec<Habitat> {
             let health = client.health().map_err(anyhow::Error::from);
             let took_ms = started.elapsed().as_millis();
             let slow = started.elapsed() >= PACK_SLOW_HEALTH;
-            let where_ = format!(
+            let admission = client.admission_line();
+            let mut where_ = format!(
                 "{} workspace {}; pack responded in {took_ms}ms{}",
                 client.base(),
                 client.workspace(),
                 psi_suffix()
             );
+            if let Some(line) = admission {
+                where_.push_str("; ");
+                where_.push_str(&line);
+            }
             match health {
                 Ok(_) if slow => Habitat {
                     name: "pack",
@@ -30191,6 +30234,11 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 Ok(_) => Habitat {
                     name: "pack",
                     state: where_,
+                    ok: true,
+                },
+                Err(e) if is_read_shed(&e) => Habitat {
+                    name: "pack",
+                    state: format!("{PACK_READ_BUSY_LINE}; {where_}"),
                     ok: true,
                 },
                 Err(e) if writer_slow(&e) => Habitat {
@@ -31193,7 +31241,9 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         return "warn";
     }
     // A slow pack answered. The summary must not say memory does not answer.
-    if row.name == "pack" && row.state.contains("pack busy") {
+    if row.name == "pack"
+        && (row.state.contains("pack busy") || row.state.contains("busy, retrying"))
+    {
         return "warn";
     }
     // Search answered 401 or 403. Recall still runs on stored memories,
@@ -35183,6 +35233,7 @@ pub const RELATED_MEMORY_CAP: usize = 5;
 /// the doctor starts it, and the line says so only when the start did not
 /// bring it up.
 pub fn recall_memories(issue: &str) -> Result<String> {
+    let _deadline = pack_link::CommandDeadline::enter(pack_cmd_budget());
     let _clock = arm_cmd_pack();
     let _listing = ListingMemo::enter();
     recall_memories_with(issue, true)
@@ -35192,6 +35243,7 @@ pub fn recall_memories(issue: &str) -> Result<String> {
 /// a working note cannot come back as a fact on the next prompt. A pack
 /// that runs out of time adds nothing, so the hook stays quiet.
 pub(crate) fn recall_memories_for_prompt(issue: &str) -> String {
+    let _deadline = pack_link::CommandDeadline::enter(pack_cmd_budget());
     let _clock = arm_cmd_pack();
     match recall_memories_with(issue, false) {
         Ok(text) => {
@@ -35201,7 +35253,7 @@ pub(crate) fn recall_memories_for_prompt(issue: &str) -> String {
                 text
             }
         }
-        Err(err) if is_pack_busy(&err) => String::new(),
+        Err(err) if pack_settled(&err) => String::new(),
         Err(err) => recall_down(&err),
     }
 }
@@ -35216,6 +35268,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     let mut woke = false;
     let mut ask = |what: &dyn Fn() -> Result<Vec<Hit>>| -> Result<Vec<Hit>> {
         match what() {
+            Err(err) if is_deadline_miss(&err) || is_read_shed(&err) => Err(err),
             Err(err) if is_pack_busy(&err) => Err(pack_busy_err()),
             Ok(h) => Ok(h),
             Err(_) if !woke => {
@@ -35232,7 +35285,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     // the call is not started again.
     let own = match ask(&|| issue_memories(issue)) {
         Ok(hits) => hits,
-        Err(err) if is_pack_busy(&err) => return Err(err),
+        Err(err) if pack_settled(&err) => return Err(err),
         Err(_) => Vec::new(),
     };
     let mut cues = vec![issue.to_string()];
@@ -35275,7 +35328,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     for cue in &cues {
         match ask(&|| packset_search_relevant(cue, pool)) {
             Ok(hits) => related.extend(hits),
-            Err(err) if is_pack_busy(&err) => return Err(err),
+            Err(err) if pack_settled(&err) => return Err(err),
             Err(e) if own.is_empty() && related.is_empty() => return Ok(recall_down(&e)),
             Err(_) => break,
         }
@@ -45560,6 +45613,7 @@ mod tests {
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         let related = vec![
             hit("own21", "note", "note 21"),
@@ -45739,6 +45793,7 @@ mod tests {
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         let downgraded = tagged(
             "summary",
@@ -45779,6 +45834,7 @@ mod tests {
                 ballots: None,
                 of: None,
                 rerank_score: None,
+                labels: Vec::new(),
             }
         };
         let cased = serde_json::json!({"origin": "User-Declared", "source": {"basis": " Person "}});
@@ -45947,6 +46003,7 @@ mod tests {
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         // A forged note-basis entity claiming the person said it is ignored:
         // a note is agent-derived by its real origin.
@@ -50410,6 +50467,7 @@ mod tests {
             ballots: Some(ballots),
             of: Some(3),
             rerank_score: None,
+            labels: Vec::new(),
         }
     }
 
@@ -50489,6 +50547,7 @@ mod tests {
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         assert!(!admits_judged(&hit, true, 0.9, cue, 0.0, 0.0));
     }
@@ -50698,6 +50757,7 @@ mod tests {
             ballots: Some(2),
             of: Some(3),
             rerank_score: None,
+            labels: Vec::new(),
         }
     }
 
@@ -50941,6 +51001,7 @@ mod tests {
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         let cue = "the registry rejected my token";
         let judged = vec![
@@ -52455,6 +52516,7 @@ mod tests {
             ballots,
             of,
             rerank_score: None,
+            labels: Vec::new(),
         };
         assert!(agreed(&hit(Some(2), Some(3))));
         assert!(!agreed(&hit(Some(1), Some(3))));
@@ -52502,6 +52564,7 @@ mod tests {
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         assert!(is_refresher(&standing));
         let tagged = Hit {
@@ -52514,6 +52577,7 @@ mod tests {
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         assert!(!is_refresher(&tagged));
         let untagged = Hit {
@@ -52526,6 +52590,7 @@ mod tests {
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         assert!(!is_refresher(&untagged));
     }
@@ -52793,6 +52858,7 @@ mod tests {
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         assert_eq!(
             hit_line(&h, "2026-09-12T00:00:00.000Z"),
@@ -52808,6 +52874,7 @@ mod tests {
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         assert_eq!(
             hit_line(&bare, "2026-09-12T00:00:00.000Z"),
@@ -54826,6 +54893,7 @@ mod tests {
             ballots,
             of,
             rerank_score: None,
+            labels: Vec::new(),
         };
         let cue = "build on the cluster fuse";
         assert!(admits_judged(
@@ -58588,6 +58656,7 @@ box-1 is yours.
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         let out = verbatim::dedup(vec![
             hit("same words"),
@@ -59218,6 +59287,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         assert!(
             is_refresher(&hit(&person)),
@@ -67778,16 +67848,23 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let atoms = atoms_lean(&PacksetClient::new(&url), "ws").unwrap();
         assert_eq!(atoms.len(), 1);
         assert_eq!(seen.load(Ordering::SeqCst), 3);
-        // Busy past the retries is an error the caller sees, not a hang.
+        // Busy past the read budget is one plain line, not a hang and not
+        // a status code.
         let (url, seen) = serve_busy_then(usize::MAX, "{}");
+        let per_try = pack_timeout().min(atoms_timeout());
+        let budget = pack_link::admission_retry_budget("GET", per_try);
         let err = atoms_lean(&PacksetClient::new(&url), "ws").unwrap_err();
-        assert!(err.to_string().contains("503"), "{err}");
-        assert_eq!(seen.load(Ordering::SeqCst), 1 + BUSY_TRIES as usize);
+        assert_eq!(err.to_string(), PACK_READ_BUSY_LINE, "{err}");
+        assert!(is_read_shed(&err), "{err}");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            pack_link::busy_attempts(budget) as usize
+        );
     }
 
     /// A recall clock used to take the first 503 as the answer. The listing
-    /// asks again while the clock still has the wait, and a writer that
-    /// stays busy is [`PackBusy`] after those asks, not on the first one.
+    /// asks again while the read budget still has the wait, and a writer
+    /// that stays busy is one plain line after those asks, not on the first.
     #[test]
     fn a_clocked_listing_asks_a_busy_writer_again() {
         let _env = env_guard();
@@ -67809,9 +67886,16 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(atoms[0]["text"], "a lesson about ferrule");
         assert_eq!(seen.load(Ordering::SeqCst), 3);
         let (url, seen) = serve_busy_then(usize::MAX, "{}");
+        let per_try = pack_call_budget().min(pack_timeout());
+        let budget = pack_link::admission_retry_budget("GET", per_try);
         let err = atoms_lean(&PacksetClient::new(&url), "ws").unwrap_err();
-        assert!(is_pack_busy(&err), "{err}");
-        assert_eq!(seen.load(Ordering::SeqCst), 1 + BUSY_TRIES as usize);
+        assert_eq!(err.to_string(), PACK_READ_BUSY_LINE, "{err}");
+        assert!(is_read_shed(&err), "{err}");
+        assert!(!is_pack_busy(&err), "{err}");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            pack_link::busy_attempts(budget) as usize
+        );
     }
 
     /// The rows of `body` as they were read before: its atoms as maps, each
@@ -68730,6 +68814,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 ballots: None,
                 of: None,
                 rerank_score: None,
+                labels: Vec::new(),
             }
         };
         let mut rows = vec![
@@ -68807,6 +68892,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ballots: None,
             of: None,
             rerank_score: None,
+            labels: Vec::new(),
         };
         let mut hits = vec![
             hit(
@@ -69021,6 +69107,21 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "http://127.0.0.1:8761/v1/search: 400: q required".into(),
         ));
         assert!(!writer_busy(&other));
+        let shed = anyhow::Error::new(packset_client::Error::Unavailable(PACK_SHED_LINE.into()));
+        assert!(is_write_shed(&shed));
+        assert!(!is_read_shed(&shed));
+        let late = anyhow::Error::new(packset_client::Error::Unavailable(
+            PACK_DEADLINE_LINE.into(),
+        ));
+        assert!(is_deadline_miss(&late));
+        assert!(!is_pack_busy(&late));
+        let row = Habitat {
+            name: "pack",
+            state: "http://127.0.0.1:9 workspace seat; pack responded in 4ms; busy, retrying"
+                .into(),
+            ok: true,
+        };
+        assert_eq!(doctor_word(&row), "warn");
     }
 
     #[test]
@@ -69184,8 +69285,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     /// Length and grade are a warning, not a rewrite. The person's prefer
-    /// and the agent's remember are both stored as typed. The pack refuses
-    /// the agent's prose, so the seat keeps that one copy itself.
+    /// and the agent's remember are both stored as typed. Packset 0.17.6
+    /// keeps prose past the gate and names the warning, so the pack is
+    /// given that same text and not a split copy.
     #[test]
     fn a_long_agent_claim_is_stored_as_typed_and_the_persons_as_written() {
         let _g = env_guard();
@@ -69206,11 +69308,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                     .is_some_and(|warning| !warning.is_empty()),
                 "{kept}"
             );
-            assert!(
-                stored.lock().unwrap().is_empty(),
-                "the pack was given a rewritten copy: {:?}",
-                stored.lock().unwrap()
-            );
+            let posted = stored.lock().unwrap().clone();
+            assert_eq!(posted.len(), 1, "the pack was given a split: {posted:?}");
+            assert_eq!(posted[0]["text"], text, "{posted:?}");
             let preferred = packset_write_as("Prefer", text, None, Some(false))
                 .unwrap_or_else(|why| panic!("prefer refused {text:?}: {why:#}"));
             assert_eq!(preferred["text"], text);
@@ -69226,11 +69326,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let kept = packset_write_agent("Remember", three, None, Some(false))
             .unwrap_or_else(|why| panic!("three sentences refused: {why:#}"));
         assert_eq!(kept["text"], three, "{kept}");
-        assert!(
-            stored.lock().unwrap().is_empty(),
-            "three sentences were split: {:?}",
-            stored.lock().unwrap()
-        );
+        let posted = stored.lock().unwrap().clone();
+        assert_eq!(posted.len(), 1, "three sentences were split: {posted:?}");
+        assert_eq!(posted[0]["text"], three, "{posted:?}");
     }
 
     /// A comma before "so" stays a comma. Search shows that text once.
@@ -69265,12 +69363,16 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             .iter()
             .filter(|hit| verbatim::content_hash(&hit.text) == verbatim::content_hash(text))
             .count();
-        assert_eq!(same, 1, "{hits:?}");
-        assert!(
-            stored.lock().unwrap().is_empty(),
-            "{:?}",
-            stored.lock().unwrap()
+        assert_eq!(
+            same, 0,
+            "the pack stored it, so no second local copy: {hits:?}"
         );
+        let posted = stored.lock().unwrap().clone();
+        assert!(
+            posted.iter().all(|atom| atom["text"] == text),
+            "the pack was given a rewrite: {posted:?}"
+        );
+        assert!(!posted.is_empty(), "{posted:?}");
     }
 
     /// The pack is asked for the abbreviation, so a claim that only says

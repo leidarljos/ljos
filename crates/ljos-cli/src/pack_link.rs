@@ -13,7 +13,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use packset_client::{Error, Hit};
 use serde::de::DeserializeOwned;
@@ -48,6 +48,8 @@ pub(crate) struct Answer {
     pub status: u16,
     pub body: String,
     pub trusted: bool,
+    /// `Retry-After` when the writer sent one, in whole seconds.
+    pub retry_after: Option<Duration>,
 }
 
 /// Answers a hook process already has for a search or a status read, by
@@ -423,6 +425,219 @@ struct Raw {
     status: u16,
     body: String,
     keep: bool,
+    retry_after: Option<Duration>,
+}
+
+/// Each later wait is this many times the last, and never past five seconds.
+const BUSY_GROWTH: u32 = 3;
+const BUSY_WAIT_CAP: Duration = Duration::from_secs(5);
+
+thread_local! {
+    /// The command's admission deadline, as a wall time. A nested guard
+    /// keeps the sooner of the two, so a search inside a longer command
+    /// stays short. The socket clock is a separate bound.
+    static COMMAND_DEADLINE: std::cell::RefCell<Option<SystemTime>> = const { std::cell::RefCell::new(None) };
+    /// The `X-Packset-Deadline` for the request in flight, frozen when the
+    /// call starts so a retry does not push the deadline out.
+    static HELD_DEADLINE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// How long this command is willing to wait for the pack. Search and
+/// recall pass a few seconds. Remember passes twenty. Import passes a minute.
+pub struct CommandDeadline {
+    prev: Option<SystemTime>,
+}
+
+impl CommandDeadline {
+    #[must_use]
+    pub fn enter(budget: Duration) -> Self {
+        let prev = COMMAND_DEADLINE.with(|cell| *cell.borrow());
+        let proposed = SystemTime::now() + budget;
+        let next = match prev {
+            Some(existing) if existing <= proposed => existing,
+            _ => proposed,
+        };
+        COMMAND_DEADLINE.with(|cell| *cell.borrow_mut() = Some(next));
+        Self { prev }
+    }
+}
+
+impl Drop for CommandDeadline {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        COMMAND_DEADLINE.with(|cell| *cell.borrow_mut() = prev);
+    }
+}
+
+struct HeldDeadline {
+    prev: Option<String>,
+    active: bool,
+}
+
+impl HeldDeadline {
+    fn enter(budget: Duration) -> Self {
+        let prev = HELD_DEADLINE.with(|cell| cell.borrow().clone());
+        if prev.is_some() {
+            return Self {
+                prev,
+                active: false,
+            };
+        }
+        let stamp = deadline_stamp(budget);
+        HELD_DEADLINE.with(|cell| *cell.borrow_mut() = Some(stamp));
+        Self { prev, active: true }
+    }
+}
+
+impl Drop for HeldDeadline {
+    fn drop(&mut self) {
+        if self.active {
+            let prev = self.prev.clone();
+            HELD_DEADLINE.with(|cell| *cell.borrow_mut() = prev);
+        }
+    }
+}
+
+fn is_write(method: &str) -> bool {
+    !matches!(method, "GET" | "HEAD")
+}
+
+fn command_remaining() -> Option<Duration> {
+    let when = COMMAND_DEADLINE.with(|cell| *cell.borrow())?;
+    Some(
+        when.duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO),
+    )
+}
+
+/// How long the retries of one call may take. A read stops inside the
+/// short search budget. A write may use the command's remaining time,
+/// which is longer for remember and import.
+pub(crate) fn admission_retry_budget(method: &str, per_try: Duration) -> Duration {
+    let fallback = if is_write(method) {
+        super::REMEMBER_BUDGET
+    } else {
+        super::SEARCH_PACK_BUDGET
+    };
+    let room = match (command_remaining(), clock_left()) {
+        (Some(cmd), Some(clock)) => cmd.min(clock),
+        (Some(cmd), None) => cmd,
+        (None, Some(clock)) => clock,
+        (None, None) => fallback,
+    };
+    let room = if is_write(method) {
+        room
+    } else {
+        room.min(super::SEARCH_PACK_BUDGET)
+    };
+    per_try.min(room).max(Duration::from_millis(1))
+}
+
+fn deadline_stamp(budget: Duration) -> String {
+    let proposed = SystemTime::now() + budget;
+    let when = match COMMAND_DEADLINE.with(|cell| *cell.borrow()) {
+        Some(command) if command < proposed => command,
+        _ => proposed,
+    };
+    unix_ms(when).to_string()
+}
+
+fn unix_ms(when: SystemTime) -> u64 {
+    when.duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn current_deadline(method: &str) -> String {
+    HELD_DEADLINE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| deadline_stamp(admission_retry_budget(method, budget())))
+}
+
+struct Pause {
+    sleep: Duration,
+    charge: Duration,
+}
+
+fn planned_wait(backoff: Duration, retry_after: Option<Duration>) -> Duration {
+    match retry_after {
+        Some(after) if after > backoff => after,
+        _ => backoff,
+    }
+}
+
+/// Half of `wait`, plus up to the other half. `salt` picks the fraction,
+/// so a herd waiting on the same `Retry-After` does not wake together.
+fn jittered(wait: Duration, salt: u64) -> Duration {
+    let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX).max(1);
+    let half = ms / 2;
+    let extra = if half == 0 { 0 } else { salt % (half + 1) };
+    Duration::from_millis(half + extra)
+}
+
+/// The next wait, when charging it still ends inside `budget`. The sleep
+/// is the jittered wait. The charge is the full wait, so every host stops
+/// on the same attempt.
+fn pause_for(
+    backoff: Duration,
+    retry_after: Option<Duration>,
+    waited: Duration,
+    budget: Duration,
+    salt: u64,
+) -> Option<Pause> {
+    let charge = planned_wait(backoff, retry_after);
+    if waited.saturating_add(charge) >= budget {
+        return None;
+    }
+    let room = budget.saturating_sub(waited).max(Duration::from_millis(1));
+    Some(Pause {
+        sleep: jittered(charge, salt)
+            .min(room)
+            .max(Duration::from_millis(1)),
+        charge,
+    })
+}
+
+fn retry_after_of(header: Option<&str>) -> Option<Duration> {
+    let raw = header?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    raw.parse::<u64>().ok().map(Duration::from_secs)
+}
+
+fn jitter_salt(asked: u32) -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::from(elapsed.subsec_nanos()))
+        .unwrap_or(0);
+    nanos ^ u64::from(asked)
+}
+
+fn shed_error(method: &str) -> Error {
+    let line = if is_write(method) {
+        super::PACK_SHED_LINE
+    } else {
+        super::PACK_READ_BUSY_LINE
+    };
+    Error::Unavailable(line.to_string())
+}
+
+fn deadline_error() -> Error {
+    Error::Unavailable(super::PACK_DEADLINE_LINE.to_string())
+}
+
+#[cfg(test)]
+pub(crate) fn busy_attempts(budget: Duration) -> u32 {
+    let mut waited = Duration::ZERO;
+    let mut wait = super::BUSY_WAIT;
+    let mut attempts = 1u32;
+    while pause_for(wait, None, waited, budget, 0).is_some() {
+        waited = waited.saturating_add(wait);
+        wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
+        attempts = attempts.saturating_add(1);
+    }
+    attempts
 }
 
 /// The pack accepted a connection and then stayed silent, or the connect
@@ -617,12 +832,15 @@ fn read_response(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<R
         })?;
     let mut length = None;
     let mut close = header.starts_with("HTTP/1.0");
+    let mut retry_after = None;
     for line in header.lines().skip(1) {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         if name.eq_ignore_ascii_case("content-length") {
             length = value.trim().parse().ok();
+        } else if name.eq_ignore_ascii_case("retry-after") {
+            retry_after = retry_after_of(Some(value));
         } else if name.eq_ignore_ascii_case("connection")
             && value.trim().eq_ignore_ascii_case("close")
         {
@@ -662,6 +880,7 @@ fn read_response(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<R
         status,
         body: String::from_utf8_lossy(&body).into_owned(),
         keep: !close && !(300..400).contains(&status),
+        retry_after,
     })
 }
 
@@ -700,8 +919,10 @@ fn render(
     token: Option<&str>,
     body: Option<&[u8]>,
 ) -> Vec<u8> {
-    let mut head =
-        format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\n");
+    let deadline = current_deadline(method);
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\nX-Packset-Deadline: {deadline}\r\n"
+    );
     if let Some(token) = token {
         head.push_str("Authorization: Bearer ");
         head.push_str(token);
@@ -846,10 +1067,12 @@ impl PacksetClient {
         format!("dir:{}", abs.display())
     }
 
-    /// One request. `bearer` asks to carry the token; it is left off when
+    /// One call. `bearer` asks to carry the token; it is left off when
     /// the proof does not hold or another user owns the port. A 3xx is
-    /// returned as the answer and not followed. HTTP 503 is one answer:
-    /// the caller decides whether to ask again.
+    /// returned as the answer and not followed. A 503 is asked again
+    /// after `Retry-After`, with jitter, while that wait still fits in
+    /// the call's budget. A 408 is the deadline passing: it is not asked
+    /// again.
     pub(crate) fn roundtrip(
         &self,
         method: &str,
@@ -879,24 +1102,45 @@ impl PacksetClient {
         let token = load_token();
         *self.token.lock().unwrap_or_else(|p| p.into_inner()) = token.clone();
         let allow = bearer && token.is_some() && !foreign(&self.base);
-        let answer = self.exchange(
-            addr,
-            &Wire {
-                method,
-                path,
-                query,
-                body,
-                token: token.as_deref(),
-            },
-            allow,
-            timeout,
-        )?;
-        if let Some(key) = memo_key {
-            if (200..300).contains(&answer.status) {
-                keep_answer(key, &answer);
+        let budget = admission_retry_budget(method, timeout);
+        let _held = HeldDeadline::enter(budget);
+        let mut waited = Duration::ZERO;
+        let mut wait = super::BUSY_WAIT;
+        let mut asked = 0u32;
+        loop {
+            let answer = self.exchange(
+                addr,
+                &Wire {
+                    method,
+                    path,
+                    query,
+                    body,
+                    token: token.as_deref(),
+                },
+                allow,
+                timeout,
+            )?;
+            if answer.status == 408 {
+                return Err(deadline_error());
+            }
+            if answer.status != 503 {
+                if let Some(key) = &memo_key {
+                    if (200..300).contains(&answer.status) {
+                        keep_answer(key.clone(), &answer);
+                    }
+                }
+                return Ok(answer);
+            }
+            asked = asked.saturating_add(1);
+            match pause_for(wait, answer.retry_after, waited, budget, jitter_salt(asked)) {
+                Some(pause) => {
+                    std::thread::sleep(pause.sleep);
+                    waited = waited.saturating_add(pause.charge);
+                    wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
+                }
+                None => return Err(shed_error(method)),
             }
         }
-        Ok(answer)
     }
 
     fn exchange(
@@ -930,6 +1174,7 @@ impl PacksetClient {
                         status: raw.status,
                         body: raw.body,
                         trusted: false,
+                        retry_after: raw.retry_after,
                     });
                 }
             }
@@ -978,6 +1223,7 @@ impl PacksetClient {
             status: raw.status,
             body: raw.body,
             trusted,
+            retry_after: raw.retry_after,
         })
     }
 
@@ -1040,7 +1286,8 @@ impl PacksetClient {
                     continue;
                 }
             };
-            if raw.status == 503 {
+            // A shed or a passed deadline is the answer. The call is not sent.
+            if raw.status == 503 || raw.status == 408 {
                 return Ok(Gate::Busy(raw));
             }
             if raw.status != 401 {
@@ -1064,7 +1311,7 @@ impl PacksetClient {
             .unwrap_or_else(|| "seat".to_string())
     }
 
-    /// [`Self::roundtrip`] again while the writer answers busy, inside `timeout`.
+    /// [`Self::roundtrip`] with the token when the proof holds.
     fn tried(
         &self,
         method: &str,
@@ -1073,26 +1320,7 @@ impl PacksetClient {
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<Answer, Error> {
-        // A silent socket is one try: this call already waited out
-        // `timeout`. A writer that answers 503 is asked again, on the same
-        // backoff as a listing. The first wait is 50 ms and each later
-        // wait is three times that, three times, which sums to 650 ms and
-        // fits in the 5 s recall budget.
-        let started = Instant::now();
-        let mut wait = super::BUSY_WAIT;
-        let mut n = 0u32;
-        loop {
-            let answer = self.roundtrip(method, path, query, body, true, timeout)?;
-            let room =
-                started.elapsed() + wait < timeout && wait < clock_left().unwrap_or(Duration::MAX);
-            if answer.status == 503 && n < super::BUSY_TRIES && room {
-                n += 1;
-                std::thread::sleep(wait);
-                wait *= 3;
-                continue;
-            }
-            return Ok(answer);
-        }
+        self.roundtrip(method, path, query, body, true, timeout)
     }
 
     fn json_ok<T: DeserializeOwned>(&self, path: &str, answer: Answer) -> Result<T, Error> {
@@ -1104,6 +1332,66 @@ impl PacksetClient {
             ));
         }
         serde_json::from_str(&answer.body).map_err(Error::from)
+    }
+
+    /// The `line` field of `GET /stats`: `ok`, or `busy, retrying` when
+    /// the writer is shedding. One try, so doctor does not spend the
+    /// read budget on a writer that has no `/stats`. `None` when the
+    /// writer does not answer, or the body has no line.
+    #[must_use]
+    pub fn admission_line(&self) -> Option<String> {
+        let timeout =
+            Duration::from_millis(300).min(clock_left().unwrap_or(Duration::from_secs(1)));
+        let answer = self
+            .exchange_direct("GET", "/stats", &[], None, true, timeout)
+            .ok()?;
+        if answer.status == 503 {
+            return Some("busy, retrying".to_string());
+        }
+        if !(200..300).contains(&answer.status) {
+            return None;
+        }
+        let value: Value = serde_json::from_str(&answer.body).ok()?;
+        value
+            .get("line")
+            .and_then(Value::as_str)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+    }
+
+    /// One exchange, with the deadline header and no retry. `/stats` uses
+    /// this so a busy writer is one answer, not a wait.
+    fn exchange_direct(
+        &self,
+        method: &str,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<&[u8]>,
+        bearer: bool,
+        timeout: Duration,
+    ) -> Result<Answer, Error> {
+        let Some(addr) = self.addr else {
+            return Err(Error::Bad(format!(
+                "{} is not a socket this seat can pin",
+                self.base
+            )));
+        };
+        let token = load_token();
+        let allow = bearer && token.is_some() && !foreign(&self.base);
+        let budget = admission_retry_budget(method, timeout);
+        let _held = HeldDeadline::enter(budget);
+        self.exchange(
+            addr,
+            &Wire {
+                method,
+                path,
+                query,
+                body,
+                token: token.as_deref(),
+            },
+            allow,
+            timeout,
+        )
     }
 
     pub fn health(&self) -> Result<String, Error> {
@@ -1425,5 +1713,188 @@ mod tests {
         }
         foreign(url);
         assert_eq!(reads() - start, 5, "a call after the search reads again");
+    }
+
+    fn quiet_pack() -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::remove_var("PACKSET_TOKEN");
+            std::env::remove_var("PACKSET_TOKEN_FILE");
+            std::env::remove_var("PACKSET_TIMEOUT_MS");
+            std::env::remove_var("LJOS_IN_HOOK");
+            std::env::set_var("PACKSET_HOME", home.path());
+        }
+        home
+    }
+
+    /// `on` sees the request text and how many requests came before this one.
+    /// It answers with a status, a body, and `Retry-After` seconds when set.
+    fn serve(
+        on: impl Fn(usize, &str) -> (u16, String, Option<u64>) + Send + 'static,
+    ) -> (
+        super::PacksetClient,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                loop {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf).into_owned();
+                let n = {
+                    let mut log = log.lock().unwrap();
+                    log.push(req.clone());
+                    log.len() - 1
+                };
+                let (code, body, retry) = on(n, &req);
+                let reason = match code {
+                    200 => "OK",
+                    408 => "Request Timeout",
+                    503 => "Service Unavailable",
+                    _ => "Error",
+                };
+                let retry = retry
+                    .map(|secs| format!("Retry-After: {secs}\r\n"))
+                    .unwrap_or_default();
+                let resp = format!(
+                    "HTTP/1.1 {code} {reason}\r\n{retry}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+        (super::PacksetClient::new(format!("http://{addr}")), seen)
+    }
+
+    fn deadline_of(req: &str) -> u64 {
+        req.lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("x-packset-deadline")
+                    .then(|| value.trim().parse().ok())
+                    .flatten()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_read_waits_out_retry_after_and_then_reads() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let (client, seen) = serve(|n, req| {
+            assert!(deadline_of(req) > 0, "{req}");
+            if n == 0 {
+                (
+                    503,
+                    r#"{"error":"packsetd is busy: the read queue is full"}"#.into(),
+                    Some(1),
+                )
+            } else {
+                (200, "ok".into(), None)
+            }
+        });
+        let started = std::time::Instant::now();
+        let body = client.health().unwrap();
+        let took = started.elapsed();
+        assert_eq!(body, "ok");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert!(
+            took >= std::time::Duration::from_millis(400),
+            "Retry-After was not waited: {took:?}"
+        );
+        assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+        let first = &seen.lock().unwrap()[0];
+        let now = super::unix_ms(std::time::SystemTime::now());
+        let stamp = deadline_of(first);
+        assert!(stamp > now, "deadline {stamp} is not after {now}");
+        assert!(stamp < now + 5_000, "deadline {stamp} is not a short read");
+    }
+
+    #[test]
+    fn a_retry_after_past_the_read_budget_fails_in_one_line() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let (client, seen) = serve(|_, _| (503, r#"{"error":"busy"}"#.into(), Some(30)));
+        let started = std::time::Instant::now();
+        let err = client.health().unwrap_err();
+        let took = started.elapsed();
+        assert_eq!(err.to_string(), crate::PACK_READ_BUSY_LINE, "{err}");
+        assert_eq!(seen.lock().unwrap().len(), 1, "the long wait was taken");
+        assert!(took < std::time::Duration::from_millis(500), "{took:?}");
+    }
+
+    #[test]
+    fn a_passed_deadline_is_one_line_and_is_not_retried() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let (client, seen) = serve(|_, req| {
+            assert!(deadline_of(req) > 0, "{req}");
+            (
+                408,
+                r#"{"error":"the deadline passed before this request ran"}"#.into(),
+                None,
+            )
+        });
+        let err = client.health().unwrap_err();
+        assert_eq!(err.to_string(), crate::PACK_DEADLINE_LINE, "{err}");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_shed_write_names_the_later_retry() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let (client, seen) = serve(|_, _| (503, r#"{"error":"busy"}"#.into(), Some(1)));
+        let started = std::time::Instant::now();
+        let err = {
+            let _deadline = super::CommandDeadline::enter(std::time::Duration::from_millis(200));
+            client
+                .post_atom(&serde_json::json!({"text": "one write", "workspace": "seat"}))
+                .unwrap_err()
+        };
+        let took = started.elapsed();
+        assert_eq!(err.to_string(), crate::PACK_SHED_LINE, "{err}");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(took < std::time::Duration::from_millis(500), "{took:?}");
+    }
+
+    #[test]
+    fn stats_line_is_the_admission_line() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let (client, seen) = serve(|_, req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.contains("GET /stats") {
+                (200, r#"{"ok":true,"line":"busy, retrying"}"#.into(), None)
+            } else {
+                (200, r#"{"line":"ok"}"#.into(), None)
+            }
+        });
+        assert_eq!(client.admission_line().as_deref(), Some("busy, retrying"));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let (client, seen) = serve(|_, _| (503, r#"{"error":"busy"}"#.into(), Some(1)));
+        assert_eq!(client.admission_line().as_deref(), Some("busy, retrying"));
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "stats does not wait out Retry-After"
+        );
     }
 }

@@ -426,7 +426,7 @@ fn a_busy_remember_retries_queues_and_the_next_call_sends_it() {
         "remember tried {tries} times\n{said}"
     );
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("pack busy, try again"), "{said}");
+    assert!(err.contains("packsetd busy, retrying later"), "{said}");
     assert!(err.contains("queued"), "{said}");
     let queue = world.home.join(".state/ljos/note-queue.jsonl");
     let queued = std::fs::read_to_string(&queue).unwrap_or_default();

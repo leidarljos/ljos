@@ -768,6 +768,7 @@ fn listed() -> Result<Vec<Value>> {
     let client = super::pack()?;
     let workspace = client.workspace();
     match super::atoms_mail(&client, &workspace) {
+        Err(err) if super::is_read_shed(&err) || super::is_deadline_miss(&err) => Err(err),
         Err(err) if super::is_pack_busy(&err) => Err(super::pack_busy_err()),
         Err(err) => Err(err).context("mail: the pack did not answer"),
         Ok(atoms) => Ok(atoms),
@@ -952,7 +953,7 @@ pub fn inbox_sync(all: bool, until: Option<&str>) -> Result<String> {
     // The mail is already read. A receipt the embedder sits on is the
     // same `pack busy` a silent pack prints, and it used to discard this.
     if let Err(err) = mark_shown(&atoms, &seat) {
-        if !super::is_pack_busy(&err) {
+        if !super::pack_settled(&err) {
             return Err(err);
         }
     }
@@ -1273,7 +1274,7 @@ pub fn prompt_note() -> (String, Vec<String>) {
     // and the next search would have to read it.
     let atoms = match listed() {
         Ok(atoms) => atoms,
-        Err(err) if super::is_pack_busy(&err) => return (String::new(), Vec::new()),
+        Err(err) if super::pack_settled(&err) => return (String::new(), Vec::new()),
         Err(_) => return (MAIL_UNCHECKED.to_string(), Vec::new()),
     };
     let seat = super::seat_name();

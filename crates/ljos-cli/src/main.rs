@@ -1849,7 +1849,22 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
-        if ljos_cli::is_pack_busy(e) {
+        if ljos_cli::is_read_shed(e) || ljos_cli::is_deadline_miss(e) {
+            // A hook must not fail the runner. A read that was shed, or a
+            // request the writer dropped because its deadline passed, is
+            // one line and is not exit 75.
+            let hook_cmd = std::env::args_os().nth(1).is_some_and(|arg| arg == "hook");
+            if hook_cmd {
+                std::process::exit(0);
+            }
+            if ljos_cli::is_deadline_miss(e) {
+                eprintln!("{}", ljos_cli::PACK_DEADLINE_LINE);
+            } else {
+                eprintln!("{}", ljos_cli::PACK_READ_BUSY_LINE);
+            }
+            std::process::exit(1);
+        }
+        if ljos_cli::is_pack_busy(e) || ljos_cli::is_write_shed(e) {
             // `ljos hook` answers the runner and must not fail it: a
             // silent pack is not a refused command. Every other command,
             // including remember with `LJOS_IN_HOOK` still set, exits 75
@@ -1858,7 +1873,11 @@ fn main() -> Result<()> {
             if hook_cmd {
                 std::process::exit(0);
             }
-            eprintln!("{}", ljos_cli::PACK_BUSY_LINE);
+            if ljos_cli::is_write_shed(e) {
+                eprintln!("{}", ljos_cli::PACK_SHED_LINE);
+            } else {
+                eprintln!("{}", ljos_cli::PACK_BUSY_LINE);
+            }
             std::process::exit(ljos_cli::PACK_BUSY_EXIT);
         }
         // A gate whose hook fails answers allow in the runner's JSON with
@@ -2413,6 +2432,8 @@ fn run_command() -> Result<()> {
             ljos_cli::log_recall("search", &query.join(" "));
             // A short budget. Past it the word ranking prints. The call
             // does not sit until an outer timeout with nothing on screen.
+            let _deadline =
+                ljos_cli::pack_link::CommandDeadline::enter(ljos_cli::SEARCH_PACK_BUDGET);
             let _pack_clock = ljos_cli::pack_link::PackClock::enter(ljos_cli::SEARCH_PACK_BUDGET);
             let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
             let day = match valid_at.as_deref().map(str::trim) {
@@ -2441,6 +2462,12 @@ fn run_command() -> Result<()> {
             let mut hits =
                 match packset_search_as_of(&join(&query), fetch, as_of.as_deref(), rerank) {
                     Ok(hits) => hits,
+                    Err(err) if !dated && ljos_cli::is_deadline_miss(&err) => return Err(err),
+                    Err(err) if !dated && ljos_cli::is_read_shed(&err) => {
+                        eprintln!("{}", ljos_cli::PACK_READ_BUSY_LINE);
+                        eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
+                        ljos_cli::search_by_words(&join(&query), fetch)
+                    }
                     Err(err) if !dated && ljos_cli::pack_unreachable(&err) => {
                         eprintln!("packsetd is unreachable (connection refused)");
                         std::process::exit(ljos_cli::PACK_BUSY_EXIT);
