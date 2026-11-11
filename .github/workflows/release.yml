@@ -359,6 +359,10 @@ jobs:
           cp scripts/install.sh dist/install.sh
           cp scripts/uninstall.sh dist/uninstall.sh
           (cd dist && sha256sum install.sh > install.sh.sha256 && sha256sum uninstall.sh > uninstall.sh.sha256)
+      # The attached install.sh has to name the archives this workflow
+      # just downloaded, for every target the build matrix produced.
+      - name: Installer matches the archives
+        run: scripts/release-install-check.sh --release-dist dist
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: |

@@ -27,6 +27,15 @@
 #                   default now
 #   --from-dir DIR  take the programs from DIR instead of downloading
 #                   (a local build, or an offline copy)
+#   --asset-dir DIR take each release archive and its .sha256 from DIR
+#                   instead of GitHub. The file names are the ones a
+#                   release publishes for this target
+#   --target TRIPLE install for TRIPLE (x86_64-unknown-linux-gnu and the
+#                   other three the release workflow builds) instead of
+#                   this machine
+#   --no-build      a missing archive stops the install. No source build
+#   --print-assets  print the archive name for each repository and exit.
+#                   Each repository needs --pin or --version
 #   --no-onboard    install only; onboard nothing
 #   --no-modify-path
 #                   leave the shell profiles alone. Without it, when the
@@ -69,6 +78,8 @@ set -eu
 BIN_DIR=${LJOS_BIN_DIR:-$HOME/.local/bin}
 WITH_EMBED=1
 FROM_DIR=
+ASSET_DIR=
+TARGET_OVERRIDE=
 ONBOARD=1
 MODIFY_PATH=1
 OWNER=leidarljos
@@ -76,6 +87,8 @@ PINS=
 ATTEST=0
 CLOUD=0
 FORCE=0
+NO_BUILD=0
+PRINT_ASSETS=0
 
 say() { printf '%s\n' "$*"; }
 
@@ -101,14 +114,31 @@ rust_floor() {
     [ -n "$v" ] && MIN_RUST=$v
   fi
 }
-need_rust() {
-  rust_floor
-  command -v rustc >/dev/null 2>&1 || die "no rustc to build $1; install Rust $MIN_RUST or newer from https://rustup.rs"
-  have=$(rustc --version 2>/dev/null | awk '{print $2}' | sed 's/-.*//')
+# rustc's version, or nothing when rustc is not on PATH.
+rust_have() {
+  command -v rustc >/dev/null 2>&1 || return 1
+  rustc --version 2>/dev/null | awk '{print $2}' | sed 's/-.*//'
+}
+
+# True when HAVE is at least MIN_RUST. Compares major and minor.
+rust_new_enough() {
+  have=$1
+  [ -n "$have" ] || return 1
   awk -v min="$MIN_RUST" -v have="$have" 'BEGIN {
     split(min, a, "."); split(have, b, ".");
     exit !(b[1] + 0 > a[1] + 0 || (b[1] + 0 == a[1] + 0 && b[2] + 0 >= a[2] + 0))
-  }' || die "rustc $have is older than $MIN_RUST, the oldest these crates build with; install a current toolchain from https://rustup.rs, or use a release build for this platform"
+  }'
+}
+
+need_rust() {
+  rust_floor
+  have=$(rust_have || true)
+  if ! rust_new_enough "$have"; then
+    if [ -n "$have" ]; then
+      die "rustc $have is older than $MIN_RUST, the oldest these crates build with; install a current toolchain from https://rustup.rs, or use a release build for this platform"
+    fi
+    die "no rustc to build $1; install Rust $MIN_RUST or newer from https://rustup.rs"
+  fi
 }
 warn() { printf '  warning: %s\n' "$*"; }
 warn_embed() {
@@ -123,6 +153,10 @@ while [ $# -gt 0 ]; do
     --with-embed) WITH_EMBED=1; shift ;;
     --no-embed) WITH_EMBED=0; shift ;;
     --from-dir) FROM_DIR=$2; shift 2 ;;
+    --asset-dir) ASSET_DIR=$2; shift 2 ;;
+    --target) [ $# -ge 2 ] || die "--target needs a triple"; TARGET_OVERRIDE=$2; shift 2 ;;
+    --no-build) NO_BUILD=1; shift ;;
+    --print-assets) PRINT_ASSETS=1; shift ;;
     --no-onboard) ONBOARD=0; shift ;;
     --no-modify-path) MODIFY_PATH=0; shift ;;
     --version) [ $# -ge 2 ] || die "--version needs a version"; PINS="$PINS ljos=$2"; shift 2 ;;
@@ -172,7 +206,7 @@ elif command -v wget >/dev/null 2>&1; then
   fetch() { wget -q -O "$2" "$1"; }
   latest_url() { wget -q --max-redirect=5 -S --spider "$1" 2>&1 | sed -n 's/^ *[Ll]ocation: *//p' | tail -n 1; }
 else
-  [ -n "$FROM_DIR" ] || die "need curl or wget"
+  [ -n "$FROM_DIR" ] || [ -n "$ASSET_DIR" ] || [ "$PRINT_ASSETS" = 1 ] || die "need curl or wget"
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -180,7 +214,7 @@ if command -v sha256sum >/dev/null 2>&1; then
 elif command -v shasum >/dev/null 2>&1; then
   sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
 else
-  [ -n "$FROM_DIR" ] || die "need sha256sum or shasum to check the downloads"
+  [ -n "$FROM_DIR" ] || [ "$PRINT_ASSETS" = 1 ] || die "need sha256sum or shasum to check the downloads"
 fi
 
 case "$(uname -s)-$(uname -m)" in
@@ -190,6 +224,9 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-"arm64") TARGET=aarch64-apple-darwin ;;
   *) TARGET=unknown ;;
 esac
+if [ -n "$TARGET_OVERRIDE" ]; then
+  TARGET=$TARGET_OVERRIDE
+fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ljos-install.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -220,16 +257,25 @@ claimdag claimdag-cli claimdag v
 ljos-policyd ljos-policyd ljos-policyd v
 consensus ljos-consensus ljos-consensus v"
 
+# No published archive. One line names the rustc a source build needs, and
+# cargo is not started when this machine is older than that.
 source_build() {
-  crate=$1 ver=$2
+  crate=$1 ver=$2 asset=$3
+  rust_floor
+  have=$(rust_have || true)
+  if ! rust_new_enough "$have"; then
+    if [ -n "$have" ]; then
+      die "no $asset for $TARGET; a source build needs rustc $MIN_RUST or newer (found rustc $have)"
+    fi
+    die "no $asset for $TARGET; a source build needs rustc $MIN_RUST or newer (no rustc on PATH)"
+  fi
   command -v cargo >/dev/null 2>&1 ||
-    die "no release build of $crate for $TARGET, and no cargo to build it; install Rust $MIN_RUST or newer from https://rustup.rs"
-  need_rust "$crate"
+    die "no $asset for $TARGET; rustc $have meets $MIN_RUST and cargo is not on PATH"
   if [ -n "$ver" ]; then
-    say "  building $crate $ver from source (no release build for $TARGET)"
+    say "  building $crate $ver from source (no $asset for $TARGET)"
     cargo install --locked --quiet --root "$TMP/cargo" --version "=$ver" "$crate" >&2
   else
-    say "  building $crate from source (no release build for $TARGET)"
+    say "  building $crate from source (no $asset for $TARGET)"
     cargo install --locked --quiet --root "$TMP/cargo" "$crate" >&2
   fi
   for built in "$TMP"/cargo/bin/*; do
@@ -384,22 +430,31 @@ install_one() {
   # vissue and vissue-mcp share one archive. The second row reuses it.
   if [ -s "$TMP/$asset" ]; then
     :
-  elif [ "$TARGET" = unknown ] || ! fetch "$url" "$TMP/$asset" 2>/dev/null; then
-    if [ "$TARGET" != unknown ]; then
-      warn "no $asset in the $repo $tag release; building $crate from source"
+  elif [ -n "$ASSET_DIR" ] && [ -s "$ASSET_DIR/$asset" ]; then
+    cp "$ASSET_DIR/$asset" "$TMP/$asset"
+  elif [ "$TARGET" = unknown ] || [ -n "$ASSET_DIR" ] || ! fetch "$url" "$TMP/$asset" 2>/dev/null; then
+    if [ "$NO_BUILD" = 1 ]; then
+      die "no $asset for $TARGET"
     fi
-    source_build "$crate" "$ver"
+    source_build "$crate" "$ver" "$asset"
     case ",$progs," in
       *,packset-embed,*) [ -x "$BIN_DIR/packset-embed" ] || warn_embed "a source build" ;;
     esac
     return
   fi
-  fetch "$url.sha256" "$TMP/$asset.sha256" || die "$asset has no published checksum"
+  if [ -n "$ASSET_DIR" ]; then
+    cp "$ASSET_DIR/$asset.sha256" "$TMP/$asset.sha256" || die "$asset has no checksum beside it in $ASSET_DIR"
+  else
+    fetch "$url.sha256" "$TMP/$asset.sha256" || die "$asset has no published checksum"
+  fi
   want=$(sed 's/[ *].*//' "$TMP/$asset.sha256" | head -n 1)
   got=$(sha256 "$TMP/$asset")
   [ "$want" = "$got" ] || die "$asset: checksum mismatch (published $want, downloaded $got); nothing from it was installed"
-  attested=$(attest "$TMP/$asset" "$repo" "$got")
-  printf '%s\n' "$attested" >> "$TMP/attested"
+  attested=skipped
+  if [ -z "$ASSET_DIR" ]; then
+    attested=$(attest "$TMP/$asset" "$repo" "$got")
+    printf '%s\n' "$attested" >> "$TMP/attested"
+  fi
   mkdir -p "$TMP/x-$repo"
   case $asset in
     *.tar.xz) tar -xJf "$TMP/$asset" -C "$TMP/x-$repo" ;;
@@ -424,6 +479,27 @@ for pin in $PINS; do
   printf '%s\n' "$COMPONENTS" | grep -q "^${pin%%=*} " ||
     die "--pin ${pin%%=*}: not one of the repositories this installs"
 done
+
+# One archive name per repository row, for this target. A row with no
+# pin is an error: printing must not ask GitHub which tag is current.
+if [ "$PRINT_ASSETS" = 1 ]; then
+  while read -r repo crate progs style; do
+    [ -n "$repo" ] || continue
+    ver=$(pinned "$repo")
+    ver=${ver#v}
+    [ -n "$ver" ] || die "--print-assets needs --pin $repo=VER"
+    tag=v$ver
+    case $style in
+      v) asset="$repo-$tag-$TARGET.tar.gz" ;;
+      dist) asset="$crate-$TARGET.tar.xz" ;;
+      *) die "unknown archive style $style" ;;
+    esac
+    printf '%s\n' "$asset"
+  done <<EOF
+$COMPONENTS
+EOF
+  exit 0
+fi
 
 say "Installing ljos into $BIN_DIR ($TARGET)"
 printf '%s\n' "$COMPONENTS" | while read -r repo crate progs style; do
