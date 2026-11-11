@@ -20,6 +20,19 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   It sets up the tracker and memory.
   Search matches words, and the encoder is not installed.
   `sh install.sh` with no flag still installs the encoder.
+- `ljos memory export --machine NAME` sets the machine in the file.
+  The default is `LJOS_SYNC_HOST` when that is set, and otherwise the hostname.
+  `ljos memory import --as-machine NAME` stores that machine for the import.
+  The file bytes stay as they are, so the import id stays the digest of the file.
+- ljos builds against packset 0.17.6.
+  Each pack request sends `X-Packset-Deadline`.
+  Search and recall use a short deadline.
+  Remember and import use a longer one.
+  A pack that answers status 503 is retried after the Retry-After time, with jitter, inside that deadline.
+  A write that is still busy is queued, or exits 75 with `packsetd busy, retrying later`.
+  A busy read stops with `packsetd busy`.
+  Status 408 means the deadline passed before the request ran, and ljos does not send it again.
+  `ljos doctor` and the status line show `ok` or `busy, retrying` from `GET /stats`.
 
 ### Fixes
 
@@ -41,6 +54,10 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 - `ljos-mcp` does not take a seat from the Model Context Protocol client's name.
   A saved seat record is filed under that conversation's id, so another conversation does not read it.
   A conversation id with no seat is `seat-unresolved`.
+- `ljos memory export --out` writes the file in place when rename fails with an input/output error (EIO), a cross-device link (EXDEV), an operation not permitted (EPERM), or an operation not supported (ENOTSUP).
+  The file is read back, and the temporary file is removed.
+- `ljos memory export` leaves out a row whose entities name another seat.
+  A row with no seat tag is exported only from this seat's import or export directory.
 
 ### Documentation
 
@@ -52,6 +69,11 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 - The docs open with what ljos does and what it has measured.
   A new page compares ljos with beads, Mem0, Letta, Zep, Basic Memory and git-bug.
   The README leads with the measured results and a short comparison.
+
+### Miscellaneous
+
+- Linux release archives of ljos are built on Ubuntu 22.04, so their glibc floor is 2.35.
+  The encoder archives stay on Ubuntu 24.04, because that release's protoc is the one the Open Neural Network Exchange (ONNX) Runtime build requires.
 
 
 ## 0.40.0 (2026-11-10)
