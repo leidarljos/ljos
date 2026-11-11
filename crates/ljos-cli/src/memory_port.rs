@@ -356,6 +356,47 @@ fn write_export_body(out: &Path, bytes: &[u8]) -> Result<()> {
     write_private(out, bytes)
 }
 
+/// A store can refuse `rename` across its boundary. These are the
+/// errors that mean the bytes are still only in the temporary file, and
+/// a write onto the destination itself can finish the place.
+fn rename_refused(err: &std::io::Error) -> bool {
+    let Some(code) = err.raw_os_error() else {
+        return false;
+    };
+    code == libc::EIO || code == libc::EXDEV || code == libc::EPERM || code == libc::ENOTSUP
+}
+
+#[cfg(test)]
+thread_local! {
+    static RENAME_FAULT: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+fn rename_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(code) = RENAME_FAULT.with(|cell| cell.get()) {
+        return Err(std::io::Error::from_raw_os_error(code));
+    }
+    std::fs::rename(from, to)
+}
+
+/// Write `bytes` onto `path` without following a symlink, then read the
+/// file back. The caller compares those bytes with what it asked to write.
+fn write_in_place(path: &Path, bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::read(path)
+}
+
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
@@ -386,9 +427,19 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
     }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("memory: cannot place {}", path.display()))?;
-    Ok(())
+    let place_err = format!("memory: cannot place {}", path.display());
+    match rename_into_place(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(err) if rename_refused(&err) => {
+            let placed = write_in_place(path, bytes);
+            let _ = std::fs::remove_file(&tmp);
+            match placed {
+                Ok(got) if got == bytes => Ok(()),
+                _ => Err(err).with_context(|| place_err),
+            }
+        }
+        Err(err) => Err(err).with_context(|| place_err),
+    }
 }
 
 fn write_if_absent(path: &Path, bytes: &[u8]) -> Result<bool> {
@@ -2859,6 +2910,63 @@ mod tests {
             format!("{}/{}", views[0].source_machine, views[0].source_seat),
             "lane-b/seat-a"
         );
+    }
+
+    struct RenameFault;
+
+    impl RenameFault {
+        fn arm(code: i32) -> Self {
+            RENAME_FAULT.with(|cell| cell.set(Some(code)));
+            Self
+        }
+    }
+
+    impl Drop for RenameFault {
+        fn drop(&mut self) {
+            RENAME_FAULT.with(|cell| cell.set(None));
+        }
+    }
+
+    fn temp_names(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn a_refused_rename_writes_the_bytes_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.jsonl");
+        let bytes = b"lane bytes\n";
+        for code in [libc::EIO, libc::EXDEV, libc::EPERM, libc::ENOTSUP] {
+            let fault = RenameFault::arm(code);
+            write_private(&path, bytes).unwrap();
+            drop(fault);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{code}");
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{code}");
+            assert!(temp_names(dir.path()).is_empty(), "{code}");
+        }
+        let fault = RenameFault::arm(libc::ENOENT);
+        let err = write_private(&path, b"nope\n").unwrap_err();
+        drop(fault);
+        assert!(err.to_string().contains("cannot place"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(temp_names(dir.path()).len(), 1);
+        let slot = dir.path().join("slot");
+        std::fs::create_dir(&slot).unwrap();
+        let fault = RenameFault::arm(libc::EIO);
+        let err = write_private(&slot, b"x").unwrap_err();
+        drop(fault);
+        assert!(err.to_string().contains("cannot place"), "{err}");
+        assert!(std::fs::metadata(&slot).unwrap().is_dir());
+        assert!(temp_names(dir.path())
+            .iter()
+            .all(|name| !name.starts_with("slot.")));
     }
 
     #[test]
