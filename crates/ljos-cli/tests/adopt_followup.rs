@@ -276,6 +276,7 @@ fn default_search_keeps_this_seats_topic_and_drops_routine_logs() {
             ("LJOS_SEAT", "ada"),
             ("PACKSET_URL", &url),
             ("PACKSET_AUTH", "off"),
+            ("PACKSET_TOKEN", "probe-token"),
         ],
     );
     let said = text(&on_topic);
@@ -317,6 +318,7 @@ fn default_search_keeps_this_seats_topic_and_drops_routine_logs() {
             ("LJOS_SEAT", "ada"),
             ("PACKSET_URL", &url),
             ("PACKSET_AUTH", "off"),
+            ("PACKSET_TOKEN", "probe-token"),
         ],
     );
     let said = text(&hourly);
@@ -333,6 +335,7 @@ fn default_search_keeps_this_seats_topic_and_drops_routine_logs() {
             ("LJOS_SEAT", "ada"),
             ("PACKSET_URL", &url),
             ("PACKSET_AUTH", "off"),
+            ("PACKSET_TOKEN", "probe-token"),
         ],
     );
     let said = text(&stop);

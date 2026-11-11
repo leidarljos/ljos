@@ -715,9 +715,16 @@ fn mark_pack_quiet() {
     }
 }
 
+/// The tool call's own bound is spent. A shorter read, one atom inside
+/// its own budget, times out while the call still has time and the caller
+/// carries on. That read is not the call failing.
+fn tool_bound_spent() -> bool {
+    crate::tool_bound::remaining().is_some_and(|left| left <= Duration::from_millis(50))
+}
+
 fn pack_io(err: std::io::Error) -> std::io::Error {
     let quiet = io_is_quiet(&err) || err.to_string().contains("the pack did not answer");
-    if quiet && crate::tool_bound::armed() {
+    if quiet && tool_bound_spent() {
         crate::tool_bound::note("packsetd");
         crate::tool_bound::mark_failed("packsetd timed out");
         return std::io::Error::new(std::io::ErrorKind::TimedOut, "packsetd timed out");

@@ -279,6 +279,7 @@ fn a_held_write_does_not_fail_readers() {
             .env("LJOS_TRACKER_GIT", "off")
             .env("LJOS_HOOKD", "off")
             .env("PACKSET_AUTH", "off")
+            .env("PACKSET_TOKEN", "probe-token")
             .env("PACKSET_URL", format!("http://127.0.0.1:{port}"));
         cmd
     };

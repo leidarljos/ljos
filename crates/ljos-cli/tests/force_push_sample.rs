@@ -1,8 +1,9 @@
-//! The force-push samples in the README and the guides are the line
-//! `ljos hook` prints for the payload each page pipes in, with no seat
-//! rules, the ask pack switched off, and an `ljos-policyd` that answers a
-//! force push as 0.6 does. The hook is a runner's, so it runs in a
-//! sitting, from a checkout on a topic branch.
+//! The force-push samples in the guides are the line `ljos hook` prints
+//! for the payload each page pipes in, with no seat rules, the ask pack
+//! switched off, and an `ljos-policyd` that answers a force push as 0.6
+//! does. The hook is a runner's, so it runs in a sitting, from a checkout
+//! on a topic branch. The README shows `ljos policy` for the same push,
+//! not this hook line.
 
 ljos_test_boot::harness!();
 use std::io::Write;
@@ -107,7 +108,6 @@ fn each_force_push_sample_is_what_the_hook_prints() {
             r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}"#,
             r#"{"hookSpecificOutput""#,
             &[
-                "README.md",
                 "docs/source/howto-recall.rst",
                 "docs/orgmode/howto-recall.org",
             ][..],

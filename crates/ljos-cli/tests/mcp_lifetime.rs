@@ -57,6 +57,9 @@ fn server(home: &std::path::Path) -> Command {
         .env("VISSUE_ROOT", &tracker)
         .env("LJOS_SEAT", "probe")
         .env("PACKSET_WORKSPACE", "probe")
+        // A search asks the writer only when this seat can show a token.
+        // The stand-in answers without checking it.
+        .env("PACKSET_TOKEN", "probe-token")
         .current_dir(home);
     cmd
 }
@@ -304,8 +307,10 @@ fn malformed_calls_hold_no_slot_and_the_call_before_eof_answers() {
     );
 }
 
-/// A search slower than the old fixed 35 s drain. The pack is allowed 45 s,
-/// so the server has to hold the end of stdin until the answer is written.
+/// A search slower than the old fixed 35 s drain. The pack is allowed 45 s
+/// and the tool call 60 s, so the server holds the end of stdin until the
+/// answer is written. The default tool bound is 30 s and would cut this
+/// call; the test sets the bound the way a seat allows a long pack read.
 #[test]
 fn a_call_longer_than_the_old_drain_still_answers_on_eof() {
     let home = tempfile::tempdir().unwrap();
@@ -313,6 +318,7 @@ fn a_call_longer_than_the_old_drain_still_answers_on_eof() {
     let mut child = server(home.path())
         .env("PACKSET_URL", url)
         .env("PACKSET_TIMEOUT_MS", "45000")
+        .env("LJOS_MCP_TIMEOUT", "60")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

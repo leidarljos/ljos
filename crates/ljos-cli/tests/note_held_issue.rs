@@ -1,9 +1,9 @@
 //! `ljos note` with no id notes on the issue this seat holds.
 //!
 //! An id `vissue create` mints still names the issue. A shorter hyphenated
-//! word does not. With nothing held and no id, the command fails and does
-//! not ask the tracker to take a note. `ljos_note` with a blank issue does
-//! the same as the command.
+//! word does not. With nothing held and no id, the note is stored with
+//! `unattached-note` and the tracker is not asked. `ljos_note` with a blank
+//! issue does the same.
 
 ljos_test_boot::harness!();
 use std::io::Write;
@@ -161,18 +161,17 @@ fn a_hyphenated_word_shorter_than_a_minted_id_stays_text() {
     );
 }
 
-/// No hold and no id. The command fails at once and does not ask for a note.
+/// No hold and no id. The note is stored with `unattached-note` and the
+/// tracker is not asked, the same as `ljos_note` with no issue.
 #[test]
-fn a_note_with_no_hold_and_no_id_fails_without_a_note_call() {
+fn a_note_with_no_hold_and_no_id_is_stored_unattached() {
     let hab = Hab::new();
     let started = Instant::now();
     let out = hab.note(&["note", "some", "text"]);
     let took = started.elapsed();
+    let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !out.status.success(),
-        "ljos note succeeded with nothing held"
-    );
+    assert!(out.status.success(), "ljos note failed: {stdout}{stderr}");
     assert!(
         took < Duration::from_secs(2),
         "a missing issue took {took:?}: {stderr}"
@@ -183,8 +182,8 @@ fn a_note_with_no_hold_and_no_id_fails_without_a_note_call() {
         hab.calls()
     );
     assert!(
-        stderr.contains("ljos note ID TEXT...") && stderr.contains("ljos note TEXT..."),
-        "the failure did not name both forms:\n{stderr}"
+        stdout.contains("unattached-note"),
+        "the note was not stored unattached:\n{stdout}"
     );
 }
 

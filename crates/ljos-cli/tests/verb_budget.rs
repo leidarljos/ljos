@@ -38,6 +38,12 @@ fn home_of(dir: &Path) -> std::path::PathBuf {
 }
 
 fn ljos(dir: &Path, pack: &str, args: &[&str]) -> (std::process::Output, Duration) {
+    ljos_at(dir, pack, args, false)
+}
+
+/// `token` is what lets a search ask the writer. Without one the search
+/// reads stored atoms and never waits on a silent pack.
+fn ljos_at(dir: &Path, pack: &str, args: &[&str], token: bool) -> (std::process::Output, Duration) {
     let home = home_of(dir);
     let path = format!(
         "{}:{}",
@@ -45,8 +51,8 @@ fn ljos(dir: &Path, pack: &str, args: &[&str]) -> (std::process::Output, Duratio
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
     let started = Instant::now();
-    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
-        .args(args)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    cmd.args(args)
         .current_dir(dir)
         .env("PATH", &path)
         .env("HOME", &home)
@@ -59,9 +65,11 @@ fn ljos(dir: &Path, pack: &str, args: &[&str]) -> (std::process::Output, Duratio
         .env("LJOS_SEAT", "ada")
         .env("LJOS_HOOKD", "off")
         .env("LJOS_TRACKER_GIT", "off")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+        .stdin(Stdio::null());
+    if token {
+        cmd.env("PACKSET_TOKEN", "probe-token");
+    }
+    let out = cmd.output().unwrap();
     (out, started.elapsed())
 }
 
@@ -131,7 +139,7 @@ fn a_silent_pack_does_not_hold_a_search() {
     let dir = tempfile::tempdir().unwrap();
     let pack = silent_pack();
     for args in [vec!["search", "32148"], vec!["search", "--rerank", "32148"]] {
-        let (out, took) = ljos(dir.path(), &pack, &args);
+        let (out, took) = ljos_at(dir.path(), &pack, &args, true);
         let said = text_of(&out);
         assert!(
             took < Duration::from_secs(8),
