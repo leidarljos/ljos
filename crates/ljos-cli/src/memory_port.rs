@@ -114,10 +114,20 @@ struct Row {
     diagnostic: String,
     #[serde(default)]
     effect: String,
+    /// Set when `ljos forget` retires the row. The line stays in the slot.
+    #[serde(default, skip_serializing_if = "is_false")]
+    retired: bool,
+    /// The deed accession that withdrew the row, when forget was given one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retracted_by: Option<String>,
 }
 
 fn lesson_kind() -> String {
     "lesson".into()
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -524,6 +534,8 @@ fn keep_empty_at(place: &Place, kind: &str) {
         at: now_rfc3339(),
         diagnostic: "empty text is not a claim".into(),
         effect: "failed".into(),
+        retired: false,
+        retracted_by: None,
     };
     let path = place
         .home
@@ -607,6 +619,8 @@ fn write_kept(
         at: now_rfc3339(),
         diagnostic: why.to_string(),
         effect: effect.into(),
+        retired: false,
+        retracted_by: None,
     };
     let path = place.home.join("kept").join(format!("{digest}.json"));
     write_if_absent(&path, &serde_json::to_vec_pretty(&row)?)?;
@@ -1025,6 +1039,8 @@ fn raw_row(import_id: &str, index: usize, line: &str, label: &str) -> Row {
         at: String::new(),
         diagnostic: label.into(),
         effect: "stored-local".into(),
+        retired: false,
+        retracted_by: None,
     }
 }
 
@@ -1082,6 +1098,8 @@ fn row_from_value(import_id: &str, index: usize, value: &Value, text: &str) -> R
         at,
         diagnostic: String::new(),
         effect,
+        retired: false,
+        retracted_by: None,
     }
 }
 
@@ -1590,9 +1608,14 @@ fn to_hit(row: &Row, score: f64) -> Hit {
     }
 }
 
+fn row_retired(row: &Row) -> bool {
+    row.retired || row.labels.iter().any(|label| label == "retired")
+}
+
 fn selected(place: &Place, query: &str, filter: &SourceFilter, attempts: bool) -> Vec<(Row, f64)> {
     let mut rows: Vec<Row> = load_rows(place, attempts)
         .into_iter()
+        .filter(|row| !row_retired(row))
         .filter(|row| !row.text.trim().is_empty())
         .filter(|row| passes(row, filter))
         .collect();
@@ -1684,6 +1707,238 @@ fn merge_into(
     hits.truncate(room);
     let left = limit.saturating_sub(hits.len());
     hits.extend(extras.into_iter().take(left));
+}
+
+/// An imported row `ljos forget` retired. `pack_id` is the atom the pack
+/// stored for it, when the import posted one.
+pub(crate) struct RetiredImport {
+    pub body: Value,
+    pub pack_id: Option<String>,
+}
+
+/// Ids of imported rows search still returns, on every seat of this tracker.
+///
+/// A second seat reads the same tracker, so it can retire a row the owning
+/// seat's search showed.
+pub(crate) fn import_row_ids() -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_import_ids(&memory_home(), &mut ids);
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Retire the imported row `id` names. The file stays, with `retired` set,
+/// and search leaves the row out. `None` when the slot has no such row.
+///
+/// # Errors
+///
+/// The slot cannot be rewritten.
+pub(crate) fn retire_imported(id: &str, why: Option<&str>) -> Result<Option<RetiredImport>> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let home = memory_home();
+    if !home.exists() {
+        return Ok(None);
+    }
+    let _held = lock_home(&home);
+    if let Some(found) = retire_indexes(&home, id, why)? {
+        return Ok(Some(found));
+    }
+    if let Some(found) = retire_kept(&home, id, why)? {
+        return Ok(Some(found));
+    }
+    Ok(None)
+}
+
+fn collect_import_ids(home: &Path, ids: &mut Vec<String>) {
+    for row in import_rows(home) {
+        if !row_retired(&row) && !row.id.is_empty() {
+            ids.push(row.id);
+        }
+    }
+}
+
+fn import_rows(home: &Path) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let root = home.join("imports");
+    let Ok(seats) = std::fs::read_dir(&root) else {
+        return rows;
+    };
+    let mut seats: Vec<_> = seats.filter_map(|entry| entry.ok()).collect();
+    seats.sort_by_key(|entry| entry.file_name());
+    for seat in seats {
+        let Ok(slots) = std::fs::read_dir(seat.path()) else {
+            continue;
+        };
+        let mut slots: Vec<_> = slots.filter_map(|entry| entry.ok()).collect();
+        slots.sort_by_key(|entry| entry.file_name());
+        for slot in slots {
+            let index = slot.path().join("index.jsonl");
+            let Ok(text) = std::fs::read_to_string(&index) else {
+                continue;
+            };
+            for line in text.lines() {
+                if let Ok(row) = serde_json::from_str::<Row>(line) {
+                    rows.push(row);
+                }
+            }
+        }
+    }
+    let kept = home.join("kept");
+    if let Ok(entries) = std::fs::read_dir(&kept) {
+        let mut entries: Vec<_> = entries.filter_map(|entry| entry.ok()).collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
+            };
+            if let Ok(row) = serde_json::from_slice::<Row>(&bytes) {
+                rows.push(row);
+            }
+        }
+    }
+    rows
+}
+
+fn retire_indexes(home: &Path, id: &str, why: Option<&str>) -> Result<Option<RetiredImport>> {
+    let root = home.join("imports");
+    let Ok(seats) = std::fs::read_dir(&root) else {
+        return Ok(None);
+    };
+    let mut seats: Vec<_> = seats.filter_map(|entry| entry.ok()).collect();
+    seats.sort_by_key(|entry| entry.file_name());
+    for seat in seats {
+        let Ok(slots) = std::fs::read_dir(seat.path()) else {
+            continue;
+        };
+        let mut slots: Vec<_> = slots.filter_map(|entry| entry.ok()).collect();
+        slots.sort_by_key(|entry| entry.file_name());
+        for slot in slots {
+            let index = slot.path().join("index.jsonl");
+            if let Some(found) = retire_index_file(&index, &slot.path(), id, why)? {
+                return Ok(Some(found));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn retire_index_file(
+    index: &Path,
+    slot: &Path,
+    id: &str,
+    why: Option<&str>,
+) -> Result<Option<RetiredImport>> {
+    let Ok(text) = std::fs::read_to_string(index) else {
+        return Ok(None);
+    };
+    let mut matched: Option<Row> = None;
+    let mut changed = false;
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut row: Row = match serde_json::from_str(line) {
+            Ok(row) => row,
+            Err(_) => {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+        };
+        if row.id == id {
+            if !row_retired(&row) {
+                mark_retired(&mut row, why);
+                changed = true;
+            }
+            matched = Some(row.clone());
+            out.push_str(&serde_json::to_string(&row)?);
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    let Some(row) = matched else {
+        return Ok(None);
+    };
+    if changed {
+        write_private(index, out.as_bytes())?;
+    }
+    Ok(Some(retired_of(
+        &row,
+        posted_pack_id(slot, &row.content_sha256),
+    )))
+}
+
+fn retire_kept(home: &Path, id: &str, why: Option<&str>) -> Result<Option<RetiredImport>> {
+    let dir = home.join("kept");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(None);
+    };
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let path = entry.path();
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(mut row) = serde_json::from_slice::<Row>(&bytes) else {
+            continue;
+        };
+        if row.id != id {
+            continue;
+        }
+        if !row_retired(&row) {
+            mark_retired(&mut row, why);
+            write_private(&path, &serde_json::to_vec_pretty(&row)?)?;
+        }
+        return Ok(Some(retired_of(&row, None)));
+    }
+    Ok(None)
+}
+
+fn mark_retired(row: &mut Row, why: Option<&str>) {
+    row.retired = true;
+    if !row.labels.iter().any(|label| label == "retired") {
+        row.labels.push("retired".into());
+    }
+    if let Some(why) = why.map(str::trim).filter(|why| !why.is_empty()) {
+        row.retracted_by = Some(why.to_string());
+    }
+}
+
+fn posted_pack_id(slot: &Path, content: &str) -> Option<String> {
+    if content.is_empty() {
+        return None;
+    }
+    let path = slot.join("receipts").join(format!("posted-{content}.json"));
+    let bytes = std::fs::read(path).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("pack_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn retired_of(row: &Row, pack_id: Option<String>) -> RetiredImport {
+    let kind = if row.kind.is_empty() {
+        "lesson"
+    } else {
+        row.kind.as_str()
+    };
+    RetiredImport {
+        body: json!({
+            "id": row.id,
+            "kind": kind,
+            "text": row.text,
+            "tombstone": true,
+            "due_at": "",
+        }),
+        pack_id,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2141,6 +2396,8 @@ fn store_label_row(place: &Place, label: &str, detail: &str, effect: &str) -> Re
         at: now_rfc3339(),
         diagnostic: detail.to_string(),
         effect: effect.into(),
+        retired: false,
+        retracted_by: None,
     };
     write_if_absent(
         &place.home.join("attempts").join(format!("{digest}.json")),
@@ -2179,6 +2436,8 @@ fn store_attempt(place: &Place, args: &[String], err: &str) -> Result<()> {
         at: now_rfc3339(),
         diagnostic: err.to_string(),
         effect: "failed".into(),
+        retired: false,
+        retracted_by: None,
     };
     write_if_absent(
         &place.home.join("attempts").join(format!("{digest}.json")),
@@ -2838,6 +3097,8 @@ mod tests {
             at: "2026-01-01T00:00:00Z".into(),
             diagnostic: String::new(),
             effect: "stored-local".into(),
+            retired: false,
+            retracted_by: None,
         }
     }
 

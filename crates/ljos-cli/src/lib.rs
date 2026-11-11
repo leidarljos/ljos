@@ -20185,30 +20185,62 @@ pub fn packset_write_as(
 /// # Errors
 ///
 /// An unset `PACKSET_URL`, an id the workspace does not hold, a `why` that is
-/// not an accession, or the request's.
+/// not an accession, or the request's. An id that names an atom, including
+/// one imported from another machine, is retired here. The tracker is left
+/// alone for that id.
 pub fn packset_forget(id: &str, why: Option<&str>) -> Result<Value> {
     let trimmed = id.trim();
     if trimmed.is_empty() {
         bail!("forget: an atom id is required");
     }
     let why = why.map(str::trim).filter(|w| !w.is_empty());
-    let client = pack()?;
-    let workspace = client.workspace();
-    let full;
-    let trimmed = if trimmed.len() < 32 {
-        let ids: Vec<String> = atoms_lean(&client, &workspace)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|a| a["id"].as_str().map(str::to_string))
-            .collect();
-        full = resolve_short_id("forget", trimmed, &ids)?;
-        full.as_str()
+    let packed = pack();
+    let mut ids: Vec<String> = packed
+        .as_ref()
+        .ok()
+        .and_then(|client| atoms_lean(client, &client.workspace()).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|atom| atom["id"].as_str().map(str::to_string))
+        .collect();
+    let pack_ids = ids.clone();
+    for imported in memory_port::import_row_ids() {
+        if !ids.iter().any(|id| id == &imported) {
+            ids.push(imported);
+        }
+    }
+    let resolved = if trimmed.len() < 32 {
+        resolve_forget_id(trimmed, &ids)?
     } else {
-        trimmed
+        trimmed.to_string()
     };
+    if let Some(retired) = memory_port::retire_imported(&resolved, why)? {
+        if let Ok(client) = &packed {
+            let workspace = client.workspace();
+            let mut targets = Vec::new();
+            if pack_ids.iter().any(|id| id == &resolved) {
+                targets.push(resolved.clone());
+            }
+            if let Some(pack_id) = retired.pack_id.filter(|pack_id| pack_id != &resolved) {
+                targets.push(pack_id);
+            }
+            for target in targets {
+                if let Err(err) = client.delete_atom(&workspace, &target, why) {
+                    if !err.to_string().contains("no current atom") {
+                        return Err(err).with_context(|| {
+                            format!("forget: POST /v1/atoms/delete failed for {target}")
+                        });
+                    }
+                }
+            }
+        }
+        return Ok(retired.body);
+    }
+    let client = packed?;
+    let workspace = client.workspace();
     client
-        .delete_atom(&workspace, trimmed, why)
-        .with_context(|| format!("forget: POST /v1/atoms/delete failed for {trimmed}"))
+        .delete_atom(&workspace, &resolved, why)
+        .with_context(|| format!("forget: POST /v1/atoms/delete failed for {resolved}"))
 }
 
 /// One row of the influence graph: `from` listens to `to` with `weight`.
@@ -28972,6 +29004,42 @@ pub fn resolve_short_id(verb: &str, input: &str, ids: &[String]) -> Result<Strin
         [one] => Ok((*one).clone()),
         many => bail!(
             "{verb}: {input} starts {} ids ({}); type more of it",
+            many.len(),
+            many.iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// [`resolve_short_id`] plus the content hash of an imported id.
+///
+/// An import's id is `local:<import>:<index>:<hash>`. Search prints that
+/// hash's head as the short id. The head does not start the full id, so a
+/// prefix match leaves it unresolved and the pack is asked for a current
+/// atom it does not keep under that head.
+fn resolve_forget_id(input: &str, ids: &[String]) -> Result<String> {
+    let input = input.trim();
+    if input.len() < 6 || ids.iter().any(|id| id == input) {
+        return Ok(input.to_string());
+    }
+    let mut hits: Vec<&String> = ids
+        .iter()
+        .filter(|id| {
+            id.starts_with(input)
+                || id
+                    .rsplit_once(':')
+                    .is_some_and(|(_, tail)| !tail.is_empty() && tail.starts_with(input))
+        })
+        .collect();
+    hits.sort();
+    hits.dedup();
+    match hits.as_slice() {
+        [] => Ok(input.to_string()),
+        [one] => Ok((*one).clone()),
+        many => bail!(
+            "forget: {input} starts {} ids ({}); type more of it",
             many.len(),
             many.iter()
                 .map(|s| s.as_str())
@@ -70468,6 +70536,212 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn forget_refuses_an_empty_id() {
         let err = packset_forget("   ", None).unwrap_err();
         assert!(err.to_string().contains("atom id is required"), "{err}");
+    }
+
+    /// An imported row is current for search and absent from the pack's
+    /// current set. Forget retires it by the hash's short id and by the
+    /// full `local:` id. The line stays. The tracker is not asked.
+    #[test]
+    fn an_imported_atom_is_forgotten_by_short_id_and_by_full_id() {
+        let _env = env_guard();
+        let home = tempfile::tempdir().unwrap();
+        let tracker = home.path().join("tracker");
+        std::fs::create_dir_all(&tracker).unwrap();
+        let bin = home.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let vissue_log = home.path().join("vissue.log");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\necho \"issue $2 not found\" >&2\nexit 1\n",
+            vissue_log.display()
+        );
+        let vissue = bin.join("vissue");
+        std::fs::write(&vissue, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&vissue, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths([
+            bin.as_path(),
+            std::path::Path::new("/usr/bin"),
+            std::path::Path::new("/bin"),
+        ])
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut socket) = stream else { break };
+                let req = read_http(&mut socket);
+                let (status, payload) = if req.starts_with("POST /v1/atoms/delete")
+                    || req.contains("\nPOST /v1/atoms/delete")
+                {
+                    ("400 Bad Request", r#"{"error":"no current atom imported"}"#)
+                } else if req.starts_with("POST ") {
+                    ("400 Bad Request", r#"{"error":"refused"}"#)
+                } else {
+                    ("200 OK", r#"{"atoms":[]}"#)
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = std::io::Write::write_all(&mut socket, resp.as_bytes());
+            }
+        });
+        let pack_home = home.path().join("pack");
+        std::fs::create_dir_all(&pack_home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
+            std::env::set_var("XDG_STATE_HOME", home.path().join(".local/state"));
+            std::env::set_var("XDG_DATA_HOME", home.path().join(".local/share"));
+            std::env::set_var("VISSUE_ROOT", &tracker);
+            std::env::set_var("LJOS_SEAT", "owner");
+            std::env::set_var("PACKSET_URL", format!("http://{addr}"));
+            std::env::set_var("PACKSET_HOME", &pack_home);
+            std::env::set_var("PATH", &path);
+            std::env::remove_var("PACKSET_TOKEN");
+            std::env::remove_var("PACKSET_TOKEN_FILE");
+            std::env::remove_var("PACKSET_WORKSPACE");
+        }
+        let kiln = "The kiln fires at dusk on the north bench.";
+        let glaze = "The glaze crazes when the shelf cools too fast.";
+        let file = home.path().join("mem.jsonl");
+        let mut body = String::new();
+        body.push_str(
+            &serde_json::json!({
+                "format": "ljos-memory-1",
+                "record": "export",
+                "machine": "grok-bot-vm-428302341",
+                "seat": "dseams-paper",
+                "exported_at": "2026-03-01T15:00:00Z",
+            })
+            .to_string(),
+        );
+        body.push('\n');
+        for (text, source) in [(kiln, "src-kiln"), (glaze, "src-glaze")] {
+            body.push_str(
+                &serde_json::json!({
+                    "format": "ljos-memory-1",
+                    "kind": "lesson",
+                    "text": text,
+                    "origin": "agent-derived",
+                    "atom_id": source,
+                    "exported_at": "2026-03-01T15:00:00Z",
+                    "source": {"machine": "grok-bot-vm-428302341", "seat": "dseams-paper"},
+                })
+                .to_string(),
+            );
+            body.push('\n');
+        }
+        std::fs::write(&file, body).unwrap();
+        let imported = memory_port::import_cmd(&file, None, None, None).unwrap();
+        assert!(imported.contains("imported "), "{imported}");
+        let index = import_index(&tracker);
+        let rows = index_rows(&index);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let kiln_row = rows.iter().find(|row| row.1.contains("kiln")).unwrap();
+        let glaze_row = rows.iter().find(|row| row.1.contains("glaze")).unwrap();
+        let short: String = kiln_row
+            .0
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .chars()
+            .take(8)
+            .collect();
+        assert_eq!(short.len(), 8, "{short}");
+        assert!(!kiln_row.0.starts_with(&short), "{kiln_row:?}");
+        let mut hits = Vec::new();
+        memory_port::merge_cli(
+            &mut hits,
+            "kiln",
+            10,
+            &memory_port::SourceFilter::default(),
+            false,
+        );
+        assert!(
+            hits.iter()
+                .any(|hit| hit.id.as_deref() == Some(kiln_row.0.as_str())),
+            "search missed the import: {hits:?}"
+        );
+        let calls_before = std::fs::read_to_string(&vissue_log).unwrap_or_default();
+        let forgotten = packset_forget(&short, None).unwrap();
+        let calls_after = std::fs::read_to_string(&vissue_log).unwrap_or_default();
+        assert_eq!(
+            calls_before, calls_after,
+            "forget asked vissue:\n{calls_after}"
+        );
+        assert_eq!(forgotten["id"], kiln_row.0);
+        assert_eq!(forgotten["tombstone"], true);
+        assert!(forgotten["text"].as_str().unwrap().contains("kiln"));
+        let said = atom_out(&forgotten, false).unwrap();
+        assert!(!said.contains("not found"), "{said}");
+        assert!(!said.contains("issue "), "{said}");
+        hits.clear();
+        memory_port::merge_cli(
+            &mut hits,
+            "kiln",
+            10,
+            &memory_port::SourceFilter::default(),
+            false,
+        );
+        assert!(
+            hits.is_empty(),
+            "a retired import stayed in search: {hits:?}"
+        );
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "other");
+        }
+        let forgotten = packset_forget(&glaze_row.0, None).unwrap();
+        let calls_full = std::fs::read_to_string(&vissue_log).unwrap_or_default();
+        assert_eq!(
+            calls_after, calls_full,
+            "forget asked vissue:\n{calls_full}"
+        );
+        assert_eq!(forgotten["id"], glaze_row.0);
+        assert_eq!(forgotten["tombstone"], true);
+        assert!(!format!("{forgotten}").contains("not found"));
+        let stored = std::fs::read_to_string(&index).unwrap();
+        assert!(stored.contains(kiln), "{stored}");
+        assert!(stored.contains(glaze), "{stored}");
+        let rows = index_rows(&index);
+        assert!(rows.iter().all(|row| row.2), "a row was erased: {rows:?}");
+    }
+
+    fn import_index(tracker: &std::path::Path) -> std::path::PathBuf {
+        let root = tracker.join(".ljos").join("memory").join("imports");
+        let mut found = Vec::new();
+        for seat in std::fs::read_dir(&root).unwrap() {
+            let seat = seat.unwrap().path();
+            for slot in std::fs::read_dir(&seat).unwrap() {
+                let index = slot.unwrap().path().join("index.jsonl");
+                if index.is_file() {
+                    found.push(index);
+                }
+            }
+        }
+        assert_eq!(found.len(), 1, "{found:?}");
+        found.pop().unwrap()
+    }
+
+    fn index_rows(index: &std::path::Path) -> Vec<(String, String, bool)> {
+        std::fs::read_to_string(index)
+            .unwrap()
+            .lines()
+            .filter_map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).ok()?;
+                Some((
+                    value["id"].as_str().unwrap_or("").to_string(),
+                    value["text"].as_str().unwrap_or("").to_string(),
+                    value["retired"].as_bool().unwrap_or(false)
+                        || value["labels"]
+                            .as_array()
+                            .is_some_and(|labels| labels.iter().any(|label| label == "retired")),
+                ))
+            })
+            .collect()
     }
 
     /// A fake tracker on PATH: `show` answers as told, `claim` logs its
