@@ -1,6 +1,7 @@
 //! `ljos file` with no `--parent` says where the ticket went.
 //! A hold is the parent, and stderr names it. With no hold and no `-p`,
-//! the project is the `prefix=` line of `vissue identity`.
+//! the project is the `prefix=` line of `vissue identity`. With no prefix
+//! either, the ticket goes in Software. Nothing is asked.
 
 ljos_test_boot::harness!();
 use std::os::unix::fs::PermissionsExt;
@@ -145,14 +146,17 @@ fn a_checkout_prefix_is_the_project_when_nothing_is_held() {
 }
 
 #[test]
-fn a_checkout_with_no_prefix_still_asks_for_a_project() {
+fn a_checkout_with_no_prefix_files_in_software() {
     let seat = Seat::new("'vissue test' 'root=/tmp/tracker'");
     let out = seat.file(&["x"]);
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "{err}");
+    assert!(out.status.success(), "{err}");
+    let creates = seat.creates();
+    assert_eq!(creates.len(), 1, "{creates:?}");
     assert!(
-        err.contains("no project: name one with -p, or a parent with --parent"),
-        "{err}"
+        creates[0].starts_with("vissue create -p Software "),
+        "{creates:?}"
     );
-    assert!(seat.creates().is_empty(), "{:?}", seat.creates());
+    assert!(err.contains("filed in Software"), "{err}");
+    assert!(!err.contains('?'), "file asked a question:\n{err}");
 }

@@ -10184,10 +10184,40 @@ fn abbreviation_match(text: &str, cue: &str) -> bool {
 /// parts its tokenizer would otherwise keep joined. A claim can then match
 /// `oauthCallbackUrl` through `oauth callback url`, or a phrase through its
 /// short form.
+/// Other names of a tool or a concept the cue already names.
+///
+/// `dependency` is how a task asks for the `pnpm` rule, and `query` is how
+/// it asks for the Postgres rule. Secret words and `main` are not expanded:
+/// one of those in a sentence is not a request for every sibling.
+fn alias_query_words(cue: &str) -> Vec<String> {
+    let have = pack_words(cue);
+    let mut extra = Vec::new();
+    for group in CUE_ALIASES {
+        if matches!(group.first().copied(), Some("secret" | "trunk")) {
+            continue;
+        }
+        let named = group
+            .iter()
+            .any(|word| have.contains(*word) || have.contains(&singular(word)));
+        if !named {
+            continue;
+        }
+        for word in *group {
+            if !have.contains(*word) {
+                extra.push((*word).to_string());
+            }
+        }
+    }
+    extra.sort_unstable();
+    extra.dedup();
+    extra
+}
+
 fn recall_query(cue: &str) -> String {
     let have = pack_words(cue);
     let mut extra = prompt_words(cue).to_vec();
     extra.extend_from_slice(&phrase_acronyms(cue));
+    extra.extend(alias_query_words(cue));
     extra.retain(|token| !have.contains(token));
     extra.sort_unstable();
     extra.dedup();
@@ -10964,16 +10994,71 @@ fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
 /// quartiles equal the median.
 pub const POOL_PER_SHOWN: usize = 4;
 
+/// The encoder's first hit, stamped on the in-memory row by
+/// [`search_ranked`]. It is not stored on the atom.
+fn semantic_pin(hit: &Hit) -> bool {
+    hit.entities.iter().any(|tag| tag == "semantic:1")
+}
+
+/// How many alias groups `text` and `cue` both name. A task that says
+/// `dependency` names the `pnpm` lesson, and that match outranks a row
+/// that only shares an ordinary word.
+fn alias_overlap(text: &str, cue: &str) -> u8 {
+    let have = cue_terms(text, true);
+    cue_terms(cue, false)
+        .iter()
+        .filter(|word| word.starts_with("alias:") && have.binary_search(word).is_ok())
+        .count() as u8
+}
+
+/// Alias groups where the cue and the lesson name different members.
+/// "this query" against a Postgres lesson is that bridge. A lesson that
+/// repeats the cue's own word is not.
+fn alias_bridge(text: &str, cue: &str) -> u8 {
+    let cue_words = pack_words(cue);
+    let text_words = pack_words(text);
+    let mut bridged = 0u8;
+    for group in CUE_ALIASES {
+        if matches!(group.first().copied(), Some("secret" | "trunk")) {
+            continue;
+        }
+        let named = |words: &std::collections::HashSet<String>, word: &str| {
+            words.contains(word) || words.contains(&singular(word))
+        };
+        let cue_named: Vec<&str> = group
+            .iter()
+            .copied()
+            .filter(|word| named(&cue_words, word))
+            .collect();
+        if cue_named.is_empty() {
+            continue;
+        }
+        let crosses = group.iter().copied().any(|word| {
+            named(&text_words, word)
+                && !cue_named
+                    .iter()
+                    .any(|cue| *cue == word || singular(cue) == singular(word))
+        });
+        if crosses {
+            bridged = bridged.saturating_add(1);
+        }
+    }
+    bridged
+}
+
 /// Indices of `rows`, most relevant to `cue` first. This seat's memories
-/// and the person's rules come before another seat's. Within a seat the
-/// lexical match grades how much of the cue each row covers, then BM25
-/// among rows that cover as much, then the fused score, which carries
-/// age, only to break an exact tie. Another seat's row stays in the list.
+/// and the person's rules come before another seat's. A hit the encoder
+/// ranked alone comes next, then a lesson that names more of the cue's
+/// concepts, then the lexical match, then BM25, then the fused score,
+/// which carries age, only to break an exact tie. Another seat's row
+/// stays in the list.
 fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<usize> {
     let texts: Vec<&str> = rows.iter().map(|h| h.borrow().text.as_str()).collect();
     let docs: Vec<Tokens> = texts.iter().map(|text| match_token_stream(text)).collect();
     let bm25 = bm25_for_cue(&docs, cue);
     let lexical = lexical_match_scores(&texts, cue);
+    let alias: Vec<u8> = texts.iter().map(|text| alias_overlap(text, cue)).collect();
+    let bridge: Vec<u8> = texts.iter().map(|text| alias_bridge(text, cue)).collect();
     let keys: Vec<(f64, f64, f64)> = rows
         .iter()
         .enumerate()
@@ -10985,6 +11070,12 @@ fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<us
         let (ka, kb) = (keys[a], keys[b]);
         u8::from(foreign_memory(rows[a].borrow(), &mine))
             .cmp(&u8::from(foreign_memory(rows[b].borrow(), &mine)))
+            .then(
+                u8::from(!semantic_pin(rows[a].borrow()))
+                    .cmp(&u8::from(!semantic_pin(rows[b].borrow()))),
+            )
+            .then(bridge[b].cmp(&bridge[a]))
+            .then(alias[b].cmp(&alias[a]))
             .then(kb.0.total_cmp(&ka.0))
             .then(kb.1.total_cmp(&ka.1))
             .then(kb.2.total_cmp(&ka.2))
@@ -11668,6 +11759,40 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
             .map(|h| (h, DenseSignal::default()))
             .collect()),
     }
+}
+
+/// Hits for a plain-language task. The encoder's first hit, when it clears
+/// [`DENSE_ALONE_AT`], is marked so a later sort keeps it ahead of a row
+/// that only shares a word. The caller ranks and cuts.
+pub fn search_ranked(query: &str, limit: u32) -> Result<Vec<Hit>> {
+    let q = query.trim();
+    if q.is_empty() {
+        bail!("search: empty query");
+    }
+    // No token means the search reads stored atoms and does not ask the
+    // writer. A writer that is not there is still a down pack: one error,
+    // not an empty answer.
+    if let Ok(client) = pack() {
+        if seat_has_no_token(&client) {
+            if let Err(err) = client.health() {
+                let err = anyhow::Error::from(err);
+                if pack_unreachable(&err) {
+                    return Err(err.context("search: GET /v1/search failed"));
+                }
+            }
+        }
+    }
+    let pairs = search_with_signals(q, limit)?;
+    let mut hits = Vec::with_capacity(pairs.len());
+    for (mut hit, signal) in pairs {
+        if signal.rank.is_some_and(|rank| rank <= DENSE_ALONE_RANK)
+            && signal.cosine.is_some_and(|cosine| cosine >= DENSE_ALONE_AT)
+        {
+            hit.entities.push("semantic:1".into());
+        }
+        hits.push(hit);
+    }
+    Ok(fold_verbatim(q, hits))
 }
 
 /// The local path reranks when the judge did not answer.
@@ -14106,6 +14231,29 @@ fn search_relevant(
         if let Some(hits) = body["hits"].as_array_mut() {
             hits.extend(extra);
         }
+    } else {
+        // The writer ranked by relevance and left room. A lesson that
+        // names the cue's concept shares no token with it (`pnpm` against
+        // "add the lodash dependency"), so the writer's cut can miss it.
+        let mut extra = Vec::new();
+        for atom in relevant_atoms(client, cue, limit as usize) {
+            if !names_the_subject(atom_text(&atom), cue) {
+                continue;
+            }
+            let id = atom["id"].as_str();
+            let text = atom["text"].as_str();
+            let present = body["hits"].as_array().is_some_and(|hits| {
+                hits.iter().any(|hit| {
+                    (id.is_some() && hit["id"].as_str() == id) || hit["text"].as_str() == text
+                })
+            });
+            if !present {
+                extra.push(atom);
+            }
+        }
+        if let Some(hits) = body["hits"].as_array_mut() {
+            hits.extend(extra);
+        }
     }
     if open {
         redact_hit_provenance(&mut body);
@@ -14471,7 +14619,11 @@ fn word_ranked(client: &PacksetClient, cue: &str, limit: usize) -> Vec<(Value, f
     let texts: Vec<&str> = atoms.iter().map(atom_text).collect();
     let scores = lexical_match_scores(&texts, cue);
     let mut order: Vec<usize> = (0..atoms.len())
-        .filter(|&i| scores[i] > 0.0 && pack_word_seq(texts[i]).any(|w| asked.contains(&w)))
+        .filter(|&i| {
+            scores[i] > 0.0
+                && (names_the_subject(texts[i], cue)
+                    || pack_word_seq(texts[i]).any(|w| asked.contains(&w)))
+        })
         .collect();
     order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
     order.truncate(limit);
@@ -14594,20 +14746,43 @@ fn default_search_key(hit: &Hit, mine: &str) -> (bool, bool) {
     (foreign_memory(hit, mine), !preferred_search_kind(hit))
 }
 
-/// Drop notes, attempts, logs and routine status lines, keep a hit only
-/// when it shares a topic word with `query`, and put this seat's lessons
-/// and preferences first. No topic word means no hits: an unrelated row
-/// is not an answer. `attempts` keeps a stored failed command when the
-/// caller asked for one and it still names the topic.
+/// Whether `hit` is about `query`. A shared topic word, a concept the
+/// alias groups treat as the same thing, or the encoder's first hit.
+fn hit_bears_on(hit: &Hit, topics: &[String], query: &str) -> bool {
+    semantic_pin(hit) || names_the_subject(&hit.text, query) || hit_has_topic(hit, topics)
+}
+
+/// Drop notes, attempts, logs and routine status lines, and keep a hit
+/// that bears on `query`. This seat's lessons and preferences come first,
+/// then a concept match, then how much of the cue the row covers. The
+/// fused score, which carries age, only breaks a tie. No bearing means
+/// no hits: an unrelated row is not an answer. `attempts` keeps a stored
+/// failed command when the caller asked for one and it still bears on
+/// the topic.
 pub fn refine_default_hits(hits: &mut Vec<Hit>, query: &str, attempts: bool) {
     let topics = search_topics(query);
-    hits.retain(|hit| !search_skip_kind(hit, attempts) && hit_has_topic(hit, &topics));
+    hits.retain(|hit| !search_skip_kind(hit, attempts) && hit_bears_on(hit, &topics, query));
+    let texts: Vec<&str> = hits.iter().map(|hit| hit.text.as_str()).collect();
+    let lexical = lexical_match_scores(&texts, query);
+    let alias: Vec<u8> = texts
+        .iter()
+        .map(|text| alias_overlap(text, query))
+        .collect();
+    let bridge: Vec<u8> = texts.iter().map(|text| alias_bridge(text, query)).collect();
     let mine = seat_name();
-    hits.sort_by(|a, b| {
-        default_search_key(a, &mine)
-            .cmp(&default_search_key(b, &mine))
-            .then(b.score.total_cmp(&a.score))
+    let mut order: Vec<usize> = (0..hits.len()).collect();
+    order.sort_by(|&a, &b| {
+        default_search_key(&hits[a], &mine)
+            .cmp(&default_search_key(&hits[b], &mine))
+            .then(u8::from(!semantic_pin(&hits[a])).cmp(&u8::from(!semantic_pin(&hits[b]))))
+            .then(bridge[b].cmp(&bridge[a]))
+            .then(alias[b].cmp(&alias[a]))
+            .then(lexical[b].total_cmp(&lexical[a]))
+            .then(hits[b].score.total_cmp(&hits[a].score))
+            .then(a.cmp(&b))
     });
+    let mut taken: Vec<Option<Hit>> = hits.drain(..).map(Some).collect();
+    hits.extend(order.into_iter().filter_map(|i| taken[i].take()));
 }
 
 /// Whether `err` is a pack that refused the connection. The line search
@@ -19554,8 +19729,38 @@ pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> R
 /// Why a session-end note is not posted when this conversation has no
 /// sitting. Packset keeps a `note` only on a ticket. It has no form for
 /// an unverified note that names none, so the write is not attempted.
-pub(crate) const NOTE_WITHOUT_TICKET: &str =
+pub const NOTE_WITHOUT_TICKET: &str =
     "this conversation holds no sitting, and packset keeps a note only on a ticket";
+
+/// Store `text` as an unattached note and return the one label line.
+/// A note with no ticket is kept. It is not a refusal and it is not filed.
+pub fn note_unattached_line(text: &str) -> String {
+    memory_port::keep_unattached(text);
+    format!("label unattached-note: {NOTE_WITHOUT_TICKET}\n")
+}
+
+/// One plain line when a pack or a habitat is down or missing.
+/// `None` when `err` is some other failure.
+#[must_use]
+pub fn plain_server_fault(err: &anyhow::Error) -> Option<String> {
+    let full = format!("{err:#}").to_ascii_lowercase();
+    if full.contains("connection refused")
+        || full.contains("connect error")
+        || full.contains("not answering")
+        || full.contains("no pack writer")
+    {
+        return Some("packsetd is unreachable (connection refused)".to_string());
+    }
+    if full.contains("not on path") {
+        let line = err.to_string();
+        let line = line
+            .lines()
+            .next()
+            .unwrap_or("a required program is not on PATH");
+        return Some(line.trim().to_string());
+    }
+    None
+}
 
 /// Write an agent-derived working note with provenance tags. Unlike
 /// [`packset_write_agent_tagged`], the atom is a `note`, not a lesson, so
@@ -35411,7 +35616,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     let pool = u32::try_from(RELATED_MEMORY_CAP * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let mut related = Vec::new();
     for cue in &cues {
-        match ask(&|| packset_search_relevant(cue, pool)) {
+        match ask(&|| search_ranked(cue, pool)) {
             Ok(hits) => related.extend(hits),
             Err(err) if pack_settled(&err) => return Err(err),
             Err(e) if own.is_empty() && related.is_empty() => return Ok(recall_down(&e)),
@@ -50614,6 +50819,77 @@ mod tests {
         ] {
             assert!(!names_the_subject(pnpm, cue), "{cue}");
             assert!(!names_the_subject(pg, cue), "{cue}");
+        }
+    }
+
+    fn task_hit(text: &str, score: f64) -> Hit {
+        Hit {
+            id: Some(format!("id-{text}")),
+            text: text.into(),
+            score,
+            kind: "lesson".into(),
+            ts: None,
+            entities: vec!["horizon:standing".into()],
+            ballots: Some(2),
+            of: Some(2),
+            rerank_score: None,
+            labels: Vec::new(),
+        }
+    }
+
+    /// A plain-language task does not have to repeat the lesson's words.
+    /// The package-manager lesson leads "add the lodash dependency", and
+    /// the Postgres lesson is kept for a query that never says Postgres.
+    #[test]
+    fn a_plain_task_ranks_the_lesson_that_names_the_concept() {
+        let pnpm = "Use pnpm instead of npm for every JavaScript package install in this repo";
+        let slow = "The web app build is slow on the laptop today";
+        let kiln = "The kiln fires at dusk on the north bench";
+        let mut hits = vec![
+            task_hit(slow, 0.95),
+            task_hit(kiln, 0.9),
+            task_hit(pnpm, 0.1),
+        ];
+        refine_default_hits(&mut hits, "add the lodash dependency to the web app", false);
+        assert!(
+            hits.first().is_some_and(|hit| hit.text.contains("pnpm")),
+            "the package lesson was not first: {hits:?}"
+        );
+        assert!(
+            hits.iter().all(|hit| !hit.text.contains("kiln")),
+            "an unrelated lesson survived: {hits:?}"
+        );
+
+        let pg = "Our staging Postgres is version 15; do not use features from Postgres 16";
+        let planner = "The query planner is slow on the laptop";
+        let mut hits = vec![
+            task_hit(kiln, 0.99),
+            task_hit(planner, 0.8),
+            task_hit(pg, 0.05),
+        ];
+        refine_default_hits(
+            &mut hits,
+            "can I use MERGE RETURNING in this database query",
+            false,
+        );
+        assert!(
+            hits.iter().any(|hit| hit.text.contains("Postgres")),
+            "the database lesson was dropped: {hits:?}"
+        );
+        assert!(
+            hits.iter().all(|hit| !hit.text.contains("kiln")),
+            "an unrelated lesson survived: {hits:?}"
+        );
+        let pg_at = hits
+            .iter()
+            .position(|hit| hit.text.contains("Postgres"))
+            .unwrap();
+        let planner_at = hits.iter().position(|hit| hit.text.contains("planner"));
+        if let Some(planner_at) = planner_at {
+            assert!(
+                pg_at <= planner_at,
+                "the database lesson ranked behind a word overlap: {hits:?}"
+            );
         }
     }
 
@@ -69481,6 +69757,152 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             .map(String::as_str)
             .unwrap_or("");
         assert!(line.to_ascii_lowercase().contains("coi"), "{lines:?}");
+    }
+
+    /// A task that says "dependency" asks the pack for the package-manager
+    /// names, so the pnpm lesson is in the candidate pool.
+    #[test]
+    fn a_plain_task_asks_for_the_concepts_other_names() {
+        let _g = env_guard();
+        let (url, log) = serve_http(|_| (200, r#"{"hits":[]}"#.into()));
+        let _url = PackUrl::set(&url);
+        search_ranked("add the lodash dependency to the web app", 5).unwrap();
+        let lines = log.lock().unwrap().clone();
+        let line = lines
+            .iter()
+            .find(|line| line.contains("/v1/search"))
+            .map(String::as_str)
+            .unwrap_or("");
+        let lower = line.to_ascii_lowercase();
+        assert!(lower.contains("pnpm"), "{lines:?}");
+        assert!(lower.contains("dependency"), "{lines:?}");
+    }
+
+    /// Export, import into an empty pack, export again, import that file.
+    /// Both lessons come back once.
+    #[test]
+    fn a_fresh_pack_round_trip_keeps_each_lesson_once() {
+        let _g = env_guard();
+        drop_listing_cache();
+        forget_atom_listings();
+        let tracker = tempfile::tempdir().unwrap();
+        let stored = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let posts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let slot = Arc::clone(&stored);
+        let posted = Arc::clone(&posts);
+        let (url, _) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.contains("POST /v1/atoms") {
+                let body = req
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body)
+                    .unwrap_or("");
+                if let Ok(atom) = serde_json::from_str::<Value>(body) {
+                    posted.lock().unwrap().push(format!(
+                        "{} {}",
+                        atom["kind"].as_str().unwrap_or("?"),
+                        atom["text"].as_str().unwrap_or("?")
+                    ));
+                }
+                let body = req
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body)
+                    .unwrap_or("");
+                let Ok(mut atom) = serde_json::from_str::<serde_json::Map<String, Value>>(body)
+                else {
+                    return (400, r#"{"error":"bad atom"}"#.into());
+                };
+                if let Err(why) = packset_core::record::validate(&mut atom) {
+                    return (
+                        400,
+                        serde_json::json!({ "error": why.to_string() }).to_string(),
+                    );
+                }
+                let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
+                let kind = atom.get("kind").and_then(Value::as_str).unwrap_or("");
+                let mut held = slot.lock().unwrap();
+                if let Some(existing) = held.iter().find(|have| {
+                    have["text"].as_str() == Some(text) && have["kind"].as_str() == Some(kind)
+                }) {
+                    return (200, existing.to_string());
+                }
+                atom.insert(
+                    "id".to_string(),
+                    Value::String(format!("atom-{}", held.len() + 1)),
+                );
+                let value = Value::Object(atom);
+                held.push(value.clone());
+                return (200, value.to_string());
+            }
+            if line.contains("GET /v1/atoms") {
+                let atoms = slot.lock().unwrap().clone();
+                return (200, serde_json::json!({ "atoms": atoms }).to_string());
+            }
+            (200, "{}".into())
+        });
+        let _url = PackUrl::set(&url);
+        std::env::set_var("VISSUE_ROOT", tracker.path());
+        std::env::set_var("LJOS_TRACKER_GIT", "off");
+        let kiln = "The kiln fires at dusk on the north bench.";
+        let bench = "Use the north bench for the kiln.";
+        let place = memory_port::Place::current();
+        let first = tracker.path().join("first.jsonl");
+        let n = memory_port::export_atoms(
+            &place,
+            &first,
+            &[
+                serde_json::json!({
+                    "id": "kiln-1",
+                    "kind": "lesson",
+                    "text": kiln,
+                    "origin": "agent-derived",
+                    "entities": ["seat:inky"],
+                    "source": {"seat": "inky", "basis": "agent"},
+                }),
+                serde_json::json!({
+                    "id": "bench-1",
+                    "kind": "preference",
+                    "text": bench,
+                    "origin": "user-stated",
+                    "entities": ["seat:inky"],
+                    "source": {"seat": "inky", "basis": "person"},
+                }),
+            ],
+        )
+        .unwrap();
+        assert_eq!(n, 2);
+        memory_port::import_cmd(&first, None, None, None).unwrap();
+        assert_eq!(
+            stored.lock().unwrap().len(),
+            2,
+            "{:?}",
+            stored.lock().unwrap()
+        );
+        drop_listing_cache();
+        forget_atom_listings();
+        let second = tracker.path().join("second.jsonl");
+        memory_port::export_cmd(&second, None).unwrap();
+        let again = std::fs::read_to_string(&second).unwrap();
+        assert_eq!(again.matches(kiln).count(), 1, "{again}");
+        assert_eq!(again.matches(bench).count(), 1, "{again}");
+        drop_listing_cache();
+        forget_atom_listings();
+        memory_port::import_cmd(&second, None, None, None).unwrap();
+        let held = stored.lock().unwrap().clone();
+        assert_eq!(
+            posts.lock().unwrap().len(),
+            2,
+            "reimport posted again: {:?}\nfile:\n{again}\nstored: {:?}",
+            posts.lock().unwrap(),
+            stored.lock().unwrap()
+        );
+        assert_eq!(held.len(), 2, "reimport posted another copy: {held:?}");
+        let texts: Vec<&str> = held
+            .iter()
+            .filter_map(|atom| atom["text"].as_str())
+            .collect();
+        assert!(texts.contains(&kiln), "{texts:?}");
+        assert!(texts.contains(&bench), "{texts:?}");
     }
 
     /// The token [`PackUrl`] shows. A stub that holds a person's preference

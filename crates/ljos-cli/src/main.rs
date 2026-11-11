@@ -1901,6 +1901,11 @@ fn main() -> Result<()> {
             }
             std::process::exit(ljos_cli::PACK_BUSY_EXIT);
         }
+        if let Some(line) = ljos_cli::plain_server_fault(e) {
+            eprintln!("{line}");
+            let down = line.starts_with("packsetd is unreachable");
+            std::process::exit(if down { ljos_cli::PACK_BUSY_EXIT } else { 1 });
+        }
         // A gate whose hook fails answers allow in the runner's JSON with
         // the note that says why, and exits 0: a broken ljos blocks nothing.
         ljos_cli::answer_failed_gate(&format!("{e:#}"));
@@ -2541,26 +2546,34 @@ fn run_command() -> Result<()> {
             // snapshot is not that pack, so a busy writer stays a failure
             // there. A search of now ranks the snapshot by words instead.
             let dated = as_of.is_some();
-            let mut hits =
-                match packset_search_as_of(&join(&query), fetch, as_of.as_deref(), rerank) {
-                    Ok(hits) => hits,
-                    Err(err) if !dated && ljos_cli::is_deadline_miss(&err) => return Err(err),
-                    Err(err) if !dated && ljos_cli::is_read_shed(&err) => {
-                        eprintln!("{}", ljos_cli::PACK_READ_BUSY_LINE);
-                        eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
-                        ljos_cli::search_by_words(&join(&query), fetch)
-                    }
-                    Err(err) if !dated && ljos_cli::pack_unreachable(&err) => {
-                        eprintln!("packsetd is unreachable (connection refused)");
-                        std::process::exit(ljos_cli::PACK_BUSY_EXIT);
-                    }
-                    Err(err) if !dated && ljos_cli::pack_memory_down(&err) => {
-                        eprintln!("{}", ljos_cli::pack_busy_sentence());
-                        eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
-                        ljos_cli::search_by_words(&join(&query), fetch)
-                    }
-                    Err(err) => return Err(err),
-                };
+            let asked = join(&query);
+            // A search of now asks for relevance, so a plain-language task
+            // surfaces the lesson that names its concept. A dated search
+            // stays the pack as it stood, and `--rerank` keeps the
+            // cross-encoder.
+            let mut hits = match if !dated && !rerank {
+                ljos_cli::search_ranked(&asked, fetch)
+            } else {
+                packset_search_as_of(&asked, fetch, as_of.as_deref(), rerank)
+            } {
+                Ok(hits) => hits,
+                Err(err) if !dated && ljos_cli::is_deadline_miss(&err) => return Err(err),
+                Err(err) if !dated && ljos_cli::is_read_shed(&err) => {
+                    eprintln!("{}", ljos_cli::PACK_READ_BUSY_LINE);
+                    eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
+                    ljos_cli::search_by_words(&asked, fetch)
+                }
+                Err(err) if !dated && ljos_cli::pack_unreachable(&err) => {
+                    eprintln!("packsetd is unreachable (connection refused)");
+                    std::process::exit(ljos_cli::PACK_BUSY_EXIT);
+                }
+                Err(err) if !dated && ljos_cli::pack_memory_down(&err) => {
+                    eprintln!("{}", ljos_cli::pack_busy_sentence());
+                    eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
+                    ljos_cli::search_by_words(&asked, fetch)
+                }
+                Err(err) => return Err(err),
+            };
             if let Some(day) = day {
                 hits.retain(|h| ljos_cli::valid_on(&h.entities, &day));
             }
@@ -2576,13 +2589,13 @@ fn run_command() -> Result<()> {
             if !dated || filter.active() {
                 ljos_cli::memory_port::merge_cli(
                     &mut hits,
-                    &join(&query),
+                    &asked,
                     limit as usize,
                     &filter,
                     attempts,
                 );
             }
-            ljos_cli::refine_default_hits(&mut hits, &join(&query), attempts);
+            ljos_cli::refine_default_hits(&mut hits, &asked, attempts);
             hits.truncate(limit as usize);
             ljos_cli::note_lookups(&hits);
             let ranking = ljos_cli::ranking_now();
@@ -2740,7 +2753,7 @@ fn run_command() -> Result<()> {
             }
             // No hold, no `--parent` and no `-p`: the `prefix=` line
             // `vissue identity` prints for this checkout. `--top` still
-            // needs a named project. No prefix keeps today's error.
+            // needs a named project. No prefix files in Software.
             if project.is_none() && no_hold && !top && !named_parent && !named_project {
                 let prefix = run_captured("vissue", &["identity"]).ok().and_then(|said| {
                     said.stdout.lines().find_map(|line| {
@@ -2753,8 +2766,18 @@ fn run_command() -> Result<()> {
                     project = Some(prefix);
                 }
             }
-            let Some(project) = project else {
-                anyhow::bail!("no project: name one with -p, or a parent with --parent");
+            let defaulted = project.is_none() && !top;
+            let project = match project {
+                Some(project) => project,
+                // `--top` still needs a project the caller named. A plain
+                // file, with no checkout prefix and no hold, uses the
+                // seat's default project. Nothing is asked. The line is
+                // printed once the ticket exists, so a missing tracker
+                // stays one error line.
+                None if top => {
+                    anyhow::bail!("no project: name one with -p, or a parent with --parent");
+                }
+                None => "Software".to_string(),
             };
             let qd = match (quorum, deadline.as_deref()) {
                 (Some(n), Some(d)) => Some((n, d)),
@@ -2789,6 +2812,9 @@ fn run_command() -> Result<()> {
             // captures the id the docs name. The tracker's own line and
             // the commit line go to stderr. `--porcelain` is the same.
             if !id.is_empty() {
+                if defaulted {
+                    eprintln!("filed in Software, the default project");
+                }
                 ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
                 println!("{id}");
             }
@@ -2798,7 +2824,15 @@ fn run_command() -> Result<()> {
             print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
         }
         Cmd::Note { words } => {
-            let (issue, text, inferred) = note_target(&words)?;
+            let (issue, text, inferred) = match note_target(&words) {
+                Ok(found) => found,
+                Err(err) if err.to_string().contains("no issue is held") => {
+                    let text = words.join(" ");
+                    print!("{}", ljos_cli::note_unattached_line(&text));
+                    return Ok(());
+                }
+                Err(err) => return Err(err),
+            };
             let pending = ljos_cli::retry_pending_claim(&issue);
             if !pending.is_empty() {
                 print!("{pending}");

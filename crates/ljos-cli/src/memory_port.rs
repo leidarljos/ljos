@@ -743,8 +743,13 @@ pub fn export_atoms(place: &Place, out: &Path, atoms: &[Value]) -> Result<usize>
         let Some(row) = export_row(atom, place, &exported_at) else {
             continue;
         };
-        let key = row["content_sha256"].as_str().unwrap_or("").to_string()
-            + row["atom_id"].as_str().unwrap_or("");
+        // The same lesson posted again, or kept in the slot beside the
+        // pack, is one row. The id the pack minted is not part of the key.
+        let key = format!(
+            "{}\n{}",
+            row["kind"].as_str().unwrap_or(""),
+            normalize(row["text"].as_str().unwrap_or(""))
+        );
         if !seen.insert(key) {
             continue;
         }
@@ -1250,6 +1255,14 @@ fn atom_for_pack(row: &Row, workspace: &str) -> Value {
     } else {
         crate::admit::ORIGIN_PEER.to_string()
     };
+    // The importing seat owns the copy. The donor stays on the import
+    // record, so a fresh pack can export the lesson again.
+    let owner = crate::seat_name();
+    let owner = if owner.is_empty() {
+        row.seat.clone()
+    } else {
+        owner
+    };
     let mut source = json!({
         "imports": [{
             "input_sha256": row.import_id,
@@ -1262,7 +1275,7 @@ fn atom_for_pack(row: &Row, workspace: &str) -> Value {
             "origin": row.origin,
         }],
         "machine": row.machine,
-        "seat": row.seat,
+        "seat": owner,
     });
     if !row.basis.is_empty() {
         source["basis"] = Value::String(row.basis.clone());
@@ -1294,11 +1307,19 @@ fn writer_refused(err: &anyhow::Error) -> bool {
 /// Post `rows` into the pack. A row already posted, or one the file itself
 /// marked unsafe, is left as it is. Returns the refusals a writer that
 /// answered gave. A seat with no writer returns nothing.
+fn same_memory(atom: &Value, row: &Row) -> bool {
+    atom["kind"].as_str().unwrap_or("") == row.kind
+        && normalize(atom["text"].as_str().unwrap_or("")) == normalize(&row.text)
+}
+
 fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
     let _deadline = crate::pack_link::CommandDeadline::enter(crate::IMPORT_ADMISSION);
     let Ok(client) = crate::pack() else {
         return Ok(Vec::new());
     };
+    // A lesson already in this pack is not posted again. A second import
+    // of the same memories, even from a new file, stays one copy.
+    let mut held = crate::memories::live_atoms().unwrap_or_default();
     let mut refused = Vec::new();
     for row in rows {
         if row.text.trim().is_empty() {
@@ -1318,6 +1339,14 @@ fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
         if mark.is_file() {
             continue;
         }
+        if let Some(existing) = held.iter().find(|atom| same_memory(atom, row)) {
+            let id = existing["id"].as_str().unwrap_or("").to_string();
+            let _ = write_if_absent(
+                &mark,
+                &serde_json::to_vec(&json!({"pack_id": id, "row": row.id})).unwrap_or_default(),
+            );
+            continue;
+        }
         let atom = atom_for_pack(row, &client.workspace());
         match crate::admit::store_labelled(&client, atom) {
             Ok(posted) => {
@@ -1326,6 +1355,7 @@ fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
                     &mark,
                     &serde_json::to_vec(&json!({"pack_id": id, "row": row.id})).unwrap_or_default(),
                 );
+                held.push(posted);
             }
             Err(err) if crate::is_write_shed(&err) || crate::is_deadline_miss(&err) => {
                 return Err(err);
@@ -3031,6 +3061,28 @@ mod tests {
         assert!(temp_names(dir.path())
             .iter()
             .all(|name| !name.starts_with("slot.")));
+    }
+
+    #[test]
+    fn export_keeps_one_copy_of_the_same_lesson() {
+        let (dir, target) = place("dedup");
+        let out = dir.path().join("out.jsonl");
+        let kiln = "The kiln fires at dusk on the north bench.";
+        let bench = "Use the north bench for the kiln.";
+        let n = export_atoms(
+            &target,
+            &out,
+            &[
+                atom("aaa", &target.seat, kiln),
+                atom("bbb", &target.seat, kiln),
+                atom("ccc", &target.seat, bench),
+            ],
+        )
+        .unwrap();
+        assert_eq!(n, 2);
+        let body = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(body.matches(kiln).count(), 1, "{body}");
+        assert_eq!(body.matches(bench).count(), 1, "{body}");
     }
 
     #[test]

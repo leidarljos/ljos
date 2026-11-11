@@ -18,11 +18,11 @@ use ljos_cli::{
     island_entities, kind_label, learn_and_write, learn_reading, note_lookups, now_utc, on_path,
     other_seat, pack, packset_consolidate, packset_forget, packset_island_as, packset_search_as_of,
     panel_steps, parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory,
-    predictions_of, protocol_text, read_campaign, receive, release, remember_findings,
-    resolve_assignee, rows_about, run_captured, runner_pid, search_reading, seat_name,
-    settle_discount, sitting_gated, timeline, topic_words, tracker_show_json, trust_from_pack,
-    with_discount, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
-    CARD_NAMES, LEARN_BETA, POLICY_TCB,
+    predictions_of, protocol_text, read_campaign, receive, refine_default_hits, release,
+    remember_findings, resolve_assignee, rows_about, run_captured, runner_pid, search_ranked,
+    search_reading, seat_name, settle_discount, sitting_gated, timeline, topic_words,
+    tracker_show_json, trust_from_pack, with_discount, write_persona, write_prediction, write_rule,
+    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -1587,8 +1587,17 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<Json<SearchPage>, McpError> {
-        let hits =
-            packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false).map_err(refused)?;
+        let hits = if args
+            .as_of
+            .as_deref()
+            .is_some_and(|at| !at.trim().is_empty())
+        {
+            packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false).map_err(refused)?
+        } else {
+            let mut hits = search_ranked(&args.query, 10).map_err(refused)?;
+            refine_default_hits(&mut hits, &args.query, false);
+            hits
+        };
         note_lookups(&hits);
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
