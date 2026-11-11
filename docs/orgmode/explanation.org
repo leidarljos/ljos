@@ -2,7 +2,7 @@
 #+options: toc:nil num:nil
 
 # [[[cog import ljos_version as v; v.lines("This page describes ljos {version}.")]]]
-This page describes ljos 0.40.0.
+This page describes ljos 0.41.0.
 # [[[end]]]
 
 * One seat over the habitats

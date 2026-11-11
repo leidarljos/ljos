@@ -5,6 +5,55 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.41.0 (2026-11-11)
+
+### Features
+
+- `ljos --help` groups commands under Start, Daily, Tracker, Memory,
+  Coordination and Admin.
+  The commands a new seat needs come first.
+  Commands a runner or git calls, and other rarely typed ones, stay off
+  that list and still run.
+  `ljos help --all` lists every command.
+- `sh install.sh --no-embed` is the one-command install.
+  It fetches the release programs and checks each SHA-256.
+  It sets up the tracker and memory.
+  Search matches words, and the encoder is not installed.
+  `sh install.sh` with no flag still installs the encoder.
+
+### Fixes
+
+- A lesson proposal records the seat that filed it, and `ljos proposals` shows that seat.
+- A main conversation listed in `seats.toml` is that seat when `LJOS_SEAT` is unset.
+  An unresolved seat names the conversation id, and `seat-unresolved` and `seat-unlisted` exit 2.
+  Failed commands stay stored as attempts and are left out of `ljos search` unless `--attempts` is set.
+  A missing deed tells you to cite the `id=` line `deedar create` prints.
+  `ljos sitting` and `ljos recall` read the pack listing once per command.
+  A busy `ljos remember` tries the pack three times inside twenty seconds, queues the lesson, and exits 75.
+  Default `ljos search` keeps this seat's lessons and preferences that share a topic word.
+  A refused packsetd connection prints one line and exits 75.
+- A read does not create the note-queue directory or its lock. They appear when a lesson is queued.
+  A conversation record that names another seat stays filed under that conversation.
+- `ljos onboard --dry-run` says "would write" for each path.
+  It writes nothing.
+- `ljos remember` warns in one line when a sentence runs past the pack's word limit, and the line says to split that sentence into two.
+  The remember how-to states the limit of 29 words a sentence.
+- `ljos-mcp` does not take a seat from the Model Context Protocol client's name.
+  A saved seat record is filed under that conversation's id, so another conversation does not read it.
+  A conversation id with no seat is `seat-unresolved`.
+
+### Documentation
+
+- CITATION.cff names leiðarljós (ljos), Rohit Goswami, the Massachusetts Institute of Technology licence and
+  this version.
+- Old `howto.html` and `reference.html` section links open the page that section moved to.
+  The warm prompt hook median on 10,000 lessons is 139.1 ms, the figure in `prompt-hook.rows-10000.after`.
+  The docs build fails on an unresolved internal link or old section anchor.
+- The docs open with what ljos does and what it has measured.
+  A new page compares ljos with beads, Mem0, Letta, Zep, Basic Memory and git-bug.
+  The README leads with the measured results and a short comparison.
+
+
 ## 0.40.0 (2026-11-10)
 
 Develop's work since 0.38.0 that 0.39.0 did not ship. A guarded call still runs. `block-on-warning` does not block.
