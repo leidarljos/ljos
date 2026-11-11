@@ -116,6 +116,7 @@ fn only_a_named_seat_or_a_call_argument_names_the_seat() {
     let from_arg = ljos_cli::resolve_call_seat(Some("inky"));
     unsafe { std::env::set_var("LJOS_SEAT", "saddle") };
     let from_env = ljos_cli::resolve_call_seat(None);
+    let explicit = ljos_cli::resolve_call_seat(Some("inky"));
     unsafe {
         for (key, value) in saved {
             match value {
@@ -124,13 +125,12 @@ fn only_a_named_seat_or_a_call_argument_names_the_seat() {
             }
         }
     }
-    let missing = missing
-        .expect_err("a call with no seat was named")
-        .to_string();
+    let missing = missing.expect("a missing seat still resolves");
     assert!(
-        missing.contains("LJOS_SEAT") || missing.contains("pass seat"),
-        "{missing}"
+        missing.source.contains("no seat rule matched") || missing.seat.starts_with("unknown-"),
+        "{missing:?}"
     );
     assert_eq!(from_arg.expect("the call's seat").seat, "inky");
     assert_eq!(from_env.expect("LJOS_SEAT").seat, "saddle");
+    assert_eq!(explicit.expect("the explicit seat").seat, "inky");
 }

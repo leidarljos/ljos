@@ -133,16 +133,19 @@ fn a_mapped_main_conversation_sits_and_an_unresolved_one_exits_2() {
     assert!(!stdout.contains("sand-sub"), "{said}");
 
     let sub = "sand-subagent-0099";
-    let refused = world.ljos(&["seat"], &[("CURSOR_CONVERSATION_ID", sub)]);
-    let said = text(&refused);
-    assert_eq!(refused.status.code(), Some(2), "{said}");
+    let open = world.ljos(&["seat"], &[("CURSOR_CONVERSATION_ID", sub)]);
+    let said = text(&open);
+    assert!(open.status.success(), "{said}");
     let both = format!(
         "{}{}",
-        String::from_utf8_lossy(&refused.stdout),
-        String::from_utf8_lossy(&refused.stderr)
+        String::from_utf8_lossy(&open.stdout),
+        String::from_utf8_lossy(&open.stderr)
     );
-    assert!(both.contains("label seat-unresolved"), "{said}");
-    assert!(both.contains(sub), "{said}");
+    assert!(!both.contains("label seat-unresolved"), "{said}");
+    assert!(
+        both.contains("reading every seat") || both.contains("every-seat"),
+        "{said}"
+    );
     assert!(!both.contains("this conversation's seat is seat"), "{said}");
 }
 

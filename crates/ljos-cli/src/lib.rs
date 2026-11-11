@@ -69,6 +69,7 @@ pub mod runner_hooks;
 pub mod runner_skills;
 #[cfg(test)]
 mod seat_mcp_layout;
+pub mod seat_resolve;
 pub mod seat_roster;
 pub mod sitting_gate;
 pub mod slot;
@@ -1532,7 +1533,7 @@ fn filled(argv: &[String], server: &Path, name: &str) -> Vec<String> {
 /// Pronouns and defaults, not product names. A runner's own `LJOS_SEAT`
 /// is treated the same way in [`resolve_assignee`]: the process naming
 /// itself is omitted, so occupancy falls through to the session.
-fn omitted_actor_name(name: &str) -> bool {
+pub(crate) fn omitted_actor_name(name: &str) -> bool {
     matches!(
         name.trim().to_ascii_lowercase().as_str(),
         "seat" | "you" | "agent"
@@ -4220,7 +4221,7 @@ fn conversation_derived_seat() -> Option<String> {
 /// `~/.config/ljos/seats.toml`: conversation id to seat. A `seats` key is
 /// the roster shape and is not a conversation. The file is this box's
 /// map. A name that is only the placeholder `seat` is not an entry.
-fn mapped_box_seat() -> Option<String> {
+pub(crate) fn mapped_box_seat() -> Option<String> {
     let path = config_base()?.join("ljos").join("seats.toml");
     let text = std::fs::read_to_string(&path).ok()?;
     let value = toml::from_str::<toml::Value>(&text).ok()?;
@@ -4309,10 +4310,12 @@ pub fn whoami() -> Seat {
     // tracker's name for the same thing. A legacy holder is the seat it
     // names (`inky-n9o` is `inky`). A subagent name is left as written so
     // a claim under it is refused rather than given the client's harness.
-    let named = named_var("LJOS_SEAT")
-        .map(|n| (seat_for_env(&n), "LJOS_SEAT"))
-        .or_else(|| named_var("VISSUE_AGENT").map(|n| (seat_for_env(&n), "VISSUE_AGENT")))
-        .or_else(|| mapped_box_seat().map(|n| (n, "seats.toml")));
+    // `--seat`, LJOS_SEAT, the env file, the seats map, the parent
+    // record, then the one recent writer. A subagent id is not a seat,
+    // so the next rule runs. VISSUE_AGENT is the same name from the
+    // tracker when none of those matched.
+    let named = seat_resolve::named_from_env()
+        .or_else(|| named_var("VISSUE_AGENT").map(|n| (seat_for_env(&n), "VISSUE_AGENT")));
     // A record filed under a conversation id this shell carries. The
     // process tree is not consulted for a seat.
     let record = seat_from_session_records().filter(|seat| !omitted_actor_name(&seat.seat));
@@ -4328,6 +4331,18 @@ pub fn whoami() -> Seat {
         .or_else(|| program.as_ref().map(|p| p.seat.clone()))
         .or_else(|| agent.clone())
         .unwrap_or_else(login_user);
+    // No rule named a seat. A read looks at every seat. A write uses
+    // unknown-<hostname>. Anything else keeps the login user below.
+    if named.is_none()
+        && program
+            .as_ref()
+            .is_none_or(|seat| seat_resolve::usable(&seat.seat).is_none())
+        && agent.as_deref().and_then(seat_resolve::usable).is_none()
+    {
+        if let Some(seat) = seat_resolve::command_fallback() {
+            return seat;
+        }
+    }
     // A holder a person named wins outright outside a bound hook call
     // or a conversation-stamped runner. A legacy holder is stored as the
     // seat it names, so the claim is not taken under the raw name.
@@ -4568,53 +4583,45 @@ fn seat_roster(slug: &str) -> std::collections::BTreeSet<String> {
 ///
 /// # Errors
 ///
-/// No seat was passed and `LJOS_SEAT` is unset, or the call passed a
-/// name that is neither the announced seat, a harness id, nor a seat
-/// the tracker knows.
+/// The call passed a name that is neither the announced seat, a harness
+/// id, nor a seat the tracker knows. A missing seat is not an error: the
+/// read runs against every seat, and a write uses `unknown-<hostname>`.
 pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     load_seat_env();
-    let from_call = arg.map(str::trim).filter(|name| !name.is_empty());
-    let named = named_var("LJOS_SEAT").or_else(|| named_var("VISSUE_AGENT"));
-    let (raw, from_env) = match (from_call, named.as_deref()) {
+    let from_call = arg
+        .map(str::trim)
+        .filter(|name| seat_resolve::usable(name).is_some());
+    let named = named_var("LJOS_SEAT")
+        .or_else(|| named_var("VISSUE_AGENT"))
+        .and_then(|name| seat_resolve::usable(&name));
+    let (raw, from_env, rule) = match (from_call, named.as_deref()) {
         (Some(name), Some(seat))
             if is_harness_name(name)
                 || seat_slug(name) == seat_slug(seat)
                 || canonical_seat_name(name) == canonical_seat_name(seat) =>
         {
-            (seat.to_string(), true)
+            (seat.to_string(), true, "LJOS_SEAT")
         }
-        (Some(name), _) => (name.to_string(), false),
-        (None, Some(seat)) => (seat.to_string(), true),
+        (Some(name), _) => (name.to_string(), false, "--seat"),
+        (None, Some(seat)) => (seat.to_string(), true, "LJOS_SEAT"),
         (None, None) => {
-            if let Some(seat) = mapped_box_seat() {
-                (seat, true)
+            if let Some((seat, rule)) = seat_resolve::named_from_env() {
+                (seat, true, rule)
             } else {
-                let missing = missing_seat_value();
-                return Err(policy_label::labelled(
-                    "seat-unresolved",
-                    format!(
-                        "pass seat, your own bot name, on every call: this server has no LJOS_SEAT (missing {missing})"
-                    ),
-                ));
+                return Ok(seat_resolve::unresolved_seat());
             }
         }
     };
     if is_raw_subagent_name(&raw) {
-        return Err(policy_label::labelled("seat-unresolved", SUBAGENT_NO_SEAT));
+        return Ok(seat_resolve::unresolved_seat());
     }
     let slug_source = raw.split('@').next().unwrap_or(raw.as_str()).trim();
     if slug_source.is_empty() || omitted_actor_name(slug_source) {
-        return Err(policy_label::labelled(
-            "seat-unresolved",
-            format!("pass seat, your own bot name, not {raw:?}"),
-        ));
+        return Ok(seat_resolve::unresolved_seat());
     }
     let named_slug = canonical_seat_name(&raw);
     if named_slug.is_empty() || named_slug == "runner" || omitted_actor_name(&named_slug) {
-        return Err(policy_label::labelled(
-            "seat-unresolved",
-            format!("pass seat, your own bot name, not {raw:?}"),
-        ));
+        return Ok(seat_resolve::unresolved_seat());
     }
     let known = seat_roster(&named_slug);
     // The initialized connection names its own seat even when this tracker
@@ -4646,8 +4653,8 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
         bail!("{}", unknown_seat_error(&named_slug, &known));
     };
     let (holder, source) = match session_holder(&slug) {
-        Some((holder, keys)) => (holder, format!("the seat this call named; session {keys}")),
-        None => (slug.clone(), "the seat this call named".to_string()),
+        Some((holder, keys)) => (holder, format!("{rule}; session {keys}")),
+        None => (slug.clone(), rule.to_string()),
     };
     Ok(Seat {
         seat: slug,
@@ -4832,8 +4839,11 @@ pub fn write_seat(verb: &str) -> Result<Seat> {
     let who = resolve_seat();
     // A seat taken from the process or the login is still the seat that
     // writes. The tracker roster, when it lists seats, is a separate check.
+    // A write that had no seat is not refused for being missing.
     let _ = verb;
-    registered_seat(&who.seat)?;
+    if !who.source.contains("unknown seat") {
+        registered_seat(&who.seat)?;
+    }
     Ok(who)
 }
 
@@ -5161,6 +5171,13 @@ fn occupancy_scope(assignee: &str, issue: &str) -> String {
 /// and only the writes [`write_seat`] guards are refused.
 #[must_use]
 pub fn seat_source_row(who: &Seat) -> Habitat {
+    if who.source.starts_with("no seat rule matched") {
+        return Habitat {
+            name: "seat source",
+            state: who.source.clone(),
+            ok: true,
+        };
+    }
     match derived_seat(who) {
         Some(from) => Habitat {
             name: "seat source",
@@ -5186,6 +5203,9 @@ pub fn doctor_seat_source() -> Habitat {
 #[must_use]
 pub fn format_seat_row() -> String {
     let who = resolve_seat();
+    if who.source.starts_with("no seat rule matched") {
+        return who.source.clone();
+    }
     format!(
         "{}, holding as {} (from {})",
         who.seat, who.holder, who.source
@@ -15942,7 +15962,7 @@ fn probe_lists_ljos(argv: &[String]) -> std::result::Result<(), String> {
 }
 
 /// `$XDG_STATE_HOME/ljos`, else `~/.local/state/ljos`.
-fn state_base_dir() -> PathBuf {
+pub(crate) fn state_base_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
@@ -16070,7 +16090,7 @@ pub(crate) fn data_base() -> Option<PathBuf> {
 /// output, not the login's `~/.config`. A machine that has user rules must
 /// not change a hook or a guard test. The directory is created once and the
 /// environment is not written, so tests do not race on it.
-fn config_base() -> Option<PathBuf> {
+pub(crate) fn config_base() -> Option<PathBuf> {
     #[cfg(test)]
     if let Some(path) = CONFIG_OVERRIDE.with(|slot| slot.borrow().clone()) {
         return Some(path);
@@ -18415,12 +18435,27 @@ pub const NOTE_BASIS_ENTITY: &str = "note-basis:";
 /// The entity prefix a note uses to name where it came from when known.
 pub const NOTE_SOURCE_ENTITY: &str = "note-source:";
 
+/// Whether this write had no seat, so the memory carries `seat:unresolved`.
+fn memory_is_unresolved() -> bool {
+    let source = seated()
+        .map(|seat| seat.source)
+        .unwrap_or_else(|| resolve_seat().source);
+    source.contains("unknown seat")
+}
+
 /// Explicit claim body. The text is stored as given; never harvested. A
 /// trailing citation is the atom's source, not another sentence. The
 /// entities open with the seat that wrote it.
 pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
     let (text, citation) = peel_citations(text);
-    let mut entities = vec![format!("{SEAT_ENTITY}{}", seat_name())];
+    let seat = seat_name();
+    let mut entities = vec![format!("{SEAT_ENTITY}{seat}")];
+    if memory_is_unresolved() {
+        entities.push(seat_resolve::UNRESOLVED_LABEL.to_string());
+    }
+    if kind == "lesson" || kind == packset_core::record::NOTE_KIND {
+        seat_resolve::note_seat_write(&seat);
+    }
     entities.extend(take_validity());
     let mut source = atom_source();
     if let Some(citation) = citation {
@@ -40314,10 +40349,13 @@ pub fn format_hits(hits: &[Hit], explain: bool) -> String {
 /// when that is news.
 #[must_use]
 pub fn other_seat(entities: &[String], mine: &str) -> Option<String> {
+    if seat_resolve::reads_every(mine) {
+        return None;
+    }
     entities
         .iter()
         .filter_map(|e| e.strip_prefix(SEAT_ENTITY))
-        .find(|s| !s.is_empty() && *s != mine)
+        .find(|s| !s.is_empty() && *s != mine && *s != "unresolved")
         .map(str::to_string)
 }
 
@@ -49236,10 +49274,13 @@ mod tests {
                 .all(|name| !name.starts_with("seat-") && !name.starts_with("session-")),
             "a client name left a record: {names:?}"
         );
-        let err = with_config_home(config.path(), || resolve_call_seat(None)).unwrap_err();
-        let label = super::policy_label::as_policy(&err).expect("a policy label");
-        assert_eq!(label.label, "seat-unresolved");
-        assert!(err.to_string().contains(id), "{err}");
+        let seat = with_config_home(config.path(), || resolve_call_seat(None))
+            .expect("a missing seat still resolves");
+        assert!(
+            seat.source.contains("no seat rule matched") || seat.seat.starts_with("unknown-"),
+            "{seat:?}"
+        );
+        assert!(!seat.seat.contains(id), "{seat:?}");
     }
 
     #[test]

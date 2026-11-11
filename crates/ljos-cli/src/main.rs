@@ -1941,12 +1941,86 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
     )
 }
 
+/// Pull `--seat NAME` off the command line. It names this process, and
+/// it wins over `LJOS_SEAT`. `log`, `memories` and `proposals` keep a
+/// `--seat` that comes after the command, because there it filters.
+fn take_seat_flag(args: &[std::ffi::OsString]) -> (Option<String>, Vec<std::ffi::OsString>) {
+    let mut command_at = None;
+    for (index, arg) in args.iter().enumerate().skip(1) {
+        if !arg.to_string_lossy().starts_with('-') {
+            command_at = Some(index);
+            break;
+        }
+    }
+    let command = command_at
+        .and_then(|index| args.get(index))
+        .map(|arg| arg.to_string_lossy().into_owned());
+    // These commands already use `--seat` for a filter, after the command name.
+    let keep_later = matches!(command.as_deref(), Some("log" | "memories" | "proposals"));
+    let mut seat = None;
+    let mut kept = Vec::with_capacity(args.len());
+    if let Some(first) = args.first() {
+        kept.push(first.clone());
+    }
+    let mut index = 1;
+    while index < args.len() {
+        let arg = args[index].to_string_lossy();
+        let after = command_at.is_some_and(|at| index > at);
+        let steal = !(keep_later && after) && (arg == "--seat" || arg.starts_with("--seat="));
+        if steal {
+            if let Some(value) = arg.strip_prefix("--seat=") {
+                if !value.is_empty() {
+                    seat = Some(value.to_string());
+                }
+            } else if let Some(value) = args.get(index + 1) {
+                seat = Some(value.to_string_lossy().into_owned());
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        kept.push(args[index].clone());
+        index += 1;
+    }
+    (seat, kept)
+}
+
+/// Reads look at every seat when none of the rules match. The writes
+/// that used to stop, and remember, note and file, use `unknown-<hostname>`.
+fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
+    use ljos_cli::seat_resolve::Kind;
+    match cmd {
+        Cmd::Search { .. }
+        | Cmd::Recall { .. }
+        | Cmd::Doctor { .. }
+        | Cmd::Statusline
+        | Cmd::Seat { .. }
+        | Cmd::Mesh {
+            cmd: MeshCmd::Status,
+        } => Kind::Read,
+        Cmd::Remember { .. }
+        | Cmd::Note { .. }
+        | Cmd::File { .. }
+        | Cmd::Sitting { .. }
+        | Cmd::Claim { .. }
+        | Cmd::Slot { .. }
+        | Cmd::Finish { .. }
+        | Cmd::Release { .. }
+        | Cmd::Complete { .. }
+        | Cmd::Options { .. }
+        | Cmd::Deed { .. } => Kind::Write,
+        _ => Kind::Keep,
+    }
+}
+
 fn run_command() -> Result<()> {
     // `--help` exits before the seat is read. `ljos help` is a command.
     if root_help_only() {
         print!("{}", help_groups::render(&Cli::command(), false));
         return Ok(());
     }
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let (seat_flag, args) = take_seat_flag(&raw);
     ljos_cli::load_seat_env();
     ljos_cli::normalize_tracker_env();
     // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
@@ -1956,7 +2030,7 @@ fn run_command() -> Result<()> {
     }
     // Help, version and a missing argument exit here, before any write.
     // A memory subcommand that clap cannot parse still records the error.
-    let cmd = match Cli::try_parse() {
+    let cmd = match Cli::try_parse_from(args) {
         Ok(cli) => cli.cmd,
         Err(err) => {
             let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1964,6 +2038,7 @@ fn run_command() -> Result<()> {
             err.exit();
         }
     };
+    ljos_cli::seat_resolve::prepare(seat_flag, seat_kind(&cmd));
     // A lesson left while the pack was busy goes out on the next call
     // that writes. A read, a dry run, onboard, offboard, uninstall and
     // doctor leave the queue where it is and do not create its lock.
@@ -1999,32 +2074,6 @@ fn run_command() -> Result<()> {
             ljos_cli::runner_skills::refresh_on_new_version();
             ljos_cli::runner_env::refresh_on_new_version();
         }
-    }
-    // A subagent with no seat would hold under its process tree ("bash").
-    // The commands that name a holder refuse instead.
-    if matches!(
-        cmd,
-        Cmd::Seat { .. }
-            | Cmd::Sitting { .. }
-            | Cmd::Claim { .. }
-            | Cmd::Note { .. }
-            | Cmd::Slot { .. }
-            | Cmd::Finish { .. }
-            | Cmd::Release { .. }
-            | Cmd::Complete { .. }
-            | Cmd::File { .. }
-            | Cmd::Options { .. }
-            | Cmd::Deed { .. }
-    ) && ljos_cli::unseated_subagent()
-    {
-        return Err(ljos_cli::policy_label::labelled(
-            "seat-unresolved",
-            format!(
-                "{} (missing {})",
-                ljos_cli::SUBAGENT_NO_SEAT,
-                ljos_cli::missing_seat_value()
-            ),
-        ));
     }
     // These act on the claims the hooks keep, and the hooks of the tool
     // calls before this one may still be queued.
@@ -2707,6 +2756,7 @@ fn run_command() -> Result<()> {
             // captures the id the docs name. The tracker's own line and
             // the commit line go to stderr. `--porcelain` is the same.
             if !id.is_empty() {
+                ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
                 println!("{id}");
             }
             eprint!("{rest}");

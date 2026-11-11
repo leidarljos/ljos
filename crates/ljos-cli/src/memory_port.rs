@@ -614,10 +614,15 @@ fn secret_source(source: &Value) -> bool {
 }
 
 /// The seat named by a `seat:` entity. `seat:import*` and `seat:label:*`
-/// are bookkeeping, not an owner, and stay out of the check.
+/// are bookkeeping, not an owner, and stay out of the check. So is
+/// `seat:unresolved`, the label on a write that had no seat.
 fn seat_entity(tag: &str) -> Option<&str> {
     let rest = tag.strip_prefix("seat:")?;
-    if rest.is_empty() || rest.starts_with("import") || rest.starts_with("label:") {
+    if rest.is_empty()
+        || rest == "unresolved"
+        || rest.starts_with("import")
+        || rest.starts_with("label:")
+    {
         None
     } else {
         Some(rest)

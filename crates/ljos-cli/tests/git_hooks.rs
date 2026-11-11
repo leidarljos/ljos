@@ -724,9 +724,12 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
         String::from_utf8_lossy(&seat.stdout),
         String::from_utf8_lossy(&seat.stderr)
     );
-    assert_eq!(seat.status.code(), Some(2), "{seat_said}");
-    assert!(seat_said.contains("label seat-unresolved"), "{seat_said}");
-    assert!(seat_said.contains("no seat of its own"), "{seat_said}");
+    assert!(seat.status.success(), "{seat_said}");
+    assert!(!seat_said.contains("label seat-unresolved"), "{seat_said}");
+    assert!(
+        seat_said.contains("reading every seat") || seat_said.contains("every-seat"),
+        "{seat_said}"
+    );
 }
 
 /// Re-running `ljos claim <parent>` from the same sand-sub conversation

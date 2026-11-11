@@ -144,7 +144,7 @@ fn as_tool_error(e: McpError) -> Result<CallToolResponse, McpError> {
 /// What every bot hears at initialize. Short on purpose: the runner injects
 /// this into the model's context, and the tools do the bookkeeping.
 pub const SERVER_INSTRUCTIONS: &str = "\
-Pass seat on every call: your own bot name. It is required when this server has no LJOS_SEAT.
+Pass seat when you know the name. With no seat, ljos resolves one, and a read still runs.
 Before any repo work, call ljos_start with the repo or the issue and the task. It recalls and claims.
 Git commits are booked automatically.
 Call ljos_note for your own working notes on the issue: what you tried, found or decided.
@@ -317,6 +317,20 @@ fn runs_without_seat(name: &str) -> bool {
     SEAT_FREE_TOOLS.contains(&name)
 }
 
+/// Search, recall, status and doctor read every seat when none is named.
+/// Every other tool writes as `unknown-<hostname>` rather than stopping.
+fn mcp_seat_kind(name: &str) -> ljos_cli::seat_resolve::Kind {
+    let verb = name.trim_start_matches("ljos_");
+    if matches!(
+        verb,
+        "search" | "recall" | "doctor" | "status" | "statusline"
+    ) {
+        ljos_cli::seat_resolve::Kind::Read
+    } else {
+        ljos_cli::seat_resolve::Kind::Write
+    }
+}
+
 /// The call's `seat`, when the bot passed one.
 fn seat_argument(
     args: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -348,7 +362,7 @@ fn bind_seat_env(seat: &str) {
 }
 
 const SEAT_PROPERTY: &str =
-    "This bot's name. Pass it on every call. Required when the server has no LJOS_SEAT.";
+    "This seat's name. Optional. With none, ljos resolves a seat, and a read still runs.";
 
 /// Every listed tool accepts `seat`. The handlers ignore the field; the
 /// server reads it before the handler runs. It is not required in the
@@ -3681,7 +3695,9 @@ impl ServerHandler for LjosServer {
             .peer
             .peer_info()
             .map(|info| info.client_info.name.clone());
+        let kind = mcp_seat_kind(&name);
         let resolved = tokio::task::spawn_blocking(move || {
+            ljos_cli::seat_resolve::prepare(seat_text.clone(), kind);
             note_connected_client(client.as_deref());
             ljos_cli::resolve_call_seat(seat_text.as_deref())
         })
@@ -3710,7 +3726,11 @@ impl ServerHandler for LjosServer {
                     return Ok(attach_next(&name, as_tool_error(refused(e))?));
                 }
             }
-            bind_seat_env(&seat.seat);
+            if !ljos_cli::seat_resolve::reads_every(&seat.seat)
+                && !seat.source.contains("unknown seat")
+            {
+                bind_seat_env(&seat.seat);
+            }
         }
         // A server spawned per call has no idle thread left running. The
         // seat's sitting is on disk: finish it when the last call is past
