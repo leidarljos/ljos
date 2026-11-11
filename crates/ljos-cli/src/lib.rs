@@ -2131,7 +2131,54 @@ fn cursor_conversation() -> Option<String> {
     }
 }
 
-static STAMP_ENV: std::sync::OnceLock<Option<Vec<(String, String)>>> = std::sync::OnceLock::new();
+/// The runtime directory and home [`same_runtime_dir`] compared when the
+/// ancestor stamp was read. A later call under another directory is another
+/// seat, and the first call's stamp does not answer for it.
+#[derive(PartialEq, Eq)]
+struct StampKey {
+    runtime: Option<String>,
+    home: Option<String>,
+}
+
+struct StampCache {
+    key: StampKey,
+    value: Option<Vec<(String, String)>>,
+}
+
+static STAMP_ENV: std::sync::Mutex<Option<StampCache>> = std::sync::Mutex::new(None);
+
+fn ancestor_stamp_key() -> StampKey {
+    let nonempty = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
+    StampKey {
+        runtime: nonempty("XDG_RUNTIME_DIR"),
+        home: nonempty("HOME"),
+    }
+}
+
+/// The ancestor stamp for the runtime directory now in force. The first
+/// call in this process does not freeze a stamp for a directory a later
+/// call has left.
+fn cached_ancestor_stamp() -> Option<Vec<(String, String)>> {
+    let key = ancestor_stamp_key();
+    {
+        let slot = STAMP_ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = slot.as_ref() {
+            if cached.key == key {
+                return cached.value.clone();
+            }
+        }
+    }
+    let value = stamp_from_ancestors();
+    *STAMP_ENV
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(StampCache {
+        key,
+        value: value.clone(),
+    });
+    value
+}
 
 /// Whether `pid`, named `comm`, is a cargo test runner binary under
 /// `target/.../deps/`.
@@ -2260,6 +2307,8 @@ fn clean_shell_environ(env: Vec<(String, String)>, is_self: bool) -> Vec<(String
 /// one the outermost process above this one was started with, read from
 /// `/proc`, so neither `VAR=id ljos`, `VAR=id git commit`, `export VAR=id`
 /// nor an intermediate program that builds its own environment changes it.
+/// The runtime directory and the home are the exception. They choose which
+/// ancestors count, and a later call under another directory reads again.
 fn stamp_env() -> Vec<(String, String)> {
     let above = if cfg!(test) {
         None
@@ -2270,7 +2319,7 @@ fn stamp_env() -> Vec<(String, String)> {
     {
         stamp_from_ancestors()
     } else {
-        STAMP_ENV.get_or_init(stamp_from_ancestors).clone()
+        cached_ancestor_stamp()
     };
     above.unwrap_or_else(|| {
         if cfg!(test) {
