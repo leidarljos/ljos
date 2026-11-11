@@ -562,6 +562,17 @@ fn secret_source(source: &Value) -> bool {
     })
 }
 
+/// The seat named by a `seat:` entity. `seat:import*` and `seat:label:*`
+/// are bookkeeping, not an owner, and stay out of the check.
+fn seat_entity(tag: &str) -> Option<&str> {
+    let rest = tag.strip_prefix("seat:")?;
+    if rest.is_empty() || rest.starts_with("import") || rest.starts_with("label:") {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
 fn owned_by_other(atom: &Value, seat: &str) -> bool {
     let named = atom["source"]["seat"].as_str().unwrap_or("").trim();
     // A seat named on the atom is the owner. An imported copy names this
@@ -575,12 +586,29 @@ fn owned_by_other(atom: &Value, seat: &str) -> bool {
     let seats: Vec<&str> = entities
         .iter()
         .filter_map(Value::as_str)
-        .filter_map(|tag| tag.strip_prefix("seat:"))
-        .filter(|rest| {
-            !rest.is_empty() && !rest.starts_with("import") && !rest.starts_with("label:")
-        })
+        .filter_map(seat_entity)
         .collect();
     !seats.is_empty() && seats.iter().all(|item| *item != seat)
+}
+
+/// Whether a stored row belongs in this seat's export.
+///
+/// A row whose entities name a seat other than this one stays out. The
+/// seat tags are the same ones [`owned_by_other`] reads. A row with no
+/// seat tag is kept only from this seat's own `imports/<seat>/` or
+/// `exports/<seat>/` directory. Shared `kept/` and `attempts/` rows with
+/// no seat tag stay out.
+fn export_local_row(row: &Row, seat: &str, own_dir: bool) -> bool {
+    let seats: Vec<&str> = row
+        .entities
+        .iter()
+        .filter_map(|tag| seat_entity(tag))
+        .collect();
+    if seats.is_empty() {
+        own_dir
+    } else {
+        seats.iter().all(|item| *item == seat)
+    }
 }
 
 fn export_row(atom: &Value, place: &Place, exported_at: &str) -> Option<Value> {
@@ -681,9 +709,22 @@ pub fn export_cmd(out: &Path) -> Result<String> {
     Ok(format!("exported {count} memories to {}\n", out.display()))
 }
 
+fn push_local(rows: &mut Vec<Row>, batch: Vec<Row>, seat: &str, own_dir: bool) {
+    for row in batch {
+        if export_local_row(&row, seat, own_dir) {
+            rows.push(row);
+        }
+    }
+}
+
 fn local_atoms(place: &Place) -> Vec<Value> {
-    load_rows(place, true)
-        .into_iter()
+    let mut rows = Vec::new();
+    push_local(&mut rows, load_index(place), &place.seat, true);
+    push_local(&mut rows, load_export_rows(place), &place.seat, true);
+    push_local(&mut rows, load_kept(place), &place.seat, false);
+    push_local(&mut rows, load_attempts(place), &place.seat, false);
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    rows.into_iter()
         .map(|row| {
             json!({
                 "id": if row.source_id.is_empty() {
@@ -696,9 +737,6 @@ fn local_atoms(place: &Place) -> Vec<Value> {
                 "origin": row.origin,
                 "entities": row.entities,
                 "source": {
-                    // The seat that holds this copy. The donor stays on the
-                    // entities, so a later export is not dropped as foreign
-                    // and still carries the original labels.
                     "seat": place.seat,
                     "machine": row.machine,
                     "basis": row.basis,
@@ -1249,6 +1287,21 @@ fn push_label(labels: &mut Vec<String>, label: &str) {
     if !labels.iter().any(|item| item == label) {
         labels.push(label.into());
     }
+}
+
+fn load_export_rows(place: &Place) -> Vec<Row> {
+    let dir = place.home.join("exports").join(path_segment(&place.seat));
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .filter_map(|entry| {
+            let bytes = std::fs::read(entry.path()).ok()?;
+            serde_json::from_slice::<Row>(&bytes).ok()
+        })
+        .collect()
 }
 
 fn load_kept(place: &Place) -> Vec<Row> {
@@ -2070,8 +2123,8 @@ mod tests {
         assert!(!stdout_path(Path::new("./-")));
     }
 
-    /// A fresh seat that imports an export and exports again carries the same
-    /// ids, kinds, text and entity labels. The header is this seat's own.
+    /// The seat that wrote the file can import it and export the same rows.
+    /// Another seat keeps the import and does not export those rows.
     #[test]
     fn an_export_round_trip_keeps_the_memory_set() {
         let (_here_dir, here) = place("alfa");
@@ -2083,11 +2136,20 @@ mod tests {
         let first = here.home.join("first.jsonl");
         export_atoms(&here, &first, &[lesson, pref]).unwrap();
         let bytes = std::fs::read(&first).unwrap();
+        let (_same_dir, same) = place("alfa");
+        import_bytes(&same, &bytes, None, None, None).unwrap();
+        let second = same.home.join("second.jsonl");
+        export_atoms(&same, &second, &local_atoms(&same)).unwrap();
+        assert_eq!(memory_set(&first), memory_set(&second));
         let (_there_dir, there) = place("beta");
         import_bytes(&there, &bytes, None, None, None).unwrap();
-        let second = there.home.join("second.jsonl");
-        export_atoms(&there, &second, &local_atoms(&there)).unwrap();
-        assert_eq!(memory_set(&first), memory_set(&second));
+        let third = there.home.join("third.jsonl");
+        export_atoms(&there, &third, &local_atoms(&there)).unwrap();
+        assert!(
+            memory_set(&third).is_empty(),
+            "{}",
+            memory_set(&third).len()
+        );
     }
 
     fn memory_set(
@@ -2573,6 +2635,136 @@ mod tests {
         assert_eq!(hits[0].id, before[0].id);
         assert_eq!(hits[0].text, before[0].text);
         assert_eq!(hits[0].score, before[0].score);
+    }
+
+    fn stored_row(id: &str, text: &str, entities: &[&str]) -> Row {
+        Row {
+            id: id.into(),
+            text: text.into(),
+            kind: "lesson".into(),
+            origin: "agent-derived".into(),
+            basis: String::new(),
+            labels: Vec::new(),
+            entities: entities.iter().map(|tag| (*tag).to_string()).collect(),
+            machine: "cursor".into(),
+            seat: String::new(),
+            import_id: String::new(),
+            source_id: id.into(),
+            content_sha256: sha256_hex(text.as_bytes()),
+            origin_hash: sha256_hex(text.as_bytes()),
+            at: "2026-01-01T00:00:00Z".into(),
+            diagnostic: String::new(),
+            effect: "stored-local".into(),
+        }
+    }
+
+    fn write_stored(dir: &Path, name: &str, row: &Row) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), serde_json::to_vec_pretty(row).unwrap()).unwrap();
+    }
+
+    /// A kept row for another seat stays out. This seat's row is the export.
+    /// A row with no seat tag stays out of shared directories and stays in
+    /// this seat's import and export directories. `seat:import*` and
+    /// `seat:label:*` are not seat names.
+    #[test]
+    fn export_skips_another_seats_kept_row() {
+        let (_dir, here) = place("me");
+        let seat = here.seat.clone();
+        write_stored(
+            &here.home.join("kept"),
+            "mine.json",
+            &stored_row(
+                "mine",
+                "the north bench is mine",
+                &[&format!("seat:{seat}")],
+            ),
+        );
+        write_stored(
+            &here.home.join("kept"),
+            "other.json",
+            &stored_row("other", "the south bench is theirs", &["seat:seat-other"]),
+        );
+        write_stored(
+            &here.home.join("kept"),
+            "both.json",
+            &stored_row(
+                "both",
+                "a shared bench names two seats",
+                &[&format!("seat:{seat}"), "seat:seat-other"],
+            ),
+        );
+        write_stored(
+            &here.home.join("kept"),
+            "bare.json",
+            &stored_row("bare", "a kept row with no seat", &[]),
+        );
+        write_stored(
+            &here.home.join("kept"),
+            "book.json",
+            &stored_row(
+                "book",
+                "import and label tags are not a seat",
+                &["seat:import:cursor:seat-other", "seat:label:kept"],
+            ),
+        );
+        write_stored(
+            &here.home.join("attempts"),
+            "try.json",
+            &stored_row("try", "an attempt with no seat", &[]),
+        );
+        let imports = here
+            .home
+            .join("imports")
+            .join(path_segment(&seat))
+            .join("slot-bare");
+        std::fs::create_dir_all(&imports).unwrap();
+        let bare_import = stored_row("bare-import", "an import row with no seat", &[]);
+        std::fs::write(
+            imports.join("index.jsonl"),
+            format!("{}\n", serde_json::to_string(&bare_import).unwrap()),
+        )
+        .unwrap();
+        let foreign = here
+            .home
+            .join("imports")
+            .join(path_segment(&seat))
+            .join("slot-other");
+        std::fs::create_dir_all(&foreign).unwrap();
+        let foreign_row = stored_row(
+            "foreign",
+            "an import that names another seat",
+            &["seat:seat-other"],
+        );
+        std::fs::write(
+            foreign.join("index.jsonl"),
+            format!("{}\n", serde_json::to_string(&foreign_row).unwrap()),
+        )
+        .unwrap();
+        write_stored(
+            &here.home.join("exports").join(path_segment(&seat)),
+            "copy.json",
+            &stored_row("copy", "an export row with no seat", &[]),
+        );
+        let out = here.home.join("out.jsonl");
+        let count = export_atoms(&here, &out, &local_atoms(&here)).unwrap();
+        assert_eq!(count, 3);
+        let body = std::fs::read_to_string(&out).unwrap();
+        assert!(body.contains("the north bench is mine"), "{body}");
+        assert!(body.contains("an import row with no seat"), "{body}");
+        assert!(body.contains("an export row with no seat"), "{body}");
+        assert!(!body.contains("the south bench is theirs"), "{body}");
+        assert!(!body.contains("a shared bench names two seats"), "{body}");
+        assert!(!body.contains("a kept row with no seat"), "{body}");
+        assert!(
+            !body.contains("import and label tags are not a seat"),
+            "{body}"
+        );
+        assert!(!body.contains("an attempt with no seat"), "{body}");
+        assert!(
+            !body.contains("an import that names another seat"),
+            "{body}"
+        );
     }
 
     #[test]
