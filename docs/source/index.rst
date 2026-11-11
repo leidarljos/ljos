@@ -36,7 +36,7 @@ What it has done
 
 ============ ==============================================================================================================================================
 7,901 tokens for the 20 core Model Context Protocol (MCP) tools, against 17,855 for all 52
-196.3 ms     warm prompt hook median on a pack of 10,000 lessons, down from 602.5 ms
+139.1 ms     warm prompt hook median on a pack of 10,000 lessons, down from 196.3 ms; ``prompt-hook.rows-10000.after`` in hook-latency.txt
 0 of 186     near-topic lesson pairs merged by the duplicate check
 0.949        recall@5 in packset's LongMemEval\ :sub:`S` session retrieval run, BM25+ fused with e5-large-v2, 470 questions; retrieval, not answer accuracy
 2,293        tests passed on the 0.40.0 release commit, 0 failed

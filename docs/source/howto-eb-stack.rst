@@ -5,6 +5,9 @@
 Bump a recipe with eb-stack
 ===========================
 
+.. raw:: html
+
+   <span id="bump-a-recipe-with-eb-stack-and-keep-what-the-campaign-taught"></span>
 
 One sitting on the ticket, one island per recipe before it is touched:
 

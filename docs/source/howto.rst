@@ -5,6 +5,9 @@
 How-to guides
 =============
 
+.. raw:: html
+
+   <span id="how-to"></span>
 
 Each page is one task. Start with the first two; the rest stand alone.
 

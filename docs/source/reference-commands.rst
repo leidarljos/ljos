@@ -5,6 +5,10 @@
 Commands
 ========
 
+.. raw:: html
+
+   <span id="command-line"></span>
+
 ``sitting ISSUE [--assignee NAME] [--cards DIR] [--playbook NAME] [--anyway]``
    Stores: all. Open a sitting: doctor, sync when the repository names a scope, cards, due, island, blockers, playbook, workflow when the issue carries one, panel when the issue is a decision, recall, timeline, reclaim, claim; reclaim hands back claims quiet longer than ``LJOS_LEASE_SECS`` (900; 0 is off) whose conversation is gone, and keeps one whose runner still runs; stops at the first store down; the name defaults to this conversation's holder (``ljos seat``); ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``; the name is a tracker ``playbook:`` note until finish or release.
 ``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--gen G] [--assignee NAME] [--close]``
@@ -12,7 +16,7 @@ Commands
 ``calibrate -p PROJECT [--rounds N]``
    Stores: consensus, pack. Trust rows from the project's voting history (Dawid-Skene accuracy)
 ``remember TEXT [--as PERSONA] [--transient|--standing]``
-   Stores: pack. One lesson, stored as written, origin ``user-declared``; as a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the hook shows it from the next prompt it bears on; run under an agent runner it is an episode, kept and not a refresher until a review promotes it; ``--transient`` or ``--standing`` picks one either way.
+   Stores: pack. One lesson, stored as written, origin ``user-declared``; as a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the hook shows it from the next prompt it bears on; run under an agent runner it is an episode, kept and not a refresher until a review promotes it; ``--transient`` or ``--standing`` picks one either way. A sentence of more than 29 words is stored as written, and the command warns to split it into two sentences.
 ``memories list|review|tui|prune``
    Stores: pack. Review the memories agents wrote on their own: ``list`` newest first with provenance, unreviewed agents' memories by default; ``review`` keeps, drops, edits or merges them; ``tui`` browses them; ``prune`` names duplicates and never-recalled memories and writes only with ``--apply``.
 ``prefer TEXT [--deny PATTERN] [--ask PATTERN] [--user --why REASON]``

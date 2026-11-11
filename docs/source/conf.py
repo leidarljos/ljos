@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from pathlib import Path
 
@@ -126,5 +127,44 @@ def _social(app, pagename, templatename, context, doctree):
         context["body"] = _one_heading(body, title)
 
 
+# Old section ids from howto.html and reference.html at 0eb8cdc9. An empty
+# value stays on this page. Any other value is the page the section moved to.
+_LEGACY_ANCHORS = json.loads(
+    (_DOCS / "_static" / "legacy-anchors.json").read_text(encoding="utf-8")
+)
+
+
+def _legacy_script(pagename: str) -> str:
+    """Send an old fragment to the page that now holds that section."""
+    page = _LEGACY_ANCHORS.get(pagename)
+    if not page:
+        return ""
+    moved = {key: value for key, value in page.items() if value}
+    if not moved:
+        return ""
+    payload = json.dumps(moved, ensure_ascii=True, separators=(",", ":"))
+    return (
+        "<script>(function(){var m="
+        + payload
+        + ";function go(){var h=location.hash.replace(/^#/,\"\");"
+        + "try{h=decodeURIComponent(h)}catch(e){return}"
+        + "var n=m[h];if(!n)return;if(document.getElementById(h))return;"
+        + "location.replace(n)}"
+        + "if(document.readyState===\"loading\")"
+        + "document.addEventListener(\"DOMContentLoaded\",go);else go()})();"
+        + "</script>"
+    )
+
+
+def _legacy(app, pagename, templatename, context, doctree):
+    script = _legacy_script(pagename)
+    if not script:
+        return
+    body = context.get("body")
+    if isinstance(body, str):
+        context["body"] = body + "\n" + script
+
+
 def setup(app):
     app.connect("html-page-context", _social)
+    app.connect("html-page-context", _legacy)

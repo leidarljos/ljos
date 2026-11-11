@@ -69,7 +69,9 @@ A missing release, a failed download or a checksum that does not match is a warn
    2.0000  1/3 lesson  1fe4b916d956798196df680ade594ac5    today   The lexical default is BM25+. It beat BM25 by two points on turns.
    1.0000  1/3 preference  85dde12b553372dafb3d50e3b4b63fec    today   CombMNZ over RRF for fusing two ballots.
 
-A claim is two sentences at most, and it is stored as written. A lesson or a preference
+A claim is two sentences at most, and it is stored as written. The pack's limit
+is 29 words a sentence. A longer sentence is kept, and ``ljos remember`` warns in
+one line to split that sentence into two sentences. A lesson or a preference
 you type takes effect at once. The hook shows both from the next prompt they bear on.
 Run ``ljos remember`` from a terminal of your own. An agent that runs it stores the lesson
 at once, labelled agent-derived and unreviewed, until a review keeps it.

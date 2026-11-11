@@ -65,7 +65,9 @@ $ ljos search "which fusion"
 1.0000	1/3	preference	85dde12b553372dafb3d50e3b4b63fec	today	CombMNZ over RRF for fusing two ballots.
 #+end_src
 
-A claim is two sentences at most, and it is stored as written. A lesson or a preference
+A claim is two sentences at most, and it is stored as written. The pack's limit
+is 29 words a sentence. A longer sentence is kept, and =ljos remember= warns in
+one line to split that sentence into two sentences. A lesson or a preference
 you type takes effect at once. The hook shows both from the next prompt they bear on.
 Run =ljos remember= from a terminal of your own. An agent that runs it stores the lesson
 at once, labelled agent-derived and unreviewed, until a review keeps it.

@@ -19,7 +19,8 @@ Features
   lesson an agent writes is labelled agent-derived until a person accepts it.
 - **Memory at the prompt.** The prompt hook adds the memories a prompt
   bears on before the model reads it. On a pack of 10,000 lessons the
-  warm hook takes a median of 196.3 ms.
+  warm hook takes a median of 139.1 ms
+  (``prompt-hook.rows-10000.after`` in ``hook-latency.txt``).
 - **A review clock.** ``ljos due`` lists the claims due for review on a Free
   Spaced Repetition Scheduler (FSRS) clock. ``ljos graded`` records the
   answer, and a claim nobody reviews sinks in search.
@@ -53,7 +54,7 @@ the commands that reproduce it.
 What                                                                       Result                                                                                                                                  Source
 ========================================================================== ======================================================================================================================================= ==============================================================================================================
 MCP tool list, tokens a session pays (o200k\ :sub:`base`)                  7,901 for the 20 core tools; 17,855 for all 52                                                                                          `mcp-size.txt <https://github.com/leidarljos/ljos/blob/develop/measurements/mcp-size.txt>`__
-Prompt hook, 10,000 live lessons, warm median                              602.5 ms before, 196.3 ms after, with the same output                                                                                   `hook-latency.txt <https://github.com/leidarljos/ljos/blob/develop/measurements/hook-latency.txt>`__
+Prompt hook, 10,000 live lessons, warm median                              196.3 ms before, 139.1 ms after, with the same output (``prompt-hook.rows-10000.after``)                                                `hook-latency.txt <https://github.com/leidarljos/ljos/blob/develop/measurements/hook-latency.txt>`__
 Prompt hook, 10,000 live lessons, cold median                              958.4 ms before, 456.4 ms after                                                                                                         `hook-latency.txt <https://github.com/leidarljos/ljos/blob/develop/measurements/hook-latency.txt>`__
 Prompt hook, 1,000 live lessons, warm median                               89.2 ms before, 36.9 ms after                                                                                                           `hook-latency.txt <https://github.com/leidarljos/ljos/blob/develop/measurements/hook-latency.txt>`__
 Prompt hook on a seat of about 2,500 atoms                                 970 ms and 27 pack requests (0.35.1); 247 to 303 ms and 8 requests (0.35.9)                                                             `hook-latency.txt <https://github.com/leidarljos/ljos/blob/develop/measurements/hook-latency.txt>`__

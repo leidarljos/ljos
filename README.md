@@ -14,7 +14,7 @@ These notes describe ljos 0.40.0.
 ## What it has done
 
 - 7,901 tokens for the 20 core Model Context Protocol (MCP) tools, against 17,855 for all 52 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
-- 196.3 ms warm prompt hook median on 10,000 live lessons, down from 602.5 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt)).
+- 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
 - The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
 - packset, the memory writer, on LongMemEval_S session retrieval over 470 questions: recall@5 0.914 with BM25+ alone, 0.949 with BM25+ fused with e5-large-v2 ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). This scores retrieval, not answer accuracy.
 - 2,293 tests passed, 0 failed, 2 ignored on the 0.40.0 release commit ([CI run 42801686714](https://github.com/leidarljos/ljos/actions/runs/42801686714)).

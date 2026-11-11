@@ -2,6 +2,13 @@
 #+description: Keep the cards, record a number that is measured again and again, and retire a memory with its reason.
 #+options: toc:nil num:nil
 
+* Remember a lesson
+
+=ljos remember= stores one lesson as written. A claim is two sentences at
+most. The pack's limit is 29 words a sentence: a longer one is kept, and
+the command warns in one line, naming the count and the limit, to split
+that sentence into two sentences.
+
 * Keep the cards
 
 Cards are two files a person writes: =USER.md= and =MEMORY.md=. The seat

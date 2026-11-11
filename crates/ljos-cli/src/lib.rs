@@ -28305,23 +28305,64 @@ pub fn format_write_ack_plain(body: &Value, when: &dyn Fn(&str) -> String) -> St
     format!("{head}\n  id {short}{due}")
 }
 
+/// Digits immediately before `marker`. "shorter words" has none, so a
+/// readability line is not read as a word-limit line.
+fn digits_before(text: &str, marker: &str) -> Option<usize> {
+    let at = text.find(marker)?;
+    let head = text[..at].trim_end();
+    let digits: String = head
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.chars().rev().collect::<String>().parse().ok()
+}
+
+/// Digits immediately after `marker`.
+fn digits_after(text: &str, marker: &str) -> Option<usize> {
+    let rest = text.split(marker).nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// `(sentence index, words, limit)` when `warning` is the pack's word-limit
+/// line, `atom sentence N is very hard to read: W words, the limit is L`.
+/// The index is absent when the pack did not name a sentence.
+fn sentence_word_limit(warning: &str) -> Option<(Option<usize>, usize, usize)> {
+    let words = digits_before(warning, " words")?;
+    let limit = digits_after(warning, "the limit is ")?;
+    Some((digits_after(warning, "atom sentence "), words, limit))
+}
+
 /// The line a write prints when it was stored over a prose warning: as
 /// written, or as the shorter copies an agent's claim was cut into
-/// (`copies`), what the gate said, and that shorter sentences are
-/// recalled better. `None` when the pack gave no warning.
+/// (`copies`). A sentence past the pack's word limit names the count and
+/// the limit and says to split that sentence into two. Any other warning
+/// keeps the pack's reason, and that shorter sentences are recalled
+/// better. `None` when the pack gave no warning.
 #[must_use]
 pub fn prose_warning_line(body: &Value) -> Option<String> {
     let warning = body["prose"]["warning"].as_str()?.trim();
+    if warning.is_empty() {
+        return None;
+    }
     let how = match body["copies"].as_u64() {
         Some(1) => "stored as a shorter copy".to_string(),
         Some(n) => format!("stored as {n} shorter copies"),
         None => "stored as written".to_string(),
     };
-    (!warning.is_empty()).then(|| {
-        format!(
-            "{how}; the pack's prose check said: {warning}. Shorter sentences are recalled better."
-        )
-    })
+    if let Some((index, words, limit)) = sentence_word_limit(warning) {
+        let which = match index {
+            Some(n) => format!("sentence {n} has"),
+            None => "sentence has".to_string(),
+        };
+        return Some(format!(
+            "{how}; {which} {words} words; limit {limit}. Split that sentence into two sentences."
+        ));
+    }
+    Some(format!(
+        "{how}; the pack's prose check said: {warning}. Shorter sentences are recalled better."
+    ))
 }
 
 /// One line after a pack write: id, kind, due, text. Not the embedding.
@@ -70939,6 +70980,26 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             None
         );
         assert_eq!(prose_warning_line(&serde_json::json!({"id": "b"})), None);
+    }
+
+    /// The pack names the count and the limit. The line says to split the
+    /// sentence, which is the edit that brings it under that limit.
+    #[test]
+    fn a_sentence_past_the_word_limit_says_to_split_it() {
+        let warned = serde_json::json!({"id": "a", "prose": {"warning":
+            "atom sentence 1 is very hard to read: 33 words, the limit is 29; split it at a conjunction or drop a clause"}});
+        let line = prose_warning_line(&warned).unwrap();
+        assert_eq!(
+            line,
+            "stored as written; sentence 1 has 33 words; limit 29. Split that sentence into two sentences."
+        );
+        assert!(!line.contains('\n'));
+        let copied = serde_json::json!({"copies": 1, "prose": {"warning":
+            "40 words, the limit is 29"}});
+        assert_eq!(
+            prose_warning_line(&copied).unwrap(),
+            "stored as a shorter copy; sentence has 40 words; limit 29. Split that sentence into two sentences."
+        );
     }
 
     #[test]

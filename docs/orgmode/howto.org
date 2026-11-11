@@ -2,6 +2,10 @@
 #+description: Task pages for ljos: connect a runner, check the seat, bring memory into the prompt, sit an issue, vote, hand over and read the command check.
 #+options: toc:nil num:nil
 
+#+begin_export html
+<span id="how-to"></span>
+#+end_export
+
 Each page is one task. Start with the first two; the rest stand alone.
 
 - [[file:howto-runner.org][Connect an agent runner]]: wire ljos into a runner, an editor or a shell-only agent. The page also puts the seat in the status bar.

@@ -33,6 +33,9 @@ sphinx-build -b html -n "$SRC" "$BUILD" 2>&1
 # -W can be harsh on unknown roles; if too strict use without -W
 # Prefer success: retry without -W only if needed — try strict first.
 
+echo "==> internal links"
+python3 "$ROOT/docs/scripts/check_html_links.py" "$BUILD"
+
 echo ""
 echo "OK: open $BUILD/index.html"
 echo "    python3 -m http.server -d $BUILD 8000   # optional"
