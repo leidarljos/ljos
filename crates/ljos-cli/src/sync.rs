@@ -5901,14 +5901,20 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         assert!(commit_host(&root, std::slice::from_ref(&rel), "probe-host", deadline).unwrap());
         assert!(root.join(".hook-ran").is_file());
-        assert_eq!(git(&["log", "-1", "--format=%s"]), "chore(sync): probe-host user rules");
+        assert_eq!(
+            git(&["log", "-1", "--format=%s"]),
+            "chore(sync): probe-host user rules"
+        );
         install("#!/bin/sh\necho 'hook refused the commit' >&2\nexit 1\n");
         std::fs::write(root.join(&rel), "different sealed content\n").unwrap();
         let before = git(&["rev-parse", "HEAD"]);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let error = commit_host(&root, &[rel], "probe-host", deadline).unwrap_err();
         assert!(format!("{error:#}").contains("commit refused"), "{error:#}");
-        assert!(format!("{error:#}").contains("hook refused the commit"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("hook refused the commit"),
+            "{error:#}"
+        );
         assert_eq!(git(&["rev-parse", "HEAD"]), before);
     }
 
