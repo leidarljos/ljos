@@ -5,7 +5,22 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.41.1 (2026-11-11)
+
+### Fixes
+
+- A command with no seat no longer stops.
+  The seat is `--seat`, then `LJOS_SEAT`, then a `seat=` line in `~/.config/ljos/env`, then the seats map for the agent or conversation identifier, then the parent process seat record, then the single seat that wrote most recently from this machine.
+  Search, recall, status and doctor read every seat when none of those match.
+  Remember, note and file write as `unknown-` plus the host name, label the memory `seat:unresolved`, and print one line that names the seat and how to set one with `--seat` or `LJOS_SEAT`.
+  Doctor shows which rule picked the seat.
+- The encoder job stores the repository in `_ljos` under the workspace, so `apt-mirror.sh` can run.
+  A path under the runner temp directory is outside `GITHUB_WORKSPACE`, and `actions/checkout` refuses it.
+
 ## 0.41.0 (2026-11-11)
+
+Develop tagged 0.41.0. The GitHub release was not published: the encoder job failed when the checkout path sat outside the workspace.
+
 
 ### Features
 
