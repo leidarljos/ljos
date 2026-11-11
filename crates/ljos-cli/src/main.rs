@@ -436,6 +436,9 @@ enum Cmd {
         /// Store this as a standing rule now. The default.
         #[arg(long)]
         standing: bool,
+        /// Print the pack's warning when a sentence is over 29 words.
+        #[arg(long)]
+        verbose: bool,
         /// The day (YYYY-MM-DD) the claim starts to hold in the world. `ljos search --valid-at` leaves it out before then.
         #[arg(long, value_name = "DATE")]
         valid_from: Option<String>,
@@ -1821,11 +1824,12 @@ fn named_node(raw: &str) -> Result<String, String> {
 
 /// The write acknowledgement: the plain sentence for a person at a
 /// terminal, the tab-separated row for a pipe.
-fn write_ack(body: &serde_json::Value) -> String {
+fn write_ack(body: &serde_json::Value, verbose: bool) -> String {
     // The pack keeps a person's hard sentence and says why it would have
     // refused it; that goes to stderr, so the one line a script reads
-    // stays one line.
-    if let Some(note) = ljos_cli::prose_warning_line(body) {
+    // stays one line. A sentence past 29 words is printed only with
+    // `--verbose`.
+    if let Some(note) = ljos_cli::prose_warning_shown(body, verbose) {
         eprintln!("{note}");
     }
     if std::io::stdout().is_terminal() {
@@ -2135,6 +2139,7 @@ fn run_command() -> Result<()> {
             as_persona,
             transient,
             standing,
+            verbose,
             valid_from,
             valid_to,
         } => {
@@ -2181,7 +2186,7 @@ fn run_command() -> Result<()> {
                         )
                     }
                 })?;
-                println!("{}", write_ack(&body));
+                println!("{}", write_ack(&body, verbose));
                 eprintln!("{}", ljos_cli::remember_note(&body));
                 if let Some(line) = ljos_cli::memories::reinforced_line(&body) {
                     eprintln!("{line}");
@@ -2353,12 +2358,12 @@ fn run_command() -> Result<()> {
             };
             let basis = ljos_cli::Basis::of_rule();
             let body = ljos_cli::packset_prefer(&text, as_persona.as_deref())?;
-            println!("{}", write_ack(&body));
+            println!("{}", write_ack(&body, false));
             if let Some(line) = ljos_cli::memories::reinforced_line(&body) {
                 eprintln!("{line}");
             }
             for rule in &rules {
-                println!("{}", write_ack(&write_rule(rule, basis)?));
+                println!("{}", write_ack(&write_rule(rule, basis)?, false));
             }
             if !proposed.is_empty() && !ljos_cli::person_present() {
                 for rule in &proposed {
@@ -3233,7 +3238,7 @@ fn run_command() -> Result<()> {
                 return Ok(());
             }
             let body = write_persona_as(&persona, how)?;
-            println!("{}", write_ack(&body));
+            println!("{}", write_ack(&body, false));
             ljos_cli::refresh_agents();
         }
         Cmd::Upgrade { version, dir, only } => {
@@ -3432,7 +3437,7 @@ fn run_command() -> Result<()> {
                     if json {
                         ljos_cli::atom_out(&body, true)?
                     } else {
-                        write_ack(&body)
+                        write_ack(&body, false)
                     }
                 );
             }
@@ -4537,7 +4542,7 @@ fn run_command() -> Result<()> {
             (Some(name), Some(value)) => {
                 let every_s = parse_every(&every)?;
                 let (body, prev) = habit(&name, value, &unit, every_s, &source)?;
-                println!("{}", write_ack(&body));
+                println!("{}", write_ack(&body, false));
                 if let Some(p) = prev {
                     eprintln!(
                         "was {}{}{} ({}), now closed",

@@ -16,7 +16,7 @@ Commands
 ``calibrate -p PROJECT [--rounds N]``
    Stores: consensus, pack. Trust rows from the project's voting history (Dawid-Skene accuracy)
 ``remember TEXT [--as PERSONA] [--transient|--standing]``
-   Stores: pack. One lesson, stored as written, origin ``user-declared``; as a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the hook shows it from the next prompt it bears on; run under an agent runner it is an episode, kept and not a refresher until a review promotes it; ``--transient`` or ``--standing`` picks one either way. A sentence of more than 29 words is stored as written, and the command warns to split it into two sentences.
+   Stores: pack. One lesson, stored as written, origin ``user-declared``; as a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the hook shows it from the next prompt it bears on; run under an agent runner it is an episode, kept and not a refresher until a review promotes it; ``--transient`` or ``--standing`` picks one either way. A sentence of more than 29 words is stored as written, and ``--verbose`` prints one line to split it into two sentences.
 ``memories list|review|tui|prune``
    Stores: pack. Review the memories agents wrote on their own: ``list`` newest first with provenance, unreviewed agents' memories by default; ``review`` keeps, drops, edits or merges them; ``tui`` browses them; ``prune`` names duplicates and never-recalled memories and writes only with ``--apply``.
 ``prefer TEXT [--deny PATTERN] [--ask PATTERN] [--user --why REASON]``

@@ -77,6 +77,7 @@ pub mod slot;
 pub mod subagent;
 pub mod swap_log;
 pub mod sync;
+pub mod tool_bound;
 pub mod tools;
 mod tracker_attach;
 pub mod tracker_place;
@@ -1844,9 +1845,12 @@ pub fn mcp_forward_with_requests(
     }
     let stdout = child.stdout.take().context("forward: stdout closed")?;
     let mut answer = None;
-    for line in std::io::BufReader::new(stdout).lines() {
-        let Ok(v) = serde_json::from_str::<Value>(&line?) else {
-            continue;
+    let mut take = |line: &str,
+                    child: &mut std::process::Child,
+                    request: &mut dyn FnMut(&str, Value) -> std::result::Result<Value, Value>|
+     -> Result<bool> {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return Ok(false);
         };
         if let Some(method) = v.get("method").and_then(Value::as_str) {
             if let Some(id) = v.get("id") {
@@ -1859,9 +1863,56 @@ pub fn mcp_forward_with_requests(
                 writeln!(stdin, "{response}")?;
                 stdin.flush()?;
             }
-        } else if v["id"] == serde_json::json!(1) {
+            return Ok(false);
+        }
+        if v["id"] == serde_json::json!(1) {
             answer = Some(v);
-            break;
+            return Ok(true);
+        }
+        Ok(false)
+    };
+    if tool_bound::armed() {
+        let name = program
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("ljos-mcp");
+        tool_bound::note(name);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let deadline = tool_bound::deadline_instant().unwrap_or_else(std::time::Instant::now);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                let _ = child.kill();
+                let msg = format!("{name} timed out");
+                tool_bound::mark_failed(msg.clone());
+                bail!(msg);
+            }
+            let line = match rx.recv_timeout(left) {
+                Ok(line) => line?,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = child.kill();
+                    let msg = format!("{name} timed out");
+                    tool_bound::mark_failed(msg.clone());
+                    bail!(msg);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            if take(&line, &mut child, &mut request)? {
+                break;
+            }
+        }
+    } else {
+        for line in std::io::BufReader::new(stdout).lines() {
+            if take(&line?, &mut child, &mut request)? {
+                break;
+            }
         }
     }
     drop(child.stdin.take());
@@ -13370,14 +13421,26 @@ pub fn arm_hook_wall_budget() -> WallGuard {
 
 /// Time left in the armed wall budget. `None` when this call is not armed.
 pub(crate) fn wall_left() -> Option<std::time::Duration> {
-    WALL_DEADLINE.with(|cell| {
+    let thread = WALL_DEADLINE.with(|cell| {
         cell.get()
             .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
-    })
+    });
+    let tool = tool_bound::remaining();
+    match (thread, tool) {
+        (Some(thread), Some(tool)) => Some(thread.min(tool)),
+        (Some(thread), None) => Some(thread),
+        (None, Some(tool)) => Some(tool),
+        (None, None) => None,
+    }
 }
 
 fn wall_deadline() -> Option<std::time::Instant> {
-    WALL_DEADLINE.with(std::cell::Cell::get)
+    let thread = WALL_DEADLINE.with(std::cell::Cell::get);
+    let tool = tool_bound::deadline_instant();
+    match (thread, tool) {
+        (Some(thread), Some(tool)) => Some(thread.min(tool)),
+        (held, call) => held.or(call),
+    }
 }
 
 /// The whole wait from a sitting's first line through its durable claim.
@@ -17455,7 +17518,8 @@ fn timeout_cause(cause: &(dyn std::error::Error + 'static)) -> bool {
         return matches!(
             io.kind(),
             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-        ) || io.to_string().contains("the pack did not answer");
+        ) || io.to_string().contains("the pack did not answer")
+            || io.to_string().contains("packsetd timed out");
     }
     if let Some(inner) = cause.downcast_ref::<packset_client::Error>() {
         return pack_link::error_is_timeout(inner);
@@ -17500,6 +17564,7 @@ pub fn longest_call_timeout() -> std::time::Duration {
         .max(atoms_timeout())
         .max(guard_timeout())
         .max(ROW_LOCK_WAIT_DURABLE)
+        .max(tool_bound::budget())
 }
 
 /// Start the default writer when a memory verb could not connect.
@@ -29026,6 +29091,21 @@ pub fn prose_warning_line(body: &Value) -> Option<String> {
     ))
 }
 
+/// The prose warning to print. A sentence past the pack's word limit is
+/// kept, and the line that names the count is printed only when `verbose`
+/// is set. Any other warning is printed either way.
+#[must_use]
+pub fn prose_warning_shown(body: &Value, verbose: bool) -> Option<String> {
+    let warning = body["prose"]["warning"].as_str()?.trim();
+    if warning.is_empty() {
+        return None;
+    }
+    if !verbose && sentence_word_limit(warning).is_some() {
+        return None;
+    }
+    prose_warning_line(body)
+}
+
 /// One line after a pack write: id, kind, due, text. Not the embedding.
 #[must_use]
 pub fn format_write_ack(body: &serde_json::Value) -> String {
@@ -37810,7 +37890,7 @@ fn finish_lesson(issue: &str, text: &str) -> String {
         }
         let posted = admit::store_labelled(&client, atom)?;
         let id = memories::short_id(posted["id"].as_str().unwrap_or("?"));
-        let warned = prose_warning_line(&posted)
+        let warned = prose_warning_shown(&posted, false)
             .map(|line| format!("{line}\n"))
             .unwrap_or_default();
         Ok(format!(
@@ -38485,6 +38565,16 @@ impl CommitLock {
     #[must_use]
     pub fn acquire(path: &std::path::Path) -> Self {
         use std::os::unix::io::AsRawFd;
+        if let Some(deadline) = tool_bound::deadline_instant() {
+            tool_bound::note("lock");
+            return match Self::acquire_by(path, deadline) {
+                Some(lock) => lock,
+                None => {
+                    tool_bound::mark_failed("lock timed out");
+                    Self(None)
+                }
+            };
+        }
         let Ok(file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -43841,6 +43931,15 @@ pub fn bind_connection_env(cmd: &mut std::process::Command) {
 /// ballot is the caster's persona ballot, not that seat's own row.
 pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Result<()> {
     use std::process::{Command, Stdio};
+    if tool_bound::armed() {
+        let left = wall_left()
+            .unwrap_or_else(tool_bound::budget)
+            .max(std::time::Duration::from_millis(1));
+        let said = run_captured_within(bin, args, identity, left)?;
+        print!("{}", said.stdout);
+        eprint!("{}", said.stderr);
+        return Ok(());
+    }
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     let mut cmd = Command::new(path);
     if let Some(who) = identity_or_seat(identity) {
@@ -43936,7 +44035,8 @@ pub fn run_captured_as(
 }
 
 fn capture_timed_out(err: &anyhow::Error) -> bool {
-    err.to_string().contains("did not answer in time")
+    let text = err.to_string();
+    text.contains("did not answer in time") || text.contains(" timed out")
 }
 
 /// Run `cmd` and stop it if it is still going after `deadline`.
@@ -44096,6 +44196,12 @@ fn run_captured_within(
 ) -> Result<Said> {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
+    if tool_bound::armed() {
+        tool_bound::note(bin);
+        if let Some(line) = tool_bound::failure() {
+            bail!(line);
+        }
+    }
     if let Some(left) = wall_left() {
         deadline = deadline.min(left).max(std::time::Duration::from_millis(1));
     }
@@ -44162,6 +44268,11 @@ fn run_captured_within(
                 stop_captured(&mut child, true);
                 let _ = join_soon(out_task);
                 let _ = join_soon(err_task);
+                if tool_bound::armed() {
+                    let line = format!("{bin} timed out");
+                    tool_bound::mark_failed(line.clone());
+                    bail!(line);
+                }
                 bail!("{bin} did not answer in time");
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
@@ -45072,14 +45183,31 @@ pub(crate) fn bounded_output(
     use std::io::Read as _;
     use std::process::Stdio;
 
+    let program = std::path::Path::new(cmd.get_program())
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "command".to_string());
+    let timed_out = || {
+        let msg = if tool_bound::armed() {
+            let line = format!("{program} timed out");
+            tool_bound::mark_failed(line.clone());
+            line
+        } else {
+            "hook budget spent".to_string()
+        };
+        std::io::Error::new(std::io::ErrorKind::TimedOut, msg)
+    };
+    if tool_bound::armed() {
+        tool_bound::note(&program);
+        if let Some(line) = tool_bound::failure() {
+            return Err(std::io::Error::other(line));
+        }
+    }
     let Some(left) = wall_left() else {
         return cmd.output();
     };
     if left.is_zero() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "hook budget spent",
-        ));
+        return Err(timed_out());
     }
     // A process group ensures a descendant cannot keep either pipe open
     // after the budget kills the command that started it.
@@ -45129,10 +45257,7 @@ pub(crate) fn bounded_output(
                 stop_output_group(&mut child);
                 let _ = join_soon(out_task);
                 let _ = join_soon(err_task);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "hook budget spent",
-                ));
+                return Err(timed_out());
             }
             Err(err) => {
                 stop_output_group(&mut child);
@@ -72086,6 +72211,14 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             prose_warning_line(&copied).unwrap(),
             "stored as a shorter copy; sentence has 40 words; limit 29. Split that sentence into two sentences."
         );
+        assert!(prose_warning_shown(&warned, false).is_none());
+        assert_eq!(
+            prose_warning_shown(&warned, true).as_deref(),
+            Some(prose_warning_line(&warned).unwrap().as_str())
+        );
+        let grade = serde_json::json!({"prose": {"warning":
+            "readability grade 14.78 exceeds 14; use shorter sentences and shorter words"}});
+        assert!(prose_warning_shown(&grade, false).is_some());
     }
 
     #[test]

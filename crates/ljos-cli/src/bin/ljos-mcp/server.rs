@@ -14,15 +14,15 @@ use anyhow::Context as _;
 use ljos_cli::{
     age_of, announce_seat, atom_label, brief, bump_plan, calibrate, cards, claim, complete,
     conflicts, consensus_steps_for, copy_playbook, doctor, due_page, finish, forecasts_from_json,
-    format_change, format_consolidation, graded, habit, habits, handover_scoped, identity_or_seat,
-    island_entities, kind_label, learn_and_write, learn_reading, note_lookups, now_utc, on_path,
-    other_seat, pack, packset_consolidate, packset_forget, packset_island_as, packset_search_as_of,
-    panel_steps, parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory,
-    predictions_of, protocol_text, read_campaign, receive, refine_default_hits, release,
-    remember_findings, resolve_assignee, rows_about, run_captured, runner_pid, search_ranked,
-    search_reading, seat_name, settle_discount, sitting_gated, timeline, topic_words,
-    tracker_show_json, trust_from_pack, with_discount, write_persona, write_prediction, write_rule,
-    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
+    format_change, format_consolidation, graded, habit, habits, handover_scoped, island_entities,
+    kind_label, learn_and_write, learn_reading, note_lookups, now_utc, on_path, other_seat, pack,
+    packset_consolidate, packset_forget, packset_island_as, packset_search_as_of, panel_steps,
+    parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory, predictions_of,
+    protocol_text, read_campaign, receive, refine_default_hits, release, remember_findings,
+    resolve_assignee, rows_about, run_captured, runner_pid, search_ranked, search_reading,
+    seat_name, settle_discount, sitting_gated, timeline, topic_words, tracker_show_json,
+    trust_from_pack, with_discount, write_persona, write_prediction, write_rule, write_trust,
+    Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -144,7 +144,7 @@ fn as_tool_error(e: McpError) -> Result<CallToolResponse, McpError> {
 /// What every bot hears at initialize. Short on purpose: the runner injects
 /// this into the model's context, and the tools do the bookkeeping.
 pub const SERVER_INSTRUCTIONS: &str = "\
-Pass seat when you know the name. With no seat, ljos resolves one, and a read still runs.
+Use LJOS_SEAT if set, else the seat from seats.map. `ljos seat` prints it.
 Before any repo work, call ljos_start with the repo or the issue and the task. It recalls and claims.
 Git commits are booked automatically.
 Call ljos_note for your own working notes on the issue: what you tried, found or decided.
@@ -348,7 +348,7 @@ fn seat_argument(
                 Ok(Some(text.to_string()))
             }
         }
-        Some(_) => Err("pass seat as your own bot name".into()),
+        Some(_) => Err("pass seat as the name `ljos seat` prints".into()),
     }
 }
 
@@ -1280,30 +1280,9 @@ fn habitat(bin: &str, args: &[&str]) -> Result<Json<Said>, McpError> {
 /// [`habitat`] with `VISSUE_AGENT` set, so a ballot is recorded under a
 /// persona's name.
 fn habitat_as(bin: &str, args: &[&str], identity: Option<&str>) -> Result<Json<Said>, McpError> {
-    let Some(who) = identity_or_seat(identity) else {
-        return habitat(bin, args);
-    };
-    use std::process::{Command, Stdio};
-    let path = which::which(bin).map_err(|_| refused(anyhow::anyhow!("{bin} not on PATH")))?;
-    let mut cmd = Command::new(path);
-    cmd.env("VISSUE_AGENT", who);
-    ljos_cli::bind_connection_env(&mut cmd);
-    let out = cmd
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| refused(anyhow::anyhow!("{bin}: {e}")))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    if !out.status.success() {
-        return Err(refused(anyhow::anyhow!(
-            "{bin} exited {}: {stderr}",
-            out.status
-        )));
-    }
-    Ok(said(ljos_cli::Said { stdout, stderr }))
+    ljos_cli::run_captured_as(bin, args, identity)
+        .map(said)
+        .map_err(refused)
 }
 
 /// A message to one seat, or to a group.
@@ -1806,15 +1785,33 @@ impl LjosServer {
         // is refused.
         let raw_issue = args.issue.clone();
         let note = args.text.clone();
-        let issue = tokio::task::spawn_blocking(move || {
+        let stored = note.clone();
+        let issue = ljos_cli::tool_bound::blocking(move || {
             let raw = raw_issue.trim();
             let passed = (!raw.is_empty()).then_some(raw);
-            ljos_cli::bookkeep::note_issue(passed)
+            match ljos_cli::bookkeep::note_issue(passed) {
+                Ok(issue) => Ok(Some(issue)),
+                Err(err) if err == "ljos_note: pass an issue id" => {
+                    let text = stored.trim();
+                    if text.is_empty() {
+                        return Err("ljos_note: pass the note".to_string());
+                    }
+                    ljos_cli::memory_port::keep_unattached(text);
+                    Ok(None)
+                }
+                Err(err) => Err(err),
+            }
         })
         .await
         .map_err(|e| McpError::internal_error(format!("note: {e}"), None))?
         .map_err(|e| refused(anyhow::anyhow!(e)))?;
-        habitat("ljos", &["note", &issue, &note])
+        match issue {
+            Some(issue) => habitat("ljos", &["note", &issue, &note]),
+            None => Ok(Json(Said {
+                text: "stored with label unattached-note\n".into(),
+                aside: None,
+            })),
+        }
     }
 
     #[tool(
@@ -3421,6 +3418,7 @@ async fn acquire_call_order(order: Order, id: &RequestId) -> OrderPermit {
     let mut permit = Some(OrderPermit {
         id: Some(id.clone()),
     });
+    let _stage = ljos_cli::tool_bound::stage("lock");
     loop {
         let mut notified = std::pin::pin!(CALL_WAKE.notified());
         notified.as_mut().enable();
@@ -3561,7 +3559,9 @@ async fn forward_call(
     }
     let program = fresh.to_path_buf();
     let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel::<ForwardRequest>();
+    let ticket = ljos_cli::tool_bound::ticket();
     let mut worker = tokio::task::spawn_blocking(move || {
+        let _bound = ticket.map(ljos_cli::tool_bound::Ticket::bind);
         ljos_cli::mcp_forward_with_requests(&program, FORWARDED, init, params, |method, params| {
             let (reply, answer) = std::sync::mpsc::channel();
             let closed = || {
@@ -3610,13 +3610,37 @@ impl rmcp::Service<rmcp::RoleServer> for LjosService {
         request: ClientRequest,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ServerResult, McpError> {
-        let order = match &request {
-            ClientRequest::CallToolRequest(call) => call_order(&call.params.name),
+        let name = match &request {
+            ClientRequest::CallToolRequest(call) => call.params.name.to_string(),
             _ => return rmcp::Service::handle_request(&self.0, request, context).await,
         };
-        let _in_flight = crate::lifetime::call_in_flight(&context.id);
-        let _order = acquire_call_order(order, &context.id).await;
-        rmcp::Service::handle_request(&self.0, request, context).await
+        let tool = name.clone();
+        ljos_cli::tool_bound::scope(&name, async move {
+            let budget =
+                ljos_cli::tool_bound::remaining().unwrap_or_else(ljos_cli::tool_bound::budget);
+            let order = call_order(&tool);
+            let id = context.id.clone();
+            let run = async move {
+                let _in_flight = crate::lifetime::call_in_flight(&id);
+                let _order = acquire_call_order(order, &id).await;
+                rmcp::Service::handle_request(&self.0, request, context).await
+            };
+            match tokio::time::timeout(budget, run).await {
+                Ok(Ok(result)) => match ljos_cli::tool_bound::failure() {
+                    Some(line) => Err(McpError::internal_error(line, None)),
+                    None => Ok(result),
+                },
+                Ok(Err(err)) => match ljos_cli::tool_bound::failure() {
+                    Some(line) => Err(McpError::internal_error(line, None)),
+                    None => Err(err),
+                },
+                Err(_) => Err(McpError::internal_error(
+                    ljos_cli::tool_bound::timeout_line(),
+                    None,
+                )),
+            }
+        })
+        .await
     }
 
     async fn handle_notification(
@@ -3705,7 +3729,7 @@ impl ServerHandler for LjosServer {
             .peer_info()
             .map(|info| info.client_info.name.clone());
         let kind = mcp_seat_kind(&name);
-        let resolved = tokio::task::spawn_blocking(move || {
+        let resolved = ljos_cli::tool_bound::blocking(move || {
             ljos_cli::seat_resolve::prepare(seat_text.clone(), kind);
             note_connected_client(client.as_deref());
             ljos_cli::resolve_call_seat(seat_text.as_deref())
@@ -3748,7 +3772,7 @@ impl ServerHandler for LjosServer {
         let tool = name.clone();
         let args = request.arguments.clone();
         let writes = ljos_cli::bookkeep::mcp_tool_writes(&name);
-        let _ = tokio::task::spawn_blocking(move || {
+        let _ = ljos_cli::tool_bound::blocking(move || {
             if !seated {
                 return;
             }
@@ -3829,6 +3853,12 @@ impl ServerHandler for LjosServer {
         )
         .await
         .or_else(as_tool_error)?;
+        if let Some(line) = ljos_cli::tool_bound::failure() {
+            return Ok(attach_next(
+                &name,
+                CallToolResult::error(vec![ContentBlock::text(line)]).into(),
+            ));
+        }
         Ok(attach_next(&name, response))
     }
 
@@ -4679,6 +4709,24 @@ mod tests {
     fn memory_writes_are_scoped_to_what_the_person_stated() {
         assert!(
             !SERVER_INSTRUCTIONS.contains("freely"),
+            "{SERVER_INSTRUCTIONS}"
+        );
+        assert!(
+            SERVER_INSTRUCTIONS.contains("LJOS_SEAT"),
+            "{SERVER_INSTRUCTIONS}"
+        );
+        assert!(
+            SERVER_INSTRUCTIONS.contains("seats.map"),
+            "{SERVER_INSTRUCTIONS}"
+        );
+        assert!(
+            SERVER_INSTRUCTIONS.contains("`ljos seat`"),
+            "{SERVER_INSTRUCTIONS}"
+        );
+        assert!(
+            !SERVER_INSTRUCTIONS
+                .to_ascii_lowercase()
+                .contains("bot name"),
             "{SERVER_INSTRUCTIONS}"
         );
         assert!(

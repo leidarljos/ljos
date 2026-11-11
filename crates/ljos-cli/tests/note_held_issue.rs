@@ -225,3 +225,82 @@ fn a_blank_mcp_note_goes_on_the_held_issue() {
         hab.calls()
     );
 }
+
+/// No issue and no hold. The note is stored with `unattached-note` and the
+/// call succeeds. The tracker is not asked.
+#[test]
+fn a_note_with_no_issue_is_stored_unattached() {
+    let hab = Hab::new();
+    let mut child = hab
+        .command(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(30));
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    });
+    let mut stdin = child.stdin.take().unwrap();
+    for line in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ljos_note","arguments":{"text":"zircon without a ticket"}}}"#,
+    ] {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "ljos-mcp failed: {stdout}{stderr}");
+    assert!(
+        stdout.contains("unattached-note"),
+        "the note was not stored unattached:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("pass an issue id"),
+        "the call still asked for an issue:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("\"isError\":true"),
+        "an unattached note was an error:\n{stdout}"
+    );
+    assert!(
+        !hab.calls().contains("vissue note"),
+        "the tracker was asked for a note with no issue:\n{}",
+        hab.calls()
+    );
+    let mut labelled = false;
+    for entry in walkdir_files(hab.dir.path()) {
+        let Ok(text) = std::fs::read_to_string(&entry) else {
+            continue;
+        };
+        if text.contains("unattached-note") && text.contains("zircon without a ticket") {
+            labelled = true;
+            break;
+        }
+    }
+    assert!(labelled, "no kept row carried unattached-note");
+}
+
+fn walkdir_files(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}

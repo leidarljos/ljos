@@ -5,9 +5,9 @@
 * Remember a lesson
 
 =ljos remember= stores one lesson as written. A claim is two sentences at
-most. The pack's limit is 29 words a sentence: a longer one is kept, and
-the command warns in one line, naming the count and the limit, to split
-that sentence into two sentences.
+most. The pack's limit is 29 words a sentence: a longer one is kept.
+=ljos remember --verbose= prints one line, naming the count and the limit,
+to split that sentence into two sentences.
 
 * Keep the cards
 

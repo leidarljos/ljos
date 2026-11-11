@@ -157,7 +157,32 @@ fn nonce() -> Option<String> {
 fn pin(url: &Url) -> Option<SocketAddr> {
     let host = url.host_str()?;
     let port = url.port_or_known_default()?;
-    (host, port).to_socket_addrs().ok()?.next()
+    if !crate::tool_bound::armed() {
+        return (host, port).to_socket_addrs().ok()?.next();
+    }
+    let left = crate::wall_left().unwrap_or(Duration::from_millis(1));
+    if left.is_zero() {
+        crate::tool_bound::note("packsetd");
+        crate::tool_bound::mark_failed("packsetd timed out");
+        return None;
+    }
+    let host = host.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let found = (host.as_str(), port)
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next());
+        let _ = tx.send(found);
+    });
+    match rx.recv_timeout(left) {
+        Ok(addr) => addr,
+        Err(_) => {
+            crate::tool_bound::note("packsetd");
+            crate::tool_bound::mark_failed("packsetd timed out");
+            None
+        }
+    }
 }
 
 fn host_header(url: &Url) -> String {
@@ -261,7 +286,11 @@ pub(crate) fn search_stalled() -> bool {
 
 pub(crate) fn error_is_timeout(err: &Error) -> bool {
     match err {
-        Error::Io(io) => io_is_quiet(io) || io.to_string().contains("the pack did not answer"),
+        Error::Io(io) => {
+            io_is_quiet(io)
+                || io.to_string().contains("the pack did not answer")
+                || io.to_string().contains("packsetd timed out")
+        }
         _ => false,
     }
 }
@@ -686,8 +715,21 @@ fn mark_pack_quiet() {
     }
 }
 
+fn pack_io(err: std::io::Error) -> std::io::Error {
+    let quiet = io_is_quiet(&err) || err.to_string().contains("the pack did not answer");
+    if quiet && crate::tool_bound::armed() {
+        crate::tool_bound::note("packsetd");
+        crate::tool_bound::mark_failed("packsetd timed out");
+        return std::io::Error::new(std::io::ErrorKind::TimedOut, "packsetd timed out");
+    }
+    err
+}
+
 fn quiet_io() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::TimedOut, "the pack did not answer")
+    pack_io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "the pack did not answer",
+    ))
 }
 
 /// A read or a connect that ended because the socket stayed silent.
@@ -753,20 +795,20 @@ fn bounded_wait(requested: Duration, connect: bool) -> std::io::Result<Duration>
     if let Some(deadline) = clock_deadline() {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err(std::io::Error::new(
+            return Err(pack_io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "the pack did not answer",
-            ));
+            )));
         }
         wait = wait.min(left);
         if connect {
             wait = wait.min(super::pack_connect_budget());
         }
         if wait.is_zero() {
-            return Err(std::io::Error::new(
+            return Err(pack_io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "the pack did not answer",
-            ));
+            )));
         }
     }
     Ok(wait)
@@ -795,7 +837,7 @@ fn write_all(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
             }
             Ok(n) => sent += n,
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
+            Err(err) => return Err(pack_io(err)),
         }
     }
     stream.flush()
@@ -887,10 +929,10 @@ fn read_response(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<R
 fn arm_read(stream: &TcpStream, deadline: Instant) -> std::io::Result<()> {
     let remain = deadline.saturating_duration_since(Instant::now());
     if remain.is_zero() {
-        return Err(std::io::Error::new(
+        return Err(pack_io(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             "the pack did not answer",
-        ));
+        )));
     }
     stream.set_read_timeout(Some(remain))?;
     Ok(())
@@ -907,7 +949,7 @@ fn read_some(stream: &mut TcpStream, tmp: &mut [u8]) -> std::io::Result<usize> {
             }
             Ok(n) => return Ok(n),
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
+            Err(err) => return Err(pack_io(err)),
         }
     }
 }
@@ -1102,6 +1144,9 @@ impl PacksetClient {
         let token = load_token();
         *self.token.lock().unwrap_or_else(|p| p.into_inner()) = token.clone();
         let allow = bearer && token.is_some() && !foreign(&self.base);
+        if crate::tool_bound::armed() {
+            crate::tool_bound::note("packsetd");
+        }
         let budget = admission_retry_budget(method, timeout);
         let _held = HeldDeadline::enter(budget);
         let mut waited = Duration::ZERO;
@@ -1378,6 +1423,9 @@ impl PacksetClient {
         };
         let token = load_token();
         let allow = bearer && token.is_some() && !foreign(&self.base);
+        if crate::tool_bound::armed() {
+            crate::tool_bound::note("packsetd");
+        }
         let budget = admission_retry_budget(method, timeout);
         let _held = HeldDeadline::enter(budget);
         self.exchange(
