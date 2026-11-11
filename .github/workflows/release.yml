@@ -28,13 +28,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Ubuntu 22.04 is glibc 2.35. ubuntu-latest is newer, and a
+          # binary built there does not run on a 22.04 machine.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-latest
             target: x86_64-apple-darwin
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
@@ -50,7 +52,22 @@ jobs:
       - name: The tag is the crate version
         run: |
           set -eu
-          crate=$(python3 -c 'import tomllib; d = tomllib.load(open("Cargo.toml", "rb")); print(d.get("workspace", {}).get("package", {}).get("version") or d["package"]["version"])')
+          # Ubuntu 22.04's python3 is 3.10 and has no tomllib.
+          crate=$(python3 <<'PY'
+          import re
+          text = open("Cargo.toml", encoding="utf-8").read()
+          def section(name):
+              found = re.search(r"(?ms)^\[%s\]\s*(.*?)(?=^\[|\Z)" % re.escape(name), text)
+              if not found:
+                  return None
+              version = re.search(r'(?m)^version\s*=\s*"([^"]+)"', found.group(1))
+              return version.group(1) if version else None
+          crate = section("workspace.package") or section("package")
+          if not crate:
+              raise SystemExit("Cargo.toml has no version")
+          print(crate)
+          PY
+          )
           if [ "v$crate" != "$TAG" ]; then
             echo "Cargo.toml says $crate and the tag says $TAG" >&2
             exit 1
@@ -102,6 +119,34 @@ jobs:
           mkdir -p "$CARGO_HOME"
           export CARGO_BUILD_RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=/src --remap-path-prefix=${CARGO_HOME}=/cargo"
           cargo build --locked --release --target "${{ matrix.target }}" -p ljos -p ljos-hud
+      # The floor is the glibc on the 22.04 runner. A newer GLIBC_ symbol
+      # means the archive will not start on that release.
+      - name: glibc symbols stay at 2.35
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          bin="target/${{ matrix.target }}/release/ljos"
+          too_new=$(
+            objdump -T "$bin" | awk '
+              {
+                for (i = 1; i <= NF; i++) {
+                  if ($i ~ /GLIBC_[0-9]/) {
+                    v = $i
+                    sub(/.*GLIBC_/, "", v)
+                    sub(/[^0-9.].*/, "", v)
+                    n = split(v, a, ".")
+                    major = a[1] + 0
+                    minor = (n > 1 ? a[2] + 0 : 0)
+                    if (major > 2 || (major == 2 && minor > 35)) print v
+                  }
+                }
+              }
+            ' | sort -u
+          )
+          if [ -n "$too_new" ]; then
+            printf 'glibc newer than 2.35: %s\n' "$too_new" >&2
+            exit 1
+          fi
       - run: |
           set -eu
           name="ljos-${TAG}-${{ matrix.target }}"
@@ -123,7 +168,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Ubuntu 22.04 ships protobuf-compiler 3.12.4. This job requires
+          # libprotoc 3.21.12, which Ubuntu 24.04 carries, so the encoder
+          # stays on 24.04.
+          - os: ubuntu-24.04
             triple: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             triple: aarch64-unknown-linux-gnu
