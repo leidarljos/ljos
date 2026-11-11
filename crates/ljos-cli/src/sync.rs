@@ -5164,9 +5164,7 @@ fn git_within(
     }
     // A hook or a worktree script exports GIT_DIR, which outranks `-C`.
     let mut cmd = crate::git_at(root);
-    // The login's hooks and ljos's sitting gate run on none of these calls.
-    cmd.args(["-c", "core.hooksPath=/dev/null"])
-        .args(args)
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -5876,6 +5874,42 @@ mod tests {
         std::fs::create_dir_all(root.join(".ljos/user-rules")).unwrap();
         std::fs::write(root.join(&rel), "sealed\n").unwrap();
         rel
+    }
+
+    #[test]
+    fn user_rule_commits_honor_checkout_hooks() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _env = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let rel = rules_repo(&root);
+        let git = |args: &[&str]| {
+            let out = crate::git_at(&root).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        git(&["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        let install = |body: &str| {
+            std::fs::write(&hook, body).unwrap();
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        install("#!/bin/sh\nprintf 'ran\n' >> .hook-ran\n");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        assert!(commit_host(&root, std::slice::from_ref(&rel), "probe-host", deadline).unwrap());
+        assert!(root.join(".hook-ran").is_file());
+        assert_eq!(git(&["log", "-1", "--format=%s"]), "chore(sync): probe-host user rules");
+        install("#!/bin/sh\necho 'hook refused the commit' >&2\nexit 1\n");
+        std::fs::write(root.join(&rel), "different sealed content\n").unwrap();
+        let before = git(&["rev-parse", "HEAD"]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let error = commit_host(&root, &[rel], "probe-host", deadline).unwrap_err();
+        assert!(format!("{error:#}").contains("commit refused"), "{error:#}");
+        assert!(format!("{error:#}").contains("hook refused the commit"), "{error:#}");
+        assert_eq!(git(&["rev-parse", "HEAD"]), before);
     }
 
     /// A commit cut off by the budget leaves no index.lock: git is
