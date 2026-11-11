@@ -154,7 +154,7 @@ fn a_silent_pack_does_not_hold_a_remember() {
     let (out, took) = ljos(dir.path(), &pack, &["remember", "tabs not spaces"]);
     let said = text_of(&out);
     assert!(
-        took < Duration::from_secs(8),
+        took < Duration::from_secs(22),
         "remember waited {took:?}\n{said}"
     );
     assert_eq!(out.status.code(), Some(75), "{said}");

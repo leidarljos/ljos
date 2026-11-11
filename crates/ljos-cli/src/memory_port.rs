@@ -1323,15 +1323,26 @@ fn overlap(text: &str, query: &str) -> f64 {
 
 fn to_hit(row: &Row, score: f64) -> Hit {
     let entities = row.entities.clone();
+    // A failed command is stored, and the line names the failure. It is
+    // not a lesson the default search returns.
+    let kind = if row.id.starts_with("attempt:") {
+        let label = row
+            .labels
+            .iter()
+            .find(|label| !label.is_empty())
+            .map(String::as_str)
+            .unwrap_or("attempt");
+        format!("attempt, {label}")
+    } else if row.kind.is_empty() {
+        "lesson".into()
+    } else {
+        row.kind.clone()
+    };
     Hit {
         id: Some(row.id.clone()),
         text: row.text.clone(),
         score,
-        kind: if row.kind.is_empty() {
-            "lesson".into()
-        } else {
-            row.kind.clone()
-        },
+        kind,
         ts: if row.at.is_empty() {
             None
         } else {
@@ -1387,7 +1398,13 @@ pub fn append_recall(hits: &mut Vec<Hit>, query: &str, limit: usize) {
 
 /// Search merge for `ljos search`. An active filter replaces the list:
 /// the filter runs on the slot before the limit.
-pub fn merge_cli(hits: &mut Vec<Hit>, query: &str, limit: usize, filter: &SourceFilter) {
+pub fn merge_cli(
+    hits: &mut Vec<Hit>,
+    query: &str,
+    limit: usize,
+    filter: &SourceFilter,
+    attempts: bool,
+) {
     let home = memory_home();
     if !home.exists() {
         if filter.active() {
@@ -1397,7 +1414,7 @@ pub fn merge_cli(hits: &mut Vec<Hit>, query: &str, limit: usize, filter: &Source
     }
     let place = Place::current();
     if filter.active() {
-        let found = selected(&place, query, filter, true);
+        let found = selected(&place, query, filter, attempts);
         let take = limit.max(1);
         *hits = found
             .into_iter()
@@ -1406,7 +1423,7 @@ pub fn merge_cli(hits: &mut Vec<Hit>, query: &str, limit: usize, filter: &Source
             .collect();
         return;
     }
-    merge_into(hits, &place, query, limit, filter, true);
+    merge_into(hits, &place, query, limit, filter, attempts);
 }
 
 fn merge_into(

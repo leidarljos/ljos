@@ -557,6 +557,9 @@ enum Cmd {
         /// Print JSON. The ranking is a field, and the mode line is left off stderr.
         #[arg(long)]
         json: bool,
+        /// Include failed commands. They are stored as attempts and left out of the default list.
+        #[arg(long)]
+        attempts: bool,
     },
     /// Candidate contradictions from the geometry of the seat's memory: the lowest passes between single memories, read by the optional `landscape` habitat.
     Conflicts {
@@ -1826,12 +1829,22 @@ fn main() -> Result<()> {
         ljos_cli::memory_port::record_memory_error(&args, &format!("{e:#}"));
         if let Some(label) = ljos_cli::policy_label::as_policy(e) {
             println!("label {}: {}", label.label, label.detail);
+            // A seat that was not resolved, or is not on the roster, is a
+            // failed command. 2 is the status a bad invocation already
+            // uses, so a script that checks the status sees the failure.
+            // Other labels are notes and still exit 0.
+            if matches!(label.label, "seat-unresolved" | "seat-unlisted") {
+                std::process::exit(USAGE_STATUS);
+            }
             return Ok(());
         }
         if ljos_cli::is_pack_busy(e) {
-            // A hook that still holds the error prints nothing. The runner
-            // is not failed for a pack that did not answer in time.
-            if std::env::var_os("LJOS_IN_HOOK").is_some() {
+            // `ljos hook` answers the runner and must not fail it: a
+            // silent pack is not a refused command. Every other command,
+            // including remember with `LJOS_IN_HOOK` still set, exits 75
+            // so a script can see the pack did not take the write.
+            let hook_cmd = std::env::args_os().nth(1).is_some_and(|arg| arg == "hook");
+            if hook_cmd {
                 std::process::exit(0);
             }
             eprintln!("{}", ljos_cli::PACK_BUSY_LINE);
@@ -1897,6 +1910,15 @@ fn run_command() -> Result<()> {
             err.exit();
         }
     };
+    // A lesson left while the pack was busy goes out on the next call
+    // that is not itself a remember still waiting on that pack. `ljos
+    // hook` keeps its own budget and does not spend it on the queue.
+    if !matches!(
+        cmd,
+        Cmd::Remember { .. } | Cmd::Hook { .. } | Cmd::Help { .. }
+    ) {
+        ljos_cli::flush_queued_lessons();
+    }
     let mut sitting_budget = match &cmd {
         Cmd::Sitting { issue, .. } => {
             println!("sitting {issue}: checking blockers");
@@ -1944,7 +1966,11 @@ fn run_command() -> Result<()> {
     {
         return Err(ljos_cli::policy_label::labelled(
             "seat-unresolved",
-            ljos_cli::SUBAGENT_NO_SEAT,
+            format!(
+                "{} (missing {})",
+                ljos_cli::SUBAGENT_NO_SEAT,
+                ljos_cli::missing_seat_value()
+            ),
         ));
     }
     // These act on the claims the hooks keep, and the hooks of the tool
@@ -1990,11 +2016,6 @@ fn run_command() -> Result<()> {
                 std::process::exit(USAGE_STATUS);
             }
             ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
-            // A silent pack is one command budget, then the usual busy line.
-            // Asking again, or waiting out the thirty-second default, is
-            // what held the first remember.
-            let _pack_clock = ljos_cli::arm_cmd_pack();
-            let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
             // A paragraph or a session is several claims: each goes in on
             // its own, where the whole was refused at the pack's cap.
             let chunks = ljos_cli::claim_chunks(&text);
@@ -2005,21 +2026,30 @@ fn run_command() -> Result<()> {
                 // A person at the terminal, and words from their latest
                 // prompt, are their lesson. Any other text is a standing
                 // lesson too, sitting or not, labelled agent-derived.
-                let body = if ljos_cli::person_present() {
-                    let horizon = ljos_cli::remember_horizon(transient, standing, false);
-                    packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?
-                } else if ljos_cli::capture::said_in_latest_prompt(&text) {
-                    let horizon = transient.then_some(true);
-                    ljos_cli::packset_write_mcp("Remember", &text, as_persona.as_deref(), horizon)?
-                } else {
-                    let horizon = if transient { Some(true) } else { Some(false) };
-                    ljos_cli::packset_write_agent(
-                        "Remember",
-                        &text,
-                        as_persona.as_deref(),
-                        horizon,
-                    )?
-                };
+                // A busy pack is asked again inside twenty seconds. It
+                // still exits 75, and the lesson waits in the state dir.
+                let body = ljos_cli::remember_with_retry(&text, || {
+                    if ljos_cli::person_present() {
+                        let horizon = ljos_cli::remember_horizon(transient, standing, false);
+                        packset_write_as("Remember", &text, as_persona.as_deref(), horizon)
+                    } else if ljos_cli::capture::said_in_latest_prompt(&text) {
+                        let horizon = transient.then_some(true);
+                        ljos_cli::packset_write_mcp(
+                            "Remember",
+                            &text,
+                            as_persona.as_deref(),
+                            horizon,
+                        )
+                    } else {
+                        let horizon = if transient { Some(true) } else { Some(false) };
+                        ljos_cli::packset_write_agent(
+                            "Remember",
+                            &text,
+                            as_persona.as_deref(),
+                            horizon,
+                        )
+                    }
+                })?;
                 println!("{}", write_ack(&body));
                 eprintln!("{}", ljos_cli::remember_note(&body));
                 if let Some(line) = ljos_cli::memories::reinforced_line(&body) {
@@ -2344,6 +2374,7 @@ fn run_command() -> Result<()> {
             source_seat,
             import_id,
             json,
+            attempts,
         } => {
             ljos_cli::log_recall("search", &query.join(" "));
             // A short budget. Past it the word ranking prints. The call
@@ -2376,6 +2407,10 @@ fn run_command() -> Result<()> {
             let mut hits =
                 match packset_search_as_of(&join(&query), fetch, as_of.as_deref(), rerank) {
                     Ok(hits) => hits,
+                    Err(err) if !dated && ljos_cli::pack_unreachable(&err) => {
+                        eprintln!("packsetd is unreachable (connection refused)");
+                        std::process::exit(ljos_cli::PACK_BUSY_EXIT);
+                    }
                     Err(err) if !dated && ljos_cli::pack_memory_down(&err) => {
                         eprintln!("{}", ljos_cli::pack_busy_sentence());
                         eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
@@ -2396,11 +2431,15 @@ fn run_command() -> Result<()> {
                 import_id,
             };
             if !dated || filter.active() {
-                ljos_cli::memory_port::merge_cli(&mut hits, &join(&query), limit as usize, &filter);
+                ljos_cli::memory_port::merge_cli(
+                    &mut hits,
+                    &join(&query),
+                    limit as usize,
+                    &filter,
+                    attempts,
+                );
             }
-            if filter.active() {
-                ljos_cli::prefer_calling_seat(&mut hits);
-            }
+            ljos_cli::refine_default_hits(&mut hits, &join(&query), attempts);
             hits.truncate(limit as usize);
             ljos_cli::note_lookups(&hits);
             let ranking = ljos_cli::ranking_now();

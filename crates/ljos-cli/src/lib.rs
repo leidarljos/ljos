@@ -2986,6 +2986,7 @@ pub fn seat_for_thread(thread: &str) -> Seat {
     let seat = named_var("LJOS_SEAT")
         .and_then(|raw| seated_name(&raw))
         .or_else(|| ANNOUNCED.get().map(|s| s.seat.clone()))
+        .or_else(mapped_box_seat)
         .unwrap_or_else(login_user);
     let path = session_record_path(thread);
     if let Some(holder) = std::fs::read_to_string(&path)
@@ -4152,12 +4153,20 @@ fn named_var(key: &str) -> Option<String> {
 }
 
 /// The seat this conversation would be, with `LJOS_SEAT` out of the way:
-/// the client that connected, the record under a conversation id, a
-/// runner variable that names its own seat, or the seat an agy or
-/// opencode conversation id books as. The login user is not one of these.
+/// the client that connected, the box seat map, the record under a
+/// conversation id, a runner variable that names its own seat, or the
+/// seat an agy or opencode conversation id books as. The login user is
+/// not one of these. A record that only says `seat` is kept here so the
+/// disagreement line can name the conversation id that did not resolve.
 fn conversation_derived_seat() -> Option<String> {
-    if let Some(seat) = ANNOUNCED.get() {
+    if let Some(seat) = ANNOUNCED
+        .get()
+        .filter(|seat| !omitted_actor_name(&seat.seat))
+    {
         return Some(seat.seat.clone());
+    }
+    if let Some(seat) = mapped_box_seat() {
+        return Some(seat);
     }
     if let Some(seat) = seat_from_session_records() {
         return Some(seat.seat);
@@ -4174,6 +4183,43 @@ fn conversation_derived_seat() -> Option<String> {
     None
 }
 
+/// `~/.config/ljos/seats.toml`: conversation id to seat. A `seats` key is
+/// the roster shape and is not a conversation. The file is this box's
+/// map. A name that is only the placeholder `seat` is not an entry.
+fn mapped_box_seat() -> Option<String> {
+    let path = config_base()?.join("ljos").join("seats.toml");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let value = toml::from_str::<toml::Value>(&text).ok()?;
+    let table = value.as_table()?;
+    let ids: Vec<String> = stamped_sessions().into_iter().map(|(_, id)| id).collect();
+    for id in ids {
+        let Some(toml::Value::String(seat)) = table.get(&id) else {
+            continue;
+        };
+        let seat = seat.trim();
+        if seat.is_empty() || omitted_actor_name(seat) || is_raw_subagent_name(seat) {
+            continue;
+        }
+        return Some(seat_for_env(seat));
+    }
+    None
+}
+
+/// What to print when the derived seat collapsed to the placeholder
+/// `seat`. The conversation id is the value that was not in the map.
+#[must_use]
+pub fn missing_seat_value() -> String {
+    named_var("CURSOR_CONVERSATION_ID")
+        .or_else(|| {
+            stamped_sessions()
+                .into_iter()
+                .map(|(_, id)| id)
+                .find(|id| !id.is_empty())
+        })
+        .or_else(cursor_conversation)
+        .unwrap_or_else(|| "unset".to_string())
+}
+
 /// One line when `LJOS_SEAT` and the conversation's seat are both set and
 /// are not the same seat. `None` when either is missing or they agree.
 fn seat_disagreement_line() -> Option<String> {
@@ -4184,6 +4230,13 @@ fn seat_disagreement_line() -> Option<String> {
     if kept.is_empty() || other.is_empty() || kept == other {
         return None;
     }
+    // `seat` is the placeholder, not a name. The line names the conversation
+    // id that did not resolve, which is the value that is actually missing.
+    let other = if omitted_actor_name(&other) {
+        missing_seat_value()
+    } else {
+        other
+    };
     Some(format!(
         "ljos: LJOS_SEAT is {kept} and this conversation's seat is {other}; writing as {kept}\n"
     ))
@@ -4224,10 +4277,11 @@ pub fn whoami() -> Seat {
     // a claim under it is refused rather than given the client's harness.
     let named = named_var("LJOS_SEAT")
         .map(|n| (seat_for_env(&n), "LJOS_SEAT"))
-        .or_else(|| named_var("VISSUE_AGENT").map(|n| (seat_for_env(&n), "VISSUE_AGENT")));
+        .or_else(|| named_var("VISSUE_AGENT").map(|n| (seat_for_env(&n), "VISSUE_AGENT")))
+        .or_else(|| mapped_box_seat().map(|n| (n, "seats.toml")));
     // A record filed under a conversation id this shell carries. The
     // process tree is not consulted for a seat.
-    let record = seat_from_session_records();
+    let record = seat_from_session_records().filter(|seat| !omitted_actor_name(&seat.seat));
     let program = ANNOUNCED
         .get()
         .cloned()
@@ -4498,10 +4552,17 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
         (Some(name), _) => (name.to_string(), false),
         (None, Some(seat)) => (seat.to_string(), true),
         (None, None) => {
-            return Err(policy_label::labelled(
-                "seat-unresolved",
-                "pass seat, your own bot name, on every call: this server has no LJOS_SEAT",
-            ))
+            if let Some(seat) = mapped_box_seat() {
+                (seat, true)
+            } else {
+                let missing = missing_seat_value();
+                return Err(policy_label::labelled(
+                    "seat-unresolved",
+                    format!(
+                        "pass seat, your own bot name, on every call: this server has no LJOS_SEAT (missing {missing})"
+                    ),
+                ));
+            }
         }
     };
     if is_raw_subagent_name(&raw) {
@@ -5638,10 +5699,11 @@ fn seated_name(raw: &str) -> Option<String> {
     (slug != "runner" && !omitted_actor_name(&slug)).then_some(slug)
 }
 
-/// The seat a git hook may book as. `LJOS_SEAT`, then `antigravity` when
-/// `ANTIGRAVITY_CONVERSATION_ID` is set, then `opencode` when
-/// `OPENCODE_SESSION_ID` is set. A conversation id does not name a seat.
-/// Nothing here reads the process tree. `None` means the hook does not book.
+/// The seat a git hook may book as. `LJOS_SEAT`, then the box seat map,
+/// then `antigravity` when `ANTIGRAVITY_CONVERSATION_ID` is set, then
+/// `opencode` when `OPENCODE_SESSION_ID` is set. A conversation id with
+/// no map entry does not name a seat. Nothing here reads the process
+/// tree. `None` means the hook does not book.
 #[must_use]
 pub fn git_hook_seat() -> Option<String> {
     if let Some(name) = named_var("LJOS_SEAT") {
@@ -5650,6 +5712,12 @@ pub fn git_hook_seat() -> Option<String> {
             return None;
         }
         let seat = seat_for_env(&name);
+        let slug = seat_slug(&seat);
+        if slug != "runner" && !omitted_actor_name(&slug) {
+            return Some(seat);
+        }
+    }
+    if let Some(seat) = mapped_box_seat() {
         let slug = seat_slug(&seat);
         if slug != "runner" && !omitted_actor_name(&slug) {
             return Some(seat);
@@ -5678,6 +5746,11 @@ pub fn unseated_subagent() -> bool {
         // A real seat keeps the conversation, including one whose id is a
         // subagent. The name `example-host-sand-sub` is not a seat.
         return set.iter().any(|name| is_raw_subagent_name(name));
+    }
+    // A main conversation the box seat map names is that seat. It is not
+    // a subagent that forgot `LJOS_SEAT`.
+    if mapped_box_seat().is_some() {
+        return false;
     }
     cursor_conversation().is_some_and(|id| subagent_id(&id))
 }
@@ -14394,8 +14467,103 @@ pub fn search_by_words(query: &str, limit: u32) -> Vec<Hit> {
     };
     prefer_calling_seat(&mut hits);
     memory_port::append_recall(&mut hits, query, limit as usize);
-    prefer_calling_seat(&mut hits);
+    refine_default_hits(&mut hits, query, false);
     hits
+}
+
+/// Kinds a default search does not return. A note, an attempt and a log
+/// are the seat's own bookkeeping. They crowded out lessons when the pack
+/// ranked by words.
+const SEARCH_SKIP_KINDS: &[&str] = &["note", "attempt", "log"];
+
+/// A routine status line, not a lesson. These are the notes that filled
+/// default search: a hourly keep-moving nudge, a poke log, and a record
+/// of asking `memory --help`.
+fn routine_status_note(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("keep-moving")
+        || lower.contains("keep moving")
+        || lower.contains("hourly poke")
+        || lower.contains("poke log")
+        || lower.contains("memory --help")
+}
+
+fn search_skip_kind(hit: &Hit, attempts: bool) -> bool {
+    let kind = hit.kind.to_ascii_lowercase();
+    let attempt = hit
+        .id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("attempt:"))
+        || kind == "attempt"
+        || kind.starts_with("attempt,")
+        || kind.starts_with("attempt ");
+    // `--attempts` asks for the stored failure. A routine status line
+    // still is not a lesson about the query.
+    if attempt && attempts {
+        return routine_status_note(&hit.text);
+    }
+    if attempt {
+        return true;
+    }
+    SEARCH_SKIP_KINDS.iter().any(|skip| kind == *skip) || routine_status_note(&hit.text)
+}
+
+/// Words the query is about. Stop words and words under three letters
+/// are not a topic: matching them returned every routine note.
+fn search_topics(query: &str) -> Vec<String> {
+    pack_word_seq(query).collect()
+}
+
+fn hit_has_topic(hit: &Hit, topics: &[String]) -> bool {
+    if topics.is_empty() {
+        return false;
+    }
+    let words: std::collections::HashSet<String> = pack_word_seq(&hit.text).collect();
+    topics.iter().any(|word| words.contains(word))
+}
+
+/// Lesson and preference before any other kind that survived the filter.
+fn preferred_search_kind(hit: &Hit) -> bool {
+    let kind = hit.kind.to_ascii_lowercase();
+    kind == "lesson"
+        || kind.starts_with("lesson")
+        || kind == "preference"
+        || kind.starts_with("preference")
+}
+
+/// Default search order. The caller's seat comes first, then a lesson or
+/// a preference, then the score the ranker gave. A foreign status note
+/// must not outrank this seat's own lesson.
+fn default_search_key(hit: &Hit, mine: &str) -> (bool, bool) {
+    (foreign_memory(hit, mine), !preferred_search_kind(hit))
+}
+
+/// Drop notes, attempts, logs and routine status lines, keep a hit only
+/// when it shares a topic word with `query`, and put this seat's lessons
+/// and preferences first. No topic word means no hits: an unrelated row
+/// is not an answer. `attempts` keeps a stored failed command when the
+/// caller asked for one and it still names the topic.
+pub fn refine_default_hits(hits: &mut Vec<Hit>, query: &str, attempts: bool) {
+    let topics = search_topics(query);
+    hits.retain(|hit| !search_skip_kind(hit, attempts) && hit_has_topic(hit, &topics));
+    let mine = seat_name();
+    hits.sort_by(|a, b| {
+        default_search_key(a, &mine)
+            .cmp(&default_search_key(b, &mine))
+            .then(b.score.total_cmp(&a.score))
+    });
+}
+
+/// Whether `err` is a pack that refused the connection. The line search
+/// prints is this fact alone, not the chain under it.
+#[must_use]
+pub fn pack_unreachable(err: &anyhow::Error) -> bool {
+    err.to_string()
+        .to_ascii_lowercase()
+        .contains("connection refused")
+        || format!("{err:#}")
+            .to_ascii_lowercase()
+            .contains("connection refused")
 }
 
 /// [`packset_search_opts`] without the rerank, chosen by relevance, see
@@ -16791,6 +16959,22 @@ const BUSY_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 /// How many times a busy writer is asked again.
 const BUSY_TRIES: u32 = 3;
 
+/// Posts of one `ljos remember`, including the first. A fourth post is
+/// what held a remember for most of a minute on a box that was already
+/// out of memory.
+const REMEMBER_TRIES: u32 = 3;
+/// The whole remember retry, pauses included. Twenty seconds is as long
+/// as a script should wait; the old thirty-second socket timeout, asked
+/// again, was the forty-six second exit.
+const REMEMBER_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+/// The first pause between remember tries. The next pause is twice as
+/// long, and no pause is longer than [`REMEMBER_BACKOFF_CAP`], so the
+/// pauses cannot eat the budget the posts need.
+const REMEMBER_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+/// The longest pause between remember tries. Four seconds leaves each of
+/// the three posts a few seconds inside [`REMEMBER_BUDGET`].
+const REMEMBER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// One line when a pack call runs out of time. Exit [`PACK_BUSY_EXIT`].
 pub const PACK_BUSY_LINE: &str = "pack busy, try again";
 
@@ -17277,10 +17461,46 @@ static ATOM_LISTINGS: std::sync::Mutex<Vec<Held<Value>>> = std::sync::Mutex::new
 /// [`ATOM_LISTINGS`] as [`Row`]s.
 static ROW_LISTINGS: std::sync::Mutex<Vec<Held<Row>>> = std::sync::Mutex::new(Vec::new());
 /// How long a listing serves later reads in one hook process.
+/// Two seconds covers the searches of one prompt. A sitting or a recall
+/// on a busy box spends longer than that between its first listing and
+/// its last, so a command keeps the snapshot until it returns instead.
 const ATOMS_MEMO: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Listings kept for the command now running. A hook uses [`ATOMS_MEMO`].
+/// A sitting reads the listing for due, for recall and for the timeline,
+/// and a recall reads it for the issue and again for each search. Those
+/// were serial round-trips. The count is nested commands in this process.
+static CMD_LISTING_MEMO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Keep one pack listing until this guard drops, so the rest of the
+/// command reads that snapshot. A write still drops it.
+struct ListingMemo;
+
+impl ListingMemo {
+    fn enter() -> Self {
+        CMD_LISTING_MEMO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for ListingMemo {
+    fn drop(&mut self) {
+        if CMD_LISTING_MEMO.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            forget_atom_listings();
+        }
+    }
+}
 
 fn atoms_memo_on() -> bool {
     std::env::var_os("LJOS_IN_HOOK").is_some()
+        || CMD_LISTING_MEMO.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
+fn memo_fresh(at: std::time::Instant) -> bool {
+    if CMD_LISTING_MEMO.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        return true;
+    }
+    at.elapsed() < ATOMS_MEMO
 }
 
 /// What a listing is read into: whole atoms, or the [`Row`]s the prompt
@@ -17363,7 +17583,7 @@ fn memo_listing<T>(
     memo.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .find(|(k, at, _, _)| k == key && at.elapsed() < ATOMS_MEMO)
+        .find(|(k, at, _, _)| k == key && memo_fresh(*at))
         .map(|(_, _, listed, trusted)| (std::sync::Arc::clone(listed), *trusted))
 }
 
@@ -17686,6 +17906,10 @@ pub(crate) fn forget_atom_listings() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
+    PLAYBOOK_ROSTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
     *ORIGINS_RECORDED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
@@ -17794,6 +18018,19 @@ fn listed_of<T: Listed>(
     {
         return Ok(kept);
     }
+    // Due reads atoms and recall reads rows. Both are the same listing.
+    // The second shape is built from the atoms the first read kept, so
+    // the command does not fetch the store again.
+    if let Some((atoms, trusted)) = memo_key
+        .as_deref()
+        .and_then(|key| memo_listing(&ATOM_LISTINGS, key))
+    {
+        let listed = T::of_atoms(std::sync::Arc::clone(&atoms));
+        if let Some(key) = &memo_key {
+            memo_keep(T::memo(), key, &listed, trusted);
+        }
+        return Ok((listed, trusted));
+    }
     // The whole listing is a megabyte the writer builds in a fifth of a
     // second. A hook keeps the last one on disk under the pack's own
     // last-write stamp: while the stamp stands, the listing does too.
@@ -17801,7 +18038,10 @@ fn listed_of<T: Listed>(
     // The pack-wide stamp: a write to any workspace moves it, which is
     // conservative, and the same status read serves the encoder check in
     // this hook through the client's memo.
-    let stamp = if memo_key.is_some() && whole {
+    // The on-disk listing is for the next hook process. A command keeps
+    // the snapshot in memory and does not pay a status round-trip to
+    // stamp a file it will not read.
+    let stamp = if std::env::var_os("LJOS_IN_HOOK").is_some() && memo_key.is_some() && whole {
         client
             .status(None)
             .ok()
@@ -19331,6 +19571,100 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
     packset_write_as(label, text, None, None)
 }
 
+/// How long one remember post may wait. The tries still to come, and a
+/// pause before each of them, have to fit in `left`.
+fn remember_slice(
+    left: std::time::Duration,
+    tries_left: u32,
+    backoff: std::time::Duration,
+) -> std::time::Duration {
+    let pauses = tries_left.saturating_sub(1);
+    let reserved = backoff.saturating_mul(pauses);
+    let room = left.saturating_sub(reserved);
+    let slice = room / tries_left.max(1);
+    // Shorter than the connect budget, a try returns before the handshake
+    // and never sees a pack that is only slow.
+    slice
+        .max(std::time::Duration::from_millis(200))
+        .min(left.max(std::time::Duration::from_millis(1)))
+}
+
+/// Post one lesson, asking a busy pack again. At most [`REMEMBER_TRIES`]
+/// posts, and the waits stay inside [`REMEMBER_BUDGET`]. A pack that is
+/// still busy after that queues the lesson and returns [`PackBusy`], so
+/// the command exits [`PACK_BUSY_EXIT`].
+///
+/// # Errors
+///
+/// The pack refused the text, or it was still busy after the tries. A
+/// busy failure has the lesson queued when the queue could take it.
+pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) -> Result<Value> {
+    let started = std::time::Instant::now();
+    let mut backoff = REMEMBER_BACKOFF;
+    let mut last = None;
+    for index in 0..REMEMBER_TRIES {
+        let left = REMEMBER_BUDGET.saturating_sub(started.elapsed());
+        if index > 0 && left < std::time::Duration::from_millis(200) {
+            break;
+        }
+        let slice = remember_slice(left, REMEMBER_TRIES - index, backoff);
+        let result = {
+            let _clock = pack_link::PackClock::enter(slice);
+            let _quiet = pack_link::QuietPack::enter();
+            post()
+        };
+        match result {
+            Ok(body) => return Ok(body),
+            Err(err) if is_pack_busy(&err) || writer_busy(&err) || writer_slow(&err) => {
+                last = Some(err);
+                let after = REMEMBER_TRIES - index - 1;
+                if after == 0 {
+                    break;
+                }
+                let left = REMEMBER_BUDGET.saturating_sub(started.elapsed());
+                let pause = backoff.min(left / (after + 1));
+                if pause.is_zero() {
+                    break;
+                }
+                std::thread::sleep(pause);
+                backoff = (backoff * 2).min(REMEMBER_BACKOFF_CAP);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    queue_busy_lesson(text);
+    Err(last.unwrap_or_else(pack_busy_err))
+}
+
+/// Keep `text` for the next ljos that reaches the pack, and say so.
+fn queue_busy_lesson(text: &str) {
+    let dir = note_queue::state_dir();
+    let queued = queue_memory("", text, "", "lesson", &[]);
+    match queued {
+        Ok(_) => eprintln!(
+            "remember: the pack is busy; the lesson is queued in {} and the next ljos call sends it",
+            dir.join("note-queue.jsonl").display()
+        ),
+        Err(err) => eprintln!("remember: the pack is busy; the lesson was not queued: {err:#}"),
+    }
+}
+
+/// Send lessons queued while the pack was busy, when this call can reach
+/// the pack. A silent pack is not waited out: this is not the command.
+pub fn flush_queued_lessons() {
+    let dir = note_queue::state_dir();
+    if note_queue::pending_in(&dir).is_empty() {
+        return;
+    }
+    // Two seconds is one post of a short lesson on a pack that is up.
+    // A silent pack stops here instead of holding the command.
+    let _clock = pack_link::PackClock::enter(std::time::Duration::from_secs(2));
+    match flush_note_queue() {
+        Ok(done) if !done.kept.is_empty() => eprint!("{}", note_queue::drained_lines(&done)),
+        _ => {}
+    }
+}
+
 /// The preference `ljos prefer` writes, stored at once from any caller.
 ///
 /// Typed by the person, it is theirs. Under a runner the same person-words
@@ -20287,34 +20621,45 @@ pub fn playbooks_of(atoms: &[Value]) -> Vec<Playbook> {
     latest.into_values().map(|(_, p)| p).collect()
 }
 
-fn ensure_shipped_playbooks() {
-    let have = pack()
-        .ok()
-        .and_then(|c| c.atoms_of_kind(&c.workspace(), "playbook").ok())
-        .map(|atoms| playbooks_of(&atoms))
-        .unwrap_or_default();
-    for p in shipped_playbooks() {
-        if have.iter().any(|h| h.name == p.name) {
-            continue;
-        }
-        let _ = write_playbook(&p);
-    }
-}
+/// The roster this command already built. A sitting asks for it once to
+/// bind the recipe and again to copy it. Filling a missing shipped
+/// playbook used to list the kind, then list it again for every name it
+/// posted, and the copy listed it once more. One list, then the posts,
+/// serves both asks. A later write drops it with the atom listings.
+static PLAYBOOK_ROSTER: std::sync::Mutex<Option<Vec<Playbook>>> = std::sync::Mutex::new(None);
 
 /// The roster: pack atoms, with the six shipped filled in when missing.
 pub fn playbooks_from_pack() -> Result<Vec<Playbook>> {
-    ensure_shipped_playbooks();
+    if let Some(got) = PLAYBOOK_ROSTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return Ok(got);
+    }
     let client = pack()?;
+    let workspace = client.workspace();
     let atoms = client
-        .atoms_of_kind(&client.workspace(), "playbook")
+        .atoms_of_kind(&workspace, "playbook")
         .context("playbook: GET /v1/atoms?kind=playbook failed")?;
     let mut got = playbooks_of(&atoms);
     for p in shipped_playbooks() {
-        if !got.iter().any(|g| g.name == p.name) {
-            got.push(p);
+        if got.iter().any(|g| g.name == p.name) {
+            continue;
         }
+        // The list just read has no live atom of this name, so there is
+        // nothing to supersede and no reason to list the kind again.
+        if let Ok(atom) = playbook_atom(&p, &workspace) {
+            let _ = client.post_atom(&atom);
+        }
+        got.push(p);
     }
     got.sort_by(|a, b| a.name.cmp(&b.name));
+    // post_atom drops the roster. Put back the list this call built, so
+    // the copy later in the same sitting does not list the kind again.
+    *PLAYBOOK_ROSTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(got.clone());
     Ok(got)
 }
 
@@ -25306,7 +25651,7 @@ pub fn require_deed(accession: &str) -> Result<()> {
 }
 
 /// The accession a citation names, out of what a caller pastes: the id
-/// itself, `accession=ID` or `id=ID` (the lines `deedar create` prints), a
+/// itself, `id=ID` (the line `deedar create` prints) or `accession=ID`, a
 /// whole `deedar create` output, or `file=sha256:HEX` (the product line,
 /// which `deedar current` resolves to its deed once the prefix is gone).
 #[must_use]
@@ -25344,7 +25689,7 @@ pub fn resolve_deed(accession: &str) -> Result<String> {
     }
     let said = run_captured("deedar", &["current", &token]).map_err(|e| {
         anyhow::anyhow!(
-            "deed: {token} is not in the deed store: {e:#} (cite the `accession=` line `deedar create` prints)"
+            "deed: {token} is not in the deed store: {e:#} (cite the `id=` line `deedar create` prints)"
         )
     })?;
     let named = said
@@ -34851,6 +35196,7 @@ pub const RELATED_MEMORY_CAP: usize = 5;
 /// bring it up.
 pub fn recall_memories(issue: &str) -> Result<String> {
     let _clock = arm_cmd_pack();
+    let _listing = ListingMemo::enter();
     recall_memories_with(issue, true)
 }
 
@@ -36218,6 +36564,10 @@ pub fn sitting_stream_started(
     budget: SittingPreclaimBudget,
     mut emit: impl FnMut(&str),
 ) -> Result<String> {
+    // One listing for due, recall and the timeline. Each used to fetch
+    // the store on its own, and on a busy box those round-trips were the
+    // sitting's time.
+    let _listing = ListingMemo::enter();
     let mut out = String::new();
     let down = sitting_hard_down();
     let mut deferred =
@@ -40609,6 +40959,15 @@ fn unverified_label(h: &Hit, kind: &str) -> String {
 /// and MCP name it the same.
 #[must_use]
 pub fn kind_label(h: &Hit) -> String {
+    // A failed command is stored as an attempt. The line names that, and
+    // the failure label, ahead of the note rules that would call it a lesson.
+    if h.id.as_deref().is_some_and(|id| id.starts_with("attempt:")) || h.kind.starts_with("attempt")
+    {
+        if h.kind.starts_with("attempt") {
+            return h.kind.clone();
+        }
+        return "attempt".to_string();
+    }
     if substituted(h) {
         return unverified_label(h, "note");
     }
@@ -57510,6 +57869,7 @@ mod tests {
         let err = super::require_deed("deed-missing").unwrap_err().to_string();
         assert!(err.contains("deed-missing"), "{err}");
         assert!(err.contains("not in the deed store"), "{err}");
+        assert!(err.contains("`id=`"), "{err}");
         assert!(super::require_deed("known").is_ok());
         assert!(super::require_deed("  ").is_err());
     }
@@ -65261,6 +65621,35 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(super::seat_disagreement_line(), None);
     }
 
+    /// A record that only says `seat` is the placeholder. The warning names
+    /// the conversation id that did not resolve.
+    #[test]
+    fn an_unresolved_seat_warning_names_the_conversation() {
+        let _env = env_guard();
+        let rt = tempfile::tempdir().unwrap();
+        let id = "bc-unmapped-0000-4000-8000-000000000099";
+        let path = rt
+            .path()
+            .join("ljos")
+            .join(format!("session-{}", super::session_tag(id)));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("seat\nseat\nids\t{id}\n")).unwrap();
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
+            std::env::set_var("CURSOR_CONVERSATION_ID", id);
+            std::env::set_var("LJOS_SEAT", "papers");
+        }
+        let line = super::seat_disagreement_line().expect("one warning");
+        assert!(line.contains(id), "{line}");
+        assert!(!line.contains("this conversation's seat is seat"), "{line}");
+        assert!(line.contains("writing as papers"), "{line}");
+        unsafe {
+            std::env::remove_var("CURSOR_CONVERSATION_ID");
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+    }
+
     #[test]
     fn a_codex_shell_sits_as_codex_and_a_nameless_runner_shell_cannot_vote() {
         let _env = env_guard();
@@ -65407,7 +65796,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     #[test]
-    fn a_conversation_id_and_a_seats_file_do_not_name_the_seat() {
+    fn a_mapped_main_conversation_is_that_seat() {
         let _env = env_guard();
         let keys = [
             "LJOS_SEAT",
@@ -65443,10 +65832,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 }
             }
         }
-        assert_ne!(seat.seat, "saddle");
-        assert!(!seat.source.contains("seats.toml"), "{seat:?}");
+        assert_eq!(seat.seat, "saddle", "{seat:?}");
+        assert!(seat.source.contains("seats.toml"), "{seat:?}");
         assert!(row.ok, "{}", row.state);
-        assert!(!row.state.contains("seats.toml"), "{}", row.state);
+        assert!(row.state.contains("saddle"), "{}", row.state);
     }
 
     #[test]

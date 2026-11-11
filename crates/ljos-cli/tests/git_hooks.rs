@@ -524,8 +524,8 @@ fn ljos_seat_ignores_a_seats_file_and_a_raw_conversation_id() {
         &[("LJOS_SEAT", ""), ("CURSOR_CONVERSATION_ID", id)],
     );
     let said = String::from_utf8(known.stdout).unwrap();
-    assert!(!said.contains("rgoswami"), "{said}");
-    assert!(!said.contains("seats.toml"), "{said}");
+    assert!(said.contains("rgoswami"), "{said}");
+    assert!(said.contains("seats.toml"), "{said}");
     let unknown_id = "zzzzzzzz-hello";
     let unknown = hab.ljos_in(
         &hab.repo,
@@ -724,7 +724,7 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
         String::from_utf8_lossy(&seat.stdout),
         String::from_utf8_lossy(&seat.stderr)
     );
-    assert!(seat.status.success(), "{seat_said}");
+    assert_eq!(seat.status.code(), Some(2), "{seat_said}");
     assert!(seat_said.contains("label seat-unresolved"), "{seat_said}");
     assert!(seat_said.contains("no seat of its own"), "{seat_said}");
 }

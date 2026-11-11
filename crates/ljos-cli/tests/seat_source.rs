@@ -80,10 +80,9 @@ fn only_a_named_seat_or_a_call_argument_names_the_seat() {
         &config,
         &[("CURSOR_CONVERSATION_ID", id), ("LJOS_SEAT", "")],
     );
-    assert_eq!(field(&unnamed, "seat"), "probe-login", "{unnamed}");
-    assert!(!unnamed.contains("rgoswami"), "{unnamed}");
+    assert_eq!(field(&unnamed, "seat"), "rgoswami", "{unnamed}");
+    assert!(unnamed.contains("seats.toml"), "{unnamed}");
     assert!(!unnamed.contains("exec-daemon"), "{unnamed}");
-    assert!(!unnamed.contains("seats.toml"), "{unnamed}");
     assert!(!unnamed.contains("process tree"), "{unnamed}");
 
     let named = seat_out(&daemon, &config, &[("LJOS_SEAT", "saddle")]);
