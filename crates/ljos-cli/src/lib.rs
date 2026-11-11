@@ -12508,7 +12508,7 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
         );
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let id = text.split_whitespace().next().unwrap_or("").to_string();
+    let id = created_issue_id(&text);
     if id.is_empty() {
         bail!("vissue create printed no id");
     }
@@ -33772,7 +33772,7 @@ pub fn file_issue(
     }
     let said = run_captured_as("vissue", &argv, Some(agent))?;
     let text = said.stdout;
-    let id = text.split_whitespace().next().unwrap_or("").to_string();
+    let id = created_issue_id(&text);
     if let (Some((n, d)), false) = (quorum_deadline, id.is_empty()) {
         let note = format!("{}{n} by {}", reap::QUORUM_NOTE, d.trim());
         run_captured("vissue", &["note", &id, &note])?;
@@ -39852,18 +39852,84 @@ fn refused_or_busy(out: &std::process::Output) -> Result<PathCommit, String> {
 
 /// What git said when it refused: the first line of stderr, else of
 /// stdout, else how it exited. A git killed by a signal says nothing.
+/// A missing `user.name` names the two settings that file needs.
 fn git_refusal(out: &std::process::Output) -> String {
     use std::os::unix::process::ExitStatusExt as _;
     for stream in [&out.stderr, &out.stdout] {
         let said = first_line(stream);
         if !said.is_empty() {
-            return said;
+            return explain_git_refusal(&said);
         }
     }
     match (out.status.code(), out.status.signal()) {
         (_, Some(signal)) => format!("git was killed by signal {signal} before it said why"),
         (Some(code), _) => format!("git exited {code} and said nothing"),
         _ => "git said nothing".into(),
+    }
+}
+
+/// The id `vissue create` printed.
+///
+/// vissue 0.24 prints `project: NAME` and then the heading line
+/// `NAME-xxxx  TODO  [#C]  title`. The id is the first token of that
+/// heading. A quiet create prints the id alone. A `file:` or `inbox:`
+/// line is a path, and a token that ends in `:` is a label.
+pub(crate) fn created_issue_id(text: &str) -> String {
+    let mut bare = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(word) = line.split_whitespace().next() else {
+            continue;
+        };
+        if word.ends_with(':') || line.starts_with("file:") || line.starts_with("inbox:") {
+            continue;
+        }
+        if word.contains('-') {
+            return word.to_string();
+        }
+        if bare.is_empty() {
+            bare = word.to_string();
+        }
+    }
+    bare
+}
+
+/// Attach the fix when git stopped because it has no author.
+fn explain_git_refusal(said: &str) -> String {
+    if said.contains("Author identity unknown") || said.contains("unable to auto-detect email") {
+        format!("{said}. Set git user.name and user.email, then run the command again")
+    } else {
+        said.to_string()
+    }
+}
+
+#[cfg(test)]
+mod created_issue_id_tests {
+    use super::{created_issue_id, explain_git_refusal};
+
+    #[test]
+    fn the_project_line_is_not_the_id() {
+        let text = "\
+project: demo
+demo-zcre  TODO  [#C]  Pick a parser
+file: /tmp/tracker/Software/demo/issues.org
+";
+        assert_eq!(created_issue_id(text), "demo-zcre");
+    }
+
+    #[test]
+    fn a_quiet_create_is_the_id_alone() {
+        assert_eq!(created_issue_id("demo-zcre\n"), "demo-zcre");
+    }
+
+    #[test]
+    fn a_missing_git_author_names_the_settings() {
+        let said = explain_git_refusal("Author identity unknown");
+        assert!(said.contains("user.name"), "{said}");
+        assert!(said.contains("user.email"), "{said}");
     }
 }
 

@@ -213,8 +213,8 @@ fi
 # repository, crate, programs, tarball style
 COMPONENTS="ljos ljos ljos,ljos-mcp v
 packset packset packset,packsetd,packset-mcp v
-vissue vissue-cli vissue dist
-vissue vissue-mcp vissue-mcp dist
+vissue vissue-cli vissue v
+vissue vissue-mcp vissue-mcp v
 deedar deedar-cli deedar v
 claimdag claimdag-cli claimdag v
 ljos-policyd ljos-policyd ljos-policyd v
@@ -381,7 +381,13 @@ install_one() {
     dist) asset="$crate-$TARGET.tar.xz" ;;
   esac
   url="https://github.com/$OWNER/$repo/releases/download/$tag/$asset"
-  if [ "$TARGET" = unknown ] || ! fetch "$url" "$TMP/$asset" 2>/dev/null; then
+  # vissue and vissue-mcp share one archive. The second row reuses it.
+  if [ -s "$TMP/$asset" ]; then
+    :
+  elif [ "$TARGET" = unknown ] || ! fetch "$url" "$TMP/$asset" 2>/dev/null; then
+    if [ "$TARGET" != unknown ]; then
+      warn "no $asset in the $repo $tag release; building $crate from source"
+    fi
     source_build "$crate" "$ver"
     case ",$progs," in
       *,packset-embed,*) [ -x "$BIN_DIR/packset-embed" ] || warn_embed "a source build" ;;
@@ -579,13 +585,14 @@ case "$(cd "$HOME" && pwd -P)/" in
     say "  \`ljos doctor\` says why. Install into a HOME outside /tmp to try them." ;;
 esac
 say "The guard lets a force push run, with a warning:"
-# A checkout this script was started in may carry a push gate. Ask from
-# the home directory, and ignore a git dir the caller exported.
+# A push onto main also trips the sitting gate, which hides this warning.
+# A topic branch shows the force-push rule on its own. Ask from the home
+# directory, and ignore a git dir the caller exported.
 (
   cd "$HOME" || exit 1
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX \
     GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE
-  ljos policy -- git push --force origin main
+  ljos policy -- git push --force origin topic
 ) || true
 if [ "$CLOUD" = 1 ]; then
   if "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
