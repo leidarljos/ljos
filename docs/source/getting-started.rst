@@ -1,33 +1,59 @@
-.. [[[cog import ljos_version as v; v.lines("", ":description: This page takes about ten minutes. It describes ljos {version}.", ":cover: https://leidarljos.github.io/ljos/_static/og.png", "", "This page takes about ten minutes. It describes ljos {version}.", "")]]]
+.. [[[cog import ljos_version as v; v.lines("", ":description: The first sitting: a lesson, a search and a ticket, then a second seat. It describes ljos {version}.", ":cover: https://leidarljos.github.io/ljos/_static/og.png", "", "The first sitting: a lesson, a search and a ticket, then a second seat. It describes ljos {version}.", "")]]]
 
-:description: This page takes about ten minutes. It describes ljos 0.41.1.
+:description: The first sitting: a lesson, a search and a ticket, then a second seat. It describes ljos 0.41.1.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-This page takes about ten minutes. It describes ljos 0.41.1.
+The first sitting: a lesson, a search and a ticket, then a second seat. It describes ljos 0.41.1.
 
 .. [[[end]]]
 
-By the end you will have remembered a lesson and put two seats on one ticket.
-They will have voted, noted and settled the vote. You will have asked
-``ljos-policyd`` about a command, and you will know how to take ljos off again.
+Do the first three sections in order. They install ljos, store a lesson, search it, and file a ticket.
+The last section puts a second seat on that ticket. The how-to guides cover one task each after that.
+Mem0 stores memory by running a model over what it ingests. The lesson below is stored as written.
+beads keeps a ticket queue in Dolt. The ticket below is an Org heading in a git repository.
 
-0. Install
-==========
+Install
+=======
+
+Linux and macOS are supported. Windows works through Windows Subsystem for Linux (WSL) and is untested.
+
+From a checkout of this repository:
 
 .. code:: console
 
-   $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+   $ sh scripts/install.sh --no-embed
    $ export PATH="$HOME/.local/bin:$PATH"
+
+A release attaches that script:
+
+.. code:: console
+
+   $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
+
+The ``install.sh`` attached to the 0.41.1 release asks for ``vissue-cli-<target>.tar.xz``.
+The vissue release publishes ``vissue-v<version>-<target>.tar.gz``. Use the script in this tree until a later release.
 
 The programs go to ``~/.local/bin``. They are ``ljos``, ``ljos-mcp``, ``packset``,
 ``packsetd``, ``vissue``, ``deedar``, ``claimdag``, ``ljos-policyd`` and ``ljos-consensus``.
 The installer checks each download against its published SHA-256 sum.
 It builds from source with ``cargo`` where a platform has no release.
-``--no-embed`` leaves out the encoder for meaning-based search.
+``--no-embed`` leaves out the encoder. Search then matches words, and a search prints ``ranking is lexical: encoder unavailable``.
 
 Read the script before you run it. It is ``scripts/install.sh`` in this repository.
 It runs ``ljos onboard`` for each coding runner it finds. With none found, it still sets up
 the tracker, the pack writer and the deed store.
+
+The tracker commits each change, so git needs an identity:
+
+.. code:: console
+
+   $ git config --global user.name "Your Name"
+   $ git config --global user.email "you@example.com"
+   $ ljos doctor
+   ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
+
+On a clean install the ready line names memory, the tracker and the command guard.
+A row under it names anything that still needs action. Add ``--all`` to see every row.
 
 To install by hand, or to see what onboarding would write:
 
@@ -39,285 +65,119 @@ To install by hand, or to see what onboarding would write:
    $ ljos doctor
 
 ``ljos onboard`` writes the MCP entry, the hooks and the skill into each runner it finds.
-``ljos onboard --example`` lists the runners ljos knows. ``ljos doctor`` prints only the rows
-that need action. Add ``--all`` to see every row.
+``ljos onboard --example`` lists the runners ljos knows.
 
-Nothing needs a variable set. ``ljos onboard`` makes a deed store, a tracker and a
-config file for ``vissue``, and it starts the pack writer. Git needs an identity, because
-the tracker commits each change.
+Nothing else needs a variable set. ``ljos onboard`` makes a deed store, a tracker and a
+config file for ``vissue``, and it starts the pack writer.
 
 The command harness runs a hook only after you trust it. Open ``/hooks`` in the command harness and trust each ljos hook.
 Trust it again after an upgrade rewrites one.
 
-The hooks fail open on every runner. A ``ljos`` that is missing, crashes or times out lets the call run.
-A check whose hook fails answers allow, with a note that says why nothing judged the call.
-
-``ljos upgrade`` moves each installed program to its latest published release.
-``ljos``, ``ljos-mcp`` and ``ljos-hud`` come from the ljos release, and each other program from the repository that publishes it.
-Each line names the version a program had and the version it has, or ``current`` when those are the same.
-A missing release, a failed download or a checksum that does not match is a warning, and the other programs still move.
-``ljos upgrade --only NAME`` moves one program, and the previous binary is kept as ``NAME.bak-pre-VERSION``.
-
-1. The memory loop
-==================
+A lesson and a search
+=====================
 
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
+   ljos: no seat was named; this write uses unknown-cursor. Set one with --seat NAME or export LJOS_SEAT=NAME.
+   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
+     id a6ae2751, next review 2026-11-12 21:40 +00:00
+   standing: the hook shows it from the next prompt it bears on
+   $ ljos search "lexical default"
+   ranking is lexical: encoder unavailable
+   1.0000	2/2	lesson, agent-derived	a6ae2751564de44a99c5915a6d9ea7f2	today	The lexical default is BM25+. It beat BM25 by two points on turns.
+
+The id and the review time are the ones that run printed. The name after ``unknown-`` is the host name.
+This run sat under an agent runner, so the search row says ``lesson, agent-derived``.
+Typed at a terminal with no runner above it, the same command is the person's sentence.
+Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
+``ljos search "which fusion"`` shares no word with either sentence and prints ``No hits.``
+
+.. code:: console
+
    $ ljos prefer "CombMNZ over RRF for fusing two ballots."
-   $ ljos search "which fusion"
-   2.0000  1/3 lesson  1fe4b916d956798196df680ade594ac5    today   The lexical default is BM25+. It beat BM25 by two points on turns.
-   1.0000  1/3 preference  85dde12b553372dafb3d50e3b4b63fec    today   CombMNZ over RRF for fusing two ballots.
+   remembered (preference): CombMNZ over RRF for fusing two ballots.
+     id f8b725a9, next review 2026-11-12 21:40 +00:00
+   $ ljos search fusing
+   ranking is lexical: encoder unavailable
+   1.0000	2/2	unverified agent preference (origin agent-derived)	f8b725a9c82783a79a3a01d185244770	today	CombMNZ over RRF for fusing two ballots.
 
-No seat has to be set first.
-``ljos remember``, ``ljos prefer`` and ``ljos search`` run with no ``--seat`` and no ``LJOS_SEAT``.
-Search, recall, status and doctor read every seat when none is named.
-A remember with no seat stores the lesson as ``unknown-`` plus the host name and says how to set one.
+``ljos due`` lists claims when their review time arrives. A claim you stop reviewing sinks in search.
+The how-to :doc:`Keep memory current <howto-memory>` is the review clock, ``ljos graded`` and ``ljos forget``.
 
-A claim is two sentences at most, and it is stored as written. The pack's limit
-is 29 words a sentence. A longer sentence is kept, and ``ljos remember`` warns in
-one line to split that sentence into two sentences. A lesson or a preference
-you type takes effect at once. The hook shows both from the next prompt they bear on.
-Run ``ljos remember`` from a terminal of your own. An agent that runs it stores the lesson
-at once, labelled agent-derived and unreviewed, until a review keeps it.
-
-Tomorrow, ``ljos due`` lists both claims. Read each one and grade it:
+A ticket
+========
 
 .. code:: console
 
-   $ ljos graded 3f9c...            # recalled: comes back later
-   $ ljos graded 3f9c... --lapsed   # had to look it up: comes back sooner
+   $ LJOS_SEAT=alice ljos file "Pick a codec" -p demo -t decision --options keep,drop
+   demo-2f5j
+   project: demo
+   demo-2f5j  TODO  [#C]  Pick a codec
+   file: ~/.local/share/vissue/tracker/Software/demo/issues.org
+   tracker git: committed chore(issues): demo-2f5j filed by alice; no remote, kept local
 
-A claim you stop reviewing sinks in search. A claim shown wrong is retired with the deed
-that showed it: ``ljos forget 3f9c... --why deed-...``.
+The id is the only line on standard output, so ``id=$(LJOS_SEAT=alice ljos file ...)`` captures it.
+The heading, the path and the commit line are on standard error. The id in the heading is the same one.
+Under a runner that already recorded a seat, ljos names both and writes as ``LJOS_SEAT``.
+With no git identity the heading is still written, and the last line is ``tracker git: commit refused: Author identity unknown. Set git user.name and user.email, then run the command again``.
+``ljos doctor`` then warns that the issue file is uncommitted.
 
-2. Two seats on one ticket
-==========================
+The file is Org. ``vissue show demo-2f5j`` prints the heading, and the tracker repository is the one ``ljos doctor --all`` names under ``tracker``.
 
-A seat is one agent working the tracker. Name each seat with ``LJOS_SEAT``. The tracker
-needs a project, so the first ticket creates one.
+A second seat
+=============
+
+One seat holds a ticket at a time. Bob's claim is refused, and the refusal names alice:
 
 .. code:: console
 
-   $ ljos file "Pick a codec" -p demo -t decision --options keep,drop
-   demo-fhy7  TODO  [#C]  Pick a codec
-   file: .../tracker/Software/demo/issues.org
-   tracker git: committed chore(issues): demo-fhy7 filed by alice; no remote, kept local
-   $ ljos claim demo-fhy7 --assignee alice
+   $ LJOS_SEAT=alice ljos claim demo-2f5j --assignee alice
    gen=2
-   tracker: demo-fhy7 STARTED under alice
+   tracker: demo-2f5j STARTED under alice
+   $ LJOS_SEAT=bob ljos claim demo-2f5j --assignee bob
+   label claim-conflict: claim: demo-2f5j is held by another (alice, seat alice, still running, ...), not by bob (this one).
 
-One seat holds a ticket at a time. If bob claims it now, the claim is refused and the
-refusal names alice. Bob files or claims another ticket. To help on this one, bob writes a
-note or sends alice a message.
-The refusal prints ``label claim-conflict:`` and names the holder.
-A close with open children prints ``label children-open:`` and leaves the parent open.
-A block that would loop prints ``label graph-cycle:`` and does not store the edge.
-
-Both seats vote, each from its own runner. A seat votes once on a ticket. ljos refuses a second
-ballot from one shell, whatever session id the second ballot names.
-Ballots count as one voice when they share a session id, a parent, a calling shell or the root session of one agent runner.
-A subagent of that root session counts with its parent.
-When those ballots disagree, the latest one is that voice.
-A seat ballot is its own voice only when the cast has no shell, no agent runner and no earlier row.
-``ljos consensus`` names the ballots it folded and why.
-A persona ballot records the casting seat, the parent session and the persona.
+The rest of bob's line names ``ljos release``, ``ljos note`` and ``ljos send``. The ticket stays with alice.
+Bob can file another ticket. To help on this one, bob writes a note.
 
 .. code:: console
 
-   $ ljos vote demo-fhy7 --for keep --used none     # in alice's runner
-   $ ljos vote demo-fhy7 --for keep --used none     # in bob's runner
-   $ ljos consensus demo-fhy7 --no-file
-   settle (DeGroot, 2 voters): keep 1.000
+   $ LJOS_SEAT=alice ljos note demo-2f5j "the codec is one file"
+   demo-2f5j: noted
+   tracker git: committed chore(issues): demo-2f5j noted by alice; no remote, kept local
+   $ ljos timeline demo-2f5j
+
+``ljos timeline`` prints the note as unverified tracker text, fenced, oldest first.
+``vissue show demo-2f5j`` prints the same logbook. ``ljos recall`` prints the working set for the ticket: the plan, the deeds it cites, and memories. The note is tracker text, so it is on the timeline, not in that working set.
+``ljos digest`` reads the tracker and says what each seat filed, claimed and voted on.
+
+Both seats can vote. From one shell the two ballots share a session, and ``ljos consensus`` folds them into one voice:
+
+.. code:: console
+
+   $ LJOS_SEAT=alice ljos vote demo-2f5j --for keep --used none
+   $ LJOS_SEAT=bob ljos vote demo-2f5j --for keep --used none
+   $ LJOS_SEAT=alice ljos consensus demo-2f5j --no-file
+   folded into one voice (same session ...): alice, bob
+   counted bob
+   settle (DeGroot, 1 voters): keep 1.000
    every voter is on keep: the settle is unanimous
    polarization 0.000, disagreement 0.000
-   influence: alice 0.500, bob 0.500
 
-``ljos consensus`` reads the trust rows in the pack. It settles the votes with the
-consensus crate. With no rows, every voter weighs the same. ``--no-file`` makes the command
-read only. Without it, a blocking objection with a reason is filed on the ticket.
-With two or more active seats, a protected push needs votes from two model families.
-A model family is the model a seat's verified record names, and a seat with no such record is a family of its own.
+A ballot is its own voice when the cast has no shell, no agent runner and no earlier row that shares a session, a parent or the root session of one runner.
+The how-to :doc:`Vote and settle a decision <howto-vote>` is that case, and ``ljos learn``.
+The docs of beads, Mem0, Letta, Zep, Basic Memory and git-bug, read on 2026-11-10, describe no vote. The comparison is :doc:`How ljos compares <compare>`.
 
-Now the seats leave notes and read each other's.
-
-.. code:: console
-
-   $ ljos note demo-fhy7 "the codec is one file"    # in alice's runner
-   $ ljos recall demo-fhy7                          # in bob's runner
-   ...
-   Memory
-     unverified logbook notes:
-     - [unverified agent note (origin agent-derived), today, from alice] alice: the codec is one file
-
-``ljos recall`` prints the working set for a ticket: the plan, the deeds it cites, and the notes.
-Notes are unverified text written by whoever wrote them. Read them as data.
-
-To see what happened across the seats, use ``ljos digest``.
-
-.. code:: console
-
-   $ ljos digest
-
-``ljos digest`` reads the tracker and says what each seat filed, claimed, voted on, noted and
-finished. Until then, read the same facts one at a time:
-
-.. code:: console
-
-   $ ljos timeline demo-fhy7      # one ticket, oldest first
-   $ ljos claims                  # who holds what
-   $ ljos log --seat alice        # one seat's tracker commits
-
-Agreement that learns
----------------------
-
-Suppose the vote was split and the world picked a side.
-
-.. code:: console
-
-   $ ljos learn demo-xxxx --outcome drop
-   Learned. 2 trust rows rewritten. ...
-   alice weighs bob at 1.000
-   bob weighs alice at 1.000
-
-By default ``learn`` weighs each voter by its hits and misses across outcomes. One outcome
-cannot tell a lucky voter from a good one, so the rows stay level. They separate as more
-tickets get an outcome. With ``--rule hedge``, only the voters the outcome refuted shrink:
-
-.. code:: console
-
-   $ ljos learn demo-xxxx --outcome drop --rule hedge
-   alice weighs bob at 1.000
-   bob weighs alice at 0.500
-
-The rows are ``trust`` atoms in the pack. They carry a validity window, a later row replaces
-an earlier one, and they travel in a handover. A person can set one by hand:
-``ljos trust alice bob 0.9 --why deed-...``.
-
-Finish
-------
-
-.. code:: console
-
-   $ echo 'fn main() {}' > codec.rs
-   $ deedar create file --name "the codec" --path codec.rs --agent alice
-   $ ljos deed demo-fhy7 --add deed-file-the-codec
-   $ ljos finish demo-fhy7 --assignee alice --lesson "The codec is one file." --outcome keep
-   completed the session node for demo-fhy7 as done
-   tracker: demo-fhy7 no longer claimed by alice; back to TODO
-   remembered the lesson as agent-derived, unreviewed (id 081ce739); search finds it now, and `ljos accept 081ce739` marks it reviewed
-   the ticket demo-fhy7 stays open and nobody holds it; a person closes it when the work is accepted
-
-``ljos finish`` hands the claim back and stores the lesson, labelled agent-derived and
-unreviewed. Search finds it at once, and ``ljos accept ID`` marks it reviewed. Completing a
-claim node does not close the ticket. A person does, when the work is accepted.
-A yes the person said in chat is kept with the acceptance.
-The seat that heard it runs ``ljos accept ID --quote "..." --at TIME --via SEAT``, and the acceptance keeps those words.
-
-3. Seats and grants
-===================
-
-The tracker's ``vissue.toml`` lists the seats. Add one with:
-
-.. code:: console
-
-   $ ljos seat add carol
-
-``ljos seat add`` writes the seat's row in ``vissue.toml``. You no longer edit the file by hand.
-``ljos seat`` prints the name this agent works under and
-where the name came from. The name is ``LJOS_SEAT`` when it is set. Otherwise ljos derives
-one from the runner, and a derived name counts as a seat.
-
-A grant with ``close=own`` lets one named seat close the tickets it filed or has claimed. Without a grant,
-``ljos finish`` leaves the ticket open for a person to close.
-
-.. code:: console
-
-   $ ljos seat grant alice close=own --quote "the person's words" --at 2026-10-29T02:00:00Z --via RECORDER
-
-The row lives in ``vissue.toml``. It holds the quote, the time, the recorder named by ``--via``,
-and the tracker commit. A grant edited in by hand is ignored. A seat cannot grant itself.
-Every close cites the grant record.
-
-Solo mode
----------
-
-When ``vissue.toml`` lists one active seat, that seat's own vote settles
-consensus for the push check. With two or more seats, the normal quorum applies.
-
-4. Ask policyd
-==============
-
-``ljos-policyd`` reads each shell command before it runs. ``ljos policy -- COMMAND`` prints its
-answer for one command and runs nothing.
-
-.. code:: console
-
-   $ ljos policy -- ls
-   ls
-   allow
-   $ ljos policy -- rm -rf /usr/share/foo
-   rm -rf /usr/share/foo
-   allow	warn	rm-rf-outside-tmp	a recursive delete reaches outside /tmp and /var/tmp
-
-By default every command runs, and ljos never refuses, asks or holds one; a cloud seat's push
-rule is the one exception. There are three answers. ``allow`` runs the command. A warning runs it too, and shows one line that names the
-rule and says why. ``rewrite`` replaces the command with a fixed one and lets that one run.
-policyd answers ``allow``, or ``allow``, ``warn``, the rule and its warning, separated by tabs. An
-older policyd that answers ``deny`` or ``prompt`` reads as the same warning.
-``block-on-warning`` does not block. When your own ``ljos.toml`` names a policyd config that sets
-``block-on-warning true``, ljos warns with the rule's label. The command runs (see
-the how-to).
-A rewrite is ``allow``, ``rewrite`` and the new command, separated by tabs.
-Each rewrite leaves a note and a row in ``$XDG_DATA_HOME/ljos/rewrite.jsonl``. A repository's
-``rewrite = false`` turns rewriting off there.
-An ``allow`` can carry a warning: ``allow``, ``warn``, the rule and the warning, separated by tabs.
-The command runs, and ljos keeps the label in ``$XDG_DATA_HOME/ljos/bypass.jsonl``.
-
-A warning is the only thing between a runner and a destructive command. Read it, and keep
-backups and branch protection on the remote.
-
-A force push runs with the ``git-force-push`` warning. An ordinary push of a branch runs with
-nothing to say. A push onto a protected branch also warns when the ticket of your sitting has
-no settled consensus. With one active seat, its own vote settles it. The ``pre-push`` git hook,
-once ``ljos git-hooks install`` has run, still holds that push under a runner.
-
-If ``ljos-policyd`` is missing or slow, the command runs and ljos logs a warning.
-``ljos doctor`` shows the policy row.
-
-5. Hand a ticket to another seat
-================================
-
-.. code:: console
-
-   $ ljos handover --out /tmp/bag --issue demo-fhy7
-   issues=1 deeds=1 files=8
-   /tmp/bag/manifest-sha256.txt.sig
-
-On the receiving seat, with its own stores:
-
-.. code:: console
-
-   $ ljos receive /tmp/bag
-   the payload matches the manifest ...
-   $ ljos receive /tmp/bag --import
-
-The receiver checks three things in order. The bag arrived as written. The deeds were in
-the sender's log before the handover. A key the receiver accepts signed it.
-Only then does it import the atoms and the trust rows.
-
-A scratch seat has no host key, so its bag goes out unsigned, and ``--import`` refuses an
-unsigned bag. ``ljos onboard`` writes the key.
-
-6. Take it off
-==============
+Take it off
+===========
 
 .. code:: console
 
    $ ljos offboard
 
-``ljos offboard`` undoes what ``ljos onboard`` wrote. It removes the ljos entries from each
-runner's files and leaves the rest of each file as it was.
+``ljos offboard`` removes the ljos entries from each runner's files and leaves the rest of each file as it was.
+With no runner onboarded it prints ``ok``, ``offboard``, ``nothing installed by ljos onboard``.
 
 .. code:: console
 
@@ -329,17 +189,10 @@ with an allow until each running agent session restarts. With the binary already
 ``curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/uninstall.sh && sh uninstall.sh``
 does the same.
 
-``scripts/fresh-install-check.sh`` tests the whole path. It installs into an empty ``HOME``,
-onboards, and takes two seats through file, claim, vote, consensus, note, recall and digest.
-Then it runs ``ljos offboard`` and checks that ``HOME`` is clean. It lists every step that failed.
-
-.. code:: console
-
-   $ scripts/fresh-install-check.sh --cargo-target target/release
-
 Where next
 ==========
 
-- :doc:`How-to <howto>`: wire the server into a runner, sign handovers, read the cards.
-- :doc:`Reference <reference>`: every verb and tool.
-- :doc:`Explanation <explanation>`: why it is built this way.
+- :doc:`How-to guides <howto>`: one task a page. Runners, the review clock, a sitting, mail, a signed handover, votes, and the command check.
+- :doc:`Reference <reference>`: every verb, the MCP tools, the hooks and the variables.
+- :doc:`Explanation <explanation>`: why the stores are split the way they are.
+- :doc:`How ljos compares <compare>`: the tables behind the comparisons above.

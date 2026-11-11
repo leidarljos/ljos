@@ -20,78 +20,91 @@ These notes describe ljos 0.41.1.
 - 2,293 tests passed, 0 failed, 2 ignored on the 0.40.0 release commit ([CI run 42801686714](https://github.com/leidarljos/ljos/actions/runs/42801686714)).
 
 [What ljos does](https://leidarljos.github.io/ljos/introduction.html) lists every measured number with its method.
+No row compares ljos with another memory tool on a shared benchmark. `hook-latency.txt` says so on its `third-party` line.
 
-## How it compares
+## Where it sits
 
-- Memory: ljos, beads and Basic Memory keep what was written. Mem0 runs a model over what it ingests by default.
-- Tickets: ljos and beads let an agent claim a ticket. git-bug keeps issues inside git.
-- Votes: ljos records a ballot per agent and settles them. The docs of the other four describe no vote.
-- Stores: ljos uses Org files and JSON lines in git, beads uses Dolt, Mem0 uses Qdrant and SQLite, Basic Memory uses Markdown files, and git-bug uses git objects.
-- Licences: ljos and beads are `MIT`, Mem0 is `Apache-2.0`, Basic Memory is `AGPL-3.0`, git-bug is `GPL-3.0`.
+Mem0 and Zep run a model over what they ingest. ljos stores the sentence as written.
+beads lets an agent claim a ticket and keeps the queue in Dolt. ljos keeps tickets as Org headings in git, and one seat holds a ticket.
+git-bug keeps issues in the project's own git objects. ljos keeps a separate tracker repository.
+Basic Memory is a shared notebook of Markdown. ljos's memory is short claims with a review clock.
+Letta gives the agent tools to edit its own memory. ljos has no model in that loop.
+Of these, the ljos docs are the ones that describe a ballot per agent, a settle, and a handover the receiver checks before import.
 
-[How ljos compares](https://leidarljos.github.io/ljos/compare.html) has the full table, Letta and Zep, and a link to each tool's own docs.
+[How ljos compares](https://leidarljos.github.io/ljos/compare.html) has the full table, the licences, and a link to each tool's own docs, read on 2026-11-10.
 
 ## Try it
 
 Linux and macOS are supported. Windows works through Windows Subsystem for Linux (WSL) and is untested.
 
+From a checkout of this repository:
+
+```
+sh scripts/install.sh --no-embed
+export PATH="$HOME/.local/bin:$PATH"
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+ljos doctor
+ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
+ljos search "lexical default"
+ljos file "Pick a codec" -p demo
+```
+
+A release attaches that same script:
+
 ```
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
-export PATH="$HOME/.local/bin:$PATH"
-ljos doctor
-ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
-echo "how do I push the v0.32.0 tag?" | ljos hook --prompt --text
 ```
 
-The hook prints the preference ahead of the prompt:
+The `install.sh` attached to the 0.41.1 release asks for `vissue-cli-<target>.tar.xz`. The vissue release publishes `vissue-v<version>-<target>.tar.gz`. Use the script in this tree until a later release.
 
-```
-Remembered, oldest first (`ljos search` for more):
-- [preference, today] Push a tag with git push origin TAG; --follow-tags skips lightweight tags.
-```
+`--no-embed` leaves out the encoder. Search then matches words, and `ljos search` prints `ranking is lexical: encoder unavailable`.
+The installer checks each download against its published SHA-256 sum. It sets up the tracker, the memory writer and the deed store, then runs `ljos onboard` for each runner it finds.
+Git needs `user.name` and `user.email`, because the tracker commits each change. Without them the heading is still written, and the line is `tracker git: commit refused: Author identity unknown`.
 
-The installer puts the programs in `~/.local/bin` and checks each one against its published SHA-256 sum.
-It sets up the tracker, the memory writer and the deed store. Then it runs `ljos onboard` for each runner it finds.
-`--no-embed` leaves out the encoder, and search then matches words.
-Claude Code runs a hook only after you trust it: open `/hooks` there after `ljos onboard`.
+On a clean install, `ljos doctor` prints `ljos is ready: memory, tracker and command guard work`.
+`ljos remember` prints the lesson and the first eight characters of its id. With no seat set, the write uses `unknown-` plus the host name.
+`ljos search "lexical default"` prints that lesson. A query that shares no word with the stored text, such as `which fusion`, prints `No hits.`
+`ljos file` prints the new id, then `project:`, the heading, the path, and `tracker git: committed ... no remote, kept local`.
+
+Mem0's default add runs a model over the text. The sentence above is stored as written.
+The ticket is an Org heading in a git repository, which you can open. beads stores the same kind of queue in Dolt.
+
+[Getting started](https://leidarljos.github.io/ljos/getting-started.html) has the output from one run of these commands, then a second seat on the ticket.
 
 To install by hand:
 
 ```
-cargo binstall --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus
+cargo binstall --locked ljos packset deedar-cli claimdag-cli vissue-cli vissue-mcp ljos-policyd ljos-consensus
 ljos onboard
 ljos doctor
 ```
 
-`ljos offboard` takes ljos out of each runner, and `ljos uninstall` takes it off the machine.
-[Getting started](https://leidarljos.github.io/ljos/getting-started.html) has both, and a ten-minute tour.
+`ljos offboard` takes ljos out of each runner. With no runner onboarded it prints `ok offboard nothing installed by ljos onboard`. `ljos uninstall` takes the programs off the machine.
 
-## Two seats on one ticket
+## A second seat
 
 ```
-LJOS_SEAT=alice ljos seat add alice
-LJOS_SEAT=alice ljos seat add bob
-id=$(LJOS_SEAT=alice ljos file "Pick a fuse" -p demo -t decision --options keep,drop | awk 'NR==1 { print $1 }')
-LJOS_SEAT=alice ljos claim "$id" --assignee alice
-LJOS_SEAT=alice ljos vote "$id" --for keep --used none
-LJOS_SEAT=bob ljos note "$id" "the patch is one file"
-LJOS_SEAT=bob ljos recall "$id"
-LJOS_SEAT=alice ljos consensus "$id"
+LJOS_SEAT=alice ljos claim ID --assignee alice
+LJOS_SEAT=bob ljos claim ID --assignee bob
 ```
 
-A second claim on a held ticket prints `label claim-conflict:` and names the holder.
-`ljos recall` shows bob's note, labelled as unverified text from bob.
-`ljos consensus` settles the ballots by the trust rows in the pack, and `ljos learn ID --outcome OPTION` moves those rows toward the voters who turned out right.
+Bob's claim prints `label claim-conflict:` and names alice. The ticket stays with alice.
+`ljos note` writes on the ticket. `ljos timeline ID` prints that note as unverified tracker text. `vissue show ID` prints the logbook.
+Votes cast from one shell share a session, so `ljos consensus` folds them into one voice. A vote from each seat's own runner is its own voice. The getting-started page shows the fold.
 
 ## The command check
 
 Before an agent's shell command runs, the runner's hook asks `ljos-policyd`, which answers allow, warn or rewrite.
-A warning names the rule and the command runs; ljos is not a sandbox.
-For `git push --force` on a topic branch the hook answers:
+A warning names the rule and the command runs. ljos is not a sandbox.
+`ljos policy -- git push --force origin topic` prints:
 
 ```
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"allow\twarn\tgit-force-push\ta force push rewrites a published branch"}}
+git push --force origin topic
+allow	warn	git-force-push	a force push rewrites a published branch
 ```
+
+A push onto `main` or `develop` warns under `sitting-gate` until the ticket of the sitting has a settled consensus. With one active seat, that seat's own vote settles it.
 
 ## The MCP server
 
@@ -116,11 +129,11 @@ The official MCP Registry lists the server from the crates.io page of `ljos`, an
 | Page | Answer |
 |---|---|
 | [What ljos does](https://leidarljos.github.io/ljos/introduction.html) | Features and every measured number |
-| [Getting started](https://leidarljos.github.io/ljos/getting-started.html) | Install, two seats on one ticket, offboard |
+| [How ljos compares](https://leidarljos.github.io/ljos/compare.html) | beads, Mem0, Letta, Zep, Basic Memory, git-bug |
+| [Getting started](https://leidarljos.github.io/ljos/getting-started.html) | Tutorial: install, remember, search, a ticket, a second seat |
 | [How-to guides](https://leidarljos.github.io/ljos/howto.html) | One task a page: runners, memory, sittings, votes, handover |
 | [Reference](https://leidarljos.github.io/ljos/reference.html) | Commands, MCP tools, hooks, rules and variables |
 | [Explanation](https://leidarljos.github.io/ljos/explanation.html) | The reason for the design |
-| [How ljos compares](https://leidarljos.github.io/ljos/compare.html) | beads, Mem0, Letta, Zep, Basic Memory, git-bug |
 
 Questions and bugs go to [GitHub issues](https://github.com/leidarljos/ljos/issues).
 [CONTRIBUTING.md](CONTRIBUTING.md) covers changes, and [CITATION.cff](CITATION.cff) says how to cite ljos.

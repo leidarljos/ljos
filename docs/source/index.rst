@@ -35,9 +35,9 @@ What it has done
 ================
 
 ============ ==============================================================================================================================================
-7,901 tokens for the 20 core Model Context Protocol (MCP) tools, against 17,855 for all 52
+7,900 tokens for the 20 core Model Context Protocol (MCP) tools, against 17,854 for all 52
 139.1 ms     warm prompt hook median on a pack of 10,000 lessons, down from 196.3 ms; ``prompt-hook.rows-10000.after`` in hook-latency.txt
-0 of 186     near-topic lesson pairs merged by the duplicate check
+0 of 186     near-topic pairs merged; 12 of 78 duplicate pairs found
 0.949        recall@5 in packset's LongMemEval\ :sub:`S` session retrieval run, BM25+ fused with e5-large-v2, 470 questions; retrieval, not answer accuracy
 2,293        tests passed on the 0.40.0 release commit, 0 failed
 10 runners   with an onboarding shape: Claude Code, Codex, Cursor, Grok, OpenCode, Windsurf, Antigravity, Hermes, omp, shell
@@ -45,23 +45,29 @@ MIT          licence; Rust; Linux and macOS
 ============ ==============================================================================================================================================
 
 :doc:`What ljos does <introduction>` lists each feature and the file
-that measured each number. :doc:`How ljos compares <compare>` sets it
-beside beads, Mem0, Letta, Zep, Basic Memory and git-bug.
+that measured each number.
+
+Mem0 and Zep run a model over what they ingest. ljos stores the sentence as written.
+beads keeps a ticket queue in Dolt and an agent can claim one. ljos keeps Org headings in git, and one seat holds a ticket.
+:doc:`How ljos compares <compare>` sets ljos beside beads, Mem0, Letta, Zep, Basic Memory and git-bug.
 
 Install
 =======
 
 .. code:: console
 
-   $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+   $ sh scripts/install.sh --no-embed
    $ export PATH="$HOME/.local/bin:$PATH"
    $ ljos doctor
-   ljos is ready: memory and command guard work. Optional extras: `ljos doctor --all`.
+   ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
 
+From a checkout, that script installs the programs. A release attaches the same script as ``install.sh``.
+The copy on the 0.41.1 release asks for a vissue archive that project does not publish. Use the script in this tree until a later release.
+``--no-embed`` leaves out the encoder, and search matches words.
 The installer checks each download against its published SHA-256 sum.
 It then runs ``ljos onboard`` for each coding runner it finds. When ``ljos doctor``
 prints ``ljos is ready``, you are done. A row it prints instead names the
-part that needs action. To install by hand instead:
+part that needs action. Git needs ``user.name`` and ``user.email`` before the first ticket. To install by hand instead:
 
 .. code:: console
 
@@ -71,28 +77,30 @@ part that needs action. To install by hand instead:
 
 :doc:`Getting started <getting-started>` says what each program is.
 
-First minute
-============
+First commands
+==============
 
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
    remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
-     id 07be8829, next review 2026-09-26 23:27 +00:00
-   $ ljos search lexical default
-   1.0000  3/3 lesson  07be8829... today   The lexical default is BM25+. It beat BM25 by two points on turns.
-   $ ljos due
-   0 due; 1 scheduled, next at 2026-09-26T23:27:31.528Z
+     id a6ae2751, next review 2026-11-12 21:40 +00:00
+   $ ljos search "lexical default"
+   1.0000	2/2	lesson, agent-derived	a6ae2751564de44a99c5915a6d9ea7f2	today	The lexical default is BM25+. It beat BM25 by two points on turns.
+   $ ljos file "Pick a codec" -p demo
+
+``ljos search`` prints the lesson when the query shares a word with it.
+``ljos file`` prints the new id and commits the Org heading. :doc:`Getting started <getting-started>` has the full transcript, including a second seat.
 
 Where to go next
 ================
 
-- :doc:`Getting started <getting-started>`: a ten-minute tutorial with memory, two seats on one ticket, a vote and offboard.
-- :doc:`How-to guides <howto>`: one task a section, from hooks and onboarding to handover, trust and sync.
-- :doc:`Integration <integration>` and :doc:`Grok Build <grok-build>`: the runners ljos sits in.
+- :doc:`Getting started <getting-started>`: the tutorial, from install to a ticket and a second seat.
+- :doc:`How-to guides <howto>`: one task a page, from hooks and onboarding to handover, trust and sync.
+- :doc:`Reference <reference>`: every verb, server tool and variable.
 - :doc:`Explanation <explanation>` and :doc:`Architecture <architecture>`: why the design is what it is.
 - :doc:`How ljos compares <compare>`: the other memory tools and agent trackers.
-- :doc:`Reference <reference>`: every verb, server tool and variable.
+- :doc:`Integration <integration>` and :doc:`Grok Build <grok-build>`: the runners ljos sits in.
 
 Community
 =========
@@ -108,11 +116,18 @@ Community
    :hidden:
 
    introduction
+   compare
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Tutorial
+   :hidden:
+
    getting-started
 
 .. toctree::
    :maxdepth: 1
-   :caption: Use
+   :caption: How-to
    :hidden:
 
    howto
@@ -121,20 +136,19 @@ Community
 
 .. toctree::
    :maxdepth: 1
-   :caption: Understand
-   :hidden:
-
-   explanation
-   architecture
-   compare
-
-.. toctree::
-   :maxdepth: 1
    :caption: Reference
    :hidden:
 
    reference
    seat
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Explanation
+   :hidden:
+
+   explanation
+   architecture
 
 .. |image1| image:: _static/seat.svg
    :width: 100.0%

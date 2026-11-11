@@ -38,31 +38,37 @@ file a person can open.
 
 | | |
 |---+---|
-| 7,901 tokens | for the 20 core Model Context Protocol (MCP) tools, against 17,855 for all 52 |
+| 7,900 tokens | for the 20 core Model Context Protocol (MCP) tools, against 17,854 for all 52 |
 | 139.1 ms | warm prompt hook median on a pack of 10,000 lessons, down from 196.3 ms; =prompt-hook.rows-10000.after= in hook-latency.txt |
-| 0 of 186 | near-topic lesson pairs merged by the duplicate check |
+| 0 of 186 | near-topic pairs merged; 12 of 78 duplicate pairs found |
 | 0.949 | recall@5 in packset's LongMemEval_S session retrieval run, BM25+ fused with e5-large-v2, 470 questions; retrieval, not answer accuracy |
 | 2,293 | tests passed on the 0.40.0 release commit, 0 failed |
 | 10 runners | with an onboarding shape: Claude Code, Codex, Cursor, Grok, OpenCode, Windsurf, Antigravity, Hermes, omp, shell |
 | MIT | licence; Rust; Linux and macOS |
 
 [[file:introduction.org][What ljos does]] lists each feature and the file
-that measured each number. [[file:compare.org][How ljos compares]] sets it
-beside beads, Mem0, Letta, Zep, Basic Memory and git-bug.
+that measured each number.
+
+Mem0 and Zep run a model over what they ingest. ljos stores the sentence as written.
+beads keeps a ticket queue in Dolt and an agent can claim one. ljos keeps Org headings in git, and one seat holds a ticket.
+[[file:compare.org][How ljos compares]] sets ljos beside beads, Mem0, Letta, Zep, Basic Memory and git-bug.
 
 * Install
 
 #+begin_src console
-$ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+$ sh scripts/install.sh --no-embed
 $ export PATH="$HOME/.local/bin:$PATH"
 $ ljos doctor
-ljos is ready: memory and command guard work. Optional extras: `ljos doctor --all`.
+ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
 #+end_src
 
+From a checkout, that script installs the programs. A release attaches the same script as =install.sh=.
+The copy on the 0.41.1 release asks for a vissue archive that project does not publish. Use the script in this tree until a later release.
+=--no-embed= leaves out the encoder, and search matches words.
 The installer checks each download against its published SHA-256 sum.
 It then runs =ljos onboard= for each coding runner it finds. When =ljos doctor=
 prints =ljos is ready=, you are done. A row it prints instead names the
-part that needs action. To install by hand instead:
+part that needs action. Git needs =user.name= and =user.email= before the first ticket. To install by hand instead:
 
 #+begin_src console
 $ cargo binstall --locked ljos packset deedar-cli claimdag-cli vissue-cli vissue-mcp ljos-policyd ljos-consensus
@@ -72,26 +78,28 @@ $ ljos doctor
 
 [[file:getting-started.org][Getting started]] says what each program is.
 
-* First minute
+* First commands
 
 #+begin_src console
 $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
 remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
-  id 07be8829, next review 2026-09-26 23:27 +00:00
-$ ljos search lexical default
-1.0000	3/3	lesson	07be8829...	today	The lexical default is BM25+. It beat BM25 by two points on turns.
-$ ljos due
-0 due; 1 scheduled, next at 2026-09-26T23:27:31.528Z
+  id a6ae2751, next review 2026-11-12 21:40 +00:00
+$ ljos search "lexical default"
+1.0000	2/2	lesson, agent-derived	a6ae2751564de44a99c5915a6d9ea7f2	today	The lexical default is BM25+. It beat BM25 by two points on turns.
+$ ljos file "Pick a codec" -p demo
 #+end_src
+
+=ljos search= prints the lesson when the query shares a word with it.
+=ljos file= prints the new id and commits the Org heading. [[file:getting-started.org][Getting started]] has the full transcript, including a second seat.
 
 * Where to go next
 
-- [[file:getting-started.org][Getting started]]: a ten-minute tutorial with memory, two seats on one ticket, a vote and offboard.
+- [[file:getting-started.org][Getting started]]: the tutorial, from install to a ticket and a second seat.
 - [[file:howto.org][How-to guides]]: one task a page, from hooks and onboarding to handover, trust and sync.
-- [[file:integration.org][Integration]] and [[file:grok-build.org][Grok Build]]: the runners ljos sits in.
+- [[file:reference.org][Reference]]: every verb, server tool and variable.
 - [[file:explanation.org][Explanation]] and [[file:architecture.org][Architecture]]: why the design is what it is.
 - [[file:compare.org][How ljos compares]]: the other memory tools and agent trackers.
-- [[file:reference.org][Reference]]: every verb, server tool and variable.
+- [[file:integration.org][Integration]] and [[file:grok-build.org][Grok Build]]: the runners ljos sits in.
 
 * Community
 
@@ -107,11 +115,18 @@ $ ljos due
    :hidden:
 
    introduction
+   compare
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Tutorial
+   :hidden:
+
    getting-started
 
 .. toctree::
    :maxdepth: 1
-   :caption: Use
+   :caption: How-to
    :hidden:
 
    howto
@@ -120,18 +135,17 @@ $ ljos due
 
 .. toctree::
    :maxdepth: 1
-   :caption: Understand
-   :hidden:
-
-   explanation
-   architecture
-   compare
-
-.. toctree::
-   :maxdepth: 1
    :caption: Reference
    :hidden:
 
    reference
    seat
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Explanation
+   :hidden:
+
+   explanation
+   architecture
 #+end_export
