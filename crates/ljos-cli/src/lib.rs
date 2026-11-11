@@ -44,6 +44,7 @@ mod memlock;
 pub mod memories;
 pub mod memory_port;
 pub mod mesh;
+pub mod mesh_lane;
 pub mod note_queue;
 pub mod note_retire;
 pub mod offboard;

@@ -127,6 +127,12 @@ The seat is whatever the writer says, so the label records a claim and nothing m
 It reads `mesh.toml`. `mesh up` does not.
 [mesh.md](mesh.md) describes the policy.
 
+`ljos mesh pull --seat S --from DIR` reads lane JSONL exports from a shared handoff directory into seat `S` and writes a deduplicated seed for that seat.
+It prints `imported N, skipped M duplicates`.
+`ljos mesh push --seat S --to DIR` writes the seat's memories back as one lane file.
+A 503 from the pack is retried after `Retry-After`, and a 408 stops the pull.
+[mesh.md](mesh.md) names the seed path, the lock, and the `lane:` tag.
+
 ## Deeds
 
 A cloud seat's finish exports the deeds that seat cited on the issue into `.ljos/deeds/<seat>/`. The bag carries the deed, the inclusion receipt, the file bytes and any supersedes link. The tracker commit takes the bag, so a fetch brings it to the box. A machine that never ran `ljos cloud up` writes no bag on finish.

@@ -342,6 +342,27 @@ enum MeshCmd {
         /// Other swarm ids, each given rules of its own.
         swarms: Vec<String>,
     },
+    /// Import lane JSONL files from a handoff directory into a seat and write that seat's seed.
+    Pull {
+        /// Seat that stores the memories.
+        #[arg(long)]
+        seat: String,
+        /// Directory of `<lane>.jsonl` exports.
+        #[arg(long, value_name = "DIR")]
+        from: PathBuf,
+    },
+    /// Write a seat's memories into a handoff directory as one lane file.
+    Push {
+        /// Seat whose memories are written.
+        #[arg(long)]
+        seat: String,
+        /// Directory that receives `<lane>.jsonl`.
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+        /// File name, without `.jsonl`. `LJOS_SYNC_HOST`, then the hostname, when omitted.
+        #[arg(long, value_name = "NAME")]
+        lane: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -636,7 +657,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CloudCmd,
     },
-    /// Join or leave the Headscale mesh, or print its ACL policy.
+    /// Join or leave the Headscale mesh, print its ACL policy, or move lane memory through a handoff directory.
     Mesh {
         #[command(subcommand)]
         cmd: MeshCmd,
@@ -1955,8 +1976,11 @@ fn take_seat_flag(args: &[std::ffi::OsString]) -> (Option<String>, Vec<std::ffi:
     let command = command_at
         .and_then(|index| args.get(index))
         .map(|arg| arg.to_string_lossy().into_owned());
-    // These commands already use `--seat` for a filter, after the command name.
-    let keep_later = matches!(command.as_deref(), Some("log" | "memories" | "proposals"));
+    // These commands already use `--seat` for their own argument, after the command name.
+    let keep_later = matches!(
+        command.as_deref(),
+        Some("log" | "memories" | "proposals" | "mesh")
+    );
     let mut seat = None;
     let mut kept = Vec::with_capacity(args.len());
     if let Some(first) = args.first() {
@@ -2420,6 +2444,15 @@ fn run_command() -> Result<()> {
             MeshCmd::Down => ljos_cli::mesh::down().write(),
             MeshCmd::Status => println!("{}", ljos_cli::mesh::status_text()),
             MeshCmd::Acl { swarms } => println!("{}", ljos_cli::mesh::acl(&swarms)?),
+            MeshCmd::Pull { seat, from } => {
+                let store = ljos_cli::mesh_lane::SeatStore::open(&seat)?;
+                print!("{}", ljos_cli::mesh_lane::pull(&store, &from)?.line());
+            }
+            MeshCmd::Push { seat, to, lane } => {
+                let store = ljos_cli::mesh_lane::SeatStore::open(&seat)?;
+                let lane = lane.unwrap_or_else(ljos_cli::memory_port::export_host);
+                print!("{}", ljos_cli::mesh_lane::push(&store, &to, &lane)?);
+            }
         },
         Cmd::Sync {
             key,

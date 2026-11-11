@@ -156,6 +156,17 @@ impl Place {
             machine: machine_name(),
         }
     }
+
+    /// [`Self::current`] with `seat` as the seat the files are stored under.
+    #[must_use]
+    pub fn for_seat(seat: &str) -> Self {
+        let mut place = Self::current();
+        let seat = seat.trim();
+        if !seat.is_empty() {
+            place.seat = seat.to_string();
+        }
+        place
+    }
 }
 
 fn machine_name() -> String {
@@ -775,6 +786,48 @@ fn chosen_machine(flag: Option<&str>, sync_host: Option<&str>) -> String {
 fn export_machine(flag: Option<&str>) -> String {
     let sync = std::env::var("LJOS_SYNC_HOST").ok();
     chosen_machine(flag, sync.as_deref())
+}
+
+/// Machine name an export uses when no `--machine` flag is passed.
+#[must_use]
+pub fn export_host() -> String {
+    export_machine(None)
+}
+
+/// Lessons this seat would put in an export, one row per text.
+///
+/// The pack is included when it answers. A seat with no pack contributes
+/// the rows already stored under the tracker. Each row is the object
+/// [`export_row`] writes, without a clock, so a later file can be hashed
+/// and compared.
+pub(crate) fn portable_rows(place: &Place) -> Vec<Value> {
+    let mut atoms = Vec::new();
+    if let Ok(live) = crate::memories::live_atoms() {
+        atoms.extend(live);
+    }
+    atoms.extend(local_atoms(place));
+    let mut rows = Vec::new();
+    let mut seen = BTreeSet::new();
+    for atom in &atoms {
+        let Some(mut row) = export_row(atom, place, "") else {
+            continue;
+        };
+        if let Some(obj) = row.as_object_mut() {
+            obj.remove("exported_at");
+        }
+        let key = row["content_sha256"].as_str().unwrap_or("").to_string();
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        rows.push(row);
+    }
+    rows.sort_by(|a, b| {
+        a["content_sha256"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["content_sha256"].as_str().unwrap_or(""))
+    });
+    rows
 }
 
 pub fn export_cmd(out: &Path, machine: Option<&str>) -> Result<String> {

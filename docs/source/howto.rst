@@ -16,6 +16,7 @@ Each page is one task. Start with the first two; the rest stand alone.
 - :doc:`Add a seat and let it close tickets <howto-seats>`: add a seat to the tracker and grant it the right to close named tickets.
 - :doc:`Bring memory into the prompt <howto-recall>`: turn on the prompt hook, ask what a task touches, and read an issue's history as one dated list.
 - :doc:`Keep memory current <howto-memory>`: keep the cards, record a number that is measured again and again, and retire a memory with its reason.
+- :doc:`Move memory across lanes <howto-mesh>`: pull lane exports into a seat and push that seat's memories to the shared handoff.
 - :doc:`Sit an issue <howto-sitting>`: open a sitting, end it with a lesson, and hold a done claim that sits beside a failing test.
 - :doc:`Send mail between seats <howto-mail>`: write to another seat, read the inbox, and wake an idle seat when mail reaches it.
 - :doc:`Hand work to another seat <howto-handover>`: sign a handover bundle and receive from the same sender again.
@@ -34,6 +35,7 @@ Each page is one task. Start with the first two; the rest stand alone.
    howto-seats
    howto-recall
    howto-memory
+   howto-mesh
    howto-sitting
    howto-mail
    howto-handover

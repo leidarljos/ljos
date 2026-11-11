@@ -97,3 +97,16 @@ No other rule exists, so no swarm reaches another, and the box reaches no swarm.
 The join key carries the swarm's tag.
 No user owns a tag, so a node cannot tag itself into another swarm.
 `ljos mesh acl SWARM...` adds the same pair of rules for each swarm it names.
+
+## Lane memory
+
+`ljos mesh pull --seat S --from DIR` reads the lane JSONL files in `DIR`, imports each distinct text into seat `S`, and writes a seed at `<tracker>/.ljos/memory/mesh/<seat>/seed.jsonl`.
+The lane is the file name without `.jsonl`.
+The printed line is `imported N, skipped M duplicates`.
+Each stored atom carries a packset tag `lane:<name>`.
+`ljos mesh push --seat S --to DIR` writes that seat's memories to `DIR/<lane>.jsonl`.
+The lane name is `--lane`, or `LJOS_SYNC_HOST`, or the hostname.
+A pull and a push each take a file lock on the directory and on the seat.
+A writer that answers 503 is asked again after `Retry-After`.
+A 408 stops the pull, and the next pull continues with the rows still missing.
+[Move memory across lanes](source/howto-mesh.rst) has the commands.
