@@ -2900,10 +2900,12 @@ fn record_for(text: &str, mine: &[String], source: String) -> Option<Seat> {
 /// Names an MCP library sends when the runner gives none. They name the
 /// library, not the runner, and every runner built on it would share one
 /// seat.
+#[cfg(test)]
 const LIBRARY_CLIENT_NAMES: &[&str] = &["mcp", "mcp-client", "client", "runner"];
 
 /// The seat a connecting client names: its own name, unless that is a
 /// library's default, which is `runner`. The process tree is not a seat.
+#[cfg(test)]
 fn seat_for_client(client: &str) -> String {
     let name = seat_slug(client);
     if let Some(runner) = runner_for_client(&harnesses_path(), &name) {
@@ -2917,6 +2919,7 @@ fn seat_for_client(client: &str) -> String {
 
 /// The harness a client name belongs to, by its `clients` list in the
 /// runners file.
+#[cfg(test)]
 fn runner_for_client(file: &Path, slug: &str) -> Option<String> {
     harnesses_with_shipped(file)
         .ok()?
@@ -2928,15 +2931,6 @@ fn runner_for_client(file: &Path, slug: &str) -> Option<String> {
                 .any(|c| seat_slug(c) == slug)
                 .then(|| seat_slug(&h.name))
         })
-}
-
-/// The seat of a record another seat left under one of this process's
-/// conversation ids. A runner started from a shell of another runner
-/// inherits that runner's ids; the record they find is the parent's.
-fn inherited_record(name: &str) -> Option<Seat> {
-    stamped_sessions().into_iter().find_map(|(_, id)| {
-        read_record(&session_record_path(&id), String::new()).filter(|s| s.seat != name)
-    })
 }
 
 tokio::task_local! {
@@ -3020,89 +3014,71 @@ fn holder_naming(text: &str, id: &str) -> Option<String> {
         .then(|| holder.to_string())
 }
 
-/// The MCP server, once a client has said who it is: the seat is the
-/// client's name. The holder is that seat and a short tag for the
-/// `*_SESSION_ID` the runner stamped, else that seat tagged with the
-/// runner's process. The record under the
-/// runtime directory is how `ljos` in a shell the same runner opened
-/// names the same seat and holder. A runner started from another runner's
-/// shell carries that runner's ids; it holds under its own process and
-/// leaves the parent's records alone.
+/// The MCP server, once a client has connected. The client's own name is
+/// not a seat: `cursor` and a test client's `t` do not become the
+/// conversation. The seat is `LJOS_SEAT`, `VISSUE_AGENT`, or the box seat
+/// map for this conversation's id. With none of those, nothing is
+/// recorded and a later call with no seat argument is `seat-unresolved`.
+///
+/// A record is filed only under this conversation's id, tagged with that
+/// id. Another conversation's id does not read it, and a line-editor
+/// session id does not either. The process record is the same seat, for
+/// this process alone.
 pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
     load_seat_env();
-    // The hooks sit `LJOS_SEAT` (the process, else `~/.config/ljos/env`).
-    // The client's harness name is the seat only when nobody named one.
-    // A subagent name is kept, so it is not replaced by that harness.
-    // A harness id the tracker does not list is the tracker's seat for
-    // that harness, the seat each call then resolves to.
-    let harness = seat_for_client(client);
-    let name = named_var("LJOS_SEAT")
+    // The harness name is how the client introduced itself. It is not
+    // who is sitting.
+    let _ = (client, runner_pid);
+    let Some(name) = named_var("LJOS_SEAT")
         .or_else(|| named_var("VISSUE_AGENT"))
         .and_then(|raw| seated_name(&raw))
-        .unwrap_or(harness);
+        .or_else(mapped_box_seat)
+        .filter(|name| {
+            !name.is_empty() && !omitted_actor_name(name) && !is_raw_subagent_name(name)
+        })
+    else {
+        return Seat {
+            seat: String::new(),
+            holder: String::new(),
+            source: "no seat".into(),
+        };
+    };
     let name = listed_harness_seat(&name).unwrap_or(name);
-    if let Some(parent) = inherited_record(&name) {
+    let Some(id) = cursor_conversation() else {
         let seat = Seat::tagged(
             name,
             &conversation_tag(runner_pid),
-            format!(
-                "the client that connected, process {runner_pid}, inside {}",
-                parent.seat
-            ),
+            format!("LJOS_SEAT, process {runner_pid}"),
         );
         write_record(&seat_record_path(runner_pid), &seat);
         let _ = ANNOUNCED.set(seat.clone());
         return seat;
-    }
-    let seat = if let Some((holder, keys)) = session_holder(&name) {
-        Seat {
-            seat: name,
-            holder,
-            source: format!("the client that connected, process {runner_pid}; session {keys}"),
-        }
-    } else {
-        Seat::tagged(
-            name,
-            &conversation_tag(runner_pid),
-            format!("the client that connected, process {runner_pid}"),
-        )
     };
-    // One record by the runner's process, one by each conversation id the
-    // runner stamped: a shell whose line editor stamps an id of its own
-    // still shares one with the server, and finds this seat by it.
-    write_record(&seat_record_path(runner_pid), &seat);
-    for (_, id) in stamped_sessions() {
-        write_record(&session_record_path(&id), &seat);
-    }
+    let seat = Seat::tagged(name, &session_tag(&id), format!("conversation {id}"));
+    write_record_ids(&session_record_path(&id), &seat, &[id]);
     let _ = ANNOUNCED.set(seat.clone());
     seat
 }
 
 /// Drop the records [`announce_seat`] wrote, when the server ends.
 pub fn retire_seat(runner_pid: u32) {
-    let mine = read_record(&seat_record_path(runner_pid), String::new());
     let _ = std::fs::remove_file(seat_record_path(runner_pid));
-    for (_, id) in stamped_sessions() {
-        let path = session_record_path(&id);
-        // Another seat's record under an inherited id stays for its owner.
-        let theirs = read_record(&path, String::new())
-            .is_some_and(|r| mine.as_ref().is_some_and(|m| m.holder != r.holder));
-        if !theirs {
-            let _ = std::fs::remove_file(path);
-        }
+    // Only this conversation's record. Another conversation's id is a
+    // different file and stays.
+    if let Some(id) = cursor_conversation() {
+        let _ = std::fs::remove_file(session_record_path(&id));
     }
 }
 
-/// The seat a server announced for one of the conversation ids this
-/// process carries. A shell's line editor may add a session id of its
-/// own; any one shared id is enough.
+/// The seat recorded for this conversation's id. A line-editor session
+/// id and another conversation's id are not this conversation, so they
+/// do not name its seat.
 fn seat_from_session_records() -> Option<Seat> {
-    stamped_sessions().into_iter().find_map(|(key, id)| {
-        read_record(
-            &session_record_path(&id),
-            format!("this conversation's record, session {key}"),
-        )
-    })
+    let id = cursor_conversation()?;
+    read_record(
+        &session_record_path(&id),
+        format!("this conversation's record, {id}"),
+    )
 }
 
 /// The holder recorded for `seat` by a recent MCP hook call, else the
@@ -49127,41 +49103,61 @@ mod tests {
     }
 
     #[test]
-    fn a_runner_started_inside_another_keeps_its_own_holder() {
+    fn a_client_name_is_not_recorded_as_the_seat() {
         let _g = env_guard();
-        let _scratch = tempfile::tempdir().unwrap();
-        let dir = _scratch.path().to_path_buf();
+        let dir = tempfile::tempdir().unwrap();
+        let id = "bc-paper-0000-4000-8000-0000000000a1";
         unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", &dir);
-            std::env::set_var("ACME_SESSION_ID", "01a09b25-1111-7972-881a-3cee2ea6efd6");
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            std::env::set_var("CURSOR_CONVERSATION_ID", id);
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
         }
-        let parent = announce_seat("Acme CLI", 5151);
-        // The child inherits the parent's id and connects under its own name.
-        let child = announce_seat("Brio Agent", 5252);
-        assert_eq!(child.seat, "brio-agent");
-        assert_ne!(child.holder, parent.holder);
-        assert_eq!(
-            seat_from_session_records()
-                .expect("the parent's record")
-                .holder,
-            parent.holder,
-            "the child leaves the parent's record alone"
+        let config = tempfile::tempdir().unwrap();
+        let seat = with_config_home(config.path(), || announce_seat("t", 4242));
+        assert!(seat.seat.is_empty(), "{seat:?}");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.starts_with("seat-") && !name.starts_with("session-")),
+            "a client name left a record: {names:?}"
         );
-        retire_seat(5252);
-        assert_eq!(
-            seat_from_session_records()
-                .expect("still the parent's")
-                .holder,
-            parent.holder,
-            "the child's exit does not take the parent's record"
-        );
-        retire_seat(5151);
-        assert!(seat_from_session_records().is_none());
+        let err = with_config_home(config.path(), || resolve_call_seat(None)).unwrap_err();
+        let label = super::policy_label::as_policy(&err).expect("a policy label");
+        assert_eq!(label.label, "seat-unresolved");
+        assert!(err.to_string().contains(id), "{err}");
+    }
+
+    #[test]
+    fn another_conversation_does_not_read_this_ones_seat() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let paper = "bc-paper-0000-4000-8000-0000000000b1";
+        let saddle = "bc-saddle-000-4000-8000-0000000000b2";
         unsafe {
-            std::env::remove_var("ACME_SESSION_ID");
-            std::env::remove_var("XDG_RUNTIME_DIR");
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            std::env::set_var("CURSOR_CONVERSATION_ID", paper);
+            std::env::set_var("LJOS_SEAT", "instanton-paper");
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        let filed = announce_seat("cursor", 5151);
+        assert_eq!(filed.seat, "instanton-paper", "{filed:?}");
+        let record = std::fs::read_to_string(session_record_path(paper)).unwrap();
+        assert!(record.starts_with("instanton-paper\n"), "{record}");
+        assert!(record.contains(paper), "{record}");
+        assert!(!session_record_path(saddle).exists());
+        unsafe { std::env::set_var("CURSOR_CONVERSATION_ID", saddle) };
+        assert!(
+            seat_from_session_records().is_none(),
+            "saddle's conversation read instanton-paper's record"
+        );
     }
 
     #[test]
@@ -49218,21 +49214,27 @@ mod tests {
             std::env::set_var("XDG_RUNTIME_DIR", &dir);
             std::env::set_var("ACME_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
+        unsafe { std::env::set_var("LJOS_SEAT", "acme-cli") };
         let server = announce_seat("Acme CLI", 4242);
-        assert_eq!(server.seat, "acme-cli");
-        // The shell's line editor stamps its own id; the shared one still
-        // finds the record, and the holder is the server's.
+        assert_eq!(server.seat, "acme-cli", "{server:?}");
+        assert!(
+            seat_from_session_records().is_none(),
+            "a line-editor session id is not the conversation id"
+        );
+        assert!(
+            !session_record_path("01a09b25-ffe9-7972-881a-3cee2ea6efd6").exists(),
+            "the seat was filed under a session id that is not the conversation"
+        );
         unsafe {
             std::env::set_var(
                 "AAA_LINE_EDITOR_SESSION_ID",
                 "9f9f9f9f-0000-0000-0000-000000000000",
             );
         }
-        let shell = seat_from_session_records().expect("the shared id finds the record");
-        assert_eq!(shell.holder, server.holder);
-        assert_eq!(shell.seat, server.seat);
-        retire_seat(4242);
-        assert!(seat_from_session_records().is_none());
+        assert!(
+            seat_from_session_records().is_none(),
+            "a line-editor id does not read another conversation's seat"
+        );
         unsafe {
             std::env::remove_var("ACME_SESSION_ID");
             std::env::remove_var("AAA_LINE_EDITOR_SESSION_ID");

@@ -4080,8 +4080,35 @@ mod tests {
             std::fs::read_to_string(&seat_file).unwrap_or_default()
         );
         note_connected_client(Some("Codex"));
+        assert!(
+            !seat_file.exists(),
+            "the client's name is not a seat: {}",
+            std::fs::read_to_string(&seat_file).unwrap_or_default()
+        );
+        // A conversation bound by another test in this process is not
+        // this call. The seat file is the process record when no
+        // conversation id is set.
+        ljos_cli::bind_call_conversation(
+            "{}",
+            &ljos_cli::HookCall {
+                event: String::new(),
+                cue: String::new(),
+                session: None,
+                shape: ljos_cli::HookShape::Asks,
+            },
+        );
+        unsafe {
+            std::env::remove_var("CURSOR_CONVERSATION_ID");
+            std::env::set_var("LJOS_SEAT", "saddle");
+        }
+        reset_connected_client();
+        note_connected_client(Some("Codex"));
         let text = std::fs::read_to_string(&seat_file).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(text.lines().next(), Some("codex"), "{text}");
+        assert_eq!(text.lines().next(), Some("saddle"), "{text}");
+        assert!(
+            !text.lines().next().unwrap_or("").contains("codex"),
+            "{text}"
+        );
     }
 
     struct ConnectedReset;

@@ -323,6 +323,17 @@ pub(crate) fn write_agent_one(client: &PacksetClient, mut atom: Value) -> Result
     }
     stamp_origin(&mut atom, ORIGIN_AGENT);
     atom["source"]["basis"] = Value::String(crate::Basis::Agent.as_str().into());
+    if atom["source"]["seat"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
+        let seat = proposing_seat();
+        if !seat.is_empty() {
+            atom["source"]["seat"] = Value::String(seat);
+        }
+    }
     post_live(client, atom)
 }
 
@@ -745,7 +756,7 @@ pub fn file_open(text: &str, kind: &str) -> Result<String> {
     } else {
         kind.trim()
     };
-    let seat = crate::seat_name();
+    let seat = proposing_seat();
     let id = proposal_id(text, &seat);
     let rec = Record {
         id: id.clone(),
@@ -757,7 +768,7 @@ pub fn file_open(text: &str, kind: &str) -> Result<String> {
         kind: kind.to_string(),
         origin: ORIGIN_AGENT.into(),
         grant: None,
-        seat,
+        seat: seat.clone(),
         at: crate::now_utc(),
         reason: String::new(),
         amendment: None,
@@ -766,11 +777,23 @@ pub fn file_open(text: &str, kind: &str) -> Result<String> {
             "text": text,
             "origin": ORIGIN_AGENT,
             "level": LEVEL_L0,
-            "source": {"seat": crate::seat_name(), "basis": "agent"},
+            "source": {"seat": &seat, "basis": "agent"},
         }),
     };
     append(&rec)?;
     Ok(format!("{id}\n"))
+}
+
+/// The seat filing this proposal: the one this call resolved, not a
+/// placeholder and not an empty name. Empty when nothing resolved, which
+/// the listing prints as `seat unknown`.
+fn proposing_seat() -> String {
+    let seat = crate::seat_name();
+    if seat.is_empty() || crate::omitted_actor_name(&seat) {
+        String::new()
+    } else {
+        seat
+    }
 }
 
 fn proposal_id(text: &str, seat: &str) -> String {
@@ -1083,11 +1106,24 @@ fn display_status(rec: &Record, held: &[Value]) -> String {
     }
 }
 
+fn proposal_seat(rec: &Record) -> String {
+    let filed = rec.seat.trim();
+    if !filed.is_empty() {
+        return filed.to_string();
+    }
+    rec.atom["source"]["seat"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
 fn proposal_line(rec: &Record, held: &[Value]) -> String {
-    let seat = if rec.seat.trim().is_empty() {
+    let named = proposal_seat(rec);
+    let seat = if named.is_empty() {
         "seat unknown".to_string()
     } else {
-        format!("seat {}", rec.seat)
+        format!("seat {named}")
     };
     let text = if rec.status == "refused" && !rec.reason.is_empty() {
         format!(
@@ -1386,6 +1422,26 @@ mod tests {
             amendment: None,
             atom: serde_json::json!({"text": "use uv for python envs"}),
         }
+    }
+
+    /// The seat that filed a proposal is on the row and in the listing.
+    #[test]
+    fn a_proposal_names_the_seat_that_filed_it() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", dir.path());
+            std::env::set_var("LJOS_SEAT", "saddle");
+            std::env::remove_var("PACKSET_URL");
+        }
+        let filed = file_open("Fire the kiln only after the shelf is cool.", "lesson").unwrap();
+        assert!(!filed.trim().is_empty(), "{filed}");
+        let listed = list_proposals(None, None);
+        assert!(listed.contains("seat saddle"), "{listed}");
+        assert!(!listed.contains("seat unknown"), "{listed}");
+        let row = read_latest().into_values().next().unwrap();
+        assert_eq!(row.seat, "saddle");
+        assert_eq!(row.atom["source"]["seat"], "saddle");
     }
 
     /// A held proposal carries the whole atom, so its row is private and
