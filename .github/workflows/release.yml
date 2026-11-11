@@ -195,14 +195,15 @@ jobs:
         with:
           toolchain: 1.89.0
           targets: ${{ matrix.triple }}
-      # The job builds no ljos crate. Checkout is only for apt-mirror.sh,
-      # and it lands under RUNNER_TEMP so rust-toolchain.toml is not in
-      # the workspace when packset-embed is installed.
+      # The job builds no ljos crate. Checkout is only for apt-mirror.sh.
+      # The path has to sit under GITHUB_WORKSPACE; actions/checkout
+      # refuses RUNNER_TEMP. A subdirectory keeps rust-toolchain.toml
+      # off the workspace root when packset-embed is installed.
       - uses: actions/checkout@v4
         if: runner.os == 'Linux'
         with:
           persist-credentials: false
-          path: ${{ runner.temp }}/ljos
+          path: _ljos
       # ONNX Runtime 1.28.3 vendors protobuf 21.12, so protoc has to be
       # that release: Debian's protobuf-compiler 3.21.12, which Ubuntu
       # 24.04 carries. cdn.pyke.io resolves to nothing, so a build that
@@ -211,7 +212,7 @@ jobs:
         run: |
           set -eu
           if [ "${RUNNER_OS}" = "Linux" ]; then
-            sudo timeout -k 5 90 bash "${{ runner.temp }}/ljos/.github/scripts/apt-mirror.sh"
+            sudo timeout -k 5 90 bash _ljos/.github/scripts/apt-mirror.sh
             sudo apt-get install -y --no-install-recommends build-essential cmake python3 protobuf-compiler pkg-config libssl-dev
             protoc=/usr/bin/protoc
           else
