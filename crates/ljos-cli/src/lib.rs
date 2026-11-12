@@ -38006,6 +38006,14 @@ pub fn sitting_stream_started(
     // the store on its own, and on a busy box those round-trips were the
     // sitting's time.
     let _listing = ListingMemo::enter();
+    // A missing ticket is named and left alone. The habitat probes below
+    // run `vissue` in the working directory, and that writes `vissue.toml`
+    // into a product checkout that is not the tracker.
+    if let Err(err) = issue_title(issue) {
+        if tracker_misses(&err, issue) {
+            bail!("issue {issue} not found");
+        }
+    }
     let mut out = String::new();
     let down = sitting_hard_down();
     let mut deferred =
