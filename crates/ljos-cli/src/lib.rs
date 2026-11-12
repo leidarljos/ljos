@@ -16402,40 +16402,21 @@ pub(crate) fn state_base_dir() -> PathBuf {
 }
 
 fn probe_lists_ljos_run(argv: &[String]) -> std::result::Result<(), String> {
-    use std::io::Read;
-    use std::process::{Command, Stdio};
     let (bin, args) = argv.split_first().ok_or("empty probe")?;
-    let mut child = Command::new(expand(bin))
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("{bin}: {e}"))?;
-    let started = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() > std::time::Duration::from_secs(30) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("no answer in 30 s".into());
-            }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-            Err(e) => return Err(e.to_string()),
-        }
-    };
-    let mut out = String::new();
-    if let Some(mut o) = child.stdout.take() {
-        let _ = o.read_to_string(&mut out);
+    let mut cmd = std::process::Command::new(expand(bin));
+    cmd.args(args);
+    // Two seconds, the same cap as a `--version` probe. The old thirty
+    // second wait held doctor with nothing printed. A grandchild left on
+    // the pipe is stopped with the child.
+    let said = output_within(cmd, None, std::time::Duration::from_secs(2))
+        .map_err(|_| "timed out".to_string())?;
+    if !said.status.success() {
+        return Err(format!("exit {}", said.status.code().unwrap_or(-1)));
     }
-    if let Some(mut e) = child.stderr.take() {
-        let _ = e.read_to_string(&mut out);
-    }
-    if !status.success() {
-        return Err(format!("exit {}", status.code().unwrap_or(-1)));
-    }
-    if out.contains("ljos_sitting") {
+    let out = String::from_utf8_lossy(&said.stdout);
+    let err = String::from_utf8_lossy(&said.stderr);
+    let combined = format!("{out}{err}");
+    if combined.contains("ljos_sitting") {
         Ok(())
     } else {
         Err("its output names no ljos tool".into())
@@ -19724,9 +19705,10 @@ pub(crate) fn queue_memory(
         let why = pack_copy::gate_refusal(text)
             .unwrap_or_else(|| "the pack would refuse this copy".into());
         memory_port::keep_prose(text, kind, &why);
+        let case = content_case(&why).unwrap_or("policy");
         return Err(policy_label::labelled(
             "writer-pending",
-            "queue: the pack would refuse this copy",
+            format!("queue: the pack would refuse this copy on {case}: {why}"),
         ));
     }
     let at = std::time::SystemTime::now()
@@ -19824,17 +19806,21 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
         }
         match post_queued_lesson(&client, note) {
             Ok(body) => note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string()),
+            Err(e) if existing_atom_id(&e).is_some() => {
+                note_queue::Sent::Kept(existing_atom_id(&e).unwrap_or_default())
+            }
             Err(e) if note_can_wait(&e) => note_queue::Sent::Wait(format!("{e:#}")),
             Err(e) => {
                 // A refused lesson is kept in this seat's memory slot.
                 // A lesson another seat queued stays that seat's, so the
                 // drainer does not take the copy.
+                let why = plain_refusal(&format!("{e:#}"));
                 let mine = seat_name();
                 let queued = note.seat.trim();
                 if queued.is_empty() || queued == mine {
-                    memory_port::keep_prose(&note.text, &note.kind, &format!("{e:#}"));
+                    memory_port::keep_prose(&note.text, &note.kind, &why);
                 }
-                note_queue::Sent::Refused(format!("{e:#}"))
+                note_queue::Sent::Refused(why)
             }
         }
     })?;
@@ -20163,12 +20149,20 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
     match post() {
         Ok(body) => Ok(body),
         Err(err) if is_deadline_miss(&err) => Err(err),
-        Err(err)
-            if is_pack_busy(&err)
-                || is_write_shed(&err)
-                || writer_busy(&err)
-                || writer_slow(&err) =>
-        {
+        Err(err) if existing_atom_id(&err).is_some() => {
+            let id = existing_atom_id(&err).unwrap_or_default();
+            eprintln!("remember: already stored as {id}");
+            Ok(serde_json::json!({
+                "id": id,
+                "kind": "lesson",
+                "text": text,
+            }))
+        }
+        Err(err) if pack_under_load(&err) => {
+            // Load is not a content refusal. The lesson is queued even
+            // when a local prose check would turn the same words away.
+            // The pack applies policy, size and duplicate rules on the
+            // send, after the pressure has fallen.
             queue_busy_lesson(text);
             Err(err)
         }
@@ -20176,16 +20170,132 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
     }
 }
 
+/// A 503, a shed, or a pressure line. A passed deadline is not load:
+/// the caller already returned it. The text match covers a 503 whose
+/// shed note was not on this thread, which is the line packsetd 0.17.8
+/// prints under memory pressure.
+fn pack_under_load(err: &anyhow::Error) -> bool {
+    if is_deadline_miss(err) {
+        return false;
+    }
+    if is_pack_busy(err)
+        || is_write_shed(err)
+        || is_read_shed(err)
+        || writer_busy(err)
+        || writer_slow(err)
+    {
+        return true;
+    }
+    let text = format!("{err:#}").to_ascii_lowercase();
+    text.contains("memory pressure") || text.contains("packsetd is busy") || text.contains(": 503:")
+}
+
 /// Keep `text` for the next ljos that reaches the pack, and say so.
+///
+/// A busy or pressure answer has not judged the words. The copy is
+/// queued. An empty text is not a lesson. A duplicate the pack already
+/// named is not queued: [`remember_with_retry`] prints that atom id.
 fn queue_busy_lesson(text: &str) {
     let dir = note_queue::state_dir();
-    let queued = queue_memory("", text, "", "lesson", &[]);
+    let queued = queue_lesson_under_load(text);
     match queued {
         Ok(_) => eprintln!(
             "remember: the pack is busy; the lesson is queued in {} and the next ljos call sends it",
             dir.join("note-queue.jsonl").display()
         ),
         Err(err) => eprintln!("remember: the pack is busy; the lesson was not queued: {err:#}"),
+    }
+}
+
+/// Queue `text` because the pack is under load. The local atom gate is
+/// not applied: that gate is a guess, and a 503 has not refused the copy.
+fn queue_lesson_under_load(text: &str) -> Result<bool> {
+    let text = text.trim();
+    if text.is_empty() {
+        memory_port::keep_empty("lesson");
+        return Err(policy_label::labelled(
+            "empty-input",
+            "remember: empty text is not a claim",
+        ));
+    }
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    note_queue::push_in(
+        &note_queue::state_dir(),
+        note_queue::Queued {
+            issue: String::new(),
+            text: text.to_string(),
+            workspace: memory_workspace(""),
+            at,
+            kind: "lesson".into(),
+            supersedes: Vec::new(),
+            seat: seat_name(),
+            home: String::new(),
+        },
+    )
+}
+
+/// `size` or `policy` when `why` is a content refusal. Load is neither.
+fn content_case(why: &str) -> Option<&'static str> {
+    let lower = why.to_ascii_lowercase();
+    if lower.contains("soft cap")
+        || lower.contains("characters")
+        || (lower.contains("past the") && lower.contains("character"))
+    {
+        return Some("size");
+    }
+    if lower.contains("sentence")
+        || lower.contains("readability")
+        || lower.contains("adverb")
+        || lower.contains("credential")
+        || lower.contains("invisible unicode")
+        || lower.contains("instructs the model")
+        || lower.contains("empty text")
+        || lower.contains("unknown atom")
+        || lower.contains("atom text is required")
+    {
+        return Some("policy");
+    }
+    None
+}
+
+/// The atom id a pack names when the lesson is a copy of one it holds.
+/// `None` for a load error and for a refusal that names no id.
+fn existing_atom_id(err: &anyhow::Error) -> Option<String> {
+    let text = format!("{err:#}");
+    let lower = text.to_ascii_lowercase();
+    if is_pack_busy(err) || writer_busy(err) || is_write_shed(err) || is_read_shed(err) {
+        return None;
+    }
+    const MARKERS: &[&str] = &[
+        "duplicate of ",
+        "already stored as ",
+        "already holds ",
+        "existing atom ",
+    ];
+    for marker in MARKERS {
+        let Some(at) = lower.find(marker) else {
+            continue;
+        };
+        let rest = &text[at + marker.len()..];
+        let id: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if id.len() >= 8 {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// `why` with `size:` or `policy:` in front when the pack's words are one
+/// of those cases and the line does not already say so.
+fn plain_refusal(why: &str) -> String {
+    match content_case(why) {
+        Some(case) if !why.starts_with(&format!("{case}:")) => format!("{case}: {why}"),
+        _ => why.to_string(),
     }
 }
 
@@ -20212,7 +20322,7 @@ pub fn flush_queued_lessons() {
             let waiting = note_queue::pending_in(&dir).len();
             if waiting > 0 {
                 eprintln!(
-                    "memory: {waiting} note(s) still queued (the pack did not answer: {err:#})"
+                    "memory: {waiting} note(s) still queued (the lesson is safe and will be sent automatically; the pack did not answer: {err:#})"
                 );
             }
             return;
@@ -29511,7 +29621,7 @@ fn probe_version(bin: &str) -> ProbedVersion {
     let Ok(said) = output_within(cmd, None, SEAT_ANSWER_BUDGET) else {
         return ProbedVersion {
             version: None,
-            error: None,
+            error: Some("timed out".into()),
         };
     };
     let stdout = String::from_utf8_lossy(&said.stdout);
@@ -29602,10 +29712,9 @@ fn crate_max_version(name: &str, refresh: bool) -> Option<CrateVersion> {
         }
     }
     let url = format!("https://crates.io/api/v1/crates/{name}");
-    let said = std::process::Command::new("curl")
-        .args(["-sS", "-A", "ljos-doctor", "--max-time", "3", &url])
-        .output()
-        .ok();
+    let mut curl = std::process::Command::new("curl");
+    curl.args(["-sS", "-A", "ljos-doctor", "--max-time", "3", &url]);
+    let said = output_within(curl, None, std::time::Duration::from_secs(4)).ok();
     let got = said.and_then(|said| {
         if !said.status.success() {
             return None;
@@ -30720,6 +30829,21 @@ pub fn doctor_seat() -> Vec<Habitat> {
     for (bin, crate_name) in SEAT_BINS {
         let found = which::which(bin).ok();
         let probed = found.as_ref().map(|_| probe_version(bin));
+        if probed
+            .as_ref()
+            .is_some_and(|p| p.error.as_deref() == Some("timed out"))
+        {
+            let shown = found
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| (*bin).to_string());
+            out.push(Habitat {
+                name: bin,
+                state: format!("{shown} --version timed out"),
+                ok: false,
+            });
+            continue;
+        }
         let have = probed.as_ref().and_then(|p| p.version.clone());
         // The encoder's loader error is not a version. A binary that does
         // not start is named here, and the seat still ranks by words.
@@ -32288,6 +32412,10 @@ fn note_degraded(out: &mut String) {
 /// A pack or encoder line. The quiet sitting keeps one degraded line.
 fn is_memory_noise_line(line: &str) -> bool {
     let line = line.trim();
+    // The skip line is the one a person acts on. The quiet sitting keeps it.
+    if line.starts_with("memory skipped:") {
+        return false;
+    }
     line.starts_with("memory-unavailable")
         || line.starts_with("ranked by words")
         || line.starts_with("lexical-only:")
@@ -32554,7 +32682,10 @@ pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String 
         let mut out = String::new();
         compact_section(name, &body, &mut out, memories);
         out
-    } else if first.starts_with("next:") || first.starts_with("plan complete") {
+    } else if first.starts_with("next:")
+        || first.starts_with("plan complete")
+        || first.starts_with("memory skipped:")
+    {
         format!("{first}\n")
     } else if is_memory_noise_line(first) {
         let mut out = String::new();
@@ -37474,6 +37605,18 @@ const SITTING_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_sec
 /// The read is a search, so this is that search's own deadline.
 const SITTING_PACK_READ: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long the sitting's one search may take in total. A cold encoder
+/// may use [`COLD_SEARCH_BUDGET`]. Nothing, including a 503 wait and a
+/// fallback listing, runs longer than that.
+fn sitting_memory_budget() -> std::time::Duration {
+    let want = if read_encoder_status().as_ref().is_some_and(encoder_cold) {
+        COLD_SEARCH_BUDGET
+    } else {
+        SITTING_PACK_READ
+    };
+    want.min(COLD_SEARCH_BUDGET)
+}
+
 /// How many memories the sitting's one search asks for. The island shows
 /// [`RELATED_MEMORY_CAP`] of them. The rest are room for the issue's own
 /// rows and the due cards that share the ticket's words.
@@ -37488,6 +37631,10 @@ const SITTING_QUERY_CHARS: usize = 400;
 const SITTING_LIST_CAP: usize = 512 * 1024;
 
 pub const SITTING_WORDS_LINE: &str = "ranked by words; the pack search did not answer in time\n";
+
+/// The one line a sitting prints when the related-memory search did not
+/// answer, then the rest of the sitting continues.
+pub const MEMORY_SKIPPED_LINE: &str = "memory skipped: packsetd busy\n";
 
 /// The one line a quiet sitting prints when the pack or the encoder did
 /// not answer. `--verbose` keeps the section that failed.
@@ -37534,8 +37681,9 @@ struct SittingListingGuard {
 
 impl SittingListingGuard {
     fn enter(ticket: &str) -> Self {
-        let deadline = pack_link::CommandDeadline::enter(SITTING_PACK_READ);
-        let clock = pack_link::PackClock::enter(SITTING_PACK_READ);
+        let budget = sitting_memory_budget();
+        let deadline = pack_link::CommandDeadline::enter(budget);
+        let clock = pack_link::PackClock::enter(budget);
         let listing = match pack() {
             Ok(client) => match sitting_pack_read(&client, ticket) {
                 Ok((atoms, searched)) => SittingListing {
@@ -37608,7 +37756,8 @@ fn sitting_pack_read(client: &PacksetClient, ticket: &str) -> Result<(Vec<Value>
         ("q", query.as_str()),
         ("limit", limit.as_str()),
     ];
-    match client.roundtrip("GET", "/v1/search", &pairs, None, true, SITTING_PACK_READ) {
+    let budget = pack_link::clock_left().unwrap_or_else(sitting_memory_budget);
+    match client.roundtrip("GET", "/v1/search", &pairs, None, true, budget) {
         Ok(answer) if (200..300).contains(&answer.status) => {
             let body: Value = serde_json::from_str(&answer.body)
                 .context("sitting: the /v1/search answer is not JSON")?;
@@ -37626,7 +37775,19 @@ fn sitting_pack_read(client: &PacksetClient, ticket: &str) -> Result<(Vec<Value>
             sitting_limited_listing(client).map(|atoms| (atoms, false))
         }
         Ok(answer) => bail!("sitting: GET /v1/search: status code {}", answer.status),
-        Err(_) => sitting_limited_listing(client).map(|atoms| (atoms, false)),
+        // A search that never answers, or whose deadline passed, is not
+        // followed by another read. A 503 that came back still has the
+        // bounded listing: a write holding the search answers that way.
+        // The listing uses whatever the clock has left.
+        Err(err) => {
+            let err = anyhow::Error::from(err);
+            let spent = pack_link::clock_left()
+                .is_some_and(|left| left <= std::time::Duration::from_millis(50));
+            if spent || is_pack_busy(&err) || is_deadline_miss(&err) {
+                return Err(err);
+            }
+            sitting_limited_listing(client).map(|atoms| (atoms, false))
+        }
     }
 }
 
@@ -37643,8 +37804,9 @@ fn sitting_limited_listing(client: &PacksetClient) -> Result<Vec<Value>> {
         ("limit", limit.as_str()),
         ("order", "newest"),
     ];
+    let left = pack_link::clock_left().unwrap_or(SITTING_PACK_READ);
     let answer = client
-        .roundtrip("GET", "/v1/atoms", &pairs, None, true, SITTING_PACK_READ)
+        .roundtrip("GET", "/v1/atoms", &pairs, None, true, left)
         .map_err(anyhow::Error::from)?;
     if !(200..300).contains(&answer.status) {
         bail!("sitting: GET /v1/atoms: status code {}", answer.status);
@@ -37846,6 +38008,13 @@ pub fn sitting_stream_started(
     let ticket = sitting_ticket_text(issue, &title);
     let _listing = SittingListingGuard::enter(&ticket);
     let mut fell_back = false;
+    // The search is over, whether it answered or the deadline passed.
+    // Say so before doctor, which probes other programs and must not be
+    // what a person waits on to hear that memory was skipped.
+    if sitting_listing().is_some_and(|listing| !listing.ok) {
+        fell_back = true;
+        emit_piece(&mut out, &mut emit, MEMORY_SKIPPED_LINE);
+    }
 
     let mut piece = String::new();
     let rows = doctor_seat();
@@ -60786,6 +60955,84 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(
             super::note_can_wait(&unnamed),
             "the words alone are not a refusal"
+        );
+        let pressure = anyhow::Error::new(packset_client::Error::Unavailable(
+            "packsetd is busy: memory pressure; try again".into(),
+        ));
+        assert!(
+            super::note_can_wait(&pressure),
+            "memory pressure is load, not a refusal: {pressure:#}"
+        );
+        assert!(super::existing_atom_id(&pressure).is_none(), "{pressure:#}");
+        let duplicate =
+            anyhow::anyhow!("http://127.0.0.1:9/v1/atoms: 400: duplicate of abcdef0123456789");
+        assert!(!super::note_can_wait(&duplicate), "{duplicate:#}");
+        assert_eq!(
+            super::existing_atom_id(&duplicate).as_deref(),
+            Some("abcdef0123456789")
+        );
+        assert_eq!(
+            super::content_case("atom text is past the soft cap of 4000 characters"),
+            Some("size")
+        );
+        assert_eq!(
+            super::content_case("atom has 3 sentences; one claim is at most 2"),
+            Some("policy")
+        );
+    }
+
+    /// A pressure 503 queues the lesson even when the local prose gate
+    /// would refuse the same words. The queue file is the durable copy.
+    #[test]
+    fn a_pressure_503_queues_a_lesson_the_local_gate_would_refuse() {
+        let _env = crate::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: test_env_lock holds the environment and restores it.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", tmp.path());
+        }
+        let words = packset_core::prose::VERY_HARD_WORDS + 4;
+        let text = "word ".repeat(words);
+        let text = text.trim();
+        assert!(
+            !pack_copy::pack_copy_ok(text),
+            "the local gate accepted a sentence past the word limit"
+        );
+        let err = super::remember_with_retry(text, || {
+            Err(anyhow::Error::new(packset_client::Error::Unavailable(
+                "packsetd is busy: memory pressure; try again".into(),
+            )))
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("memory pressure"), "{err:#}");
+        let queued =
+            std::fs::read_to_string(tmp.path().join("ljos/note-queue.jsonl")).unwrap_or_default();
+        assert!(
+            queued.contains(text),
+            "the lesson was dropped instead of queued:\n{queued}"
+        );
+    }
+
+    /// A duplicate is the atom the pack already holds, not an error and
+    /// not a queued copy.
+    #[test]
+    fn a_duplicate_lesson_names_the_existing_atom() {
+        let _env = crate::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: test_env_lock holds the environment and restores it.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", tmp.path());
+        }
+        let body = super::remember_with_retry("pin the fuse", || {
+            Err(anyhow::anyhow!(
+                "http://127.0.0.1:9/v1/atoms: 400: duplicate of abcdef0123456789"
+            ))
+        })
+        .unwrap();
+        assert_eq!(body["id"], "abcdef0123456789");
+        assert!(
+            !tmp.path().join("ljos/note-queue.jsonl").exists(),
+            "a duplicate was queued"
         );
     }
 

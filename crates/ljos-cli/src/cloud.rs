@@ -1858,17 +1858,23 @@ fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
     let name = Path::new(&command).file_name().and_then(|n| n.to_str());
     if name == Some(crate::MCP_SERVER_COMMAND) {
         if let Ok(own) = crate::server_path() {
-            if !install_matches(&chosen, &own) {
-                return LaunchCheck::Warn(if pathy {
-                    format!("{} is not this install's {}", launch.command, own.display())
-                } else {
-                    format!(
-                        "{} resolves to {}, not {}",
-                        launch.command,
-                        chosen.display(),
-                        own.display()
-                    )
-                });
+            match install_matches(&chosen, &own) {
+                InstallMatch::Yes => {}
+                InstallMatch::TimedOut => {
+                    return LaunchCheck::Warn(format!("{} --version timed out", chosen.display()));
+                }
+                InstallMatch::No => {
+                    return LaunchCheck::Warn(if pathy {
+                        format!("{} is not this install's {}", launch.command, own.display())
+                    } else {
+                        format!(
+                            "{} resolves to {}, not {}",
+                            launch.command,
+                            chosen.display(),
+                            own.display()
+                        )
+                    });
+                }
             }
         }
     }
@@ -1917,14 +1923,12 @@ fn shell_command_path(command: &str) -> Option<PathBuf> {
         return None;
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let out = Command::new(shell)
-        .arg("-lc")
+    let mut cmd = Command::new(shell);
+    cmd.arg("-lc")
         .arg("command -v -- \"$1\"")
         .arg("_")
-        .arg(command)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .arg(command);
+    let out = super::output_within(cmd, None, VERSION_PROBE).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1947,30 +1951,46 @@ fn same_binary(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// How long one doctor probe of a binary or a login shell may run.
+/// A hang used to hold `ljos doctor` with no row. Two seconds is long
+/// enough to exec `ljos-mcp --version` and short enough that the report
+/// still prints.
+const VERSION_PROBE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether `chosen` is this install's `ljos-mcp`.
+enum InstallMatch {
+    Yes,
+    No,
+    /// `--version` did not exit. The doctor names that and continues.
+    TimedOut,
+}
+
 /// Whether `chosen` is this install's `ljos-mcp`.
 ///
 /// The same file is. A shell wrapper is too, when it execs this binary
 /// (`$LJOS_MCP_BIN` or `$LJOS_BIN/ljos-mcp`) or its `--version` line matches
-/// this install's. A different binary still does not.
-fn install_matches(chosen: &Path, own: &Path) -> bool {
+/// this install's. A different binary still does not. A `--version` that
+/// does not return is [`InstallMatch::TimedOut`], not a mismatch.
+fn install_matches(chosen: &Path, own: &Path) -> InstallMatch {
     if same_binary(chosen, own) {
-        return true;
+        return InstallMatch::Yes;
     }
     let Ok(text) = fs::read_to_string(chosen) else {
-        return false;
+        return InstallMatch::No;
     };
     if !wrapper_script(&text) {
-        return false;
+        return InstallMatch::No;
     }
     if wrapper_targets(&text)
         .iter()
         .any(|target| same_binary(target, own))
     {
-        return true;
+        return InstallMatch::Yes;
     }
     match (binary_version(chosen), binary_version(own)) {
-        (Some(left), Some(right)) => left == right,
-        _ => false,
+        (VersionLine::TimedOut, _) | (_, VersionLine::TimedOut) => InstallMatch::TimedOut,
+        (VersionLine::Text(left), VersionLine::Text(right)) if left == right => InstallMatch::Yes,
+        _ => InstallMatch::No,
     }
 }
 
@@ -2016,19 +2036,33 @@ fn wrapper_targets(text: &str) -> Vec<PathBuf> {
     out
 }
 
-/// The first line of `path --version`, when the program runs.
-fn binary_version(path: &Path) -> Option<String> {
-    let out = Command::new(path)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+/// What `path --version` printed, or that it did not finish.
+enum VersionLine {
+    Text(String),
+    TimedOut,
+    Missing,
+}
+
+/// The first line of `path --version`, when the program returns inside
+/// [`VERSION_PROBE`]. A program that is still running is [`VersionLine::TimedOut`].
+fn binary_version(path: &Path) -> VersionLine {
+    let mut cmd = Command::new(path);
+    cmd.arg("--version");
+    let out = match super::output_within(cmd, None, VERSION_PROBE) {
+        Ok(out) => out,
+        Err(err) if err.kind() == std::io::ErrorKind::TimedOut => return VersionLine::TimedOut,
+        Err(_) => return VersionLine::Missing,
+    };
     if !out.status.success() {
-        return None;
+        return VersionLine::Missing;
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let line = text.lines().next().unwrap_or("").trim();
-    (!line.is_empty()).then(|| line.to_string())
+    if line.is_empty() {
+        VersionLine::Missing
+    } else {
+        VersionLine::Text(line.to_string())
+    }
 }
 
 fn home_bin_exists(name: &str) -> bool {

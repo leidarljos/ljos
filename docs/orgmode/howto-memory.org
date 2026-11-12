@@ -9,6 +9,14 @@ most. The pack's limit is 29 words a sentence: a longer one is kept.
 =ljos remember --verbose= prints one line, naming the count and the limit,
 to split that sentence into two sentences.
 
+A pack that answers 503, including =packsetd is busy: memory pressure=,
+queues the lesson in =~/.local/state/ljos/note-queue.jsonl=. The next
+=ljos search= or =ljos sitting= sends it under the same deadline as
+=ljos remember=, and says the lesson is safe and will be sent
+automatically. Load is not a reason to drop the lesson. A refusal on
+content names the case: size, or policy. A lesson that duplicates an atom
+already in the pack prints that atom id.
+
 * Keep the cards
 
 Cards are two files a person writes: =USER.md= and =MEMORY.md=. The seat

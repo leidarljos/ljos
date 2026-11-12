@@ -24,7 +24,7 @@ A plan files the parent and its checklist in one tracker commit, claims the pare
    $ ljos ready --mine
    next: day-ef56  pick a default
 
-``ljos ready --mine`` names the next unfinished item. ``ljos finish ITEM`` ticks that item off. A sitting without ``--verbose`` is the short form: what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``.
+``ljos ready --mine`` names the next unfinished item. ``ljos finish ITEM`` ticks that item off. A sitting without ``--verbose`` is the short form: what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``. A pack that answers 503, or does not answer, is one line, ``memory skipped: packsetd busy``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold, and about a second otherwise. Quiet claims are a count of the project file already opened for the ticket.
 
 Start a sitting, and end one
 ============================

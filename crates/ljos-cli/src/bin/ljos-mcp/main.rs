@@ -14,11 +14,34 @@ mod server;
 
 use rmcp::{transport::stdio, ServiceExt};
 
+/// Print `--version` or `--help` and report that a flag was handled.
+fn flag_line() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
+        return true;
+    }
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
+        println!("Serve one seat over the Model Context Protocol on standard input.");
+        println!("--version  print the version and exit");
+        println!("--help     print this help and exit");
+        return true;
+    }
+    false
+}
+
 /// Clients keep one server per thread for days, so an idle one must be
 /// cheap. A tool's work runs on the blocking pool or blocks a worker for
 /// one call, so two workers keep the stdin reader moving; the pool is
 /// capped and its threads leave after a short idle.
 fn main() -> anyhow::Result<()> {
+    // `--version` and `--help` leave before the runtime, the seat env, a
+    // pack connection or a read of stdin. A doctor probe and a wrapper
+    // that execs this binary both stop here.
+    if flag_line() {
+        return Ok(());
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .max_blocking_threads(8)
@@ -48,10 +71,6 @@ async fn serve() -> anyhow::Result<()> {
     // One process is one connection. A later seat argument cannot mint a
     // second session for a ballot.
     ljos_cli::ballot_sig::pin_connection_session(None);
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
     lifetime::watch_parent();
     // Starting the server is a run of this version: refresh skills and
     // runner env files ljos wrote.

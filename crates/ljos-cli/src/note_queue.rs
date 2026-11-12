@@ -401,7 +401,7 @@ pub fn drained_lines(done: &Drained) -> String {
     }
     if done.left > 0 {
         out.push_str(&format!(
-            "memory: {} note(s) still queued ({})\n",
+            "memory: {} note(s) still queued (the lesson is safe and will be sent automatically; {})\n",
             done.left,
             done.waiting_on
                 .as_deref()
@@ -727,7 +727,9 @@ mod tests {
             "{lines}"
         );
         assert!(
-            lines.contains("1 note(s) still queued (connection refused)"),
+            lines.contains(
+                "1 note(s) still queued (the lesson is safe and will be sent automatically; connection refused)"
+            ),
             "{lines}"
         );
         let done = drain_in(&dir, |_| Sent::Kept("id".into())).unwrap();

@@ -200,6 +200,10 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
         "a stalled search is the one read, and the sitting says so:\n{stdout}"
     );
     assert!(
+        stdout.contains("memory skipped: packsetd busy"),
+        "a search that never answers is one line and the sitting goes on:\n{stdout}"
+    );
+    assert!(
         started.elapsed() < Duration::from_secs(8),
         "sitting took {:?}",
         started.elapsed()
@@ -352,4 +356,143 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
     );
     assert!(!said.contains("memory degraded"), "{said}");
     assert!(!stdout.contains("the whole pack was listed"), "{said}");
+}
+
+/// Every request is 503 with a long Retry-After. The sitting must not
+/// sleep that out, and it must not open a second unbounded read.
+fn pressure_pack() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut sock) = stream else { break };
+            thread::spawn(move || {
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                loop {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let body = r#"{"error":"packsetd is busy: memory pressure; try again"}"#;
+                let resp = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 60\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            });
+        }
+    });
+    port
+}
+
+fn sitting_fixture(root: &Path) -> (String, std::path::PathBuf, std::path::PathBuf) {
+    let log = root.join("calls.log");
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join(".cursor")).unwrap();
+    std::fs::create_dir_all(root.join("run")).unwrap();
+    std::fs::write(
+        home.join(".cursor/mcp.json"),
+        r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
+    )
+    .unwrap();
+    let tracker = root.join("tracker");
+    std::fs::create_dir_all(tracker.join("Software")).unwrap();
+    script(
+        root,
+        "vissue",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"vissue $*\" >> '{}'\ncase \"$1\" in\n  show) printf '%s\\n' '{{\"id\":\"probe-sit\",\"title\":\"probe\",\"state\":\"TODO\"}}' ;;\n  recall) echo noted ;;\n  identity) printf '%s\\n' 'vissue test' 'root={}' 'prefix=Software' ;;\nesac\nexit 0\n",
+            log.display(),
+            tracker.display()
+        ),
+    );
+    script(
+        root,
+        "claimdag",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            log.display()
+        ),
+    );
+    script(
+        root,
+        "deedar",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"deedar $*\" >> '{}'\necho head\nexit 0\n",
+            log.display()
+        ),
+    );
+    let layout = vissue_core::Layout::new(&tracker, "Software");
+    vissue_core::ops::create(&layout, "probe", "probe work", Default::default()).unwrap();
+    let doc =
+        vissue_core::IssueDoc::parse_file("probe", &layout.project_issues_path("probe")).unwrap();
+    (doc.headings[0].id.clone(), home, tracker)
+}
+
+fn run_sitting(root: &Path, url: &str) -> (bool, String, Duration) {
+    let (issue, home, tracker) = sitting_fixture(root);
+    let path = format!("{}:/usr/bin:/bin", root.display());
+    let started = Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["sitting", &issue, "--verbose"])
+        .current_dir(root)
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_RUNTIME_DIR", root.join("run"))
+        .env("VISSUE_ROOT", &tracker)
+        .env("VISSUE_NO_ROUTE", "1")
+        .env("LJOS_SEAT", "ada")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("PACKSET_AUTH", "off")
+        .env("PACKSET_URL", url)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let took = started.elapsed();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    (out.status.success(), format!("{stdout}{stderr}"), took)
+}
+
+#[test]
+fn a_sitting_skips_memory_when_packsetd_answers_503() {
+    let root = tempfile::tempdir().unwrap();
+    let port = pressure_pack();
+    let (ok, said, took) = run_sitting(root.path(), &format!("http://127.0.0.1:{port}"));
+    assert!(
+        took < Duration::from_secs(8),
+        "a 503 with Retry-After 60 held the sitting for {took:?}:\n{said}"
+    );
+    assert!(ok, "{said}");
+    assert!(said.contains("memory skipped: packsetd busy"), "{said}");
+    assert!(
+        said.contains("== claim") || said.contains("claimed"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_sitting_skips_memory_when_packsetd_never_answers() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let (ok, said, took) = run_sitting(root.path(), &format!("http://127.0.0.1:{port}"));
+    assert!(
+        took < Duration::from_secs(8),
+        "a closed pack port held the sitting for {took:?}:\n{said}"
+    );
+    assert!(ok, "{said}");
+    assert!(said.contains("memory skipped: packsetd busy"), "{said}");
 }

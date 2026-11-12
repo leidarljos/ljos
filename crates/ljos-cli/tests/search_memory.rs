@@ -211,6 +211,10 @@ fn search_says_when_a_queued_lesson_is_still_waiting() {
         "search did not say the lesson is waiting:\n{stderr}\n{}",
         String::from_utf8_lossy(&out.stdout)
     );
+    assert!(
+        stderr.contains("the lesson is safe and will be sent automatically"),
+        "search did not say the queued lesson is safe:\n{stderr}"
+    );
     let left = std::fs::read_to_string(queue_dir.join("note-queue.jsonl")).unwrap_or_default();
     assert!(
         left.contains(lesson),

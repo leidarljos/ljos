@@ -5,6 +5,15 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## Unreleased
+
+### Fixes
+
+- A busy or memory-pressure 503 from packsetd queues the lesson. A content refusal names size or policy. A duplicate prints the atom id already in the pack. Search says a queued lesson is safe and will be sent automatically.
+- `ljos-mcp --version` and `--help` print and exit before the server, a pack connection, or a read of stdin.
+- `ljos doctor` gives each subprocess probe a short timeout and prints a row when one does not answer.
+- `ljos sitting` stops the related-memory search at fifteen seconds when the encoder is cold, prints `memory skipped: packsetd busy` when the pack answers 503 or does not answer, and continues.
+
 ## 0.41.4 (2026-11-12)
 
 ### Fixes
