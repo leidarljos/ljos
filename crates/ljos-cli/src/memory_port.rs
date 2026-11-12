@@ -638,14 +638,15 @@ fn secret_source(source: &Value) -> bool {
     })
 }
 
-/// The seat named by a `seat:` entity. `seat:import*` and `seat:label:*`
-/// are bookkeeping, not an owner, and stay out of the check. So is
-/// `seat:unresolved`, the label on a write that had no seat.
+/// The seat named by a `seat:` entity. `seat:import*`, `seat:iid:` and
+/// `seat:label:*` are bookkeeping, not an owner, and stay out of the
+/// check. So is `seat:unresolved`, the label on a write that had no seat.
 fn seat_entity(tag: &str) -> Option<&str> {
     let rest = tag.strip_prefix("seat:")?;
     if rest.is_empty()
         || rest == "unresolved"
         || rest.starts_with("import")
+        || rest.starts_with("iid:")
         || rest.starts_with("label:")
     {
         None
@@ -1119,7 +1120,10 @@ fn string_list(value: &Value) -> Vec<String> {
 fn stamp_entities_of(seat: &str, machine: &str, row: &mut Row) {
     let owner = format!("seat:{seat}");
     let source = format!("seat:import:{}:{}", encode_name(machine), encode_name(seat));
-    if !row.entities.iter().any(|tag| tag == &owner) {
+    // An adopted row already names the seat that holds the copy. Adding the
+    // donor here made search rank that copy as another seat's.
+    let has_owner = row.entities.iter().any(|tag| seat_entity(tag).is_some());
+    if !has_owner && !row.entities.iter().any(|tag| tag == &owner) {
         row.entities.push(owner);
     }
     if !machine.is_empty() && !row.entities.iter().any(|tag| tag == &source) {
@@ -1129,6 +1133,296 @@ fn stamp_entities_of(seat: &str, machine: &str, row: &mut Row) {
     if !row.entities.iter().any(|tag| tag == &mark) {
         row.entities.push(mark);
     }
+}
+
+/// A lesson this seat already holds, by the text's hash or by a lane and
+/// the row id inside that lane.
+struct KnownLane {
+    hashes: BTreeSet<String>,
+    ids: BTreeSet<String>,
+}
+
+fn row_hashes(row: &Row) -> BTreeSet<String> {
+    let mut hashes = BTreeSet::new();
+    if !row.content_sha256.is_empty() {
+        hashes.insert(row.content_sha256.clone());
+    }
+    let trimmed = row.text.trim();
+    if !trimmed.is_empty() {
+        hashes.insert(sha256_hex(trimmed.as_bytes()));
+    }
+    hashes
+}
+
+fn lanes_of(row: &Row) -> BTreeSet<String> {
+    row.entities
+        .iter()
+        .filter_map(|tag| tag.strip_prefix("lane:"))
+        .filter(|lane| !lane.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Hashes and row ids already stored for `lane`. A different lane's copy
+/// of the same text stays, so integrate can still name it an exact copy.
+fn known_in_lane(place: &Place, lane: &str) -> KnownLane {
+    let mut known = KnownLane {
+        hashes: BTreeSet::new(),
+        ids: BTreeSet::new(),
+    };
+    for row in load_rows(place, false) {
+        if row_retired(&row) || !lanes_of(&row).iter().any(|item| item == lane) {
+            continue;
+        }
+        known.hashes.extend(row_hashes(&row));
+        if !row.source_id.is_empty() {
+            known.ids.insert(row.source_id.clone());
+        }
+    }
+    known
+}
+
+fn tag_lane(rows: &mut [Row], lane: &str) {
+    let tag = format!("lane:{lane}");
+    for row in rows.iter_mut() {
+        if !row.entities.iter().any(|entity| entity == &tag) {
+            row.entities.push(tag.clone());
+        }
+    }
+}
+
+/// Rows of `lane` this seat does not already hold, and how many it does.
+fn split_known(place: &Place, lane: &str, rows: &[Row]) -> (Vec<Row>, usize) {
+    let known = known_in_lane(place, lane);
+    let mut hashes = known.hashes;
+    let mut ids = known.ids;
+    let mut fresh = Vec::new();
+    let mut unchanged = 0usize;
+    for row in rows {
+        let id_hit = !row.source_id.is_empty() && ids.contains(&row.source_id);
+        let hash_hit = row_hashes(row).iter().any(|hash| hashes.contains(hash));
+        if id_hit || hash_hit {
+            unchanged += 1;
+            continue;
+        }
+        hashes.extend(row_hashes(row));
+        if !row.source_id.is_empty() {
+            ids.insert(row.source_id.clone());
+        }
+        fresh.push(row.clone());
+    }
+    (fresh, unchanged)
+}
+
+/// Give `row` this seat's packset tags and the integrated label.
+///
+/// The donor's `seat:` tag is dropped. `lane:` tags stay. A lesson with
+/// no horizon becomes standing, which is what search and the prompt rank.
+fn adopt_row(place: &Place, row: &mut Row) {
+    row.entities.retain(|tag| match seat_entity(tag) {
+        Some(seat) => seat == place.seat,
+        None => true,
+    });
+    let owner = format!("seat:{}", place.seat);
+    if !row.entities.iter().any(|tag| tag == &owner) {
+        row.entities.push(owner);
+    }
+    if !row
+        .entities
+        .iter()
+        .any(|tag| tag == "horizon:standing" || tag == "horizon:transient")
+    {
+        row.entities.push("horizon:standing".into());
+    }
+    row.labels.retain(|label| label != "unintegrated");
+    push_label(&mut row.labels, "imported");
+    push_label(&mut row.labels, "integrated");
+}
+
+fn rewrite_integrated(place: &Place, import_id: &str) -> Result<()> {
+    let index = slot_dir(place, import_id).join("index.jsonl");
+    let Ok(text) = std::fs::read_to_string(&index) else {
+        return Ok(());
+    };
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut row: Row = match serde_json::from_str(line) {
+            Ok(row) => row,
+            Err(_) => {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+        };
+        if !row_retired(&row) {
+            adopt_row(place, &mut row);
+        }
+        out.push_str(&serde_json::to_string(&row)?);
+        out.push('\n');
+    }
+    write_private(&index, out.as_bytes())
+}
+
+/// One lane row `mesh pull` keeps under the seat's `mesh` slot.
+pub(crate) struct MeshRow {
+    pub text: String,
+    pub kind: String,
+    pub origin: String,
+    pub content_sha256: String,
+    pub source_id: String,
+    pub lanes: BTreeSet<String>,
+    pub entities: BTreeSet<String>,
+}
+
+const MESH_IMPORT: &str = "mesh";
+
+/// Append `rows` to the seat's mesh slot. A hash already stored there is
+/// left as it is. Each row is `imported,unintegrated` until integrate.
+pub(crate) fn stage_mesh_rows(place: &Place, rows: &[MeshRow]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let dir = slot_dir(place, MESH_IMPORT);
+    ensure_dir(&dir)?;
+    let manifest_path = dir.join("manifest.json");
+    if !manifest_path.is_file() {
+        let manifest = json!({
+            "format": FORMAT,
+            "target_seat": place.seat,
+            "target_machine": place.machine,
+            "source_machine": "mesh",
+            "source_seat": place.seat,
+            "imported_at": now_rfc3339(),
+            "source_exported_at": "",
+            "input_sha256": MESH_IMPORT,
+            "rows": 0,
+            "labels": ["imported", "unintegrated"],
+            "known_format": true,
+        });
+        write_private(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
+    }
+    let index_path = dir.join("index.jsonl");
+    let existing = std::fs::read_to_string(&index_path).unwrap_or_default();
+    let mut have = BTreeSet::new();
+    for line in existing.lines() {
+        let Ok(row) = serde_json::from_str::<Row>(line) else {
+            continue;
+        };
+        have.extend(row_hashes(&row));
+    }
+    let mut body = String::new();
+    let mut added = 0usize;
+    for row in rows {
+        if have.contains(&row.content_sha256) {
+            continue;
+        }
+        let mut entities = Vec::new();
+        for lane in &row.lanes {
+            entities.push(format!("lane:{lane}"));
+        }
+        for tag in &row.entities {
+            if !tag.starts_with("lane:")
+                && !tag.starts_with("seat:")
+                && !entities.iter().any(|have| have == tag)
+            {
+                entities.push(tag.clone());
+            }
+        }
+        entities.push(format!("seat:{}", place.seat));
+        if !entities
+            .iter()
+            .any(|tag| tag == "horizon:standing" || tag == "horizon:transient")
+        {
+            entities.push("horizon:standing".into());
+        }
+        let stored = Row {
+            id: format!("local:mesh:{}", row.content_sha256),
+            text: row.text.clone(),
+            kind: row.kind.clone(),
+            origin: if row.origin.is_empty() {
+                crate::admit::ORIGIN_PEER.into()
+            } else {
+                row.origin.clone()
+            },
+            basis: String::new(),
+            labels: vec!["imported".into(), "unintegrated".into()],
+            entities,
+            machine: place.machine.clone(),
+            seat: place.seat.clone(),
+            import_id: MESH_IMPORT.into(),
+            source_id: row.source_id.clone(),
+            content_sha256: row.content_sha256.clone(),
+            origin_hash: sha256_hex(format!("{}\n{}", row.source_id, row.text).as_bytes()),
+            at: String::new(),
+            diagnostic: String::new(),
+            effect: "stored-local".into(),
+            retired: false,
+            retracted_by: None,
+        };
+        body.push_str(&serde_json::to_string(&stored)?);
+        body.push('\n');
+        have.insert(row.content_sha256.clone());
+        added += 1;
+    }
+    if added == 0 {
+        return Ok(());
+    }
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(&body);
+    write_private(&index_path, next.as_bytes())?;
+    if let Ok(bytes) = std::fs::read(&manifest_path) {
+        if let Ok(mut manifest) = serde_json::from_slice::<Value>(&bytes) {
+            let lines = next.lines().filter(|line| !line.trim().is_empty()).count();
+            manifest["rows"] = json!(lines);
+            write_private(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
+        }
+    }
+    Ok(())
+}
+
+/// Note that the pack already holds the mesh row `content` names.
+pub(crate) fn mark_mesh_posted(place: &Place, content: &str, pack_id: &str) -> Result<()> {
+    if content.is_empty() {
+        return Ok(());
+    }
+    let path = slot_dir(place, MESH_IMPORT)
+        .join("receipts")
+        .join(format!("posted-{content}.json"));
+    write_if_absent(
+        &path,
+        &serde_json::to_vec(&json!({
+            "pack_id": pack_id,
+            "row": format!("local:mesh:{content}"),
+        }))?,
+    )?;
+    Ok(())
+}
+
+/// Hashes and `lane\\tid` keys already in this seat's slots.
+pub(crate) fn known_mesh(place: &Place) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut hashes = BTreeSet::new();
+    let mut row_ids = BTreeSet::new();
+    // Kept rows are this machine's own notes. A lane export of one of them
+    // is still new to the seat that is pulling.
+    for row in load_index(place) {
+        if row_retired(&row) {
+            continue;
+        }
+        hashes.extend(row_hashes(&row));
+        if row.source_id.is_empty() {
+            continue;
+        }
+        for lane in lanes_of(&row) {
+            row_ids.insert(format!("{lane}\t{}", row.source_id));
+        }
+    }
+    (hashes, row_ids)
 }
 
 /// Import `bytes` into `place`. `stop` returns after that stage so a
@@ -1142,8 +1436,48 @@ fn import_bytes(
     as_machine: Option<&str>,
     stop: Option<Stop>,
 ) -> Result<ImportDone> {
+    import_at(
+        place,
+        bytes,
+        source_machine,
+        source_seat,
+        as_machine,
+        stop,
+        None,
+    )
+}
+
+fn import_at(
+    place: &Place,
+    bytes: &[u8],
+    source_machine: Option<&str>,
+    source_seat: Option<&str>,
+    as_machine: Option<&str>,
+    stop: Option<Stop>,
+    lane: Option<&str>,
+) -> Result<ImportDone> {
     let _held = lock_home(&place.home);
     let import_id = sha256_hex(bytes);
+    let mut parsed = parse_payload(bytes, &import_id, source_machine, source_seat, as_machine);
+    let mut unchanged = 0usize;
+    if let Some(lane) = lane.map(str::trim).filter(|lane| !lane.is_empty()) {
+        tag_lane(&mut parsed.rows, lane);
+        let dir = slot_dir(place, &import_id);
+        if !dir.join("index.jsonl").is_file() {
+            let (fresh, skipped) = split_known(place, lane, &parsed.rows);
+            unchanged = skipped;
+            if fresh.is_empty() && !dir.join("payload.jsonl").is_file() {
+                return Ok(ImportDone {
+                    import_id,
+                    rows: 0,
+                    unchanged,
+                    labels: Vec::new(),
+                    searchable: 0,
+                });
+            }
+            parsed.rows = fresh;
+        }
+    }
     let dir = slot_dir(place, &import_id);
     ensure_dir(&dir)?;
     let payload = dir.join("payload.jsonl");
@@ -1155,7 +1489,6 @@ fn import_bytes(
     } else {
         write_private(&payload, bytes)?;
     }
-    let parsed = parse_payload(bytes, &import_id, source_machine, source_seat, as_machine);
     let manifest_path = dir.join("manifest.json");
     if !manifest_path.is_file() {
         let (shown, time_labels) = if parsed.exported_at.is_empty() {
@@ -1203,9 +1536,27 @@ fn import_bytes(
     if stop == Some(Stop::Receipt) {
         bail!("memory: stopped after receipt");
     }
-    let rows = parsed.rows;
     let index_path = dir.join("index.jsonl");
-    if !index_path.is_file() {
+    let stored;
+    let mut rows = parsed.rows;
+    if index_path.is_file() {
+        unchanged = unchanged.max(rows.len());
+        stored = 0;
+        rows = std::fs::read_to_string(&index_path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Row>(line).ok())
+            .collect();
+    } else if rows.is_empty() {
+        return Ok(ImportDone {
+            import_id,
+            rows: 0,
+            unchanged,
+            labels: Vec::new(),
+            searchable: 0,
+        });
+    } else {
+        stored = rows.len();
         let mut body = String::new();
         for row in &rows {
             body.push_str(&serde_json::to_string(row)?);
@@ -1242,7 +1593,8 @@ fn import_bytes(
     labels.dedup();
     Ok(ImportDone {
         import_id,
-        rows: rows.len(),
+        rows: stored,
+        unchanged,
         labels,
         searchable: rows
             .iter()
@@ -1255,6 +1607,8 @@ fn import_bytes(
 pub struct ImportDone {
     pub import_id: String,
     pub rows: usize,
+    /// Rows already held, by content hash or by lane and row id.
+    pub unchanged: usize,
     pub labels: Vec<String>,
     pub searchable: usize,
 }
@@ -1335,9 +1689,46 @@ fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
     let Ok(client) = crate::pack() else {
         return Ok(Vec::new());
     };
-    // A lesson already in this pack is not posted again. A second import
-    // of the same memories, even from a new file, stays one copy.
+    // A lesson already in this pack, or already integrated for this seat,
+    // is not posted again. A second import of the same memories stays one copy.
     let mut held = crate::memories::live_atoms().unwrap_or_default();
+    if let Some(home) = dir
+        .parent()
+        .and_then(|seat| seat.parent())
+        .and_then(|imports| imports.parent())
+        .filter(|_| {
+            dir.parent()
+                .and_then(|seat| seat.parent())
+                .and_then(|imports| imports.file_name())
+                .is_some_and(|name| name == "imports")
+        })
+    {
+        let seat = dir
+            .parent()
+            .and_then(|seat| seat.file_name())
+            .and_then(|name| name.to_str())
+            .and_then(decode_name)
+            .unwrap_or_default();
+        let local = Place {
+            home: home.to_path_buf(),
+            seat,
+            machine: String::new(),
+        };
+        for row in load_rows(&local, false) {
+            if row_retired(&row) || rows.iter().any(|posting| posting.id == row.id) {
+                continue;
+            }
+            let integrated = row.labels.iter().any(|label| label == "integrated");
+            let kept = row.import_id.is_empty();
+            if integrated || kept {
+                held.push(json!({
+                    "id": row.id,
+                    "kind": row.kind,
+                    "text": row.text,
+                }));
+            }
+        }
+    }
     let mut refused = Vec::new();
     for row in rows {
         if row.text.trim().is_empty() {
@@ -1408,7 +1799,22 @@ pub fn import_path(
     }
     let bytes =
         std::fs::read(path).with_context(|| format!("memory: cannot read {}", path.display()))?;
-    import_bytes(place, &bytes, source_machine, source_seat, as_machine, None)
+    let Some(lane) = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|lane| !lane.is_empty())
+    else {
+        return import_bytes(place, &bytes, source_machine, source_seat, as_machine, None);
+    };
+    import_at(
+        place,
+        &bytes,
+        source_machine,
+        source_seat,
+        as_machine,
+        None,
+        Some(lane),
+    )
 }
 
 pub fn import_cmd(
@@ -1419,6 +1825,18 @@ pub fn import_cmd(
 ) -> Result<String> {
     let place = Place::current();
     let done = import_path(&place, path, source_machine, source_seat, as_machine)?;
+    if done.rows == 0 {
+        return Ok(format!("unchanged {} rows\n", done.unchanged));
+    }
+    if done.unchanged > 0 {
+        return Ok(format!(
+            "imported {} rows {} unchanged {} labels {}\n",
+            done.import_id,
+            done.rows,
+            done.unchanged,
+            done.labels.join(",")
+        ));
+    }
     Ok(format!(
         "imported {} rows {} labels {}\n",
         done.import_id,
@@ -2177,7 +2595,14 @@ fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<String
             .join("integration")
             .join(format!("{event_id}.json"));
         write_if_absent(&path, &serde_json::to_vec_pretty(&event)?)?;
-        let posting: Vec<Row> = mine.into_iter().cloned().collect();
+        // The slot row becomes this seat's memory: its label, its seat tag
+        // and a standing horizon. A text the pack already holds is not posted
+        // again. materialise records that and leaves the row integrated.
+        rewrite_integrated(place, import_id)?;
+        let posting: Vec<Row> = load_rows(place, false)
+            .into_iter()
+            .filter(|row| row.import_id == import_id && !row_retired(row))
+            .collect();
         for note in materialise(&slot_dir(place, import_id), &posting)? {
             out.push_str(&format!("  not posted: {note}\n"));
         }
@@ -3409,5 +3834,54 @@ mod tests {
         let found = selected(&target, "lesson", &filter, false);
         assert_eq!(found.len(), 1);
         assert!(found[0].0.text.contains("beta"));
+    }
+
+    #[test]
+    fn a_second_lane_export_is_unchanged_and_integrate_makes_it_searchable() {
+        let (dir, target) = place("paper");
+        let text = "the brine lane keeps the zircon shelf";
+        let lane = dir.path().join("handoff");
+        std::fs::create_dir(&lane).unwrap();
+        let file = lane.join("brine.jsonl");
+        std::fs::write(
+            &file,
+            header_with_id("host-a", "brine", text, "2026-11-12T07:30:00Z", "row-1"),
+        )
+        .unwrap();
+        let done = import_path(&target, &file, None, None, None).unwrap();
+        assert_eq!(done.rows, 1);
+        assert_eq!(done.unchanged, 0);
+        std::fs::write(
+            &file,
+            header_with_id("host-a", "brine", text, "2026-11-12T08:00:00Z", "row-1"),
+        )
+        .unwrap();
+        let again = import_path(&target, &file, None, None, None).unwrap();
+        assert_eq!(again.rows, 0);
+        assert_eq!(again.unchanged, 1);
+        let slots = std::fs::read_dir(target.home.join("imports").join(path_segment(&target.seat)))
+            .unwrap()
+            .count();
+        assert_eq!(slots, 1, "a second clock opened another slot");
+        let before = selected(&target, "zircon", &SourceFilter::default(), false);
+        assert!(before[0]
+            .0
+            .labels
+            .iter()
+            .any(|label| label == "unintegrated"));
+        let report = integrate(&target, None, true, false).unwrap();
+        assert!(report.contains(text), "{report}");
+        let found = selected(&target, "zircon", &SourceFilter::default(), false);
+        assert_eq!(found.len(), 1);
+        let row = &found[0].0;
+        assert!(row.labels.iter().any(|label| label == "imported"));
+        assert!(row.labels.iter().any(|label| label == "integrated"));
+        assert!(!row.labels.iter().any(|label| label == "unintegrated"));
+        assert!(row
+            .entities
+            .iter()
+            .any(|tag| tag == &format!("seat:{}", target.seat)));
+        assert!(row.entities.iter().any(|tag| tag == "lane:brine"));
+        assert!(row.entities.iter().any(|tag| tag == "horizon:standing"));
     }
 }

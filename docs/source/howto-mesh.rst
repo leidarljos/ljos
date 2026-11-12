@@ -14,8 +14,8 @@ Pull lane exports into a seat
 
 .. code:: console
 
-   $ ljos mesh pull --seat box --from /srv/handoff
-   imported 12, skipped 3 duplicates
+   $ LJOS_SEAT=box ljos mesh pull --seat box --from /srv/handoff
+   imported 12, unchanged 0, skipped 3 duplicates
 
 ``--from`` is the handoff directory. Each ``*.jsonl`` file is one lane, and the
 lane name is the file name with ``.jsonl`` removed. A file whose name ends in
@@ -23,14 +23,25 @@ lane name is the file name with ``.jsonl`` removed. A file whose name ends in
 unread. A line that is a header, or a line that is not a lesson, is left
 unread as well.
 
-The text's SHA-256 is the identity of a lesson. The first copy is imported.
-Every later copy of that text is a duplicate. The command prints one line,
-``imported N, skipped M duplicates``.
+The text's SHA-256 is the identity of a lesson. So is the lane plus the row
+id, when the line carries ``atom_id``, ``row_id`` or ``id``. The first copy
+is imported. A copy already in the pack is unchanged, and is not
+imported again. A repeated text in this same pull is a duplicate. The
+command prints one line, ``imported N, unchanged U, skipped M duplicates``.
+
+A new row is stored in the seat's import slot with the labels
+``imported,unintegrated``. ``pull`` then integrates the seat's imports.
+That is the same work as a full ``ljos memory integrate``, and the pull
+script does not run that verb itself. Integrate keeps one copy of a text already in the pack,
+posts a new one once, and relabels the row
+``imported,integrated``.
 
 The atom stored for a lesson carries a packset tag ``lane:<name>`` for each
-lane that held the text in that pull, and ``seat:<seat>`` for the seat that
-received it. A second pull of the same directory imports nothing and skips
-every row. The seed bytes stay as they were.
+lane that held the text, and ``seat:<seat>`` for the seat that received it.
+A lesson with no horizon becomes standing, so search ranks it with this
+seat's own memories. ``LJOS_SEAT`` is that seat, the same name as ``--seat``.
+A second pull of the same directory imports nothing. The seed bytes stay as
+they were.
 
 The seed is ``<tracker>/.ljos/memory/mesh/<seat>/seed.jsonl``. Rows are sorted
 by the content hash. The file carries no clock, so the same lessons write

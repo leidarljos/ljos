@@ -41747,11 +41747,22 @@ pub fn other_seat(entities: &[String], mine: &str) -> Option<String> {
     if seat_resolve::reads_every(mine) {
         return None;
     }
-    entities
-        .iter()
-        .filter_map(|e| e.strip_prefix(SEAT_ENTITY))
-        .find(|s| !s.is_empty() && *s != mine && *s != "unresolved")
-        .map(str::to_string)
+    entities.iter().find_map(|tag| {
+        let rest = tag.strip_prefix(SEAT_ENTITY)?;
+        // `seat:import…`, `seat:iid:` and `seat:label:` are provenance on a
+        // copy this seat integrated. They are not another seat's lesson.
+        if rest.is_empty()
+            || rest == mine
+            || rest == "unresolved"
+            || rest.starts_with("import")
+            || rest.starts_with("iid:")
+            || rest.starts_with("label:")
+        {
+            None
+        } else {
+            Some(rest.to_string())
+        }
+    })
 }
 
 /// Another seat's working memory. The person's rule stays with this seat

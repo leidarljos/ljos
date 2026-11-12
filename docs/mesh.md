@@ -100,10 +100,23 @@ No user owns a tag, so a node cannot tag itself into another swarm.
 
 ## Lane memory
 
-`ljos mesh pull --seat S --from DIR` reads the lane JSONL files in `DIR`, imports each distinct text into seat `S`, and writes a seed at `<tracker>/.ljos/memory/mesh/<seat>/seed.jsonl`.
+`ljos mesh pull --seat S --from DIR` reads the lane `.jsonl` files in `DIR` into seat `S` and writes a seed at `<tracker>/.ljos/memory/mesh/<seat>/seed.jsonl`.
 The lane is the file name without `.jsonl`.
-The printed line is `imported N, skipped M duplicates`.
-Each stored atom carries a packset tag `lane:<name>`.
+A row already in the pack stays unchanged and is not imported again. The match is the text SHA-256, or that lane plus the row id (`atom_id`, `row_id` or `id`).
+The printed line is `imported N, unchanged U, skipped M duplicates`.
+`N` is new texts. `U` is texts or row ids already held. `M` is a repeated text in this pull.
+New rows land in the seat's import slot labelled `imported,unintegrated`.
+`pull` then integrates them. That is the same step as a full `ljos memory integrate`.
+Integrate deduplicates each row against memories already in the pack, posts a new one once, and relabels the row `imported,integrated`.
+The stored atom carries the packset tags `lane:<name>` and `seat:<S>`.
+A lesson with no horizon is standing, so this seat's search ranks it with the seat's own memories.
+The pull script runs one command. It does not call integrate itself:
+
+```
+LJOS_SEAT=S ljos mesh pull --seat S --from DIR
+```
+
+`LJOS_SEAT` is the seat whose later searches read the slot. It is the same name as the seat passed to pull.
 `ljos mesh push --seat S --to DIR` writes that seat's memories to `DIR/<lane>.jsonl`.
 The lane name is `--lane`, or `LJOS_SYNC_HOST`, or the hostname.
 A pull and a push each take a file lock on the directory and on the seat.

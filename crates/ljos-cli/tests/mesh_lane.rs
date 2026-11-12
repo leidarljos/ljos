@@ -67,14 +67,16 @@ fn write_lane(dir: &Path, lane: &str, texts: &[&str]) {
     std::fs::write(dir.join(format!("{lane}.jsonl")), body).unwrap();
 }
 
-fn counts(stdout: &str) -> (usize, usize) {
+fn counts(stdout: &str) -> (usize, usize, usize) {
     let mut words = stdout.split_whitespace();
     assert_eq!(words.next(), Some("imported"), "{stdout}");
     let imported = words.next().unwrap().trim_end_matches(',').parse().unwrap();
+    assert_eq!(words.next(), Some("unchanged"), "{stdout}");
+    let unchanged = words.next().unwrap().trim_end_matches(',').parse().unwrap();
     assert_eq!(words.next(), Some("skipped"), "{stdout}");
     let skipped = words.next().unwrap().parse().unwrap();
     assert_eq!(words.next(), Some("duplicates"), "{stdout}");
-    (imported, skipped)
+    (imported, unchanged, skipped)
 }
 
 /// A writer that answers one scripted status for each `POST /v1/atoms`.
@@ -112,7 +114,23 @@ fn scripted_pack(mode: &'static str, atoms: Arc<Mutex<Vec<serde_json::Value>>>) 
             let req = String::from_utf8_lossy(&buf).into_owned();
             let line = req.lines().next().unwrap_or("");
             let body = req.split_once("\r\n\r\n").map_or("", |(_, rest)| rest);
-            let (status, payload, extra) = if line.starts_with("POST /v1/atoms") {
+            let (status, payload, extra) = if line.starts_with("GET /v1/search") {
+                let hits: Vec<serde_json::Value> = atoms
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|atom| {
+                        serde_json::json!({
+                            "id": atom["id"],
+                            "text": atom["text"],
+                            "score": 1.0,
+                            "kind": atom.get("kind").cloned().unwrap_or(serde_json::json!("lesson")),
+                            "entities": atom.get("entities").cloned().unwrap_or(serde_json::json!([])),
+                        })
+                    })
+                    .collect();
+                (200, serde_json::json!({"hits": hits}).to_string(), "")
+            } else if line.starts_with("POST /v1/atoms") {
                 let n = posts.fetch_add(1, Ordering::SeqCst);
                 if mode == "deadline" || (mode == "retry" && n == 0) {
                     let code = if mode == "deadline" { 408 } else { 503 };
@@ -169,7 +187,7 @@ fn pull_dedups_and_a_second_run_skips_every_row() {
     );
     assert!(pull.status.success(), "{}", text(&pull));
     let stdout = String::from_utf8(pull.stdout).unwrap();
-    assert_eq!(counts(&stdout), (3, 1), "{stdout}");
+    assert_eq!(counts(&stdout), (3, 0, 1), "{stdout}");
     let seed = std::fs::read(root.join(".ljos/memory/mesh/box/seed.jsonl")).unwrap();
     let again = run(
         &root,
@@ -185,7 +203,7 @@ fn pull_dedups_and_a_second_run_skips_every_row() {
         ],
     );
     assert!(again.status.success(), "{}", text(&again));
-    assert_eq!(counts(&String::from_utf8(again.stdout).unwrap()), (0, 4));
+    assert_eq!(counts(&String::from_utf8(again.stdout).unwrap()), (0, 4, 0));
     assert_eq!(
         std::fs::read(root.join(".ljos/memory/mesh/box/seed.jsonl")).unwrap(),
         seed
@@ -246,7 +264,10 @@ fn push_then_pull_round_trips_a_kept_lesson() {
         ],
     );
     assert!(pulled.status.success(), "{}", text(&pulled));
-    assert_eq!(counts(&String::from_utf8(pulled.stdout).unwrap()), (1, 0));
+    assert_eq!(
+        counts(&String::from_utf8(pulled.stdout).unwrap()),
+        (1, 0, 0)
+    );
 }
 
 #[test]
@@ -294,10 +315,14 @@ fn two_pulls_at_once_keep_one_copy_of_each_text() {
     let right = right.wait_with_output().unwrap();
     assert!(left.status.success(), "{}", text(&left));
     assert!(right.status.success(), "{}", text(&right));
-    let (li, ls) = counts(&String::from_utf8(left.stdout).unwrap());
-    let (ri, rs) = counts(&String::from_utf8(right.stdout).unwrap());
+    let (li, lu, ls) = counts(&String::from_utf8(left.stdout).unwrap());
+    let (ri, ru, rs) = counts(&String::from_utf8(right.stdout).unwrap());
     assert_eq!(li + ri, 3, "imported {li} and {ri}");
-    assert_eq!(ls + rs, 5, "skipped {ls} and {rs}");
+    assert_eq!(
+        lu + ru + ls + rs,
+        5,
+        "unchanged {lu}+{ru} skipped {ls}+{rs}"
+    );
     let body = std::fs::read_to_string(root.join(".ljos/memory/mesh/box/seed.jsonl")).unwrap();
     for lesson in ["alpha kiln", "shared kiln", "beta kiln"] {
         assert_eq!(body.matches(lesson).count(), 1, "{lesson} in {body}");
@@ -326,7 +351,10 @@ fn a_busy_writer_is_retried_and_a_deadline_stops_the_pull() {
         ],
     );
     assert!(pulled.status.success(), "{}", text(&pulled));
-    assert_eq!(counts(&String::from_utf8(pulled.stdout).unwrap()), (1, 0));
+    assert_eq!(
+        counts(&String::from_utf8(pulled.stdout).unwrap()),
+        (1, 0, 0)
+    );
     let stored = atoms.lock().unwrap();
     assert_eq!(stored.len(), 1, "{stored:?}");
     let tags = stored[0]["entities"].to_string();
@@ -361,6 +389,47 @@ fn a_busy_writer_is_retried_and_a_deadline_stops_the_pull() {
         std::fs::read_to_string(root.join(".ljos/memory/mesh/late/seed.jsonl")).unwrap_or_default();
     assert!(!seed.contains("gamma kiln"), "{seed}");
     assert!(missed.lock().unwrap().is_empty());
+}
+
+#[test]
+fn pull_integrates_a_lane_and_a_second_pull_imports_nothing() {
+    let (home, root) = world();
+    let from = root.join("handoff");
+    std::fs::create_dir(&from).unwrap();
+    write_lane(&from, "brine", &["the brine lane keeps a zircon shelf"]);
+    let atoms = Arc::new(Mutex::new(Vec::new()));
+    let url = scripted_pack("ok", Arc::clone(&atoms));
+    let args = [
+        "mesh",
+        "pull",
+        "--seat",
+        "box",
+        "--from",
+        from.to_str().unwrap(),
+    ];
+    let pulled = run(&root, home.path(), &url, &args);
+    assert!(pulled.status.success(), "{}", text(&pulled));
+    assert_eq!(
+        counts(&String::from_utf8(pulled.stdout).unwrap()),
+        (1, 0, 0)
+    );
+    let index =
+        std::fs::read_to_string(root.join(".ljos/memory/imports/box/mesh/index.jsonl")).unwrap();
+    let row: serde_json::Value = serde_json::from_str(index.lines().next().unwrap()).unwrap();
+    let labels = row["labels"].to_string();
+    assert!(labels.contains("imported"), "{row}");
+    assert!(labels.contains("integrated"), "{row}");
+    assert!(!labels.contains("unintegrated"), "{row}");
+    assert!(row["entities"].to_string().contains("lane:brine"), "{row}");
+    assert!(row["entities"].to_string().contains("seat:box"), "{row}");
+    let found = run(&root, home.path(), &url, &["search", "zircon", "shelf"]);
+    assert!(found.status.success(), "{}", text(&found));
+    let said = text(&found);
+    assert!(said.contains("zircon shelf"), "{said}");
+    let again = run(&root, home.path(), &url, &args);
+    assert!(again.status.success(), "{}", text(&again));
+    assert_eq!(counts(&String::from_utf8(again.stdout).unwrap()), (0, 1, 0));
+    assert_eq!(atoms.lock().unwrap().len(), 1, "a second pull posted again");
 }
 
 #[test]

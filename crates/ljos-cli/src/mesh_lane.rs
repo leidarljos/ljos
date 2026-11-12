@@ -2,8 +2,11 @@
 //!
 //! A handoff directory holds one JSONL file per lane. `pull` reads those
 //! files into a seat, keeps one copy of each text, and writes a seed whose
-//! bytes follow from the texts and the lanes. `push` writes the seat's
-//! memories back to that directory as one lane file.
+//! bytes follow from the texts and the lanes. A text or a lane row id the
+//! seat already holds is unchanged. New rows land in the seat's mesh slot
+//! as `imported,unintegrated`, and `pull` then integrates them, which is
+//! the same step as `ljos memory integrate --all`. `push` writes the
+//! seat's memories back to that directory as one lane file.
 //!
 //! The directory and the seat each take an exclusive lock for the whole
 //! run, so two runs wait and the seed keeps a single copy of each text.
@@ -65,6 +68,7 @@ impl SeatStore {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Summary {
     pub imported: usize,
+    pub unchanged: usize,
     pub skipped: usize,
 }
 
@@ -73,8 +77,8 @@ impl Summary {
     #[must_use]
     pub fn line(&self) -> String {
         format!(
-            "imported {}, skipped {} duplicates\n",
-            self.imported, self.skipped
+            "imported {}, unchanged {}, skipped {} duplicates\n",
+            self.imported, self.unchanged, self.skipped
         )
     }
 }
@@ -86,6 +90,8 @@ struct Kept {
     kind: String,
     lanes: BTreeSet<String>,
     entities: BTreeSet<String>,
+    /// `lane` + tab + the export's row id. Empty when the line names none.
+    row_ids: BTreeSet<String>,
 }
 
 struct Incoming {
@@ -93,6 +99,7 @@ struct Incoming {
     kind: String,
     lanes: BTreeSet<String>,
     entities: BTreeSet<String>,
+    row_ids: BTreeSet<String>,
     copies: usize,
 }
 
@@ -174,6 +181,24 @@ fn require_dir(path: &Path) -> Result<()> {
 
 fn content_hash(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+/// The id a lane line already has: the pack atom, then `row_id`, then `id`.
+fn raw_row_id(value: &Value) -> Option<String> {
+    for key in ["atom_id", "row_id", "id"] {
+        let Some(id) = value.get(key).and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        if id.is_empty() || id.contains('\t') || id.contains('\n') || id.contains('\0') {
+            continue;
+        }
+        return Some(id.to_string());
+    }
+    None
+}
+
+fn row_key(lane: &str, id: &str) -> String {
+    format!("{lane}\t{id}")
 }
 
 fn clean_lane(name: &str) -> Option<String> {
@@ -271,12 +296,24 @@ fn kept_from_line(value: &Value, file_lane: &str) -> Option<Kept> {
     if lanes.is_empty() {
         return None;
     }
+    let mut row_ids = BTreeSet::new();
+    for id in string_list(&value["row_ids"]) {
+        if id.contains('\t') && !id.contains('\n') {
+            row_ids.insert(id);
+        }
+    }
+    if let Some(id) = raw_row_id(value) {
+        for lane in &lanes {
+            row_ids.insert(row_key(lane, &id));
+        }
+    }
     Some(Kept {
         content_sha256: content_hash(text),
         text: text.to_string(),
         kind,
         lanes,
         entities,
+        row_ids,
     })
 }
 
@@ -325,20 +362,32 @@ fn lane_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn read_seed(path: &Path) -> Result<BTreeMap<String, Kept>> {
+fn read_seed(path: &Path) -> Result<(BTreeMap<String, Kept>, BTreeSet<String>)> {
     if !path.is_file() {
-        return Ok(BTreeMap::new());
+        return Ok((BTreeMap::new(), BTreeSet::new()));
     }
     let bytes =
         std::fs::read(path).with_context(|| format!("mesh: cannot read {}", path.display()))?;
     let mut rows = BTreeMap::new();
+    let mut row_ids = BTreeSet::new();
     for value in values_of(&bytes) {
         let Some(row) = kept_from_line(&value, "") else {
             continue;
         };
+        row_ids.extend(row.row_ids.iter().cloned());
         rows.insert(row.content_sha256.clone(), row);
     }
-    Ok(rows)
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let record = value["record"].as_str().unwrap_or("");
+        if record == "seed" || record == "export" {
+            row_ids.extend(string_list(&value["row_ids"]));
+        }
+    }
+    Ok((rows, row_ids))
 }
 
 fn row_value(seat: &str, row: &Kept) -> Value {
@@ -350,6 +399,7 @@ fn row_value(seat: &str, row: &Kept) -> Value {
         "content_sha256": row.content_sha256,
         "lanes": row.lanes.iter().cloned().collect::<Vec<_>>(),
         "entities": entities_of(seat, &row.lanes, &row.entities),
+        "row_ids": row.row_ids.iter().cloned().collect::<Vec<_>>(),
     })
 }
 
@@ -358,10 +408,13 @@ fn document(
     seat: &str,
     machine: &str,
     rows: &BTreeMap<String, Kept>,
+    extra_ids: &BTreeSet<String>,
 ) -> Result<Vec<u8>> {
     let mut lanes = BTreeSet::new();
+    let mut row_ids = extra_ids.clone();
     for row in rows.values() {
         lanes.extend(row.lanes.iter().cloned());
+        row_ids.extend(row.row_ids.iter().cloned());
     }
     let header = json!({
         "format": FORMAT,
@@ -369,6 +422,7 @@ fn document(
         "machine": machine,
         "seat": seat,
         "lanes": lanes.into_iter().collect::<Vec<_>>(),
+        "row_ids": row_ids.into_iter().collect::<Vec<_>>(),
     });
     let mut lines = vec![serde_json::to_string(&header)?];
     for row in rows.values() {
@@ -420,8 +474,12 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn write_seed(store: &SeatStore, rows: &BTreeMap<String, Kept>) -> Result<()> {
-    let bytes = document("seed", &store.seat, &store.seat, rows)?;
+fn write_seed(
+    store: &SeatStore,
+    rows: &BTreeMap<String, Kept>,
+    row_ids: &BTreeSet<String>,
+) -> Result<()> {
+    let bytes = document("seed", &store.seat, &store.seat, rows, row_ids)?;
     write_bytes(&store.seed_path(), &bytes)
 }
 
@@ -430,6 +488,7 @@ fn merge_row(rows: &mut BTreeMap<String, Kept>, row: Kept) {
         Some(have) => {
             have.lanes.extend(row.lanes);
             have.entities.extend(row.entities);
+            have.row_ids.extend(row.row_ids);
         }
         None => {
             rows.insert(row.content_sha256.clone(), row);
@@ -457,13 +516,13 @@ fn stop_for_admission(err: &anyhow::Error) -> bool {
         || pack_transport(err)
 }
 
-fn post_row(seat: &str, row: &Kept) -> Result<()> {
+fn post_row(seat: &str, row: &Kept) -> Result<Option<String>> {
     let Ok(client) = crate::pack() else {
-        return Ok(());
+        return Ok(None);
     };
     let lanes: Vec<&str> = row.lanes.iter().map(String::as_str).collect();
     let lane = lanes.first().copied().unwrap_or("");
-    let atom = json!({
+    let mut atom = json!({
         "schema": "inside.atom/v1",
         "kind": row.kind,
         "text": row.text,
@@ -478,23 +537,41 @@ fn post_row(seat: &str, row: &Kept) -> Result<()> {
         },
         "workspace": client.workspace(),
     });
+    if atom["entities"].as_array().is_none_or(|tags| {
+        !tags.iter().any(|tag| {
+            tag.as_str() == Some("horizon:standing") || tag.as_str() == Some("horizon:transient")
+        })
+    }) {
+        atom["entities"]
+            .as_array_mut()
+            .expect("entities")
+            .push(json!("horizon:standing"));
+    }
     match crate::admit::store_labelled(&client, atom) {
-        Ok(_) => Ok(()),
+        Ok(posted) => Ok(posted["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)),
         Err(err) if stop_for_admission(&err) => Err(err),
-        Err(_) => Ok(()),
+        Err(_) => Ok(None),
     }
 }
 
 fn pull_with(
     store: &SeatStore,
     from: &Path,
+    already_hashes: &BTreeSet<String>,
+    already_ids: &BTreeSet<String>,
     mut post: impl FnMut(&Kept) -> Result<()>,
 ) -> Result<Summary> {
     require_name(&store.seat, "seat")?;
     require_dir(from)?;
     let _dir = Held::exclusive(from)?;
     let _seat = Held::seat(&store.dir)?;
-    let mut have = read_seed(&store.seed_path())?;
+    let (mut have, mut row_ids) = read_seed(&store.seed_path())?;
+    row_ids.extend(already_ids.iter().cloned());
+    let mut known_hashes = already_hashes.clone();
+    known_hashes.extend(have.keys().cloned());
     let mut incoming: BTreeMap<String, Incoming> = BTreeMap::new();
     for path in lane_files(from)? {
         let Some(lane) = lane_of(&path) else {
@@ -513,18 +590,28 @@ fn pull_with(
                     kind: row.kind.clone(),
                     lanes: BTreeSet::new(),
                     entities: BTreeSet::new(),
+                    row_ids: BTreeSet::new(),
                     copies: 0,
                 });
             slot.copies += 1;
             slot.lanes.extend(row.lanes);
             slot.entities.extend(row.entities);
+            slot.row_ids.extend(row.row_ids);
         }
     }
     let mut imported = 0usize;
+    let mut unchanged = 0usize;
     let mut skipped = 0usize;
     for (hash, inc) in incoming {
-        if have.contains_key(&hash) {
-            skipped += inc.copies;
+        let id_known = inc.row_ids.iter().any(|id| row_ids.contains(id));
+        if known_hashes.contains(&hash) || id_known {
+            unchanged += inc.copies;
+            row_ids.extend(inc.row_ids.iter().cloned());
+            if let Some(existing) = have.get_mut(&hash) {
+                existing.lanes.extend(inc.lanes);
+                existing.entities.extend(inc.entities);
+                existing.row_ids.extend(inc.row_ids);
+            }
             continue;
         }
         let row = Kept {
@@ -533,31 +620,81 @@ fn pull_with(
             kind: inc.kind,
             lanes: inc.lanes,
             entities: inc.entities,
+            row_ids: inc.row_ids,
         };
         if let Err(err) = post(&row) {
-            let _ = write_seed(store, &have);
+            let _ = write_seed(store, &have, &row_ids);
             return Err(err);
         }
         imported += 1;
         skipped += inc.copies.saturating_sub(1);
+        row_ids.extend(row.row_ids.iter().cloned());
+        known_hashes.insert(hash.clone());
         have.insert(hash, row);
     }
-    write_seed(store, &have)?;
-    Ok(Summary { imported, skipped })
+    write_seed(store, &have, &row_ids)?;
+    Ok(Summary {
+        imported,
+        unchanged,
+        skipped,
+    })
 }
 
 /// Import every lane file in `from` into `store`.
 ///
-/// The summary counts new texts as imported and repeated texts as skipped.
-/// A second pull of the same directory imports nothing.
+/// The summary counts new texts as imported, a text or a lane row id the
+/// seat already holds as unchanged, and a repeated text in this pull as
+/// skipped. A second pull of the same directory imports nothing.
+///
+/// After the seed is written, `pull` integrates every import in the seat.
+/// That is [`crate::memory_port::integrate`] with `--all`: each
+/// `imported,unintegrated` row is deduplicated against the seat's memories,
+/// posted once with `lane:` and `seat:` tags, and relabelled
+/// `imported,integrated`.
 ///
 /// # Errors
 ///
 /// The directory is missing, or the pack sheds the write or passes its deadline.
 pub fn pull(store: &SeatStore, from: &Path) -> Result<Summary> {
     let _deadline = crate::pack_link::CommandDeadline::enter(crate::IMPORT_ADMISSION);
+    let place = crate::memory_port::Place::for_seat(&store.seat);
+    let (mut hashes, ids) = crate::memory_port::known_mesh(&place);
+    if let Ok(atoms) = crate::memories::live_atoms() {
+        for atom in atoms {
+            if let Some(text) = atom["text"]
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                hashes.insert(content_hash(text));
+            }
+        }
+    }
     let seat = store.seat.clone();
-    pull_with(store, from, |row| post_row(&seat, row))
+    let summary = pull_with(store, from, &hashes, &ids, |row| {
+        crate::memory_port::stage_mesh_rows(
+            &place,
+            &[crate::memory_port::MeshRow {
+                text: row.text.clone(),
+                kind: row.kind.clone(),
+                origin: crate::admit::ORIGIN_PEER.into(),
+                content_sha256: row.content_sha256.clone(),
+                source_id: row
+                    .row_ids
+                    .iter()
+                    .find_map(|key| key.split_once('\t').map(|(_, id)| id.to_string()))
+                    .unwrap_or_default(),
+                lanes: row.lanes.clone(),
+                entities: row.entities.clone(),
+            }],
+        )?;
+        if let Some(id) = post_row(&seat, row)? {
+            crate::memory_port::mark_mesh_posted(&place, &row.content_sha256, &id)?;
+        }
+        Ok(())
+    })?;
+    crate::memory_port::integrate(&place, None, true, false)?;
+    Ok(summary)
 }
 
 fn push_with(store: &SeatStore, to: &Path, lane: &str, extra: &[Value]) -> Result<String> {
@@ -570,14 +707,14 @@ fn push_with(store: &SeatStore, to: &Path, lane: &str, extra: &[Value]) -> Resul
     require_dir(to)?;
     let _dir = Held::exclusive(to)?;
     let _seat = Held::seat(&store.dir)?;
-    let mut rows = read_seed(&store.seed_path())?;
+    let (mut rows, row_ids) = read_seed(&store.seed_path())?;
     for value in extra {
         if let Some(row) = kept_from_line(value, &lane) {
             merge_row(&mut rows, row);
         }
     }
     let dest = to.join(format!("{lane}.jsonl"));
-    let bytes = document("export", &store.seat, &lane, &rows)?;
+    let bytes = document("export", &store.seat, &lane, &rows, &row_ids)?;
     write_bytes(&dest, &bytes)?;
     Ok(format!(
         "pushed {} memories to {}\n",
@@ -647,15 +784,26 @@ mod tests {
         let (from, store) = handoff(dir.path());
         write_lane(&from, "lane-a", &["alpha kiln", "shared kiln"]);
         write_lane(&from, "lane-b", &["shared kiln", "beta kiln"]);
-        let summary = pull_with(&store, &from, |_| Ok(())).unwrap();
+        let summary = pull_with(
+            &store,
+            &from,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            |_| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             summary,
             Summary {
                 imported: 3,
+                unchanged: 0,
                 skipped: 1
             }
         );
-        assert_eq!(summary.line(), "imported 3, skipped 1 duplicates\n");
+        assert_eq!(
+            summary.line(),
+            "imported 3, unchanged 0, skipped 1 duplicates\n"
+        );
         let mut texts = texts_of(dir.path());
         texts.sort();
         assert_eq!(texts, ["alpha kiln", "beta kiln", "shared kiln"]);
@@ -677,18 +825,86 @@ mod tests {
         let (from, store) = handoff(dir.path());
         write_lane(&from, "lane-a", &["alpha kiln", "shared kiln"]);
         write_lane(&from, "lane-b", &["shared kiln", "beta kiln"]);
-        pull_with(&store, &from, |_| Ok(())).unwrap();
+        pull_with(
+            &store,
+            &from,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let first = std::fs::read(store.seed_path()).unwrap();
-        let again = pull_with(&store, &from, |_| Ok(())).unwrap();
+        let again = pull_with(
+            &store,
+            &from,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            |_| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             again,
             Summary {
                 imported: 0,
-                skipped: 4
+                unchanged: 4,
+                skipped: 0
             }
         );
         assert_eq!(std::fs::read(store.seed_path()).unwrap(), first);
         assert!(!first.windows(11).any(|w| w == b"exported_at"));
+    }
+
+    #[test]
+    fn a_known_lane_row_id_is_unchanged_when_the_text_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, store) = handoff(dir.path());
+        let write = |text: &str| {
+            let body = format!(
+                "{}\n{}\n",
+                json!({
+                    "format": FORMAT,
+                    "record": "export",
+                    "machine": "brine",
+                    "seat": "brine",
+                }),
+                json!({
+                    "format": FORMAT,
+                    "kind": "lesson",
+                    "text": text,
+                    "atom_id": "row-7",
+                })
+            );
+            std::fs::write(from.join("brine.jsonl"), body).unwrap();
+        };
+        write("alpha kiln");
+        let first = pull_with(
+            &store,
+            &from,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(first.imported, 1);
+        write("alpha kiln moved");
+        let posts = AtomicU64::new(0);
+        let again = pull_with(&store, &from, &BTreeSet::new(), &BTreeSet::new(), |_| {
+            posts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            again,
+            Summary {
+                imported: 0,
+                unchanged: 1,
+                skipped: 0
+            }
+        );
+        assert_eq!(posts.load(Ordering::SeqCst), 0);
+        let body = std::fs::read_to_string(store.seed_path()).unwrap();
+        assert!(body.contains("alpha kiln"), "{body}");
+        assert!(!body.contains("moved"), "{body}");
     }
 
     #[test]
@@ -701,7 +917,14 @@ mod tests {
         let run = |gate: Arc<Barrier>, store: SeatStore, from: PathBuf| {
             thread::spawn(move || {
                 gate.wait();
-                pull_with(&store, &from, |_| Ok(())).unwrap()
+                pull_with(
+                    &store,
+                    &from,
+                    &BTreeSet::new(),
+                    &BTreeSet::new(),
+                    |_| Ok(()),
+                )
+                .unwrap()
             })
         };
         let left = run(Arc::clone(&gate), store.clone(), from.clone());
@@ -709,7 +932,11 @@ mod tests {
         let left = left.join().unwrap();
         let right = right.join().unwrap();
         assert_eq!(left.imported + right.imported, 3, "{left:?} {right:?}");
-        assert_eq!(left.skipped + right.skipped, 5, "{left:?} {right:?}");
+        assert_eq!(
+            left.skipped + right.skipped + left.unchanged + right.unchanged,
+            5,
+            "{left:?} {right:?}"
+        );
         assert_eq!(texts_of(dir.path()).len(), 3);
     }
 
@@ -719,7 +946,7 @@ mod tests {
         let (from, store) = handoff(dir.path());
         write_lane(&from, "lane-a", &["alpha kiln", "beta kiln", "gamma kiln"]);
         let calls = AtomicU64::new(0);
-        let err = pull_with(&store, &from, |_| {
+        let err = pull_with(&store, &from, &BTreeSet::new(), &BTreeSet::new(), |_| {
             let n = calls.fetch_add(1, Ordering::SeqCst);
             if n == 1 {
                 Err(anyhow::Error::new(packset_client::Error::Unavailable(
@@ -741,7 +968,14 @@ mod tests {
         let (from, store) = handoff(dir.path());
         write_lane(&from, "lane-a", &["alpha kiln", "shared kiln"]);
         write_lane(&from, "lane-b", &["shared kiln"]);
-        pull_with(&store, &from, |_| Ok(())).unwrap();
+        pull_with(
+            &store,
+            &from,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            |_| Ok(()),
+        )
+        .unwrap();
         let dest = dir.path().join("out");
         let line = push_with(&store, &dest, "box", &[]).unwrap();
         assert!(line.starts_with("pushed 2 memories to "), "{line}");
