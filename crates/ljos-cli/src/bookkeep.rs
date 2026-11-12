@@ -12,6 +12,8 @@ use serde_json::Value;
 
 static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 static DURABLE_WRITES: AtomicUsize = AtomicUsize::new(0);
+/// The issue `ljos_start` filed and claimed in this process.
+static OPEN_ISSUE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Held for the body of a write that replaces a file.
 pub struct DurableWrite(());
@@ -141,42 +143,135 @@ pub fn blank_issue(id: &str) -> bool {
     )
 }
 
-/// The issue `raw` names. A placeholder is not an issue. There is no book
-/// to inherit one from.
+/// The issue `raw` names. A placeholder is not an issue. A blank argument
+/// is the issue [`open_issue`] holds for this conversation.
 #[must_use]
 pub fn canonical_issue(raw: Option<&str>, _session: Option<&str>) -> Option<String> {
-    raw.map(str::trim)
+    if let Some(id) = raw
+        .map(str::trim)
         .filter(|id| !blank_issue(id))
         .map(str::to_string)
+    {
+        return Some(id);
+    }
+    open_issue()
 }
 
-/// No claim book, so a session holds no issue.
+/// The issue this conversation's `ljos_start` opened.
 #[must_use]
 pub fn session_issue(_session: Option<&str>) -> Option<String> {
-    None
+    open_issue()
 }
 
-/// No claim book, so nothing is open.
+/// The issue [`start_work`] filed and claimed, until [`note_finished`].
 #[must_use]
 pub fn open_issue() -> Option<String> {
-    None
+    OPEN_ISSUE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
-/// Nothing to finish.
-pub fn note_finished(_issue: &str) {}
+/// Remember `id` as the issue this conversation writes on.
+pub fn remember_issue(id: &str) {
+    let id = id.trim();
+    if id.is_empty() {
+        return;
+    }
+    *OPEN_ISSUE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id.to_string());
+}
 
-/// The book does not file a claim. The task is the note.
+/// Drop the issue [`start_work`] opened, once that issue is finished.
+pub fn note_finished(issue: &str) {
+    let mut slot = OPEN_ISSUE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.as_deref() == Some(issue) {
+        *slot = None;
+    }
+}
+
+/// File one issue for `task` when this conversation has none, claim it, and
+/// remember it. A later write in the same conversation uses that issue.
 ///
 /// # Errors
 ///
-/// `task` is empty.
-pub fn start_work(_issue: Option<&str>, _repo: Option<&str>, task: &str) -> Result<String, String> {
+/// `task` is empty, the named issue is not in the tracker, or the tracker
+/// cannot take a new issue.
+pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result<String, String> {
     let task = task.split_whitespace().collect::<Vec<_>>().join(" ");
     if task.is_empty() {
         return Err("ljos_start: pass the task in one sentence".into());
     }
-    log_line(&format!("note: {task}"));
-    Ok(format!("noted: {task}"))
+    let (id, fresh) = if let Some(id) = open_issue() {
+        (id, false)
+    } else if let Some(id) = issue
+        .map(str::trim)
+        .filter(|id| !blank_issue(id))
+        .map(str::to_string)
+    {
+        if super::tracker_show_json(&id).is_err() {
+            return Err(format!("issue {id} not found"));
+        }
+        (id, true)
+    } else {
+        (file_task(&task, repo)?, true)
+    };
+    remember_issue(&id);
+    let noted = if fresh {
+        String::new()
+    } else {
+        super::attach_to_issue(&id, &task).unwrap_or_else(|err| format!("note: {err:#}\n"))
+    };
+    let claimed = match super::claim(&id, &super::holder_name()) {
+        Ok(text) => text,
+        Err(err) => format!("claim: {err:#}\n"),
+    };
+    log_line(&format!("start: {id} {task}"));
+    Ok(format!("claimed {id}\n{noted}{claimed}"))
+}
+
+/// File `task` as one issue in the seat's tracker. The project is the last
+/// path component of `repo`, else `work`.
+fn file_task(task: &str, repo: Option<&str>) -> Result<String, String> {
+    super::tracker_place::pin_root();
+    let layout =
+        vissue_core::Layout::resolve(None, None).map_err(|err| format!("ljos_start: {err}"))?;
+    if super::tracker_place::product_repo(layout.root()).is_some() {
+        return Err(format!(
+            "ljos_start: {} is a product checkout, not the tracker",
+            layout.root().display()
+        ));
+    }
+    let project = repo
+        .map(std::path::Path::new)
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .unwrap_or("work")
+        .to_string();
+    let dir = layout.projects_dir().join(&project);
+    std::fs::create_dir_all(&dir).map_err(|err| format!("ljos_start: {err}"))?;
+    let made = vissue_core::ops::create(
+        &layout,
+        &project,
+        task,
+        vissue_core::ops::CreateOpts {
+            quiet: true,
+            issue_type: Some("task"),
+            ..vissue_core::ops::CreateOpts::default()
+        },
+    )
+    .map_err(|err| format!("ljos_start: {err}"))?;
+    let id = made.trim().to_string();
+    if id.is_empty() || !id.contains('-') {
+        return Err("ljos_start: filing printed no id".into());
+    }
+    let _ = super::persist_tracker(&id, "filed");
+    Ok(id)
 }
 
 /// Finishes nothing. Bind it so a drop is still a drop.

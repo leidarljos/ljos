@@ -34471,6 +34471,25 @@ fn live_gen(id: &str, gen: Option<u64>) -> Result<u64> {
     })
 }
 
+/// Put `text` on `issue` as a logbook note. A write that follows
+/// `ljos_start` uses this so the conversation keeps the one issue start
+/// opened.
+///
+/// # Errors
+///
+/// `text` is empty, or the tracker cannot take the note.
+pub fn attach_to_issue(issue: &str, text: &str) -> Result<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("note: the text is empty");
+    }
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    let said =
+        vissue_core::ops::note(&layout, issue, text).with_context(|| format!("note: {issue}"))?;
+    let persisted = persist_tracker(issue, "noted");
+    Ok(format!("noted on {issue}\n{said}{persisted}"))
+}
+
 /// Create a tracker issue, persist its inbox or project file, and
 /// record a panel candidate, returning `(id, stdout, persisted,
 /// candidate)`. Both `ljos file` and subagent child filing share this

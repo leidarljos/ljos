@@ -1739,6 +1739,21 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<FileArgs>,
     ) -> Result<Json<Said>, McpError> {
+        let bare = !args.top
+            && args.parent.is_none()
+            && args.project.is_none()
+            && args.kind.is_none()
+            && args.tags.is_none()
+            && args.priority.is_none()
+            && args.body.is_none()
+            && args.options.is_empty();
+        if bare {
+            if let Some(id) = ljos_cli::bookkeep::open_issue() {
+                let text = ljos_cli::attach_to_issue(&id, &args.title)
+                    .map_err(|e| refused(anyhow::anyhow!(e)))?;
+                return Ok(Json(Said { text, aside: None }));
+            }
+        }
         let mut argv: Vec<String> = vec!["file".into(), args.title];
         if args.top {
             argv.push("--top".into());
@@ -2047,6 +2062,7 @@ impl LjosServer {
                 None => ljos_cli::plan::open_plan(None, &args.task, &args.items),
             }
             .map_err(|e| refused(anyhow::anyhow!(e)))?;
+            ljos_cli::bookkeep::remember_issue(&opened.parent);
             let assignee = call_assignee("start", None)?;
             let claimed =
                 claim(&opened.parent, &assignee).unwrap_or_else(|err| format!("claim: {err:#}\n"));
