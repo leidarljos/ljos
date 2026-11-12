@@ -459,6 +459,26 @@ struct Raw {
 
 /// A sitting or MCP pack read. Longer reads keep their own budgets.
 const SHORT_READ: Duration = Duration::from_secs(1);
+
+/// How long one MCP pack read may take.
+///
+/// The usual read is [`SHORT_READ`], so a silent writer cannot spend the
+/// whole tool budget. A seat that raises `LJOS_MCP_TIMEOUT` above its
+/// thirty-second default and sets `PACKSET_TIMEOUT_MS` is waiting on one
+/// long read. That read uses the shorter of the two.
+fn mcp_read_cap() -> Duration {
+    let tool = crate::tool_bound::budget();
+    if tool > crate::tool_bound::DEFAULT {
+        if let Some(ms) = std::env::var("PACKSET_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+        {
+            return Duration::from_millis(ms).min(tool);
+        }
+    }
+    SHORT_READ
+}
 const HEALTH_BUDGET: Duration = Duration::from_secs(2);
 const STATUS_BUDGET: Duration = Duration::from_secs(2);
 
@@ -543,7 +563,8 @@ fn command_remaining() -> Option<Duration> {
 /// How long this call may run, and the offset on `X-Packset-Deadline`.
 /// The caller's budget wins. A thread timeout, `PACKSET_TIMEOUT_MS`, the
 /// wall clock, and a command or pack clock shorten it. An MCP read is
-/// about a second. A sitting read is about a second because its clock is.
+/// about a second unless the seat raised the tool bound and the pack
+/// timeout. A sitting read is about a second because its clock is.
 fn tightened(method: &str, requested: Duration) -> Duration {
     let mut budget = requested;
     if let Some(ms) = crate::pack_budget_ms() {
@@ -559,7 +580,7 @@ fn tightened(method: &str, requested: Duration) -> Duration {
         budget = budget.min(left);
     }
     if !is_write(method) && crate::tool_bound::armed() {
-        budget = budget.min(SHORT_READ);
+        budget = budget.min(mcp_read_cap());
     }
     if let Some(left) = clock_left() {
         budget = budget.min(left);
@@ -1698,7 +1719,8 @@ impl PacksetClient {
         }
         // A rerank outside a clock, a hook, or an MCP call may load the
         // model, so it gets a minute. A sitting clock and an MCP read stay
-        // near one second. Any other search is the short search budget.
+        // near one second, unless the seat raised the tool bound and the
+        // pack timeout. Any other search is the short search budget.
         let timeout = if rerank
             && !clock_armed()
             && std::env::var_os("LJOS_IN_HOOK").is_none()
@@ -1706,7 +1728,7 @@ impl PacksetClient {
         {
             Duration::from_secs(60)
         } else if crate::tool_bound::armed() {
-            SHORT_READ
+            mcp_read_cap()
         } else {
             super::SEARCH_PACK_BUDGET
         };
@@ -1949,6 +1971,28 @@ mod tests {
         assert!(
             (200..1_500).contains(&ahead),
             "mcp read deadline is {ahead} ms ahead"
+        );
+    }
+
+    /// A seat that raises the tool bound and the pack timeout is waiting
+    /// on one long read. The deadline is that pack timeout, not a second.
+    #[test]
+    fn a_raised_mcp_bound_keeps_the_pack_timeout_on_a_read() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        unsafe {
+            std::env::set_var("PACKSET_TIMEOUT_MS", "45000");
+            std::env::set_var("LJOS_MCP_TIMEOUT", "60");
+        }
+        let _bound = crate::tool_bound::arm(std::time::Duration::from_secs(60));
+        let (client, seen) = serve(|_, _| (200, r#"{"hits":[]}"#.into(), None));
+        client
+            .search_fetched("seat", "review set", 1, None, false)
+            .unwrap();
+        let ahead = ahead_ms(&seen.lock().unwrap()[0]);
+        assert!(
+            (40_000..50_000).contains(&ahead),
+            "raised read deadline is {ahead} ms ahead"
         );
     }
 

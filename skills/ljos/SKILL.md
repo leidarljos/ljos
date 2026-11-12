@@ -735,6 +735,8 @@ plus that call's budget. Search and recall use a few seconds. Remember
 uses about twenty seconds, and an import about a minute. A hook stays
 under two seconds, and an interactive mail, inbox or recall call under
 five. A sitting's pack read and an MCP pack read use about one second.
+A seat that raises `LJOS_MCP_TIMEOUT` above its thirty-second default and
+sets `PACKSET_TIMEOUT_MS` may use the shorter of those two for that read.
 `LJOS_PACK_CONNECT_MS` is the connect timeout (default 300, at most 1000).
 `LJOS_PACK_TIMEOUT_MS` caps an interactive call (default 4000, at most 5000).
 `LJOS_HOOK_PACK_TIMEOUT_MS` caps a hook (default 1500, at most 2000).

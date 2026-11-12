@@ -79,6 +79,11 @@ fn stdin_eof_answers_the_call_in_flight_then_exits() {
     let (url, search_arrived) = slow_pack(Duration::from_secs(7));
     let mut child = server(home.path())
         .env("PACKSET_URL", url)
+        // The deadline client keeps an MCP read to about a second unless
+        // the seat raised both of these. Seven seconds is longer than the
+        // five rmcp waits after the input ends.
+        .env("PACKSET_TIMEOUT_MS", "15000")
+        .env("LJOS_MCP_TIMEOUT", "60")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -257,6 +262,9 @@ fn malformed_calls_hold_no_slot_and_the_call_before_eof_answers() {
     let mut child = server(home.path())
         .env("PACKSET_URL", url)
         .env("PACKSET_TIMEOUT_MS", bound.as_millis().to_string())
+        // The default tool bound caps an MCP read at about a second. This
+        // seat raises it so the seven-second stand-in still answers.
+        .env("LJOS_MCP_TIMEOUT", "60")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
