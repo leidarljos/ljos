@@ -1578,13 +1578,14 @@ mod tests {
     }
 
     /// How long a prompt may stay down, and how long the body may run
-    /// after the prompt is up, before the test fails. The same five
+    /// after the prompt is up, before the test fails. The same fifteen
     /// seconds covers both, so a later prompt that never arrives fails
-    /// the test.
-    const HANG: std::time::Duration = std::time::Duration::from_secs(5);
+    /// the test. Five was tight when Argon2 ran under a loaded macOS
+    /// runner.
+    const HANG: std::time::Duration = std::time::Duration::from_secs(15);
 
     /// Run `body` until it finishes. `prompted` is the signal that the
-    /// prompt is up and its line has been typed. Five seconds guards
+    /// prompt is up and its line has been typed. Fifteen seconds guards
     /// that signal, and the same cap guards the wait after it.
     fn bounded<T: Send + 'static>(
         what: &'static str,
