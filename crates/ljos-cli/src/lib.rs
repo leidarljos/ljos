@@ -13448,8 +13448,8 @@ fn wall_deadline() -> Option<std::time::Instant> {
 ///
 /// The documented caller wraps a sitting in `timeout -k 5 30`, so the work
 /// through its durable claim gets the first third of that 30-second window.
-/// The remaining 20 seconds cover the streamed sections: their five-second
-/// recall and island budget, plus 15 seconds for the rest.
+/// The remaining 20 seconds cover the streamed sections: their one-second
+/// recall and island budget, plus the rest.
 fn sitting_claim_wait() -> std::time::Duration {
     let secs = std::env::var("LJOS_SITTING_CLAIM_WAIT")
         .ok()
@@ -17248,27 +17248,10 @@ fn writer_busy(err: &anyhow::Error) -> bool {
     )
 }
 
-/// The first wait before a busy writer is asked again; each later wait is
-/// three times the one before.
-const BUSY_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
-/// How many times a busy writer is asked again.
-const BUSY_TRIES: u32 = 3;
-
-/// Posts of one `ljos remember`, including the first. A fourth post is
-/// what held a remember for most of a minute on a box that was already
-/// out of memory.
-const REMEMBER_TRIES: u32 = 3;
-/// The whole remember retry, pauses included. Twenty seconds is as long
-/// as a script should wait; the old thirty-second socket timeout, asked
-/// again, was the forty-six second exit.
+/// The whole remember post, including one shed wait. Twenty seconds is as
+/// long as a script should wait; the old thirty-second socket timeout,
+/// asked again, was the forty-six second exit.
 const REMEMBER_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
-/// The first pause between remember tries. The next pause is twice as
-/// long, and no pause is longer than [`REMEMBER_BACKOFF_CAP`], so the
-/// pauses cannot eat the budget the posts need.
-const REMEMBER_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
-/// The longest pause between remember tries. Four seconds leaves each of
-/// the three posts a few seconds inside [`REMEMBER_BUDGET`].
-const REMEMBER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// One line when a pack call runs out of time. Exit [`PACK_BUSY_EXIT`].
 pub const PACK_BUSY_LINE: &str = "pack busy, try again";
@@ -17483,25 +17466,40 @@ fn unavailable_line<'a>(cause: &'a (dyn std::error::Error + 'static)) -> Option<
     }
 }
 
-/// A read the writer shed with 503 after the read budget.
+fn shed_is(err: &anyhow::Error, kind: pack_link::ShedKind, legacy: &str) -> bool {
+    err.chain().any(|cause| match unavailable_line(cause) {
+        Some(text) => match pack_link::shed_kind(text) {
+            Some(found) => found == kind,
+            None => text == legacy,
+        },
+        None => false,
+    })
+}
+
+/// The line a shed or a passed deadline prints: the pack's JSON `error`.
+#[must_use]
+pub fn pack_fault_line(err: &anyhow::Error) -> String {
+    err.chain()
+        .find_map(|cause| unavailable_line(cause).map(str::to_string))
+        .unwrap_or_else(|| PACK_BUSY_LINE.to_string())
+}
+
+/// A read the writer shed with 503 after one retry.
 #[must_use]
 pub fn is_read_shed(err: &anyhow::Error) -> bool {
-    err.chain()
-        .any(|cause| unavailable_line(cause) == Some(PACK_READ_BUSY_LINE))
+    shed_is(err, pack_link::ShedKind::Read, PACK_READ_BUSY_LINE)
 }
 
-/// A write the writer shed with 503 after the write budget.
+/// A write the writer shed with 503 after one retry.
 #[must_use]
 pub fn is_write_shed(err: &anyhow::Error) -> bool {
-    err.chain()
-        .any(|cause| unavailable_line(cause) == Some(PACK_SHED_LINE))
+    shed_is(err, pack_link::ShedKind::Write, PACK_SHED_LINE)
 }
 
-/// The writer answered 408. The request did not run.
+/// The writer answered 408, or the call's deadline passed.
 #[must_use]
 pub fn is_deadline_miss(err: &anyhow::Error) -> bool {
-    err.chain()
-        .any(|cause| unavailable_line(cause) == Some(PACK_DEADLINE_LINE))
+    shed_is(err, pack_link::ShedKind::Deadline, PACK_DEADLINE_LINE)
 }
 
 /// The pack answered and will not take another blind try: it shed the
@@ -17616,34 +17614,18 @@ fn ensure_writer() -> Result<()> {
 }
 
 fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
-    // A clocked call returns the first answer. Starting the writer, or
-    // asking again, is what turned one timeout into a minute.
-    if pack_link::clock_armed() {
-        return match op() {
-            // A shed or a passed deadline already used its budget. Folding
-            // it into [`PackBusy`] would hide the line the command prints.
-            Err(err) if is_read_shed(&err) || is_write_shed(&err) || is_deadline_miss(&err) => {
-                Err(err)
-            }
-            Err(err) if is_pack_busy(&err) || writer_busy(&err) => Err(pack_busy_err()),
-            other => other,
-        };
-    }
-    let mut wait = BUSY_WAIT;
-    let mut tries = 0;
-    loop {
-        match op() {
-            Err(err) if tries < BUSY_TRIES && writer_busy(&err) => {
-                tries += 1;
-                std::thread::sleep(wait);
-                wait *= 3;
-            }
-            Err(err) if writer_unreachable(&err) => {
-                ensure_writer()?;
-                return op();
-            }
-            other => return other,
+    // A shed or a passed deadline already had its one retry. Asking again
+    // here is what turned one timeout into a minute.
+    match op() {
+        Err(err) if is_read_shed(&err) || is_write_shed(&err) || is_deadline_miss(&err) => Err(err),
+        Err(err) if pack_link::clock_armed() && (is_pack_busy(&err) || writer_busy(&err)) => {
+            Err(pack_busy_err())
         }
+        Err(err) if writer_unreachable(&err) => {
+            ensure_writer()?;
+            op()
+        }
+        other => other,
     }
 }
 
@@ -18424,9 +18406,10 @@ fn listed_of<T: Listed>(
     // A runner kills PreToolUse at 10s and then ignores the hook, which
     // drops a deny. Inside a hook the listing stops at 2s so the local
     // gate still runs. Outside a hook the caller's PACKSET_TIMEOUT_MS
-    // still bounds it. A writer that answers busy is asked again for
-    // `Retry-After`, with jitter, inside the read budget. A timeout is
-    // [`PackBusy`]. A shed read is one plain line. The clock is the
+    // still bounds it. A writer that answers 503 is asked once more after
+    // `Retry-After`, with the same deadline. A second 503 is the JSON
+    // `error` field. A timeout is
+    // [`PackBusy`]. The clock is the
     // command's shared budget. A thread bound, from `with_pack_timeout`
     // or a wall budget, shortens this one read and does not raise the clock.
     let armed = pack_link::clock_armed();
@@ -19948,74 +19931,33 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
 
 /// How long one remember post may wait. The tries still to come, and a
 /// pause before each of them, have to fit in `left`.
-fn remember_slice(
-    left: std::time::Duration,
-    tries_left: u32,
-    backoff: std::time::Duration,
-) -> std::time::Duration {
-    let pauses = tries_left.saturating_sub(1);
-    let reserved = backoff.saturating_mul(pauses);
-    let room = left.saturating_sub(reserved);
-    let slice = room / tries_left.max(1);
-    // Shorter than the connect budget, a try returns before the handshake
-    // and never sees a pack that is only slow.
-    slice
-        .max(std::time::Duration::from_millis(200))
-        .min(left.max(std::time::Duration::from_millis(1)))
-}
-
-/// Post one lesson, asking a busy pack again. At most [`REMEMBER_TRIES`]
-/// posts, and the waits stay inside [`REMEMBER_BUDGET`]. A pack that is
-/// still busy after that queues the lesson and returns [`PackBusy`], so
-/// the command exits [`PACK_BUSY_EXIT`].
+/// Post one lesson. The client waits out one `Retry-After` on a 503.
+/// A pack that is still shed, or that does not answer, queues the lesson.
+/// A passed deadline is returned as that line and is not queued.
 ///
 /// # Errors
 ///
-/// The pack refused the text, or it was still busy after the tries. A
-/// busy failure has the lesson queued when the queue could take it.
+/// The pack refused the text, or it was still degraded after the one
+/// retry. A shed or a silent pack has the lesson queued when the queue
+/// could take it.
 pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) -> Result<Value> {
     let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
-    let started = std::time::Instant::now();
-    let mut backoff = REMEMBER_BACKOFF;
-    let mut last = None;
-    for index in 0..REMEMBER_TRIES {
-        let left = REMEMBER_BUDGET.saturating_sub(started.elapsed());
-        if index > 0 && left < std::time::Duration::from_millis(200) {
-            break;
-        }
-        let slice = remember_slice(left, REMEMBER_TRIES - index, backoff);
-        let result = {
-            let _clock = pack_link::PackClock::enter(slice);
-            let _quiet = pack_link::QuietPack::enter();
-            post()
-        };
-        match result {
-            Ok(body) => return Ok(body),
-            Err(err) if is_deadline_miss(&err) => return Err(err),
+    let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
+    let _quiet = pack_link::QuietPack::enter();
+    match post() {
+        Ok(body) => Ok(body),
+        Err(err) if is_deadline_miss(&err) => Err(err),
+        Err(err)
+            if is_pack_busy(&err)
+                || is_write_shed(&err)
+                || writer_busy(&err)
+                || writer_slow(&err) =>
+        {
+            queue_busy_lesson(text);
             Err(err)
-                if is_pack_busy(&err)
-                    || is_write_shed(&err)
-                    || writer_busy(&err)
-                    || writer_slow(&err) =>
-            {
-                last = Some(err);
-                let after = REMEMBER_TRIES - index - 1;
-                if after == 0 {
-                    break;
-                }
-                let left = REMEMBER_BUDGET.saturating_sub(started.elapsed());
-                let pause = backoff.min(left / (after + 1));
-                if pause.is_zero() {
-                    break;
-                }
-                std::thread::sleep(pause);
-                backoff = (backoff * 2).min(REMEMBER_BACKOFF_CAP);
-            }
-            Err(err) => return Err(err),
         }
+        Err(err) => Err(err),
     }
-    queue_busy_lesson(text);
-    Err(last.unwrap_or_else(pack_busy_err))
 }
 
 /// Keep `text` for the next ljos that reaches the pack, and say so.
@@ -30712,7 +30654,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
                     },
                     Err(e) if is_read_shed(&e) => Habitat {
                         name: "pack",
-                        state: format!("{PACK_READ_BUSY_LINE}; {where_}"),
+                        state: format!("{}; {where_}", pack_fault_line(&e)),
                         ok: true,
                     },
                     Err(e) if writer_slow(&e) => Habitat {
@@ -37148,8 +37090,8 @@ fn format_sitting_recall(rows: &[Value]) -> String {
 
 /// How long the recall and the island search may take together. Past this
 /// the sitting ranks by words and says so, and it does not wait out a
-/// writer that is reloading its encoder.
-const SITTING_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+/// writer that is reloading its encoder. About a second.
+const SITTING_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// One pack read at the start of the memory half of a sitting. A busy
 /// writer is shed inside this, and the sitting does not ask again.
@@ -68735,8 +68677,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 } else {
                     ("200 OK", body)
                 };
+                let retry = if status.starts_with("503") {
+                    "Retry-After: 0\r\n"
+                } else {
+                    ""
+                };
                 let resp = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    "HTTP/1.1 {status}\r\n{retry}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
                     payload.len()
                 );
                 let _ = s.write_all(resp.as_bytes());
@@ -68761,22 +68708,16 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             std::env::remove_var("SEATALFA_MEMORY_HOME");
             std::env::set_var("PACKSET_HOME", pack_home.path());
         }
-        let (url, seen) = serve_busy_then(2, r#"{"atoms":[{"id":"a","kind":"rule"}]}"#);
+        let (url, seen) = serve_busy_then(1, r#"{"atoms":[{"id":"a","kind":"rule"}]}"#);
         let atoms = atoms_lean(&PacksetClient::new(&url), "ws").unwrap();
         assert_eq!(atoms.len(), 1);
-        assert_eq!(seen.load(Ordering::SeqCst), 3);
-        // Busy past the read budget is one plain line, not a hang and not
-        // a status code.
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+        // A second 503 is the JSON error, not another wait.
         let (url, seen) = serve_busy_then(usize::MAX, "{}");
-        let per_try = pack_timeout().min(atoms_timeout());
-        let budget = pack_link::admission_retry_budget("GET", per_try);
         let err = atoms_lean(&PacksetClient::new(&url), "ws").unwrap_err();
-        assert_eq!(err.to_string(), PACK_READ_BUSY_LINE, "{err}");
+        assert_eq!(err.to_string(), "packsetd is busy", "{err}");
         assert!(is_read_shed(&err), "{err}");
-        assert_eq!(
-            seen.load(Ordering::SeqCst),
-            pack_link::busy_attempts(budget) as usize
-        );
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
     }
 
     /// A recall clock used to take the first 503 as the answer. The listing
@@ -68795,24 +68736,19 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
         let _clock = pack_link::PackClock::enter(std::time::Duration::from_secs(5));
         let (url, seen) = serve_busy_then(
-            2,
+            1,
             r#"{"atoms":[{"id":"a","kind":"lesson","text":"a lesson about ferrule"}]}"#,
         );
         let atoms = atoms_lean(&PacksetClient::new(&url), "ws").unwrap();
         assert_eq!(atoms.len(), 1);
         assert_eq!(atoms[0]["text"], "a lesson about ferrule");
-        assert_eq!(seen.load(Ordering::SeqCst), 3);
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
         let (url, seen) = serve_busy_then(usize::MAX, "{}");
-        let per_try = pack_call_budget().min(pack_timeout());
-        let budget = pack_link::admission_retry_budget("GET", per_try);
         let err = atoms_lean(&PacksetClient::new(&url), "ws").unwrap_err();
-        assert_eq!(err.to_string(), PACK_READ_BUSY_LINE, "{err}");
+        assert_eq!(err.to_string(), "packsetd is busy", "{err}");
         assert!(is_read_shed(&err), "{err}");
         assert!(!is_pack_busy(&err), "{err}");
-        assert_eq!(
-            seen.load(Ordering::SeqCst),
-            pack_link::busy_attempts(budget) as usize
-        );
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
     }
 
     /// The rows of `body` as they were read before: its atoms as maps, each

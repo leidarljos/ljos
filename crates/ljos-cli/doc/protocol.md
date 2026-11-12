@@ -646,20 +646,25 @@ When the pack refuses the listing, the hook prints `mail could not be checked`
 and does not block the prompt. When a pack call runs out of time, the hook
 prints nothing and exits 0.
 
-Mail, inbox, recall and the hook give each pack call a connect timeout
-and a total timeout. `LJOS_PACK_CONNECT_MS` is the connect timeout
-(default 300, at most 1000). `LJOS_PACK_TIMEOUT_MS` is the total for an
-interactive command (default 4000, at most 5000). `LJOS_HOOK_PACK_TIMEOUT_MS`
-is the total inside a hook (default 1500, at most 2000). `PACKSET_TIMEOUT_MS`
-is used when the matching one of those is unset, and it cannot stretch
-these calls past the caps. A call that runs out of time is not tried
-again. An interactive command prints `pack busy, try again` and exits 75.
-`ljos search` and a sitting's recall ask a busy writer again inside
-the same budget; if search still does not answer they rank the stored
-snapshot by words and print `ranked by words; the pack search did not
-answer in time`. A sitting prints that listing and its recall before
-the review sweep. The sweep runs outside the recall clock and finishes
-on the pack's own budget.
+Every packsetd call sends `X-Packset-Deadline`, unix milliseconds for now
+plus that call's budget. Search and recall use a few seconds. Remember
+uses about twenty seconds, and an import about a minute. A hook stays
+under two seconds, and an interactive mail, inbox or recall call under
+five. A sitting's pack read and an MCP pack read use about one second.
+`LJOS_PACK_CONNECT_MS` is the connect timeout (default 300, at most 1000).
+`LJOS_PACK_TIMEOUT_MS` caps an interactive call (default 4000, at most 5000).
+`LJOS_HOOK_PACK_TIMEOUT_MS` caps a hook (default 1500, at most 2000).
+`PACKSET_TIMEOUT_MS` applies when the matching one of those is unset, and
+it cannot stretch these calls past the caps. A 503 waits the `Retry-After`
+seconds once and sends the same request with the same deadline. A second
+503, or a deadline that has passed, stops. The command prints the JSON
+`error` field on one line and does not retry for the rest of the timeout.
+A call that stays silent until its budget runs out is not tried again.
+An interactive command prints `pack busy, try again` and exits 75.
+When search still does not answer it ranks the stored snapshot by words
+and prints `ranked by words; the pack search did not answer in time`.
+A sitting prints that listing and its recall before the review sweep.
+The sweep runs outside the recall clock and finishes on the pack's own budget.
 
 A shell seat has no hook. It polls `ljos inbox`, which writes the receipt.
 `ljos read` writes one for a message the seat names.

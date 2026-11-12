@@ -7,8 +7,9 @@
 //!
 //! The directory and the seat each take an exclusive lock for the whole
 //! run, so two runs wait and the seed keeps a single copy of each text.
-//! A pack that answers 503 is asked again after `Retry-After`. A 408 stops
-//! the pull. Rows already stored stay in the seed.
+//! A pack that answers 503 is asked again once, after `Retry-After`, with
+//! the same deadline. A second 503 or a 408 stops the pull. Rows already
+//! stored stay in the seed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;

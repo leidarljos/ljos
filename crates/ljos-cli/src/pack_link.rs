@@ -457,9 +457,10 @@ struct Raw {
     retry_after: Option<Duration>,
 }
 
-/// Each later wait is this many times the last, and never past five seconds.
-const BUSY_GROWTH: u32 = 3;
-const BUSY_WAIT_CAP: Duration = Duration::from_secs(5);
+/// A sitting or MCP pack read. Longer reads keep their own budgets.
+const SHORT_READ: Duration = Duration::from_secs(1);
+const HEALTH_BUDGET: Duration = Duration::from_secs(2);
+const STATUS_BUDGET: Duration = Duration::from_secs(2);
 
 thread_local! {
     /// The command's admission deadline, as a wall time. A nested guard
@@ -539,27 +540,39 @@ fn command_remaining() -> Option<Duration> {
     )
 }
 
-/// How long the retries of one call may take. A read stops inside the
-/// short search budget. A write may use the command's remaining time,
-/// which is longer for remember and import.
+/// How long this call may run, and the offset on `X-Packset-Deadline`.
+/// The caller's budget wins. A thread timeout, `PACKSET_TIMEOUT_MS`, the
+/// wall clock, and a command or pack clock shorten it. An MCP read is
+/// about a second. A sitting read is about a second because its clock is.
+fn tightened(method: &str, requested: Duration) -> Duration {
+    let mut budget = requested;
+    if let Some(ms) = crate::pack_budget_ms() {
+        budget = budget.min(Duration::from_millis(ms.max(1)));
+    } else if let Some(ms) = std::env::var("PACKSET_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+    {
+        budget = budget.min(Duration::from_millis(ms));
+    }
+    if let Some(left) = crate::wall_left() {
+        budget = budget.min(left);
+    }
+    if !is_write(method) && crate::tool_bound::armed() {
+        budget = budget.min(SHORT_READ);
+    }
+    if let Some(left) = clock_left() {
+        budget = budget.min(left);
+    }
+    if let Some(left) = command_remaining() {
+        budget = budget.min(left);
+    }
+    budget.max(Duration::from_millis(1))
+}
+
+/// How long one call may take. [`tightened`].
 pub(crate) fn admission_retry_budget(method: &str, per_try: Duration) -> Duration {
-    let fallback = if is_write(method) {
-        super::REMEMBER_BUDGET
-    } else {
-        super::SEARCH_PACK_BUDGET
-    };
-    let room = match (command_remaining(), clock_left()) {
-        (Some(cmd), Some(clock)) => cmd.min(clock),
-        (Some(cmd), None) => cmd,
-        (None, Some(clock)) => clock,
-        (None, None) => fallback,
-    };
-    let room = if is_write(method) {
-        room
-    } else {
-        room.min(super::SEARCH_PACK_BUDGET)
-    };
-    per_try.min(room).max(Duration::from_millis(1))
+    tightened(method, per_try)
 }
 
 fn deadline_stamp(budget: Duration) -> String {
@@ -583,50 +596,6 @@ fn current_deadline(method: &str) -> String {
         .unwrap_or_else(|| deadline_stamp(admission_retry_budget(method, budget())))
 }
 
-struct Pause {
-    sleep: Duration,
-    charge: Duration,
-}
-
-fn planned_wait(backoff: Duration, retry_after: Option<Duration>) -> Duration {
-    match retry_after {
-        Some(after) if after > backoff => after,
-        _ => backoff,
-    }
-}
-
-/// Half of `wait`, plus up to the other half. `salt` picks the fraction,
-/// so a herd waiting on the same `Retry-After` does not wake together.
-fn jittered(wait: Duration, salt: u64) -> Duration {
-    let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX).max(1);
-    let half = ms / 2;
-    let extra = if half == 0 { 0 } else { salt % (half + 1) };
-    Duration::from_millis(half + extra)
-}
-
-/// The next wait, when charging it still ends inside `budget`. The sleep
-/// is the jittered wait. The charge is the full wait, so every host stops
-/// on the same attempt.
-fn pause_for(
-    backoff: Duration,
-    retry_after: Option<Duration>,
-    waited: Duration,
-    budget: Duration,
-    salt: u64,
-) -> Option<Pause> {
-    let charge = planned_wait(backoff, retry_after);
-    if waited.saturating_add(charge) >= budget {
-        return None;
-    }
-    let room = budget.saturating_sub(waited).max(Duration::from_millis(1));
-    Some(Pause {
-        sleep: jittered(charge, salt)
-            .min(room)
-            .max(Duration::from_millis(1)),
-        charge,
-    })
-}
-
 fn retry_after_of(header: Option<&str>) -> Option<Duration> {
     let raw = header?.trim();
     if raw.is_empty() {
@@ -635,38 +604,95 @@ fn retry_after_of(header: Option<&str>) -> Option<Duration> {
     raw.parse::<u64>().ok().map(Duration::from_secs)
 }
 
-fn jitter_salt(asked: u32) -> u64 {
-    let nanos = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| u64::from(elapsed.subsec_nanos()))
-        .unwrap_or(0);
-    nanos ^ u64::from(asked)
+/// Read or write shed, or a deadline that passed. The line is what the
+/// command prints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShedKind {
+    Read,
+    Write,
+    Deadline,
 }
 
-fn shed_error(method: &str) -> Error {
-    let line = if is_write(method) {
-        super::PACK_SHED_LINE
-    } else {
-        super::PACK_READ_BUSY_LINE
-    };
-    Error::Unavailable(line.to_string())
+thread_local! {
+    static SHED: std::cell::RefCell<Vec<(String, ShedKind)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn deadline_error() -> Error {
-    Error::Unavailable(super::PACK_DEADLINE_LINE.to_string())
+fn note_shed(line: &str, kind: ShedKind) {
+    SHED.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        cell.retain(|(text, _)| text != line);
+        cell.push((line.to_string(), kind));
+        if cell.len() > 32 {
+            cell.remove(0);
+        }
+    });
 }
 
-#[cfg(test)]
-pub(crate) fn busy_attempts(budget: Duration) -> u32 {
-    let mut waited = Duration::ZERO;
-    let mut wait = super::BUSY_WAIT;
-    let mut attempts = 1u32;
-    while pause_for(wait, None, waited, budget, 0).is_some() {
-        waited = waited.saturating_add(wait);
-        wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
-        attempts = attempts.saturating_add(1);
+pub(crate) fn shed_kind(line: &str) -> Option<ShedKind> {
+    SHED.with(|cell| {
+        cell.borrow()
+            .iter()
+            .rev()
+            .find(|(text, _)| text == line)
+            .map(|(_, kind)| *kind)
+    })
+}
+
+/// Time left until the frozen `X-Packset-Deadline`. `None` when no call
+/// is in flight.
+fn held_remaining() -> Option<Duration> {
+    let stamp = HELD_DEADLINE.with(|cell| cell.borrow().clone())?;
+    let ms: u64 = stamp.parse().ok()?;
+    let now = unix_ms(SystemTime::now());
+    Some(Duration::from_millis(ms.saturating_sub(now)))
+}
+
+fn deadline_passed() -> bool {
+    held_remaining().is_some_and(|left| left.is_zero())
+}
+
+/// `wait` finishes before the frozen deadline, so the resend still has time.
+fn retry_room(wait: Duration) -> bool {
+    held_remaining().is_some_and(|left| wait < left)
+}
+
+/// The JSON `error` field, as one line. A deadline with no field uses the
+/// deadline sentence. Anything else with no field is `degraded`.
+fn fault_line(body: &str, deadline: bool) -> String {
+    let parsed = serde_json::from_str::<Value>(body).ok().and_then(|value| {
+        value
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    if let Some(text) = parsed {
+        let text = text.trim();
+        if let Some(line) = text.lines().next().map(str::trim).filter(|s| !s.is_empty()) {
+            return line.to_string();
+        }
     }
-    attempts
+    if deadline {
+        return super::PACK_DEADLINE_LINE.to_string();
+    }
+    let raw = body.trim();
+    if !raw.is_empty() && !raw.contains('\n') && raw.len() <= 160 && !raw.starts_with('{') {
+        return raw.to_string();
+    }
+    "degraded".to_string()
+}
+
+fn degrade(body: &str, method: &str, deadline: bool) -> Error {
+    let line = fault_line(body, deadline);
+    let kind = if deadline {
+        ShedKind::Deadline
+    } else if is_write(method) {
+        ShedKind::Write
+    } else {
+        ShedKind::Read
+    };
+    note_shed(&line, kind);
+    Error::Unavailable(line)
 }
 
 /// The pack accepted a connection and then stayed silent, or the connect
@@ -1101,7 +1127,7 @@ impl PacksetClient {
             &[("cwd", shown.as_str())],
             None,
             true,
-            budget(),
+            STATUS_BUDGET,
         ) {
             if answer.status == 200 {
                 if let Ok(val) = serde_json::from_str::<Value>(&answer.body) {
@@ -1118,10 +1144,9 @@ impl PacksetClient {
 
     /// One call. `bearer` asks to carry the token; it is left off when
     /// the proof does not hold or another user owns the port. A 3xx is
-    /// returned as the answer and not followed. A 503 is asked again
-    /// after `Retry-After`, with jitter, while that wait still fits in
-    /// the call's budget. A 408 is the deadline passing: it is not asked
-    /// again.
+    /// returned as the answer and not followed. A 503 waits `Retry-After`
+    /// once and is sent again with the same deadline. A second 503, or a
+    /// deadline that has passed, is the JSON `error` field and stops.
     pub(crate) fn roundtrip(
         &self,
         method: &str,
@@ -1154,45 +1179,49 @@ impl PacksetClient {
         if crate::tool_bound::armed() {
             crate::tool_bound::note("packsetd");
         }
-        let budget = admission_retry_budget(method, timeout);
+        let budget = tightened(method, timeout);
         let _held = HeldDeadline::enter(budget);
-        let mut waited = Duration::ZERO;
-        let mut wait = super::BUSY_WAIT;
-        let mut asked = 0u32;
-        loop {
-            let answer = self.exchange(
-                addr,
-                &Wire {
-                    method,
-                    path,
-                    query,
-                    body,
-                    token: token.as_deref(),
-                },
-                allow,
-                timeout,
-            )?;
-            if answer.status == 408 {
-                return Err(deadline_error());
-            }
-            if answer.status != 503 {
-                if let Some(key) = &memo_key {
-                    if (200..300).contains(&answer.status) {
-                        keep_answer(key.clone(), &answer);
+        let _clock = PackClock::enter(budget);
+        let call = Wire {
+            method,
+            path,
+            query,
+            body,
+            token: token.as_deref(),
+        };
+        let answer = self.exchange(addr, &call, allow, budget)?;
+        let answer = match answer.status {
+            408 => return Err(degrade(&answer.body, method, true)),
+            503 => match answer
+                .retry_after
+                .filter(|wait| !deadline_passed() && retry_room(*wait))
+            {
+                Some(wait) => {
+                    std::thread::sleep(wait);
+                    if deadline_passed() {
+                        return Err(degrade(&answer.body, method, true));
                     }
+                    self.exchange(addr, &call, allow, budget)?
                 }
-                return Ok(answer);
-            }
-            asked = asked.saturating_add(1);
-            match pause_for(wait, answer.retry_after, waited, budget, jitter_salt(asked)) {
-                Some(pause) => {
-                    std::thread::sleep(pause.sleep);
-                    waited = waited.saturating_add(pause.charge);
-                    wait = (wait * BUSY_GROWTH).min(BUSY_WAIT_CAP);
-                }
-                None => return Err(shed_error(method)),
+                None => return Err(degrade(&answer.body, method, deadline_passed())),
+            },
+            _ => answer,
+        };
+        if answer.status == 408 {
+            return Err(degrade(&answer.body, method, true));
+        }
+        if answer.status == 503 {
+            return Err(degrade(&answer.body, method, false));
+        }
+        if deadline_passed() && !(200..300).contains(&answer.status) {
+            return Err(degrade(&answer.body, method, true));
+        }
+        if let Some(key) = &memo_key {
+            if (200..300).contains(&answer.status) {
+                keep_answer(key.clone(), &answer);
             }
         }
+        Ok(answer)
     }
 
     fn exchange(
@@ -1450,7 +1479,7 @@ impl PacksetClient {
     }
 
     pub fn health(&self) -> Result<String, Error> {
-        let answer = self.tried("GET", "/health", &[], None, budget())?;
+        let answer = self.tried("GET", "/health", &[], None, HEALTH_BUDGET)?;
         if !(200..300).contains(&answer.status) {
             return Err(refused(
                 &format!("{}/health", self.base),
@@ -1465,13 +1494,19 @@ impl PacksetClient {
         let query: Vec<(&str, &str)> = workspace
             .map(|workspace| vec![("workspace", workspace)])
             .unwrap_or_default();
-        let answer = self.tried("GET", "/v1/status", &query, None, budget())?;
+        let answer = self.tried("GET", "/v1/status", &query, None, STATUS_BUDGET)?;
         self.json_ok("/v1/status", answer)
     }
 
     pub fn post_atom(&self, atom: &Value) -> Result<Value, Error> {
         let bytes = serde_json::to_vec(atom)?;
-        let answer = self.tried("POST", "/v1/atoms", &[], Some(&bytes), budget())?;
+        let answer = self.tried(
+            "POST",
+            "/v1/atoms",
+            &[],
+            Some(&bytes),
+            super::REMEMBER_BUDGET,
+        )?;
         self.json_ok("/v1/atoms", answer)
     }
 
@@ -1486,7 +1521,13 @@ impl PacksetClient {
             body["why"] = Value::String(accession.to_string());
         }
         let bytes = serde_json::to_vec(&body)?;
-        let answer = self.tried("POST", "/v1/atoms/delete", &[], Some(&bytes), budget())?;
+        let answer = self.tried(
+            "POST",
+            "/v1/atoms/delete",
+            &[],
+            Some(&bytes),
+            super::REMEMBER_BUDGET,
+        )?;
         if answer.status == 404 {
             return Err(Error::Bad(format!("no atom {id}")));
         }
@@ -1499,7 +1540,7 @@ impl PacksetClient {
             "/v1/atoms",
             &[("workspace", workspace), ("kind", kind)],
             None,
-            budget(),
+            super::SEARCH_PACK_BUDGET,
         )?;
         let body: Value = self.json_ok("/v1/atoms", answer)?;
         Ok(body
@@ -1515,7 +1556,7 @@ impl PacksetClient {
             "/v1/pack",
             &[("workspace", workspace), ("set", set)],
             None,
-            budget(),
+            super::SEARCH_PACK_BUDGET,
         )?;
         let body: Value = self.json_ok("/v1/pack", answer)?;
         Ok(body
@@ -1527,7 +1568,13 @@ impl PacksetClient {
 
     pub fn sweep(&self, workspace: &str) -> Result<Value, Error> {
         let bytes = serde_json::to_vec(&serde_json::json!({"workspace": workspace}))?;
-        let answer = self.tried("POST", "/v1/sweep", &[], Some(&bytes), budget())?;
+        let answer = self.tried(
+            "POST",
+            "/v1/sweep",
+            &[],
+            Some(&bytes),
+            super::REMEMBER_BUDGET,
+        )?;
         self.json_ok("/v1/sweep", answer)
     }
 
@@ -1537,7 +1584,13 @@ impl PacksetClient {
             "id": id,
             "recalled": recalled,
         }))?;
-        let answer = self.tried("POST", "/v1/grade", &[], Some(&bytes), budget())?;
+        let answer = self.tried(
+            "POST",
+            "/v1/grade",
+            &[],
+            Some(&bytes),
+            super::REMEMBER_BUDGET,
+        )?;
         self.json_ok("/v1/grade", answer)
     }
 
@@ -1548,7 +1601,13 @@ impl PacksetClient {
             "id": id,
             "fields": fields,
         }))?;
-        let answer = self.tried("POST", "/v1/atoms/update", &[], Some(&bytes), budget())?;
+        let answer = self.tried(
+            "POST",
+            "/v1/atoms/update",
+            &[],
+            Some(&bytes),
+            super::REMEMBER_BUDGET,
+        )?;
         self.json_ok("/v1/atoms/update", answer)
     }
 
@@ -1571,7 +1630,13 @@ impl PacksetClient {
         if let Some(name) = lens.filter(|n| !n.trim().is_empty()) {
             query.push(("as", name));
         }
-        let answer = self.tried("GET", "/v1/activate", &query, None, budget())?;
+        let answer = self.tried(
+            "GET",
+            "/v1/activate",
+            &query,
+            None,
+            super::SEARCH_PACK_BUDGET,
+        )?;
         self.json_ok("/v1/activate", answer)
     }
 
@@ -1582,7 +1647,7 @@ impl PacksetClient {
             "/v1/hubs",
             &[("workspace", workspace), ("limit", limit.as_str())],
             None,
-            budget(),
+            super::SEARCH_PACK_BUDGET,
         )?;
         self.json_ok("/v1/hubs", answer)
     }
@@ -1590,7 +1655,13 @@ impl PacksetClient {
     pub fn consolidate(&self, workspace: &str, apply: bool) -> Result<Value, Error> {
         let bytes =
             serde_json::to_vec(&serde_json::json!({"workspace": workspace, "apply": apply}))?;
-        let answer = self.tried("POST", "/v1/consolidate", &[], Some(&bytes), budget())?;
+        let answer = self.tried(
+            "POST",
+            "/v1/consolidate",
+            &[],
+            Some(&bytes),
+            super::REMEMBER_BUDGET,
+        )?;
         self.json_ok("/v1/consolidate", answer)
     }
 
@@ -1625,12 +1696,19 @@ impl PacksetClient {
         if rerank {
             query.push(("rerank", "1"));
         }
-        // A rerank used to wait at least a minute, past any shorter
-        // budget. A clocked call, and a hook, keep the short budget.
-        let timeout = if rerank && !clock_armed() && std::env::var_os("LJOS_IN_HOOK").is_none() {
-            Duration::from_secs(60).max(budget())
+        // A rerank outside a clock, a hook, or an MCP call may load the
+        // model, so it gets a minute. A sitting clock and an MCP read stay
+        // near one second. Any other search is the short search budget.
+        let timeout = if rerank
+            && !clock_armed()
+            && std::env::var_os("LJOS_IN_HOOK").is_none()
+            && !crate::tool_bound::armed()
+        {
+            Duration::from_secs(60)
+        } else if crate::tool_bound::armed() {
+            SHORT_READ
         } else {
-            budget()
+            super::SEARCH_PACK_BUDGET
         };
         let answer = self.tried("GET", "/v1/search", &query, None, timeout)?;
         let trusted = answer.trusted;
@@ -1645,7 +1723,13 @@ impl PacksetClient {
             "ids": ids,
             "as": "",
         }))?;
-        let answer = self.tried("POST", "/v1/fire", &[], Some(&bytes), budget())?;
+        let answer = self.tried(
+            "POST",
+            "/v1/fire",
+            &[],
+            Some(&bytes),
+            super::REMEMBER_BUDGET,
+        )?;
         self.json_ok("/v1/fire", answer)
     }
 }
@@ -1849,8 +1933,61 @@ mod tests {
             .unwrap_or(0)
     }
 
+    fn ahead_ms(req: &str) -> u64 {
+        let now = super::unix_ms(std::time::SystemTime::now());
+        deadline_of(req).saturating_sub(now)
+    }
+
     #[test]
-    fn a_read_waits_out_retry_after_and_then_reads() {
+    fn an_mcp_read_deadline_is_about_a_second() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _bound = crate::tool_bound::arm(std::time::Duration::from_secs(30));
+        let (client, seen) = serve(|_, _| (200, "ok".into(), None));
+        client.health().unwrap();
+        let ahead = ahead_ms(&seen.lock().unwrap()[0]);
+        assert!(
+            (200..1_500).contains(&ahead),
+            "mcp read deadline is {ahead} ms ahead"
+        );
+    }
+
+    #[test]
+    fn a_one_second_clock_caps_the_read_deadline() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _clock = super::PackClock::enter(std::time::Duration::from_secs(1));
+        let (client, seen) = serve(|_, _| (200, "ok".into(), None));
+        client.health().unwrap();
+        let ahead = ahead_ms(&seen.lock().unwrap()[0]);
+        assert!(
+            (200..1_500).contains(&ahead),
+            "clocked read deadline is {ahead} ms ahead"
+        );
+    }
+
+    #[test]
+    fn a_200_carries_the_call_deadline() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let (client, seen) = serve(|_, req| {
+            assert!(deadline_of(req) > 0, "{req}");
+            (200, "ok".into(), None)
+        });
+        let body = client.health().unwrap();
+        assert_eq!(body, "ok");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let now = super::unix_ms(std::time::SystemTime::now());
+        let stamp = deadline_of(&seen.lock().unwrap()[0]);
+        assert!(stamp > now, "deadline {stamp} is not after {now}");
+        assert!(
+            stamp < now + 3_000,
+            "health deadline {stamp} is not about two seconds past {now}"
+        );
+    }
+
+    #[test]
+    fn a_503_waits_retry_after_once_and_then_reads() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let (client, seen) = serve(|n, req| {
@@ -1869,34 +2006,43 @@ mod tests {
         let body = client.health().unwrap();
         let took = started.elapsed();
         assert_eq!(body, "ok");
-        assert_eq!(seen.lock().unwrap().len(), 2);
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        assert_eq!(deadline_of(&got[0]), deadline_of(&got[1]));
         assert!(
-            took >= std::time::Duration::from_millis(400),
+            took >= std::time::Duration::from_millis(900),
             "Retry-After was not waited: {took:?}"
         );
         assert!(took < std::time::Duration::from_secs(3), "{took:?}");
-        let first = &seen.lock().unwrap()[0];
-        let now = super::unix_ms(std::time::SystemTime::now());
-        let stamp = deadline_of(first);
-        assert!(stamp > now, "deadline {stamp} is not after {now}");
-        assert!(stamp < now + 5_000, "deadline {stamp} is not a short read");
     }
 
     #[test]
-    fn a_retry_after_past_the_read_budget_fails_in_one_line() {
+    fn a_second_503_is_the_error_line_and_stops() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        let (client, seen) = serve(|_, _| (503, r#"{"error":"busy"}"#.into(), Some(30)));
+        let (client, seen) = serve(|_, _| {
+            (
+                503,
+                r#"{"error":"packsetd is busy: the read queue is full"}"#.into(),
+                Some(0),
+            )
+        });
         let started = std::time::Instant::now();
         let err = client.health().unwrap_err();
         let took = started.elapsed();
-        assert_eq!(err.to_string(), crate::PACK_READ_BUSY_LINE, "{err}");
-        assert_eq!(seen.lock().unwrap().len(), 1, "the long wait was taken");
+        assert_eq!(
+            err.to_string(),
+            "packsetd is busy: the read queue is full",
+            "{err}"
+        );
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 2, "a 503 is resent once");
+        assert_eq!(deadline_of(&got[0]), deadline_of(&got[1]));
         assert!(took < std::time::Duration::from_millis(500), "{took:?}");
     }
 
     #[test]
-    fn a_passed_deadline_is_one_line_and_is_not_retried() {
+    fn an_expired_deadline_is_the_error_line_and_is_not_retried() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let (client, seen) = serve(|_, req| {
@@ -1908,25 +2054,24 @@ mod tests {
             )
         });
         let err = client.health().unwrap_err();
-        assert_eq!(err.to_string(), crate::PACK_DEADLINE_LINE, "{err}");
+        assert_eq!(
+            err.to_string(),
+            "the deadline passed before this request ran",
+            "{err}"
+        );
         assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
     #[test]
-    fn a_shed_write_names_the_later_retry() {
+    fn a_retry_after_past_the_deadline_does_not_wait() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        let (client, seen) = serve(|_, _| (503, r#"{"error":"busy"}"#.into(), Some(1)));
+        let (client, seen) = serve(|_, _| (503, r#"{"error":"busy"}"#.into(), Some(30)));
         let started = std::time::Instant::now();
-        let err = {
-            let _deadline = super::CommandDeadline::enter(std::time::Duration::from_millis(200));
-            client
-                .post_atom(&serde_json::json!({"text": "one write", "workspace": "seat"}))
-                .unwrap_err()
-        };
+        let err = client.health().unwrap_err();
         let took = started.elapsed();
-        assert_eq!(err.to_string(), crate::PACK_SHED_LINE, "{err}");
-        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert_eq!(err.to_string(), "busy", "{err}");
+        assert_eq!(seen.lock().unwrap().len(), 1, "the long wait was taken");
         assert!(took < std::time::Duration::from_millis(500), "{took:?}");
     }
 

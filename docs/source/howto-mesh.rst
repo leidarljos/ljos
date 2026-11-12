@@ -39,9 +39,10 @@ the same bytes.
 ``pull`` takes an exclusive lock on the handoff directory and on the seat.
 Two pulls of one seat wait, and the seed holds one copy of each text.
 
-A writer that answers 503 is asked again after the ``Retry-After`` it sent,
-inside the import budget. A 408 stops the pull. Lessons already stored stay
-in the seed, and the next pull continues with the rows still missing.
+A writer that answers 503 is asked again once, after the ``Retry-After`` it
+sent, with the same deadline. A second 503 or a 408 stops the pull. Lessons
+already stored stay in the seed, and the next pull continues with the rows
+still missing.
 
 Push a seat to the handoff
 ==========================

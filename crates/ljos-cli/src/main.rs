@@ -1910,11 +1910,7 @@ fn main() -> Result<()> {
             if hook_cmd {
                 std::process::exit(0);
             }
-            if ljos_cli::is_deadline_miss(e) {
-                eprintln!("{}", ljos_cli::PACK_DEADLINE_LINE);
-            } else {
-                eprintln!("{}", ljos_cli::PACK_READ_BUSY_LINE);
-            }
+            eprintln!("{}", ljos_cli::pack_fault_line(e));
             std::process::exit(1);
         }
         if ljos_cli::is_pack_busy(e) || ljos_cli::is_write_shed(e) {
@@ -1927,7 +1923,7 @@ fn main() -> Result<()> {
                 std::process::exit(0);
             }
             if ljos_cli::is_write_shed(e) {
-                eprintln!("{}", ljos_cli::PACK_SHED_LINE);
+                eprintln!("{}", ljos_cli::pack_fault_line(e));
             } else {
                 eprintln!("{}", ljos_cli::PACK_BUSY_LINE);
             }
@@ -2195,7 +2191,7 @@ fn run_command() -> Result<()> {
                 // A person at the terminal, and words from their latest
                 // prompt, are their lesson. Any other text is a standing
                 // lesson too, sitting or not, labelled agent-derived.
-                // A busy pack is asked again inside twenty seconds. It
+                // A busy pack is asked once more after Retry-After. It
                 // still exits 75, and the lesson waits in the state dir.
                 let body = ljos_cli::remember_with_retry(&text, || {
                     if ljos_cli::person_present() {
@@ -2597,7 +2593,7 @@ fn run_command() -> Result<()> {
                 Ok(hits) => hits,
                 Err(err) if !dated && ljos_cli::is_deadline_miss(&err) => return Err(err),
                 Err(err) if !dated && ljos_cli::is_read_shed(&err) => {
-                    eprintln!("{}", ljos_cli::PACK_READ_BUSY_LINE);
+                    eprintln!("{}", ljos_cli::pack_fault_line(&err));
                     eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
                     ljos_cli::search_by_words(&asked, fetch)
                 }

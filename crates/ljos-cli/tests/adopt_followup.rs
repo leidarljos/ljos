@@ -360,9 +360,9 @@ fn busy_then_ready() -> (u16, u16, std::sync::Arc<std::sync::atomic::AtomicUsize
             let _ = sock.set_read_timeout(Some(Duration::from_secs(1)));
             let mut buf = [0u8; 1024];
             let _ = sock.read(&mut buf);
-            let body = b"busy";
+            let body = br#"{"error":"the pack is shedding writes"}"#;
             let resp = format!(
-                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             let _ = sock.write_all(resp.as_bytes());
@@ -425,14 +425,14 @@ fn a_busy_remember_retries_queues_and_the_next_call_sends_it() {
     let took = started.elapsed();
     let said = text(&out);
     assert_eq!(out.status.code(), Some(75), "{said}");
-    assert!(took < std::time::Duration::from_secs(22), "{took:?} {said}");
+    assert!(took < std::time::Duration::from_secs(3), "{took:?} {said}");
     let tries = posts.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
-        (3..=64).contains(&tries),
+        (1..=12).contains(&tries),
         "remember tried {tries} times\n{said}"
     );
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("packsetd busy, retrying later"), "{said}");
+    assert!(err.contains("the pack is shedding writes"), "{said}");
     assert!(err.contains("queued"), "{said}");
     let queue = world.home.join(".state/ljos/note-queue.jsonl");
     let queued = std::fs::read_to_string(&queue).unwrap_or_default();

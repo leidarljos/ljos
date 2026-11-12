@@ -107,6 +107,6 @@ Each stored atom carries a packset tag `lane:<name>`.
 `ljos mesh push --seat S --to DIR` writes that seat's memories to `DIR/<lane>.jsonl`.
 The lane name is `--lane`, or `LJOS_SYNC_HOST`, or the hostname.
 A pull and a push each take a file lock on the directory and on the seat.
-A writer that answers 503 is asked again after `Retry-After`.
-A 408 stops the pull, and the next pull continues with the rows still missing.
+A writer that answers 503 is asked again once, after `Retry-After`, with the same deadline.
+A second 503 or a 408 stops the pull, and the next pull continues with the rows still missing.
 [Move memory across lanes](source/howto-mesh.rst) has the commands.
