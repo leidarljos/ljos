@@ -136,6 +136,11 @@ pub struct Builder {
 }
 
 impl Packsetd {
+    /// Whether `packsetd` is on `PATH`, or at the local fallback.
+    pub fn on_path() -> bool {
+        locate().is_some()
+    }
+
     /// A writer with `PACKSET_AUTH=off` and a fresh temp home.
     pub fn open() -> Self {
         let mut started = Self::build();
