@@ -35789,49 +35789,10 @@ pub(crate) fn recall_memories_for_prompt(issue: &str) -> String {
     }
 }
 
-fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
-    let issue = issue.trim();
-    if let Some(listing) = sitting_listing() {
-        if !listing.ok {
-            bail!(PACK_READ_BUSY_LINE);
-        }
-        let own = tagged_with_issue(listing.atoms.as_ref(), issue);
-        return Ok(recall_lines(
-            &own,
-            Vec::new(),
-            issue,
-            &now_utc(),
-            include_notes,
-        ));
-    }
-    // A dead encoder stays lexical until the writer is replaced and the
-    // next search starts the child. Ask once, then read the rows.
-    if read_encoder_status().as_ref().is_some_and(encoder_failed) {
-        restart_dead_encoder();
-    }
-    let mut woke = false;
-    let mut ask = |what: &dyn Fn() -> Result<Vec<Hit>>| -> Result<Vec<Hit>> {
-        match what() {
-            Err(err) if is_deadline_miss(&err) || is_read_shed(&err) => Err(err),
-            Err(err) if is_pack_busy(&err) => Err(pack_busy_err()),
-            Ok(h) => Ok(h),
-            Err(_) if !woke => {
-                woke = true;
-                wake_for_recall();
-                what()
-            }
-            Err(e) => Err(e),
-        }
-    };
-    // A pack that cannot list its atoms (an older or stand-in writer) still
-    // answers the search below, so the tagged list is empty rather than an
-    // error; a pack that answers neither is down. A timeout is not that:
-    // the call is not started again.
-    let own = match ask(&|| issue_memories(issue)) {
-        Ok(hits) => hits,
-        Err(err) if pack_settled(&err) => return Err(err),
-        Err(_) => Vec::new(),
-    };
+/// Cues a recall searches: the issue id, its tags on that same cue, and
+/// the title when it is not the id. A tracker that does not answer leaves
+/// the id on its own.
+fn recall_cues(issue: &str) -> Vec<String> {
     let mut cues = vec![issue.to_string()];
     // The title and the tags come off one card. The tags are the words a
     // seat chose to classify the work, and a short title such as
@@ -35867,6 +35828,123 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
             cues.push(title.to_string());
         }
     }
+    cues
+}
+
+/// Related hits from a sitting's one listing. The search is not asked
+/// again. The cues are the ones [`recall_cues`] would have sent, and the
+/// rank is the lexical match the pack uses when it answers by words.
+fn related_from_listing(atoms: &[Value], cues: &[String], own: &[Hit]) -> Vec<Hit> {
+    let skip: std::collections::BTreeSet<&str> =
+        own.iter().filter_map(|hit| hit.id.as_deref()).collect();
+    let pool = RELATED_MEMORY_CAP * POOL_PER_SHOWN;
+    let mut related = Vec::new();
+    for cue in cues {
+        related.extend(listed_word_hits(atoms, cue, pool, &skip));
+    }
+    related
+}
+
+/// At most `limit` live lessons in `atoms` that share a word with `cue`,
+/// best lexical match first. Ids in `skip` are the issue's own memories.
+fn listed_word_hits(
+    atoms: &[Value],
+    cue: &str,
+    limit: usize,
+    skip: &std::collections::BTreeSet<&str>,
+) -> Vec<Hit> {
+    let now = now_utc();
+    let live: Vec<&Value> = atoms
+        .iter()
+        .filter(|atom| atom.live(&now))
+        .filter(|atom| atom["tombstone"] != Value::Bool(true))
+        .filter(|atom| {
+            atom["id"]
+                .as_str()
+                .is_none_or(|id| !id.is_empty() && !skip.contains(id))
+        })
+        .collect();
+    let texts: Vec<&str> = live
+        .iter()
+        .map(|atom| atom["text"].as_str().unwrap_or(""))
+        .collect();
+    let scores = lexical_match_scores(&texts, cue);
+    let asked = pack_words(cue);
+    let mut order: Vec<usize> = (0..live.len())
+        .filter(|&i| {
+            let kind = live[i]["kind"].as_str().unwrap_or("");
+            if scores[i] <= 0.0
+                || UNREVIEWED_KINDS.contains(&kind)
+                || texts[i].trim().is_empty()
+                || !(names_the_subject(texts[i], cue)
+                    || pack_word_seq(texts[i]).any(|word| asked.contains(&word)))
+            {
+                return false;
+            }
+            atom_as_hit(live[i]).is_some_and(|hit| !search_skip_kind(&hit, false))
+        })
+        .collect();
+    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+    order.truncate(limit);
+    let proven = pack().ok().is_some_and(|client| pack_proven(&client));
+    order
+        .into_iter()
+        .filter_map(|i| {
+            record_listed(live[i], proven);
+            let mut hit = atom_as_hit(live[i])?;
+            hit.score = scores[i];
+            hit.ts = written_at(live[i]);
+            Some(hit)
+        })
+        .collect()
+}
+
+fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
+    let issue = issue.trim();
+    if let Some(listing) = sitting_listing() {
+        if !listing.ok {
+            bail!(PACK_READ_BUSY_LINE);
+        }
+        let own = tagged_with_issue(listing.atoms.as_ref(), issue);
+        let cues = recall_cues(issue);
+        let related = related_from_listing(listing.atoms.as_ref(), &cues, &own);
+        return Ok(recall_lines(
+            &own,
+            related,
+            &cues.join(" "),
+            &now_utc(),
+            include_notes,
+        ));
+    }
+    // A dead encoder stays lexical until the writer is replaced and the
+    // next search starts the child. Ask once, then read the rows.
+    if read_encoder_status().as_ref().is_some_and(encoder_failed) {
+        restart_dead_encoder();
+    }
+    let mut woke = false;
+    let mut ask = |what: &dyn Fn() -> Result<Vec<Hit>>| -> Result<Vec<Hit>> {
+        match what() {
+            Err(err) if is_deadline_miss(&err) || is_read_shed(&err) => Err(err),
+            Err(err) if is_pack_busy(&err) => Err(pack_busy_err()),
+            Ok(h) => Ok(h),
+            Err(_) if !woke => {
+                woke = true;
+                wake_for_recall();
+                what()
+            }
+            Err(e) => Err(e),
+        }
+    };
+    // A pack that cannot list its atoms (an older or stand-in writer) still
+    // answers the search below, so the tagged list is empty rather than an
+    // error; a pack that answers neither is down. A timeout is not that:
+    // the call is not started again.
+    let own = match ask(&|| issue_memories(issue)) {
+        Ok(hits) => hits,
+        Err(err) if pack_settled(&err) => return Err(err),
+        Err(_) => Vec::new(),
+    };
+    let cues = recall_cues(issue);
     let pool = u32::try_from(RELATED_MEMORY_CAP * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let mut related = Vec::new();
     for cue in &cues {
