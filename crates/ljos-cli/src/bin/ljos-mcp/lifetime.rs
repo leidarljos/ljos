@@ -121,6 +121,68 @@ fn client_ancestor() -> Option<Watched> {
         })
 }
 
+/// Child pids of `parent`. Linux reads `/proc`. macOS asks
+/// `proc_listchildpids`. Anywhere else there is no list.
+#[cfg(target_os = "linux")]
+fn child_pids(parent: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(end) = stat.rfind(')') else {
+            continue;
+        };
+        let mut fields = stat[end + 1..].split_whitespace();
+        let _state = fields.next();
+        if fields.next().and_then(|ppid| ppid.parse::<u32>().ok()) == Some(parent) {
+            found.push(pid);
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "macos")]
+fn child_pids(parent: u32) -> Vec<u32> {
+    let Ok(ppid) = libc::pid_t::try_from(parent) else {
+        return Vec::new();
+    };
+    if ppid <= 0 {
+        return Vec::new();
+    }
+    // SAFETY: a null buffer asks only for the count. The second call writes
+    // that many pid_t values into `buf`.
+    unsafe {
+        let count = libc::proc_listchildpids(ppid, std::ptr::null_mut(), 0);
+        if count <= 0 {
+            return Vec::new();
+        }
+        let mut buf = vec![0 as libc::pid_t; count as usize];
+        let bytes = count * libc::c_int::try_from(std::mem::size_of::<libc::pid_t>()).unwrap_or(0);
+        let wrote = libc::proc_listchildpids(ppid, buf.as_mut_ptr().cast(), bytes);
+        if wrote <= 0 {
+            return Vec::new();
+        }
+        buf.truncate(wrote as usize);
+        buf.into_iter()
+            .filter_map(|pid| u32::try_from(pid).ok())
+            .filter(|pid| *pid > 0)
+            .collect()
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn child_pids(_parent: u32) -> Vec<u32> {
+    Vec::new()
+}
+
 /// Whether `watched` is still that same process.
 #[cfg(target_os = "linux")]
 fn still_there(watched: &Watched) -> bool {
@@ -416,6 +478,11 @@ fn orphaned(limit: Option<Duration>, looked: &mut std::time::Instant, held: &mut
 
 fn watch(client: Option<Watched>, orphan: Option<Duration>) {
     note_request_if_unset();
+    // Children of the client are not the client. The read is what keeps
+    // the per-host list in this process.
+    if let Some(client) = client.as_ref() {
+        let _ = child_pids(client.pid);
+    }
     let queue = client
         .as_ref()
         .map(|c| open_kqueue(c.pid))
@@ -568,6 +635,19 @@ mod tests {
             window >= Duration::from_secs(50),
             "drain {window:?} is shorter than a 45 s pack call plus margin"
         );
+    }
+
+    #[test]
+    fn child_pids_names_a_live_child() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let kids = child_pids(std::process::id());
+        child.kill().unwrap();
+        let _ = child.wait();
+        assert!(kids.contains(&pid), "child {pid} missing from {kids:?}");
     }
 
     #[test]
