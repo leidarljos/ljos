@@ -2,7 +2,8 @@
 //!
 //! The sitting used to ask the pack once per section, then sweep after
 //! the read clock was gone. A writer that answered 503 held each of those
-//! calls. The sitting now reads the pack once, inside a second.
+//! calls. The sitting now searches once, skips on 503, and may also probe
+//! status. A status line is not a second memory read.
 
 ljos_test_boot::harness!();
 
@@ -127,21 +128,28 @@ fn a_busy_pack_costs_one_read_and_the_sitting_stays_quiet() {
         "sitting waited {took:?}\n{said}"
     );
     assert!(out.status.success(), "{said}");
-    assert_eq!(
-        said.matches("memory degraded: ranked by words").count(),
-        1,
-        "{said}"
+    assert!(
+        said.contains("memory skipped: packsetd busy"),
+        "a 503 is one skipped line, and the sitting goes on:\n{said}"
     );
     assert!(!said.contains("GET /v1/atoms failed"), "{said}");
     assert!(!said.contains("packsetd busy, retrying"), "{said}");
     let asked = paths.lock().unwrap().clone();
+    let pack_reads: Vec<_> = asked
+        .iter()
+        .filter(|line| !line.contains("/v1/status") && !line.contains("/health"))
+        .cloned()
+        .collect();
     assert!(
-        asked.iter().any(|line| line.contains("/v1/search")),
+        pack_reads.iter().any(|line| line.contains("/v1/search")),
         "the sitting did not search: {asked:?}\n{said}"
     );
     assert!(
-        asked.len() <= 2,
+        pack_reads.len() <= 2,
         "the sitting asked the pack more than the search and its listing fallback: {asked:?}\n{said}"
     );
-    assert!(!asked.is_empty(), "the sitting never read the pack\n{said}");
+    assert!(
+        !pack_reads.is_empty(),
+        "the sitting never read the pack\n{said}"
+    );
 }
