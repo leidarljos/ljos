@@ -927,6 +927,7 @@ fn read_response(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<R
             )
         })?;
     let mut length = None;
+    let mut chunked = false;
     let mut close = header.starts_with("HTTP/1.0");
     let mut retry_after = None;
     for line in header.lines().skip(1) {
@@ -935,6 +936,10 @@ fn read_response(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<R
         };
         if name.eq_ignore_ascii_case("content-length") {
             length = value.trim().parse().ok();
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            chunked = value
+                .split(',')
+                .any(|coding| coding.trim().eq_ignore_ascii_case("chunked"));
         } else if name.eq_ignore_ascii_case("retry-after") {
             retry_after = retry_after_of(Some(value));
         } else if name.eq_ignore_ascii_case("connection")
@@ -944,7 +949,17 @@ fn read_response(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<R
         }
     }
     let mut body = buf.split_off(head_end + 4);
-    if let Some(length) = length {
+    // packsetd 0.17.9 streams a listing in chunks. The chunk sizes are not
+    // the body: read as JSON they fail with "trailing characters".
+    if chunked {
+        let mut chunks = Chunks::default();
+        let mut raw = std::mem::take(&mut body);
+        while !chunks.feed(&raw, &mut body)? {
+            arm_read(stream, deadline)?;
+            let n = read_some(stream, &mut tmp)?;
+            raw.extend_from_slice(&tmp[..n]);
+        }
+    } else if let Some(length) = length {
         while body.len() < length {
             arm_read(stream, deadline)?;
             let n = read_some(stream, &mut tmp)?;
@@ -978,6 +993,68 @@ fn read_response(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<R
         keep: !close && !(300..400).contains(&status),
         retry_after,
     })
+}
+
+/// Where a chunked body has been read up to.
+#[derive(Default)]
+struct Chunks {
+    /// The first byte of `raw` not yet decoded.
+    at: usize,
+}
+
+impl Chunks {
+    /// Decode the whole chunks in `raw` past the last call into `out`.
+    /// True once the last chunk and its trailers are in.
+    fn feed(&mut self, raw: &[u8], out: &mut Vec<u8>) -> std::io::Result<bool> {
+        loop {
+            let rest = &raw[self.at..];
+            let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") else {
+                return Ok(false);
+            };
+            let line = String::from_utf8_lossy(&rest[..eol]);
+            let digits = line.split(';').next().unwrap_or("").trim();
+            let size = usize::from_str_radix(digits, 16).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("the pack's chunk size {digits:?} is not hex"),
+                )
+            })?;
+            let start = eol + 2;
+            if size == 0 {
+                // Trailers, if any, end with an empty line.
+                let tail = &rest[eol..];
+                return Ok(tail.windows(4).any(|w| w == b"\r\n\r\n"));
+            }
+            let Some(end) = start.checked_add(size) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the pack's chunk size is too big",
+                ));
+            };
+            let Some(framed) = end.checked_add(2) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the pack's chunk size is too big",
+                ));
+            };
+            if rest.len() < framed {
+                return Ok(false);
+            }
+            if &rest[end..framed] != b"\r\n" {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the pack's chunk does not end where its size says",
+                ));
+            }
+            out.extend_from_slice(&rest[start..end]);
+            self.at = self.at.checked_add(framed).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the pack's chunk size is too big",
+                )
+            })?;
+        }
+    }
 }
 
 fn arm_read(stream: &TcpStream, deadline: Instant) -> std::io::Result<()> {
@@ -1823,6 +1900,8 @@ fn send_once(
         live.proven = false;
         return Err(err);
     }
+    // Mail, the lean listing, search, status, health and the other pack
+    // calls all read the answer here.
     match read_response(stream, deadline) {
         Ok(raw) => {
             if !raw.keep {
@@ -1874,6 +1953,290 @@ mod tests {
         }
         foreign(url);
         assert_eq!(reads() - start, 5, "a call after the search reads again");
+    }
+
+    /// packsetd 0.17.9 streams `/v1/atoms` in 16 KiB chunks. The client
+    /// hands the caller the JSON, not the chunk sizes around it.
+    #[test]
+    fn a_chunked_listing_reads_as_its_json() {
+        use std::io::Write;
+        let atom = format!(r#"{{"id":"a","text":"{}"}}"#, "x".repeat(20 * 1024));
+        let json = format!(r#"{{"atoms":[{atom},{atom}]}}"#);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sent = json.clone();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                        Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+            sock.write_all(head.as_bytes()).unwrap();
+            for piece in sent.as_bytes().chunks(16 * 1024) {
+                let mut chunk = format!("{:x}\r\n", piece.len()).into_bytes();
+                chunk.extend_from_slice(piece);
+                chunk.extend_from_slice(b"\r\n");
+                // Split each chunk across writes, so a read ends mid-chunk.
+                let (one, two) = chunk.split_at(chunk.len() / 3);
+                sock.write_all(one).unwrap();
+                sock.flush().unwrap();
+                sock.write_all(two).unwrap();
+            }
+            sock.write_all(b"0\r\n\r\n").unwrap();
+        });
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let raw = super::read_response(&mut stream, deadline).unwrap();
+        assert_eq!(raw.status, 200);
+        assert_eq!(raw.body, json);
+        let parsed: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        assert_eq!(parsed["atoms"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn a_chunk_size_that_is_not_hex_is_refused() {
+        let mut out = Vec::new();
+        let err = super::Chunks::default()
+            .feed(b"zz\r\nhello\r\n0\r\n\r\n", &mut out)
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let mut out = Vec::new();
+        let done = super::Chunks::default()
+            .feed(b"5;ext=1\r\nhello\r\n0\r\nX-T: 1\r\n\r\n", &mut out)
+            .unwrap();
+        assert!(done);
+        assert_eq!(out, b"hello");
+    }
+
+    /// A chunk may end in the middle of a read. The next read continues
+    /// that chunk, and bytes already taken stay taken.
+    #[test]
+    fn a_chunk_that_arrives_in_pieces_is_one_body() {
+        let mut chunks = super::Chunks::default();
+        let mut out = Vec::new();
+        let mut raw = b"3\r\nabc\r\n4\r\n".to_vec();
+        assert!(!chunks.feed(&raw, &mut out).unwrap());
+        assert_eq!(out, b"abc");
+        raw.extend_from_slice(b"defg\r\n0\r\n\r\n");
+        assert!(chunks.feed(&raw, &mut out).unwrap());
+        assert_eq!(out, b"abcdefg");
+    }
+
+    /// The bytes packsetd writes for a streamed body: at most 16 KiB in a
+    /// chunk, then a zero chunk. `write_chunked` in packsetd is this.
+    fn packsetd_chunks(body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = Vec::new();
+        for piece in body.chunks(4096) {
+            buf.extend_from_slice(piece);
+            if buf.len() >= 16 * 1024 {
+                push_chunk(&mut out, &buf);
+                buf.clear();
+            }
+        }
+        if !buf.is_empty() {
+            push_chunk(&mut out, &buf);
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    fn push_chunk(out: &mut Vec<u8>, buf: &[u8]) {
+        out.extend_from_slice(format!("{:x}\r\n", buf.len()).as_bytes());
+        out.extend_from_slice(buf);
+        out.extend_from_slice(b"\r\n");
+    }
+
+    /// Answers each request with a chunked body, split across two writes.
+    fn serve_chunked(on: impl Fn(&str) -> String + Send + 'static) -> super::PacksetClient {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                loop {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf);
+                let body = on(&req);
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                            Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                if sock.write_all(head.as_bytes()).is_err() {
+                    continue;
+                }
+                let framed = packsetd_chunks(body.as_bytes());
+                let mid = framed.len() / 2;
+                if sock.write_all(&framed[..mid]).is_err() {
+                    continue;
+                }
+                let _ = sock.flush();
+                let _ = sock.write_all(&framed[mid..]);
+            }
+        });
+        super::PacksetClient::new(format!("http://{addr}"))
+    }
+
+    /// Mail, the lean listing, search and status are not separate readers.
+    /// A chunked answer has to come back as JSON on each of them.
+    #[test]
+    fn mail_listing_search_and_status_read_a_chunked_body() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let text = "x".repeat(20 * 1024);
+        let listing = format!(r#"{{"atoms":[{{"id":"a","kind":"lesson","text":"{text}"}}]}}"#);
+        let client = serve_chunked(move |req| {
+            if req.contains("/v1/status") {
+                r#"{"version":"0.17.9"}"#.to_string()
+            } else if req.contains("/v1/search") {
+                r#"{"hits":[{"text":"kept"}]}"#.to_string()
+            } else if req.contains("kind=message") {
+                r#"{"atoms":[{"id":"m","kind":"message","text":"a letter for this seat"}]}"#
+                    .to_string()
+            } else if req.contains("kind=receipt") || req.contains("kind=group") {
+                r#"{"atoms":[]}"#.to_string()
+            } else if req.contains("/health") {
+                "ok".to_string()
+            } else if req.contains("/v1/atoms") {
+                listing.clone()
+            } else {
+                r#"{}"#.to_string()
+            }
+        });
+        let client = client.with_workspace("seat");
+        let atoms = crate::atoms_lean(&client, "seat").unwrap();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0]["text"].as_str().map(str::len), Some(text.len()));
+        let letters = crate::atoms_mail(&client, "seat").unwrap();
+        assert_eq!(letters.len(), 1);
+        assert_eq!(letters[0]["kind"], "message");
+        let status = client.status(Some("seat")).unwrap();
+        assert_eq!(status["version"], "0.17.9");
+        let (hits, _) = client
+            .search_fetched("seat", "kept", 1, None, false)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "kept");
+        assert_eq!(client.health().unwrap(), "ok");
+    }
+
+    /// The whole answer on the socket, headers included.
+    fn read_raw(port: u16, path: &str) -> Vec<u8> {
+        use std::io::{Read, Write};
+        let mut sock = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        sock.set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        sock.write_all(req.as_bytes()).unwrap();
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            match sock.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(err) => panic!("reading the pack: {err}"),
+            }
+        }
+        buf
+    }
+
+    /// The decoded body when `raw` is a chunked answer, or nothing when
+    /// the writer still sends a length.
+    fn chunked_json(raw: &[u8]) -> Option<String> {
+        let at = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
+        let header = String::from_utf8_lossy(&raw[..at]);
+        let chunked = header.lines().skip(1).any(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case("transfer-encoding")
+                    && value
+                        .split(',')
+                        .any(|coding| coding.trim().eq_ignore_ascii_case("chunked"))
+            })
+        });
+        if !chunked {
+            return None;
+        }
+        let mut out = Vec::new();
+        let done = super::Chunks::default()
+            .feed(&raw[at + 4..], &mut out)
+            .expect("the writer's chunks");
+        assert!(done, "the writer's chunked listing did not finish");
+        Some(String::from_utf8(out).expect("the listing is utf-8"))
+    }
+
+    /// The packsetd a test starts. A writer that streams `/v1/atoms`
+    /// (0.17.9) is checked as chunks. An older writer still has to answer
+    /// with JSON through the same reader.
+    #[test]
+    fn a_live_packsetd_listing_is_json() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let daemon = ljos_test_boot::Packsetd::open();
+        let raw = read_raw(daemon.port(), "/v1/atoms?workspace=seat&embedding=omit");
+        let client = super::PacksetClient::new(daemon.url()).with_workspace("seat");
+        let atoms = crate::atoms_lean(&client, "seat")
+            .unwrap_or_else(|err| panic!("lean listing: {err}\n{}", daemon.log()));
+        let letters = crate::atoms_mail(&client, "seat")
+            .unwrap_or_else(|err| panic!("mail listing: {err}\n{}", daemon.log()));
+        assert!(letters.iter().all(serde_json::Value::is_object));
+        let status = client
+            .status(Some("seat"))
+            .unwrap_or_else(|err| panic!("status: {err}\n{}", daemon.log()));
+        assert!(status.is_object(), "{status}");
+        let health = client
+            .health()
+            .unwrap_or_else(|err| panic!("health: {err}\n{}", daemon.log()));
+        assert!(!health.is_empty(), "{health}");
+        let search = client
+            .roundtrip(
+                "GET",
+                "/v1/search",
+                &[("workspace", "seat"), ("q", "seat"), ("limit", "1")],
+                None,
+                false,
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap_or_else(|err| panic!("search: {err}\n{}", daemon.log()));
+        assert!(
+            (200..300).contains(&search.status),
+            "search {}\n{}\n{}",
+            search.status,
+            search.body,
+            daemon.log()
+        );
+        serde_json::from_str::<serde_json::Value>(&search.body).expect("search answer is JSON");
+        if let Some(json) = chunked_json(&raw) {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json).expect("chunked listing is JSON");
+            assert_eq!(
+                parsed["atoms"].as_array().map(Vec::len),
+                Some(atoms.len()),
+                "the client dropped atoms from the chunked listing"
+            );
+            let body = &raw[raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4..];
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(body).is_err(),
+                "a chunked listing was already bare JSON"
+            );
+        }
     }
 
     fn quiet_pack() -> tempfile::TempDir {
