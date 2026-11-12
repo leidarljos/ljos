@@ -59,6 +59,8 @@ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.
 The `install.sh` attached to the 0.41.1 release asked for `vissue-cli-<target>.tar.xz`. The 0.41.2 script fetches `vissue-v<version>-<target>.tar.gz`, the archive the vissue release publishes.
 
 `--no-embed` leaves out the encoder. Search then matches words, and `ljos search` prints `ranking is lexical: encoder unavailable`.
+A cold encoder, one packsetd stopped after five minutes with no embed call, gets a longer budget. The search is asked again once the model has answered. The ranking line names the ranker that ordered the printed rows. A row whose score is only the word-rank floor, 0.20, is left out.
+A lesson `ljos remember` queued because the pack was busy is sent again on `ljos search` and `ljos sitting`. When it is still waiting, that command says so.
 The installer checks each download against its published SHA-256 sum. It sets up the tracker, the memory writer and the deed store, then runs `ljos onboard` for each runner it finds.
 Git needs `user.name` and `user.email`, because the tracker commits each change. Without them the heading is still written, and the line is `tracker git: commit refused: Author identity unknown`.
 

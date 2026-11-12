@@ -5,6 +5,19 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## Unreleased
+
+### Fixes
+
+- A sitting reads related memories with one `GET /v1/search` built from the ticket title and body, with a small limit and its own one-second deadline.
+  A writer with no search is asked for a limited listing instead, and a body over the cap is not ranked.
+- `ljos search` gives a cold encoder time to load and asks once more.
+  The ranking line names the ranker that ordered the printed rows.
+  A hit whose score is only the word-rank floor, 0.20, is left out, and this seat's own memories stay ahead of another seat's on a tie.
+- `ljos search` and `ljos sitting` send a lesson queued while the pack was busy, under the same admission and deadline as `ljos remember`, and say when it is still waiting.
+- `ljos doctor` treats an `mcp.json` command that is a shell wrapper as this install when the wrapper runs this `ljos-mcp`, or when `ljos-mcp --version` matches.
+  A different binary still warns.
+
 ## 0.41.3 (2026-11-11)
 
 ### Features
