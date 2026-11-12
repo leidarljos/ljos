@@ -5,6 +5,14 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.41.6 (2026-11-12)
+
+### Fixes
+
+- A packsetd that streams an atom listing with chunked transfer encoding is read as the JSON.
+  Mail, the lean listing, search and status use that reader, so `ljos inbox` and `ljos finish` no longer stop on the chunk sizes.
+
+
 ## 0.41.5 (2026-11-12)
 
 ### Fixes
