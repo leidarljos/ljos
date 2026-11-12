@@ -5,6 +5,26 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.41.3 (2026-11-11)
+
+### Features
+
+- Each packsetd call sends X-Packset-Deadline as unix milliseconds, now plus that call's budget.
+  A 503 waits Retry-After once and sends the same request again with the same deadline.
+  A second 503, or a passed deadline, stops and prints the JSON error field on one line.
+  A sitting pack read and an MCP pack read use about one second.
+- `ljos sitting --plan TITLE -- ITEM...` files the parent and its checklist in one tracker commit, claims the parent, and prints the ids.
+  `ljos ready --mine` names the next unfinished item, and `ljos finish ITEM` ticks that item off.
+  A sitting asks the pack once, so a busy pack costs about a second, and the short form is one degraded-memory line plus a quiet-claim count.
+
+### Fixes
+
+- A sitting's island lists related memories from its one pack read, ranked by the ticket's words.
+  The read is not asked again.
+- An MCP pack read stays about one second.
+  A seat that raises `LJOS_MCP_TIMEOUT` above thirty seconds and sets `PACKSET_TIMEOUT_MS` may use the shorter of those two for that read.
+
+
 ## 0.41.2 (2026-11-11)
 
 ### Features
