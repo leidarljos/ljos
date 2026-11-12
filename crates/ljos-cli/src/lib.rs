@@ -1640,6 +1640,18 @@ pub fn holder_for_session(seat: &str, id: &str) -> String {
     format!("{}@{}", seat.trim(), session_tag(id))
 }
 
+/// A conversation key for a seat when the caller named none.
+///
+/// The same seat always produces the same key, so every such sitting is
+/// one holder. It is not a conversation id a runner stamps. The holder
+/// [`holder_for_session`] builds from it is this seat's own sitting, the
+/// one `ljos sitting` takes when `LJOS_SEAT` is set and no conversation
+/// is stamped, and a tagged conversation of the seat is a different holder.
+#[must_use]
+pub fn seat_conversation_key(seat: &str) -> String {
+    format!("ljos-seat:{}", seat.trim())
+}
+
 /// Who is sitting. The seat is the program that connected: the name a
 /// runner remembers, votes and earns trust under, the same across its
 /// conversations. The holder is that seat in one conversation: the name
@@ -70605,6 +70617,19 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
         assert_eq!(printed.mode, "lexical");
         assert_eq!(printed.reason, "local memory snapshot");
+    }
+
+    #[test]
+    fn a_seat_with_no_conversation_id_has_one_stable_holder() {
+        let key = seat_conversation_key("papers");
+        assert_eq!(key, seat_conversation_key("papers"));
+        assert_ne!(key, seat_conversation_key("dseams-paper"));
+        let holder = holder_for_session("papers", &key);
+        assert!(holder.starts_with("papers@"), "{holder}");
+        assert_ne!(holder, "papers");
+        assert!(same_holder(&holder, "papers"), "{holder}");
+        let other = holder_for_session("papers", "conv-papers-0001");
+        assert!(!same_holder(&holder, &other), "{holder} {other}");
     }
 
     /// With `LJOS_CAPTURE=off` a stated choice is left alone, and `nudge`

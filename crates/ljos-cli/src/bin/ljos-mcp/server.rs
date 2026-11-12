@@ -2112,7 +2112,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to begin work on an issue, or pass plan and items to file that checklist in one tracker commit and sit the parent. It is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Omit assignee.",
+        description = "Call this to begin work on an issue, or pass plan and items to file that checklist in one tracker commit and sit the parent. It is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Omit assignee. A call that sends no conversation id still sits, bound to this seat, the same sitting `ljos sitting` takes when LJOS_SEAT is set and no conversation is stamped. Pass _meta.conversation_id to sit as that conversation.",
         annotations(
             title = "Open a sitting",
             read_only_hint = false,
@@ -3855,30 +3855,15 @@ impl ServerHandler for LjosServer {
                 } else if let Some(holder) = ljos_cli::holder_from_bare_session_record(&seat.seat) {
                     seat.holder = holder;
                 } else if name == "ljos_sitting" || name == "ljos_claim" {
-                    // A hold taken as the bare seat would be adoptable by
-                    // the first conversation that asks, and could take over
-                    // a live tagged conversation's hold under `same_holder`.
-                    let passed_assignee = request
-                        .arguments
-                        .as_ref()
-                        .and_then(|a| a.get("assignee"))
-                        .and_then(serde_json::Value::as_str);
-                    if let Err(e) = ljos_cli::with_call_seat(seat.clone(), async {
-                        call_assignee("sitting", passed_assignee)
-                    })
-                    .await
-                    {
-                        return Ok(attach_next(&name, as_tool_error(e)?));
-                    }
-                    return Ok(attach_next(
-                        &name,
-                        as_tool_error(refused(anyhow::anyhow!(
-                            "{name}: no conversation could be bound for bare seat {}; \
-                             pass _meta.conversation_id on the call or run through the runner's \
-                             beforeMCPExecution hook",
-                            seat.seat
-                        )))?,
-                    ));
+                    // No conversation id. Sit as this seat, the holder the
+                    // CLI takes when LJOS_SEAT is set and nothing is stamped.
+                    // The key is the seat, so every such call is one holder.
+                    // A tagged conversation is a different holder: it does
+                    // not take this sitting, and this sitting does not take
+                    // a live tagged one. An explicit `_meta.conversation_id`
+                    // was applied above.
+                    let key = ljos_cli::seat_conversation_key(&seat.seat);
+                    seat.holder = ljos_cli::holder_for_session(&seat.seat, &key);
                 }
             }
         }

@@ -34,5 +34,9 @@ as text, so the model reads it as a tool result.
 One call files that parent and the items in one tracker commit, claims the
 parent, and returns the checklist with ids. Pass ``issue`` with ``items`` to
 file the items under that ticket instead. ``ljos_sitting`` takes the same
-``items`` list, and ``plan`` when the parent does not exist yet. ``ljos_finish``
+``items`` list, and ``plan`` when the parent does not exist yet. A call that
+sends no conversation id still sits, bound to this seat, the same sitting
+``ljos sitting`` takes when ``LJOS_SEAT`` is set and no conversation is
+stamped. ``_meta.conversation_id`` sits as that conversation. ``ljos_claim``
+uses the same holder. ``ljos_finish``
 on a checklist id marks it done and names the next item.

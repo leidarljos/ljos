@@ -1506,6 +1506,48 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
     );
     let _ = srv2.kill();
     let _ = srv2.wait();
+
+    // 3. No hook and no _meta. The sitting still opens, bound to the seat.
+    clear_holds();
+    let (bare, mut srv3) = mcp_call(None);
+    let bare_str = bare.to_string();
+    assert!(
+        bare["result"]["isError"] != true && bare.get("error").is_none(),
+        "a sitting with no conversation id should open: {bare_str}"
+    );
+    assert!(
+        !bare_str.contains("no conversation could be bound"),
+        "{bare_str}"
+    );
+    let stable = ljos_cli::holder_for_session("inky", &ljos_cli::seat_conversation_key("inky"));
+    let card_text = std::fs::read_to_string(&home.card).unwrap();
+    assert!(
+        card_text.contains(&stable),
+        "expected the seat holder {stable}: {card_text}"
+    );
+    let _ = srv3.kill();
+    let _ = srv3.wait();
+
+    // 4. An explicit conversation id still names that conversation.
+    clear_holds();
+    let (named, mut srv4) = mcp_call(Some(serde_json::json!({"conversation_id": CONV_Y})));
+    let named_str = named.to_string();
+    assert!(
+        named["result"]["isError"] != true && named.get("error").is_none(),
+        "expected success with _meta conversation_id: {named_str}"
+    );
+    let card_text = std::fs::read_to_string(&home.card).unwrap();
+    assert!(
+        card_text.contains(&holder(CONV_Y)),
+        "expected CLAIMED_BY {}: {card_text}",
+        holder(CONV_Y)
+    );
+    assert!(
+        !card_text.contains(&stable),
+        "the seat holder replaced the conversation: {card_text}"
+    );
+    let _ = srv4.kill();
+    let _ = srv4.wait();
 }
 
 /// A shell that carries both `the command harness thread id` and
