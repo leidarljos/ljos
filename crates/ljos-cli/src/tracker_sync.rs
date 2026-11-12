@@ -342,12 +342,11 @@ mod tests {
 warn\ttracker\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted issue edits in Software/other/issues.org and 1 more; commit them in x or no other host sees them\n";
         let short = crate::compact_sitting(full, "probe-a");
         assert!(
-            short.starts_with("tracker: 1 unpushed, 2 uncommitted edits\n"),
+            !short.contains("unpushed") && !short.contains("uncommitted"),
             "{short}"
         );
         assert!(!short.contains("git -C"), "{short}");
         assert!(!short.contains("Software/other"), "{short}");
-        assert_eq!(short.matches("unpushed").count(), 1, "{short}");
     }
 
     #[test]

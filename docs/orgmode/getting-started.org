@@ -1,12 +1,12 @@
 #+title: Getting started
 #+options: toc:nil num:nil
 
-# [[[cog import ljos_version as v; v.lines("The first sitting: a lesson, a search and a ticket, then a second seat. It describes ljos {version}.")]]]
-The first sitting: a lesson, a search and a ticket, then a second seat. It describes ljos 0.41.2.
+# [[[cog import ljos_version as v; v.lines("A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos {version}.")]]]
+A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.41.2.
 # [[[end]]]
 
-Do the first three sections in order. They install ljos, store a lesson, search it, and file a ticket.
-The last section puts a second seat on that ticket. The how-to guides cover one task each after that.
+Do the sections in order. They install ljos, store a lesson, search it, and open a day's work as a plan.
+The last section puts a second seat on a single ticket. The how-to guides cover one task each after that.
 Mem0 stores memory by running a model over what it ingests. The lesson below is stored as written.
 beads keeps a ticket queue in Dolt. The ticket below is an Org heading in a git repository.
 
@@ -119,6 +119,30 @@ With no git identity the heading is still written, and the last line is =tracker
 =ljos doctor= then warns that the issue file is uncommitted.
 
 The file is Org. =vissue show demo-2f5j= prints the heading, and the tracker repository is the one =ljos doctor --all= names under =tracker=.
+
+* Open the day's work
+
+A plan files one parent and its checklist in a single tracker commit, claims the parent, and prints the items with their ids. The next unfinished item is the one to do. =ljos finish= on that id marks it done and names the one after it. =ljos ready --mine= names the same next item later, without opening the sitting again.
+
+#+begin_src console
+$ LJOS_SEAT=alice ljos sitting --plan "Ship the codec" -p day -- "measure the files" "pick a default" "write the note"
+day-ab12  Ship the codec
+  day-cd34  measure the files
+  day-ef56  pick a default
+  day-gh78  write the note
+next: day-cd34  measure the files
+tracker git: committed chore(issues): day-ab12 filed, day-cd34 filed, day-ef56 filed, day-gh78 filed by alice; no remote, kept local
+sitting day-ab12: checking blockers
+day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
+next: day-cd34  measure the files
+$ LJOS_SEAT=alice ljos finish day-cd34
+ticked day-cd34
+next: day-ef56  pick a default
+$ LJOS_SEAT=alice ljos ready --mine
+next: day-ef56  pick a default
+#+end_src
+
+The ids are the ones that run printed. The parent is claimed. Each item stays open until =ljos finish= ticks it. A sitting with no =--verbose= prints what needs action. A degraded pack is one line, =memory degraded: ranked by words=. Quiet claims are a count that points at =ljos claims --mine=. =ljos sitting ISSUE --verbose= prints every section.
 
 * A second seat
 

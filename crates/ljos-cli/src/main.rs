@@ -951,13 +951,17 @@ enum Cmd {
         issue: String,
     },
     /// Tickets that are open and not waiting on an open ticket.
+    /// `--mine` names the next unfinished item of each plan this seat holds.
     Ready {
         /// Only this project.
         #[arg(short = 'p', long)]
         project: Option<String>,
         /// Print JSON rows.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "mine")]
         json: bool,
+        /// The next unfinished item of each plan this seat holds.
+        #[arg(long, conflicts_with = "json")]
+        mine: bool,
     },
     /// Who holds what on the tracker: `vissue claims`, with its flags.
     /// `--mine` lists this seat's claims that have had no note, deed or finish for a day.
@@ -1616,10 +1620,34 @@ enum Cmd {
         #[arg(long, default_value = "")]
         source: String,
     },
-    /// Start work on a ticket: the checks, what ljos remembers for it, and the claim.
+    /// Start work on a ticket, or file a plan and sit it.
+    ///
+    /// `ljos sitting ISSUE` claims that ticket. `ljos sitting --plan TITLE -- ITEM...`
+    /// files the parent and the items in one tracker commit, claims the parent,
+    /// and prints the checklist. `ljos ready --mine` names the next unfinished
+    /// item. `ljos finish ITEM` ticks that item off.
     Sitting {
-        /// The tracker id of the issue.
-        issue: String,
+        /// The tracker id of the issue. Absent when `--plan` files a new one.
+        #[arg(
+            value_name = "ISSUE",
+            required_unless_present = "plan",
+            conflicts_with = "plan"
+        )]
+        issue: Option<String>,
+        /// File this parent and the items after `--`, then sit the parent.
+        #[arg(long, value_name = "TITLE")]
+        plan: Option<String>,
+        /// The project the plan is filed in. Absent: this checkout's prefix, else Software.
+        #[arg(short = 'p', long, requires = "plan")]
+        project: Option<String>,
+        /// Checklist items, after `--`.
+        #[arg(
+            last = true,
+            value_name = "ITEM",
+            requires = "plan",
+            allow_hyphen_values = true
+        )]
+        items: Vec<String>,
         /// Occupancy name, taken as given, the seat's own name too. Absent: this conversation's holder (`ljos seat`). Always scoped to the issue.
         #[arg(long)]
         assignee: Option<String>,
@@ -2081,9 +2109,14 @@ fn run_command() -> Result<()> {
         ljos_cli::flush_queued_lessons();
     }
     let mut sitting_budget = match &cmd {
-        Cmd::Sitting { issue, .. } => {
-            println!("sitting {issue}: checking blockers");
-            std::io::Write::flush(&mut std::io::stdout())?;
+        Cmd::Sitting { issue, plan, .. } => {
+            if plan.is_none() {
+                println!(
+                    "sitting {}: checking blockers",
+                    issue.as_deref().unwrap_or("plan")
+                );
+                std::io::Write::flush(&mut std::io::stdout())?;
+            }
             Some(begin_sitting_preclaim())
         }
         _ => None,
@@ -2972,8 +3005,16 @@ fn run_command() -> Result<()> {
             print!("{said}");
         }
         Cmd::Show { issue } => print!("{}", ljos_cli::show_issue(&issue)?),
-        Cmd::Ready { project, json } => {
-            print!("{}", ljos_cli::ready_view(project.as_deref(), json)?);
+        Cmd::Ready {
+            project,
+            json,
+            mine,
+        } => {
+            if mine {
+                print!("{}", ljos_cli::plan::ready_mine()?);
+            } else {
+                print!("{}", ljos_cli::ready_view(project.as_deref(), json)?);
+            }
         }
         Cmd::Claims { args } => {
             if args.iter().any(|arg| arg == "--mine") {
@@ -4574,13 +4615,27 @@ fn run_command() -> Result<()> {
         },
         Cmd::Sitting {
             issue,
+            plan,
+            project,
+            items,
             assignee,
             cards: cards_dir,
             anyway,
             playbook,
             verbose,
         } => {
+            let issue = if let Some(title) = plan {
+                let opened = ljos_cli::plan::open_plan(project.as_deref(), &title, &items)?;
+                print!("{}", opened.text);
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                println!("sitting {}: checking blockers", opened.parent);
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                opened.parent
+            } else {
+                issue.context("sitting: pass an issue, or --plan TITLE -- ITEM...")?
+            };
             let mut memories = Vec::new();
+            ljos_cli::begin_quiet_sitting();
             let printed = sitting_stream_started(
                 &issue,
                 &assignee_for("sitting", assignee.as_deref(), false)?,

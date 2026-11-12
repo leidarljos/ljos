@@ -56,6 +56,7 @@ pub mod panel_runner;
 pub mod person_key;
 mod person_tty;
 pub mod persona_session;
+pub mod plan;
 pub mod plugin;
 pub mod policy_label;
 pub mod proc_tree;
@@ -21043,6 +21044,20 @@ static PLAYBOOK_ROSTER: std::sync::Mutex<Option<Vec<Playbook>>> = std::sync::Mut
 
 /// The roster: pack atoms, with the six shipped filled in when missing.
 pub fn playbooks_from_pack() -> Result<Vec<Playbook>> {
+    if let Some(listing) = sitting_listing() {
+        let mut got = if listing.ok {
+            playbooks_of(&listing.atoms)
+        } else {
+            Vec::new()
+        };
+        for p in shipped_playbooks() {
+            if !got.iter().any(|g| g.name == p.name) {
+                got.push(p);
+            }
+        }
+        got.sort_by(|a, b| a.name.cmp(&b.name));
+        return Ok(got);
+    }
     if let Some(got) = PLAYBOOK_ROSTER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -30593,169 +30608,191 @@ pub fn doctor_seat() -> Vec<Habitat> {
     // Scope cloud is readable here when cloud up wrote its age identity.
     // The key is not in the tracker.
     out.push(cloud::cloud_age_row());
-    // A fresh install has no writer until its first memory verb starts one;
-    // doctor starts it the same way, so the rows below ask a live pack.
-    // One silent accept is one command budget, shared by every probe below,
-    // so a sitting is not the sum of thirty-second reads.
-    let _pack_clock = arm_cmd_pack();
-    let _quiet_pack = pack_link::QuietPack::enter();
-    wake_writer();
-    // How many stored preferences the hook enforces: a preference with no
-    // rule is recalled and never holds the agent to it.
-    out.push(preferences_row());
-    // Old user rules with no basis stay visible until the person keeps
-    // them. The count is a warning; the seat still starts.
-    out.push(user_rules_row());
-    // The dense ballot: without it the pack ranks by words alone, and an
-    // island's seeds are weaker than the agent may assume.
-    out.push(
-        match pack()
-            .map_err(|e| anyhow::anyhow!("{e:#}"))
-            .and_then(|c| c.status(None).map_err(anyhow::Error::from))
-        {
-            Ok(status) => {
-                let available = status["embedder"]["available"].as_bool().unwrap_or(false);
-                let answering = status["embedder"]["answering"].as_bool();
-                if answering == Some(true) {
-                    forget_encoder_restart(&status);
-                }
-                Habitat {
-                    name: "encoder",
-                    state: if available {
-                        "dense ballot on".to_string()
-                    } else if answering == Some(false) {
-                        // The row used to say packsetd would restart the
-                        // child on the next search. That child is packsetd's,
-                        // and a failed call leaves `answering` false until a
-                        // later one succeeds. Name the command that replaces
-                        // the writer so the next search can start the child.
-                        encoder_degraded_state()
-                    } else {
-                        "off; search is lexical. The encoder is optional: packset-embed \
+    // A sitting already read the pack once. Doctor does not ask again:
+    // status, health and the memory census were a second and a third call,
+    // and each one waited out a busy writer on its own.
+    if let Some(listing) = sitting_listing() {
+        out.push(Habitat {
+            name: "pack",
+            state: if listing.ok {
+                format!("{} atoms", listing.atoms.len())
+            } else {
+                PACK_READ_BUSY_LINE.to_string()
+            },
+            ok: true,
+        });
+        if !listing.ok {
+            out.push(Habitat {
+                name: "encoder",
+                state: format!("{ENCODER_DEGRADED}: the pack read did not answer"),
+                ok: false,
+            });
+        }
+    } else {
+        // A fresh install has no writer until its first memory verb starts one;
+        // doctor starts it the same way, so the rows below ask a live pack.
+        // One silent accept is one command budget, shared by every probe below,
+        // so a sitting is not the sum of thirty-second reads.
+        let _pack_clock = arm_cmd_pack();
+        let _quiet_pack = pack_link::QuietPack::enter();
+        wake_writer();
+        // How many stored preferences the hook enforces: a preference with no
+        // rule is recalled and never holds the agent to it.
+        out.push(preferences_row());
+        // Old user rules with no basis stay visible until the person keeps
+        // them. The count is a warning; the seat still starts.
+        out.push(user_rules_row());
+        // The dense ballot: without it the pack ranks by words alone, and an
+        // island's seeds are weaker than the agent may assume.
+        out.push(
+            match pack()
+                .map_err(|e| anyhow::anyhow!("{e:#}"))
+                .and_then(|c| c.status(None).map_err(anyhow::Error::from))
+            {
+                Ok(status) => {
+                    let available = status["embedder"]["available"].as_bool().unwrap_or(false);
+                    let answering = status["embedder"]["answering"].as_bool();
+                    if answering == Some(true) {
+                        forget_encoder_restart(&status);
+                    }
+                    Habitat {
+                        name: "encoder",
+                        state: if available {
+                            "dense ballot on".to_string()
+                        } else if answering == Some(false) {
+                            // The row used to say packsetd would restart the
+                            // child on the next search. That child is packsetd's,
+                            // and a failed call leaves `answering` false until a
+                            // later one succeeds. Name the command that replaces
+                            // the writer so the next search can start the child.
+                            encoder_degraded_state()
+                        } else {
+                            "off; search is lexical. The encoder is optional: packset-embed \
                          links ONNX Runtime 1.28; `cargo binstall --locked packset-embed` \
                          takes the release build, beside packsetd"
-                            .to_string()
-                    },
-                    ok: available,
+                                .to_string()
+                        },
+                        ok: available,
+                    }
                 }
-            }
-            Err(e) => Habitat {
-                name: "encoder",
-                state: format!("pack does not answer: {e}"),
-                ok: false,
-            },
-        },
-    );
-    out.push(match pack() {
-        Ok(client) => {
-            let started = std::time::Instant::now();
-            let health = client.health().map_err(anyhow::Error::from);
-            let took_ms = started.elapsed().as_millis();
-            let slow = started.elapsed() >= PACK_SLOW_HEALTH;
-            let admission = client.admission_line();
-            let mut where_ = format!(
-                "{} workspace {}; pack responded in {took_ms}ms{}",
-                client.base(),
-                client.workspace(),
-                psi_suffix()
-            );
-            if let Some(line) = admission {
-                where_.push_str("; ");
-                where_.push_str(&line);
-            }
-            match health {
-                Ok(_) if slow => Habitat {
-                    name: "pack",
-                    state: format!("{}; {}", pack_busy_sentence(), where_),
-                    ok: true,
-                },
-                Ok(_) => Habitat {
-                    name: "pack",
-                    state: where_,
-                    ok: true,
-                },
-                Err(e) if is_read_shed(&e) => Habitat {
-                    name: "pack",
-                    state: format!("{PACK_READ_BUSY_LINE}; {where_}"),
-                    ok: true,
-                },
-                Err(e) if writer_slow(&e) => Habitat {
-                    name: "pack",
-                    state: format!("{}; {}", pack_busy_sentence(), where_),
-                    ok: true,
-                },
                 Err(e) => Habitat {
-                    name: "pack",
-                    state: match bookkeep::temp_home() {
-                        Some(_) => format!(
+                    name: "encoder",
+                    state: format!("pack does not answer: {e}"),
+                    ok: false,
+                },
+            },
+        );
+        out.push(match pack() {
+            Ok(client) => {
+                let started = std::time::Instant::now();
+                let health = client.health().map_err(anyhow::Error::from);
+                let took_ms = started.elapsed().as_millis();
+                let slow = started.elapsed() >= PACK_SLOW_HEALTH;
+                let admission = client.admission_line();
+                let mut where_ = format!(
+                    "{} workspace {}; pack responded in {took_ms}ms{}",
+                    client.base(),
+                    client.workspace(),
+                    psi_suffix()
+                );
+                if let Some(line) = admission {
+                    where_.push_str("; ");
+                    where_.push_str(&line);
+                }
+                match health {
+                    Ok(_) if slow => Habitat {
+                        name: "pack",
+                        state: format!("{}; {}", pack_busy_sentence(), where_),
+                        ok: true,
+                    },
+                    Ok(_) => Habitat {
+                        name: "pack",
+                        state: where_,
+                        ok: true,
+                    },
+                    Err(e) if is_read_shed(&e) => Habitat {
+                        name: "pack",
+                        state: format!("{PACK_READ_BUSY_LINE}; {where_}"),
+                        ok: true,
+                    },
+                    Err(e) if writer_slow(&e) => Habitat {
+                        name: "pack",
+                        state: format!("{}; {}", pack_busy_sentence(), where_),
+                        ok: true,
+                    },
+                    Err(e) => Habitat {
+                        name: "pack",
+                        state: match bookkeep::temp_home() {
+                            Some(_) => format!(
                             "{} does not answer: {e}. Under a temporary HOME the writer does not \
                              start on its own; run `packset ensure`",
                             client.base()
                         ),
-                        None => format!("{} does not answer: {e}", client.base()),
+                            None => format!("{} does not answer: {e}", client.base()),
+                        },
+                        ok: false,
                     },
-                    ok: false,
-                },
+                }
             }
-        }
-        Err(e) => Habitat {
-            name: "pack",
-            state: e.to_string(),
-            ok: false,
-        },
-    });
-    // The writer's token: packsetd 0.15 answers its owner only, and a seat
-    // with no token meets a 401 on every memory, mail and recall call while
-    // `/health` still says ok.
-    if let Ok(client) = pack() {
-        let refused = client
-            .status(None)
-            .err()
-            .map(|e| format!("{e:#}").contains("401"));
-        out.push(pack_token_row(
-            client.has_token(),
-            std::env::var_os("PACKSET_TOKEN").is_some_and(|v| !v.is_empty()),
-            packset_client::token_path(),
-            refused,
-        ));
-    }
-    // A search that keeps answering 401 or 403 is using stored memories
-    // only. Asked when the pack answers, so a seat whose search is fine
-    // gains no row, and the row is a warning rather than a failed doctor.
-    if out.iter().any(|h| h.name == "pack" && h.ok) {
+            Err(e) => Habitat {
+                name: "pack",
+                state: e.to_string(),
+                ok: false,
+            },
+        });
+        // The writer's token: packsetd 0.15 answers its owner only, and a seat
+        // with no token meets a 401 on every memory, mail and recall call while
+        // `/health` still says ok.
         if let Ok(client) = pack() {
-            if let Some(row) = search_auth_habitat(&client) {
-                out.push(row);
+            let refused = client
+                .status(None)
+                .err()
+                .map(|e| format!("{e:#}").contains("401"));
+            out.push(pack_token_row(
+                client.has_token(),
+                std::env::var_os("PACKSET_TOKEN").is_some_and(|v| !v.is_empty()),
+                packset_client::token_path(),
+                refused,
+            ));
+        }
+        // A search that keeps answering 401 or 403 is using stored memories
+        // only. Asked when the pack answers, so a seat whose search is fine
+        // gains no row, and the row is a warning rather than a failed doctor.
+        if out.iter().any(|h| h.name == "pack" && h.ok) {
+            if let Ok(client) = pack() {
+                if let Some(row) = search_auth_habitat(&client) {
+                    out.push(row);
+                }
             }
         }
-    }
-    // What the pack holds and what it let go: the seat that lets a pack
-    // grow or forget under it reads it here rather than in `packset status`.
-    if let Ok(client) = pack() {
-        if let Ok(status) = client.status(Some(&client.workspace())) {
-            let live = status["live"].as_u64().unwrap_or(0);
-            let cap = status["live_cap"].as_u64().unwrap_or(0);
-            let forgotten: Vec<String> = status["forgotten_by_reason"]
-                .as_object()
-                .map(|m| {
-                    m.iter()
-                        .map(|(why, n)| format!("{} by {why}", n.as_u64().unwrap_or(0)))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let mut state = if cap > 0 {
-                format!("{live} live of {cap}")
-            } else {
-                format!("{live} live, no cap")
-            };
-            if !forgotten.is_empty() {
-                state.push_str(&format!("; forgotten {}", forgotten.join(", ")));
+        // What the pack holds and what it let go: the seat that lets a pack
+        // grow or forget under it reads it here rather than in `packset status`.
+        if let Ok(client) = pack() {
+            if let Ok(status) = client.status(Some(&client.workspace())) {
+                let live = status["live"].as_u64().unwrap_or(0);
+                let cap = status["live_cap"].as_u64().unwrap_or(0);
+                let forgotten: Vec<String> = status["forgotten_by_reason"]
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .map(|(why, n)| format!("{} by {why}", n.as_u64().unwrap_or(0)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut state = if cap > 0 {
+                    format!("{live} live of {cap}")
+                } else {
+                    format!("{live} live, no cap")
+                };
+                if !forgotten.is_empty() {
+                    state.push_str(&format!("; forgotten {}", forgotten.join(", ")));
+                }
+                out.push(Habitat {
+                    name: "memory",
+                    state,
+                    ok: cap == 0 || live <= cap,
+                });
             }
-            out.push(Habitat {
-                name: "memory",
-                state,
-                ok: cap == 0 || live <= cap,
-            });
         }
     }
     out.push(match host_key_path() {
@@ -32036,6 +32073,60 @@ fn suppress_repeated_status(block: &str) -> String {
     out
 }
 
+thread_local! {
+    /// Whether this sitting already printed [`MEMORY_DEGRADED_LINE`].
+    static SAID_DEGRADED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Start a quiet sitting. A second degraded line in the same sitting is dropped.
+pub fn begin_quiet_sitting() {
+    SAID_DEGRADED.with(|said| said.set(false));
+}
+
+fn note_degraded(out: &mut String) {
+    SAID_DEGRADED.with(|said| {
+        if !said.get() {
+            said.set(true);
+            out.push_str(MEMORY_DEGRADED_LINE);
+        }
+    });
+}
+
+/// A pack or encoder line. The quiet sitting keeps one degraded line.
+fn is_memory_noise_line(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("memory-unavailable")
+        || line.starts_with("ranked by words")
+        || line.starts_with("lexical-only:")
+        || line.starts_with("encoder down:")
+        || line.contains("packsetd busy")
+        || line.contains("GET /v1/atoms failed")
+        || (line.starts_with("due:")
+            && (line.contains("pack") || line.contains("atoms") || line.contains("busy")))
+        || (line.starts_with("recall:")
+            && (line.contains("pack")
+                || line.contains("atoms")
+                || line.contains("busy")
+                || line.contains("encoder")))
+}
+
+fn memory_row(name: &str, state: &str) -> bool {
+    (name == "encoder" && (state.starts_with(ENCODER_DEGRADED) || state.contains("lexical")))
+        || (name == "packset-embed" && state.starts_with("not runnable"))
+        || (name == "pack" && (state.contains("busy") || state.contains(PACK_READ_BUSY_LINE)))
+}
+
+/// A quiet-claim dump line, or the `+N more` that follows it.
+fn quiet_claim_extra(line: &str) -> Option<usize> {
+    let line = line.trim();
+    if line.contains("ljos finish ") && line.contains("ljos note ") {
+        return Some(1);
+    }
+    let rest = line.strip_prefix('+')?;
+    let n = rest.strip_suffix(" more (ljos claims --mine)")?;
+    n.trim().parse().ok()
+}
+
 /// One section of a sitting's report, cut for [`compact_sitting`].
 fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut Vec<String>) {
     match name {
@@ -32043,10 +32134,20 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
             let mut down = Vec::new();
             let mut words = Vec::new();
             let mut act = String::new();
-            let mut degraded = false;
+            let mut memory = false;
             for l in lines {
+                if is_memory_noise_line(l) {
+                    memory = true;
+                    continue;
+                }
                 let cols: Vec<&str> = l.splitn(3, '\t').collect();
-                if let [word, name, _] = cols.as_slice() {
+                if let [word, name, state] = cols.as_slice() {
+                    if *name == "mcp" || memory_row(name, state) {
+                        if memory_row(name, state) {
+                            memory = true;
+                        }
+                        continue;
+                    }
                     words.push((*word, *name));
                 }
                 match cols.as_slice() {
@@ -32062,12 +32163,6 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                         if cloud_only_advice(name, state) {
                             continue;
                         }
-                        if *word == "warn"
-                            && ((*name == "encoder" && state.starts_with(ENCODER_DEGRADED))
-                                || (*name == "packset-embed" && state.starts_with("not runnable")))
-                        {
-                            degraded = true;
-                        }
                         if *word == "no" && (REQUIRED.contains(name) || *name == "pack") {
                             down.push(*name);
                         }
@@ -32082,23 +32177,22 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                 }
             }
             // The `without:` line carries the one pointer to the full rows.
-            out.push_str(&summary_verdict(
-                &down,
-                &[],
-                &working_parts(&words),
-                degraded,
-            ));
+            // A degraded encoder is one line of its own, not a parenthetical
+            // on the ready line and not the doctor's warn row.
+            out.push_str(&summary_verdict(&down, &[], &working_parts(&words), false));
             out.push('\n');
             out.push_str(&act);
+            if memory {
+                note_degraded(out);
+            }
         }
         "island" => {
             for l in lines {
-                if let Some(text) = sitting_memory_text(l) {
+                if is_memory_noise_line(l) {
+                    note_degraded(out);
+                } else if let Some(text) = sitting_memory_text(l) {
                     memories.push(text);
-                } else if l.starts_with("weak island")
-                    || l.starts_with("ranked by words")
-                    || l.starts_with("recall:")
-                {
+                } else if l.starts_with("weak island") || l.starts_with("recall:") {
                     out.push_str(l);
                     out.push('\n');
                 }
@@ -32106,7 +32200,9 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
         }
         "due" => {
             for l in lines {
-                if !l.starts_with("0 due") && !l.trim().is_empty() {
+                if is_memory_noise_line(l) {
+                    note_degraded(out);
+                } else if !l.starts_with("0 due") && !l.trim().is_empty() {
                     out.push_str(l);
                     out.push('\n');
                 }
@@ -32139,10 +32235,28 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
             }
         }
         "claim" => {
+            let mut quiet = 0usize;
             for l in lines {
+                if l.starts_with("next:") || l.starts_with("plan complete") {
+                    out.push_str(l);
+                    out.push('\n');
+                    continue;
+                }
+                if let Some(n) = quiet_claim_extra(l) {
+                    quiet += n;
+                    continue;
+                }
+                if is_memory_noise_line(l) {
+                    note_degraded(out);
+                    continue;
+                }
                 if !l.starts_with("gen=") && !l.trim().is_empty() {
                     out.push_str(&compact_tracker_line(l));
                 }
+            }
+            if quiet > 0 {
+                let noun = if quiet == 1 { "claim" } else { "claims" };
+                out.push_str(&format!("{quiet} quiet {noun} (`ljos claims --mine`)\n"));
             }
         }
         "sync" => {
@@ -32164,9 +32278,11 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
         }
         "recall" | "timeline" => {
             for l in lines {
-                if l.starts_with("ranked by words") {
+                if l.starts_with("next:") || l.starts_with("plan complete") {
                     out.push_str(l);
                     out.push('\n');
+                } else if is_memory_noise_line(l) {
+                    note_degraded(out);
                 }
             }
         }
@@ -32183,6 +32299,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
 /// `ljos sitting --verbose` prints the full report.
 #[must_use]
 pub fn compact_sitting(full: &str, issue: &str) -> String {
+    begin_quiet_sitting();
     let mut out = String::new();
     let mut memories: Vec<String> = Vec::new();
     let mut section = "";
@@ -32244,11 +32361,23 @@ pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String 
         let mut out = String::new();
         compact_section(name, &body, &mut out, memories);
         out
+    } else if first.starts_with("next:") || first.starts_with("plan complete") {
+        format!("{first}\n")
+    } else if is_memory_noise_line(first) {
+        let mut out = String::new();
+        note_degraded(&mut out);
+        out
     } else if first.starts_with("tracker:")
         || first.starts_with("tracker git:")
         || first.starts_with("ranked by words")
     {
-        compact_tracker_line(first)
+        if is_memory_noise_line(first) {
+            let mut out = String::new();
+            note_degraded(&mut out);
+            out
+        } else {
+            compact_tracker_line(first)
+        }
     } else {
         String::new()
     };
@@ -32260,10 +32389,19 @@ pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String 
 /// file, other seats' too; `--verbose` keeps it. Any other line comes
 /// back as it is.
 fn compact_tracker_line(line: &str) -> String {
-    match line.split_once(tracker_sync::FIX) {
-        Some((counts, _)) => format!("{counts}\n"),
-        None => format!("{line}\n"),
+    let shown = match line.split_once(tracker_sync::FIX) {
+        Some((counts, _)) => counts,
+        None => line,
+    };
+    // Unpushed commits and other seats' uncommitted edits are drift.
+    // `--verbose` keeps the line and its fix. A push that was refused
+    // is more than drift, and the quiet sitting still says so.
+    let drift = shown.contains("unpushed") || shown.contains("uncommitted");
+    let refused = shown.contains("refused") || shown.contains("still running");
+    if drift && !refused {
+        return String::new();
     }
+    format!("{shown}\n")
 }
 
 /// The line a compact sitting ends on.
@@ -32764,12 +32902,19 @@ pub fn sitting_due_report(issue: &str) -> Result<String> {
 /// [`sitting_due_report`] and the listing it read, so the sitting ranks
 /// memories from the same atoms instead of asking the pack twice.
 fn sitting_due_and_atoms(issue: &str, title: &str) -> Result<(String, Vec<Value>)> {
-    let client = pack()?;
-    // The review sweep is a write. It used to run here, inside the recall
-    // clock, and a writer that was still going spent that clock before
-    // this list was read. The list is the snapshot as it stands. The
-    // sweep runs after the listing and the recall have been printed.
-    let atoms = atoms_lean(&client, &client.workspace()).context("due: GET /v1/atoms failed")?;
+    let atoms = if let Some(listing) = sitting_listing() {
+        if !listing.ok {
+            bail!(PACK_READ_BUSY_LINE);
+        }
+        listing.atoms.as_ref().clone()
+    } else {
+        let client = pack()?;
+        // The review sweep is a write. It used to run here, inside the recall
+        // clock, and a writer that was still going spent that clock before
+        // this list was read. The list is the snapshot as it stands. The
+        // sweep runs after the listing and the recall have been printed.
+        atoms_lean(&client, &client.workspace()).context("due: GET /v1/atoms failed")?
+    };
     let now = now_utc();
     let ticket = sitting_ticket_text(issue, title);
     let seat = seat_name();
@@ -32790,6 +32935,12 @@ fn sitting_due_and_atoms(issue: &str, title: &str) -> Result<(String, Vec<Value>
 /// and runs until the writer answers or that budget ends. Empty when the
 /// sweep finds nothing or the pack cannot be asked.
 fn sitting_review_sweep() -> String {
+    // The sweep is a write. On a busy pack it used its own budget, about
+    // twenty seconds, after the sitting's read clock had already been
+    // dropped. The sitting's one read is the listing. `ljos due` still sweeps.
+    if sitting_listing().is_some() {
+        return String::new();
+    }
     let Ok(client) = pack() else {
         return String::new();
     };
@@ -35698,6 +35849,19 @@ pub(crate) fn recall_memories_for_prompt(issue: &str) -> String {
 
 fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     let issue = issue.trim();
+    if let Some(listing) = sitting_listing() {
+        if !listing.ok {
+            bail!(PACK_READ_BUSY_LINE);
+        }
+        let own = tagged_with_issue(listing.atoms.as_ref(), issue);
+        return Ok(recall_lines(
+            &own,
+            Vec::new(),
+            issue,
+            &now_utc(),
+            include_notes,
+        ));
+    }
     // A dead encoder stays lexical until the writer is replaced and the
     // next search starts the child. Ask once, then read the rows.
     if read_encoder_status().as_ref().is_some_and(encoder_failed) {
@@ -35998,35 +36162,40 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
     }
     // An island from a listener that did not take the token is not a
     // memory. The row would otherwise be the listener's text, dated.
-    if let Ok(island) = packset_island(&title, false) {
-        if !pack().is_ok_and(|client| client.carried()) {
-            events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
-            let skip = events.len().saturating_sub(limit);
-            return Ok((title, events[skip..].to_vec()));
-        }
-        let ticket = sitting_ticket_text(issue, &title);
-        let now = now_utc();
-        let seat = seat_name();
-        for atom in island["island"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(reviewable)
-            .filter(|a| sitting_memory_score(issue, &ticket, a, &now, &seat).is_some())
-            .take(8)
-        {
-            if let Some((days, clock)) = stamp_key(atom["ts"].as_str().map(local_stamp).as_deref())
+    // A sitting already spent its one pack read. The timeline keeps the
+    // tracker's rows and does not ask the pack for another island.
+    if sitting_listing().is_none() {
+        if let Ok(island) = packset_island(&title, false) {
+            if !pack().is_ok_and(|client| client.carried()) {
+                events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
+                let skip = events.len().saturating_sub(limit);
+                return Ok((title, events[skip..].to_vec()));
+            }
+            let ticket = sitting_ticket_text(issue, &title);
+            let now = now_utc();
+            let seat = seat_name();
+            for atom in island["island"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(reviewable)
+                .filter(|a| sitting_memory_score(issue, &ticket, a, &now, &seat).is_some())
+                .take(8)
             {
-                events.push(Event {
-                    days,
-                    clock,
-                    source: "memory",
-                    text: format!(
-                        "[{}] {}",
-                        atom_label(atom),
-                        atom["text"].as_str().unwrap_or("").trim()
-                    ),
-                });
+                if let Some((days, clock)) =
+                    stamp_key(atom["ts"].as_str().map(local_stamp).as_deref())
+                {
+                    events.push(Event {
+                        days,
+                        clock,
+                        source: "memory",
+                        text: format!(
+                            "[{}] {}",
+                            atom_label(atom),
+                            atom["text"].as_str().unwrap_or("").trim()
+                        ),
+                    });
+                }
             }
         }
     }
@@ -36982,7 +37151,83 @@ fn format_sitting_recall(rows: &[Value]) -> String {
 /// writer that is reloading its encoder.
 const SITTING_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// One pack read at the start of the memory half of a sitting. A busy
+/// writer is shed inside this, and the sitting does not ask again.
+const SITTING_PACK_READ: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub const SITTING_WORDS_LINE: &str = "ranked by words; the pack search did not answer in time\n";
+
+/// The one line a quiet sitting prints when the pack or the encoder did
+/// not answer. `--verbose` keeps the section that failed.
+pub const MEMORY_DEGRADED_LINE: &str = "memory degraded: ranked by words\n";
+
+/// The atoms one sitting read, shared by due, recall, the playbook and
+/// the timeline. `ok` is false when that read did not answer; later
+/// sections then do not open another socket.
+struct SittingListing {
+    atoms: std::sync::Arc<Vec<Value>>,
+    ok: bool,
+}
+
+impl Clone for SittingListing {
+    fn clone(&self) -> Self {
+        Self {
+            atoms: std::sync::Arc::clone(&self.atoms),
+            ok: self.ok,
+        }
+    }
+}
+
+thread_local! {
+    static SITTING_LISTING: std::cell::RefCell<Option<SittingListing>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn sitting_listing() -> Option<SittingListing> {
+    SITTING_LISTING.with(|slot| slot.borrow().clone())
+}
+
+/// Read the pack once, inside [`SITTING_PACK_READ`], and keep that answer
+/// until the guard drops. A second call while the guard is held is the
+/// same answer.
+struct SittingListingGuard {
+    _deadline: pack_link::CommandDeadline,
+    _clock: pack_link::PackClock,
+}
+
+impl SittingListingGuard {
+    fn enter() -> Self {
+        let deadline = pack_link::CommandDeadline::enter(SITTING_PACK_READ);
+        let clock = pack_link::PackClock::enter(SITTING_PACK_READ);
+        let listing = match pack() {
+            Ok(client) => match atoms_lean(&client, &client.workspace()) {
+                Ok(atoms) => SittingListing {
+                    atoms: std::sync::Arc::new(atoms),
+                    ok: true,
+                },
+                Err(_) => SittingListing {
+                    atoms: std::sync::Arc::new(Vec::new()),
+                    ok: false,
+                },
+            },
+            Err(_) => SittingListing {
+                atoms: std::sync::Arc::new(Vec::new()),
+                ok: false,
+            },
+        };
+        SITTING_LISTING.with(|slot| *slot.borrow_mut() = Some(listing));
+        Self {
+            _deadline: deadline,
+            _clock: clock,
+        }
+    }
+}
+
+impl Drop for SittingListingGuard {
+    fn drop(&mut self) {
+        SITTING_LISTING.with(|slot| *slot.borrow_mut() = None);
+    }
+}
 
 /// [`sitting`]. Open blockers do not stop the sitting: the blockers
 /// section labels them `blocked-by: <ids>`. `anyway` is accepted and
@@ -37154,10 +37399,11 @@ pub fn sitting_stream_started(
         emit_piece(&mut out, &mut emit, &line);
     }
 
-    // One budget for every search and island read after the claim. A
-    // writer reloading its encoder spends it once; the next read returns.
-    let _search_clock = pack_link::PackClock::enter(SITTING_SEARCH_BUDGET);
+    // One read for due, recall, the playbook and the timeline. A busy
+    // pack costs this budget once. The sweep is not part of it: that
+    // write used to run after the clock was dropped and wait on its own.
     let _quiet_pack = pack_link::QuietPack::enter();
+    let _listing = SittingListingGuard::enter();
     let mut fell_back = false;
 
     let mut piece = String::new();
@@ -37292,18 +37538,12 @@ pub fn sitting_stream_started(
     piece.push_str(words_line(&mut fell_back));
     emit_piece(&mut out, &mut emit, &piece);
 
-    // The listing and the recall are printed. Drop the recall clock for
-    // the sweep and put back the time it had not spent, so the sweep
-    // cannot eat that budget and the timeline still shares it. The quiet
-    // mark stays across the sweep: a read that already failed does not
-    // start another wait afterwards.
-    let left = pack_link::clock_left().unwrap_or(SITTING_SEARCH_BUDGET);
-    drop(_search_clock);
+    // The sweep is a write with its own long budget. A sitting does not
+    // start it: the listing above is the one pack read. `ljos due` sweeps.
     let swept = sitting_review_sweep();
     if !swept.is_empty() {
         emit_piece(&mut out, &mut emit, &swept);
     }
-    let _search_clock = pack_link::PackClock::enter(left);
 
     let mut piece = String::new();
     sections.heading(&mut piece, "timeline");
@@ -37313,6 +37553,10 @@ pub fn sitting_stream_started(
     }
     piece.push_str(words_line(&mut fell_back));
     emit_piece(&mut out, &mut emit, &piece);
+    let next = plan::next_item_line(issue);
+    if !next.is_empty() {
+        emit_piece(&mut out, &mut emit, &next);
+    }
     sections.finish();
     Ok(out)
 }
@@ -38422,6 +38666,14 @@ pub fn finish(
     gen: Option<u64>,
     close: bool,
 ) -> Result<String> {
+    if let Some(mut ticked) = plan::tick_checklist(issue)? {
+        if let Some(text) = lesson.map(str::trim).filter(|text| !text.is_empty()) {
+            for claim in lesson_claims(text) {
+                ticked.push_str(&finish_lesson(issue, &claim));
+            }
+        }
+        return Ok(ticked);
+    }
     let pending = retry_pending_claim(issue);
     // A close asks whether a person is present, before any write. A
     // runner with no terminal is refused unless a standing grant covers
@@ -59083,13 +59335,10 @@ mod tests {
             encoder_degraded_state()
         );
         let sat = compact_sitting(&full, "Software-x");
-        assert!(
-            sat.contains(
-                "ljos is ready: memory works (ranking is lexical: encoder unavailable; `ljos doctor --all` for why)"
-            ),
-            "{sat}"
-        );
-        assert!(sat.contains(LEXICAL_ONLY_LINE.trim_end()), "{sat}");
+        assert!(sat.contains("ljos is ready: memory works."), "{sat}");
+        assert!(sat.contains(MEMORY_DEGRADED_LINE.trim_end()), "{sat}");
+        assert!(!sat.contains("lexical-only"), "{sat}");
+        assert!(!sat.contains(ENCODER_DEGRADED), "{sat}");
     }
 
     #[test]
@@ -59162,7 +59411,7 @@ mod tests {
         assert_eq!(
             short,
             "ljos is ready: memory, tracker and command guard work.\n\
-encoder down: the pack ranks by words alone\n\
+memory degraded: ranked by words\n\
 2 due; the soonest: abc\n\
 claimed Software-x for ljos-bot@ux-fix\n\
 What the seat remembers for this task:\n\
@@ -59170,6 +59419,49 @@ What the seat remembers for this task:\n\
 - Keep hooks under 8 s.\n\
 Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sitting; `ljos sitting Software-x --verbose` prints every section.\n"
         );
+    }
+
+    #[test]
+    fn a_quiet_sitting_names_degraded_memory_once_and_counts_quiet_claims() {
+        let full = "\
+== doctor
+ok\tpack\tanswers
+warn\tencoder\trecall is degraded: down
+memory-unavailable: the encoder is down
+warn\tmcp\twarning: /home/box/.cursor/mcp.json is missing ljos-mcp
+== due
+memory-unavailable: GET /v1/atoms failed
+packsetd busy, retrying later
+== island: Work
+recall: GET /v1/atoms failed: packsetd busy
+ranked by words; the pack search did not answer in time
+== claim
+claimed day-1 for ada
+day-old  old title  2 days  ljos finish day-old / ljos note day-old \"...\"
+day-b  older  3 days  ljos finish day-b / ljos note day-b \"...\"
+day-c  oldest  4 days  ljos finish day-c / ljos note day-c \"...\"
++29 more (ljos claims --mine)
+tracker: 144 unpushed, 7 uncommitted edits
+next: day-2  measure the files
+";
+        let short = compact_sitting(full, "day-1");
+        assert_eq!(
+            short.matches("memory degraded: ranked by words").count(),
+            1,
+            "{short}"
+        );
+        assert!(
+            short.contains("32 quiet claims (`ljos claims --mine`)"),
+            "{short}"
+        );
+        assert!(short.contains("next: day-2  measure the files"), "{short}");
+        assert!(!short.contains("ljos finish day-old"), "{short}");
+        assert!(!short.contains("+29 more"), "{short}");
+        assert!(!short.contains("unpushed"), "{short}");
+        assert!(!short.contains("mcp.json"), "{short}");
+        assert!(!short.contains("GET /v1/atoms"), "{short}");
+        assert!(!short.contains("packsetd busy"), "{short}");
+        assert!(!short.contains("ranked by words;"), "{short}");
     }
 
     /// The doctor headline, the mcp warning and the encoder line are said
@@ -59313,7 +59605,6 @@ host: the kernel killed a process within a day; the sitting opens, and one build
         assert_eq!(
             compact_sitting(full, "ljos-a5q4"),
             "tracker: ljos-a5q4 STARTED under ljosbot@2wbpt11jxn\n\
-tracker: 1509 unpushed, 7 uncommitted edits\n\
 ljos is ready: memory works.\n\
 without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)\n\
 host: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next\n\

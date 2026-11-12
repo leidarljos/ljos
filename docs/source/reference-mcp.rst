@@ -29,3 +29,10 @@ without the ``ljos_`` prefix, where ``core`` stands for the core set. A call
 to a tool the server does not list is refused with the shell command to
 run instead. A tool that fails answers with ``isError`` set and the reason
 as text, so the model reads it as a tool result.
+
+``ljos_start`` takes an optional ``items`` list. The ``task`` is the parent title.
+One call files that parent and the items in one tracker commit, claims the
+parent, and returns the checklist with ids. Pass ``issue`` with ``items`` to
+file the items under that ticket instead. ``ljos_sitting`` takes the same
+``items`` list, and ``plan`` when the parent does not exist yet. ``ljos_finish``
+on a checklist id marks it done and names the next item.

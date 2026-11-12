@@ -10,14 +10,16 @@ agent, in the editor harness or any other tool, can see who has it and what it t
 
 ## Start
 
-1. Find or make the ticket. `ljos file "TITLE" --top -p PROJECT` makes one and
-   prints its id (see the ljos-file skill).
-2. `ljos sitting ISSUE`. It prints whether ljos is ready, anything that
-   needs action (a store down, cards the person froze, reviews due, open
-   blockers), the memories the title brings up, and the claim. It stops at
+1. Open the day's work with `ljos sitting --plan "TITLE" -p PROJECT -- "item 1" "item 2"`.
+   That files the parent and the items in one tracker commit, claims the parent,
+   and prints the checklist with ids. The next line is the unfinished item.
+   `ljos ready --mine` names it again. `ljos finish ITEM` ticks that item off.
+   One ticket, with no checklist, is still `ljos file "TITLE" --top -p PROJECT`
+   and then `ljos sitting ISSUE`.
+2. `ljos sitting ISSUE` prints whether ljos is ready, anything that
+   needs action, the memories the title brings up, and the claim. It stops at
    the first store that does not answer. Fix that before going on.
-   `ljos sitting ISSUE --verbose` prints every section in full, the doctor's
-   rows, recall, the working set and the timeline included.
+   `ljos sitting ISSUE --verbose` prints every section in full.
 3. Read what it printed. The memories and the cards are the constraints for
    this work.
 

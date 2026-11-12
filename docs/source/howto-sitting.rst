@@ -6,6 +6,26 @@ Sit an issue
 ============
 
 
+Open the day's work
+====================
+
+A plan files the parent and its checklist in one tracker commit, claims the parent, and prints each item with its id.
+
+.. code:: console
+
+   $ ljos sitting --plan "Ship the codec" -p day -- "measure the files" "pick a default"
+   day-ab12  Ship the codec
+     day-cd34  measure the files
+     day-ef56  pick a default
+   next: day-cd34  measure the files
+   $ ljos finish day-cd34
+   ticked day-cd34
+   next: day-ef56  pick a default
+   $ ljos ready --mine
+   next: day-ef56  pick a default
+
+``ljos ready --mine`` names the next unfinished item. ``ljos finish ITEM`` ticks that item off. A sitting without ``--verbose`` is the short form: what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``.
+
 Start a sitting, and end one
 ============================
 

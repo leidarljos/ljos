@@ -347,7 +347,11 @@ fn a_seat_sees_its_two_stale_claims_and_not_another_seats() {
     assert_eq!(std::fs::read(&world.org).unwrap(), before);
 
     let sat = world.ok("ada", &["sitting", sitting]);
-    assert_eq!(quiet_lines(&sat), expected, "{sat}");
+    assert!(
+        sat.contains("2 quiet claims (`ljos claims --mine`)"),
+        "{sat}"
+    );
+    assert!(quiet_lines(&sat).is_empty(), "{sat}");
     assert!(sat.contains("is yours"), "{sat}");
     assert!(!sat.contains(fresh), "{sat}");
     assert!(!sat.contains(bea), "{sat}");
@@ -408,13 +412,23 @@ fn claims_past_the_handful_end_on_one_more_line() {
     assert!(!mine.contains("more (ljos claims --mine)"), "{mine}");
     assert!(mine.contains(&ids[3]), "{mine}");
 
-    for args in [vec!["inbox"], vec!["sitting", ids[4].as_str()]] {
-        let out = world.ok("ada", &args);
-        assert_eq!(quiet_lines(&out), shown, "{args:?}\n{out}");
-        assert!(
-            out.contains("+1 more (ljos claims --mine)"),
-            "{args:?}\n{out}"
-        );
-        assert!(!out.contains(&ids[3]), "{args:?}\n{out}");
-    }
+    let inbox = world.ok("ada", &["inbox"]);
+    assert_eq!(quiet_lines(&inbox), shown, "{inbox}");
+    assert!(inbox.contains("+1 more (ljos claims --mine)"), "{inbox}");
+    assert!(!inbox.contains(&ids[3]), "{inbox}");
+
+    let sat = world.ok("ada", &["sitting", &ids[4]]);
+    assert!(
+        sat.contains("4 quiet claims (`ljos claims --mine`)"),
+        "{sat}"
+    );
+    assert!(quiet_lines(&sat).is_empty(), "{sat}");
+    assert!(!sat.contains(&ids[3]), "{sat}");
+
+    let verbose = world.ok("ada", &["sitting", &ids[4], "--verbose"]);
+    assert_eq!(quiet_lines(&verbose), shown, "{verbose}");
+    assert!(
+        verbose.contains("+1 more (ljos claims --mine)"),
+        "{verbose}"
+    );
 }

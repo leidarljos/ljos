@@ -862,8 +862,12 @@ pub struct StartArgs {
     /// booked a commit in, or the working directory when that is a git checkout.
     #[serde(default)]
     pub repo: Option<String>,
-    /// What this sitting does, in one sentence.
+    /// What this sitting does, in one sentence. With `items`, this is the plan's title.
     pub task: String,
+    /// Checklist items under the plan. With `issue`, they are children of that ticket.
+    /// Absent, `ljos_start` only notes the task.
+    #[serde(default)]
+    pub items: Vec<String>,
     /// Two or more options, written on the filed or claimed issue as `Options: A, B`.
     #[serde(default)]
     pub options: Vec<String>,
@@ -985,8 +989,15 @@ pub struct GradeArgs {
 /// A sitting to open.
 #[derive(Deserialize, JsonSchema)]
 pub struct SittingArgs {
-    /// The tracker id of the issue (`proj-1a2b`).
-    pub issue: String,
+    /// The tracker id of the issue (`proj-1a2b`). Absent when `plan` files a new parent.
+    #[serde(default)]
+    pub issue: Option<String>,
+    /// File this parent and `items` in one tracker commit, then sit the parent.
+    #[serde(default)]
+    pub plan: Option<String>,
+    /// Checklist items. With `issue`, children of that ticket. With `plan`, children of the new parent.
+    #[serde(default)]
+    pub items: Vec<String>,
     /// Your name; a named worker occupies one slot per issue. Absent, this
     /// conversation's holder: the session the runner stamped, else the seat
     /// named after the client that connected, tagged with the runner's process.
@@ -2007,7 +2018,7 @@ impl LjosServer {
     // ---- the session graph --------------------------------------------------
 
     #[tool(
-        description = "Call this before any repo work. Pass the task in one sentence, and the issue to claim or the repo to file it in. It recalls what the seat knows and claims the issue. Shutdown finishes that claim if you do not.",
+        description = "Call this before any repo work. Pass the task in one sentence, and the issue to claim or the repo to file it in. Pass items to file that plan and its checklist in one tracker commit, then claim the parent. It recalls what the seat knows and claims the issue. Shutdown finishes that claim if you do not.",
         annotations(
             title = "Start work",
             read_only_hint = false,
@@ -2022,6 +2033,23 @@ impl LjosServer {
     ) -> Result<Json<Said>, McpError> {
         if !args.options.is_empty() {
             ljos_cli::options_line(&args.options).map_err(refused)?;
+        }
+        if !args.items.is_empty() {
+            let opened = match args.issue.as_deref() {
+                Some(issue) => ljos_cli::plan::add_items(issue, &args.items),
+                None => ljos_cli::plan::open_plan(None, &args.task, &args.items),
+            }
+            .map_err(|e| refused(anyhow::anyhow!(e)))?;
+            let assignee = call_assignee("start", None)?;
+            let claimed =
+                claim(&opened.parent, &assignee).unwrap_or_else(|err| format!("claim: {err:#}\n"));
+            let mut text = format!("{}{claimed}", opened.text);
+            if !args.options.is_empty() {
+                let extra = ljos_cli::append_issue_options(&opened.parent, &args.options)
+                    .map_err(|e| refused(anyhow::anyhow!("options on {}: {e:#}", opened.parent)))?;
+                text.push_str(&extra);
+            }
+            return Ok(Json(Said { text, aside: None }));
         }
         let mut text =
             ljos_cli::bookkeep::start_work(args.issue.as_deref(), args.repo.as_deref(), &args.task)
@@ -2084,7 +2112,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the blockers, the playbook copied before recall, the working set, reclaim, and the claim. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Sitting always binds one of the closed set before claim. The name is a tracker playbook: note until finish or release. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
+        description = "Call this to begin work on an issue, or pass plan and items to file that checklist in one tracker commit and sit the parent. It is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Omit assignee.",
         annotations(
             title = "Open a sitting",
             read_only_hint = false,
@@ -2097,15 +2125,38 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<SittingArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let text = sitting_gated(
-            &args.issue,
+        let (issue, preface) = if args.items.is_empty() {
+            let issue = args.issue.clone().ok_or_else(|| {
+                refused(anyhow::anyhow!(
+                    "ljos_sitting: pass the issue, or plan and items"
+                ))
+            })?;
+            (issue, String::new())
+        } else {
+            let opened = match (args.plan.as_deref(), args.issue.as_deref()) {
+                (_, Some(issue)) => ljos_cli::plan::add_items(issue, &args.items),
+                (Some(title), None) => ljos_cli::plan::open_plan(None, title, &args.items),
+                (None, None) => {
+                    return Err(refused(anyhow::anyhow!(
+                        "ljos_sitting: pass plan and items, or an issue"
+                    )))
+                }
+            }
+            .map_err(|e| refused(anyhow::anyhow!(e)))?;
+            (opened.parent, opened.text)
+        };
+        let sat = sitting_gated(
+            &issue,
             &call_assignee("sitting", args.assignee.as_deref())?,
             &self.cards_dir,
             args.anyway,
             args.playbook.as_deref(),
         )
         .map_err(refused)?;
-        Ok(Json(Said { text, aside: None }))
+        Ok(Json(Said {
+            text: format!("{preface}{sat}"),
+            aside: None,
+        }))
     }
 
     #[tool(

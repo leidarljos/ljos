@@ -190,12 +190,13 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
         calls.contains("claimdag claim"),
         "the issue was not claimed:\n{calls}"
     );
-    assert!(
-        searches.load(Ordering::SeqCst) > 0,
-        "the stalling search was never asked"
+    assert_eq!(
+        searches.load(Ordering::SeqCst),
+        0,
+        "a sitting reads the listing once and does not ask the stalling search:\n{stdout}"
     );
     assert!(
-        stdout.contains("ranked by words; the pack search did not answer in time"),
+        !stdout.contains("ranked by words; the pack search did not answer in time"),
         "{stdout}"
     );
     assert!(
