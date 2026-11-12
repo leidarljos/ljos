@@ -11,13 +11,13 @@ Check the seat
 
 .. [[[cog import ljos_version as v; v.lines("", "The block is the ``ljos`` row from that command on a scratch seat, taken from ljos {version}.", "")]]]
 
-The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.41.6.
+The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.41.7.
 
 .. [[[end]]]
 
 .. [[[cog import ljos_version as v; v.lines("", "``ljos --version`` printed ``ljos {version}``.", "")]]]
 
-``ljos --version`` printed ``ljos 0.41.6``.
+``ljos --version`` printed ``ljos 0.41.7``.
 
 .. [[[end]]]
 
@@ -30,9 +30,9 @@ The scratch ``PATH`` holds only this ``ljos``, so the sample does not show the o
 .. code:: text
 
    $ ljos --version
-   ljos 0.41.6
+   ljos 0.41.7
    $ ljos doctor --all
-   ok  ljos    /path/to/ljos  0.41.6  crates.io (cached) 0.41.6
+   ok  ljos    /path/to/ljos  0.41.7  crates.io (cached) 0.41.7
 
 .. END ljos-sample doctor
 

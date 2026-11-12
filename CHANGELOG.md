@@ -5,6 +5,22 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.41.7 (2026-11-12)
+
+### Fixes
+
+- A sitting or claim that sends no conversation id sits as the seat.
+  The holder is stable for that seat, the same sitting `ljos sitting` takes when `LJOS_SEAT` is set and no conversation is named.
+  A call that passes `_meta.conversation_id` still sits as that conversation.
+- `ljos mesh pull` leaves a lane row already in the pack unchanged, by the text's SHA-256 or by the lane and the row id, and counts it as unchanged.
+  The same pull integrates `imported,unintegrated` rows into the seat, deduplicated against the seat's existing memories, and relabels them `imported,integrated` with `lane:` and `seat:` tags so search ranks them.
+  A later import of the same lane file is unchanged as well.
+- `ljos search` drops another seat's hit that neither names the subject nor reaches encoder cosine 0.66.
+  That cosine is the line already used when the encoder lists a hit at the top.
+  When those were the only rows, the command says nothing relevant was found.
+  A busy pack still answers by words, and a hit that names the subject stays.
+
+
 ## 0.41.6 (2026-11-12)
 
 ### Fixes

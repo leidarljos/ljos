@@ -1,9 +1,9 @@
 .. [[[cog import ljos_version as v; v.lines("", ":description: This page describes ljos {version}.", ":cover: https://leidarljos.github.io/ljos/_static/og.png", "", "This page describes ljos {version}.", "")]]]
 
-:description: This page describes ljos 0.41.6.
+:description: This page describes ljos 0.41.7.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-This page describes ljos 0.41.6.
+This page describes ljos 0.41.7.
 
 .. [[[end]]]
 
