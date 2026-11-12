@@ -3269,6 +3269,15 @@ fn pid_exists(pid: u32) -> bool {
 /// when `ps` named it.
 #[cfg(any(test, target_os = "macos"))]
 fn ps_parent_and_comm(ps: &Path, pid: u32) -> Result<Option<(u32, String)>, ()> {
+    // An out-of-range pid is gone. Calling `ps -p` with u32::MAX made
+    // some Linux ps print an error line, which this function treated as
+    // an unknown live holder.
+    let Ok(native) = libc::pid_t::try_from(pid) else {
+        return Ok(None);
+    };
+    if native <= 0 {
+        return Ok(None);
+    }
     let mut cmd = std::process::Command::new(ps);
     cmd.args(["-o", "ppid=,comm=", "-p", &pid.to_string()]);
     let out = bounded_output(&mut cmd).map_err(|_| ())?;
