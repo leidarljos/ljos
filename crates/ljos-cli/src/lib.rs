@@ -46746,6 +46746,7 @@ mod tests {
         let outside = SeatDir::new("guard-shim");
         let outside_home = outside.path().join("home");
         let outside_cwd = outside.path().join("work");
+        let outside_proj = outside.path().join("proj");
         std::fs::create_dir_all(&outside_home).unwrap();
         std::fs::create_dir_all(&outside_cwd).unwrap();
         std::fs::set_permissions(&outside_home, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -46764,7 +46765,7 @@ mod tests {
         publish_exe(&guard.join("rm"), super::GUARD_SHIM);
         let _ = std::fs::remove_file(&marker);
         let removed = std::process::Command::new(guard.join("rm"))
-            .args(["-rf", "/home/ubuntu/proj"])
+            .args(["-rf", outside_proj.to_str().unwrap()])
             .current_dir(&sandbox)
             .env("HOME", &outside_home)
             .env(
@@ -46976,13 +46977,18 @@ mod tests {
             .iter()
             .map(|k| ((*k).to_string(), std::env::var_os(k)))
             .collect();
+        let outside = SeatDir::new("guard-home");
+        let outside_home = outside.path().join("home");
+        let outside_proj = outside.path().join("proj");
+        std::fs::create_dir_all(&outside_home).unwrap();
+        std::fs::set_permissions(&outside_home, std::fs::Permissions::from_mode(0o755)).unwrap();
         unsafe {
             std::env::set_var("POLICYD_BIN", &policyd);
             std::env::remove_var("PACKSET_URL");
             std::env::remove_var("PACKSET_PORT");
             std::env::remove_var("LJOS_OFF");
             std::env::remove_var("LJOS_GUARD");
-            std::env::set_var("HOME", "/home/ubuntu");
+            std::env::set_var("HOME", &outside_home);
             std::env::set_var("XDG_DATA_HOME", dir.path().join("data"));
         }
         let _ = super::take_guard_note();
@@ -47029,7 +47035,7 @@ mod tests {
         }
         assert!(super::tcb_verdict("git branch -D gone").is_none());
         assert!(
-            super::static_guard("rm -rf /home/ubuntu/proj").is_none(),
+            super::static_guard(&format!("rm -rf {}", outside_proj.display())).is_none(),
             "a temp HOME does not judge rm -rf"
         );
         assert!(
@@ -52417,8 +52423,12 @@ mod tests {
     #[test]
     fn a_reranked_search_keeps_the_encoder_s_first_hit() {
         let _env = env_guard();
+        let home = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
-        let _state = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let _state = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+        ]);
         let row = |id: &str, text: &str, rank: u32| {
             serde_json::json!({
                 "id": id, "text": text, "score": 2.0, "kind": "lesson",
@@ -53501,9 +53511,11 @@ mod tests {
     #[test]
     fn the_rerank_score_orders_the_hits_and_a_null_one_merges_by_match() {
         let _env = env_guard();
+        let home = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
         let _hold = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
             ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
         ]);
@@ -53576,9 +53588,11 @@ mod tests {
     #[test]
     fn a_reranked_body_that_does_not_parse_leaves_the_pool() {
         let _env = env_guard();
+        let home = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
         let _hold = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
             ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
         ]);
@@ -70151,6 +70165,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     #[test]
     fn a_slow_rerank_leaves_the_prompt_its_memory() {
         let _env = env_guard();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HoldEnv::set(&[("HOME", home.path().to_str().unwrap())]);
         let url = serve_slow_rerank();
         let _held = PackUrl::set(&url);
         let call = HookCall {
