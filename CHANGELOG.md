@@ -5,6 +5,43 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.41.2 (2026-11-11)
+
+### Features
+
+- `ljos mesh pull --seat SEAT --from DIR` imports lane JSON Lines (JSONL) files into a seat, skips duplicate texts, and writes a stable seed.
+  `ljos mesh push --seat SEAT --to DIR` writes that seat's memories to the handoff as one lane file.
+  A pull or a push takes a file lock, tags each lesson with its source lane, and retries a pack that answers 503 or stops on 408.
+
+### Fixes
+
+- A pack read with its own short budget no longer fails the whole MCP tool call when it times out.
+  The call still stops when its own bound runs out, and that line still names packsetd.
+- An MCP tool call stops at 30 seconds, or at `LJOS_MCP_TIMEOUT` seconds, or at `LJOS_MCP_TIMEOUT_MS`.
+  A pack, a git command, a habitat child or a lock that is still going returns one line naming what timed out.
+  `ljos_note` with no issue stores the note with the label `unattached-note` and succeeds.
+  The server instructions say to use `LJOS_SEAT` when it is set, otherwise the seat from `seats.map`, and that `ljos seat` prints the name.
+  `ljos remember` prints the warning for a sentence over 29 words only when `--verbose` is set.
+- CI runs the release installer's archive path against a local directory of the archives the release workflow publishes, for all four targets, and the release job requires those ljos archives to be in the dist it publishes.
+  A missing archive on a machine whose rustc is older than the crate's floor stops in one line that names that version, and cargo is not started.
+- Exporting a seat's memories and importing them into a fresh pack keeps each lesson once, and importing that file again does not add a copy.
+- The installer fetches `vissue-v<version>-<target>.tar.gz`, the archive the vissue release publishes.
+  `ljos file` reads the id from the heading line vissue prints after `project: NAME`.
+  A tracker commit with no git author names `user.name` and `user.email`.
+  The installer's force-push sample asks about a topic branch, and the warning is `git-force-push`.
+- `ljos forget` retires an imported memory by its short id or its full id.
+  The row stays in the slot, marked retired, and search leaves it out.
+  An id that names that memory is not also looked up as a tracker issue.
+- `ljos search` and recall rank a plain-language task by the lesson that names its concept, including a name the task did not use.
+- `search`, `remember`, `file`, `note`, and `finish` need only `LJOS_SEAT`, ask no question, and say in one line when the pack is down.
+
+### Documentation
+
+- The README and the getting-started page lead with the measured results, set ljos beside the other memory and tracker tools, and then follow the tutorial, the how-to guides and the reference.
+  The first sitting is install, `ljos remember`, `ljos search` and `ljos file`.
+  The sample output is from a run of those commands, and the cold hook figures name the measurement they come from.
+
+
 ## 0.41.1 (2026-11-11)
 
 ### Fixes

@@ -2,7 +2,7 @@
 #+options: toc:nil num:nil
 
 # [[[cog import ljos_version as v; v.lines("The first sitting: a lesson, a search and a ticket, then a second seat. It describes ljos {version}.")]]]
-The first sitting: a lesson, a search and a ticket, then a second seat. It describes ljos 0.41.1.
+The first sitting: a lesson, a search and a ticket, then a second seat. It describes ljos 0.41.2.
 # [[[end]]]
 
 Do the first three sections in order. They install ljos, store a lesson, search it, and file a ticket.
@@ -27,7 +27,7 @@ A release attaches that script:
 $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
 #+end_src
 
-The =install.sh= attached to the 0.41.1 release asks for =vissue-cli-<target>.tar.xz=.
+The =install.sh= attached to the 0.41.1 release asked for =vissue-cli-<target>.tar.xz=. The 0.41.2 script fetches =vissue-v<version>-<target>.tar.gz=.
 The vissue release publishes =vissue-v<version>-<target>.tar.gz=. Use the script in this tree until a later release.
 
 The programs go to =~/.local/bin=. They are =ljos=, =ljos-mcp=, =packset=,

@@ -8,7 +8,7 @@ It calls no model, and every store is a file a person can open.
 `ljos onboard` knows ten runners, among them Claude Code, Codex and Cursor.
 
 [//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
-These notes describe ljos 0.41.1.
+These notes describe ljos 0.41.2.
 [//]: # ([[[end]]])
 
 ## What it has done
@@ -56,7 +56,7 @@ A release attaches that same script:
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
 ```
 
-The `install.sh` attached to the 0.41.1 release asks for `vissue-cli-<target>.tar.xz`. The vissue release publishes `vissue-v<version>-<target>.tar.gz`. Use the script in this tree until a later release.
+The `install.sh` attached to the 0.41.1 release asked for `vissue-cli-<target>.tar.xz`. The 0.41.2 script fetches `vissue-v<version>-<target>.tar.gz`, the archive the vissue release publishes.
 
 `--no-embed` leaves out the encoder. Search then matches words, and `ljos search` prints `ranking is lexical: encoder unavailable`.
 The installer checks each download against its published SHA-256 sum. It sets up the tracker, the memory writer and the deed store, then runs `ljos onboard` for each runner it finds.
