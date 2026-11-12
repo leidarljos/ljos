@@ -13,7 +13,7 @@ These notes describe ljos 0.41.6.
 
 ## What it has done
 
-- 7,946 tokens for the 20 core Model Context Protocol (MCP) tools, against 17,900 for all 52 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
+- 8,045 tokens for the 20 core Model Context Protocol (MCP) tools, against 17,999 for all 52 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
 - 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
 - The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
 - packset, the memory writer, on LongMemEval_S session retrieval over 470 questions: recall@5 0.914 with BM25+ alone, 0.949 with BM25+ fused with e5-large-v2 ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). This scores retrieval, not answer accuracy.
@@ -116,7 +116,7 @@ tools, guard and memory first: `rule`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. `measurements/mcp-size.txt` records
-7,946 tokens for the core set against 17,900 for all fifty-two.
+8,045 tokens for the core set against 17,999 for all fifty-two.
 `LJOS_MCP_TOOLS=all` lists every tool.
 
 ```json

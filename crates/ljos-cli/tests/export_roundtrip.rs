@@ -293,12 +293,15 @@ fn memory_set(path: &Path) -> std::collections::BTreeSet<(String, String, String
         let Some(text) = value["text"].as_str() else {
             continue;
         };
+        // Import tags the file stem as a lane. That is provenance of the
+        // file, not of the memories the export carried.
         let mut labels: Vec<String> = value["entities"]
             .as_array()
             .map(|items| {
                 items
                     .iter()
                     .filter_map(serde_json::Value::as_str)
+                    .filter(|tag| !tag.starts_with("lane:"))
                     .map(str::to_string)
                     .collect()
             })
