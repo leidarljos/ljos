@@ -297,7 +297,7 @@ Another seat's hit is kept when it names the subject, which is a lexical
 score of at least 0.5, or when the encoder's cosine with the query is at
 least 0.66. Packset sends that cosine apart from the fused score so a
 client can set a floor on it. 0.66 is the line already used when the
-encoder ranks a hit first and the hit shares no word with the query: on
+encoder lists a hit at the top and the hit shares no word with the query: on
 that measured set, an unrelated prompt's best cosine stayed at 0.653.
 A cross-seat row under the line does not fill a short list. When those
 were the only rows, the command prints ``Nothing relevant was found.``
