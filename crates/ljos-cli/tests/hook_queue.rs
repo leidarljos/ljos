@@ -597,8 +597,8 @@ fn a_full_queue_refuses_the_gate_with_its_reason() {
     let _ = server.wait();
 }
 
-/// The server dies while a call waits in its queue. The call goes to the
-/// single-flight lock with what is left of its budget; when that lock
+/// The server dies while a call waits in its queue. The call goes to its
+/// seat's flight lock with what is left of its budget; when that lock
 /// stays taken too, the gate is refused, not let through.
 #[test]
 fn a_server_killed_mid_wait_falls_back_and_fails_closed() {
@@ -618,7 +618,7 @@ fn a_server_killed_mid_wait_falls_back_and_fails_closed() {
         s
     };
     let _starting = lock_file(&hab.run.join("ljos/hookd.start"));
-    let flight = lock_file(&hab.run.join("ljos/hookd.flight"));
+    let flight = lock_file(&hab.run.join("ljos/hookd.flight-probe-seat"));
     let mut cmd = ljos(&hab, &["hook"]);
     cmd.env("LJOS_HOOK_ADMIT_MS", "1500");
     let child = feed(cmd, &cursor_shell(&hab, "killed", "ls"));
@@ -643,6 +643,74 @@ fn a_server_killed_mid_wait_falls_back_and_fails_closed() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
+}
+
+/// Many seats wake at once and no hook server is listening. One seat's
+/// flight lock, and a lock left by a process that has already exited, do
+/// not hold the others. Each call answers inside a slice of the admit
+/// budget instead of waiting it out on a lock it does not share.
+#[test]
+fn seats_do_not_block_one_another_when_they_wake_together() {
+    let hab = hab("seats");
+    let _starting = lock_file(&hab.run.join("ljos/hookd.start"));
+    // The lock every seat used to share. Holding it must not slow another seat.
+    let mut shared = lock_file(&hab.run.join("ljos/hookd.flight"));
+    writeln!(shared, "{}", std::process::id()).unwrap();
+    let mut stuck = lock_file(&hab.run.join("ljos/hookd.flight-stuck"));
+    writeln!(stuck, "{}", std::process::id()).unwrap();
+    let mut finished = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let dead = finished.id();
+    finished.kill().unwrap();
+    let _ = finished.wait();
+    let gone = hab.run.join("ljos/hookd.flight-gone");
+    std::fs::write(&gone, format!("{dead}\n")).unwrap();
+    let leaked = lock_file(&gone);
+    let n = 6;
+    let started = Instant::now();
+    let mut calls = Vec::new();
+    for i in 0..n {
+        let seat = if i == 0 {
+            "gone".to_string()
+        } else {
+            format!("seat-{i}")
+        };
+        let mut cmd = ljos(&hab, &["hook"]);
+        cmd.env("LJOS_SEAT", &seat);
+        cmd.env("LJOS_HOOK_ADMIT_MS", "4000");
+        calls.push((
+            seat,
+            feed(cmd, &cursor_shell(&hab, &format!("wake-{i}"), "true")),
+        ));
+    }
+    for (seat, child) in calls {
+        let out = within(
+            child,
+            Duration::from_millis(1500),
+            &format!("seat {seat} in a wake burst"),
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{seat} failed\n{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("\"permission\":\"allow\""),
+            "{seat}: {stdout}\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("stayed taken"),
+            "{seat} waited on another seat's lock: {stderr}"
+        );
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the seats queued on one lock for {:?}",
+        started.elapsed()
+    );
+    drop(stuck);
+    drop(leaked);
+    drop(shared);
 }
 
 /// `ljos doctor` says how long gate calls took and how long they waited.

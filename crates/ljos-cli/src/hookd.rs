@@ -10,9 +10,11 @@
 //! tool's, and a server judging on its behalf would have to take the
 //! caller's word for all of them.
 //!
-//! When no server answers, the first call starts one, and the calls that
-//! meet no server take one host-wide lock in turn. A missing server costs
-//! throughput, never the cap.
+//! When no server answers, the first call starts one. A call that still
+//! meets no server takes a short lock for its own seat. Another seat's
+//! lock is a different file, so a burst of seats does not queue on one
+//! holder. A lock whose recorded process has exited is removed and taken
+//! again. A missing server costs throughput, never the cap.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -43,9 +45,9 @@ static STDIN: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 static HELD: Mutex<Option<Held>> = Mutex::new(None);
 static WAITED_MS: AtomicU64 = AtomicU64::new(0);
 
-/// What keeps this call's turn: a slot from the server, or the
-/// single-flight lock when there was no server. Dropping it gives the
-/// turn to the next call.
+/// What keeps this call's turn: a slot from the server, or this seat's
+/// flight lock when there was no server. Dropping it gives the turn to
+/// the next call of the same seat.
 enum Held {
     Slot(#[allow(dead_code)] UnixStream),
     Flight(#[allow(dead_code)] std::fs::File),
@@ -218,7 +220,7 @@ enum Ask {
     Refused(String),
 }
 
-/// A turn from the server, or with no server, the single-flight lock.
+/// A turn from the server, or with no server, this seat's flight lock.
 /// The error says why no turn came within the budget.
 fn wait_turn() -> Result<(Held, u64), String> {
     let dir = run_dir();
@@ -233,15 +235,30 @@ fn wait_turn() -> Result<(Held, u64), String> {
         Err(Ask::Refused(why)) => return Err(why),
         Err(Ask::NoServer) => {}
     }
-    let _starting = start_server(&dir);
-    let retry_until = (Instant::now() + Duration::from_millis(200)).min(deadline);
-    while Instant::now() < retry_until {
-        std::thread::sleep(Duration::from_millis(5));
-        match ask(&sock, deadline) {
-            Ok(turn) => return Ok(turn),
-            Err(Ask::Refused(why)) => return Err(why),
-            Err(Ask::NoServer) => {}
+    // The start lock is dropped before the flight lock. Holding it for the
+    // flight wait kept every other seat from starting a server.
+    let from_server = {
+        let _starting = start_server(&dir);
+        let retry_until = (Instant::now() + Duration::from_millis(200)).min(deadline);
+        let mut outcome = None;
+        while Instant::now() < retry_until {
+            std::thread::sleep(Duration::from_millis(5));
+            match ask(&sock, deadline) {
+                Ok(turn) => {
+                    outcome = Some(Ok(turn));
+                    break;
+                }
+                Err(Ask::Refused(why)) => {
+                    outcome = Some(Err(why));
+                    break;
+                }
+                Err(Ask::NoServer) => {}
+            }
         }
+        outcome
+    };
+    if let Some(done) = from_server {
+        return done;
     }
     flight(&dir, deadline)
 }
@@ -349,19 +366,76 @@ fn start_server(dir: &Path) -> Option<std::fs::File> {
     Some(lock)
 }
 
+/// The seat this hook runs as, safe as one file name. Seats that differ
+/// here do not share a flight lock.
+fn seat_token() -> String {
+    let raw = std::env::var("LJOS_SEAT").unwrap_or_default();
+    let token: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(64)
+        .collect();
+    if token.is_empty() {
+        "default".to_string()
+    } else {
+        token
+    }
+}
+
+fn flight_path(dir: &Path) -> PathBuf {
+    dir.join(format!("hookd.flight-{}", seat_token()))
+}
+
+/// Whether `pid` is still a process. `EPERM` counts as alive. A pid that
+/// does not fit `pid_t`, or that the kernel does not know, is finished.
+fn pid_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 does not deliver a signal. It only asks if `pid` exists.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+fn recorded_pid(path: &Path) -> Option<u32> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.split_whitespace().next()?.parse().ok()
+}
+
+/// Take `path` when it is free, or when the process that wrote its pid has
+/// exited. A finished holder is unlinked first, so a descriptor left open
+/// in some other process does not keep the old inode's lock on this path.
+/// `None` when a live holder still has it. The try does not wait.
+fn take_flight(path: &Path) -> Option<std::fs::File> {
+    if recorded_pid(path).is_some_and(|pid| !pid_alive(pid)) {
+        let _ = std::fs::remove_file(path);
+    }
+    let mut file = open_lock(path)?;
+    if !try_flock(&file) {
+        return None;
+    }
+    let _ = file.set_len(0);
+    let _ = file.write_all(format!("{}\n", std::process::id()).as_bytes());
+    Some(file)
+}
+
 fn flight(dir: &Path, deadline: Instant) -> Result<(Held, u64), String> {
     let asked = Instant::now();
-    let Some(file) = open_lock(&dir.join("hookd.flight")) else {
-        return Err("no hook server, and the single-flight lock cannot be opened".into());
-    };
+    let path = flight_path(dir);
     loop {
-        if try_flock(&file) {
+        if let Some(file) = take_flight(&path) {
             let waited = u64::try_from(asked.elapsed().as_millis()).unwrap_or(u64::MAX);
             return Ok((Held::Flight(file), waited));
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "no hook server, and the single-flight lock stayed taken for {} ms",
+                "no hook server, and the flight lock for seat {} stayed taken for {} ms",
+                seat_token(),
                 admit_budget().as_millis()
             ));
         }
@@ -800,5 +874,32 @@ mod tests {
         assert!(line.starts_with("go "), "{line}");
         let (_late, said) = call(&gate, 50);
         assert_eq!(said.trim(), "late");
+    }
+
+    #[test]
+    fn a_finished_holder_loses_the_flight_lock() {
+        let dir = std::env::temp_dir().join(format!("ljos-flight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hookd.flight-gone");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.kill().unwrap();
+        let _ = child.wait();
+        std::fs::write(&path, format!("{pid}\n")).unwrap();
+        let leaked = std::fs::File::open(&path).unwrap();
+        assert!(try_flock(&leaked), "the test could not hold the old inode");
+        let took = take_flight(&path).expect("a finished holder was not reclaimed");
+        assert_ne!(
+            recorded_pid(&path),
+            Some(pid),
+            "the finished pid was left as the holder"
+        );
+        drop(took);
+        drop(leaked);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
