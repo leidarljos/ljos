@@ -192,16 +192,164 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
     );
     assert_eq!(
         searches.load(Ordering::SeqCst),
-        0,
-        "a sitting reads the listing once and does not ask the stalling search:\n{stdout}"
+        1,
+        "a sitting asks the search once and does not ask it again:\n{stdout}"
     );
     assert!(
-        !stdout.contains("ranked by words; the pack search did not answer in time"),
-        "{stdout}"
+        stdout.contains("ranked by words; the pack search did not answer in time"),
+        "a stalled search is the one read, and the sitting says so:\n{stdout}"
     );
     assert!(
         started.elapsed() < Duration::from_secs(8),
         "sitting took {:?}",
         started.elapsed()
     );
+}
+
+/// Answers one small search and records every request line.
+fn search_pack(lines: Arc<Mutex<Vec<String>>>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut sock) = stream else { break };
+            let lines = Arc::clone(&lines);
+            thread::spawn(move || {
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf);
+                let line = req.lines().next().unwrap_or("").to_string();
+                lines.lock().unwrap().push(line.clone());
+                let body = if line.contains("/v1/search") {
+                    r#"{"hits":[{"id":"oak","kind":"lesson","text":"Oak Tree on Nov 23 is the morning plan.","score":0.91,"ts":"2026-11-01T08:00:00Z","entities":["seat:ada"]}]}"#
+                } else if line.contains("/v1/atoms") {
+                    r#"{"atoms":[{"id":"should-not-list","kind":"lesson","text":"the whole pack was listed"}]}"#
+                } else {
+                    r#"{"embedder":{"available":true,"answering":true}}"#
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            });
+        }
+    });
+    port
+}
+
+#[test]
+fn a_sitting_reads_related_memories_with_one_bounded_search() {
+    let root = tempfile::tempdir().unwrap();
+    let log = root.path().join("calls.log");
+    let home = root.path().join("home");
+    std::fs::create_dir_all(home.join(".cursor")).unwrap();
+    std::fs::create_dir_all(root.path().join("run")).unwrap();
+    std::fs::write(
+        home.join(".cursor/mcp.json"),
+        r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
+    )
+    .unwrap();
+    let tracker = root.path().join("tracker");
+    std::fs::create_dir_all(tracker.join("Software")).unwrap();
+    script(
+        root.path(),
+        "vissue",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"vissue $*\" >> '{}'\ncase \"$1\" in\n  show) printf '%s\\n' '{{\"id\":\"probe-sit\",\"title\":\"Oak Tree timing\",\"body\":\"Nov 23 morning\",\"state\":\"TODO\"}}' ;;\n  recall) echo noted ;;\n  identity) printf '%s\\n' 'vissue test' 'root={}' 'prefix=Software' ;;\nesac\nexit 0\n",
+            log.display(),
+            tracker.display()
+        ),
+    );
+    script(
+        root.path(),
+        "claimdag",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            log.display()
+        ),
+    );
+    script(
+        root.path(),
+        "deedar",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"deedar $*\" >> '{}'\necho head\nexit 0\n",
+            log.display()
+        ),
+    );
+    let layout = vissue_core::Layout::new(&tracker, "Software");
+    vissue_core::ops::create(&layout, "probe", "Oak Tree timing", Default::default()).unwrap();
+    let doc =
+        vissue_core::IssueDoc::parse_file("probe", &layout.project_issues_path("probe")).unwrap();
+    let issue = doc.headings[0].id.clone();
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let port = search_pack(Arc::clone(&lines));
+    let path = format!("{}:/usr/bin:/bin", root.path().display());
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["sitting", &issue, "--verbose"])
+        .current_dir(root.path())
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_RUNTIME_DIR", root.path().join("run"))
+        .env("VISSUE_ROOT", &tracker)
+        .env("LJOS_SEAT", "ada")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("PACKSET_AUTH", "off")
+        .env("PACKSET_URL", format!("http://127.0.0.1:{port}"))
+        .env("PACKSET_WORKSPACE", "seat")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!("{stdout}{stderr}");
+    assert!(out.status.success(), "{said}");
+    let asked = lines.lock().unwrap().clone();
+    let searches: Vec<_> = asked
+        .iter()
+        .filter(|line| line.contains("/v1/search"))
+        .collect();
+    assert_eq!(
+        searches.len(),
+        1,
+        "one search, not a pack listing: {asked:?}\n{said}"
+    );
+    assert!(
+        searches[0].contains("limit=20"),
+        "the search limit stays small: {}\n{said}",
+        searches[0]
+    );
+    assert!(
+        searches[0].contains("Oak")
+            || searches[0].contains("oak")
+            || searches[0].contains("Oak%20")
+            || searches[0].contains("timing"),
+        "the query is the ticket, not the pack: {}\n{said}",
+        searches[0]
+    );
+    assert!(
+        asked.iter().all(|line| !line.contains("/v1/atoms")),
+        "the sitting did not list the pack: {asked:?}\n{said}"
+    );
+    assert!(
+        stdout.contains("Oak Tree on Nov 23 is the morning plan."),
+        "{said}"
+    );
+    assert!(!said.contains("memory degraded"), "{said}");
+    assert!(!stdout.contains("the whole pack was listed"), "{said}");
 }

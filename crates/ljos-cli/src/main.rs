@@ -2551,11 +2551,17 @@ fn run_command() -> Result<()> {
             attempts,
         } => {
             ljos_cli::log_recall("search", &query.join(" "));
-            // A short budget. Past it the word ranking prints. The call
-            // does not sit until an outer timeout with nothing on screen.
-            let _deadline =
-                ljos_cli::pack_link::CommandDeadline::enter(ljos_cli::SEARCH_PACK_BUDGET);
-            let _pack_clock = ljos_cli::pack_link::PackClock::enter(ljos_cli::SEARCH_PACK_BUDGET);
+            // A cold encoder gets long enough to load and be asked again.
+            // A warm pack keeps the short budget. Past it the word ranking
+            // prints, and the line names that ranking.
+            let dated_ahead = as_of.is_some();
+            let budget = if !dated_ahead && !rerank {
+                ljos_cli::search_budget()
+            } else {
+                ljos_cli::SEARCH_PACK_BUDGET
+            };
+            let _deadline = ljos_cli::pack_link::CommandDeadline::enter(budget);
+            let _pack_clock = ljos_cli::pack_link::PackClock::enter(budget);
             let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
             let day = match valid_at.as_deref().map(str::trim) {
                 Some("any") => None,
@@ -2585,26 +2591,46 @@ fn run_command() -> Result<()> {
             // surfaces the lesson that names its concept. A dated search
             // stays the pack as it stood, and `--rerank` keeps the
             // cross-encoder.
-            let mut hits = match if !dated && !rerank {
-                ljos_cli::search_ranked(&asked, fetch)
-            } else {
+            let fetched = if dated {
                 packset_search_as_of(&asked, fetch, as_of.as_deref(), rerank)
-            } {
-                Ok(hits) => hits,
-                Err(err) if !dated && ljos_cli::is_deadline_miss(&err) => return Err(err),
-                Err(err) if !dated && ljos_cli::is_read_shed(&err) => {
-                    eprintln!("{}", ljos_cli::pack_fault_line(&err));
-                    eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
-                    ljos_cli::search_by_words(&asked, fetch)
-                }
+                    .map(|hits| (hits, None))
+            } else if !rerank {
+                ljos_cli::search_hits(&asked, fetch).map(|(hits, ranking)| (hits, Some(ranking)))
+            } else {
+                packset_search_as_of(&asked, fetch, None, true).map(|hits| (hits, None))
+            };
+            let (mut hits, mut ranking) = match fetched {
+                Ok((hits, Some(ranking))) => (hits, ranking),
+                Ok((hits, None)) => (
+                    hits,
+                    ljos_cli::ranking_now().unwrap_or(ljos_cli::Ranking {
+                        mode: "semantic",
+                        reason: "",
+                    }),
+                ),
                 Err(err) if !dated && ljos_cli::pack_unreachable(&err) => {
                     eprintln!("packsetd is unreachable (connection refused)");
                     std::process::exit(ljos_cli::PACK_BUSY_EXIT);
                 }
-                Err(err) if !dated && ljos_cli::pack_memory_down(&err) => {
-                    eprintln!("{}", ljos_cli::pack_busy_sentence());
+                Err(err)
+                    if !dated
+                        && (ljos_cli::is_deadline_miss(&err)
+                            || ljos_cli::is_read_shed(&err)
+                            || ljos_cli::pack_memory_down(&err)) =>
+                {
+                    if ljos_cli::is_read_shed(&err) {
+                        eprintln!("{}", ljos_cli::pack_fault_line(&err));
+                    } else if !ljos_cli::is_deadline_miss(&err) {
+                        eprintln!("{}", ljos_cli::pack_busy_sentence());
+                    }
                     eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
-                    ljos_cli::search_by_words(&asked, fetch)
+                    (
+                        ljos_cli::search_by_words(&asked, fetch),
+                        ljos_cli::Ranking {
+                            mode: "lexical",
+                            reason: "the pack search did not answer",
+                        },
+                    )
                 }
                 Err(err) => return Err(err),
             };
@@ -2621,7 +2647,7 @@ fn run_command() -> Result<()> {
                 import_id,
             };
             if !dated || filter.active() {
-                ljos_cli::memory_port::merge_cli(
+                ljos_cli::memory_port::merge_search(
                     &mut hits,
                     &asked,
                     limit as usize,
@@ -2630,15 +2656,15 @@ fn run_command() -> Result<()> {
                 );
             }
             ljos_cli::refine_default_hits(&mut hits, &asked, attempts);
+            ljos_cli::drop_word_floor(&mut hits, &asked, ranking.mode == "lexical");
+            ljos_cli::prefer_calling_seat(&mut hits);
             hits.truncate(limit as usize);
             ljos_cli::note_lookups(&hits);
-            let ranking = ljos_cli::ranking_now();
+            ranking = ljos_cli::ranking_for_printed(ranking, &hits);
             if json {
-                print!("{}", ljos_cli::search_json(&hits, ranking.as_ref()));
+                print!("{}", ljos_cli::search_json(&hits, Some(&ranking)));
             } else {
-                if let Some(ranking) = ranking.as_ref() {
-                    eprint!("{}", ljos_cli::ranking_line(ranking));
-                }
+                eprint!("{}", ljos_cli::ranking_line(&ranking));
                 print!("{}", format_hits(&hits, explain));
             }
         }

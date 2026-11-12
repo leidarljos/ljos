@@ -3,9 +3,10 @@
 //!
 //! `ljos note` writes the logbook line first, then a `note` atom to the
 //! pack. When the pack is off, not answering, or answers 401, the fitted
-//! copy waits here, one JSON line per copy, and the next note that reaches
-//! the pack, `ljos finish`, or the next session start sends it. `ljos
-//! doctor` only counts it. A copy the pack would refuse is kept in the
+//! copy waits here, one JSON line per copy. The next command that may
+//! send it tries under the remember budget, and tries once more if the
+//! pack is still busy. `ljos search` and `ljos sitting` say when a lesson
+//! is still waiting. `ljos doctor` only counts it. A copy the pack would refuse is kept in the
 //! memory slot with its label and leaves the queue. A line left from
 //! before that rule is cut to what the pack takes on the next send, and
 //! the original stays in the slot. A note that has to wait stays queued.

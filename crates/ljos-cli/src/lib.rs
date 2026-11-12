@@ -13705,6 +13705,197 @@ pub fn ranking_line(ranking: &Ranking) -> String {
     }
 }
 
+/// The ranking line for the rows about to be printed. A list that is only
+/// the local snapshot was ranked by words, whatever the encoder status
+/// says now.
+#[must_use]
+pub fn ranking_for_printed(ranking: Ranking, hits: &[Hit]) -> Ranking {
+    if hits.is_empty() || ranking.mode == "lexical" {
+        return ranking;
+    }
+    let local = hits
+        .iter()
+        .all(|hit| hit.id.as_deref().is_some_and(|id| id.starts_with("local:")));
+    if local {
+        Ranking {
+            mode: "lexical",
+            reason: "local memory snapshot",
+        }
+    } else {
+        ranking
+    }
+}
+
+/// Drop rows whose score is only [`NO_SUBJECT_FLOOR`]. A semantic hit and
+/// a row that names the subject stay. `lexical` is the path that ranked
+/// the pack by words; local snapshot rows are always on that scale.
+pub fn drop_word_floor(hits: &mut Vec<Hit>, query: &str, lexical: bool) {
+    hits.retain(|hit| {
+        let local = hit.id.as_deref().is_some_and(|id| id.starts_with("local:"));
+        if !lexical && !local {
+            return true;
+        }
+        if semantic_pin(hit) || names_the_subject(&hit.text, query) {
+            return true;
+        }
+        hit.score > NO_SUBJECT_FLOOR + 1e-9
+    });
+}
+
+fn semantic_ranking() -> Ranking {
+    Ranking {
+        mode: "semantic",
+        reason: "",
+    }
+}
+
+fn lexical_ranking(reason: &'static str) -> Ranking {
+    Ranking {
+        mode: "lexical",
+        reason,
+    }
+}
+
+fn encoder_has_answered_now() -> bool {
+    read_encoder_status()
+        .as_ref()
+        .is_some_and(encoder_has_answered)
+}
+
+/// A failure the search can answer with the word ranking. A pack that
+/// refused the connection is not one: the caller exits on that.
+fn search_can_fall_back(err: &anyhow::Error) -> bool {
+    !pack_unreachable(err)
+        && (is_deadline_miss(err)
+            || is_read_shed(err)
+            || is_pack_busy(err)
+            || writer_busy(err)
+            || pack_memory_down(err))
+}
+
+/// Hits for `ljos search`, and the ranking that produced them.
+///
+/// A cold encoder is asked once, which starts the model, then again after
+/// it has answered. The second answer is what is printed, and the ranking
+/// line names it. A 503 or a deadline is not turned into an empty success.
+/// When the encoder never answers, the word-ranked rows are what is
+/// printed and the line says so.
+///
+/// # Errors
+///
+/// The pack refused the connection, or the search failed for a reason
+/// that is not a busy writer or a deadline.
+pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
+    if read_encoder_status().as_ref().is_some_and(encoder_cold) {
+        return search_after_warmup(query, limit);
+    }
+    match search_direct(query, limit) {
+        Ok(hits) => {
+            let ranking = if encoder_has_answered_now() {
+                ranking_now().unwrap_or_else(semantic_ranking)
+            } else {
+                lexical_ranking("encoder is still loading")
+            };
+            Ok((hits, ranking))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// The first search starts a stopped encoder and is ranked by words.
+/// Once the encoder has answered, one more search is the semantic one.
+fn search_after_warmup(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
+    let first = search_direct(query, limit);
+    let left = pack_link::clock_left().unwrap_or(COLD_SEARCH_BUDGET);
+    let wait = left.saturating_sub(std::time::Duration::from_secs(2));
+    let warm = if wait.is_zero() {
+        false
+    } else {
+        wait_for_encoder(wait)
+    };
+    if warm {
+        match search_direct(query, limit) {
+            Ok(hits) => return Ok((hits, semantic_ranking())),
+            Err(err) if !search_can_fall_back(&err) => return Err(err),
+            Err(_) => {}
+        }
+    }
+    match first {
+        Ok(hits) => Ok((hits, lexical_ranking("encoder is still loading"))),
+        Err(err) => Err(err),
+    }
+}
+
+/// One `/v1/search`, bounded by `limit` and the clock. This does not list
+/// the pack: a listing grows with the pack and spends the budget the
+/// cold encoder needs.
+fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
+    let client = pack()?;
+    if seat_has_no_token(&client) {
+        if let Err(err) = client.health() {
+            let err = anyhow::Error::from(err);
+            if pack_unreachable(&err) {
+                return Err(err.context("search: GET /v1/search failed"));
+            }
+        }
+    }
+    let timeout = pack_link::clock_left()
+        .unwrap_or(SEARCH_PACK_BUDGET)
+        .max(std::time::Duration::from_millis(50));
+    let workspace = client.workspace();
+    let limit_s = limit.to_string();
+    let q = recall_query(query);
+    let mut pairs = vec![
+        ("workspace", workspace.as_str()),
+        ("q", q.as_str()),
+        ("limit", limit_s.as_str()),
+    ];
+    let ranked = ranks_by_relevance(&client, timeout, search_asks_with_token(&client));
+    if ranked {
+        pairs.push(("rank", "relevance"));
+    }
+    let mut answer = client
+        .roundtrip("GET", "/v1/search", &pairs, None, true, timeout)
+        .map_err(anyhow::Error::from)
+        .context("search: GET /v1/search failed")?;
+    if ranked && answer.status == 400 && names_the_rank(&answer.body) {
+        pairs.pop();
+        answer = client
+            .roundtrip("GET", "/v1/search", &pairs, None, true, timeout)
+            .map_err(anyhow::Error::from)
+            .context("search: GET /v1/search failed")?;
+    }
+    if !(200..300).contains(&answer.status) {
+        if answer.trusted && matches!(answer.status, 401 | 403) {
+            warn_search_refused(client.base(), answer.status);
+        }
+        bail!(
+            "search: GET /v1/search failed: status code {}",
+            answer.status
+        );
+    }
+    let body: Value =
+        serde_json::from_str(&answer.body).context("search: the /v1/search answer is not JSON")?;
+    let mut hits = Vec::new();
+    for value in body["hits"].as_array().into_iter().flatten() {
+        let Ok(mut hit) = serde_json::from_value::<Hit>(value.clone()) else {
+            continue;
+        };
+        let rank = value["dense_rank"]
+            .as_u64()
+            .and_then(|rank| u32::try_from(rank).ok());
+        let cosine = value["cosine"].as_f64();
+        if rank.is_some_and(|rank| rank <= DENSE_ALONE_RANK)
+            && cosine.is_some_and(|cosine| cosine >= DENSE_ALONE_AT)
+        {
+            hit.entities.push("semantic:1".into());
+        }
+        hits.push(hit);
+    }
+    keep_search_origins(&client, &hits);
+    Ok(fold_verbatim(query, hits))
+}
+
 /// Search hits as JSON, with the ranking the pack used.
 #[must_use]
 pub fn search_json(hits: &[Hit], ranking: Option<&Ranking>) -> String {
@@ -17284,6 +17475,31 @@ const PACK_HEALTH_FAILS_BEFORE_RESTART: u32 = 3;
 /// command's outer timeout.
 pub const SEARCH_PACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// How long a search waits when the encoder has not answered since the
+/// writer last stopped it. packsetd stops the encoder after five minutes
+/// idle and starts it on the next search, without waiting for the load.
+/// A model already on disk answers inside this. The warm budget stays
+/// [`SEARCH_PACK_BUDGET`].
+pub const COLD_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The score a word-ranked row gets when it does not name the subject.
+/// [`lexical_match_scores`] puts that row on the half-sigmoid under 0.5,
+/// and a single shared ordinary word lands here. Padding a result with
+/// these is not an answer.
+pub const NO_SUBJECT_FLOOR: f64 = 0.20;
+
+/// The budget for this search. A cold encoder gets [`COLD_SEARCH_BUDGET`]
+/// so the model can load and the search can be asked again. A warm
+/// encoder keeps [`SEARCH_PACK_BUDGET`].
+#[must_use]
+pub fn search_budget() -> std::time::Duration {
+    if read_encoder_status().as_ref().is_some_and(encoder_cold) {
+        COLD_SEARCH_BUDGET
+    } else {
+        SEARCH_PACK_BUDGET
+    }
+}
+
 /// `some` or `full` avg10 at or above this, in percent, is memory
 /// pressure worth naming. Ten percent of the last ten seconds is the
 /// stall a desktop feels as thrashing. Ordinary scheduling sits under it.
@@ -19973,19 +20189,54 @@ fn queue_busy_lesson(text: &str) {
     }
 }
 
-/// Send lessons queued while the pack was busy, when this call can reach
-/// the pack. A silent pack is not waited out: this is not the command.
+/// Send lessons queued while the pack was busy.
+///
+/// The wait is [`REMEMBER_BUDGET`], the same admission and deadline a
+/// remember uses, and a lesson the pack does not take is tried once more
+/// while that deadline still has time. `ljos search` and `ljos sitting`
+/// call this, and they say when a lesson is still waiting.
 pub fn flush_queued_lessons() {
     let dir = note_queue::state_dir();
     if note_queue::pending_in(&dir).is_empty() {
         return;
     }
-    // Two seconds is one post of a short lesson on a pack that is up.
-    // A silent pack stops here instead of holding the command.
-    let _clock = pack_link::PackClock::enter(std::time::Duration::from_secs(2));
-    match flush_note_queue() {
-        Ok(done) if !done.kept.is_empty() => eprint!("{}", note_queue::drained_lines(&done)),
-        _ => {}
+    let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
+    let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
+    let first = {
+        let _quiet = pack_link::QuietPack::enter();
+        flush_note_queue()
+    };
+    let done = match first {
+        Ok(done) => done,
+        Err(err) => {
+            let waiting = note_queue::pending_in(&dir).len();
+            if waiting > 0 {
+                eprintln!(
+                    "memory: {waiting} note(s) still queued (the pack did not answer: {err:#})"
+                );
+            }
+            return;
+        }
+    };
+    let done = if done.left > 0
+        && pack_link::clock_left().is_some_and(|left| left > std::time::Duration::from_millis(50))
+    {
+        let _quiet = pack_link::QuietPack::enter();
+        match flush_note_queue() {
+            Ok(mut again) => {
+                again.kept.splice(0..0, done.kept);
+                again.refused.splice(0..0, done.refused);
+                again.set_aside.splice(0..0, done.set_aside);
+                again
+            }
+            Err(_) => done,
+        }
+    } else {
+        done
+    };
+    let lines = note_queue::drained_lines(&done);
+    if !lines.is_empty() {
+        eprint!("{lines}");
     }
 }
 
@@ -35907,13 +36158,18 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
         }
         let own = tagged_with_issue(listing.atoms.as_ref(), issue);
         let cues = recall_cues(issue);
-        let related = related_from_listing(listing.atoms.as_ref(), &cues, &own);
+        let related = if listing.searched {
+            searched_hits(listing.atoms.as_ref(), &own)
+        } else {
+            related_from_listing(listing.atoms.as_ref(), &cues, &own)
+        };
         return Ok(recall_lines(
             &own,
             related,
             &cues.join(" "),
             &now_utc(),
             include_notes,
+            listing.searched,
         ));
     }
     // A dead encoder stays lexical until the writer is replaced and the
@@ -35961,7 +36217,46 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
         &cues.join(" "),
         &now_utc(),
         include_notes,
+        false,
     ))
+}
+
+/// Search hits already ranked by the writer, minus the issue's own rows.
+/// The order is the writer's. A word test here would drop a memory that
+/// the encoder matched and the ticket did not spell.
+fn searched_hits(atoms: &[Value], own: &[Hit]) -> Vec<Hit> {
+    let skip: std::collections::BTreeSet<&str> =
+        own.iter().filter_map(|hit| hit.id.as_deref()).collect();
+    let mut hits = Vec::new();
+    for atom in atoms {
+        if atom["id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && skip.contains(id))
+        {
+            continue;
+        }
+        let Some(mut hit) = atom_as_hit(atom) else {
+            continue;
+        };
+        if search_skip_kind(&hit, false) {
+            continue;
+        }
+        if let Some(score) = atom["score"].as_f64() {
+            hit.score = score;
+        }
+        hit.ts = written_at(atom).or(hit.ts);
+        if atom["dense_rank"]
+            .as_u64()
+            .is_some_and(|rank| rank <= u64::from(DENSE_ALONE_RANK))
+        {
+            hit.entities.push("semantic:1".into());
+        }
+        hits.push(hit);
+        if hits.len() == RELATED_MEMORY_CAP * POOL_PER_SHOWN {
+            break;
+        }
+    }
+    hits
 }
 
 /// The `cap` of `rows` most relevant to `cue`, in the order they came.
@@ -36030,6 +36325,7 @@ fn recall_lines(
     cue: &str,
     now: &str,
     include_notes: bool,
+    pack_order: bool,
 ) -> String {
     let key = |h: &Hit| h.id.clone().unwrap_or_else(|| h.text.clone());
     let (own_facts, own_notes): (Vec<&Hit>, Vec<&Hit>) = own
@@ -36044,7 +36340,9 @@ fn recall_lines(
         .filter(|h| include_notes || !unverified_note_hit(h))
         .filter(|h| seen.insert(key(h)))
         .collect();
-    sort_by_relevance(&mut related, cue);
+    if !pack_order {
+        sort_by_relevance(&mut related, cue);
+    }
     related.truncate(RELATED_MEMORY_CAP);
     let (related_facts, related_notes): (Vec<&Hit>, Vec<&Hit>) =
         related.iter().partition(|h| !unverified_note_hit(h));
@@ -37173,7 +37471,21 @@ const SITTING_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_sec
 
 /// One pack read at the start of the memory half of a sitting. A busy
 /// writer is shed inside this, and the sitting does not ask again.
+/// The read is a search, so this is that search's own deadline.
 const SITTING_PACK_READ: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How many memories the sitting's one search asks for. The island shows
+/// [`RELATED_MEMORY_CAP`] of them. The rest are room for the issue's own
+/// rows and the due cards that share the ticket's words.
+const SITTING_SEARCH_LIMIT: usize = RELATED_MEMORY_CAP * POOL_PER_SHOWN;
+
+/// The longest query the sitting sends. The title comes first. A logbook
+/// that is longer than this is not what makes the read grow with the pack.
+const SITTING_QUERY_CHARS: usize = 400;
+
+/// A listing answer bigger than this is not a bounded read. The sitting
+/// leaves it unparsed rather than ranking a pack-sized body.
+const SITTING_LIST_CAP: usize = 512 * 1024;
 
 pub const SITTING_WORDS_LINE: &str = "ranked by words; the pack search did not answer in time\n";
 
@@ -37183,10 +37495,12 @@ pub const MEMORY_DEGRADED_LINE: &str = "memory degraded: ranked by words\n";
 
 /// The atoms one sitting read, shared by due, recall, the playbook and
 /// the timeline. `ok` is false when that read did not answer; later
-/// sections then do not open another socket.
+/// sections then do not open another socket. `searched` is true when the
+/// atoms are the writer's search hits, in the order it ranked them.
 struct SittingListing {
     atoms: std::sync::Arc<Vec<Value>>,
     ok: bool,
+    searched: bool,
 }
 
 impl Clone for SittingListing {
@@ -37194,6 +37508,7 @@ impl Clone for SittingListing {
         Self {
             atoms: std::sync::Arc::clone(&self.atoms),
             ok: self.ok,
+            searched: self.searched,
         }
     }
 }
@@ -37209,30 +37524,35 @@ fn sitting_listing() -> Option<SittingListing> {
 
 /// Read the pack once, inside [`SITTING_PACK_READ`], and keep that answer
 /// until the guard drops. A second call while the guard is held is the
-/// same answer.
+/// same answer. The read is one `/v1/search` for `ticket`, with a small
+/// limit. A writer that has no search is asked for a limited listing
+/// instead. Either answer is bounded: it does not grow with the pack.
 struct SittingListingGuard {
     _deadline: pack_link::CommandDeadline,
     _clock: pack_link::PackClock,
 }
 
 impl SittingListingGuard {
-    fn enter() -> Self {
+    fn enter(ticket: &str) -> Self {
         let deadline = pack_link::CommandDeadline::enter(SITTING_PACK_READ);
         let clock = pack_link::PackClock::enter(SITTING_PACK_READ);
         let listing = match pack() {
-            Ok(client) => match atoms_lean(&client, &client.workspace()) {
-                Ok(atoms) => SittingListing {
+            Ok(client) => match sitting_pack_read(&client, ticket) {
+                Ok((atoms, searched)) => SittingListing {
                     atoms: std::sync::Arc::new(atoms),
                     ok: true,
+                    searched,
                 },
                 Err(_) => SittingListing {
                     atoms: std::sync::Arc::new(Vec::new()),
                     ok: false,
+                    searched: false,
                 },
             },
             Err(_) => SittingListing {
                 atoms: std::sync::Arc::new(Vec::new()),
                 ok: false,
+                searched: false,
             },
         };
         SITTING_LISTING.with(|slot| *slot.borrow_mut() = Some(listing));
@@ -37241,6 +37561,106 @@ impl SittingListingGuard {
             _clock: clock,
         }
     }
+}
+
+/// The ticket's words, title first, cut so the search query stays small.
+fn sitting_search_cue(ticket: &str) -> String {
+    let mut out = String::new();
+    for word in ticket.split_whitespace() {
+        if !out.is_empty() && out.len() + word.len() + 1 > SITTING_QUERY_CHARS {
+            break;
+        }
+        if out.is_empty() && word.len() > SITTING_QUERY_CHARS {
+            return word.chars().take(SITTING_QUERY_CHARS).collect();
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
+/// Whether `status` means this writer has no `/v1/search` to ask.
+fn search_endpoint_missing(status: u16, body: &str) -> bool {
+    if matches!(status, 404 | 405) {
+        return true;
+    }
+    if status != 400 {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("unknown") || lower.contains("not found") || lower.contains("no such")
+}
+
+/// The sitting's one pack read: search hits for `ticket`, or a short
+/// listing when the writer cannot search. An error is a read that did
+/// not answer. The caller does not ask again.
+fn sitting_pack_read(client: &PacksetClient, ticket: &str) -> Result<(Vec<Value>, bool)> {
+    let query = sitting_search_cue(ticket);
+    if query.is_empty() {
+        bail!("sitting: the ticket has no words to search");
+    }
+    let workspace = client.workspace();
+    let limit = SITTING_SEARCH_LIMIT.to_string();
+    let pairs = [
+        ("workspace", workspace.as_str()),
+        ("q", query.as_str()),
+        ("limit", limit.as_str()),
+    ];
+    match client.roundtrip("GET", "/v1/search", &pairs, None, true, SITTING_PACK_READ) {
+        Ok(answer) if (200..300).contains(&answer.status) => {
+            let body: Value = serde_json::from_str(&answer.body)
+                .context("sitting: the /v1/search answer is not JSON")?;
+            let hits = body
+                .get("hits")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            Ok((hits, true))
+        }
+        // A writer with no search, or one that sheds the search while a
+        // write is in progress, still has a bounded listing. That listing
+        // is the read that answers. A body over the cap is not ranked.
+        Ok(answer) if search_endpoint_missing(answer.status, &answer.body) => {
+            sitting_limited_listing(client).map(|atoms| (atoms, false))
+        }
+        Ok(answer) => bail!("sitting: GET /v1/search: status code {}", answer.status),
+        Err(_) => sitting_limited_listing(client).map(|atoms| (atoms, false)),
+    }
+}
+
+/// A lesson listing with a limit, used when `/v1/search` is not there.
+/// A body over [`SITTING_LIST_CAP`] is refused: the writer ignored the
+/// limit and the sitting will not rank the whole pack.
+fn sitting_limited_listing(client: &PacksetClient) -> Result<Vec<Value>> {
+    let workspace = client.workspace();
+    let limit = SITTING_SEARCH_LIMIT.to_string();
+    let pairs = [
+        ("workspace", workspace.as_str()),
+        ("embedding", "omit"),
+        ("kind", "lesson"),
+        ("limit", limit.as_str()),
+        ("order", "newest"),
+    ];
+    let answer = client
+        .roundtrip("GET", "/v1/atoms", &pairs, None, true, SITTING_PACK_READ)
+        .map_err(anyhow::Error::from)?;
+    if !(200..300).contains(&answer.status) {
+        bail!("sitting: GET /v1/atoms: status code {}", answer.status);
+    }
+    if answer.body.len() > SITTING_LIST_CAP {
+        bail!("sitting: the listing is larger than the cap");
+    }
+    let body: Value =
+        serde_json::from_str(&answer.body).context("sitting: the listing is not JSON")?;
+    let mut atoms = body
+        .get("atoms")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    atoms.truncate(SITTING_SEARCH_LIMIT);
+    Ok(atoms)
 }
 
 impl Drop for SittingListingGuard {
@@ -37423,7 +37843,8 @@ pub fn sitting_stream_started(
     // pack costs this budget once. The sweep is not part of it: that
     // write used to run after the clock was dropped and wait on its own.
     let _quiet_pack = pack_link::QuietPack::enter();
-    let _listing = SittingListingGuard::enter();
+    let ticket = sitting_ticket_text(issue, &title);
+    let _listing = SittingListingGuard::enter(&ticket);
     let mut fell_back = false;
 
     let mut piece = String::new();
@@ -46449,6 +46870,7 @@ mod tests {
             "probe-0lm4",
             "2026-10-18T12:00:00.000Z",
             true,
+            false,
         );
         // Facts lead; the working notes follow under their own heading.
         assert!(
@@ -46477,13 +46899,14 @@ mod tests {
             "probe-0lm4",
             "now",
             false,
+            false,
         );
         assert_eq!(
             prompt,
             "\nMemory\n  - [lesson, agent-derived] tagged lesson\n"
         );
         assert_eq!(
-            super::recall_lines(&[], Vec::new(), "probe-0lm4", "now", true),
+            super::recall_lines(&[], Vec::new(), "probe-0lm4", "now", true, false),
             ""
         );
         let alone = super::recall_lines(
@@ -46492,6 +46915,7 @@ mod tests {
             "probe-0lm4",
             "now",
             true,
+            false,
         );
         assert_eq!(
             alone,
@@ -59570,6 +59994,7 @@ box-1 is yours.
             "ticket words",
             "2026-11-08T00:00:00Z",
             true,
+            false,
         );
         let bullets: Vec<String> = recall.lines().filter_map(sitting_memory_text).collect();
         assert_eq!(bullets.len(), 4, "{recall}");
@@ -69888,6 +70313,51 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(head.contains(&"own-lesson"), "{ranked_ids:?}");
         assert!(head.contains(&"person-rule"), "{ranked_ids:?}");
         assert_eq!(ranked_ids.len(), 5, "{ranked_ids:?}");
+    }
+
+    /// A 0.20 row that does not name the subject is padding. A semantic
+    /// score at the same number stays, and so does a row that names the subject.
+    #[test]
+    fn a_no_subject_floor_is_not_a_search_hit() {
+        let query = "Carrollton Nov 23 morning timing";
+        let hit = |id: &str, text: &str, score: f64| Hit {
+            id: Some(id.into()),
+            text: text.into(),
+            score,
+            kind: "lesson".into(),
+            ts: None,
+            entities: vec!["seat:other".into()],
+            ballots: None,
+            of: None,
+            rerank_score: None,
+            labels: Vec::new(),
+        };
+        let mut lexical = vec![
+            hit("local:aa", "a ferry timetable for the docks", 0.2),
+            hit("oak", "Oak Tree on Nov 23 is the morning plan.", 0.2),
+        ];
+        drop_word_floor(&mut lexical, query, true);
+        let ids: Vec<_> = lexical.iter().filter_map(|h| h.id.clone()).collect();
+        assert_eq!(ids, ["oak"], "{ids:?}");
+        let mut semantic = vec![hit("pack-low", "a ferry timetable for the docks", 0.2)];
+        drop_word_floor(&mut semantic, query, false);
+        assert_eq!(
+            semantic.len(),
+            1,
+            "a semantic score at 0.20 is not the word floor"
+        );
+        let mut local = vec![hit("local:bb", "a ferry timetable for the docks", 0.2)];
+        drop_word_floor(&mut local, query, false);
+        assert!(local.is_empty(), "a snapshot row at the floor is padding");
+        let printed = ranking_for_printed(
+            Ranking {
+                mode: "semantic",
+                reason: "",
+            },
+            &[hit("local:bb", "a ferry timetable for the docks", 0.2)],
+        );
+        assert_eq!(printed.mode, "lexical");
+        assert_eq!(printed.reason, "local memory snapshot");
     }
 
     /// With `LJOS_CAPTURE=off` a stated choice is left alone, and `nudge`

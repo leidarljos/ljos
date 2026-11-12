@@ -1858,7 +1858,7 @@ fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
     let name = Path::new(&command).file_name().and_then(|n| n.to_str());
     if name == Some(crate::MCP_SERVER_COMMAND) {
         if let Ok(own) = crate::server_path() {
-            if !same_binary(&chosen, &own) {
+            if !install_matches(&chosen, &own) {
                 return LaunchCheck::Warn(if pathy {
                     format!("{} is not this install's {}", launch.command, own.display())
                 } else {
@@ -1945,6 +1945,90 @@ fn same_binary(a: &Path, b: &Path) -> bool {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
+}
+
+/// Whether `chosen` is this install's `ljos-mcp`.
+///
+/// The same file is. A shell wrapper is too, when it execs this binary
+/// (`$LJOS_MCP_BIN` or `$LJOS_BIN/ljos-mcp`) or its `--version` line matches
+/// this install's. A different binary still does not.
+fn install_matches(chosen: &Path, own: &Path) -> bool {
+    if same_binary(chosen, own) {
+        return true;
+    }
+    let Ok(text) = fs::read_to_string(chosen) else {
+        return false;
+    };
+    if !wrapper_script(&text) {
+        return false;
+    }
+    if wrapper_targets(&text)
+        .iter()
+        .any(|target| same_binary(target, own))
+    {
+        return true;
+    }
+    match (binary_version(chosen), binary_version(own)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// A small shell script that execs `ljos-mcp`, not the server itself.
+fn wrapper_script(text: &str) -> bool {
+    let head = text.lines().next().unwrap_or("").trim();
+    if !head.starts_with("#!") {
+        return false;
+    }
+    text.contains("LJOS_MCP_BIN") || text.contains("LJOS_BIN") || text.contains("ljos-mcp")
+}
+
+/// Paths a wrapper names: `$LJOS_MCP_BIN`, `$LJOS_BIN/ljos-mcp`, and an
+/// absolute `exec` of `ljos-mcp`.
+fn wrapper_targets(text: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if text.contains("LJOS_MCP_BIN") {
+        if let Ok(path) = std::env::var("LJOS_MCP_BIN") {
+            if !path.is_empty() {
+                out.push(PathBuf::from(path));
+            }
+        }
+    }
+    if text.contains("LJOS_BIN") {
+        if let Ok(dir) = std::env::var("LJOS_BIN") {
+            if !dir.is_empty() {
+                out.push(Path::new(&dir).join("ljos-mcp"));
+            }
+        }
+    }
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("exec ") else {
+            continue;
+        };
+        for word in rest.split_whitespace() {
+            let word = word.trim_matches(|c| c == '"' || c == '\'');
+            if word.starts_with('/') && word.contains("ljos-mcp") {
+                out.push(PathBuf::from(word));
+            }
+        }
+    }
+    out
+}
+
+/// The first line of `path --version`, when the program runs.
+fn binary_version(path: &Path) -> Option<String> {
+    let out = Command::new(path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().next().unwrap_or("").trim();
+    (!line.is_empty()).then(|| line.to_string())
 }
 
 fn home_bin_exists(name: &str) -> bool {

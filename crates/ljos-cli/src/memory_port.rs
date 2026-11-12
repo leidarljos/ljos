@@ -1651,7 +1651,15 @@ pub fn append_recall(hits: &mut Vec<Hit>, query: &str, limit: usize) {
         seat: crate::seat_name(),
         machine: machine_name(),
     };
-    merge_into(hits, &place, query, limit, &SourceFilter::default(), false);
+    merge_into(
+        hits,
+        &place,
+        query,
+        limit,
+        &SourceFilter::default(),
+        false,
+        None,
+    );
 }
 
 /// Search merge for `ljos search`. An active filter replaces the list:
@@ -1662,6 +1670,37 @@ pub fn merge_cli(
     limit: usize,
     filter: &SourceFilter,
     attempts: bool,
+) {
+    merge_filtered(hits, query, limit, filter, attempts, None);
+}
+
+/// [`merge_cli`] that leaves out a slot row whose score is only the
+/// no-subject floor. Those rows used to fill the printed limit and push
+/// the pack's hits out.
+pub fn merge_search(
+    hits: &mut Vec<Hit>,
+    query: &str,
+    limit: usize,
+    filter: &SourceFilter,
+    attempts: bool,
+) {
+    merge_filtered(
+        hits,
+        query,
+        limit,
+        filter,
+        attempts,
+        Some(crate::NO_SUBJECT_FLOOR),
+    );
+}
+
+fn merge_filtered(
+    hits: &mut Vec<Hit>,
+    query: &str,
+    limit: usize,
+    filter: &SourceFilter,
+    attempts: bool,
+    floor: Option<f64>,
 ) {
     let home = memory_home();
     if !home.exists() {
@@ -1676,12 +1715,13 @@ pub fn merge_cli(
         let take = limit.max(1);
         *hits = found
             .into_iter()
+            .filter(|(_, score)| floor.is_none_or(|floor| *score > floor))
             .take(take)
             .map(|(row, score)| to_hit(&row, score))
             .collect();
         return;
     }
-    merge_into(hits, &place, query, limit, filter, attempts);
+    merge_into(hits, &place, query, limit, filter, attempts, floor);
 }
 
 fn merge_into(
@@ -1691,9 +1731,11 @@ fn merge_into(
     limit: usize,
     filter: &SourceFilter,
     attempts: bool,
+    floor: Option<f64>,
 ) {
     let extras: Vec<Hit> = selected(place, query, filter, attempts)
         .into_iter()
+        .filter(|(_, score)| floor.is_none_or(|floor| *score > floor))
         .filter(|(row, _)| {
             hits.iter()
                 .all(|hit| hit.id.as_deref() != Some(row.id.as_str()) && hit.text != row.text)
@@ -3072,6 +3114,7 @@ mod tests {
             10,
             &SourceFilter::default(),
             false,
+            None,
         );
         assert_eq!(hits.len(), before.len());
         assert_eq!(hits[0].id, before[0].id);

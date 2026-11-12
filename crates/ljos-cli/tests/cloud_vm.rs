@@ -4238,6 +4238,54 @@ fn doctor_warns_on_an_absolute_ljos_mcp_from_another_install() {
     assert_eq!(ljos_cli::doctor_word(&row), "ok", "{row:?}");
 }
 
+/// `~/.cargo/bin/ljos-mcp` is often a shell wrapper that execs
+/// `$LJOS_MCP_BIN` or `$LJOS_BIN/ljos-mcp`. That is this install when the
+/// target is, or when `--version` matches. A different binary still warns.
+#[test]
+fn doctor_accepts_a_wrapper_that_runs_this_install() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".local/bin");
+    let cargo = home.join(".cargo/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&cargo).unwrap();
+    let own = bin.join("ljos-mcp");
+    executable(
+        &own,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'ljos-mcp 0.41.3'; exit 0; fi\nexit 0\n",
+    );
+    let other = home.join("other-mcp");
+    executable(
+        &other,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'ljos-mcp 9.9.9'; exit 0; fi\nexit 0\n",
+    );
+    let wrapper = cargo.join("ljos-mcp");
+    executable(
+        &wrapper,
+        "#!/bin/sh\nif [ -n \"$LJOS_MCP_BIN\" ]; then exec \"$LJOS_MCP_BIN\" \"$@\"; fi\nexec \"$LJOS_BIN/ljos-mcp\" \"$@\"\n",
+    );
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    let doc = serde_json::json!({
+        "mcpServers": { "ljos": { "command": wrapper, "args": [] } }
+    });
+    fs::write(home.join(".cursor/mcp.json"), doc.to_string()).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::set_var("LJOS_MCP_BIN", &own);
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    let row = ljos_cli::cloud::mcp_row();
+    assert_eq!(ljos_cli::doctor_word(&row), "ok", "{row:?}");
+    assert!(!row.state.contains("not this install"), "{row:?}");
+
+    std::env::set_var("LJOS_MCP_BIN", &other);
+    let row = ljos_cli::cloud::mcp_row();
+    assert_eq!(ljos_cli::doctor_word(&row), "warn", "{row:?}");
+    assert!(row.state.contains("not this install"), "{row:?}");
+}
+
 #[test]
 fn doctor_respects_env_path_in_the_entry() {
     let _g = Guard::new();

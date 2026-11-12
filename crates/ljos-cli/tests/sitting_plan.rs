@@ -136,8 +136,12 @@ fn a_busy_pack_costs_one_read_and_the_sitting_stays_quiet() {
     assert!(!said.contains("packsetd busy, retrying"), "{said}");
     let asked = paths.lock().unwrap().clone();
     assert!(
-        asked.iter().all(|line| line.contains("/v1/atoms")),
-        "the sitting asked for more than the one listing: {asked:?}\n{said}"
+        asked.iter().any(|line| line.contains("/v1/search")),
+        "the sitting did not search: {asked:?}\n{said}"
+    );
+    assert!(
+        asked.len() <= 2,
+        "the sitting asked the pack more than the search and its listing fallback: {asked:?}\n{said}"
     );
     assert!(!asked.is_empty(), "the sitting never read the pack\n{said}");
 }
