@@ -11750,6 +11750,16 @@ pub const DENSE_ALONE_RANK: u32 = 1;
 /// none of 12 unrelated prompts did (their best was 0.653).
 pub const DENSE_ALONE_AT: f64 = 0.66;
 
+/// Cosine another seat's hit must reach when it does not name the subject.
+///
+/// This is [`DENSE_ALONE_AT`]. Packset sends that cosine on the hit, apart
+/// from the fused score, as the scale a client sets a floor on. A
+/// cross-seat row under the line is the unrelated prompt's band, and it
+/// is not used to fill a short list of this seat's own hits. A row that
+/// names the subject stays, which is also the word ranking used when the
+/// pack is busy and sends no cosine.
+pub const CROSS_SEAT_COSINE: f64 = DENSE_ALONE_AT;
+
 /// How far below the prompt's best cosine a hit that names the subject
 /// may sit, in place of two scorers agreeing. The cosines of one prompt
 /// sit close together, so the distance from the best tells more than a
@@ -11854,6 +11864,7 @@ pub fn search_ranked(query: &str, limit: u32) -> Result<Vec<Hit>> {
         {
             hit.entities.push("semantic:1".into());
         }
+        note_cosine(&mut hit, signal.cosine);
         hits.push(hit);
     }
     Ok(fold_verbatim(q, hits))
@@ -13754,6 +13765,73 @@ pub fn drop_word_floor(hits: &mut Vec<Hit>, query: &str, lexical: bool) {
     });
 }
 
+/// The encoder cosine stamped on a hit for [`drop_weak_cross_seat`].
+/// In memory only, the same way as `semantic:1`. Not stored on the atom.
+const COSINE_MARK: &str = "cosine:";
+
+fn note_cosine(hit: &mut Hit, cosine: Option<f64>) {
+    let Some(cosine) = cosine.filter(|cosine| cosine.is_finite()) else {
+        return;
+    };
+    if hit_cosine(hit).is_none() {
+        hit.entities.push(format!("{COSINE_MARK}{cosine}"));
+    }
+}
+
+/// Whether `hits` carry an encoder cosine. Absent means the word ranking.
+#[must_use]
+pub fn carries_cosine(hits: &[Hit]) -> bool {
+    hits.iter().any(|hit| hit_cosine(hit).is_some())
+}
+
+fn hit_cosine(hit: &Hit) -> Option<f64> {
+    hit.entities.iter().find_map(|tag| {
+        tag.strip_prefix(COSINE_MARK)
+            .and_then(|raw| raw.parse::<f64>().ok())
+            .filter(|cosine| cosine.is_finite())
+    })
+}
+
+/// The line printed when the only rows were another seat's hits under
+/// the similarity floor. A search the pack answered with nothing still
+/// prints `No hits.`
+pub const NOTHING_RELEVANT: &str = "Nothing relevant was found.\n";
+
+/// Drop another seat's hit that does not clear the similarity floor.
+///
+/// This seat's own hits stay, and so does a person-origin rule. Another
+/// seat's hit stays when it names the subject. That is the line
+/// [`recall_floor::ON_TASK_FLOOR`] draws on [`lexical_match_scores`]: a
+/// text that names the subject scores at least 0.5, and one shared
+/// ordinary word stays under it. When the pack ranked by the encoder,
+/// a hit that does not name the subject stays only when its cosine
+/// reaches [`CROSS_SEAT_COSINE`]. A short list is not padded with a
+/// weaker cross-seat row.
+///
+/// `lexical` is the word ranking, including the one used when the pack
+/// is busy. Cosine is not required then, and a hit that names the
+/// subject still answers.
+///
+/// Returns whether any cross-seat hit was dropped.
+pub fn drop_weak_cross_seat(hits: &mut Vec<Hit>, query: &str, lexical: bool) -> bool {
+    let mine = seat_name();
+    let mut dropped = false;
+    hits.retain(|hit| {
+        if !foreign_memory(hit, &mine) {
+            return true;
+        }
+        if names_the_subject(&hit.text, query) {
+            return true;
+        }
+        if !lexical && hit_cosine(hit).is_some_and(|cosine| cosine >= CROSS_SEAT_COSINE) {
+            return true;
+        }
+        dropped = true;
+        false
+    });
+    dropped
+}
+
 fn semantic_ranking() -> Ranking {
     Ranking {
         mode: "semantic",
@@ -13902,6 +13980,7 @@ fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
         {
             hit.entities.push("semantic:1".into());
         }
+        note_cosine(&mut hit, cosine);
         hits.push(hit);
     }
     keep_search_origins(&client, &hits);
@@ -13911,6 +13990,12 @@ fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
 /// Search hits as JSON, with the ranking the pack used.
 #[must_use]
 pub fn search_json(hits: &[Hit], ranking: Option<&Ranking>) -> String {
+    search_json_empty(hits, ranking, None)
+}
+
+/// [`search_json`] that names an empty answer. `empty` is set when the
+/// only rows were another seat's hits under the similarity floor.
+pub fn search_json_empty(hits: &[Hit], ranking: Option<&Ranking>, empty: Option<&str>) -> String {
     let rows: Vec<Value> = hits
         .iter()
         .map(|hit| {
@@ -13922,7 +14007,13 @@ pub fn search_json(hits: &[Hit], ranking: Option<&Ranking>) -> String {
             })
         })
         .collect();
-    ranking_doc(ranking, serde_json::json!({ "hits": rows }))
+    let mut doc = serde_json::json!({ "hits": rows });
+    if hits.is_empty() {
+        if let Some(line) = empty.map(str::trim).filter(|line| !line.is_empty()) {
+            doc["reading"] = Value::String(line.to_string());
+        }
+    }
+    ranking_doc(ranking, doc)
 }
 
 /// Recall text as JSON, with the ranking the pack used.
@@ -70617,6 +70708,78 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
         assert_eq!(printed.mode, "lexical");
         assert_eq!(printed.reason, "local memory snapshot");
+    }
+
+    /// The reported search: from seat dseams-paper, a query about
+    /// rings-statistics-matter came back as other seats' disk and travel
+    /// lessons. Those share one ordinary word and sit under the cosine
+    /// line. This seat's lesson stays, and so does another seat's lesson
+    /// that names the subject or clears the cosine. The word ranking,
+    /// which is what a busy pack uses, still returns this seat's lesson.
+    #[test]
+    fn weak_cross_seat_hits_do_not_pad_a_short_list() {
+        let _g = env_guard();
+        let _seat = HoldEnv::set(&[("LJOS_SEAT", "dseams-paper")]);
+        assert_eq!(seat_name(), "dseams-paper");
+        let query = "related work watch rings-statistics-matter";
+        let hit = |id: &str, text: &str, seat: &str, cosine: Option<f64>| {
+            let mut row = Hit {
+                id: Some(id.into()),
+                text: text.into(),
+                score: cosine.unwrap_or(0.4),
+                kind: "lesson".into(),
+                ts: None,
+                entities: vec![format!("{SEAT_ENTITY}{seat}")],
+                ballots: None,
+                of: None,
+                rerank_score: None,
+                labels: Vec::new(),
+            };
+            note_cosine(&mut row, cosine);
+            row
+        };
+        let own = "The rings statistics matter note is the one to watch.";
+        let disk = "Watch the disk fill before the copy.";
+        let travel = "A related stop on the morning train.";
+        let named = "Rings statistics matter, and the watch note says so.";
+        let close = "Luggage for the week sits by the door.";
+        let mut semantic = vec![
+            hit("disk", disk, "disk-saver", Some(0.41)),
+            hit("travel", travel, "travel", Some(0.40)),
+            hit("own", own, "dseams-paper", Some(0.55)),
+            hit("named", named, "other", Some(0.50)),
+            hit("close", close, "travel", Some(0.72)),
+        ];
+        let dropped = drop_weak_cross_seat(&mut semantic, query, false);
+        let ids: Vec<_> = semantic.iter().filter_map(|h| h.id.clone()).collect();
+        assert!(dropped, "{ids:?}");
+        assert_eq!(ids, ["own", "named", "close"], "{ids:?}");
+        assert!(names_the_subject(named, query), "{named}");
+        assert!(!names_the_subject(disk, query), "{disk}");
+        assert!(!names_the_subject(travel, query), "{travel}");
+        assert!(!names_the_subject(close, query), "{close}");
+
+        let mut only_weak = vec![
+            hit("disk", disk, "disk-saver", Some(0.41)),
+            hit("travel", travel, "travel", Some(0.40)),
+        ];
+        assert!(drop_weak_cross_seat(&mut only_weak, query, false));
+        assert!(only_weak.is_empty(), "{only_weak:?}");
+
+        let mut lexical = vec![
+            hit("disk", disk, "disk-saver", None),
+            hit("own", own, "dseams-paper", None),
+            hit("named", named, "other", None),
+            hit("close", close, "travel", Some(0.90)),
+        ];
+        let dropped = drop_weak_cross_seat(&mut lexical, query, true);
+        let ids: Vec<_> = lexical.iter().filter_map(|h| h.id.clone()).collect();
+        assert!(dropped, "{ids:?}");
+        assert_eq!(
+            ids,
+            ["own", "named"],
+            "the word ranking keeps this seat and a hit that names the subject: {ids:?}"
+        );
     }
 
     #[test]

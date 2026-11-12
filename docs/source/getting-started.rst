@@ -92,6 +92,10 @@ This run sat under an agent runner, so the search row says ``lesson, agent-deriv
 Typed at a terminal with no runner above it, the same command is the person's sentence.
 Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
 ``ljos search "which fusion"`` shares no word with either sentence and prints ``No hits.``
+This seat's hits come first. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.
+That line is the one already used for a hit the encoder ranks first: on the measured set, an unrelated prompt's best cosine stayed at 0.653.
+A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is ``Nothing relevant was found.``
+A busy pack ranks by words and still returns a hit that names the subject.
 
 .. code:: console
 

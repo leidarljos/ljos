@@ -562,7 +562,14 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// What ljos remembers about a topic, best match first. Empty means nothing is remembered on it.
+    /// What ljos remembers about a topic, best match first.
+    ///
+    /// This seat's hits come first. Another seat's hit is kept when it names
+    /// the subject, or when the encoder's cosine reaches 0.66. A short list
+    /// is not padded with a weaker cross-seat hit. When those were the only
+    /// rows, the line is `Nothing relevant was found.` A search the pack
+    /// answered with nothing is still `No hits.` A busy pack ranks by words
+    /// and still returns a hit that names the subject.
     Search {
         query: Vec<String>,
         /// Most hits to print.
@@ -2657,15 +2664,25 @@ fn run_command() -> Result<()> {
             }
             ljos_cli::refine_default_hits(&mut hits, &asked, attempts);
             ljos_cli::drop_word_floor(&mut hits, &asked, ranking.mode == "lexical");
+            let unrelated =
+                ljos_cli::drop_weak_cross_seat(&mut hits, &asked, ranking.mode == "lexical");
             ljos_cli::prefer_calling_seat(&mut hits);
             hits.truncate(limit as usize);
             ljos_cli::note_lookups(&hits);
             ranking = ljos_cli::ranking_for_printed(ranking, &hits);
             if json {
-                print!("{}", ljos_cli::search_json(&hits, Some(&ranking)));
+                let empty = unrelated.then_some(ljos_cli::NOTHING_RELEVANT);
+                print!(
+                    "{}",
+                    ljos_cli::search_json_empty(&hits, Some(&ranking), empty)
+                );
             } else {
                 eprint!("{}", ljos_cli::ranking_line(&ranking));
-                print!("{}", format_hits(&hits, explain));
+                if hits.is_empty() && unrelated {
+                    print!("{}", ljos_cli::NOTHING_RELEVANT);
+                } else {
+                    print!("{}", format_hits(&hits, explain));
+                }
             }
         }
         Cmd::Evidence { args } => {

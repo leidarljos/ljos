@@ -40,3 +40,7 @@ sends no conversation id still sits, bound to this seat, the same sitting
 stamped. ``_meta.conversation_id`` sits as that conversation. ``ljos_claim``
 uses the same holder. ``ljos_finish``
 on a checklist id marks it done and names the next item.
+
+``ljos_search`` keeps this seat's hits first. Another seat's hit is kept
+when it names the subject, or when the encoder's cosine is at least 0.66.
+When the only rows were weaker, the reading is ``Nothing relevant was found.``

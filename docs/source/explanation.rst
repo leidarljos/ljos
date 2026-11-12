@@ -292,6 +292,19 @@ sinks without vanishing. On a corpus where one claim per topic stays recalled, r
 the kept claim first 0.947 of the time. Lexical scoring is at chance, and a recency half-life gets
 0.270. The packset site carries the table.
 
+Many seats share one pack. ``ljos search`` prints this seat's hits first.
+Another seat's hit is kept when it names the subject, which is a lexical
+score of at least 0.5, or when the encoder's cosine with the query is at
+least 0.66. Packset sends that cosine apart from the fused score so a
+client can set a floor on it. 0.66 is the line already used when the
+encoder ranks a hit first and the hit shares no word with the query: on
+that measured set, an unrelated prompt's best cosine stayed at 0.653.
+A cross-seat row under the line does not fill a short list. When those
+were the only rows, the command prints ``Nothing relevant was found.``
+A search the pack answered with nothing is still ``No hits.`` When the
+pack is busy, search ranks by words. Cosine is not required then, and a
+hit that names the subject still answers.
+
 A claim shown wrong is retracted with the deed that showed it. A contrary claim closes the old
 claim's window. The record that it was held stays.
 

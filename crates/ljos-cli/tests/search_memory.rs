@@ -221,3 +221,126 @@ fn search_says_when_a_queued_lesson_is_still_waiting() {
         "the lesson left the queue without being stored:\n{left}"
     );
 }
+
+fn serve_search(search_body: &'static str, search_status: u16, atoms: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            thread::spawn(move || {
+                let mut sock = conn;
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf);
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                let path = path.split('?').next().unwrap_or("/");
+                let (status, body, extra) = if path == "/v1/search" {
+                    (search_status, search_body, "Retry-After: 0\r\n")
+                } else if path == "/v1/atoms" {
+                    (200, atoms, "")
+                } else if path == "/v1/status" {
+                    (
+                        200,
+                        r#"{"embedder":{"available":true,"answering":true,"enabled":true},"search":{"ranks":["fused","relevance"]}}"#,
+                        "",
+                    )
+                } else {
+                    (200, "ok", "")
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+fn search_as(url: &str, home: &Path, state: &Path, query: &str) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["search", query])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home)
+        .env("XDG_STATE_HOME", state)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("LJOS_SEAT", "dseams-paper")
+        .env("PACKSET_AUTH", "off")
+        .env("PACKSET_URL", url)
+        .env("PACKSET_WORKSPACE", "seat")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap()
+}
+
+const RINGS: &str = "related work watch rings-statistics-matter";
+const OWN_RINGS: &str = "The rings statistics matter note is the one to watch.";
+const DISK_WATCH: &str = "Watch the disk fill before the copy.";
+
+#[test]
+fn unrelated_cross_seat_hits_are_not_a_search_answer() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let body = format!(
+        r#"{{"hits":[
+            {{"id":"disk","kind":"lesson","text":"{DISK_WATCH}","score":0.41,"cosine":0.41,"entities":["seat:disk-saver"]}},
+            {{"id":"travel","kind":"lesson","text":"A related stop on the morning train.","score":0.40,"cosine":0.40,"entities":["seat:travel"]}},
+            {{"id":"own","kind":"lesson","text":"{OWN_RINGS}","score":0.55,"cosine":0.55,"entities":["seat:dseams-paper"]}}
+        ],"rank":"relevance"}}"#
+    );
+    let url = serve_search(Box::leak(body.into_boxed_str()), 200, r#"{"atoms":[]}"#);
+    let out = search_as(&url, &home, &state, RINGS);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!("{stdout}{stderr}");
+    assert!(out.status.success(), "{said}");
+    assert!(stdout.contains(OWN_RINGS), "{said}");
+    assert!(!stdout.contains("disk fill"), "{said}");
+    assert!(!stdout.contains("morning train"), "{said}");
+    assert!(stderr.contains("ranking is semantic"), "{said}");
+}
+
+#[test]
+fn a_busy_pack_still_ranks_this_seats_lesson_by_words() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let atoms = format!(
+        r#"{{"atoms":[
+            {{"id":"own","kind":"lesson","text":"{OWN_RINGS}","entities":["seat:dseams-paper"]}},
+            {{"id":"disk","kind":"lesson","text":"{DISK_WATCH}","entities":["seat:disk-saver"]}}
+        ]}}"#
+    );
+    let url = serve_search(
+        r#"{"error":"packsetd is busy"}"#,
+        503,
+        Box::leak(atoms.into_boxed_str()),
+    );
+    let out = search_as(&url, &home, &state, RINGS);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!("{stdout}{stderr}");
+    assert!(out.status.success(), "{said}");
+    assert!(stdout.contains(OWN_RINGS), "{said}");
+    assert!(!stdout.contains("disk fill"), "{said}");
+    assert!(
+        stderr.contains("ranking is lexical"),
+        "the busy pack did not fall back to words: {said}"
+    );
+}

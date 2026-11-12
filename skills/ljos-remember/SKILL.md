@@ -24,9 +24,12 @@ ljos rule '*--force*' --verdict deny --why "Never force push."
 
 - Keep each memory to one or two short sentences. Write the fix, not the
   story: what to do, and why.
-- Before answering from memory, search: `ljos search TOPIC`. An empty answer
-  means the store has nothing on it. A failure means the store is down; run
-  `ljos doctor`.
+- Before answering from memory, search: `ljos search TOPIC`. `No hits.`
+  means the store has nothing on it. `Nothing relevant was found.` means
+  the only rows were another seat's lessons under the similarity floor:
+  a hit that names the subject, or an encoder cosine of at least 0.66.
+  A failure means the store is down; run `ljos doctor`. A busy pack still
+  answers by words.
 - When the person states a standing choice in a prompt ("from now on use
   bun", "never push to main"), the prompt hook saves it in their words and
   says `Saved the person's preference`. Do not write it again. A lesson the

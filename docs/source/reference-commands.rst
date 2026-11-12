@@ -30,7 +30,7 @@ Commands
 ``retire-notes``
    Stores: pack. Tombstone the note memories an older ``ljos note`` wrote; runs once per seat, and the tracker copies stay.
 ``search QUERY [-n N] [--rerank] [--as-of TIME] [--explain]``
-   Stores: pack. Ranked claims with how many scorers named each and its age; ``--rerank`` scores the top hits with the writer's cross-encoder; ``--as-of`` asks the pack as it stood then; ``--explain`` opens with what the score and the fraction mean.
+   Stores: pack. Ranked claims with how many scorers named each and its age. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. A short list is not padded with a weaker cross-seat hit. When those were the only rows, the line is ``Nothing relevant was found.`` A search the pack answered with nothing is still ``No hits.`` A busy pack ranks by words and still returns a hit that names the subject. ``--rerank`` scores the top hits with the writer's cross-encoder; ``--as-of`` asks the pack as it stood then; ``--explain`` opens with what the score and the fraction mean.
 ``timeline ISSUE [-n N]``
    Stores: tracker, deed store, pack. The logbook, the cited deeds and the activated memories as one dated list, oldest first, each line with its age and the gap since the one before.
 ``consolidate [--apply]``

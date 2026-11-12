@@ -67,6 +67,7 @@ Git needs `user.name` and `user.email`, because the tracker commits each change.
 On a clean install, `ljos doctor` prints `ljos is ready: memory, tracker and command guard work`.
 `ljos remember` prints the lesson and the first eight characters of its id. With no seat set, the write uses `unknown-` plus the host name.
 `ljos search "lexical default"` prints that lesson. A query that shares no word with the stored text, such as `which fusion`, prints `No hits.`
+This seat's hits come first. Another seat's lesson is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is `Nothing relevant was found.` A busy pack ranks by words and still returns a hit that names the subject.
 `ljos file` prints the new id, then `project:`, the heading, the path, and `tracker git: committed ... no remote, kept local`.
 
 Mem0's default add runs a model over the text. The sentence above is stored as written.

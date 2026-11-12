@@ -1566,7 +1566,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. An empty list means the pack holds nothing on it; a failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Follow with ljos_island for the cluster the task touches.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A short list is not padded with a weaker cross-seat hit. An empty list means nothing relevant was found, or the pack holds nothing on it. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Follow with ljos_island for the cluster the task touches.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -1577,21 +1577,28 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<Json<SearchPage>, McpError> {
-        let hits = if args
+        let mut hits = if args
             .as_of
             .as_deref()
             .is_some_and(|at| !at.trim().is_empty())
         {
             packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false).map_err(refused)?
         } else {
-            let mut hits = search_ranked(&args.query, 10).map_err(refused)?;
-            refine_default_hits(&mut hits, &args.query, false);
-            hits
+            search_ranked(&args.query, 10).map_err(refused)?
         };
+        if args.as_of.as_deref().is_none_or(|at| at.trim().is_empty()) {
+            refine_default_hits(&mut hits, &args.query, false);
+        }
+        let lexical = !ljos_cli::carries_cosine(&hits);
+        let unrelated = ljos_cli::drop_weak_cross_seat(&mut hits, &args.query, lexical);
         note_lookups(&hits);
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
-        let reading = search_reading(hits.len()).to_string();
+        let reading = if hits.is_empty() && unrelated {
+            ljos_cli::NOTHING_RELEVANT.trim().to_string()
+        } else {
+            search_reading(hits.len()).to_string()
+        };
         Ok(Json(SearchPage {
             reading,
             rows: hits
