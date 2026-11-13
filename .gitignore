@@ -135,3 +135,6 @@ $RECYCLE.BIN/
 !.leakguard.toml
 .venv-docs/
 docs/build/
+
+# Benchmark products. bench/hf/run.sh writes these. They are not source.
+bench/hf/out/

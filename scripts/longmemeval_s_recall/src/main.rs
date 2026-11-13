@@ -15,6 +15,9 @@
 //!
 //! Dense and fused arms are not scored. They need the encoder named in
 //! `docs/scripts/packset-longmemeval-s.txt`, and this program does not load one.
+//!
+//! `--out DIR` writes `summary.json` and `per_question.csv` for the BM25+ arm.
+//! The download names a dataset revision. `main` is not a pin.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -26,11 +29,16 @@ use packset_core::search::Record;
 use serde_json::{Map, Value};
 use sha2::Digest;
 
-/// Public cleaned LongMemEval_S release named by the upstream README.
-const DATA_URL: &str =
-    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json";
+/// Hugging Face dataset that publishes the cleaned LongMemEval_S file.
+const DATA_REPO: &str = "xiaowu0162/longmemeval-cleaned";
 
-/// sha256 of that file, computed from the bytes the URL returned.
+/// Dataset commit that published `longmemeval_s_cleaned.json`. `main` moves.
+const DATA_REV: &str = "98d7416c24c778c2fee6e6f3006e7a073259d48f";
+
+/// File inside that revision. LongMemEval_S, cleaned.
+const DATA_FILE: &str = "longmemeval_s_cleaned.json";
+
+/// sha256 of that file, computed from the bytes the revision returned.
 const DATA_SHA256: &str = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442";
 
 /// How long a download may sit before it is a hung socket.
@@ -61,13 +69,22 @@ const ISLAND_SEEDS: usize = 5;
 const ISLAND_HOPS: usize = 2;
 
 /// packset-core this program links, the same minor the seat's crate pins.
-const PACKSET_CORE: &str = "0.17.0";
+const PACKSET_CORE: &str = "0.17.6";
 
 struct Question {
+    id: String,
     kind: String,
     text: String,
     sessions: Vec<(String, String)>,
     answers: BTreeSet<String>,
+}
+
+struct Row {
+    id: String,
+    kind: String,
+    evidence: usize,
+    /// Evidence sessions inside each cutoff, in `CUTOFFS` order.
+    found: [usize; CUTOFFS.len()],
 }
 
 struct Tally {
@@ -88,12 +105,7 @@ impl Tally {
     fn add(&mut self, ranked: &[String], answers: &BTreeSet<String>) {
         self.asked += 1;
         let denom = answers.len().max(1) as f64;
-        for (slot, cut) in CUTOFFS.iter().enumerate() {
-            let top: BTreeSet<&str> = ranked.iter().take(*cut).map(String::as_str).collect();
-            let found = answers
-                .iter()
-                .filter(|id| top.contains(id.as_str()))
-                .count();
+        for (slot, found) in found_at(ranked, answers).into_iter().enumerate() {
             if found > 0 {
                 self.hit[slot] += 1;
             }
@@ -102,7 +114,25 @@ impl Tally {
     }
 }
 
+/// Evidence sessions inside each cutoff.
+fn found_at(ranked: &[String], answers: &BTreeSet<String>) -> [usize; CUTOFFS.len()] {
+    let mut found = [0; CUTOFFS.len()];
+    for (slot, cut) in CUTOFFS.iter().enumerate() {
+        let top: BTreeSet<&str> = ranked.iter().take(*cut).map(String::as_str).collect();
+        found[slot] = answers
+            .iter()
+            .filter(|id| top.contains(id.as_str()))
+            .count();
+    }
+    found
+}
+
+fn data_url() -> String {
+    format!("https://huggingface.co/datasets/{DATA_REPO}/resolve/{DATA_REV}/{DATA_FILE}")
+}
+
 fn main() -> Result<()> {
+    let args = parse_args()?;
     let scored = score_question(&toy_question());
     anyhow::ensure!(
         scored.bm25.first().map(String::as_str) == Some("s-key"),
@@ -113,7 +143,7 @@ fn main() -> Result<()> {
         "self-check: island order did not rank the labelled session first"
     );
     println!("self_check ok");
-    if std::env::args().any(|arg| arg == "--self-check") {
+    if args.self_check {
         return Ok(());
     }
 
@@ -135,6 +165,7 @@ fn main() -> Result<()> {
     let mut overall_bm25 = Tally::new();
     let mut overall_island = Tally::new();
     let mut by_kind: BTreeMap<String, (Tally, Tally)> = BTreeMap::new();
+    let mut rows = Vec::new();
     let mut abstention = 0usize;
     let mut skipped = 0usize;
     for item in items {
@@ -145,8 +176,9 @@ fn main() -> Result<()> {
                 let scored = score_question(&question);
                 overall_bm25.add(&scored.bm25, &question.answers);
                 overall_island.add(&scored.island, &question.answers);
+                rows.push(question_row(&question, &scored.bm25));
                 let entry = by_kind
-                    .entry(question.kind)
+                    .entry(question.kind.clone())
                     .or_insert_with(|| (Tally::new(), Tally::new()));
                 entry.0.add(&scored.bm25, &question.answers);
                 entry.1.add(&scored.island, &question.answers);
@@ -158,13 +190,16 @@ fn main() -> Result<()> {
         }
     }
 
-    println!("dataset_url {DATA_URL}");
+    println!("dataset_url {}", data_url());
+    println!("dataset_repo {DATA_REPO}");
+    println!("dataset_revision {DATA_REV}");
     println!("dataset_sha256 {DATA_SHA256}");
     println!("file_questions {}", items.len());
     println!("abstention_left_out {abstention}");
     println!("skipped {skipped}");
     println!("scored {}", overall_bm25.asked);
     println!("packset_core {PACKSET_CORE}");
+    println!("ljos_version {}", ljos_version());
     println!("ljos_commit {}", git_head());
     println!("encoder none");
     println!("dense_arm not_scored");
@@ -190,8 +225,170 @@ fn main() -> Result<()> {
         println!("{}", arm_line(&prefix, "bm25+", bm25));
         println!("{}", arm_line(&prefix, "island", island));
     }
-    println!("wall_s {:.3}", started.elapsed().as_secs_f64());
+    let wall = started.elapsed().as_secs_f64();
+    println!("wall_s {wall:.3}");
+    if let Some(dir) = args.out {
+        write_run(&dir, &overall_bm25, &rows, wall)?;
+    }
     Ok(())
+}
+
+struct Args {
+    self_check: bool,
+    out: Option<PathBuf>,
+}
+
+fn parse_args() -> Result<Args> {
+    let mut args = Args {
+        self_check: false,
+        out: None,
+    };
+    let mut rest = std::env::args().skip(1);
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--self-check" => args.self_check = true,
+            "--out" => {
+                let path = rest.next().context("--out needs a directory")?;
+                args.out = Some(PathBuf::from(path));
+            }
+            other => bail!("unknown argument {other}"),
+        }
+    }
+    Ok(args)
+}
+
+fn question_row(question: &Question, ranked: &[String]) -> Row {
+    Row {
+        id: question.id.clone(),
+        kind: question.kind.clone(),
+        evidence: question.answers.len(),
+        found: found_at(ranked, &question.answers),
+    }
+}
+
+fn row_recall(row: &Row, slot: usize) -> f64 {
+    let denom = row.evidence.max(1) as f64;
+    row.found[slot] as f64 / denom
+}
+
+fn write_run(dir: &Path, bm25: &Tally, rows: &[Row], wall: f64) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    write_summary(&dir.join("summary.json"), bm25, wall)?;
+    write_csv(&dir.join("per_question.csv"), rows)?;
+    Ok(())
+}
+
+fn write_summary(path: &Path, tally: &Tally, wall: f64) -> Result<()> {
+    let (hit, recall) = metric_at(tally, 5);
+    let mut body = String::from("{\n");
+    let mut comma = false;
+    // The ratio and the wall time are the scorer's own digits, written as
+    // JSON numbers so a later format pass cannot change them.
+    push_number(&mut body, &mut comma, "hit@5", &hit)?;
+    push_number(&mut body, &mut comma, "recall@5", &recall)?;
+    push_number(&mut body, &mut comma, "questions", &tally.asked.to_string())?;
+    push_number(&mut body, &mut comma, "seconds", &format!("{wall:.3}"))?;
+    push_string(&mut body, &mut comma, "ljos", ljos_version())?;
+    push_string(&mut body, &mut comma, "ljos_commit", &git_head())?;
+    push_string(&mut body, &mut comma, "packset", PACKSET_CORE)?;
+    push_string(&mut body, &mut comma, "dataset_repo", DATA_REPO)?;
+    push_string(&mut body, &mut comma, "dataset_revision", DATA_REV)?;
+    push_string(&mut body, &mut comma, "cpu_model", &cpu_model())?;
+    push_string(&mut body, &mut comma, "date", &utc_date())?;
+    body.push_str("\n}\n");
+    std::fs::write(path, body).context("write summary.json")?;
+    Ok(())
+}
+
+fn push_number(body: &mut String, comma: &mut bool, key: &str, number: &str) -> Result<()> {
+    if number.is_empty()
+        || !number
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'.'))
+    {
+        bail!("summary field {key} is not a decimal");
+    }
+    push_key(body, comma, key)?;
+    body.push_str(number);
+    Ok(())
+}
+
+fn push_string(body: &mut String, comma: &mut bool, key: &str, value: &str) -> Result<()> {
+    push_key(body, comma, key)?;
+    body.push_str(&serde_json::to_string(value).context("json string")?);
+    Ok(())
+}
+
+fn push_key(body: &mut String, comma: &mut bool, key: &str) -> Result<()> {
+    if *comma {
+        body.push_str(",\n");
+    }
+    *comma = true;
+    body.push_str("  ");
+    body.push_str(&serde_json::to_string(key).context("json key")?);
+    body.push_str(": ");
+    Ok(())
+}
+
+fn write_csv(path: &Path, rows: &[Row]) -> Result<()> {
+    let mut file = std::fs::File::create(path).context("write per_question.csv")?;
+    writeln!(
+        file,
+        "question_id,question_type,evidence,found@1,hit@1,recall@1,found@5,hit@5,recall@5,found@10,hit@10,recall@10"
+    )?;
+    for row in rows {
+        writeln!(
+            file,
+            "{},{},{},{},{},{},{},{},{},{},{},{}",
+            csv_escape(&row.id),
+            csv_escape(&row.kind),
+            row.evidence,
+            row.found[0],
+            u8::from(row.found[0] > 0),
+            ratio(row_recall(row, 0), 1),
+            row.found[1],
+            u8::from(row.found[1] > 0),
+            ratio(row_recall(row, 1), 1),
+            row.found[2],
+            u8::from(row.found[2] > 0),
+            ratio(row_recall(row, 2), 1),
+        )?;
+    }
+    Ok(())
+}
+
+fn metric_at(tally: &Tally, cut: usize) -> (String, String) {
+    let slot = CUTOFFS
+        .iter()
+        .position(|depth| *depth == cut)
+        .expect("cutoff is scored");
+    (
+        ratio(tally.hit[slot] as f64, tally.asked),
+        ratio(tally.recall[slot], tally.asked),
+    )
+}
+
+fn csv_escape(text: &str) -> String {
+    if text.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text.to_string()
+    }
+}
+
+fn ljos_version() -> &'static str {
+    include_str!("../../../Cargo.toml")
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("version = \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+        })
+        .unwrap_or("unknown")
+}
+
+fn utc_date() -> String {
+    let stamp = packset_core::clock::utcnow();
+    stamp.split('T').next().unwrap_or("unknown").to_string()
 }
 
 struct Scored {
@@ -323,6 +520,7 @@ fn parse_question(value: &Value) -> Parsed {
         .filter_map(|(sid, turns)| Some((sid.as_str()?.to_string(), session_text(turns))))
         .collect();
     Parsed::Question(Question {
+        id: id.to_string(),
         kind: value
             .get("question_type")
             .and_then(Value::as_str)
@@ -371,7 +569,7 @@ fn download(dest: &Path) -> Result<()> {
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(DOWNLOAD_TIMEOUT_S))
         .build();
-    let response = agent.get(DATA_URL).call().context("GET dataset")?;
+    let response = agent.get(&data_url()).call().context("GET dataset")?;
     let mut reader = response.into_reader();
     let partial = dest.with_extension("partial");
     let mut file = std::fs::File::create(&partial).context("create dataset file")?;
@@ -456,8 +654,8 @@ fn git_head() -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn print_machine() {
-    let model = std::fs::read_to_string("/proc/cpuinfo")
+fn cpu_model() -> String {
+    std::fs::read_to_string("/proc/cpuinfo")
         .ok()
         .and_then(|text| {
             text.lines().find_map(|line| {
@@ -465,7 +663,11 @@ fn print_machine() {
                 rest.split(':').nth(1).map(|value| value.trim().to_string())
             })
         })
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn print_machine() {
+    let model = cpu_model();
     let cores = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(0);
@@ -504,6 +706,7 @@ fn ratio(part: f64, whole: usize) -> String {
 
 fn toy_question() -> Question {
     Question {
+        id: "q-toy".to_string(),
         kind: "toy".to_string(),
         text: "Where does Alice keep the spare key?".to_string(),
         sessions: vec![
@@ -533,5 +736,50 @@ mod tests {
         let scored = score_question(&toy_question());
         assert_eq!(scored.bm25.first().map(String::as_str), Some("s-key"));
         assert_eq!(scored.island.first().map(String::as_str), Some("s-key"));
+    }
+
+    #[test]
+    fn toy_row_hits_at_five() {
+        let question = toy_question();
+        let scored = score_question(&question);
+        let row = question_row(&question, &scored.bm25);
+        assert_eq!(row.id, "q-toy");
+        assert_eq!(row.evidence, 1);
+        assert_eq!(row.found[1], 1);
+        assert_eq!(row_recall(&row, 1), 1.0);
+    }
+
+    #[test]
+    fn lock_names_the_pinned_packset_core() {
+        let versions = lock_packset_versions(include_str!("../../../Cargo.lock"));
+        assert_eq!(versions, vec![PACKSET_CORE]);
+    }
+
+    #[test]
+    fn dataset_url_pins_the_revision() {
+        let url = data_url();
+        assert!(url.contains(DATA_REV));
+        assert!(url.contains(DATA_REPO));
+        assert!(url.ends_with(DATA_FILE));
+        assert!(!url.contains("/main/"));
+    }
+
+    #[test]
+    fn summary_names_the_bm25_run() {
+        let mut tally = Tally::new();
+        tally.asked = 2;
+        tally.hit[1] = 1;
+        tally.recall[1] = 1.5;
+        let dir = std::env::temp_dir().join(format!("ljos-lme-summary-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_summary(&dir.join("summary.json"), &tally, 1.25).unwrap();
+        let text = std::fs::read_to_string(dir.join("summary.json")).unwrap();
+        assert!(text.starts_with("{\n  \"hit@5\": 0.500000"));
+        assert!(text.contains("\"recall@5\": 0.750000"));
+        assert!(text.contains("\"questions\": 2"));
+        assert!(text.contains("\"seconds\": 1.250"));
+        assert!(text.contains("\"packset\": \"0.17.6\""));
+        assert!(text.contains(DATA_REV));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

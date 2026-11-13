@@ -98,6 +98,7 @@ It stores the sentence as written. Search uses a local encoder when one is insta
 - 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
 - The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
 - packset, the memory writer, publishes a LongMemEval_S session retrieval run ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). That page records the figures. This tree does not. The run scores retrieval, not answer accuracy.
+- The ljos BM25+ CPU run on that file is repeated with `sh bench/hf/run.sh`. The summary and the per-question rows are the dataset [ljos LongMemEval_S retrieval](https://huggingface.co/datasets/rgoswami/ljos-longmemeval-s).
 - 2,293 tests passed, 0 failed, 2 ignored on the 0.40.0 release commit ([CI run 42801686714](https://github.com/leidarljos/ljos/actions/runs/42801686714)).
 
 [What ljos does](https://leidarljos.github.io/ljos/introduction.html) lists every measured number with its method.
