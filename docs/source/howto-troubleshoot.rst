@@ -30,7 +30,7 @@ Exit 1.
    ljos is not ready: ljos-policyd, vissue, deedar, claimdag, packset, packsetd and memory do not answer. Optional extras: `ljos doctor --all`.
    no  packset not on PATH, and crates.io lists 0.17.10, so run `cargo install --locked packset`.
    no  packsetd    not on PATH, and crates.io lists 0.17.10, so run `cargo install --locked packset`.
-   no  pack    http://127.0.0.1:8761 does not answer. no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.
+   no  memory    http://127.0.0.1:8761 does not answer. no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.
 
 ..
    # proseguard:on
@@ -45,7 +45,7 @@ With ``packset`` on ``PATH`` and nothing listening, a home that is not a tempora
 
 .. code:: text
 
-   no  pack    http://127.0.0.1:8761 does not answer. no pack writer is answering on 127.0.0.1:8761, so run `packset ensure`. run ljos doctor --fix
+   no  memory    http://127.0.0.1:8761 does not answer. no pack writer is answering on 127.0.0.1:8761, so run `packset ensure`. run ljos doctor --fix
 
 ..
    # proseguard:on
@@ -59,7 +59,7 @@ The printed row is:
 
 .. code:: text
 
-   no  pack    http://127.0.0.1:8761 does not answer. the memory writer does not start on its own under a temporary HOME (/tmp/seat), so run `packset ensure`. run ljos doctor --fix
+   no  memory    http://127.0.0.1:8761 does not answer. the memory writer does not start on its own under a temporary HOME (/tmp/seat), so run `packset ensure`. run ljos doctor --fix
 
 ..
    # proseguard:on
@@ -93,7 +93,7 @@ With ``vissue`` installed and no tracker configured, the row is info and this fa
 
 .. code:: text
 
-   info    tracker vissue failed (exit 1): not inside a tracker, so run `ljos onboard`.
+   info    tickets vissue failed (exit 1): not inside a tracker, so run `ljos onboard`.
 
 ..
    # proseguard:on
@@ -106,7 +106,7 @@ The summary names the tracker, and the row is:
 
 .. code:: text
 
-   no  tracker vissue 0.23.1 root=/tmp/seat/no-such-tracker prefix=Software from VISSUE_ROOT=/tmp/seat/no-such-tracker; root is not a directory. `mkdir -p /tmp/seat/no-such-tracker/Software` creates it
+   no  tickets vissue 0.23.1 root=/tmp/seat/no-such-tracker prefix=Software from VISSUE_ROOT=/tmp/seat/no-such-tracker; root is not a directory. `mkdir -p /tmp/seat/no-such-tracker/Software` creates it
 
 ..
    # proseguard:on
@@ -118,7 +118,7 @@ A tracker directory this account cannot write fails the same way:
 
 .. code:: text
 
-   no  tracker vissue 0.23.1 root=/tmp/seat/tracker prefix=Software from VISSUE_ROOT=/tmp/seat/tracker; /tmp/seat/tracker is not writable. `chmod u+w /tmp/seat/tracker` lets this account file tickets
+   no  tickets vissue 0.23.1 root=/tmp/seat/tracker prefix=Software from VISSUE_ROOT=/tmp/seat/tracker; /tmp/seat/tracker is not writable. `chmod u+w /tmp/seat/tracker` lets this account file tickets
 
 ..
    # proseguard:on
@@ -131,7 +131,7 @@ The printed row is:
 
 .. code:: text
 
-   no  tracker vissue 0.23.1 root=/tmp/seat/old-tracker prefix=Software from seat config or working directory; /tmp/seat/.config/vissue/config.toml names /tmp/seat/old-tracker, which is not a directory. `mkdir -p /tmp/seat/old-tracker/Software` creates it
+   no  tickets vissue 0.23.1 root=/tmp/seat/old-tracker prefix=Software from seat config or working directory; /tmp/seat/.config/vissue/config.toml names /tmp/seat/old-tracker, which is not a directory. `mkdir -p /tmp/seat/old-tracker/Software` creates it
 
 ..
    # proseguard:on
@@ -147,27 +147,27 @@ A missing habitat binary
 .. code:: text
 
    no  deedar  not on PATH, and crates.io lists 0.6.1, so run `cargo install --locked deedar-cli`.
-   info    tracker vissue not on PATH, so run `cargo install --locked vissue-cli`.
+   info    tickets vissue not on PATH, so run `cargo install --locked vissue-cli`.
    no  claim graph claimdag not on PATH, so run `cargo install --locked claimdag-cli`.
 
 ..
    # proseguard:on
 
-``ljos doctor --all`` also prints the deed store row, which names the same install:
+``ljos doctor --all`` also prints the deeds row, which names the same install:
 
 ..
    # proseguard:off
 
 .. code:: text
 
-   info    deed store  deedar not on PATH, so run `cargo install --locked deedar-cli`.
+   info    deeds  deedar not on PATH, so run `cargo install --locked deedar-cli`.
 
 ..
    # proseguard:on
 
 The ``vissue`` and ``claimdag`` rows are the same shape, with ``vissue-cli`` and ``claimdag-cli``.
 A required binary exits 1.
-The tracker and deed store rows are info when the program is the thing that is missing.
+The tickets and deeds rows are info when the program is the thing that is missing.
 
 Model context protocol registration
 ===================================

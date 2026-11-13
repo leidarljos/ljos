@@ -284,7 +284,7 @@ fn doctor_names_the_install_when_a_habitat_binary_is_missing() {
     );
     assert!(
         text.contains(
-            "info\tdeed store\tdeedar not on PATH, so run `cargo install --locked deedar-cli`.\n"
+            "info\tdeeds\tdeedar not on PATH, so run `cargo install --locked deedar-cli`.\n"
         ),
         "{text}"
     );
@@ -336,7 +336,7 @@ fn doctor_names_onboard_when_no_tracker_exists() {
     assert_eq!(code, 1, "{text}");
     assert!(
         text.contains(
-            "info\ttracker\tvissue failed (exit 1): not inside a tracker, so run `ljos onboard`.\n"
+            "info\ttickets\tvissue failed (exit 1): not inside a tracker, so run `ljos onboard`.\n"
         ),
         "{text}"
     );

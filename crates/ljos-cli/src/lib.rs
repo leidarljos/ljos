@@ -16685,6 +16685,18 @@ fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Stri
     }
 }
 
+/// The row name a person reads. The stored name stays the glossary's
+/// short word (`pack`, `tracker`) so a check can still match it.
+fn shown_store(name: &str) -> &str {
+    match name {
+        "pack" => "memory",
+        "deed store" => "deeds",
+        "tracker" => "tickets",
+        "host key" => "signing key",
+        other => other,
+    }
+}
+
 pub fn format_steps(steps: &[Step]) -> String {
     steps
         .iter()
@@ -16692,7 +16704,7 @@ pub fn format_steps(steps: &[Step]) -> String {
             format!(
                 "{}\t{}\t{}\n",
                 if s.ok { "ok" } else { "no" },
-                s.what,
+                shown_store(&s.what),
                 s.detail
             )
         })
@@ -16937,7 +16949,7 @@ fn pack_step(dry: bool) -> Step {
         if client.health().is_ok() {
             return Step {
                 what,
-                detail: format!("writer up at {}", client.base()),
+                detail: format!("memory writer is up at {}", client.base()),
                 ok: true,
             };
         }
@@ -17126,7 +17138,7 @@ fn deed_store_step(dry: bool) -> Step {
     match made {
         Ok(()) => step(
             format!(
-                "created {}; deedar uses it with DEEDAR_URL unset",
+                "created {}, the signed records of finished work. deedar uses it with DEEDAR_URL unset",
                 dir.display()
             ),
             true,
@@ -17244,7 +17256,7 @@ fn tracker_step(dry: bool) -> Step {
             }
             step(
                 format!(
-                    "created {}; {} names it, so vissue needs no VISSUE_ROOT",
+                    "created {}, where tickets are kept. {} names it, so no VISSUE_ROOT is needed",
                     root.display(),
                     cfg.display()
                 ),
@@ -32241,12 +32253,12 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 name: "host key",
                 state: match (&unlisted, seed) {
                     (Some(why), _) => format!(
-                        "{} (32-byte seed); {}",
+                        "{}, the signing key for deeds; {}",
                         path.display(),
                         why.lines().next().unwrap_or("").trim()
                     ),
-                    (None, true) => format!("{} (32-byte seed)", path.display()),
-                    (None, false) => format!("{} is not a 32-byte seed", path.display()),
+                    (None, true) => format!("{}, the signing key for deeds", path.display()),
+                    (None, false) => format!("{} is not a signing key", path.display()),
                 },
                 ok: seed && unlisted.is_none(),
             }
@@ -33194,7 +33206,7 @@ fn said_elsewhere_in_sitting(word: &str, name: &str, state: &str) -> bool {
     match (word, name) {
         ("no", "mcp") => true,
         ("no", name) => SITTING_SOFT.contains(&name),
-        ("warn", "tracker") => !tracker_row_beyond_drift(state),
+        ("warn", "tracker" | "tickets") => !tracker_row_beyond_drift(state),
         ("warn", name) => WARN_ROWS.contains(&name),
         _ => false,
     }
@@ -33377,7 +33389,7 @@ pub fn format_doctor(rows: &[Habitat]) -> String {
                 "{}	{}	{}
 ",
                 doctor_word(h),
-                h.name,
+                shown_store(h.name),
                 h.state
             )
         })
@@ -33419,8 +33431,8 @@ fn recall_word_matching(rows: &[Habitat]) -> bool {
 /// The parts a ready line can name, each with the rows that answer for
 /// it. A ready seat can still lack one: the tracker row is optional.
 const READY_PARTS: &[(&str, &[&str])] = &[
-    ("memory", &["pack"]),
-    ("tracker", &["tracker"]),
+    ("memory", &["pack", "memory"]),
+    ("tracker", &["tracker", "tickets"]),
     ("command guard", &["ljos-policyd", "policy", "guard"]),
 ];
 
@@ -33762,7 +33774,9 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                         if *word == "no"
                             && (REQUIRED.contains(name)
                                 || *name == "pack"
-                                || (*name == "tracker" && tracker_blocks(state)))
+                                || *name == "memory"
+                                || ((*name == "tracker" || *name == "tickets")
+                                    && tracker_blocks(state)))
                         {
                             down.push(*name);
                         }
@@ -62083,7 +62097,7 @@ mod tests {
             short,
             "ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.\n"
         );
-        assert!(format_doctor(&rows).contains("host key"));
+        assert!(format_doctor(&rows).contains("signing key"));
     }
 
     #[test]
@@ -62150,7 +62164,7 @@ mod tests {
         assert_eq!(
             format_doctor_short(&rows),
             "ljos is ready: memory and command guard work. Optional extras: `ljos doctor --all`.\n\
-             info\ttracker\t`vissue identity` exited 1: not inside a tracker\n"
+             info\ttickets\t`vissue identity` exited 1: not inside a tracker\n"
         );
         rows.push(habitat_row("guard", "off: LJOS_OFF is set", false));
         let short = format_doctor_short(&rows);
@@ -62176,7 +62190,7 @@ mod tests {
         assert!(
             sat.starts_with(
                 "ljos is ready: memory and command guard work.\n\
-                 info\ttracker\t`vissue identity` exited 1: not inside a tracker\n"
+                 info\ttickets\t`vissue identity` exited 1: not inside a tracker\n"
             ),
             "{sat}"
         );
@@ -62203,7 +62217,7 @@ mod tests {
             "ljos is not ready: memory does not answer. Optional extras: `ljos doctor --all`."
         );
         assert_eq!(lines.len(), 2, "{short}");
-        assert!(lines[1].starts_with("no\tpack\tno pack: run packset ensure"));
+        assert!(lines[1].starts_with("no\tmemory\tno pack: run packset ensure"));
         assert!(!short.contains("tracker"), "{short}");
         assert!(!short.contains("encoder"), "{short}");
         assert!(format_doctor(&rows).contains("info\tencoder\t"));
@@ -62230,7 +62244,7 @@ mod tests {
         assert!(short.contains(ENCODER_RESTART_COMMAND), "{short}");
         assert!(short.contains("lexical-only"), "{short}");
         let full = format!(
-            "== doctor\nok\tpack\tanswers\nwarn\tencoder\t{}\n{LEXICAL_ONLY_LINE}== claim\nclaimed Software-x for seat\n",
+            "== doctor\nok\tmemory\tanswers\nwarn\tencoder\t{}\n{LEXICAL_ONLY_LINE}== claim\nclaimed Software-x for seat\n",
             encoder_degraded_state()
         );
         let sat = compact_sitting(&full, "Software-x");
@@ -62295,7 +62309,7 @@ mod tests {
 
     #[test]
     fn a_compact_sitting_keeps_what_needs_action_and_the_memories() {
-        let full = "== doctor\nok\tljos-policyd\t/bin/ljos-policyd  0.5.0\nok\tpack\tanswers\ninfo\thost key\tnone yet\nok\ttracker\tvissue 0.21.0 root=/t prefix=Software\nencoder down: the pack ranks by words alone\n\
+        let full = "== doctor\nok\tljos-policyd\t/bin/ljos-policyd  0.5.0\nok\tmemory\tanswers\ninfo\tsigning key\tnone yet\nok\ttracker\tvissue 0.21.0 root=/t prefix=Software\nencoder down: the pack ranks by words alone\n\
 == sync\nsync: this repository names no scope\n\
 == cards\n\
 == due\n2 due; the soonest: abc\n\
@@ -62324,7 +62338,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_quiet_sitting_names_degraded_memory_once_and_counts_quiet_claims() {
         let full = "\
 == doctor
-ok\tpack\tanswers
+ok\tmemory\tanswers
 warn\tencoder\trecall is degraded: down
 memory-unavailable: the encoder is down
 warn\tmcp\twarning: /home/box/.cursor/mcp.json is missing ljos-mcp
@@ -62494,12 +62508,12 @@ box-1 is yours.
         let full = "== claim\ntracker: ljos-a5q4 STARTED under ljosbot@2wbpt11jxn\n\
 tracker: 1509 unpushed, 7 uncommitted edits; fix: git -C '/t' add -u -- . && git -C '/t' add -- 'Software/v.7iq8/issues.org' && git -C '/t' commit -m 'tracker: commit issue edits'\n\
 == doctor\n\
-ok\tpack\tanswers\n\
+ok\tmemory\tanswers\n\
 no\tljos-mcp\tnot on PATH; cargo install --locked ljos (crates.io 0.36.7)\n\
 no\tljos-policyd\tnot on PATH; cargo install --locked ljos-policyd (crates.io 0.6.4)\n\
 warn\thost\t6.12.94+; 361 OOM kills since boot, the last within a day (/proc/vmstat oom_kill); 0 ljos-mcp, 0 MB resident; the kernel is killing processes, read `journalctl -k -b` before the load\n\
 no\tmcp\tljos-mcp: /home/box/.cargo/bin/ljos-mcp does not exist (/home/box/.cursor/mcp.json) and the MCP client has no tools, so run `ljos cloud up`.\n\
-warn\ttracker\tvissue 0.22.0 root=/t prefix=Software from VISSUE_ROOT=/t; 1509 unpushed; uncommitted issue edits in Software/rgsaddle/issues.org and 6 more; commit them in /t or no other host sees them\n\
+warn\ttickets\tvissue 0.22.0 root=/t prefix=Software from VISSUE_ROOT=/t; 1509 unpushed; uncommitted issue edits in Software/rgsaddle/issues.org and 6 more; commit them in /t or no other host sees them\n\
 without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)\n\
 host: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next\n";
         assert_eq!(
@@ -62510,7 +62524,7 @@ without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)\n\
 host: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next\n\
 ljos-a5q4 is yours. `ljos finish ljos-a5q4 --lesson \"...\"` closes the sitting; `ljos sitting ljos-a5q4 --verbose` prints every section.\n"
         );
-        let with_extras = format!("{full}info\thost key\tnone yet\n");
+        let with_extras = format!("{full}info\tsigning key\tnone yet\n");
         let short = compact_sitting(&with_extras, "ljos-a5q4");
         let pointers: Vec<&str> = short
             .lines()
@@ -62522,8 +62536,8 @@ ljos-a5q4 is yours. `ljos finish ljos-a5q4 --lesson \"...\"` closes the sitting;
             "{short}"
         );
 
-        let refused = "== doctor\nok\tpack\tanswers\n\
-warn\ttracker\tvissue 0.22.0 root=/t prefix=Software; 3 unpushed; last push refused: no credential\n";
+        let refused = "== doctor\nok\tmemory\tanswers\n\
+warn\ttickets\tvissue 0.22.0 root=/t prefix=Software; 3 unpushed; last push refused: no credential\n";
         assert!(
             compact_sitting(refused, "x").contains("last push refused: no credential"),
             "a tracker row with more than its drift is kept"
@@ -71806,8 +71820,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ok: false,
         };
         let shown = format_doctor(&[optional, sick[0].clone()]);
-        assert!(shown.starts_with("info\thost key\t"), "{shown}");
-        assert!(shown.contains("no\tpack\t"), "{shown}");
+        assert!(shown.starts_with("info\tsigning key\t"), "{shown}");
+        assert!(shown.contains("no\tmemory\t"), "{shown}");
         assert!(healthy(&[
             Habitat {
                 name: "host key",

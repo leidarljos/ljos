@@ -59,7 +59,7 @@ fn onboard(product: &Path, args: &[&str]) -> Output {
 
 fn tracker_row(text: &str) -> &str {
     text.lines()
-        .find(|line| line.contains("\ttracker\t"))
+        .find(|line| line.contains("\ttickets\t"))
         .unwrap_or_else(|| panic!("no tracker row:\n{text}"))
 }
 

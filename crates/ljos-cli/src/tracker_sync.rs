@@ -338,8 +338,8 @@ mod tests {
         assert!(super::tracker_sync_line().is_none());
 
         let full = "tracker: 1 unpushed, 2 uncommitted edits; fix: git -C 'x' add -u -- . && git -C 'x' add -- 'Software/other/issues.org' && git -C 'x' commit -m 'tracker: commit issue edits'\n\
-== doctor\nok\tpack\tanswers\n\
-warn\ttracker\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted issue edits in Software/other/issues.org and 1 more; commit them in x or no other host sees them\n";
+== doctor\nok\tmemory\tanswers\n\
+warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted issue edits in Software/other/issues.org and 1 more; commit them in x or no other host sees them\n";
         let short = crate::compact_sitting(full, "probe-a");
         assert!(
             !short.contains("unpushed") && !short.contains("uncommitted"),

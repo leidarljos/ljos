@@ -163,6 +163,11 @@ fn onboard_with_no_assistant_names_the_next_command() {
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(text.contains("found no coding tool"), "{text}");
+    assert!(text.contains("\tmemory\t"), "{text}");
+    assert!(text.contains("\tdeeds\t"), "{text}");
+    assert!(text.contains("\ttickets\t"), "{text}");
+    assert!(text.contains("\tsigning key\t"), "{text}");
+    assert!(text.contains("would write a signing key"), "{text}");
     assert!(
         text.contains("Install an agent, then run `ljos onboard`."),
         "{text}"

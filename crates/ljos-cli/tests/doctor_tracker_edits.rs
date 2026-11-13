@@ -66,7 +66,7 @@ fn doctor_warns_on_uncommitted_issue_edits_in_the_tracker() {
     };
     let tracker_row = |said: &str| {
         said.lines()
-            .find(|l| l.contains("\ttracker\t"))
+            .find(|l| l.contains("\ttickets\t"))
             .map(str::to_string)
     };
 
@@ -77,7 +77,7 @@ fn doctor_warns_on_uncommitted_issue_edits_in_the_tracker() {
     std::fs::write(tracker.join("Software/issues/Software-b.org"), "* TODO b\n").unwrap();
     let dirty = doctor(&[]);
     let row = tracker_row(&dirty).unwrap_or_else(|| panic!("no tracker row:\n{dirty}"));
-    assert!(row.starts_with("warn\ttracker\t"), "{row}");
+    assert!(row.starts_with("warn\ttickets\t"), "{row}");
     assert!(
         row.contains("uncommitted issue edits in Software/issues.org and 1 more"),
         "{row}"

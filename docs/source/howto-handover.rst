@@ -18,7 +18,7 @@ signer. Create one only when the file is absent:
    $ test -f ~/.config/deedar/host.key || { head -c 32 /dev/urandom > ~/.config/deedar/host.key && chmod 600 ~/.config/deedar/host.key; }
    $ export DEEDAR_HOST_SIGNING_KEY=~/.config/deedar/host.key
    $ ljos doctor --all | grep 'host key'
-   ok  host key    /home/you/.config/deedar/host.key (32-byte seed)
+   ok  signing key    /home/you/.config/deedar/host.key, the signing key for deeds
 
 ``handover`` then signs the manifest and the log head. Write the bag, then
 the other seat receives it:
