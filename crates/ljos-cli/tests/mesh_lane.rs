@@ -446,3 +446,99 @@ fn help_names_pull_and_push() {
     assert!(help.contains("--to"), "{help}");
     assert!(help.contains("--lane"), "{help}");
 }
+
+/// A writer that refuses the connection stops the pull in one line and
+/// leaves the lesson for the next pull.
+#[test]
+fn a_down_writer_names_the_next_pull_and_a_later_pull_imports() {
+    let (home, root) = world();
+    let from = root.join("handoff");
+    std::fs::create_dir(&from).unwrap();
+    write_lane(&from, "lane-a", &["alpha kiln"]);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let url = format!("http://127.0.0.1:{port}");
+    let args = [
+        "mesh",
+        "pull",
+        "--seat",
+        "box",
+        "--from",
+        from.to_str().unwrap(),
+    ];
+    let stopped = run(&root, home.path(), &url, &args);
+    assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped));
+    let err = String::from_utf8_lossy(&stopped.stderr);
+    assert!(err.contains("mesh: the pull stopped:"), "{err}");
+    assert!(err.contains("not answering"), "{err}");
+    assert!(
+        err.contains(&format!(
+            "ljos mesh pull --seat box --from {}",
+            from.display()
+        )),
+        "{err}"
+    );
+    assert!(!err.contains("Caused by"), "{err}");
+    assert!(!err.contains("connection refused"), "{err}");
+    let seed =
+        std::fs::read_to_string(root.join(".ljos/memory/mesh/box/seed.jsonl")).unwrap_or_default();
+    assert!(!seed.contains("alpha kiln"), "{seed}");
+    let again = run(&root, home.path(), "off", &args);
+    assert!(again.status.success(), "{}", text(&again));
+    assert_eq!(counts(&String::from_utf8(again.stdout).unwrap()), (1, 0, 0));
+}
+
+#[test]
+fn pull_of_a_file_names_a_directory_of_lane_files() {
+    let (home, root) = world();
+    let file = root.join("lane-a.jsonl");
+    std::fs::write(&file, "{}\n").unwrap();
+    let pulled = run(
+        &root,
+        home.path(),
+        "off",
+        &[
+            "mesh",
+            "pull",
+            "--seat",
+            "box",
+            "--from",
+            file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(pulled.status.code(), Some(1), "{}", text(&pulled));
+    let err = String::from_utf8_lossy(&pulled.stderr);
+    assert!(err.contains("is not a directory"), "{err}");
+    assert!(
+        err.contains("Pass a directory of <lane>.jsonl files"),
+        "{err}"
+    );
+    assert!(!err.contains("Caused by"), "{err}");
+}
+
+#[test]
+fn a_seat_with_a_slash_names_the_flag() {
+    let (home, root) = world();
+    let dest = root.join("handoff");
+    let pushed = run(
+        &root,
+        home.path(),
+        "off",
+        &[
+            "mesh",
+            "push",
+            "--seat",
+            "a/b",
+            "--lane",
+            "lane-a",
+            "--to",
+            dest.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(pushed.status.code(), Some(1), "{}", text(&pushed));
+    let err = String::from_utf8_lossy(&pushed.stderr);
+    assert!(err.contains("is not a single name"), "{err}");
+    assert!(err.contains("Pass --seat NAME with no slash"), "{err}");
+    assert!(!err.contains("Caused by"), "{err}");
+}

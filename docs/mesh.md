@@ -121,5 +121,15 @@ LJOS_SEAT=S ljos mesh pull --seat S --from DIR
 The lane name is `--lane`, or `LJOS_SYNC_HOST`, or the hostname.
 A pull and a push each take a file lock on the directory and on the seat.
 A writer that answers 503 is asked again once, after `Retry-After`, with the same deadline.
-A second 503 or a 408 stops the pull, and the next pull continues with the rows still missing.
+A second 503, a 408, or a writer that is not answering stops the pull and exits 1.
+The line is:
+
+```
+Error: mesh: the pull stopped: CAUSE. Lessons already stored stay in the seed. Run `ljos mesh pull --seat SEAT --from DIR` for the rows still missing
+```
+A 408 uses `the deadline passed before this request ran` as `CAUSE`.
+A second 503 uses the writer's line, or `packsetd busy, retrying later`.
+A writer that is not answering uses the reason this seat prints for a down writer, and that reason names `cargo install --locked packset` or `packset ensure`.
+Lessons already stored stay in the seed, and the next pull continues with the rows still missing.
+A row the writer did not take is one of those rows.
 [Move memory across lanes](source/howto-mesh.rst) has the commands.

@@ -67,8 +67,10 @@ enum MemoryCmd {
     },
     /// Map rows in one import onto memories already stored.
     ///
-    /// `new` means this import has one copy of that text. It does not post
-    /// a text the pack already holds. `--dry-run` writes nothing.
+    /// `new` means this import has one copy of that text. A text the pack
+    /// already holds is `held`. It does not post a text the pack already
+    /// holds. `--dry-run` writes nothing. Pass an import id or `--all`.
+    /// `ljos memory imports` lists the ids.
     Integrate {
         /// One import. The id is the input digest, or a unique prefix of it.
         import_id: Option<String>,
@@ -2678,7 +2680,16 @@ fn run_command() -> Result<()> {
             MeshCmd::Acl { swarms } => println!("{}", ljos_cli::mesh::acl(&swarms)?),
             MeshCmd::Pull { seat, from } => {
                 let store = ljos_cli::mesh_lane::SeatStore::open(&seat)?;
-                print!("{}", ljos_cli::mesh_lane::pull(&store, &from)?.line());
+                // Print the line here. A down writer names itself in the
+                // message, and the shared fault path would replace that
+                // line with a bare connection failure.
+                match ljos_cli::mesh_lane::pull(&store, &from) {
+                    Ok(summary) => print!("{}", summary.line()),
+                    Err(err) => {
+                        eprintln!("Error: {err}");
+                        std::process::exit(1);
+                    }
+                }
             }
             MeshCmd::Push { seat, to, lane } => {
                 let store = ljos_cli::mesh_lane::SeatStore::open(&seat)?;

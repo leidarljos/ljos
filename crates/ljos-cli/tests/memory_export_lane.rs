@@ -280,3 +280,152 @@ fn a_missing_import_names_export() {
     );
     assert!(said.contains("no-such.jsonl"), "{said}");
 }
+
+fn fault(out: &std::process::Output) -> String {
+    format!(
+        "status {}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+#[test]
+fn integrate_without_an_id_names_imports_and_all() {
+    let (home, root) = seat_home();
+    let out = run(
+        &root,
+        home.path(),
+        "lane-seat",
+        None,
+        &["memory", "integrate"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", fault(&out));
+    let said = fault(&out);
+    assert!(said.contains("pass an import id or --all."), "{said}");
+    assert!(
+        said.contains("`ljos memory imports` lists the ids"),
+        "{said}"
+    );
+    assert!(
+        said.contains("`ljos memory integrate --all` maps every import"),
+        "{said}"
+    );
+    assert!(!said.contains("Caused by"), "{said}");
+}
+
+#[test]
+fn an_unknown_import_names_imports() {
+    let (home, root) = seat_home();
+    let out = run(
+        &root,
+        home.path(),
+        "lane-seat",
+        None,
+        &["memory", "integrate", "deadbeef"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", fault(&out));
+    let said = fault(&out);
+    assert!(
+        said.contains("no import starts with deadbeef. `ljos memory imports` lists the ids"),
+        "{said}"
+    );
+    assert!(!said.contains("Caused by"), "{said}");
+}
+
+#[test]
+fn an_id_and_all_together_names_both() {
+    let (home, root) = seat_home();
+    let out = run(
+        &root,
+        home.path(),
+        "lane-seat",
+        None,
+        &["memory", "integrate", "deadbeef", "--all"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", fault(&out));
+    let said = fault(&out);
+    assert!(
+        said.contains("pass an import id or --all, not both. `ljos memory imports` lists the ids"),
+        "{said}"
+    );
+    assert!(!said.contains("Caused by"), "{said}");
+}
+
+#[test]
+fn integrate_all_with_nothing_names_import() {
+    let (home, root) = seat_home();
+    let out = run(
+        &root,
+        home.path(),
+        "lane-seat",
+        None,
+        &["memory", "integrate", "--all"],
+    );
+    assert!(out.status.success(), "{}", fault(&out));
+    let said = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        said,
+        "no imports. `ljos memory import FILE` stores a file `ljos memory export --out` writes\n"
+    );
+}
+
+#[test]
+fn import_of_a_directory_names_export() {
+    let (home, root) = seat_home();
+    let dir = root.join("handoff");
+    std::fs::create_dir(&dir).unwrap();
+    let out = run(
+        &root,
+        home.path(),
+        "lane-seat",
+        None,
+        &["memory", "import", dir.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", fault(&out));
+    let said = fault(&out);
+    assert!(
+        said.contains("is a directory. Pass the file `ljos memory export --out` wrote"),
+        "{said}"
+    );
+    assert!(!said.contains("Caused by"), "{said}");
+}
+
+#[test]
+fn export_onto_a_directory_names_a_file() {
+    let (home, root) = seat_home();
+    let dir = root.join("notfile");
+    std::fs::create_dir(&dir).unwrap();
+    let out = run(
+        &root,
+        home.path(),
+        "lane-seat",
+        None,
+        &["memory", "export", "--out", dir.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", fault(&out));
+    let said = fault(&out);
+    assert!(
+        said.contains("is a directory. `ljos memory export --out FILE` writes a file"),
+        "{said}"
+    );
+    assert!(!said.contains("Caused by"), "{said}");
+}
+
+#[test]
+fn integrate_help_does_not_name_apply() {
+    let (home, root) = seat_home();
+    let out = run(
+        &root,
+        home.path(),
+        "lane-seat",
+        None,
+        &["memory", "integrate", "--help"],
+    );
+    assert!(out.status.success(), "{}", fault(&out));
+    let help = String::from_utf8(out.stdout).unwrap();
+    assert!(help.contains("--all"), "{help}");
+    assert!(help.contains("--dry-run"), "{help}");
+    assert!(help.contains("ljos memory imports"), "{help}");
+    assert!(!help.contains("--apply"), "{help}");
+}

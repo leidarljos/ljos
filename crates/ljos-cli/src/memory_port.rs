@@ -396,6 +396,12 @@ fn write_export_body(out: &Path, bytes: &[u8]) -> Result<()> {
         stdout.flush()?;
         return Ok(());
     }
+    if std::fs::symlink_metadata(out).is_ok_and(|meta| meta.is_dir()) {
+        bail!(
+            "memory: {} is a directory. `ljos memory export --out FILE` writes a file",
+            out.display()
+        );
+    }
     write_private(out, bytes)
 }
 
@@ -1820,6 +1826,12 @@ fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
 
 /// Read an export file. A missing path is one line that names `ljos memory export`.
 fn read_import_file(path: &Path) -> Result<Vec<u8>> {
+    if path.is_dir() {
+        bail!(
+            "memory: {} is a directory. Pass the file `ljos memory export --out` wrote",
+            path.display()
+        );
+    }
     match std::fs::read(path) {
         Ok(bytes) => Ok(bytes),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => bail!(
@@ -2477,8 +2489,13 @@ pub fn integrate(
     all: bool,
     dry_run: bool,
 ) -> Result<String> {
-    if all == import_id.is_some() {
-        bail!("memory: pass an import id or --all");
+    if all && import_id.is_some() {
+        bail!("memory: pass an import id or --all, not both. `ljos memory imports` lists the ids");
+    }
+    if !all && import_id.is_none() {
+        bail!(
+            "memory: pass an import id or --all. `ljos memory imports` lists the ids. `ljos memory integrate --all` maps every import"
+        );
     }
     let ids = if all {
         list_import_ids(place)
@@ -2486,7 +2503,10 @@ pub fn integrate(
         vec![resolve_import(place, import_id.unwrap_or(""))?]
     };
     if ids.is_empty() {
-        return Ok("no imports\n".into());
+        return Ok(
+            "no imports. `ljos memory import FILE` stores a file `ljos memory export --out` writes\n"
+                .into(),
+        );
     }
     let mut out = String::new();
     for id in ids {
@@ -2512,7 +2532,9 @@ fn list_import_ids(place: &Place) -> Vec<String> {
 fn resolve_import(place: &Place, prefix: &str) -> Result<String> {
     let prefix = prefix.trim();
     if prefix.is_empty() {
-        bail!("memory: pass an import id or --all");
+        bail!(
+            "memory: pass an import id or --all. `ljos memory imports` lists the ids. `ljos memory integrate --all` maps every import"
+        );
     }
     let hits: Vec<String> = list_import_ids(place)
         .into_iter()
@@ -2520,8 +2542,11 @@ fn resolve_import(place: &Place, prefix: &str) -> Result<String> {
         .collect();
     match hits.as_slice() {
         [one] => Ok(one.clone()),
-        [] => bail!("memory: no import starts with {prefix}"),
-        _ => bail!("memory: {prefix} starts {} imports", hits.len()),
+        [] => bail!("memory: no import starts with {prefix}. `ljos memory imports` lists the ids"),
+        _ => bail!(
+            "memory: {prefix} starts {} imports. Pass a longer id from `ljos memory imports`",
+            hits.len()
+        ),
     }
 }
 
@@ -2533,7 +2558,7 @@ fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<String
         .filter(|row| row.import_id == import_id)
         .collect();
     if mine.is_empty() {
-        bail!("memory: import {import_id} has no rows");
+        bail!("memory: import {import_id} has no rows. `ljos memory imports` lists the slots");
     }
     let slot = slot_dir(place, import_id);
     let posting_ids: BTreeSet<String> = mine.iter().map(|row| row.id.clone()).collect();
@@ -3959,5 +3984,42 @@ mod tests {
             .any(|tag| tag == &format!("seat:{}", target.seat)));
         assert!(row.entities.iter().any(|tag| tag == "lane:brine"));
         assert!(row.entities.iter().any(|tag| tag == "horizon:standing"));
+    }
+
+    #[test]
+    fn a_shared_prefix_names_the_longer_id() {
+        let (_dir, place) = place("prefix");
+        let root = place.home.join("imports").join(path_segment(&place.seat));
+        for id in ["abc111", "abc222"] {
+            let slot = root.join(id);
+            std::fs::create_dir_all(&slot).unwrap();
+            std::fs::write(slot.join("manifest.json"), b"{}\n").unwrap();
+        }
+        let err = resolve_import(&place, "abc").unwrap_err();
+        let line = err.to_string();
+        assert!(
+            line.contains("abc starts 2 imports. Pass a longer id from `ljos memory imports`"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn an_empty_import_names_the_list() {
+        let (_dir, place) = place("empty-slot");
+        let id = "only";
+        let slot = place
+            .home
+            .join("imports")
+            .join(path_segment(&place.seat))
+            .join(id);
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(slot.join("manifest.json"), b"{\"rows\":0}\n").unwrap();
+        std::fs::write(slot.join("index.jsonl"), b"").unwrap();
+        let err = integrate(&place, Some(id), false, false).unwrap_err();
+        let line = err.to_string();
+        assert!(
+            line.contains("import only has no rows. `ljos memory imports` lists the slots"),
+            "{line}"
+        );
     }
 }

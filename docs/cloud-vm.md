@@ -132,7 +132,12 @@ A text or a lane row id already in the pack is unchanged. The command then integ
 It prints `imported N, unchanged U, skipped M duplicates`.
 Run it as `LJOS_SEAT=S ljos mesh pull --seat S --from DIR`.
 `ljos mesh push --seat S --to DIR` writes the seat's memories back as one lane file.
-A 503 from the pack is retried once after `Retry-After`, and a second 503 or a 408 stops the pull.
+A 503 from the pack is retried once after `Retry-After`, and a second 503, a 408, or a writer that is not answering stops the pull and exits 1.
+The line is:
+
+```
+Error: mesh: the pull stopped: CAUSE. Lessons already stored stay in the seed. Run `ljos mesh pull --seat SEAT --from DIR` for the rows still missing
+```
 [mesh.md](mesh.md) names the seed path, the lock, and the `lane:` tag.
 
 ## Deeds

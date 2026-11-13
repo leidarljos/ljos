@@ -162,7 +162,7 @@ fn require_name(name: &str, what: &str) -> Result<String> {
         || name.contains('\\')
         || name.contains('\0')
     {
-        bail!("mesh: {what} {name:?} is not a single name");
+        bail!("mesh: {what} {name:?} is not a single name. Pass --{what} NAME with no slash");
     }
     Ok(name.to_string())
 }
@@ -181,10 +181,16 @@ fn require_dir(path: &Path) -> Result<()> {
         }
     };
     if meta.file_type().is_symlink() {
-        bail!("mesh: {} is a symlink", path.display());
+        bail!(
+            "mesh: {} is a symlink. Pass the directory itself, not a link",
+            path.display()
+        );
     }
     if !meta.is_dir() {
-        bail!("mesh: {} is not a directory", path.display());
+        bail!(
+            "mesh: {} is not a directory. Pass a directory of <lane>.jsonl files",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -464,7 +470,10 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("mesh: cannot create {}", parent.display()))?;
     }
     if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        bail!("mesh: {} is a symlink", path.display());
+        bail!(
+            "mesh: {} is a symlink. Remove the link so the lane file can be written",
+            path.display()
+        );
     }
     if std::fs::read(path).ok().as_deref() == Some(bytes) {
         return Ok(());
@@ -692,36 +701,68 @@ pub fn pull(store: &SeatStore, from: &Path) -> Result<Summary> {
     }
     let seat = store.seat.clone();
     let summary = pull_with(store, from, &hashes, &ids, |row| {
-        crate::memory_port::stage_mesh_rows(
-            &place,
-            &[crate::memory_port::MeshRow {
-                text: row.text.clone(),
-                kind: row.kind.clone(),
-                origin: crate::admit::ORIGIN_PEER.into(),
-                content_sha256: row.content_sha256.clone(),
-                source_id: row
-                    .row_ids
-                    .iter()
-                    .find_map(|key| key.split_once('\t').map(|(_, id)| id.to_string()))
-                    .unwrap_or_default(),
-                lanes: row.lanes.clone(),
-                entities: row.entities.clone(),
-            }],
-        )?;
-        if let Some(id) = post_row(&seat, row)? {
-            crate::memory_port::mark_mesh_posted(&place, &row.content_sha256, &id)?;
+        // Stage only after the post is accepted or the seat has no writer.
+        // A refused connection used to stage the row first, then stop, and
+        // the next pull counted that hash as unchanged and left it out of
+        // the seed.
+        let mesh_row = crate::memory_port::MeshRow {
+            text: row.text.clone(),
+            kind: row.kind.clone(),
+            origin: crate::admit::ORIGIN_PEER.into(),
+            content_sha256: row.content_sha256.clone(),
+            source_id: row
+                .row_ids
+                .iter()
+                .find_map(|key| key.split_once('\t').map(|(_, id)| id.to_string()))
+                .unwrap_or_default(),
+            lanes: row.lanes.clone(),
+            entities: row.entities.clone(),
+        };
+        match post_row(&seat, row) {
+            Ok(posted) => {
+                crate::memory_port::stage_mesh_rows(&place, &[mesh_row])?;
+                if let Some(id) = posted {
+                    crate::memory_port::mark_mesh_posted(&place, &row.content_sha256, &id)?;
+                }
+                Ok(())
+            }
+            Err(err) => Err(pull_stopped(&seat, from, err)),
         }
-        Ok(())
-    })?;
-    crate::memory_port::integrate(&place, None, true, false)?;
+    })
+    .map_err(|err| pull_stopped(&store.seat, from, err))?;
+    crate::memory_port::integrate(&place, None, true, false)
+        .map_err(|err| pull_stopped(&store.seat, from, err))?;
     Ok(summary)
+}
+
+/// One line when a post stops the pull. The source error is dropped so the
+/// line is not replaced by a bare connection failure, and so it does not
+/// grow a cause chain.
+fn pull_stopped(seat: &str, from: &Path, err: anyhow::Error) -> anyhow::Error {
+    if !stop_for_admission(&err) {
+        return err;
+    }
+    let cause = if crate::is_deadline_miss(&err) {
+        crate::PACK_DEADLINE_LINE.to_string()
+    } else if crate::is_write_shed(&err) || crate::is_read_shed(&err) {
+        crate::pack_fault_line(&err)
+    } else {
+        crate::pack_down_line()
+    };
+    anyhow::anyhow!(
+        "mesh: the pull stopped: {cause}. Lessons already stored stay in the seed. Run `ljos mesh pull --seat {seat} --from {}` for the rows still missing",
+        from.display()
+    )
 }
 
 fn push_with(store: &SeatStore, to: &Path, lane: &str, extra: &[Value]) -> Result<String> {
     require_name(&store.seat, "seat")?;
     let lane = require_name(lane, "lane")?;
     if std::fs::symlink_metadata(to).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        bail!("mesh: {} is a symlink", to.display());
+        bail!(
+            "mesh: {} is a symlink. Pass the directory itself, not a link",
+            to.display()
+        );
     }
     std::fs::create_dir_all(to).with_context(|| format!("mesh: cannot create {}", to.display()))?;
     require_dir(to)?;
