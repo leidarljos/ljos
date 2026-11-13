@@ -86,6 +86,9 @@ pub struct Options {
 /// found.
 pub fn uninstall(opts: &Options) -> Result<Vec<Step>> {
     let mut steps = crate::offboard::offboard(None, opts.dry)?;
+    if !opts.dry {
+        steps.extend(still_pointing());
+    }
     steps.push(git_hooks_step(opts.dry));
     steps.push(hookd_step(opts.dry));
     if !opts.keep_programs {
@@ -107,6 +110,53 @@ pub fn uninstall(opts: &Options) -> Result<Vec<Step>> {
         }
     }
     Ok(steps)
+}
+
+/// Assistant files that still name the program after offboard. Offboard
+/// removes the entries it wrote. A file it could not parse, or one the
+/// person edited into a shape offboard does not own, is named here.
+fn still_pointing() -> Vec<Step> {
+    let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) else {
+        return Vec::new();
+    };
+    let home = PathBuf::from(home);
+    const RELS: &[&str] = &[
+        ".cursor/mcp.json",
+        ".cursor/hooks.json",
+        ".claude.json",
+        ".claude/settings.json",
+        ".codex/config.toml",
+        ".codex/hooks.json",
+        ".gemini/settings.json",
+        ".gemini/config/hooks.json",
+        ".config/zed/settings.json",
+        ".codeium/windsurf/mcp_config.json",
+        ".hermes/config.yaml",
+        ".grok/config.toml",
+        ".factory/mcp.json",
+        ".kiro/settings/mcp.json",
+        ".copilot/mcp-config.json",
+    ];
+    RELS.iter()
+        .map(|rel| home.join(rel))
+        .filter(|path| points_at_ljos(path))
+        .map(|path| Step {
+            what: "assistants".into(),
+            detail: format!(
+                "{} still points at ljos. The programs are being removed, so the assistant will fail to start it. Edit {} and delete the ljos entry.",
+                path.display(),
+                path.display()
+            ),
+            ok: false,
+        })
+        .collect()
+}
+
+fn points_at_ljos(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    text.contains("ljos-mcp") || text.contains("ljos hook") || text.contains("[mcp_servers.ljos]")
 }
 
 fn git_hooks_step(dry: bool) -> Step {

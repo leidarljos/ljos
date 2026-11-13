@@ -237,6 +237,31 @@ fn purge_and_no_stub_leave_nothing_of_ljos() {
     assert!(home.join(".cargo/bin/packset").is_file());
 }
 
+/// A file the script cannot parse still names the program. It says so.
+#[test]
+fn a_config_that_still_points_at_ljos_is_named() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    write(
+        &home.join(".cursor/mcp.json"),
+        "{ this is not json, but the assistant still runs ljos-mcp\n",
+    );
+    let out = uninstall(home, &[]);
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("still points at ljos"), "{text}");
+    assert!(
+        text.contains(&home.join(".cursor/mcp.json").display().to_string()),
+        "{text}"
+    );
+    assert!(text.contains("delete the ljos entry"), "{text}");
+    assert!(text.contains("Next: edit each file named above"), "{text}");
+    assert!(
+        read(&home.join(".cursor/mcp.json")).contains("ljos-mcp"),
+        "the broken file was rewritten"
+    );
+}
+
 /// With a ljos that knows `uninstall` in the bin dir, the script hands
 /// the work to it.
 #[test]

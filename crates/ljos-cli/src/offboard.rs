@@ -424,10 +424,20 @@ pub fn offboard(runner: Option<&str>, dry: bool) -> Result<Vec<Step>> {
             for runner in &marker_fallback {
                 steps.extend(legacy_offboard(Some(runner), dry)?);
             }
+            settle_edited(&mut steps);
+            let still_edited: BTreeSet<String> = steps
+                .iter()
+                .filter(|step| step.detail.contains("you edited it after onboarding"))
+                .map(|step| step.what.clone())
+                .collect();
             if !dry {
-                manifest
-                    .entries
-                    .retain(|entry| !marker_fallback.contains(&entry.runner));
+                manifest.entries.retain(|entry| {
+                    if marker_fallback.contains(&entry.runner) {
+                        still_edited.contains(&entry.runner)
+                    } else {
+                        true
+                    }
+                });
                 write_manifest(&manifest)?;
             }
             if runner.is_some() && !selected {
@@ -445,6 +455,61 @@ pub fn offboard(runner: Option<&str>, dry: bool) -> Result<Vec<Step>> {
         Err(err) if missing_manifest(&err) => legacy_offboard(runner, dry),
         Err(err) => Err(err),
     }
+}
+
+fn edited_after(path: &Path) -> String {
+    format!(
+        "left {}; you edited it after onboarding, so the ljos entry was kept. Edit {} and delete the ljos entry, then run `ljos offboard`",
+        path.display(),
+        path.display()
+    )
+}
+
+/// A file offboard could not splice. Legacy cleanup may already have removed
+/// the ljos entry, in which case the warning is dropped. Two warnings for
+/// the same path collapse to one.
+fn settle_edited(steps: &mut Vec<Step>) {
+    let planned: Vec<String> = steps
+        .iter()
+        .filter(|step| {
+            step.detail.starts_with("removed ")
+                || step.detail.starts_with("restored ")
+                || step.detail.starts_with("would remove ")
+                || step.detail.starts_with("would restore ")
+        })
+        .map(|step| step.detail.clone())
+        .collect();
+    let mut seen = BTreeSet::new();
+    steps.retain(|step| {
+        if !step.detail.contains("you edited it after onboarding") {
+            return true;
+        }
+        let Some(path) = step
+            .detail
+            .strip_prefix("left ")
+            .and_then(|rest| rest.split(';').next())
+        else {
+            return true;
+        };
+        let path = path.trim();
+        let cleaned = !still_names_ljos(Path::new(path))
+            || planned.iter().any(|detail| detail.contains(path));
+        if cleaned {
+            return false;
+        }
+        seen.insert(path.to_string())
+    });
+}
+
+fn still_names_ljos(path: &Path) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    text.contains("ljos-mcp")
+        || text.contains("ljos hook")
+        || text.contains("name: ljos")
+        || text.contains("[mcp_servers.ljos]")
 }
 
 fn missing_manifest(error: &anyhow::Error) -> bool {
@@ -487,11 +552,8 @@ fn reverse_entry(entry: &Entry, dry: bool) -> Result<(Step, bool)> {
         return Ok((
             Step {
                 what: entry.runner.clone(),
-                detail: format!(
-                    "left {}; it was edited after onboarding",
-                    entry.path.display()
-                ),
-                ok: true,
+                detail: edited_after(&entry.path),
+                ok: false,
             },
             false,
         ));
@@ -791,8 +853,8 @@ fn clean_skill(path: &Path, runner: &str, dry: bool, steps: &mut Vec<Step>) -> R
         if recorded.trim() != current {
             steps.push(Step {
                 what: runner.to_string(),
-                detail: format!("left {}; it was edited after onboarding", path.display()),
-                ok: true,
+                detail: edited_after(path),
+                ok: false,
             });
             return Ok(());
         }

@@ -134,6 +134,36 @@ fn uninstall_takes_the_seat_off_and_leaves_the_stub() {
     assert_eq!(v["permission"], "allow");
 }
 
+/// A config offboard cannot parse still names ljos-mcp. Uninstall says so.
+#[test]
+fn uninstall_names_an_assistant_that_still_points_at_ljos() {
+    let (temp, bin) = seat_home();
+    let home = temp.path();
+    let mcp = home.join(".cursor/mcp.json");
+    write(
+        &mcp,
+        "{ this is not json, but the assistant still runs ljos-mcp\n",
+    );
+    let out = run(home, &bin, &["uninstall"]);
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("still points at ljos"), "{text}");
+    assert!(text.contains(&mcp.display().to_string()), "{text}");
+    assert!(text.contains("delete the ljos entry"), "{text}");
+    assert!(
+        read(&mcp).contains("ljos-mcp"),
+        "the broken file was rewritten"
+    );
+    assert!(
+        !bin.join("ljos-mcp").exists(),
+        "the program was left in place"
+    );
+    assert!(
+        read(&bin.join("ljos")).contains("ljos was uninstalled"),
+        "the stub was not written"
+    );
+}
+
 #[test]
 fn purge_removes_the_state_and_no_stub_leaves_nothing() {
     let (temp, bin) = seat_home();

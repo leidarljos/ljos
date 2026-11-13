@@ -22,6 +22,22 @@ Run it again and those files stay as they are.
 A pipe with no `--harness` prints the MCP entry as JSON.
 A script that should register runners passes `--harness all`.
 
+If install stops, the script names the cause and the command that fixes it.
+
+- No network, or the release download fails: check the connection and run `sh install.sh` again. A version you name is `sh install.sh --version VER`. Archives already on disk are `sh install.sh --asset-dir DIR`.
+- The OS or arch is not Linux or macOS on x86_64 or aarch64: on Windows, run the script inside WSL. To build from source, install Rust from https://rustup.rs and run `sh install.sh` again.
+- `curl` or `tar` is missing: install it and run `sh install.sh` again. Programs already unpacked are `sh install.sh --from-dir DIR`.
+- The install directory is not on PATH: the script prints `export PATH="$HOME/.local/bin:$PATH"`. Run that, then `ljos doctor`.
+- An older `ljos` is earlier on PATH: the script names both binaries and prints the `export PATH` line that puts the new one first.
+- Running the script again replaces the programs in place and says what was there.
+- A running `ljos-mcp` keeps the previous binary. Restart the assistant, or `kill` the pid the script prints, then run `ljos doctor`.
+
+`ljos onboard` with no coding tool installed says so. It still sets up the tracker, the memory writer and the deed store. Install an agent, then run `ljos onboard`. `ljos onboard --example` lists the names.
+
+`ljos offboard` after a hand edit that it cannot undo names the file and leaves the ljos entry. Edit that file, delete the ljos entry, and run `ljos offboard` again.
+
+`ljos uninstall` while an assistant still points at ljos names that file. Edit it and delete the ljos entry. The programs are still removed. A stub named `ljos` answers a hook that a running session cached.
+
 After that registration, a first recall does not need a seat, a sitting or a ticket.
 One person and one repository are enough.
 With no seat named, a write uses `unknown-` and the host name.

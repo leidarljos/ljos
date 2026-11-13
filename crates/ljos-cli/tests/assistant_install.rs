@@ -144,6 +144,30 @@ fn text_at(path: &Path) -> String {
     String::from_utf8_lossy(&bytes(path)).into_owned()
 }
 
+/// No coding tool and no runner directory. The line names what to run next.
+#[test]
+fn onboard_with_no_assistant_names_the_next_command() {
+    let home = Home::new();
+    let bin = home.path().join("bin");
+    script(
+        &bin,
+        "packset",
+        "#!/bin/sh\n[ \"$1\" = ensure ] && echo writer up && exit 0\necho \"packset stub: $*\" >&2\nexit 1\n",
+    );
+    script(
+        &bin,
+        "deedar",
+        "#!/bin/sh\n[ \"$1 $2\" = \"host accept\" ] && echo 'host key listed' && exit 0\necho \"deedar stub: $*\" >&2\nexit 1\n",
+    );
+    let out = home.ljos(&["onboard", "--harness", "all", "--dry-run"]);
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("found no coding tool"), "{text}");
+    assert!(text.contains("`ljos onboard`"), "{text}");
+    assert!(text.contains("`ljos onboard --example`"), "{text}");
+    assert!(text.contains("`ljos onboard --harness NAME`"), "{text}");
+}
+
 /// Commands on `PATH`, and no config directory yet, are enough to find the three.
 #[test]
 fn detects_claude_cursor_and_codex_from_commands() {

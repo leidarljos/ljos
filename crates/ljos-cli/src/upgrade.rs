@@ -232,22 +232,36 @@ fn release_dir() -> Option<PathBuf> {
 fn obtain(name: &str, to: &Path, url: &str) -> Result<()> {
     if let Some(dir) = release_dir() {
         let src = dir.join(name);
-        std::fs::copy(&src, to).with_context(|| format!("upgrade: copy {}", src.display()))?;
+        std::fs::copy(&src, to).with_context(|| {
+            format!(
+                "upgrade: could not read {} from the release directory. Put the archive there, or unset LJOS_RELEASE_DIR and run `ljos upgrade` again so it downloads the release",
+                src.display()
+            )
+        })?;
         return Ok(());
     }
     fetch(url, to)
+}
+
+/// What a failed release download tells the person to run next.
+fn download_failed(url: &str, err: &str) -> String {
+    format!(
+        "upgrade: could not download {url}: {err}. Check the network and run `ljos upgrade` again. With the archives on disk, set LJOS_RELEASE_DIR to that directory and run `ljos upgrade` again"
+    )
 }
 
 fn fetch(url: &str, to: &Path) -> Result<()> {
     let resp = ureq::get(url)
         .timeout(std::time::Duration::from_secs(120))
         .call()
-        .with_context(|| format!("upgrade: GET {url}"))?;
+        .map_err(|err| anyhow::anyhow!("{}", download_failed(url, &err.to_string())))?;
     let mut body = Vec::new();
     resp.into_reader()
         .take(256 * 1024 * 1024)
         .read_to_end(&mut body)
-        .with_context(|| format!("upgrade: reading {url}"))?;
+        .with_context(|| {
+            download_failed(url, "the download stopped before the file was complete")
+        })?;
     std::fs::write(to, body)?;
     Ok(())
 }
@@ -329,6 +343,93 @@ fn executable_image(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x7fELF") || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
 }
 
+/// No release archive for this `os` and `arch`, and the command that fixes it.
+fn unsupported_archive(os: &str, arch: &str) -> String {
+    format!(
+        "no published archive for {os} {arch}. Release archives are Linux and macOS on x86_64 and aarch64 (x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin). On Windows, run `ljos upgrade` inside WSL."
+    )
+}
+
+/// Processes, other than this one, whose executable is the file at `path`.
+fn pids_holding(path: &Path) -> Vec<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(meta) = std::fs::metadata(path) else {
+            return Vec::new();
+        };
+        let dev = meta.dev();
+        let ino = meta.ino();
+        let me = std::process::id();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        let mut pids = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            if pid == me {
+                continue;
+            }
+            let Ok(held) = std::fs::metadata(entry.path().join("exe")) else {
+                continue;
+            };
+            if held.dev() == dev && held.ino() == ino {
+                pids.push(pid);
+            }
+        }
+        pids.sort_unstable();
+        pids.dedup();
+        pids
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Vec::new()
+    }
+}
+
+fn running_note(name: &str, pids: &[u32]) -> String {
+    if pids.is_empty() {
+        return String::new();
+    }
+    let list = pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "{name} is still running (pid {list}) and is the previous binary. Restart the assistant, or run `kill {list}`, then start it again. Next: `ljos doctor`.\n"
+    )
+}
+
+fn replace_installed(staged: &Path, installed: &Path, held: &[u32]) -> Result<()> {
+    if let Err(err) = std::fs::rename(staged, installed) {
+        let list = held
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let next = if list.is_empty() {
+            "Stop the process using it and run `ljos upgrade` again.".to_string()
+        } else {
+            format!("Stop the process using it (`kill {list}`) and run `ljos upgrade` again.")
+        };
+        if err.raw_os_error() == Some(26) {
+            bail!(
+                "upgrade: could not replace {}: Text file busy. {next}",
+                installed.display()
+            );
+        }
+        bail!(
+            "upgrade: could not replace {}: {err}. {next}",
+            installed.display()
+        );
+    }
+    Ok(())
+}
+
 fn one_line(err: &anyhow::Error) -> String {
     format!("{err:#}")
         .split_whitespace()
@@ -369,7 +470,13 @@ fn upgrade_ljos(version: Option<&str>, dir: &Path, only: Option<&str>) -> Result
         Some(v) => v.trim_start_matches('v').to_string(),
         None => latest()?,
     };
-    let target = target().context("upgrade: no published archive for this machine")?;
+    let target = match target() {
+        Some(target) => target,
+        None => bail!(
+            "upgrade: {}",
+            unsupported_archive(std::env::consts::OS, std::env::consts::ARCH)
+        ),
+    };
     if let Some(name) = only {
         if dir.join(name).is_file() && reports(&dir.join(name), name, &version) {
             return Ok(format!("{name} {version} current\n"));
@@ -451,7 +558,9 @@ fn upgrade_ljos(version: Option<&str>, dir: &Path, only: Option<&str>) -> Result
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
         }
-        std::fs::rename(&staged, &installed)?;
+        let held = pids_holding(&installed);
+        replace_installed(&staged, &installed, &held)?;
+        out.push_str(&running_note(name, &held));
         if only.is_some() {
             out.push_str(&format!("{name} {old} {version}\n"));
         } else {
@@ -505,7 +614,8 @@ fn tar_flag(asset: &str) -> Result<&'static str, String> {
 
 /// Download and unpack one archive. The error is one line a warning can carry.
 fn fetch_tree(repo: &str, pattern: &str, version: &str, work: &Path) -> Result<PathBuf, String> {
-    let target = target().ok_or_else(|| "no published archive for this machine".to_string())?;
+    let target = target()
+        .ok_or_else(|| unsupported_archive(std::env::consts::OS, std::env::consts::ARCH))?;
     let asset = asset_of(pattern, version, target);
     let archive = work.join(&asset);
     let sum = work.join(format!("{asset}.sha256"));
@@ -569,8 +679,12 @@ fn place_component(dir: &Path, name: &str, version: &str, tree: &Path) -> Result
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| e.to_string())?;
     }
-    std::fs::rename(&staged, &installed).map_err(|e| e.to_string())?;
-    Ok(format!("{name} {old} {version}\n"))
+    let held = pids_holding(&installed);
+    replace_installed(&staged, &installed, &held).map_err(|e| one_line(&e))?;
+    Ok(format!(
+        "{name} {old} {version}\n{}",
+        running_note(name, &held)
+    ))
 }
 
 /// Each installed component, one line. A failure is a warning line.
@@ -763,5 +877,28 @@ mod tests {
             asset_of(consensus.asset, "v0.9.0", "aarch64-apple-darwin"),
             "consensus-v0.9.0-aarch64-apple-darwin.tar.gz"
         );
+    }
+
+    #[test]
+    fn an_unsupported_machine_names_the_archive_and_the_next_command() {
+        let text = unsupported_archive("linux", "riscv64");
+        assert!(
+            text.contains("no published archive for linux riscv64"),
+            "{text}"
+        );
+        assert!(text.contains("x86_64-unknown-linux-gnu"), "{text}");
+        assert!(text.contains("aarch64-apple-darwin"), "{text}");
+        assert!(text.contains("`ljos upgrade` inside WSL"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_download_names_the_retry() {
+        let text = download_failed("https://example.invalid/ljos.tar.gz", "dns error");
+        assert!(
+            text.contains("could not download https://example.invalid/ljos.tar.gz: dns error"),
+            "{text}"
+        );
+        assert!(text.contains("run `ljos upgrade` again"), "{text}");
+        assert!(text.contains("LJOS_RELEASE_DIR"), "{text}");
     }
 }

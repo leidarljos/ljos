@@ -289,7 +289,7 @@ printf '%s\n' "$MCP_FILES" | sort -u | while IFS= read -r f; do
       clean) ;;
     esac
   else
-    say "  $f names ljos; no python3 here to edit it, so it is left alone"
+    say "  $f still points at ljos, and python3 is not installed, so the file was not edited. Install python3 and run \`sh uninstall.sh\` again, or edit $f and delete the ljos entry."
   fi
 done
 # the command harness keeps its servers in TOML: the [mcp_servers.ljos] table goes.
@@ -301,11 +301,6 @@ if [ -f "$HOME/.codex/config.toml" ] && grep -q '^\[mcp_servers\.ljos\]' "$HOME/
       && mv "$HOME/.codex/config.toml.new" "$HOME/.codex/config.toml"
   fi
 fi
-for f in "$HOME/.hermes/config.yaml" "$HOME/.config/goose/config.yaml" "$HOME/.grok/config.toml" "$HOME/.aider.conf.yml"; do
-  [ -f "$f" ] && grep -q 'ljos' "$f" 2>/dev/null || continue
-  say "  $f names ljos; remove that entry by hand"
-done
-
 say "Skills"
 printf '%s\n' "$SKILL_DIRS" | sort -u | while IFS= read -r d; do
   s="$d/ljos"
@@ -430,4 +425,28 @@ if [ "$PURGE" = 1 ]; then
 else
   say "State kept under $CONFIG/ljos, $DATA/ljos and $STATE/ljos (--purge removes it)"
 fi
+still=0
+if [ "$DRY" = 0 ]; then
+  left_list=$(mktemp "${TMPDIR:-/tmp}/ljos-uninstall-left.XXXXXX")
+  {
+    printf '%s\n' "$MCP_FILES"
+    printf '%s\n' "$HOOK_FILES"
+    printf '%s\n' "$HOME/.hermes/config.yaml" "$HOME/.config/goose/config.yaml" \
+      "$HOME/.grok/config.toml" "$HOME/.aider.conf.yml" "$HOME/.codex/config.toml"
+  } | sort -u > "$left_list"
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    if grep -q 'ljos-mcp\|ljos hook\|mcp_servers\.ljos' "$f" 2>/dev/null; then
+      say "  $f still points at ljos. The programs are gone, so the assistant will fail to start it. Edit $f and delete the ljos entry."
+      still=1
+    fi
+  done < "$left_list"
+  rm -f "$left_list"
+fi
+if [ "$still" = 1 ]; then
+  say "Next: edit each file named above and delete the ljos entry. Then restart the assistant."
+fi
 say "Done. A running agent session keeps its old hook list until it restarts; the stub answers it."
+if [ "$still" = 1 ]; then
+  exit 1
+fi

@@ -6732,8 +6732,9 @@ fn onboard_detected_with_lookup(
         // first `ljos doctor` says the tracker works before one exists.
         let mut steps = vec![Step {
             what: "runners".into(),
-            detail: "found no coding tool on this machine; `ljos onboard --harness NAME` \
-                     names one, and `ljos onboard --example` lists the shapes ljos knows"
+            detail: "found no coding tool on this machine. Install a coding agent, then run \
+                     `ljos onboard`. `ljos onboard --example` lists the names. \
+                     `ljos onboard --harness NAME` registers one."
                 .into(),
             ok: true,
         }];

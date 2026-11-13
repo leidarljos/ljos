@@ -33,6 +33,25 @@ A release attaches that script:
 The ``install.sh`` attached to the 0.41.1 release asked for ``vissue-cli-<target>.tar.xz``. The 0.41.2 script fetches ``vissue-v<version>-<target>.tar.gz``.
 The vissue release publishes ``vissue-v<version>-<target>.tar.gz``.
 
+When the install stops
+----------------------
+
+The script names the cause and the command that fixes it.
+
+- No network, or the release download fails. Check the connection and run ``sh install.sh`` again. A version you name is ``sh install.sh --version VER``. Archives already on disk are ``sh install.sh --asset-dir DIR``.
+- The OS or arch is not Linux or macOS on x86_64 or aarch64. On Windows, run the script inside WSL. To build from source, install Rust from https://rustup.rs and run ``sh install.sh`` again.
+- ``curl`` or ``tar`` is missing. Install it and run ``sh install.sh`` again. Programs already unpacked are ``sh install.sh --from-dir DIR``.
+- The install directory is not on ``PATH``. The script prints ``export PATH="$HOME/.local/bin:$PATH"``. Run that, then ``ljos doctor``.
+- An older ``ljos`` is earlier on ``PATH``. The script names both binaries and prints the ``export PATH`` line that puts the new one first.
+- Running the script again replaces the programs in place and says what was there.
+- A running ``ljos-mcp`` keeps the previous binary. Restart the assistant, or ``kill`` the pid the script prints, then run ``ljos doctor``.
+
+``ljos onboard`` with no coding tool installed says so. It still sets up the tracker, the memory writer and the deed store. Install an agent, then run ``ljos onboard``. ``ljos onboard --example`` lists the names.
+
+``ljos offboard`` after a hand edit that it cannot undo names the file and leaves the ljos entry. Edit that file, delete the ljos entry, and run ``ljos offboard`` again.
+
+``ljos uninstall`` while an assistant still points at ljos names that file. Edit it and delete the ljos entry. The programs are still removed. A stub named ``ljos`` answers a hook that a running session cached. Later, upgrade with ``ljos upgrade``. It names a download that failed, a machine with no release archive, and a ``ljos-mcp`` that is still running the previous binary.
+
 The programs go to ``~/.local/bin``. They are ``ljos``, ``ljos-mcp``, ``packset``,
 ``packsetd``, ``packset-mcp``, ``vissue``, ``vissue-mcp``, ``deedar``, ``claimdag``, ``ljos-policyd`` and ``ljos-consensus``.
 The installer checks each download against its published SHA-256 sum.

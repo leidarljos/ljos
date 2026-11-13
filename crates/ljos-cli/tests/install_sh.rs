@@ -118,6 +118,10 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     let note = install(&opted_out, &progs, "/usr/bin:/bin", &["--no-modify-path"]);
     assert!(note.contains("not on PATH"), "{note}");
     assert!(note.contains(PATH_LINE), "{note}");
+    assert!(
+        note.contains("Next: ") && note.contains("ljos doctor"),
+        "{note}"
+    );
     for rc in [".profile", ".bashrc"] {
         assert!(!opted_out.join(rc).exists(), "--no-modify-path wrote {rc}");
     }
@@ -474,4 +478,322 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
     );
     assert!(org.contains(":CLAIMED_BY: demo"), "{org}");
     assert!(logged.contains("claimdag claim "), "{logged}");
+}
+
+fn run_install(home: &Path, path: &str, extra: &[&str]) -> Output {
+    std::fs::create_dir_all(home).unwrap();
+    Command::new("sh")
+        .arg(install_sh())
+        .args(extra)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", path)
+        .output()
+        .unwrap()
+}
+
+/// curl exits before any byte arrives. The script names that and the retry.
+#[test]
+fn a_failed_release_download_names_the_network_and_the_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script(
+        &bin,
+        "curl",
+        "#!/bin/sh\necho 'curl: (6) Could not resolve host: github.com' >&2\nexit 6\n",
+    );
+    let home = dir.path().join("home");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_install(&home, &path, &["--no-embed", "--no-onboard"]);
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(
+        text.contains("could not read the latest ljos release"),
+        "{text}"
+    );
+    assert!(text.contains("Could not resolve host"), "{text}");
+    assert!(text.contains("sh install.sh"), "{text}");
+    assert!(text.contains("--version VER"), "{text}");
+    assert!(text.contains("--asset-dir DIR"), "{text}");
+}
+
+/// The release answers, and the archive request fails. That is not a source build.
+#[test]
+fn a_release_that_answers_an_error_names_the_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script(
+        &bin,
+        "curl",
+        r#"#!/bin/sh
+url=
+for a in "$@"; do
+  case $a in
+    http*) url=$a ;;
+  esac
+done
+case $url in
+  *releases/latest*)
+    printf '%s' 'https://github.com/leidarljos/ljos/releases/tag/v9.9.9'
+    exit 0
+    ;;
+esac
+echo 'curl: (22) The requested URL returned error: 500' >&2
+printf '%s' '500'
+exit 0
+"#,
+    );
+    let home = dir.path().join("home");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_install(&home, &path, &["--no-embed", "--no-onboard"]);
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("could not download"), "{text}");
+    assert!(text.contains("500"), "{text}");
+    assert!(text.contains("sh install.sh"), "{text}");
+    assert!(text.contains("--asset-dir DIR"), "{text}");
+    assert!(
+        !text.contains("building "),
+        "a failed download started a source build:\n{text}"
+    );
+}
+
+/// FreeBSD is not one of the four release archives.
+#[test]
+fn an_unsupported_os_names_the_machine_and_wsl() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script(
+        &bin,
+        "uname",
+        "#!/bin/sh\ncase \"$1\" in\n  -s) echo FreeBSD ;;\n  -m) echo amd64 ;;\n  *) echo FreeBSD ;;\nesac\n",
+    );
+    let home = dir.path().join("home");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = run_install(&home, &path, &["--no-embed", "--no-onboard"]);
+    let text = said(&out);
+    assert!(
+        !out.status.success(),
+        "status {:?}\n{text}",
+        out.status.code()
+    );
+    assert!(
+        text.contains("FreeBSD amd64 is not a supported OS or arch"),
+        "{text}"
+    );
+    assert!(
+        text.contains("x86_64-unknown-linux-gnu"),
+        "missing triple\n{text:?}"
+    );
+    assert!(text.contains("sh install.sh"), "{text}");
+    assert!(text.contains("WSL"), "{text}");
+    assert!(text.contains("rustup.rs"), "{text}");
+}
+
+/// tar is how a release archive is unpacked. A missing tar stops before that.
+#[test]
+fn a_missing_tar_names_the_install_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys = dir.path().join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    for name in [
+        "sh", "mktemp", "date", "cp", "chmod", "mkdir", "rm", "mv", "cat", "grep", "sed", "awk",
+        "find", "uname", "head", "sort", "dirname", "sha256sum",
+    ] {
+        for root in ["/usr/bin", "/bin"] {
+            let found = Path::new(root).join(name);
+            if found.is_file() {
+                std::os::unix::fs::symlink(&found, sys.join(name)).unwrap();
+                break;
+            }
+        }
+    }
+    let home = dir.path().join("home");
+    let out = run_install(
+        &home,
+        &sys.display().to_string(),
+        &[
+            "--no-embed",
+            "--no-onboard",
+            "--asset-dir",
+            "/no/such/assets",
+        ],
+    );
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("need tar to unpack"), "{text}");
+    assert!(text.contains("sh install.sh"), "{text}");
+    assert!(text.contains("--from-dir DIR"), "{text}");
+}
+
+/// curl and wget are both absent, so nothing can fetch the release.
+#[test]
+fn a_missing_curl_names_how_to_install_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys = dir.path().join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    for name in ["sh", "uname", "mkdir", "date"] {
+        for root in ["/usr/bin", "/bin"] {
+            let found = Path::new(root).join(name);
+            if found.is_file() {
+                std::os::unix::fs::symlink(&found, sys.join(name)).unwrap();
+                break;
+            }
+        }
+    }
+    let home = dir.path().join("home");
+    let out = run_install(&home, &sys.display().to_string(), &["--no-embed"]);
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("need curl or wget"), "{text}");
+    assert!(text.contains("apt-get install curl"), "{text}");
+    assert!(text.contains("sh install.sh"), "{text}");
+    assert!(text.contains("--from-dir DIR"), "{text}");
+}
+
+/// An older ljos earlier on PATH is named, and this install is put first.
+#[test]
+fn an_older_ljos_earlier_on_path_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(
+            &progs,
+            name,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo \"$0 0.2.0\"; fi\nexit 0\n",
+        );
+    }
+    let old = dir.path().join("old");
+    std::fs::create_dir_all(&old).unwrap();
+    script(
+        &old,
+        "ljos",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'ljos 0.1.0'; fi\necho \"old-ljos $*\"\nexit 0\n",
+    );
+    let home = dir.path().join("home");
+    let bin = home.join(".local/bin");
+    let path = format!("{}:{}:/usr/bin:/bin", old.display(), bin.display());
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("ljos 0.1.0"), "{text}");
+    assert!(
+        text.contains(&old.join("ljos").display().to_string()),
+        "{text}"
+    );
+    assert!(text.contains("Put the new install first"), "{text}");
+    assert!(text.contains(PATH_LINE), "{text}");
+    assert!(text.contains("ljos doctor"), "{text}");
+    assert!(
+        !text.contains("old-ljos"),
+        "the policy sample ran the older ljos:\n{text}"
+    );
+}
+
+/// A second run says the programs were already there and replaces them.
+#[test]
+fn a_second_install_says_it_replaced_the_programs() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(
+            &progs,
+            name,
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{name} 0.2.0'; fi\nexit 0\n"
+            ),
+        );
+    }
+    let home = dir.path().join("home");
+    let bin = home.join(".local/bin");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let args = [
+        "--from-dir",
+        progs.to_str().unwrap(),
+        "--no-embed",
+        "--no-onboard",
+    ];
+    let first = run_install(&home, &path, &args);
+    assert!(first.status.success(), "{}", said(&first));
+    let second = run_install(&home, &path, &args);
+    let text = said(&second);
+    assert!(second.status.success(), "{text}");
+    assert!(text.contains("Replaced the ljos already at"), "{text}");
+    assert!(text.contains("ljos 0.2.0"), "{text}");
+    assert!(text.contains("Next: `ljos doctor`."), "{text}");
+}
+
+/// Replacing ljos-mcp while a process still has the old file mapped.
+#[test]
+fn upgrading_over_a_running_mcp_server_names_the_pid() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(
+            &progs,
+            name,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo \"$0 0.2.0\"; fi\nexit 0\n",
+        );
+    }
+    let home = dir.path().join("home");
+    let bin = home.join(".local/bin");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let first = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "{}", said(&first));
+    let sleep = ["/bin/sleep", "/usr/bin/sleep"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
+        .unwrap();
+    std::fs::copy(&sleep, bin.join("ljos-mcp")).unwrap();
+    let mut child = Command::new(bin.join("ljos-mcp"))
+        .arg("60")
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let second = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    let text = said(&second);
+    assert!(second.status.success(), "{text}");
+    assert!(
+        text.contains(&format!("ljos-mcp is still running (pid {pid})")),
+        "{text}"
+    );
+    assert!(text.contains(&format!("kill {pid}")), "{text}");
+    assert!(text.contains("previous binary"), "{text}");
 }

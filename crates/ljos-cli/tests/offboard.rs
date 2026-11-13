@@ -349,3 +349,84 @@ fn aider_roundtrip_and_marker_fallback_restore_the_home() {
         assert_eq!(files_under(home), before, "fallback={fallback}");
     }
 }
+
+/// A hand edit inside the ljos entry, still valid JSON, is removed by the
+/// marker fallback. The command does not claim the entry was kept.
+#[test]
+fn a_hand_edit_inside_the_ljos_entry_is_still_removed() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let bin = fake_runner_commands(home);
+    let onboard = run(home, &bin, &["onboard", "--harness", "cursor"]);
+    assert!(
+        onboard.status.success(),
+        "{}",
+        String::from_utf8_lossy(&onboard.stderr)
+    );
+    let mcp = home.join(".cursor/mcp.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&mcp).unwrap()).unwrap();
+    value["mcpServers"]["ljos"]["command"] = serde_json::json!("ljos-mcp --flag");
+    write(
+        &mcp,
+        &(serde_json::to_string_pretty(&value).unwrap() + "\n"),
+    );
+
+    let off = run(home, &bin, &["offboard"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&off.stdout),
+        String::from_utf8_lossy(&off.stderr)
+    );
+    assert!(off.status.success(), "{text}");
+    assert!(!text.contains("you edited it after onboarding"), "{text}");
+    if mcp.is_file() {
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&mcp).unwrap()).unwrap();
+        assert!(value.pointer("/mcpServers/ljos").is_none(), "{value}");
+    }
+}
+
+/// The file is no longer the bytes onboard wrote, and it does not parse, so
+/// the ljos command stays. The line names the file and the next command.
+#[test]
+fn offboard_names_a_hand_edit_it_cannot_undo() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let bin = fake_runner_commands(home);
+    let onboard = run(home, &bin, &["onboard", "--harness", "cursor"]);
+    assert!(
+        onboard.status.success(),
+        "{}",
+        String::from_utf8_lossy(&onboard.stderr)
+    );
+    let mcp = home.join(".cursor/mcp.json");
+    write(
+        &mcp,
+        "{ this is not json, but the assistant still runs ljos-mcp\n",
+    );
+    let skill = home.join(".cursor/skills/ljos/SKILL.md");
+    let mut skill_text = fs::read_to_string(&skill).unwrap();
+    skill_text.push_str("\n# a note added by hand\n");
+    fs::write(&skill, &skill_text).unwrap();
+
+    let off = run(home, &bin, &["offboard"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&off.stdout),
+        String::from_utf8_lossy(&off.stderr)
+    );
+    assert!(!off.status.success(), "{text}");
+    assert!(text.contains("you edited it after onboarding"), "{text}");
+    assert!(text.contains(&mcp.display().to_string()), "{text}");
+    assert!(text.contains("delete the ljos entry"), "{text}");
+    assert!(text.contains("`ljos offboard`"), "{text}");
+    assert!(
+        fs::read_to_string(&mcp).unwrap().contains("ljos-mcp"),
+        "the broken file was rewritten"
+    );
+    assert!(
+        fs::read_to_string(&skill)
+            .unwrap()
+            .contains("a note added by hand"),
+        "the edited skill was removed"
+    );
+}

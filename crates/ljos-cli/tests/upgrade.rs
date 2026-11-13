@@ -478,3 +478,91 @@ fn only_the_named_component_moves() {
     assert_eq!(fs::read(dir.join("ljos")).unwrap(), ljos_bytes);
     assert_eq!(fs::read(dir.join("deedar")).unwrap(), deedar_bytes);
 }
+
+/// The release directory has no archive. The error names the next command.
+#[test]
+fn a_missing_release_archive_names_the_next_command() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = root.path().join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let dir = root.path().join("bin");
+    fs::create_dir_all(&dir).unwrap();
+    executable(&dir.join("ljos"), &says("ljos", "0.1.0"));
+    executable(&dir.join("ljos-mcp"), &says("ljos-mcp", "0.1.0"));
+    let out = run(root.path(), &dir, Some(&rel), version());
+    let said = text_of(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("could not read"), "{said}");
+    assert!(said.contains("LJOS_RELEASE_DIR"), "{said}");
+    assert!(said.contains("`ljos upgrade`"), "{said}");
+}
+
+struct Stop(std::process::Child);
+
+impl Drop for Stop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// `ljos-mcp` is running. Upgrade replaces the file and names that pid.
+#[test]
+fn upgrade_names_a_running_mcp_server() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = fixture_release(root.path());
+    let dir = root.path().join("bin");
+    fs::create_dir_all(&dir).unwrap();
+    executable(&dir.join("ljos"), &says("ljos", "0.1.0"));
+    let src = root.path().join("sleeper.c");
+    fs::write(
+        &src,
+        r#"
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+  if (argc > 1 && strcmp(argv[1], "--version") == 0) {
+    printf("ljos-mcp 0.0.1\n");
+    return 0;
+  }
+  for (;;) pause();
+}
+"#,
+    )
+    .unwrap();
+    let sleeper = root.path().join("ljos-mcp-old");
+    let compiled = Command::new("cc")
+        .args(["-O0", "-o"])
+        .arg(&sleeper)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    install_built(&dir, "ljos-mcp", &sleeper);
+    let child = Command::new(dir.join("ljos-mcp"))
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let _stop = Stop(child);
+    let out = run(root.path(), &dir, Some(&rel), version());
+    let said = text_of(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!(
+            "ljos-mcp is still running (pid {pid}) and is the previous binary"
+        )),
+        "{said}"
+    );
+    assert!(said.contains(&format!("kill {pid}")), "{said}");
+    assert!(said.contains("Next: `ljos doctor`"), "{said}");
+    assert_eq!(
+        version_line(&dir.join("ljos-mcp")),
+        format!("ljos-mcp {}", version())
+    );
+}
