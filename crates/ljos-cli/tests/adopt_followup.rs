@@ -196,7 +196,8 @@ fn a_failed_command_is_left_out_of_search_until_asked() {
     assert!(asked.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&asked.stdout);
     assert!(stdout.contains("zircon-missing"), "{said}");
-    assert!(stdout.contains("attempt, effect-unavailable"), "{said}");
+    // A missing import file is the caller's input, so the label is input-warning.
+    assert!(stdout.contains("attempt, input-warning"), "{said}");
 }
 
 #[test]
