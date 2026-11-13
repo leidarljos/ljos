@@ -1684,15 +1684,11 @@ fn same_memory(atom: &Value, row: &Row) -> bool {
         && normalize(atom["text"].as_str().unwrap_or("")) == normalize(&row.text)
 }
 
-fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
-    let _deadline = crate::pack_link::CommandDeadline::enter(crate::IMPORT_ADMISSION);
-    let Ok(client) = crate::pack() else {
-        return Ok(Vec::new());
-    };
-    // A lesson already in this pack, or already integrated for this seat,
-    // is not posted again. A second import of the same memories stays one copy.
+/// Texts apply will not post again: the pack's live atoms, plus integrated
+/// or kept rows in this seat's slot that are not part of `posting_ids`.
+fn remembered(dir: &Path, posting_ids: &BTreeSet<String>) -> Vec<Value> {
     let mut held = crate::memories::live_atoms().unwrap_or_default();
-    if let Some(home) = dir
+    let Some(home) = dir
         .parent()
         .and_then(|seat| seat.parent())
         .and_then(|imports| imports.parent())
@@ -1702,33 +1698,55 @@ fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
                 .and_then(|imports| imports.file_name())
                 .is_some_and(|name| name == "imports")
         })
-    {
-        let seat = dir
-            .parent()
-            .and_then(|seat| seat.file_name())
-            .and_then(|name| name.to_str())
-            .and_then(decode_name)
-            .unwrap_or_default();
-        let local = Place {
-            home: home.to_path_buf(),
-            seat,
-            machine: String::new(),
-        };
-        for row in load_rows(&local, false) {
-            if row_retired(&row) || rows.iter().any(|posting| posting.id == row.id) {
-                continue;
-            }
-            let integrated = row.labels.iter().any(|label| label == "integrated");
-            let kept = row.import_id.is_empty();
-            if integrated || kept {
-                held.push(json!({
-                    "id": row.id,
-                    "kind": row.kind,
-                    "text": row.text,
-                }));
-            }
+    else {
+        return held;
+    };
+    let seat = dir
+        .parent()
+        .and_then(|seat| seat.file_name())
+        .and_then(|name| name.to_str())
+        .and_then(decode_name)
+        .unwrap_or_default();
+    let local = Place {
+        home: home.to_path_buf(),
+        seat,
+        machine: String::new(),
+    };
+    for row in load_rows(&local, false) {
+        if row_retired(&row) || posting_ids.contains(&row.id) {
+            continue;
+        }
+        let integrated = row.labels.iter().any(|label| label == "integrated");
+        let kept = row.import_id.is_empty();
+        if integrated || kept {
+            held.push(json!({
+                "id": row.id,
+                "kind": row.kind,
+                "text": row.text,
+            }));
         }
     }
+    held
+}
+
+/// Whether apply would leave `row` unposted because the pack already has
+/// that text, or a receipt already records the post.
+fn already_in_pack(dir: &Path, row: &Row, held: &[Value]) -> bool {
+    let mark = dir
+        .join("receipts")
+        .join(format!("posted-{}.json", row.content_sha256));
+    mark.is_file() || held.iter().any(|atom| same_memory(atom, row))
+}
+
+fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
+    let _deadline = crate::pack_link::CommandDeadline::enter(crate::IMPORT_ADMISSION);
+    let Ok(client) = crate::pack() else {
+        return Ok(Vec::new());
+    };
+    // A lesson already in this pack, or already integrated for this seat,
+    // is not posted again. A second import of the same memories stays one copy.
+    let posting_ids: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
+    let mut held = remembered(dir, &posting_ids);
     let mut refused = Vec::new();
     for row in rows {
         if row.text.trim().is_empty() {
@@ -2480,6 +2498,15 @@ fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<String
     if mine.is_empty() {
         bail!("memory: import {import_id} has no rows");
     }
+    let slot = slot_dir(place, import_id);
+    let posting_ids: BTreeSet<String> = mine.iter().map(|row| row.id.clone()).collect();
+    // The same set apply consults before it posts. A pack that is down
+    // posts nothing for a different reason, and the row stays `new`.
+    let held = if crate::pack().is_ok() {
+        remembered(&slot, &posting_ids)
+    } else {
+        Vec::new()
+    };
     let mut mappings = Vec::new();
     for row in &mine {
         if row
@@ -2553,12 +2580,17 @@ fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<String
             mappings.push(linked(other, &row.id, "near-duplicate"));
             continue;
         }
+        let relation = if already_in_pack(&slot, row, &held) {
+            "held"
+        } else {
+            "new"
+        };
         mappings.push(Mapping {
             source_id: row.source_id.clone(),
             row_id: row.id.clone(),
             content_sha256: row.content_sha256.clone(),
             canonical_id: row.id.clone(),
-            relation: "new".into(),
+            relation: relation.into(),
             linked_id: String::new(),
         });
     }
@@ -2613,10 +2645,17 @@ fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<String
             .find(|row| row.id == mapping.row_id)
             .map(|row| row.text.as_str())
             .unwrap_or("");
-        out.push_str(&format!(
-            "  {} -> {} {} {}\n",
-            mapping.row_id, mapping.canonical_id, mapping.relation, mapping.linked_id
-        ));
+        if mapping.relation == "held" {
+            out.push_str(&format!(
+                "  {} -> {} held already in pack\n",
+                mapping.row_id, mapping.canonical_id
+            ));
+        } else {
+            out.push_str(&format!(
+                "  {} -> {} {} {}\n",
+                mapping.row_id, mapping.canonical_id, mapping.relation, mapping.linked_id
+            ));
+        }
         if !text.is_empty() {
             out.push_str(&format!("    {text}\n"));
         }
