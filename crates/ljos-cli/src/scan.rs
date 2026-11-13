@@ -305,8 +305,10 @@ pub fn search_page(page: &SearchPage<'_>) -> String {
             out.push('\n');
         }
     } else {
-        out.push_str("score: scorer order, not whether the claim is true.\n");
-        out.push_str("scorers: how many of them named the hit.\n");
+        out.push_str(
+            "The number is the order in the list. It is not whether the sentence is true.\n",
+        );
+        out.push_str("Checks: how many of them named this row.\n");
     }
     out.push('\n');
     for row in page.rows {
@@ -424,11 +426,11 @@ fn search_row(row: &SearchRow<'_>) -> String {
         head.push_str(", from ");
         head.push_str(seat);
     }
-    let mut foot = format!("score {:.2}", row.score);
+    let mut foot = format!("order {:.2}", row.score);
     if row.local {
         foot.push_str(", local, not in the pack");
     } else if let Some((hit, of)) = row.ballots {
-        foot.push_str(&format!(", scorers {hit}/{of}"));
+        foot.push_str(&format!(", checks {hit}/{of}"));
     }
     if let Some(id) = row.id.map(str::trim).filter(|id| !id.is_empty()) {
         foot.push_str(", id ");

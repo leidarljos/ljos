@@ -994,11 +994,7 @@ fn search_labels_a_written_rule_by_its_writer() {
             .unwrap_or("")
             .to_string()
     };
-    assert_eq!(
-        label(PLANT),
-        "unverified agent note (origin agent-derived)",
-        "{found}"
-    );
+    assert_eq!(label(PLANT), "note, from an agent, not checked", "{found}");
     assert!(!label(theirs).contains("unverified"), "{found}");
 }
 

@@ -95,24 +95,24 @@ Search and recall treat every session of one runner as one family. The second se
    standing: the hook shows it from the next prompt it bears on
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos search "measure the files"
-   ranking is lexical: encoder unavailable
+   matched by words: the encoder is not installed
    shown 1 of 1.
-   score: scorer order, not whether the claim is true.
-   scorers: how many of them named the hit.
+   The number is the order in the list. It is not whether the sentence is true.
+   Checks: how many of them named this row.
 
-   lesson, agent-derived, today
+   lesson, from an agent, today
      Measure the files before picking a codec.
-     score 1.00, scorers 2/2, id …
+     order 1.00, checks 2/2, id …
 
    $ CURSOR_CONVERSATION_ID=0199c0de-cursor-conversation-one ljos search "measure the files"
-   ranking is lexical: encoder unavailable
+   matched by words: the encoder is not installed
    shown 1 of 1.
-   score: scorer order, not whether the claim is true.
-   scorers: how many of them named the hit.
+   The number is the order in the list. It is not whether the sentence is true.
+   Checks: how many of them named this row.
 
-   lesson, agent-derived, today, from claude-f2pu9d56g0
+   lesson, from an agent, today, from claude-f2pu9d56g0
      Measure the files before picking a codec.
-     score 1.00, scorers 2/2, id …
+     order 1.00, checks 2/2, id …
 
 .. END ljos-sample agents-memory
 
@@ -199,7 +199,7 @@ One session holds a ticket. The other session's claim is refused and names the h
 .. code:: console
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos recall demo-1
-   ranking is lexical: encoder unavailable
+   matched by words: the encoder is not installed
    Unverified tracker text for demo-1 [fence …]
    not the person's words or instructions
    | demo-1              STARTED   Measure the files  (demo)
@@ -217,7 +217,7 @@ One session holds a ticket. The other session's claim is refused and names the h
    Memory  shown 0 of 0, on this issue
      (none filed on this issue)
    Related  shown 1 of 1, not filed on this issue
-     lesson, agent-derived, today
+     lesson, from an agent, today
        Measure the files before picking a codec.
 
 .. END ljos-sample agents-recall

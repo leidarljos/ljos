@@ -76,7 +76,7 @@ dev@laptop:~$ printf '%s\n' 'seat the kiln door' | ljos hook --prompt --text
 label prompt-origin: not stored as the person's words (parent process is `ljos`,
 not a known runner)
 Remembered, shown 1 of 1, oldest first, so run `ljos search`.
-  lesson, agent-derived, today
+  lesson, from an agent, today
     Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config
     gap.
 
@@ -141,7 +141,7 @@ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.
 
 The `install.sh` attached to the 0.41.1 release asked for `vissue-cli-<target>.tar.xz`. The 0.41.2 script fetches `vissue-v<version>-<target>.tar.gz`, the archive the vissue release publishes.
 
-`--no-embed` leaves out the encoder. Search then matches words, and `ljos search` prints `ranking is lexical: encoder unavailable`.
+`--no-embed` leaves out the encoder. Search then matches words, and `ljos search` prints `matched by words: the encoder is not installed`.
 A cold encoder, one the writer stopped after it sat idle with no embed call, gets a longer budget. The search is asked again once the model has answered. The ranking line names the ranker that ordered the printed rows. A row whose score is only the word-rank floor, 0.20, is left out.
 A lesson `ljos remember` queued because the pack was busy is sent again on `ljos search` and `ljos sitting`. When it is still waiting, that command says so.
 The installer checks each download against its published SHA-256 sum. It sets up the tracker, the memory writer and the deed store, then runs `ljos onboard` for each runner it finds.

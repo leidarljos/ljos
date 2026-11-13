@@ -86,10 +86,10 @@ bac3e6e51514703c76672d163cc38cde	lesson	due 2026-11-02T14:29:43.770Z	A newcomer 
 standing: the hook shows it from the next prompt it bears on
 $ ljos brief release-engineer demo-0gmm
 What you remembered yourself:
-- [lesson, agent-derived, today] Cut a release only after the changelog names the search index.
+- [lesson, from an agent, today] Cut a release only after the changelog names the search index.
 $ ljos brief docs-reader demo-0gmm
 What you remembered yourself:
-- [lesson, agent-derived, today] A newcomer looks for the search index in the notes.
+- [lesson, from an agent, today] A newcomer looks for the search index in the notes.
 #+end_src
 
 A no vote has to name an open child. =ljos file --parent= links it in the

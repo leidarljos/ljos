@@ -221,7 +221,7 @@ fn a_missing_encoder_is_unavailable_not_still_loading() {
     let said = format!("{stdout}{stderr}");
     assert!(out.status.success(), "{said}");
     assert!(
-        stderr.contains("ranking is lexical: encoder unavailable"),
+        stderr.contains("matched by words: the encoder is not installed"),
         "{said}"
     );
     assert!(
@@ -244,7 +244,7 @@ fn a_search_that_stays_cold_says_the_rows_were_ranked_by_words() {
     let said = format!("{stdout}{stderr}");
     assert!(out.status.success(), "{said}");
     assert!(
-        stderr.contains("ranking is lexical: encoder is still loading"),
+        stderr.contains("matched by words: encoder is still loading"),
         "{said}"
     );
     assert!(
@@ -419,7 +419,7 @@ fn a_busy_pack_still_ranks_this_seats_lesson_by_words() {
     assert!(stdout.contains(OWN_RINGS), "{said}");
     assert!(!stdout.contains("disk fill"), "{said}");
     assert!(
-        stderr.contains("ranking is lexical"),
+        stderr.contains("matched by words"),
         "the busy pack did not fall back to words: {said}"
     );
 }

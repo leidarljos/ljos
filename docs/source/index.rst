@@ -89,14 +89,14 @@ First commands
    remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    $ ljos search "lexical default"
-   ranking is lexical: encoder unavailable
+   matched by words: the encoder is not installed
    shown 1 of 1.
-   score: scorer order, not whether the claim is true.
-   scorers: how many of them named the hit.
+   The number is the order in the list. It is not whether the sentence is true.
+   Checks: how many of them named this row.
 
-   lesson, agent-derived, today
+   lesson, from an agent, today
      The lexical default is BM25+. It beat BM25 by two points on turns.
-     score 1.00, scorers 2/2, id a6ae2751
+     order 1.00, checks 2/2, id a6ae2751
    $ ljos file "Pick a codec" -p demo
 
 ``ljos search`` prints the lesson when the query shares a word with it.

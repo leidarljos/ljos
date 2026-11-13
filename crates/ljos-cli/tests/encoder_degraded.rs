@@ -147,13 +147,15 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
         doctor.status
     );
     assert!(
-        text.contains("ranking is lexical: encoder unavailable; `ljos doctor --all` for why"),
+        text.contains(
+            "matched by words: the encoder is not installed; `ljos doctor --all` for why"
+        ),
         "{text}"
     );
     assert!(text.contains(ljos_cli::ENCODER_RESTART_COMMAND), "{text}");
     assert!(
-        text.contains("lexical-only"),
-        "the warning does not say the ranking is lexical-only: {text}"
+        text.contains("search is a word match"),
+        "the warning does not say the search is a word match: {text}"
     );
     let before = std::fs::read_to_string(&marker).unwrap_or_default();
     assert!(
@@ -172,11 +174,11 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
         cmd = ljos_cli::ENCODER_RESTART_COMMAND
     );
     assert!(
-        !said.contains("ranking is lexical"),
+        !said.contains("matched by words"),
         "the mode line belongs on stderr\nstdout:\n{said}"
     );
     assert!(
-        recall_err.contains("ranking is lexical: encoder unavailable"),
+        recall_err.contains("matched by words: the encoder is not installed"),
         "recall did not name the ranking\nstderr:\n{recall_err}\nstdout:\n{said}"
     );
 
@@ -184,11 +186,11 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
     let search_out = String::from_utf8_lossy(&search.stdout);
     let search_err = String::from_utf8_lossy(&search.stderr);
     assert!(
-        search_err.contains("ranking is lexical: encoder unavailable"),
+        search_err.contains("matched by words: the encoder is not installed"),
         "search did not name the ranking\nstderr:\n{search_err}\nstdout:\n{search_out}"
     );
     assert!(
-        !search_out.contains("ranking is lexical"),
+        !search_out.contains("matched by words"),
         "search put the mode on stdout:\n{search_out}"
     );
 
@@ -196,7 +198,7 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
     let json_out = String::from_utf8_lossy(&as_json.stdout);
     let json_err = String::from_utf8_lossy(&as_json.stderr);
     assert!(
-        !json_err.contains("ranking is lexical"),
+        !json_err.contains("matched by words"),
         "json search still printed the mode line:\n{json_err}"
     );
     let doc: serde_json::Value = serde_json::from_str(json_out.trim())
@@ -213,7 +215,7 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
     let recall_body = String::from_utf8_lossy(&recall_json.stdout);
     let recall_json_err = String::from_utf8_lossy(&recall_json.stderr);
     assert!(
-        !recall_json_err.contains("ranking is lexical"),
+        !recall_json_err.contains("matched by words"),
         "json recall still printed the mode line:\n{recall_json_err}"
     );
     let recalled: serde_json::Value = serde_json::from_str(recall_body.trim())

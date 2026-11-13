@@ -461,7 +461,7 @@ fn island_notices_of(body: &Value) -> Vec<String> {
     if !body["dense"].as_bool().unwrap_or(true)
         && !notices.iter().any(|n| n.contains("encoder is down"))
     {
-        notices.push("the encoder is down, ranking is lexical only".into());
+        notices.push("the encoder is down, so this is a word match".into());
     }
     notices
 }

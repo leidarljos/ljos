@@ -94,10 +94,10 @@ lesson, and the lists are not the same.
    standing: the hook shows it from the next prompt it bears on
    $ ljos brief release-engineer demo-0gmm
    What you remembered yourself:
-   - [lesson, agent-derived, today] Cut a release only after the changelog names the search index.
+   - [lesson, from an agent, today] Cut a release only after the changelog names the search index.
    $ ljos brief docs-reader demo-0gmm
    What you remembered yourself:
-   - [lesson, agent-derived, today] A newcomer looks for the search index in the notes.
+   - [lesson, from an agent, today] A newcomer looks for the search index in the notes.
 
 A no vote has to name an open child. ``ljos file --parent`` links it in the
 tracker. The parent stays open while that child is open. After the child

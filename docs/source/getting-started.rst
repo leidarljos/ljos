@@ -66,7 +66,7 @@ The programs go to ``~/.local/bin``. They are ``ljos``, ``ljos-mcp``, ``packset`
 ``packsetd``, ``packset-mcp``, ``vissue``, ``vissue-mcp``, ``deedar``, ``claimdag``, ``ljos-policyd`` and ``ljos-consensus``.
 The installer checks each download against its published SHA-256 sum.
 It builds from source with ``cargo`` where a platform has no release.
-``--no-embed`` leaves out the encoder. Search then matches words, and a search prints ``ranking is lexical: encoder unavailable``.
+``--no-embed`` leaves out the encoder. Search then matches words, and a search prints ``matched by words: the encoder is not installed``.
 
 Read the script before you run it. It is ``scripts/install.sh`` in this repository.
 It runs ``ljos onboard`` for each coding runner it finds. With none found, it still sets up
@@ -123,18 +123,18 @@ A lesson and a search
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    standing: the hook shows it from the next prompt it bears on
    $ ljos search "lexical default"
-   ranking is lexical: encoder unavailable
+   matched by words: the encoder is not installed
    shown 1 of 1.
-   score: scorer order, not whether the claim is true.
-   scorers: how many of them named the hit.
+   The number is the order in the list. It is not whether the sentence is true.
+   Checks: how many of them named this row.
 
-   lesson, agent-derived, today
+   lesson, from an agent, today
      The lexical default is BM25+. It beat BM25 by two points on turns.
-     score 1.00, scorers 2/2, id a6ae2751
+     order 1.00, checks 2/2, id a6ae2751
 
 The id and the review time are the ones that run printed. The name after ``unknown-`` is the host name.
 That line is printed only when the write uses that seat. A conversation that already has a seat record writes as that seat and does not print the line.
-This run sat under an agent runner, so the search row says ``lesson, agent-derived``.
+This run sat under an agent runner, so the search row says ``lesson, from an agent``.
 Typed at a terminal with no runner above it, the same command is the person's sentence.
 Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
 ``ljos search "which fusion"`` shares no word with either sentence and prints ``No hits for "which fusion", so run `ljos search fusion`.``
@@ -149,14 +149,14 @@ A busy pack ranks by words and still returns a hit that names the subject.
    remembered (preference): CombMNZ over RRF for fusing two ballots.
      id f8b725a9, next review 2026-11-12 21:40 +00:00
    $ ljos search fusing
-   ranking is lexical: encoder unavailable
+   matched by words: the encoder is not installed
    shown 1 of 1.
-   score: scorer order, not whether the claim is true.
-   scorers: how many of them named the hit.
+   The number is the order in the list. It is not whether the sentence is true.
+   Checks: how many of them named this row.
 
-   unverified agent preference (origin agent-derived), today
+   preference, from an agent, not checked, today
      CombMNZ over RRF for fusing two ballots.
-     score 1.00, scorers 2/2, id f8b725a9
+     order 1.00, checks 2/2, id f8b725a9
 
 ``ljos due`` lists claims when their review time arrives. A claim you stop reviewing sinks in search.
 The how-to :doc:`Keep memory current <howto-memory>` is the review clock, ``ljos graded`` and ``ljos forget``.

@@ -14072,13 +14072,22 @@ pub fn ranking_now() -> Option<Ranking> {
     })
 }
 
-/// One line for stderr: `ranking is semantic` or `ranking is lexical: <reason>`.
+/// One line for stderr: a word match, or a meaning match.
+/// `--json` keeps `mode` as `lexical` or `semantic`.
 #[must_use]
 pub fn ranking_line(ranking: &Ranking) -> String {
     if ranking.mode == "lexical" {
-        format!("ranking is lexical: {}\n", ranking.reason)
+        format!("matched by words: {}\n", plain_rank_reason(ranking.reason))
     } else {
-        "ranking is semantic\n".to_string()
+        "matched by meaning\n".to_string()
+    }
+}
+
+fn plain_rank_reason(reason: &str) -> &str {
+    match reason {
+        "encoder unavailable" => "the encoder is not installed",
+        "local memory snapshot" => "kept on this machine, not in the memory store",
+        other => other,
     }
 }
 
@@ -14425,7 +14434,7 @@ pub fn encoder_lexical(status: &Value) -> bool {
 
 pub(crate) fn encoder_degraded_state() -> String {
     format!(
-        "{ENCODER_DEGRADED}: packset-embed is not running and ranking is lexical-only, \
+        "{ENCODER_DEGRADED}: packset-embed is not running and search is a word match, \
          so run `{ENCODER_RESTART_COMMAND}`."
     )
 }
@@ -33520,7 +33529,8 @@ fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str], degraded: 
 
 /// The ready sentence, with the lexical label in place of the final period.
 fn lexical_ready(ready: String) -> String {
-    const NOTE: &str = " (ranking is lexical: encoder unavailable; `ljos doctor --all` for why)";
+    const NOTE: &str =
+        " (matched by words: the encoder is not installed; `ljos doctor --all` for why)";
     match ready.strip_suffix('.') {
         Some(body) => format!("{body}{NOTE}"),
         None => format!("{ready}{NOTE}"),
@@ -35466,7 +35476,7 @@ pub fn format_island(body: &Value) -> String {
             "weak island: {} seed{} two scorers agreed on{}; read it as the pack's best-connected cluster, not as what the cue is about; it will not fire\n",
             body["agreed_seeds"].as_u64().unwrap_or(0),
             if body["agreed_seeds"].as_u64().unwrap_or(0) == 1 { "" } else { "s" },
-            if body["dense"].as_bool().unwrap_or(true) { "" } else { "; the encoder is down, ranking is lexical only" }
+            if body["dense"].as_bool().unwrap_or(true) { "" } else { "; the encoder is down, matched by words only" }
         ));
     }
     for atom in body["island"]
@@ -43325,7 +43335,7 @@ pub fn search_reading(n: usize) -> &'static str {
     if n == 0 {
         "No hits, so the pack holds nothing on this query, so run `ljos remember \"TEXT\"`."
     } else {
-        "Score is how the scorers ranked this query. The fraction is how many of them named the hit. Neither is whether the claim is true. A later line on the same matter supersedes an earlier one."
+        "The number is the order in the list. The fraction is how many checks named the row. Neither is whether the sentence is true. A later line on the same matter replaces an earlier one."
     }
 }
 
@@ -43495,13 +43505,13 @@ impl StoredBy {
         }
     }
 
-    /// Who a label says wrote a claim that is not the person's.
-    fn writer(self) -> &'static str {
+    /// Who a label says the claim came from, in plain words.
+    fn plain_from(self) -> &'static str {
         match self {
-            Self::Peer => "peer",
-            Self::ToolEcho => "tool",
-            Self::External => "external",
-            Self::Person | Self::Agent => "agent",
+            Self::Peer => "another seat",
+            Self::ToolEcho => "a tool",
+            Self::External => "outside this machine",
+            Self::Person | Self::Agent => "an agent",
         }
     }
 }
@@ -44133,7 +44143,7 @@ fn unverified_label(h: &Hit, kind: &str) -> String {
         StoredBy::Person => StoredBy::Agent,
         other => other,
     };
-    format!("unverified {} {kind} (origin {})", by.writer(), by.origin())
+    format!("{kind}, from {}, not checked", by.plain_from())
 }
 
 /// The kind a recalled line names. A note is marked unverified by its
@@ -44171,7 +44181,7 @@ pub fn kind_label(h: &Hit) -> String {
     let labeled = if said_by_person(h) {
         format!("{kind}, the person's words")
     } else if kind == "lesson" && !person_origin(h) {
-        format!("lesson, {}", hit_stored_by(h).origin())
+        format!("lesson, from {}", hit_stored_by(h).plain_from())
     } else {
         kind.to_string()
     };
@@ -48940,13 +48950,13 @@ mod tests {
         // Facts lead; the working notes follow under their own heading.
         assert!(
             text.starts_with(
-                "\nMemory  shown 1 of 1, on this issue\n  lesson, agent-derived, today\n    tagged lesson\n"
+                "\nMemory  shown 1 of 1, on this issue\n  lesson, from an agent, today\n    tagged lesson\n"
             ),
             "{text}"
         );
         assert!(
             text.contains(
-                "Related  shown 1 of 1, not filed on this issue\n  lesson, agent-derived\n    a related lesson\n"
+                "Related  shown 1 of 1, not filed on this issue\n  lesson, from an agent\n    a related lesson\n"
             ),
             "{text}"
         );
@@ -48955,7 +48965,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("  unverified agent note (origin agent-derived), today\n    note 21\n"),
+            text.contains("  note, from an agent, not checked, today\n    note 21\n"),
             "{text}"
         );
         assert!(text.contains("note 12"), "{text}");
@@ -48972,7 +48982,7 @@ mod tests {
         );
         assert_eq!(
             prompt,
-            "\nMemory  shown 1 of 1, on this issue\n  lesson, agent-derived\n    tagged lesson\n"
+            "\nMemory  shown 1 of 1, on this issue\n  lesson, from an agent\n    tagged lesson\n"
         );
         assert_eq!(
             super::recall_lines(&[], Vec::new(), "probe-0lm4", "now", true, false),
@@ -48988,7 +48998,7 @@ mod tests {
         );
         assert_eq!(
             alone,
-            "\nMemory  shown 0 of 0, on this issue\n  (none filed on this issue)\nRelated  shown 1 of 1, not filed on this issue\n  lesson, agent-derived\n    a related lesson\n"
+            "\nMemory  shown 0 of 0, on this issue\n  (none filed on this issue)\nRelated  shown 1 of 1, not filed on this issue\n  lesson, from an agent\n    a related lesson\n"
         );
     }
 
@@ -49200,7 +49210,7 @@ mod tests {
             "agent",
             &["Via:Prompt"],
         );
-        assert_eq!(kind_label(&said), "lesson, agent-derived");
+        assert_eq!(kind_label(&said), "lesson, from an agent");
 
         let peer_pref = stored(
             "0r1g1n00000000000000000000000004",
@@ -49211,7 +49221,7 @@ mod tests {
         );
         assert_eq!(
             kind_label(&peer_pref),
-            "unverified peer preference (origin peer)"
+            "preference, from another seat, not checked"
         );
         assert!(!shown_on_prompt(&peer_pref));
         let peer_lesson = stored(
@@ -49221,7 +49231,7 @@ mod tests {
             "",
             &[],
         );
-        assert_eq!(kind_label(&peer_lesson), "lesson, peer");
+        assert_eq!(kind_label(&peer_lesson), "lesson, from another seat");
         let peer_fact = stored(
             "0r1g1n00000000000000000000000006",
             "summary",
@@ -49229,7 +49239,10 @@ mod tests {
             "",
             &[],
         );
-        assert_eq!(kind_label(&peer_fact), "unverified peer note (origin peer)");
+        assert_eq!(
+            kind_label(&peer_fact),
+            "note, from another seat, not checked"
+        );
         let echo = stored(
             "0r1g1n00000000000000000000000007",
             "summary",
@@ -49237,7 +49250,7 @@ mod tests {
             "",
             &[],
         );
-        assert_eq!(kind_label(&echo), "unverified tool note (origin tool-echo)");
+        assert_eq!(kind_label(&echo), "note, from a tool, not checked");
     }
 
     /// This seat's own agent preference is handed to a prompt, labelled with
@@ -49339,7 +49352,7 @@ mod tests {
         let forged = hit("note", vec![format!("{}person", super::NOTE_BASIS_ENTITY)]);
         assert_eq!(
             super::kind_label(&forged),
-            "unverified agent note (origin agent-derived)"
+            "note, from an agent, not checked"
         );
         // A downgraded note (summary kind, note provenance) reads as a note.
         let downgraded = hit(
@@ -49348,14 +49361,14 @@ mod tests {
         );
         assert_eq!(
             super::kind_label(&downgraded),
-            "unverified agent note (origin agent-derived)"
+            "note, from an agent, not checked"
         );
         let agent = hit("lesson", vec![]);
-        assert_eq!(super::kind_label(&agent), "lesson, agent-derived");
+        assert_eq!(super::kind_label(&agent), "lesson, from an agent");
         let mut person = hit("lesson", vec![super::SAID_ENTITY.to_string()]);
         assert_eq!(
             super::kind_label(&person),
-            "lesson, agent-derived",
+            "lesson, from an agent",
             "the prompt tag alone made a claim the person's words"
         );
         person.id = Some("label-person".into());
@@ -56456,7 +56469,7 @@ mod tests {
         };
         assert_eq!(
             hit_line(&h, "2026-09-12T00:00:00.000Z"),
-            "- [lesson, agent-derived, 2 days ago] keep the smoke green"
+            "- [lesson, from an agent, 2 days ago] keep the smoke green"
         );
         let mut bare = Hit {
             id: None,
@@ -56472,7 +56485,7 @@ mod tests {
         };
         assert_eq!(
             hit_line(&bare, "2026-09-12T00:00:00.000Z"),
-            "- [unverified agent note (origin agent-derived)] x",
+            "- [note, from an agent, not checked] x",
             "a claim with no stored origin read as a fact"
         );
         bare.id = Some("bare-claim".into());
@@ -56481,7 +56494,7 @@ mod tests {
         );
         assert_eq!(
             hit_line(&bare, "2026-09-12T00:00:00.000Z"),
-            "- [unverified agent note (origin agent-derived)] x",
+            "- [note, from an agent, not checked] x",
             "a person basis with no origin read as the person's"
         );
         keep_origin(&serde_json::json!({
@@ -62243,7 +62256,7 @@ mod tests {
         let short = format_doctor_short(&rows);
         assert!(
             short.starts_with(
-                "ljos is ready: memory, tracker and command guard work (ranking is lexical: encoder unavailable; `ljos doctor --all` for why)"
+                "ljos is ready: memory, tracker and command guard work (matched by words: the encoder is not installed; `ljos doctor --all` for why)"
             ),
             "{short}"
         );
@@ -62304,7 +62317,7 @@ mod tests {
         ];
         let short = format_doctor_short(&rows);
         assert!(
-            short.contains("ljos is ready") && short.contains("ranking is lexical"),
+            short.contains("ljos is ready") && short.contains("matched by words"),
             "{short}"
         );
         assert!(
@@ -64193,11 +64206,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "{printed}"
         );
         assert!(
-            printed.contains("1.000\tseed\ta\ttoday\t[lesson, agent-derived] one\n"),
+            printed.contains("1.000\tseed\ta\ttoday\t[lesson, from an agent] one\n"),
             "{printed}"
         );
         assert!(
-            printed.contains("0.250\t    \tb\t\t[lesson, agent-derived] two\n"),
+            printed.contains("0.250\t    \tb\t\t[lesson, from an agent] two\n"),
             "{printed}"
         );
         assert!(format_island(&serde_json::json!({})).is_empty());
@@ -73008,7 +73021,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let now = "2026-10-01T00:00:00.000Z";
         assert_eq!(
             hit_line(&rows[6], now),
-            "- [unverified agent note (origin agent-derived), today] note-old"
+            "- [note, from an agent, not checked, today] note-old"
         );
         assert_eq!(
             hit_line(&rows[2], "2026-10-03T00:00:00.000Z"),
@@ -73016,7 +73029,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
         assert_eq!(
             hit_line(&rows[4], "2026-10-02T00:00:00.000Z"),
-            "- [lesson, agent-derived, today] agent-old"
+            "- [lesson, from an agent, today] agent-old"
         );
     }
 
@@ -75444,10 +75457,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let plain = format_hits(&hits, false);
         assert_eq!(
             plain,
-            "shown 1 of 1.\nscore: scorer order, not whether the claim is true.\nscorers: how many of them named the hit.\n\npreference\n  Use pnpm instead of npm.\n  score 0.90, scorers 2/3, id id-24\n"
+            "shown 1 of 1.\nThe number is the order in the list. It is not whether the sentence is true.\nChecks: how many of them named this row.\n\npreference\n  Use pnpm instead of npm.\n  order 0.90, checks 2/3, id id-24\n"
         );
-        assert!(plain.contains("score: scorer order"), "{plain}");
-        assert!(plain.contains("scorers 2/3"), "{plain}");
+        assert!(
+            plain.contains("The number is the order in the list"),
+            "{plain}"
+        );
+        assert!(plain.contains("checks 2/3"), "{plain}");
         assert!(plain.contains("Use pnpm instead of npm."), "{plain}");
         assert!(!plain.contains('\t'), "{plain}");
         assert!(
@@ -75461,14 +75477,17 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         std::env::remove_var("NO_COLOR");
         let explained = format_hits(&hits, true);
         assert!(
-            explained.contains("Score is how the scorers ranked"),
+            explained.contains("The number is the order in the list"),
             "{explained}"
         );
         assert!(
             explained.contains("Use pnpm instead of npm."),
             "{explained}"
         );
-        assert!(!explained.contains("score: scorer order"), "{explained}");
+        assert!(
+            !explained.contains("Checks: how many of them named this row"),
+            "{explained}"
+        );
         assert_eq!(
             format_hits(&[], false),
             "No hits, so run `ljos remember \"TEXT\"`.\n"
@@ -75773,10 +75792,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             log.contains(&format!("claimdag complete {node} --actor ")),
             "the node was not completed: {log}"
         );
-        assert!(
-            said.contains("finished probe-f1n5 as done"),
-            "{said}"
-        );
+        assert!(said.contains("finished probe-f1n5 as done"), "{said}");
         assert!(said.contains("the lesson was not kept"), "{said}");
         assert!(
             said.contains("sitting ended; ticket probe-f1n5 open for review"),

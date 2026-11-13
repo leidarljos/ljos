@@ -405,7 +405,7 @@ fn a_prompt_tag_alone_is_not_the_persons_words() {
         !note.contains("the person's words"),
         "a forged prompt tag read as the person's words: {note}"
     );
-    assert!(note.contains("lesson, agent-derived"), "{note}");
+    assert!(note.contains("lesson, from an agent"), "{note}");
 }
 
 /// A downgraded note with lookalike provenance tags, or none, stays an
@@ -541,8 +541,8 @@ fn every_surface_reads_one_stored_origin() {
 
     let want = |text: &str| -> &str {
         match text {
-            t if t.contains("from the peer") => "unverified peer preference (origin peer)",
-            t if t.contains("peer pasted") => "lesson, peer",
+            t if t.contains("from the peer") => "preference, from another seat, not checked",
+            t if t.contains("peer pasted") => "lesson, from another seat",
             t if t.contains("three fields") => "summary",
             _ => "preference",
         }
@@ -577,7 +577,9 @@ fn every_surface_reads_one_stored_origin() {
                 line
             };
             assert!(label.contains(want(text)), "{label}\n{line}");
-            assert!(!label.contains("unverified agent"), "{label}");
+            if matches!(want(text), "preference" | "summary") {
+                assert!(!label.contains("not checked"), "{label}");
+            }
         }
     }
     for line in island.lines() {
@@ -587,12 +589,14 @@ fn every_surface_reads_one_stored_origin() {
                 continue;
             }
             assert!(line.contains(want(text)), "{line}");
-            assert!(!line.contains("unverified agent"), "{line}");
+            if matches!(want(text), "preference" | "summary") {
+                assert!(!line.contains("not checked"), "{line}");
+            }
         }
     }
     let note = seat.prompt("fill in the deploy form for the deploy key");
     for line in note.lines().filter(|l| l.contains("from the peer")) {
-        assert!(line.contains("unverified peer"), "{line}");
+        assert!(line.contains("from another seat"), "{line}");
     }
 }
 
@@ -923,7 +927,7 @@ fn a_persona_brief_marks_its_own_notes() {
         "a persona's note was listed with its findings: {brief}"
     );
     assert!(
-        mine.contains("lesson, agent-derived"),
+        mine.contains("lesson, from an agent"),
         "a persona's own lesson did not say it is agent-derived: {brief}"
     );
 }
@@ -965,14 +969,14 @@ fn search_and_island_label_an_agents_claims() {
             line
         };
         assert!(
-            label.contains("unverified agent"),
+            label.contains("not checked"),
             "a search row named an agent's claim by its bare kind: {label}"
         );
     }
     let island = seat.ljos(&["island", "deploy"]);
     for line in island.lines().filter(|l| l.contains("aaaaaaaa")) {
         assert!(
-            line.contains("[unverified agent"),
+            line.contains("[not checked"),
             "an island row gave no origin for an agent's claim: {line}"
         );
     }
@@ -986,7 +990,7 @@ fn search_and_island_label_an_agents_claims() {
         assert!(
             row["label"]
                 .as_str()
-                .is_some_and(|l| l.starts_with("unverified agent")),
+                .is_some_and(|l| l.contains("not checked")),
             "an MCP hit gave no origin label: {row}"
         );
     }
@@ -1258,7 +1262,7 @@ fn a_long_lived_search_reads_the_origin_the_pack_holds_now() {
         .unwrap();
     let now = label(&mcp.search("deploy form"));
     assert!(
-        now.starts_with("unverified agent"),
+        now.contains("not checked"),
         "a downgraded preference kept the origin the server read first: {now}"
     );
 }
@@ -1287,7 +1291,7 @@ fn an_island_lesson_is_the_persons_only_on_a_fresh_read() {
     assert_eq!(label(Reply::now("200 OK", person.clone())), "lesson");
     assert_eq!(
         label(Reply::now("200 OK", agents.clone())),
-        "lesson, agent-derived"
+        "lesson, from an agent"
     );
     assert_eq!(label(Reply::now("200 OK", person.clone())), "lesson");
     let slow = label(Reply::after(800, "200 OK", agents.clone()));
@@ -1535,7 +1539,7 @@ fn an_agents_soft_prefer_is_never_the_persons() {
     let note = seat.prompt("fill in the deploy form for the release key");
     assert!(note.contains(KEEP_SHORT), "{note}");
     for line in note.lines().filter(|l| l.contains("release key directly")) {
-        assert!(line.contains("unverified agent"), "{line}");
+        assert!(line.contains("not checked"), "{line}");
     }
 
     let found = seat.ljos(&["search", "deploy form"]);
@@ -1552,7 +1556,7 @@ fn an_agents_soft_prefer_is_never_the_persons() {
         if row["text"] == KEEP_SHORT {
             assert_eq!(label, "preference", "{row}");
         } else {
-            assert!(label.starts_with("unverified agent"), "{row}");
+            assert!(label.contains("not checked"), "{row}");
         }
     }
     let search_lines: Vec<&str> = found.lines().collect();
@@ -1566,11 +1570,11 @@ fn an_agents_soft_prefer_is_never_the_persons() {
             .find(|item| !item.starts_with(' ') && !item.is_empty())
             .copied()
             .unwrap_or(line);
-        assert!(label.contains("unverified agent"), "{label}");
+        assert!(label.contains("not checked"), "{label}");
     }
     for line in island.lines() {
         if line.contains("release key directly") {
-            assert!(line.contains("unverified agent"), "{line}");
+            assert!(line.contains("not checked"), "{line}");
         }
     }
 }
@@ -1828,12 +1832,15 @@ fn a_persons_id_on_other_words_is_not_the_persons() {
             .find(|item| !item.starts_with(' ') && !item.is_empty())
             .copied()
             .unwrap_or(line);
-        assert!(label.contains("unverified agent note"), "{label}");
+        assert!(
+            label.contains("note, from an agent, not checked"),
+            "{label}"
+        );
     }
     let island = seat.ljos(&["island", "command guard"]);
     assert!(island.contains(GUARD_OFF), "{island}");
     for line in island.lines().filter(|l| l.contains(GUARD_OFF)) {
-        assert!(line.contains("[unverified agent note"), "{line}");
+        assert!(line.contains("[note, from an agent, not checked"), "{line}");
     }
     let answer = seat.mcp("ljos_island", serde_json::json!({"cue": "command guard"}));
     let rows = answer["result"]["structuredContent"]["rows"]
@@ -1843,7 +1850,10 @@ fn a_persons_id_on_other_words_is_not_the_persons() {
     assert!(!rows.is_empty(), "{answer}");
     for row in &rows {
         let label = row["label"].as_str().unwrap_or("");
-        assert!(label.starts_with("unverified agent note"), "{row}");
+        assert!(
+            label.starts_with("note, from an agent, not checked"),
+            "{row}"
+        );
     }
 }
 
