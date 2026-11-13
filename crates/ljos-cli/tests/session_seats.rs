@@ -85,9 +85,14 @@ fn two_sessions_differ_and_an_explicit_seat_wins() {
     assert_ne!(a, b, "{left}{right}");
     assert!(a.starts_with("claude-"), "{left}");
     assert!(b.starts_with("claude-"), "{right}");
-    assert!(
-        String::from_utf8_lossy(&one.stdout).contains("CLAUDE_CODE_SESSION_ID"),
+    assert_eq!(
+        field(&left_out, "source"),
+        "CLAUDE_CODE_SESSION_ID in this process",
         "{left}"
+    );
+    assert!(
+        !left_out.contains("most recent write"),
+        "a fresh session names the variable, not a write: {left}"
     );
 
     let named = world.ljos(
@@ -129,5 +134,56 @@ fn a_parent_session_id_does_not_name_this_process() {
     assert!(
         stdout.contains("every-seat") || stdout.contains("reading every seat"),
         "{text}"
+    );
+}
+
+/// After this session has written, `ljos seat` still names the variable
+/// the seat came from. A bare runner name with no id says so, and the
+/// fix is one export.
+#[test]
+fn the_source_names_this_process_and_a_missing_id_says_so() {
+    let world = World::new();
+    let id = "0199a1b2-claude-session-one";
+    let first = world.ljos(&["seat"], &[("CLAUDE_CODE_SESSION_ID", id)]);
+    let text = said(&first);
+    assert!(first.status.success(), "{text}");
+    let seat = field(&String::from_utf8_lossy(&first.stdout), "seat").to_string();
+    let log = world.home().join(".local/state/ljos/seat-writes.log");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, format!("2026-11-13T00:00:00.000Z\t{seat}\tbox\n")).unwrap();
+    let again = world.ljos(&["seat"], &[("CLAUDE_CODE_SESSION_ID", id)]);
+    let text = said(&again);
+    assert!(again.status.success(), "{text}");
+    let stdout = String::from_utf8_lossy(&again.stdout);
+    assert_eq!(field(&stdout, "seat"), seat, "{text}");
+    assert_eq!(
+        field(&stdout, "source"),
+        "CLAUDE_CODE_SESSION_ID in this process",
+        "{text}"
+    );
+
+    std::fs::write(&log, "2026-11-13T00:00:00.000Z\tclaude\tbox\n").unwrap();
+    let shared = world.ljos(&["seat"], &[]);
+    let text = said(&shared);
+    assert!(shared.status.success(), "{text}");
+    let stdout = String::from_utf8_lossy(&shared.stdout);
+    let stderr = String::from_utf8_lossy(&shared.stderr);
+    assert_eq!(field(&stdout, "seat"), "claude", "{text}");
+    assert!(
+        field(&stdout, "source").contains("this session has no id"),
+        "{text}"
+    );
+    assert!(
+        stderr.contains("export LJOS_SEAT="),
+        "the fix is one export: {text}"
+    );
+
+    let help = world.ljos(&["seat", "--help"], &[]);
+    let text = said(&help);
+    assert!(help.status.success(), "{text}");
+    let help_out = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        help_out.contains("in this process"),
+        "seat help names where the session id is read: {text}"
     );
 }

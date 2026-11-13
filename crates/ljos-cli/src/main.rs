@@ -1786,11 +1786,16 @@ enum Cmd {
     },
     /// Show the seat in use, or add one to the tracker.
     ///
-    /// With no seat named, a read prints `every-seat`. A write uses
-    /// `unknown-` and the host name. `add` writes a row in the tracker's
-    /// vissue.toml. The first `add` starts the list, and a seat that is
-    /// not on it cannot write. `grant` records a quoted yes to close.
-    /// `--via` has to be this process's seat.
+    /// With `LJOS_SEAT` unset, a session id in this process names the seat.
+    /// Claude Code, Codex and Cursor each sit as the runner plus a short id,
+    /// and the source line names that variable. `LJOS_SEAT` or `--seat` is
+    /// the seat as written. With no seat and no session id, a read prints
+    /// `every-seat` and a write uses `unknown-` and the host name. A session
+    /// with no id that would share the bare runner name says so.
+    /// `add` writes a row in the tracker's vissue.toml. The first `add`
+    /// starts the list, and a seat that is not on it cannot write.
+    /// `grant` records a quoted yes to close. `--via` has to be this
+    /// process's seat.
     ///
     /// Example: `LJOS_SEAT=alice ljos seat add alice`
     Seat {

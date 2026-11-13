@@ -4985,6 +4985,29 @@ fn notice_shared_harness(family: &str) {
     );
 }
 
+/// What `ljos seat` prints for a session id read in this process.
+/// The variable name is the whole phrase, so a reader can see where the
+/// seat came from. A later write on this machine does not replace it.
+fn session_seat_source(key: &str) -> String {
+    format!("{key} in this process")
+}
+
+/// The bare runner name, with the missing id on the source line.
+/// The notice on stderr is the one-line fix.
+fn shared_for_want_of_id(seat: Seat) -> Seat {
+    notice_shared_harness(&seat.seat);
+    if seat.source.contains("this session has no id") {
+        return seat;
+    }
+    Seat {
+        source: format!(
+            "{}; this session has no id, so it shares the seat {}",
+            seat.source, seat.seat
+        ),
+        ..seat
+    }
+}
+
 /// Give a harness default its own seat when this session has an id.
 /// `LJOS_SEAT`, `--seat`, a `seat=` line and a seats file are left as named.
 fn distinguish_harness_session(seat: Seat) -> Seat {
@@ -4998,7 +5021,7 @@ fn distinguish_harness_session(seat: Seat) -> Seat {
             || seat.source.contains("most recent write")
             || seat.source.contains("conversation");
         if bare && shared_default {
-            notice_shared_harness(&seat.seat);
+            return shared_for_want_of_id(seat);
         }
         return seat;
     };
@@ -5006,13 +5029,17 @@ fn distinguish_harness_session(seat: Seat) -> Seat {
     if !same && !unnamed_fallback(&seat) {
         return seat;
     }
+    let source = session_seat_source(session.key);
     if seat.seat == session.name {
-        return seat;
+        if seat.source == source {
+            return seat;
+        }
+        return Seat { source, ..seat };
     }
     Seat {
         holder: holder_for_session(&session.name, &session.id),
         seat: session.name,
-        source: format!("{} session {}", session.family, session.key),
+        source,
     }
 }
 
