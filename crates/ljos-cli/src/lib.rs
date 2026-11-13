@@ -21099,8 +21099,9 @@ pub const REMEMBER_TEXT_CAP: usize = 1000;
 /// What `ljos remember` prints when one text is more than one claim.
 #[must_use]
 pub fn remember_split_line(n: usize) -> String {
+    let claims = if n == 1 { "claim" } else { "claims" };
     format!(
-        "remember: {n} claims from one text, and a lesson is at most two sentences so each part is stored on its own, so run `ljos search`."
+        "remember: stored as {n} {claims}, because a lesson is at most two sentences, so run `ljos search`."
     )
 }
 
@@ -63004,10 +63005,14 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(shown.contains("kept locally, not in the pack"), "{shown}");
         assert!(shown.contains("37 words"), "{shown}");
         assert!(shown.contains("limit 29"), "{shown}");
-        let split = remember_split_line(2);
-        assert!(split.contains("2 claims from one text"), "{split}");
-        assert!(split.contains("at most two sentences"), "{split}");
-        assert!(split.contains("so run `ljos search`."), "{split}");
+        assert_eq!(
+            remember_split_line(2),
+            "remember: stored as 2 claims, because a lesson is at most two sentences, so run `ljos search`."
+        );
+        assert_eq!(
+            remember_split_line(1),
+            "remember: stored as 1 claim, because a lesson is at most two sentences, so run `ljos search`."
+        );
         let hit = |atom: &Value| Hit {
             id: None,
             text: "Run the linter before the push.".into(),
