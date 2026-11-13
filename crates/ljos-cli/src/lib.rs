@@ -40335,11 +40335,6 @@ pub fn not_assignee_message(
         })
         .or_else(|| tracker.map(|t| (unscoped(t), " (the tracker's claim)".to_string())));
     let mine = unscoped(assignee);
-    let who = hold
-        .map(|h| h.seat.clone())
-        .or_else(|| named.as_ref().map(|(name, _)| name.clone()))
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| mine.clone());
     match named {
         Some((name, whence))
             if hold.is_some_and(|h| {
@@ -40352,9 +40347,18 @@ pub fn not_assignee_message(
                  The seat name does not move the claim graph: it names the conversation."
             )
         }
-        Some(_) => format!(
-            "{node} is held by another ({who}), not by {mine}, so run `ljos send {who} TEXT`."
-        ),
+        Some((name, _)) => {
+            if let Some(hold) = hold {
+                format!(
+                    "{node} is held by {name} (seat {}), not by {mine}, so run `ljos send {} TEXT`.",
+                    hold.seat, hold.seat
+                )
+            } else {
+                format!(
+                    "{node} is held by another ({name}), not by {mine}, so run `ljos send {name} TEXT`."
+                )
+            }
+        }
         None => format!(
             "complete: {node} is not held by {mine}, this shell's holder (`ljos seat` says where it came from), and no record on this host names the holder. \
              `ljos claim {node}` takes over a claim this seat already holds, then `ljos finish {node}` finishes it."
@@ -59957,7 +59961,7 @@ mod tests {
             super::not_assignee_message("demo-dlnj", "seat-bravo:demo-dlnj", Some(&hold), None);
         assert_eq!(
             said,
-            "demo-dlnj is held by another (example), not by seat-bravo, so run `ljos send example TEXT`."
+            "demo-dlnj is held by seat-alfa (seat example), not by seat-bravo, so run `ljos send example TEXT`."
         );
         let said = super::not_assignee_message("demo-dlnj", "seat-bravo", None, Some("seat-alfa"));
         assert_eq!(
