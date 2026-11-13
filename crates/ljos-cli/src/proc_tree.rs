@@ -1648,12 +1648,37 @@ struct Here {
     cgroup: String,
 }
 
-fn marks_path() -> std::path::PathBuf {
-    crate::runtime_dir().join("tool-calls")
+/// Where a tool-call record is kept. The first directory follows
+/// `XDG_RUNTIME_DIR`. Another directory does not: the home cache, or the
+/// per-user fallback when there is no home. A reader whose variable
+/// differs from the writer's still finds the record there.
+fn record_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut push = |dir: PathBuf| {
+        if !dirs.iter().any(|have| have == &dir) {
+            dirs.push(dir);
+        }
+    };
+    push(crate::runtime_dir());
+    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+        push(PathBuf::from(home).join(".cache/ljos/run"));
+    } else {
+        // SAFETY: geteuid only reads the process identity.
+        let uid = unsafe { libc::geteuid() };
+        push(crate::runtime_fallback(&std::env::temp_dir(), None, uid));
+    }
+    dirs
 }
 
-fn broken_path() -> std::path::PathBuf {
-    crate::runtime_dir().join("tool-calls.broken")
+fn mkdir_private(dir: &Path) -> bool {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(dir).is_ok()
 }
 
 /// The calling process's session id.
@@ -1699,33 +1724,78 @@ pub fn seal_unreadable_tool_call() {
 }
 
 fn mark_broken() {
-    let dir = crate::runtime_dir();
-    let _ = std::fs::create_dir_all(&dir);
+    for dir in record_dirs() {
+        if !mkdir_private(&dir) {
+            continue;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let _ = options.open(dir.join("tool-calls.broken"));
+    }
+}
+
+/// Append `line` to `name` in `dir`. `false` when the directory or the
+/// file cannot be written.
+fn append_record(dir: &Path, name: &str, line: &str) -> bool {
+    if !mkdir_private(dir) {
+        return false;
+    }
     let mut options = std::fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
+    options.create(true).append(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let _ = options.open(broken_path());
+    let mut file = match options.open(dir.join(name)) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    use std::io::Write as _;
+    file.write_all(line.as_bytes()).is_ok()
 }
 
 fn tool_marks() -> Result<Vec<ToolMark>, String> {
-    if broken_path().exists() {
-        return Err(
-            "a tool-call record could not be written, so nothing is kept as the person's".into(),
-        );
+    let dirs = record_dirs();
+    let mut broken = false;
+    let mut texts = Vec::new();
+    for dir in &dirs {
+        if dir.join("tool-calls.broken").exists() {
+            broken = true;
+        }
+        match std::fs::read_to_string(dir.join("tool-calls")) {
+            Ok(text) => texts.push(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(
+                    "the tool-call record cannot be read, so nothing is kept as the person's"
+                        .into(),
+                );
+            }
+        }
     }
-    let text = match std::fs::read_to_string(marks_path()) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => {
+    if texts.is_empty() {
+        if broken {
             return Err(
-                "the tool-call record cannot be read, so nothing is kept as the person's".into(),
+                "a tool-call record could not be written, so nothing is kept as the person's"
+                    .into(),
             );
         }
-    };
+        return Ok(Vec::new());
+    }
+    let mut marks = Vec::new();
+    for text in &texts {
+        marks.extend(parse_marks(text)?);
+    }
+    Ok(marks)
+}
+
+fn parse_marks(text: &str) -> Result<Vec<ToolMark>, String> {
     let mut marks = Vec::new();
     for line in text.lines() {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -1791,18 +1861,6 @@ pub fn note_tool_call(runner: &Proc) -> Result<(), String> {
             return Err(why);
         }
     };
-    let dir = crate::runtime_dir();
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
-    }
-    if builder.create(&dir).is_err() {
-        mark_broken();
-        return Err("the tool-call record directory cannot be created".into());
-    }
     // sid, watermark, runner pid and start, tool shell pid and start
     // (unset when the shell does not exist yet), cgroup text as hex.
     // One line stays under PIPE_BUF so the append is one write.
@@ -1817,23 +1875,14 @@ pub fn note_tool_call(runner: &Proc) -> Result<(), String> {
         mark_broken();
         return Err("the tool-call record does not fit one write".into());
     }
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let opened = options.open(marks_path());
-    let mut file = match opened {
-        Ok(file) => file,
-        Err(_) => {
-            mark_broken();
-            return Err("the tool-call record cannot be written".into());
-        }
-    };
-    use std::io::Write as _;
-    if file.write_all(line.as_bytes()).is_err() {
+    // Every directory gets the line. The runtime directory is what a
+    // reader with the same XDG_RUNTIME_DIR opens. The other directory
+    // is what a reader with a different one opens.
+    let wrote = record_dirs()
+        .iter()
+        .filter(|dir| append_record(dir, "tool-calls", &line))
+        .count();
+    if wrote == 0 {
         mark_broken();
         return Err("the tool-call record cannot be written".into());
     }
@@ -2592,6 +2641,9 @@ mod tests {
     #[test]
     fn a_young_runner_in_a_recorded_tool_call_is_refused() {
         let _guard = crate::test_env_lock();
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: `test_env_lock` puts HOME back when it drops.
+        unsafe { std::env::set_var("HOME", home.path()) };
         let opener = Proc {
             pid: 1,
             start: 1,
@@ -2613,9 +2665,56 @@ mod tests {
         assert!(why.contains("tool call"), "{why}");
         assert!(confirm_runner(&opener).is_ok(), "the opener recorded it");
         assert!(confirm_runner(&old).is_ok(), "older than the record");
-        std::fs::write(marks_path(), "nope\n").unwrap();
+        std::fs::write(crate::runtime_dir().join("tool-calls"), "nope\n").unwrap();
         let why = confirm_runner(&old).unwrap_err();
         assert!(why.contains("corrupt"), "{why}");
+    }
+
+    /// The hook writes the tool-call record under the `XDG_RUNTIME_DIR` it
+    /// was given. A later `ljos` whose variable names another directory
+    /// still has to see that record: the override must not look like a
+    /// runtime that has recorded no tool call.
+    #[test]
+    fn a_tool_call_record_is_seen_when_xdg_runtime_dir_differs() {
+        let _guard = crate::test_env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let writer = tempfile::tempdir().unwrap();
+        let reader = tempfile::tempdir().unwrap();
+        // SAFETY: this test holds `test_env_lock`, which puts the variables
+        // back when it drops. Nothing else on this thread reads them.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_RUNTIME_DIR", writer.path());
+        }
+        let opener = Proc {
+            pid: 1,
+            start: 1,
+            comm: "claude".into(),
+        };
+        let young = Proc {
+            pid: 999_999,
+            start: u64::MAX,
+            comm: "claude".into(),
+        };
+        note_tool_call(&opener).unwrap();
+        assert!(
+            writer.path().join("ljos/tool-calls").is_file(),
+            "the hook did not write the record under its runtime directory"
+        );
+        assert!(
+            home.path().join(".cache/ljos/run/tool-calls").is_file(),
+            "the hook did not keep a copy outside XDG_RUNTIME_DIR"
+        );
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", reader.path()) };
+        assert!(
+            !reader.path().join("ljos/tool-calls").exists(),
+            "the reader's runtime directory already held a record"
+        );
+        let why = confirm_runner(&young).unwrap_err();
+        assert!(
+            why.contains("tool call"),
+            "a different XDG_RUNTIME_DIR hid the record: {why}"
+        );
     }
 
     #[test]
