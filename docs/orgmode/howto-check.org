@@ -44,3 +44,18 @@ A seat nobody named is a warning. The =seat source= row says to set one with =--
 A damaged note queue is a =no= row and fails: it holds lessons the pack has not taken.
 An empty or missing log of either is whole.
 The rows for a missing writer, seat, tracker, binary, Model Context Protocol entry and a registry that did not answer are on [[file:howto-troubleshoot.org][Troubleshoot doctor]].
+
+* Repair what doctor can
+
+=ljos doctor --fix= repairs the problems that are local and reversible, then prints the doctor again.
+Each repair is one line.
+Each problem it leaves is one line, and that line names the one command to run.
+A row doctor can repair ends with =run ljos doctor --fix=.
+
+It creates a missing ljos home (=$XDG_STATE_HOME/ljos=, or =~/.local/state/ljos=) and a =ljos.toml= that sets no keys, so the defaults stand.
+It renames a stale lock or pid file whose process is gone, adding =.bak= to the name.
+It starts a pack writer that is not answering with =packset ensure= when =packset= is on =PATH=.
+It records the session seat when a runner session id is set and that seat is not recorded yet.
+
+It does not change git hooks, runner hooks, policy, credentials or keys, and it does not delete a file.
+A skill edited by hand, an env file ljos did not write, and a cloud guard file that is missing or not a known older copy are left in place, as before.
