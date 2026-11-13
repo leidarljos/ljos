@@ -27068,6 +27068,7 @@ const READERS: &[&str] = &[
     "ls",
     "file",
     "stat",
+    "du",
     "sha256sum",
     "md5sum",
     "grep",
@@ -63847,6 +63848,47 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             format!("find {l}/d/h* -delete"),
         ]);
         assert_uprooted_yet_named("changes-person-key", &[format!("rm -rf {l}/d/[h]/.config")]);
+    }
+
+    /// `du` never writes, with any flags or a glob. `wc`, `stat`, `ls`,
+    /// `file` and `head` are the same kind of read: a glob that lands on
+    /// the key directory does not name a rule. A recursive delete of that
+    /// glob still does.
+    #[test]
+    fn read_only_tools_over_globs_are_not_refused() {
+        let _g = env_guard();
+        let key = person_key::key_dir().expect("a passwd home");
+        std::fs::create_dir_all(&key).unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let share = links.path().join("share");
+        std::fs::create_dir(&share).unwrap();
+        std::os::unix::fs::symlink(&key, share.join("hit")).unwrap();
+        let glob = format!("{}/*", share.display());
+        let lines = [
+            format!("du -sh {glob}"),
+            format!("du -a --apparent-size {glob}"),
+            format!("wc -l {glob}"),
+            format!("stat {glob}"),
+            format!("ls -la {glob}"),
+            format!("file {glob}"),
+            format!("head -n 5 {glob}"),
+            "du -sh ~/.local/share/*".to_string(),
+            "wc ~/.local/share/*".to_string(),
+            "stat ~/.local/share/*".to_string(),
+            "ls ~/.local/share/*".to_string(),
+            "file ~/.local/share/*".to_string(),
+            "head ~/.local/share/*".to_string(),
+        ];
+        for line in &lines {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+            assert_eq!(seat_note(line).ok().as_deref(), Some(""), "{line}");
+        }
+        let removed = format!("rm -rf {glob}");
+        let note = seat_note(&removed).unwrap_or_else(|rule| panic!("refused: {rule:?}"));
+        assert!(
+            note.contains("uproots-person-key") || note.contains("changes-person-key"),
+            "{removed}: {note}"
+        );
     }
 
     /// An inline program can take the tree it removes as a word after its

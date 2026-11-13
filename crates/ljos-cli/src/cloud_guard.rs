@@ -449,6 +449,7 @@ fn command_is_pure_read(cmd: &str, words: &[String]) -> bool {
             | "more"
             | "wc"
             | "stat"
+            | "du"
             | "ls"
             | "file"
             | "grep"
