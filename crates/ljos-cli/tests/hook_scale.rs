@@ -263,12 +263,12 @@ fn two_lessons_prompt() -> String {
 const SAID: [&str; 3] = [CASE_14, TWO_LESSONS, CASE_14];
 
 const CASE_14: &str = concat!(
-    r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Remembered, oldest first (`ljos search` for more):\n- [lesson, agent-derived, 5 days ago, from scale] Case 14: bedaba dedaba fedaba gedaba kedaba ledaba.\n12 claims came due for review this week (19 due in all). Review is not the task: when the work reaches a pause, `ljos due` shows the soonest 8; grade one only after checking it against what you know (`ljos graded ID`, `--lapsed` when it no longer holds) and leave the rest due."}}"#,
+    r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Remembered, shown 1 of 1, oldest first. `ljos search` lists the pack.\n  lesson, agent-derived, 5 days ago, from scale\n    Case 14: bedaba dedaba fedaba gedaba kedaba ledaba.\n12 claims came due for review this week (19 due in all). Review is not the task:\nwhen the work reaches a pause, `ljos due` shows the soonest 8; grade one only\nafter checking it against what you know (`ljos graded ID`, `--lapsed` when it no\nlonger holds) and leave the rest due."}}"#,
     "\n"
 );
 
 const TWO_LESSONS: &str = concat!(
-    r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Remembered, oldest first (`ljos search` for more):\n- [lesson, agent-derived, 5 days ago, from scale] Case 41: pigaba rigaba sigaba tigaba vigaba zigaba.\n- [lesson, agent-derived, 4 days ago, from scale] Case 22: mudaba nudaba pudaba rudaba sudaba tudaba.\n12 claims came due for review this week (19 due in all). Review is not the task: when the work reaches a pause, `ljos due` shows the soonest 8; grade one only after checking it against what you know (`ljos graded ID`, `--lapsed` when it no longer holds) and leave the rest due."}}"#,
+    r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Remembered, shown 2 of 2, oldest first. `ljos search` lists the pack.\n  lesson, agent-derived, 5 days ago, from scale\n    Case 41: pigaba rigaba sigaba tigaba vigaba zigaba.\n\n  lesson, agent-derived, 4 days ago, from scale\n    Case 22: mudaba nudaba pudaba rudaba sudaba tudaba.\n12 claims came due for review this week (19 due in all). Review is not the task:\nwhen the work reaches a pause, `ljos due` shows the soonest 8; grade one only\nafter checking it against what you know (`ljos graded ID`, `--lapsed` when it no\nlonger holds) and leave the rest due."}}"#,
     "\n"
 );
 

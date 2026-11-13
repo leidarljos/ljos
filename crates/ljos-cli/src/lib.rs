@@ -70,6 +70,7 @@ pub mod rewrite;
 pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
+pub mod scan;
 #[cfg(test)]
 mod seat_mcp_layout;
 pub mod seat_resolve;
@@ -9597,17 +9598,14 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
         .map(|(h, _)| h)
         .collect();
     sort_by_relevance(&mut rows, &subject);
+    let matched = rows.len();
     rows.truncate(limit);
     if rows.is_empty() {
         return (String::new(), Vec::new());
     }
     let now = now_utc();
-    let lines: Vec<String> = rows.iter().map(|h| hit_line(h, &now)).collect();
     let ids = rows.iter().filter_map(|h| h.id.clone()).collect();
-    (
-        format!("{FAILURE_RECALL_HEADER}\n{}", lines.join("\n")),
-        ids,
-    )
+    (injected_block(&rows, &now, true, matched), ids)
 }
 
 /// Where a prompt's pack note waits. One runner discards prompt-hook
@@ -10739,6 +10737,7 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
         }
     };
     let mut hits = Vec::new();
+    let mut matched_lexical = 0;
     if let Some(atoms) = atoms {
         record_listed_origins(&atoms);
         let seen = seen_ids(call.session.as_deref());
@@ -10771,6 +10770,7 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
                         .cmp(&u8::from(foreign_memory(&rows[b.0].0, &mine)))
                         .then(b.1.total_cmp(&a.1))
                 });
+                matched_lexical = scored.len();
                 scored.truncate(limit.min(HOOK_MAX_MEMORIES));
                 hits = scored.into_iter().map(|(i, _)| rows[i].0.clone()).collect();
                 order_recalled(&mut hits, |h| h.ts.clone().unwrap_or_default());
@@ -10795,12 +10795,13 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
         return None;
     }
     let now = now_utc();
-    let lines: Vec<String> = hits.iter().map(|h| hit_line(h, &now)).collect();
+    let refs: Vec<&Hit> = hits.iter().collect();
     let ids: Vec<String> = hits.iter().filter_map(|h| h.id.clone()).collect();
-    if lines.is_empty() {
+    if refs.is_empty() {
         return None;
     }
-    Some((format!("{RECALL_HEADER}\n{}", lines.join("\n")), ids))
+    let matched = matched_lexical.max(refs.len());
+    Some((injected_block(&refs, &now, false, matched), ids))
 }
 
 /// The text a cold prompt is matched on: the claim, plus the title, rule,
@@ -11559,6 +11560,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     // the prompt repeats. This seat and the person's rules fill the cap
     // before another seat does. Preferences are then read first.
     prefer_seat(&mut rows);
+    let matched = rows.len();
     let mut rows: Vec<&Hit> = rows
         .into_iter()
         .take(limit.min(HOOK_MAX_MEMORIES))
@@ -11568,9 +11570,8 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         days_of_stamp(h.ts.as_deref()).unwrap_or(i64::MAX)
     });
     let now = now_utc();
-    let lines: Vec<String> = rows.iter().map(|h| hit_line(h, &now)).collect();
     let mut ids: Vec<String> = rows.iter().filter_map(|h| h.id.clone()).collect();
-    if lines.is_empty() {
+    if rows.is_empty() {
         // The pack search missed a row that import stored in the slot.
         // The slot keeps the horizon the hook reads, so a matching prompt
         // still hears it when the writer has not taken the post yet.
@@ -11590,11 +11591,12 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             brought = kept;
         }
         if !brought.is_empty() {
-            let lines: Vec<String> = brought.iter().map(|h| hit_line(h, &now)).collect();
-            ids = brought.into_iter().filter_map(|h| h.id).collect();
+            let refs: Vec<&Hit> = brought.iter().collect();
+            let matched = refs.len();
+            ids = brought.iter().filter_map(|h| h.id.clone()).collect();
             memories::bump_recalls(&ids);
             ids.extend(pending);
-            let mut out = format!("{RECALL_HEADER}\n{}", lines.join("\n"));
+            let mut out = injected_block(&refs, &now, false, matched);
             if !nudge.is_empty() {
                 out.push('\n');
                 out.push_str(&nudge);
@@ -11606,7 +11608,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     }
     memories::bump_recalls(&ids);
     ids.extend(pending);
-    let mut out = format!("{RECALL_HEADER}\n{}", lines.join("\n"));
+    let mut out = injected_block(&rows, &now, false, matched);
     if !nudge.is_empty() {
         out.push('\n');
         out.push_str(&nudge);
@@ -11762,16 +11764,29 @@ pub fn issue_ids_in(text: &str) -> Vec<String> {
 /// remembered on it, so an issue with no memories adds no line to the prompt.
 #[must_use]
 pub fn recall_note(issue: &str, memories: &str) -> String {
-    let head = format!("Recall for {issue} (`ljos recall {issue}` shows its full working set):");
-    let body = memories
-        .trim_start_matches('\n')
-        .trim_start_matches("Memory\n")
-        .trim_end();
+    let body = strip_memory_heading(memories);
     if body.is_empty() {
-        String::new()
-    } else {
-        format!("{head}\n{body}")
+        return String::new();
     }
+    let head = scan::wrap(&format!("On {issue}"), scan::COLS);
+    let more = scan::wrap(
+        &format!("`ljos recall {issue}` shows the working set."),
+        scan::COLS,
+    );
+    format!("{head}\n{more}\n{body}")
+}
+
+/// Drop a leading `Memory ...` line. The hook prints its own heading.
+fn strip_memory_heading(memories: &str) -> String {
+    let body = memories.trim_start_matches(['\n', '\r']);
+    let body = if let Some(rest) = body.strip_prefix("Memory") {
+        rest.find('\n')
+            .map(|index| &rest[index + 1..])
+            .unwrap_or("")
+    } else {
+        body
+    };
+    body.trim_end().to_string()
 }
 
 /// How sure Jev must be that a claim bears on a prompt when the claim
@@ -14918,7 +14933,7 @@ fn say_search_miss() {
         return;
     }
     *said = Some(line.to_string());
-    eprintln!("{line}");
+    eprintln!("{}", scan::wrap(line, scan::COLS));
 }
 
 /// Whether the writer at `client` takes `rank=relevance` in this
@@ -15674,13 +15689,16 @@ fn due_nudge(call: &HookCall) -> (String, Option<String>) {
         return (String::new(), None);
     }
     (
-        format!(
-            "{due} claim{} came due for review this week ({} due in all). Review is not the task: \
-             when the work reaches a pause, `ljos due` shows the soonest {SITTING_DUE}; grade one only \
-             after checking it against what you know (`ljos graded ID`, `--lapsed` when it no longer \
-             holds) and leave the rest due.",
-            if due == 1 { "" } else { "s" },
-            all.len()
+        scan::wrap(
+            &format!(
+                "{due} claim{} came due for review this week ({} due in all). Review is not the task: \
+                 when the work reaches a pause, `ljos due` shows the soonest {SITTING_DUE}; grade one only \
+                 after checking it against what you know (`ljos graded ID`, `--lapsed` when it no longer \
+                 holds) and leave the rest due.",
+                if due == 1 { "" } else { "s" },
+                all.len()
+            ),
+            scan::COLS,
         ),
         Some(key),
     )
@@ -17392,10 +17410,12 @@ pub const POLICY_TCB: &str =
 
 /// The line above the memories a prompt or a command recalls. The hook, the
 /// runners and `ljos policy` all print it.
-pub const RECALL_HEADER: &str = "Remembered, oldest first (`ljos search` for more):";
+pub const RECALL_HEADER: &str =
+    "Remembered, shown 1 of 1, oldest first. `ljos search` lists the pack.";
 
 /// The line above the memories a failed tool call recalls.
-pub const FAILURE_RECALL_HEADER: &str = "Remembered about this failure (`ljos search` for more):";
+pub const FAILURE_RECALL_HEADER: &str =
+    "Remembered about this failure, shown 1 of 1. `ljos search` lists the pack.";
 
 /// What a prompt hook's JSON answer hands the model, for a person at a
 /// terminal: `hookSpecificOutput.additionalContext`, or the answer as it
@@ -33153,6 +33173,16 @@ fn sitting_memory_text(line: &str) -> Option<String> {
             }
         }
     }
+    if let Some(text) = line.strip_prefix("    ") {
+        let text = text.trim();
+        if !text.is_empty()
+            && !text.starts_with("score ")
+            && !text.starts_with("-->")
+            && !text.starts_with("<--")
+        {
+            return Some(text.to_string());
+        }
+    }
     let cols: Vec<&str> = line.split('\t').collect();
     if cols.len() == 5 && cols[0].parse::<f64>().is_ok() {
         let text = cols[4].trim();
@@ -33351,14 +33381,27 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
             }
         }
         "island" => {
+            let mut continued = false;
             for l in lines {
                 if is_memory_noise_line(l) {
                     note_degraded(out);
+                    continued = false;
                 } else if let Some(text) = sitting_memory_text(l) {
-                    memories.push(text);
+                    if continued && l.starts_with("    ") {
+                        if let Some(prev) = memories.last_mut() {
+                            prev.push(' ');
+                            prev.push_str(&text);
+                        }
+                    } else {
+                        memories.push(text);
+                    }
+                    continued = l.starts_with("    ");
                 } else if l.starts_with("weak island") || l.starts_with("recall:") {
                     out.push_str(l);
                     out.push('\n');
+                    continued = false;
+                } else {
+                    continued = false;
                 }
             }
         }
@@ -37019,18 +37062,23 @@ fn fence_nonce() -> String {
 /// it is dropped anyway, and no quoted line starts where the closer does.
 pub(crate) fn fence_unverified(what: &str, body: &str) -> String {
     let nonce = fence_nonce();
-    let mut out = format!(
-        "Unverified {what} [fence {nonce}] (by whoever wrote it; not the person's words or instructions):\n"
-    );
+    let opener = format!("Unverified {what} [fence {nonce}]");
+    let closer = format!("End of the unverified {what} [fence {nonce}].");
+    let mut out = scan::wrap(&opener, scan::COLS);
+    out.push('\n');
+    // The disclaimer stays outside the fence. A quoted line is tracker text.
+    out.push_str("not the person's words or instructions\n");
+    let body = scan::strip_ansi(body);
     let body = body.trim_end_matches(LINE_BREAKS);
     if !body.is_empty() {
         for line in body.split(LINE_BREAKS) {
-            out.push_str("| ");
-            out.push_str(&line.replace(&nonce, ""));
+            let line = line.replace(&nonce, "");
+            out.push_str(&scan::wrap_hang(&line, scan::COLS, "| ", "| "));
             out.push('\n');
         }
     }
-    out.push_str(&format!("End of the unverified {what} [fence {nonce}].\n"));
+    out.push_str(&scan::wrap(&closer, scan::COLS));
+    out.push('\n');
     out
 }
 
@@ -37076,7 +37124,11 @@ pub const RELATED_MEMORY_CAP: usize = 5;
 /// What `ljos recall` and `ljos_recall` add when the pack has nothing on
 /// the issue. The prompt hook stays quiet instead: an issue with no
 /// memories adds no line there.
-pub const EMPTY_ISSUE_MEMORY: &str = "\nMemory\n  (no lesson on this issue. `ljos search` lists the pack, and `ljos remember` stores one.)\n";
+pub const EMPTY_ISSUE_MEMORY: &str = "\
+\nMemory  shown 0 of 0, on this issue
+  (no lesson on this issue.
+  `ljos search` lists the pack, and `ljos remember` stores one.)
+";
 
 /// [`recall_memories`] for a person or an agent who asked. An empty pack
 /// answer names the next command. The hook uses [`recall_memories`] and
@@ -37432,6 +37484,7 @@ fn recall_lines(
     if !pack_order {
         sort_by_relevance(&mut related, cue);
     }
+    let related_matched = related.len();
     related.truncate(RELATED_MEMORY_CAP);
     let (related_facts, related_notes): (Vec<&Hit>, Vec<&Hit>) =
         related.iter().partition(|h| !unverified_note_hit(h));
@@ -37448,58 +37501,114 @@ fn recall_lines(
             recalled_ids.push(id);
         }
     };
-    let mut out = String::from("\nMemory\n");
+    let facts_kept: Vec<&Hit> = most_relevant(&own_facts, cue, ISSUE_MEMORY_CAP);
+    let notes_kept: Vec<&Hit> = most_relevant(&own_notes, cue, ISSUE_MEMORY_CAP);
+    let mut out = String::from("\n");
+    out.push_str(&scan::count_line(
+        "Memory",
+        facts_kept.len(),
+        own_facts.len(),
+        "on this issue",
+    ));
+    out.push('\n');
     // Related hits are not this issue's lessons. With none of its own,
     // printing them under Memory alone reads as if they were filed on it.
     if own_facts.is_empty() && !related_facts.is_empty() {
         out.push_str("  (none filed on this issue)\n");
     }
-    for h in most_relevant(&own_facts, cue, ISSUE_MEMORY_CAP) {
+    for h in &facts_kept {
         note_shown(h);
-        out.push_str("  ");
-        out.push_str(&hit_line(h, now));
+        out.push_str(&memory_block(h, now));
         out.push('\n');
     }
-    if own_facts.len() > ISSUE_MEMORY_CAP {
-        out.push_str(&format!(
-            "  ({} more memories on this issue left out)\n",
-            own_facts.len() - ISSUE_MEMORY_CAP
-        ));
-    }
     if !related_facts.is_empty() {
-        out.push_str("  related:\n");
+        out.push_str(&scan::count_line(
+            "Related",
+            related_facts.len(),
+            related_matched.saturating_sub(related_notes.len()),
+            "not filed on this issue",
+        ));
+        out.push('\n');
         for h in &related_facts {
             note_shown(h);
-            out.push_str("  ");
-            out.push_str(&hit_line(h, now));
+            out.push_str(&memory_block(h, now));
             out.push('\n');
         }
     }
     // `ljos recall` lists working notes apart from the facts, under their
     // own heading, so a note never reads as something the issue established.
     if !own_notes.is_empty() || !related_notes.is_empty() {
-        out.push_str("  unverified logbook notes:\n");
-        for h in most_relevant(&own_notes, cue, ISSUE_MEMORY_CAP) {
+        out.push_str(&scan::count_line(
+            "Notes",
+            notes_kept.len() + related_notes.len(),
+            own_notes.len() + related_notes.len(),
+            "unverified logbook notes, not facts",
+        ));
+        out.push('\n');
+        for h in &notes_kept {
             note_shown(h);
-            out.push_str("  ");
-            out.push_str(&hit_line(h, now));
+            out.push_str(&memory_block(h, now));
             out.push('\n');
-        }
-        if own_notes.len() > ISSUE_MEMORY_CAP {
-            out.push_str(&format!(
-                "  ({} more logbook notes on this issue left out)\n",
-                own_notes.len() - ISSUE_MEMORY_CAP
-            ));
         }
         for h in &related_notes {
             note_shown(h);
-            out.push_str("  ");
-            out.push_str(&hit_line(h, now));
+            out.push_str(&memory_block(h, now));
             out.push('\n');
         }
     }
+    let left_out = own_facts
+        .len()
+        .saturating_sub(facts_kept.len())
+        .max(own_notes.len().saturating_sub(notes_kept.len()))
+        .max(related_matched.saturating_sub(related_facts.len() + related_notes.len()));
+    if left_out > 0 {
+        let issue = cue.split_whitespace().next().unwrap_or(cue);
+        let ask = own_facts
+            .len()
+            .max(own_notes.len())
+            .max(related_matched)
+            .max(1);
+        out.push_str(&scan::wrap(
+            &format!("`ljos search {issue} -n {ask}` lists the rest."),
+            scan::COLS,
+        ));
+        out.push('\n');
+    }
     memories::bump_recalls(&recalled_ids);
     out
+}
+
+/// The hook's injected memories: a count, then each claim under it.
+fn injected_block(rows: &[&Hit], now: &str, failure: bool, matched: usize) -> String {
+    let shown = rows.len();
+    let matched = matched.max(shown);
+    let head = if failure {
+        scan::failure_head(shown, matched)
+    } else {
+        scan::remembered_head(shown, matched)
+    };
+    let blocks: Vec<String> = rows.iter().map(|hit| memory_block(hit, now)).collect();
+    if blocks.is_empty() {
+        head
+    } else {
+        format!("{head}\n{}", blocks.join("\n\n"))
+    }
+}
+
+/// One recalled claim: the label on its own line, the text under it.
+fn memory_block(h: &Hit, now: &str) -> String {
+    let from = other_seat(&h.entities, &seat_name());
+    let age = age_of(h.ts.as_deref(), now);
+    let mut head = kind_label(h);
+    if !age.is_empty() {
+        head.push_str(", ");
+        head.push_str(&age);
+    }
+    if let Some(seat) = from {
+        head.push_str(", from ");
+        head.push_str(&seat);
+    }
+    scan::claim_block(&head, h.text.trim(), "", 2)
 }
 
 /// The one line a recall shows when the store stayed down after it was
@@ -38298,7 +38407,9 @@ pub fn ready_view(project: Option<&str>, json: bool) -> Result<String> {
         let rows = vissue_core::agent::issues_json(&layout, project, None, true)?;
         return Ok(format!("{}\n", serde_json::to_string_pretty(&rows)?));
     }
-    Ok(vissue_core::report::ready(&layout, project)?)
+    Ok(scan::ready_text(&vissue_core::report::ready(
+        &layout, project,
+    )?))
 }
 
 /// The blockers of an issue that are still open, as `id (STATE)`, read
@@ -42630,52 +42741,64 @@ pub fn search_reading(n: usize) -> &'static str {
     }
 }
 
-/// One line per hit: score, how many scorers named it out of how many
-/// ran, kind, id, age, text. The age is the one column a reader needs to
-/// lay the hits on a timeline; the count is what the hook keys on.
-/// `explain` (`ljos search --explain`) opens with [`search_reading`]; without
-/// it the hits come alone, and an empty answer is the one line `No hits.`
+/// The human search page. `explain` (`ljos search --explain`) opens with
+/// [`search_reading`]; without it the page names score and scorers in two
+/// lines. An empty answer is `No hits.` and `shown 0 of 0.` The id on each
+/// row is the eight-character prefix. `--json` does not use this.
 pub fn format_hits(hits: &[Hit], explain: bool) -> String {
+    format_search(hits, hits.len(), false, explain, "")
+}
+
+/// [`format_hits`] with the count before the limit cut. `capped` means the
+/// pack filled the page it was asked for, so more rows may exist.
+#[must_use]
+pub fn format_search(
+    hits: &[Hit],
+    matched: usize,
+    capped: bool,
+    explain: bool,
+    query: &str,
+) -> String {
     let now = now_utc();
     let mine = seat_name();
-    let mut out = if explain {
-        format!("{}\n", search_reading(hits.len()))
-    } else if hits.is_empty() {
-        "No hits.\n".to_string()
-    } else {
-        String::new()
-    };
-    for h in hits {
-        let id = h.id.as_deref().unwrap_or("-");
-        let local = h.labels.iter().any(|label| label == "kept-local");
-        let named = if local {
-            "local".to_string()
-        } else {
-            match (h.ballots, h.of) {
-                (Some(b), Some(of)) => format!("{b}/{of}"),
-                _ => "-".to_string(),
-            }
-        };
+    let reading = search_reading(hits.len());
+    let mut owned: Vec<(String, String, Option<String>, bool)> = Vec::new();
+    for hit in hits {
+        let local = hit.labels.iter().any(|label| label == "kept-local");
         let age = if local {
-            "not in the pack".to_string()
+            String::new()
         } else {
-            age_of(h.ts.as_deref(), &now)
+            age_of(hit.ts.as_deref(), &now)
         };
-        let from = other_seat(&h.entities, &mine)
-            .map(|s| format!(" (from {s})"))
-            .unwrap_or_default();
-        out.push_str(&format!(
-            "{:.4}\t{}\t{}\t{}\t{}{}\t{}\n",
-            h.score,
-            named,
-            kind_label(h),
-            id,
-            age,
-            from,
-            h.text
-        ));
+        let from = other_seat(&hit.entities, &mine);
+        owned.push((kind_label(hit), age, from, local));
     }
-    out
+    let rows: Vec<scan::SearchRow<'_>> = hits
+        .iter()
+        .zip(&owned)
+        .map(|(hit, (label, age, from, local))| scan::SearchRow {
+            label,
+            age,
+            from: from.as_deref(),
+            text: hit.text.as_str(),
+            score: hit.score,
+            ballots: match (hit.ballots, hit.of) {
+                (Some(ballots), Some(of)) if !local => Some((ballots, of)),
+                _ => None,
+            },
+            id: hit.id.as_deref(),
+            local: *local,
+        })
+        .collect();
+    scan::search_page(&scan::SearchPage {
+        rows: &rows,
+        shown: hits.len(),
+        matched,
+        capped,
+        explain,
+        query,
+        reading,
+    })
 }
 
 /// The seat that wrote a hit, when it was another than this one. Many
@@ -48190,24 +48313,28 @@ mod tests {
         );
         // Facts lead; the working notes follow under their own heading.
         assert!(
-            text.starts_with("\nMemory\n  - [lesson, agent-derived, today] tagged lesson\n"),
+            text.starts_with(
+                "\nMemory  shown 1 of 1, on this issue\n  lesson, agent-derived, today\n    tagged lesson\n"
+            ),
             "{text}"
         );
         assert!(
-            text.contains("  related:\n  - [lesson, agent-derived] a related lesson\n"),
+            text.contains(
+                "Related  shown 1 of 1, not filed on this issue\n  lesson, agent-derived\n    a related lesson\n"
+            ),
             "{text}"
         );
-        assert!(text.contains("  unverified logbook notes:\n"), "{text}");
         assert!(
-            text.contains("- [unverified agent note (origin agent-derived), today] note 21\n"),
+            text.contains("Notes  shown 10 of 22, unverified logbook notes, not facts\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  unverified agent note (origin agent-derived), today\n    note 21\n"),
             "{text}"
         );
         assert!(text.contains("note 12"), "{text}");
         assert!(!text.contains("note 11"), "{text}");
-        assert!(
-            text.contains("(12 more logbook notes on this issue left out)"),
-            "{text}"
-        );
+        assert!(text.contains("shown 10 of 22"), "{text}");
         assert_eq!(text.matches("note 21").count(), 1, "{text}");
         let prompt = super::recall_lines(
             &own,
@@ -48219,7 +48346,7 @@ mod tests {
         );
         assert_eq!(
             prompt,
-            "\nMemory\n  - [lesson, agent-derived] tagged lesson\n"
+            "\nMemory  shown 1 of 1, on this issue\n  lesson, agent-derived\n    tagged lesson\n"
         );
         assert_eq!(
             super::recall_lines(&[], Vec::new(), "probe-0lm4", "now", true, false),
@@ -48235,7 +48362,7 @@ mod tests {
         );
         assert_eq!(
             alone,
-            "\nMemory\n  (none filed on this issue)\n  related:\n  - [lesson, agent-derived] a related lesson\n"
+            "\nMemory  shown 0 of 0, on this issue\n  (none filed on this issue)\nRelated  shown 1 of 1, not filed on this issue\n  lesson, agent-derived\n    a related lesson\n"
         );
     }
 
@@ -48327,10 +48454,7 @@ mod tests {
         let text = recall_memories("sample-k2p2").unwrap();
         assert!(text.contains("rotated from 1Password"), "{text}");
         assert!(text.contains("before the old one expires"), "{text}");
-        assert!(
-            text.contains("(12 more memories on this issue left out)"),
-            "{text}"
-        );
+        assert!(text.contains("shown 10 of 22"), "{text}");
         assert!(
             text.contains("reads the registry token from the CI"),
             "{text}"
@@ -48630,10 +48754,7 @@ mod tests {
             "Example-0000000000",
             "\nMemory\n  - [lesson, today] PURPLE-HERON-42\n",
         );
-        assert!(
-            note.starts_with("Recall for Example-0000000000 (`ljos recall Example-0000000000`"),
-            "{note}"
-        );
+        assert!(note.starts_with("On Example-0000000000\n"), "{note}");
         assert!(
             note.ends_with("- [lesson, today] PURPLE-HERON-42"),
             "{note}"
@@ -53801,7 +53922,10 @@ mod tests {
             shape: HookShape::default(),
         };
         let (note, _) = failure_note(&failed, "E401: the registry rejected the token", 3);
-        let first = note.lines().nth(1).unwrap_or("");
+        let first = note
+            .lines()
+            .find(|line| line.starts_with("    "))
+            .unwrap_or("");
         assert!(first.contains("acme scope needs"), "{note}");
     }
 
@@ -63113,7 +63237,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     #[test]
     fn first_run_lines_fit_a_100_column_terminal() {
         for line in [RECALL_HEADER, FAILURE_RECALL_HEADER] {
-            assert!(line.chars().count() <= 100, "{line}");
+            assert!(line.chars().count() <= scan::COLS, "{line}");
+            assert!(!line.contains('\u{1b}'), "{line}");
         }
         let all: &[&str] = &["memory", "tracker", "command guard"];
         let cases: [(&[&str], &[&str], usize); 6] = [
@@ -66565,7 +66690,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let _pack = PackUrl::set(&url);
         let (note, _) = failure_note(&call("generic-real"), error, 3);
         assert!(note.contains("edition2024 manifest"), "{note}");
-        assert_eq!(note.lines().count(), 2, "{note}");
+        assert!(note.contains("shown 1 of 1"), "{note}");
+        assert!(!note.contains("Always run the test build"), "{note}");
     }
 
     /// A compaction forgets which memories the conversation was handed, so
@@ -71949,10 +72075,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         };
         let (text, _) = hook_note(&call, 5);
         assert!(text.contains(person), "{text}");
-        let key = text
-            .lines()
-            .find(|line| line.contains("release key lives in the README"))
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.contains("release key lives in the README"))
             .unwrap_or_else(|| panic!("the agent lesson was dropped:\n{text}"));
+        let key = lines.get(at.saturating_sub(1)).copied().unwrap_or("");
         assert!(
             key.contains("agent-derived") && !key.contains("person's words"),
             "a non-person claim stood as the person's:\n{text}"
@@ -72156,16 +72284,18 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "{ids:?}"
         );
         let printed = format_hits(&hits, false);
-        assert!(printed.contains("(from inky)"), "{printed}");
-        assert!(printed.contains("(from hlebot)"), "{printed}");
-        assert!(printed.contains("(from fortranbot)"), "{printed}");
-        let own_line = printed
-            .lines()
-            .find(|line| line.contains("beside the author"))
-            .unwrap();
+        assert!(printed.contains("from inky"), "{printed}");
+        assert!(printed.contains("from hlebot"), "{printed}");
+        assert!(printed.contains("from fortranbot"), "{printed}");
+        let lines: Vec<&str> = printed.lines().collect();
+        let own_at = lines
+            .iter()
+            .position(|line| line.contains("beside the author"))
+            .expect("own lesson");
+        let own_label = lines.get(own_at.saturating_sub(1)).copied().unwrap_or("");
         assert!(
-            !own_line.contains("(from "),
-            "this seat's lesson was labelled as another seat: {own_line}"
+            !own_label.contains("from "),
+            "this seat's lesson was labelled as another seat: {own_label}\n{printed}"
         );
         let mut ranked = hits.clone();
         sort_by_relevance(&mut ranked, "commit author committer");
@@ -74504,23 +74634,40 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let _g = env_guard();
         let hits = [signal_hit("preference", "Use pnpm instead of npm.", 0.9, 2)];
         let plain = format_hits(&hits, false);
-        assert!(plain.starts_with("0.9000\t2/3\tpreference\t"), "{plain}");
-        assert!(!plain.contains("Score is how"), "{plain}");
-        assert_eq!(plain.lines().count(), 1, "{plain}");
+        assert_eq!(
+            plain,
+            "shown 1 of 1.\nscore: scorer order, not whether the claim is true.\nscorers: how many of them named the hit.\n\npreference\n  Use pnpm instead of npm.\n  score 0.90, scorers 2/3, id id-24\n"
+        );
+        assert!(plain.contains("score: scorer order"), "{plain}");
+        assert!(plain.contains("scorers 2/3"), "{plain}");
+        assert!(plain.contains("Use pnpm instead of npm."), "{plain}");
+        assert!(!plain.contains('\t'), "{plain}");
+        assert!(
+            plain.lines().all(|line| line.chars().count() <= 80),
+            "{plain}"
+        );
+        std::env::set_var("NO_COLOR", "1");
+        assert!(!scan::color_allowed(true));
+        assert_eq!(scan::for_reader(&plain, false), plain);
+        assert!(!plain.contains('\u{1b}'));
+        std::env::remove_var("NO_COLOR");
         let explained = format_hits(&hits, true);
         assert!(
-            explained.starts_with("Score is how the scorers ranked"),
+            explained.contains("Score is how the scorers ranked"),
             "{explained}"
         );
-        assert!(explained.ends_with(&plain), "{explained}");
-        assert_eq!(format_hits(&[], false), "No hits.\n");
+        assert!(
+            explained.contains("Use pnpm instead of npm."),
+            "{explained}"
+        );
+        assert!(!explained.contains("score: scorer order"), "{explained}");
+        assert_eq!(format_hits(&[], false), "No hits.\nshown 0 of 0.\n");
         assert!(format_hits(&[], true).contains("A failure would say"));
         let mut local = signal_hit("lesson", "The door thermocouple reads low.", 1.0, 0);
         local.labels.push("kept-local".into());
         let line = format_hits(&[local], false);
-        assert!(line.contains("\tlocal\t"), "{line}");
+        assert!(line.contains("local, not in the pack"), "{line}");
         assert!(line.contains("kept locally"), "{line}");
-        assert!(line.contains("not in the pack"), "{line}");
         assert!(line.contains("The door thermocouple reads low."), "{line}");
     }
 

@@ -21,7 +21,7 @@ sentence and remember each part.
 ``ljos recall ISSUE`` with no lesson on that issue says so and names
 ``ljos search`` and ``ljos remember``. Lessons that matched the title or
 the issue's tags, and were not filed on the issue, are listed under
-``related``. An id the tracker does not hold names ``ljos search``,
+Related, with shown N of M. An id the tracker does not hold names ``ljos search``,
 ``ljos ready`` and ``ljos file``.
 With no ``LJOS_SEAT``, the command says no seat was named and uses
 ``unknown-`` plus the host name. Set the seat before a lesson you want

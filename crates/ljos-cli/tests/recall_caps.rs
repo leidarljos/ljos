@@ -26,7 +26,7 @@ const KILN_RELATED: &[&str] = &[
     "m0047", "m0048", "m0049", "m0050", "m0051", "m0052", "m0053",
 ];
 
-const LEFT_OUT: &str = "(36 more memories on this issue left out)";
+const LEFT_OUT: &str = "shown 10 of 46";
 
 #[test]
 fn recall_of_ufuv_kiln_lists_ten_own_memories_and_says_how_many_remain() {
@@ -89,10 +89,10 @@ fn recall_of_ufuv_kiln_lists_ten_own_memories_and_says_how_many_remain() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(text.matches(LEFT_OUT).count(), 1, "{text}");
-    let left = text.find(LEFT_OUT).unwrap();
-    let related = text.find("\n  related:\n").unwrap();
-    assert!(left < related, "{text}");
-    let own: Vec<&str> = marks_of(&text[..left]);
+    let memory = text.find("\nMemory  ").unwrap();
+    let related = text.find("\nRelated  ").unwrap();
+    assert!(memory < related, "{text}");
+    let own: Vec<&str> = marks_of(&text[memory..related]);
     let extra: Vec<&str> = marks_of(&text[related..]);
     assert_eq!(own, KILN_OWN, "{text}");
     assert_eq!(extra.len(), 5, "{text}");
@@ -106,7 +106,7 @@ fn recall_of_ufuv_kiln_lists_ten_own_memories_and_says_how_many_remain() {
             "{full} missing from {extra:?}\n{text}"
         );
     }
-    assert_eq!(text.matches("  - [").count(), 15, "{text}");
+    assert_eq!(text.matches("mark m").count(), 15, "{text}");
 }
 
 fn org(fixture: &Value) -> String {
@@ -151,7 +151,7 @@ fn post_all(url: &str, token: &str, fixture: &Value) {
 
 fn marks_of(text: &str) -> Vec<&str> {
     text.lines()
-        .filter(|line| line.trim_start().starts_with("- ["))
+        .filter(|line| line.contains("mark m"))
         .map(|line| {
             line.split("mark ")
                 .nth(1)

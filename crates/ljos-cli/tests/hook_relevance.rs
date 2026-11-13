@@ -301,12 +301,39 @@ fn misses(fixture: &Fixture, hook: impl Fn(&Case) -> String) -> Vec<(String, Str
     let mut misses = Vec::new();
     for case in &fixture.cases {
         let context = hook(case);
-        let shown: Vec<&str> = context
-            .lines()
-            .filter_map(|line| line.strip_prefix("- ["))
-            .map(|line| line.split_once("] ").map_or(line, |(_, text)| text))
-            .map(|text| names.get(text).copied().unwrap_or("a text no lesson has"))
-            .collect();
+        let mut shown = Vec::new();
+        let mut claim = String::new();
+        let mut open = false;
+        for line in context.lines() {
+            if let Some(text) = line.strip_prefix("    ") {
+                let text = text.trim();
+                if text.is_empty() || text.starts_with("score ") {
+                    continue;
+                }
+                if open {
+                    claim.push(' ');
+                }
+                claim.push_str(text);
+                open = true;
+            } else if open {
+                shown.push(
+                    names
+                        .get(claim.as_str())
+                        .copied()
+                        .unwrap_or("a text no lesson has"),
+                );
+                claim.clear();
+                open = false;
+            }
+        }
+        if open {
+            shown.push(
+                names
+                    .get(claim.as_str())
+                    .copied()
+                    .unwrap_or("a text no lesson has"),
+            );
+        }
         if shown != case.shows {
             misses.push((
                 case.name.clone(),
@@ -460,8 +487,8 @@ fn read_request(client: &mut TcpStream) -> Option<Vec<u8>> {
 fn first_clauses(context: &str) -> String {
     context
         .lines()
-        .map(|line| match line.split_once("; ") {
-            Some((clause, _)) if line.starts_with("- [") => format!("{clause}."),
+        .map(|line| match line.trim_start().split_once("; ") {
+            Some((clause, _)) if line.starts_with("    ") => format!("    {clause}."),
             _ => line.to_string(),
         })
         .collect::<Vec<_>>()

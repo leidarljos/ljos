@@ -110,7 +110,13 @@ A lesson and a search
    standing: the hook shows it from the next prompt it bears on
    $ ljos search "lexical default"
    ranking is lexical: encoder unavailable
-   1.0000	2/2	lesson, agent-derived	a6ae2751564de44a99c5915a6d9ea7f2	today	The lexical default is BM25+. It beat BM25 by two points on turns.
+   shown 1 of 1.
+   score: scorer order, not whether the claim is true.
+   scorers: how many of them named the hit.
+
+   lesson, agent-derived, today
+     The lexical default is BM25+. It beat BM25 by two points on turns.
+     score 1.00, scorers 2/2, id a6ae2751
 
 The id and the review time are the ones that run printed. The name after ``unknown-`` is the host name.
 That line is printed only when the write uses that seat. A conversation that already has a seat record writes as that seat and does not print the line.
@@ -130,7 +136,13 @@ A busy pack ranks by words and still returns a hit that names the subject.
      id f8b725a9, next review 2026-11-12 21:40 +00:00
    $ ljos search fusing
    ranking is lexical: encoder unavailable
-   1.0000	2/2	unverified agent preference (origin agent-derived)	f8b725a9c82783a79a3a01d185244770	today	CombMNZ over RRF for fusing two ballots.
+   shown 1 of 1.
+   score: scorer order, not whether the claim is true.
+   scorers: how many of them named the hit.
+
+   unverified agent preference (origin agent-derived), today
+     CombMNZ over RRF for fusing two ballots.
+     score 1.00, scorers 2/2, id f8b725a9
 
 ``ljos due`` lists claims when their review time arrives. A claim you stop reviewing sinks in search.
 The how-to :doc:`Keep memory current <howto-memory>` is the review clock, ``ljos graded`` and ``ljos forget``.

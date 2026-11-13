@@ -127,7 +127,7 @@ fn recall_with_the_fixture_lists_matching_nodes() {
     write_graph(&seat.home.path().join("graphify-out"));
     let (ok, text) = seat.recall(&["recall", "cue-attn"], &[]);
     assert!(ok, "{text}");
-    assert!(text.contains("\nCode context\n"), "{text}");
+    assert!(text.contains("Code context  shown"), "{text}");
     assert_code(&text);
     let (ok, bare) = seat.recall(&["recall", "cue-bare"], &[]);
     assert!(ok, "{bare}");

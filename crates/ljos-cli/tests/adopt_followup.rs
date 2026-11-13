@@ -326,7 +326,7 @@ fn default_search_keeps_this_seats_topic_and_drops_routine_logs() {
     assert!(hourly.status.success(), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&hourly.stdout).trim(),
-        "No hits.",
+        "No hits.\nshown 0 of 0.",
         "{said}"
     );
 
@@ -343,7 +343,7 @@ fn default_search_keeps_this_seats_topic_and_drops_routine_logs() {
     assert!(stop.status.success(), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&stop.stdout).trim(),
-        "No hits.",
+        "No hits.\nshown 0 of 0.",
         "{said}"
     );
 }

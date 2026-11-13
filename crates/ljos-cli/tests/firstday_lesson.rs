@@ -147,7 +147,7 @@ fn a_long_lesson_the_pack_refuses_is_not_described_as_shown_by_the_hook() {
     assert!(found.contains("thermocouple"), "{found}");
     assert!(found.contains("not in the pack"), "{found}");
     assert!(found.contains("kept locally"), "{found}");
-    assert!(found.contains("\tlocal\t"), "{found}");
+    assert!(found.contains("local, not in the pack"), "{found}");
     let (code, hook, hook_err) = seat.run_in(
         &["hook", "--prompt", "--text"],
         Some("The door thermocouple reads below eighty degrees.\n"),
@@ -287,6 +287,6 @@ fn recall_says_when_a_lesson_is_related_and_not_filed_on_the_issue() {
     let (code, recall, err) = seat.run(&["recall", id]);
     assert_eq!(code, 0, "{recall}{err}");
     assert!(recall.contains("(none filed on this issue)"), "{recall}");
-    assert!(recall.contains("related:"), "{recall}");
+    assert!(recall.contains("Related"), "{recall}");
     assert!(recall.contains("north bench"), "{recall}");
 }

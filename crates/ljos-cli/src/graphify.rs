@@ -128,26 +128,33 @@ pub fn located_graph() -> Option<PathBuf> {
 /// Matching nodes and their top edges, or empty when nothing matches.
 #[must_use]
 pub fn section(graph: &Graph, query: &str) -> String {
-    let hits = matching(graph, query);
+    let mut hits = matching(graph, query);
     if hits.is_empty() {
         return String::new();
     }
-    let mut out = String::from("\nCode context\n");
+    let total = hits.len();
+    hits.truncate(NODE_LIMIT);
+    let shown = hits.len();
+    let mut out = format!(
+        "\n{}\n",
+        crate::scan::count_line("Code context", shown, total, "")
+    );
+    if shown < total {
+        out.push_str("graphify-out/graph.json has the rest.\n");
+    }
     for node in hits {
-        out.push_str("  ");
-        out.push_str(&flat(&node.label));
-        out.push_str("  ");
-        out.push_str(&place(node));
+        let mut line = format!("  {}  {}", flat(&node.label), place(node));
         if let Some(community) = node.community {
-            out.push_str("  community ");
-            out.push_str(&community.to_string());
+            line.push_str("  community ");
+            line.push_str(&community.to_string());
         }
-        out.push_str("  degree ");
-        out.push_str(&node.degree.to_string());
+        line.push_str("  degree ");
+        line.push_str(&node.degree.to_string());
+        out.push_str(&crate::scan::wrap(&line, crate::scan::COLS));
         out.push('\n');
         for edge in top_edges(&graph.edges, &node.id) {
-            out.push_str("    ");
-            out.push_str(&edge_line(graph, edge, &node.id));
+            let edge = format!("    {}", edge_line(graph, edge, &node.id));
+            out.push_str(&crate::scan::wrap(&edge, crate::scan::COLS));
             out.push('\n');
         }
     }
@@ -200,7 +207,6 @@ fn matching<'a>(graph: &'a Graph, query: &str) -> Vec<&'a Node> {
             .then(a.0.label.cmp(&b.0.label))
             .then(a.0.id.cmp(&b.0.id))
     });
-    hits.truncate(NODE_LIMIT);
     hits.into_iter().map(|(node, _)| node).collect()
 }
 
@@ -724,7 +730,7 @@ mod tests {
         let text = section(&graph, "MultiHeadAttention");
         assert_eq!(
             text,
-            "\nCode context\n  \
+            "\nCode context  shown 1 of 1\n  \
              MultiHeadAttention  model.py:10  community 0  degree 2\n    \
              <-- Transformer  contains  [EXTRACTED]\n    \
              --> attention mechanism  implements  [INFERRED]\n"

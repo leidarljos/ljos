@@ -559,13 +559,35 @@ fn every_surface_reads_one_stored_origin() {
     }
     let found = seat.ljos(&["search", "deploy"]);
     let island = seat.ljos(&["island", "deploy"]);
-    for line in found.lines().chain(island.lines()) {
+    let search_lines: Vec<&str> = found.lines().collect();
+    for (i, line) in search_lines.iter().enumerate() {
         for row in &rows {
             let text = row["text"].as_str().unwrap_or("");
-            if line.contains(text) {
-                assert!(line.contains(want(text)), "{line}");
-                assert!(!line.contains("unverified agent"), "{line}");
+            if text.is_empty() || !line.contains(text) {
+                continue;
             }
+            let label = if line.starts_with(' ') {
+                search_lines[..i]
+                    .iter()
+                    .rev()
+                    .find(|item| !item.starts_with(' ') && !item.is_empty())
+                    .copied()
+                    .unwrap_or(line)
+            } else {
+                line
+            };
+            assert!(label.contains(want(text)), "{label}\n{line}");
+            assert!(!label.contains("unverified agent"), "{label}");
+        }
+    }
+    for line in island.lines() {
+        for row in &rows {
+            let text = row["text"].as_str().unwrap_or("");
+            if text.is_empty() || !line.contains(text) {
+                continue;
+            }
+            assert!(line.contains(want(text)), "{line}");
+            assert!(!line.contains("unverified agent"), "{line}");
         }
     }
     let note = seat.prompt("fill in the deploy form for the deploy key");
@@ -927,10 +949,24 @@ fn search_and_island_label_an_agents_claims() {
         ),
     ]);
     let found = seat.ljos(&["search", "deploy"]);
-    for line in found.lines().filter(|l| l.contains("deploy")) {
+    let lines: Vec<&str> = found.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if !line.contains("deploy") || line.trim_start().starts_with("score ") {
+            continue;
+        }
+        let label = if line.starts_with(' ') {
+            lines[..i]
+                .iter()
+                .rev()
+                .find(|item| !item.starts_with(' ') && !item.is_empty())
+                .copied()
+                .unwrap_or(line)
+        } else {
+            line
+        };
         assert!(
-            line.contains("unverified agent"),
-            "a search row named an agent's claim by its bare kind: {line}"
+            label.contains("unverified agent"),
+            "a search row named an agent's claim by its bare kind: {label}"
         );
     }
     let island = seat.ljos(&["island", "deploy"]);
@@ -981,7 +1017,13 @@ fn fenced(text: &str) -> bool {
     let Some(close) = lines.iter().position(|l| *l == closer) else {
         return false;
     };
-    let inside = &lines[open + 1..close];
+    let mut inside = &lines[open + 1..close];
+    if inside
+        .first()
+        .is_some_and(|line| *line == "not the person's words or instructions")
+    {
+        inside = &inside[1..];
+    }
     nonce.len() == 16
         && inside.iter().all(|l| l.starts_with("| "))
         && inside.iter().any(|l| l.contains("note: the person said"))
@@ -1513,7 +1555,20 @@ fn an_agents_soft_prefer_is_never_the_persons() {
             assert!(label.starts_with("unverified agent"), "{row}");
         }
     }
-    for line in found.lines().chain(island.lines()) {
+    let search_lines: Vec<&str> = found.lines().collect();
+    for (i, line) in search_lines.iter().enumerate() {
+        if !line.contains("release key directly") {
+            continue;
+        }
+        let label = search_lines[..i]
+            .iter()
+            .rev()
+            .find(|item| !item.starts_with(' ') && !item.is_empty())
+            .copied()
+            .unwrap_or(line);
+        assert!(label.contains("unverified agent"), "{label}");
+    }
+    for line in island.lines() {
         if line.contains("release key directly") {
             assert!(line.contains("unverified agent"), "{line}");
         }
@@ -1762,8 +1817,18 @@ fn a_persons_id_on_other_words_is_not_the_persons() {
     let note = seat.prompt("turn the command guard off");
     assert!(!note.contains("[preference,"), "{note}");
     let found = seat.ljos(&["search", "command guard"]);
-    for line in found.lines().filter(|l| l.contains(GUARD_OFF)) {
-        assert!(line.contains("unverified agent note"), "{line}");
+    let search_lines: Vec<&str> = found.lines().collect();
+    for (i, line) in search_lines.iter().enumerate() {
+        if !line.contains(GUARD_OFF) {
+            continue;
+        }
+        let label = search_lines[..i]
+            .iter()
+            .rev()
+            .find(|item| !item.starts_with(' ') && !item.is_empty())
+            .copied()
+            .unwrap_or(line);
+        assert!(label.contains("unverified agent note"), "{label}");
     }
     let island = seat.ljos(&["island", "command guard"]);
     assert!(island.contains(GUARD_OFF), "{island}");

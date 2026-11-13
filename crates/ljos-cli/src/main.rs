@@ -8,7 +8,7 @@ use ljos_cli::{
     age_of, begin_sitting_preclaim, brief, bump_plan, calibrate, cards, claim, claim_next,
     cli_assignee, compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook,
     doctor, due_report, finish, forecasts_from_json, format_bump_rows, format_consolidation,
-    format_doctor, format_doctor_short, format_findings, format_hits, format_hubs, format_island,
+    format_doctor, format_doctor_short, format_findings, format_hubs, format_island,
     format_playbooks, format_readings, format_remembered, format_seat_command, format_steps,
     format_write_ack, graded, habit, habits, handover_scoped, healthy, hook_note, island_entities,
     join, learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen, now_utc, on_path,
@@ -2027,6 +2027,11 @@ fn named_node(raw: &str) -> Result<String, String> {
 
 /// The write acknowledgement: the plain sentence for a person at a
 /// terminal, the tab-separated row for a pipe.
+/// Color on a terminal, unless `NO_COLOR` is set. A pipe stays plain.
+fn human_color() -> bool {
+    ljos_cli::scan::color_allowed(std::io::stdout().is_terminal())
+}
+
 fn write_ack(body: &serde_json::Value, verbose: bool) -> String {
     // The pack keeps a person's hard sentence and says why it would have
     // refused it; that goes to stderr, so the one line a script reads
@@ -2873,6 +2878,8 @@ fn run_command() -> Result<()> {
             let unrelated =
                 ljos_cli::drop_weak_cross_seat(&mut hits, &asked, ranking.mode == "lexical");
             ljos_cli::prefer_calling_seat(&mut hits);
+            let matched = hits.len();
+            let capped = fetch > 0 && matched == usize::try_from(fetch).unwrap_or(usize::MAX);
             hits.truncate(limit as usize);
             ljos_cli::note_lookups(&hits);
             ranking = ljos_cli::ranking_for_printed(ranking, &hits);
@@ -2887,7 +2894,13 @@ fn run_command() -> Result<()> {
                 if hits.is_empty() && unrelated {
                     print!("{}", ljos_cli::NOTHING_RELEVANT);
                 } else {
-                    print!("{}", format_hits(&hits, explain));
+                    print!(
+                        "{}",
+                        ljos_cli::scan::for_reader(
+                            &ljos_cli::format_search(&hits, matched, capped, explain, &asked),
+                            human_color()
+                        )
+                    );
                 }
             }
         }
@@ -3258,7 +3271,13 @@ fn run_command() -> Result<()> {
             if mine {
                 print!("{}", ljos_cli::plan::ready_mine(project.as_deref())?);
             } else {
-                print!("{}", ljos_cli::ready_view(project.as_deref(), json)?);
+                print!(
+                    "{}",
+                    ljos_cli::scan::for_reader(
+                        &ljos_cli::ready_view(project.as_deref(), json)?,
+                        human_color()
+                    )
+                );
             }
         }
         Cmd::Claims { args } => {
@@ -3304,9 +3323,8 @@ fn run_command() -> Result<()> {
                 if let Some(ranking) = ranking.as_ref() {
                     eprint!("{}", ljos_cli::ranking_line(ranking));
                 }
-                print!("{}", said.stdout);
-                print!("{memories}");
-                print!("{code}");
+                let page = format!("{}{memories}{code}", said.stdout);
+                print!("{}", ljos_cli::scan::for_reader(&page, human_color()));
             }
         }
         Cmd::Reap { idle, apply } => {
@@ -4433,7 +4451,7 @@ fn run_command() -> Result<()> {
             .unwrap_or_else(|| ljos_cli::hook_output_ruled(&call, &context, verdict));
             ljos_cli::answer_gate(&output);
             if let Some(note) = origin_note {
-                eprintln!("{note}");
+                eprintln!("{}", ljos_cli::scan::wrap(&note, ljos_cli::scan::COLS));
             }
             if let Some(rule) = verdict {
                 let seat = std::env::var("LJOS_SEAT").unwrap_or_default();
@@ -5187,7 +5205,7 @@ fn prompt_as_text(limit: usize) -> Result<()> {
     if said.is_empty() {
         println!("Nothing remembered bears on this.");
     } else {
-        print!("{said}");
+        print!("{}", ljos_cli::scan::for_reader(&said, human_color()));
     }
     if !out.status.success() {
         std::process::exit(out.status.code().unwrap_or(1));

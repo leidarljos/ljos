@@ -981,11 +981,17 @@ fn search_labels_a_written_rule_by_its_writer() {
     let out = seat.command(&["search", "deploy"], false).output().unwrap();
     let found = String::from_utf8_lossy(&out.stdout).into_owned();
     let label = |text: &str| {
-        found
-            .lines()
-            .find(|l| l.ends_with(text))
-            .and_then(|l| l.split('\t').nth(2))
-            .unwrap_or_else(|| panic!("{text} not found\n{found}"))
+        let lines: Vec<&str> = found.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("{text} not found\n{found}"));
+        lines[..at]
+            .iter()
+            .rev()
+            .find(|line| !line.starts_with(' ') && !line.is_empty())
+            .copied()
+            .unwrap_or("")
             .to_string()
     };
     assert_eq!(
