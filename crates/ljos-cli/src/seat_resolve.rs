@@ -119,7 +119,7 @@ pub fn note_seat_write(seat: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let line = format!("{}\t{seat}\t{}\n", crate::now_utc(), crate::sync::host());
+    let line = format!("{}\t{seat}\t{}\n", write_stamp(), crate::sync::host());
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -374,6 +374,33 @@ fn lookup_ids() -> Vec<String> {
     ids
 }
 
+/// RFC 3339 UTC with milliseconds. Older lines are whole seconds, with or
+/// without `.000`, and still sort as that second.
+fn write_stamp() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let coarse = crate::utc_at(dur.as_secs());
+    match coarse.strip_suffix(".000Z") {
+        Some(prefix) => format!("{prefix}.{:03}Z", dur.subsec_millis()),
+        None => coarse,
+    }
+}
+
+/// `ts` as a string that sorts by time. A stamp with no fraction is the
+/// start of that second, the same as `.000Z`.
+fn stamp_key(ts: &str) -> String {
+    let ts = ts.trim();
+    let Some(body) = ts.strip_suffix('Z') else {
+        return ts.to_string();
+    };
+    if body.contains('.') {
+        ts.to_string()
+    } else {
+        format!("{body}.000Z")
+    }
+}
+
 fn recent_line(text: &str, host: &str) -> Option<String> {
     let host = host.trim();
     if host.is_empty() || text.is_empty() {
@@ -397,7 +424,7 @@ fn recent_line(text: &str, host: &str) -> Option<String> {
         let Some(seat) = usable(seat) else {
             continue;
         };
-        let ts = ts.trim().to_string();
+        let ts = stamp_key(ts);
         match best.get(&seat) {
             Some(have) if have.as_str() >= ts.as_str() => {}
             _ => {
@@ -499,6 +526,31 @@ mod tests {
 ";
         assert_eq!(recent_line(one, "box").as_deref(), Some("bob"));
         assert!(recent_line(one, "elsewhere").is_none());
+    }
+
+    /// Two writes in one second used to read as every seat. The fraction
+    /// names the later one. A line with no fraction is that second's start.
+    #[test]
+    fn a_later_fraction_in_the_same_second_is_the_recent_seat() {
+        let log = "\
+2026-11-11T00:00:01.100Z\talice\tbox
+2026-11-11T00:00:01Z\tcarol\tbox
+2026-11-11T00:00:01.250Z\tbob\tbox
+";
+        assert_eq!(recent_line(log, "box").as_deref(), Some("bob"));
+        let tied = "\
+2026-11-11T00:00:01.000Z\talice\tbox
+2026-11-11T00:00:01Z\tbob\tbox
+";
+        assert!(recent_line(tied, "box").is_none(), "equal stamps stay a tie");
+        let stamp = write_stamp();
+        let frac = stamp
+            .trim_end_matches('Z')
+            .rsplit_once('.')
+            .map(|(_, frac)| frac)
+            .unwrap_or("");
+        assert_eq!(frac.len(), 3, "{stamp}");
+        assert!(frac.chars().all(|c| c.is_ascii_digit()), "{stamp}");
     }
 
     #[test]
