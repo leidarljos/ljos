@@ -306,12 +306,13 @@ pub fn pin_root() {
 }
 
 /// The checkout a commit of `dir` would land in, when that checkout is not
-/// a tracker. A directory in no checkout, a tracker that is its own
-/// checkout, and a path the checkout ignores are `None`.
+/// a tracker. A directory in no checkout, a tracker checkout, and a path
+/// the checkout ignores are `None`.
 ///
-/// A root [`pin_root`] invented does not count: naming the product makes
-/// [`is_tracker`] agree with it, and the commit would still be that
-/// product's.
+/// A checkout counts as the tracker when `VISSUE_ROOT` or `ISSUE_ROOT`
+/// names it, when it is the seat's tracker, when [`is_tracker`] holds, or
+/// when it already holds tracker issues. An empty prefix directory is
+/// none of those. A board file with no issue id is not a tracker issue.
 #[must_use]
 pub fn product_checkout(dir: &Path) -> Option<PathBuf> {
     let top = work_tree(dir)?;
@@ -324,33 +325,93 @@ pub fn product_checkout(dir: &Path) -> Option<PathBuf> {
     Some(top)
 }
 
-/// A tracker from its own files or from a root the person named. A pin is
-/// not a person: it is this process choosing a directory, and a product
-/// checkout must not become a tracker by being chosen.
+/// Whether `dir` is the tracker rather than a product checkout.
+///
+/// [`is_tracker`] is a `vissue.toml` at `HEAD`, a root the seat named, or
+/// `LJOS_TRACKER_REMOTE`. `VISSUE_ROOT` and `ISSUE_ROOT` are named roots,
+/// so a checkout they name is the tracker even when this process pinned
+/// the value. The directory `ljos onboard` makes is the seat's tracker
+/// before that layout is committed. Issue files already in the checkout
+/// are the tracker a commit is writing.
 fn intrinsic_tracker(dir: &Path) -> bool {
+    is_tracker(dir) || seat_root_is(dir) || holds_tracker_issues(dir)
+}
+
+/// Whether `dir` is the directory `ljos onboard` makes for this seat.
+fn seat_root_is(dir: &Path) -> bool {
+    default_root().is_some_and(|root| same_path(dir, &root))
+}
+
+fn same_path(dir: &Path, root: &Path) -> bool {
     let Some(here) = std::fs::canonicalize(dir).ok() else {
         return false;
     };
-    let same = |root: &Path| {
-        std::fs::canonicalize(root)
-            .ok()
-            .is_some_and(|canon| canon == here)
-    };
-    if configured().is_some_and(|root| same(&root)) {
+    std::fs::canonicalize(root).ok().as_ref() == Some(&here)
+}
+
+/// Prefix directories that can hold a project's issues. `Software` is the
+/// default. `VISSUE_PREFIX` and `vissue.toml` name another when set.
+fn tracker_prefixes(dir: &Path) -> Vec<String> {
+    let mut prefixes = Vec::new();
+    if let Ok(prefix) = std::env::var("VISSUE_PREFIX") {
+        let prefix = prefix.trim();
+        if !prefix.is_empty() {
+            prefixes.push(prefix.to_string());
+        }
+    }
+    if dir.join("vissue.toml").is_file() {
+        if let Some(prefix) = prefix_at(dir) {
+            if !prefixes.iter().any(|have| have == &prefix) {
+                prefixes.push(prefix);
+            }
+        }
+    }
+    if !prefixes.iter().any(|have| have == "Software") {
+        prefixes.push("Software".to_string());
+    }
+    prefixes
+}
+
+/// Whether `dir` already holds a tracker issue. The file carries an
+/// `:ID:` property. A heading with no id is a board a clone can carry,
+/// and that board does not make the checkout the tracker.
+fn holds_tracker_issues(dir: &Path) -> bool {
+    if issue_file(&dir.join("issues.org")) || issue_dir(&dir.join("issues")) {
         return true;
     }
-    for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
-        let Ok(raw) = std::env::var(key) else {
-            continue;
+    tracker_prefixes(dir).iter().any(|prefix| {
+        let Ok(projects) = std::fs::read_dir(dir.join(prefix)) else {
+            return false;
         };
-        if raw.is_empty() || pinned(&raw) {
-            continue;
-        }
-        if same(&crate::expand(&raw)) {
-            return true;
-        }
-    }
-    committed_layout(dir) || serves_named_remote(dir)
+        projects.flatten().any(|entry| {
+            let path = entry.path();
+            issue_file(&path.join("issues.org")) || issue_dir(&path.join("issues"))
+        })
+    })
+}
+
+fn issue_dir(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| issue_file(&entry.path()))
+}
+
+/// An org file whose properties name an issue id.
+fn issue_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("org"))
+        && std::fs::read_to_string(path).is_ok_and(|text| {
+            text.lines().any(|line| {
+                let line = line.trim_start();
+                let Some(rest) = line.strip_prefix(":ID:") else {
+                    return false;
+                };
+                rest.is_empty() || rest.starts_with(char::is_whitespace)
+            })
+        })
 }
 
 /// Drop a pin that sits in a product checkout, so vissue does not write
@@ -764,6 +825,129 @@ mod tests {
         }
         assert!(aimed.is_ok(), "{aimed:?}");
         assert_eq!(set.as_deref(), Some(tracker.to_str().unwrap()));
+    }
+
+    fn saved_tracker_env() -> [(&'static str, Option<std::ffi::OsString>); 5] {
+        [
+            ("VISSUE_ROOT", std::env::var_os("VISSUE_ROOT")),
+            ("ISSUE_ROOT", std::env::var_os("ISSUE_ROOT")),
+            ("VISSUE_CONFIG", std::env::var_os("VISSUE_CONFIG")),
+            ("VISSUE_PREFIX", std::env::var_os("VISSUE_PREFIX")),
+            (
+                "LJOS_TRACKER_REMOTE",
+                std::env::var_os("LJOS_TRACKER_REMOTE"),
+            ),
+        ]
+    }
+
+    fn restore_tracker_env(saved: [(&'static str, Option<std::ffi::OsString>); 5]) {
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    fn clear_tracker_env() {
+        for key in [
+            "VISSUE_ROOT",
+            "ISSUE_ROOT",
+            "VISSUE_CONFIG",
+            "VISSUE_PREFIX",
+            "LJOS_TRACKER_REMOTE",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    /// `VISSUE_ROOT` names the checkout. It is the tracker with no
+    /// `vissue.toml` and no issue file.
+    #[test]
+    fn a_checkout_named_by_vissue_root_is_not_a_product() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("vault");
+        git(&root, &["init", "-q"]);
+        std::fs::write(root.join("README"), "tracker\n").unwrap();
+        let saved = saved_tracker_env();
+        clear_tracker_env();
+        std::env::set_var("VISSUE_ROOT", &root);
+        let found = product_checkout(&root);
+        restore_tracker_env(saved);
+        assert_eq!(found, None);
+    }
+
+    /// The directory `ljos onboard` makes is the seat's tracker, including
+    /// when it is its own git checkout and nothing else names it.
+    #[test]
+    fn the_seat_tracker_directory_is_not_a_product_checkout() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::TempDir::new().unwrap();
+        let data = dir.path().join("data");
+        let root = data.join("vissue/tracker");
+        git(&root, &["init", "-q"]);
+        let saved_data = std::env::var_os("XDG_DATA_HOME");
+        let saved = saved_tracker_env();
+        clear_tracker_env();
+        std::env::set_var("XDG_DATA_HOME", &data);
+        let found = product_checkout(&root);
+        restore_tracker_env(saved);
+        match saved_data {
+            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        assert_eq!(found, None);
+    }
+
+    /// A checkout that already holds an issue id is the tracker the commit
+    /// writes. The path may be a project board or a ledger file, and it
+    /// may be reached through a symlink. A heading with no id is a board
+    /// a clone carries, and that checkout stays a product.
+    #[test]
+    fn a_checkout_holding_tracker_issues_is_not_a_product() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("tracker");
+        git(&root, &["init", "-q"]);
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        std::fs::write(
+            root.join("Software/probe/issues.org"),
+            "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("Software/proj/issues")).unwrap();
+        std::fs::write(
+            root.join("Software/proj/issues/proj-nnnn.org"),
+            "* TODO [#C] Fresh\n:PROPERTIES:\n:ID:         proj-nnnn\n:END:\n",
+        )
+        .unwrap();
+        let saved = saved_tracker_env();
+        clear_tracker_env();
+        let from_board = product_checkout(&root.join("Software/probe"));
+        let from_ledger = product_checkout(&root.join("Software/proj/issues"));
+        let link_holder = dir.path().join("link-holder");
+        std::fs::create_dir_all(&link_holder).unwrap();
+        let link = link_holder.join("tracker");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        std::fs::create_dir_all(root.join("issues")).unwrap();
+        std::fs::write(
+            root.join("issues/proj-pppp.org"),
+            "* TODO [#C] Linked\n:PROPERTIES:\n:ID:         proj-pppp\n:END:\n",
+        )
+        .unwrap();
+        let from_link = product_checkout(&link.join("issues"));
+
+        let boards = dir.path().join("boards");
+        git(&boards, &["init", "-q"]);
+        std::fs::create_dir_all(boards.join("Software/app")).unwrap();
+        std::fs::write(boards.join("Software/app/issues.org"), "* TODO x\n").unwrap();
+        let board_only = product_checkout(&boards);
+        restore_tracker_env(saved);
+        assert_eq!(from_board, None);
+        assert_eq!(from_ledger, None);
+        assert_eq!(from_link, None);
+        assert_eq!(board_only.as_deref(), Some(boards.as_path()));
     }
 
     #[test]
