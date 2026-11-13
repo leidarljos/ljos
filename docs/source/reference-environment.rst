@@ -39,6 +39,193 @@ Variable                                                    Read by
 
 ``~/.config/ljos/env`` is loaded for the keys above that the shell leaves unset.
 
+Config reference
+----------------
+
+
+ljos reads ``ljos.toml`` from the user config (~/.config/ljos/ljos.toml), then the seat file (~/.config/ljos/seats/$LJOS_SEAT/ljos.toml), then the project file (ljos.toml), then ``LJOS_CONFIG``, then .ljos/gates.toml. A later file overrides the keys it sets. ``graphify`` is read the other way: ``LJOS_GRAPHIFY``, then ``LJOS_CONFIG``, then the project file, then the seat file, then the user file, and the first value wins. ``[mail]`` is only the user's ljos.toml or mail.toml. ``[cloud] branches`` is only the seat file. A mistake is a warning. A hook and the MCP server print it and keep going. ``ljos doctor`` names the file or the environment variable that set each value.
+
+
+ljos.toml keys
+~~~~~~~~~~~~~~
+
+
+- ``attribution`` ([mail]) default unset
+- ``branches`` ([cloud] or the top of the file) default develop
+- ``command`` ([panel]) default unset
+- ``consensus_branches`` ([gates] or the top of the file) default develop, main
+- ``deny_file`` ([mail]) default unset
+- ``email`` ([identity]) default unset
+- ``graphify`` (the top of the file) default graphify-out/graph.json
+- ``harness`` ([panel]) default unset
+- ``headless`` ([panel]) default unset
+- ``identity`` ([mail]) default unset
+- ``idle_drop`` ([mcp]) default 120s
+- ``workflow.max_children`` ([workflow]) default 24
+- ``panel.max_children`` ([panel]) default 8
+- ``panel.max_descendants`` ([panel]) default 12
+- ``workflow.max_descendants`` ([workflow]) default 48
+- ``max_tokens`` ([panel] or [workflow]) default unset
+- ``max_wall_secs`` ([panel] or [workflow]) default unset
+- ``name`` ([identity]) default unset
+- ``notmuch`` ([mail]) default unset
+- ``notmuch_config`` ([mail]) default unset
+- ``orphan_idle`` ([mcp]) default 6h
+- ``owners`` (the top of the file) default unset
+- ``policyd_config`` ([gates] or the top of the file) default unset
+- ``project`` (the top of the file) default the git checkout directory name
+- ``protected_branches`` ([gates] or the top of the file) default main, master, develop
+- ``quorum`` ([gates] or the top of the file) default 2
+- ``rewrite`` ([gates] or the top of the file) default true
+- ``runner`` ([panel]) default unset
+- ``skip`` ([git_hooks]) default /tmp, /var/tmp, /dev/shm
+- ``template`` ([panel]) default unset
+
+
+LJOS_ variables
+~~~~~~~~~~~~~~~
+
+
+- ``LJOS_ASK_PACK`` default unset
+- ``LJOS_ATOMS_DRIVER`` default unset
+- ``LJOS_ATOM_NOW_MS`` default unset
+- ``LJOS_BIN`` default unset
+- ``LJOS_BIN_DIR`` default unset
+- ``LJOS_CAPTURE`` default on
+- ``LJOS_CARDS_DIR`` default unset
+- ``LJOS_CITE`` default unset
+- ``LJOS_CLOUD_AGE_SECRET`` default unset
+- ``LJOS_CONFIG`` default unset
+- ``LJOS_EXTRACT`` default unset
+- ``LJOS_EXTRACT_DEBUG`` default unset
+- ``LJOS_GIT_HOOK`` default unset
+- ``LJOS_GIT_HOOKS`` default unset
+- ``LJOS_GRAPHIFY`` default unset; then the graphify key, else graphify-out/graph.json
+- ``LJOS_GUARD`` default on outside a temporary home
+- ``LJOS_GUARD_FAIL_OPEN`` default unset
+- ``LJOS_GUARD_TIMEOUT`` default 5 seconds
+- ``LJOS_HARNESS_SESSION`` default unset
+- ``LJOS_HOLD`` default unset
+- ``LJOS_HOOKD`` default on
+- ``LJOS_HOOK_ADMIT_MS`` default unset
+- ``LJOS_HOOK_PACK_TIMEOUT_MS`` default 1500, at most 2000
+- ``LJOS_HOOK_QUEUE`` default unset
+- ``LJOS_HOOK_RELAY`` default unset
+- ``LJOS_HOOK_SLOTS`` default unset
+- ``LJOS_HOOK_TIMING`` default unset
+- ``LJOS_HUD_BIN`` default unset; sibling of ljos, then PATH
+- ``LJOS_HUD_LOG`` default unset; beside the summon socket
+- ``LJOS_HUD_SOCKET`` default $XDG_RUNTIME_DIR/ljos/hud.sock
+- ``LJOS_HUD_TRAY`` default on
+- ``LJOS_INBOX_SYNC_WAIT`` default 30 seconds
+- ``LJOS_INSTALL_SH`` default unset
+- ``LJOS_INSTALL_URL`` default the published install script
+- ``LJOS_IN_HOOK`` default unset
+- ``LJOS_JUDGE`` default unset
+- ``LJOS_LEASE_SECS`` default 900
+- ``LJOS_MAX_PARALLEL`` default the machine's parallelism, clamped to 4
+- ``LJOS_MCP_BIN`` default unset
+- ``LJOS_MCP_CONFIG`` default unset
+- ``LJOS_MCP_FORWARDED`` default unset
+- ``LJOS_MCP_GENERATION`` default unset
+- ``LJOS_MCP_IDLE`` default 30 minutes
+- ``LJOS_MCP_IDLE_DROP`` default 120s
+- ``LJOS_MCP_ORPHAN_IDLE`` default 6h
+- ``LJOS_MCP_TIMEOUT`` default 30 seconds
+- ``LJOS_MCP_TIMEOUT_MS`` default unset; LJOS_MCP_TIMEOUT applies
+- ``LJOS_MCP_TOOLS`` default the core set
+- ``LJOS_MEMBER_BIN`` default unset
+- ``LJOS_MEMLOCK_TEST_CHILD`` default unset
+- ``LJOS_MEMORY_WHY`` default unset
+- ``LJOS_MEM_PORT`` default 8761
+- ``LJOS_MESH_KEY_FILE`` default unset
+- ``LJOS_MESH_LOGIN_SERVER`` default https://hs.grund.rgoswami.me
+- ``LJOS_MESH_TUN`` default /dev/net/tun
+- ``LJOS_MESH_WAIT`` default 30 seconds
+- ``LJOS_OFF`` default unset
+- ``LJOS_ORG_DRIVER`` default unset
+- ``LJOS_PACKSETD_SIGINT_CHILD`` default unset
+- ``LJOS_PACK_CONNECT_MS`` default 300, at most 1000
+- ``LJOS_PACK_TIMEOUT_MS`` default 4000, at most 5000
+- ``LJOS_PANEL_BIN`` default unset
+- ``LJOS_PANEL_CHILD`` default unset
+- ``LJOS_PANEL_COMMAND`` default unset
+- ``LJOS_PANEL_CONCURRENCY`` default the machine's parallelism, clamped to 4
+- ``LJOS_PANEL_HARNESS`` default unset
+- ``LJOS_PANEL_PERSONAS`` default unset
+- ``LJOS_PANEL_RUNNER`` default unset
+- ``LJOS_PANEL_TEMPLATE`` default unset
+- ``LJOS_PANE_TOOL`` default the first tool that answers
+- ``LJOS_POLICY_RECALL_WAIT`` default 3 seconds
+- ``LJOS_PROCESS_NONCE`` default unset
+- ``LJOS_PROC_TREE_PROBE`` default unset
+- ``LJOS_PROGRAMS`` default unset
+- ``LJOS_PROJECT`` default unset
+- ``LJOS_RELEASE_DIR`` default unset
+- ``LJOS_SEAT`` default unset
+- ``LJOS_SEAT_KEY`` default unset
+- ``LJOS_SESSION_ID`` default unset
+- ``LJOS_SHELL_SESSION`` default unset
+- ``LJOS_SITTING_CLAIM_WAIT`` default 10 seconds
+- ``LJOS_SYNC_HOST`` default unset
+- ``LJOS_TEST_ARGV`` default unset
+- ``LJOS_TEST_CANON`` default unset
+- ``LJOS_TEST_CANON_TMP`` default unset
+- ``LJOS_TEST_HARNESS`` default unset
+- ``LJOS_TEST_HISTORY_ROOT`` default unset
+- ``LJOS_TEST_HOSTNAME`` default unset
+- ``LJOS_TEST_SESSION`` default unset
+- ``LJOS_TRACKER_DIR`` default unset
+- ``LJOS_TRACKER_GIT`` default push
+- ``LJOS_TRACKER_LOCK_WAIT`` default 20 seconds
+- ``LJOS_TRACKER_PUSH_WAIT`` default 5 seconds
+- ``LJOS_TRACKER_REMOTE`` default unset
+- ``LJOS_TRACKER_SEARCH`` default unset
+- ``LJOS_TRACKER_TOKEN`` default unset
+- ``LJOS_TRACK_WORK`` default off
+- ``LJOS_UNATTENDED`` default unset
+- ``LJOS_UNSIGNED_BALLOTS`` default unset
+- ``LJOS_USER_RULES_SYNC`` default on
+- ``LJOS_USER_RULES_SYNC_MS`` default 4000 after a write, 1500 at session start, 8000 for --sync
+- ``LJOS_USER_RULES_TRACKER`` default unset
+- ``LJOS_WAKE_BIN`` default unset
+- ``LJOS_WAKE_COMMIT`` default unset
+- ``LJOS_WAKE_FROM`` default unset
+- ``LJOS_WAKE_INTERRUPT`` default unset
+- ``LJOS_WAKE_ISSUE`` default unset
+- ``LJOS_WAKE_LAUNCHER_KEY`` default unset
+- ``LJOS_WAKE_MSG`` default unset
+- ``LJOS_WAKE_SEAT`` default unset
+- ``LJOS_WRITER_PIDFILE`` default unset
+- ``LJOS_WRITER_STANDIN`` default unset
+- ``LJOS_WRITE_SCOPE`` default unset
+
+
+Packset settings ljos passes through
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+- ``PACKSET_AUTH`` default unset
+- ``PACKSET_HOME`` default $HOME/.local/share/packset
+- ``PACKSET_PORT`` default 8761
+- ``PACKSET_TIMEOUT_MS`` default unset; a hook uses 1500 and a command uses 4000
+- ``PACKSET_TOKEN`` default unset
+- ``PACKSET_TOKEN_FILE`` default unset
+- ``PACKSET_URL`` default http://127.0.0.1:8761
+- ``PACKSET_WORKSPACE`` default seat
+
+
+Vissue settings ljos passes through
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+- ``ISSUE_ROOT`` default unset
+- ``VISSUE_AGENT`` default unset
+- ``VISSUE_CONFIG`` default $XDG_CONFIG_HOME/vissue/config.toml
+- ``VISSUE_NO_ROUTE`` default unset
+- ``VISSUE_PREFIX`` default Software, when ljos creates the tracker
+- ``VISSUE_ROOT`` default unset; then root in the vissue config, else $XDG_DATA_HOME/vissue/tracker
+
 A temporary HOME or working directory
 -------------------------------------
 

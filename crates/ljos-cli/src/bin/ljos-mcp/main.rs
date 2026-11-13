@@ -65,6 +65,7 @@ fn main() -> anyhow::Result<()> {
 async fn serve() -> anyhow::Result<()> {
     ljos_cli::normalize_tracker_env();
     ljos_cli::load_seat_env();
+    ljos_cli::config_diag::emit();
     if let Some(line) = ljos_cli::cloud::missing_mcp_line() {
         eprintln!("{line}");
     }

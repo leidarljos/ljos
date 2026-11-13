@@ -179,8 +179,10 @@ fn read_layer(path: &Path) -> Result<Option<toml::map::Map<String, toml::Value>>
         return Ok(None);
     }
     let value: toml::Value = toml::from_str(&text).map_err(|e| {
+        let (line, column) = crate::config_diag::toml_line_column(&e);
+        let message = e.message().lines().next().unwrap_or("invalid TOML");
         format!(
-            "`{}` does not parse ({e}). Fix the file, then retry.",
+            "`{}` does not parse at line {line}, column {column} ({message}). Fix the file, then retry.",
             path.display()
         )
     })?;

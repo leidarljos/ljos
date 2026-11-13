@@ -25,6 +25,7 @@ pub mod cloud;
 mod cloud_guard;
 mod cloud_hook;
 pub mod command_prefs;
+pub mod config_diag;
 pub mod converge;
 mod deedbag;
 pub mod digest;
@@ -30446,6 +30447,9 @@ pub fn doctor() -> Vec<Habitat> {
     out.extend(guard_fail_open_row());
     out.push(bypass_row());
     out.push(panes_row());
+    out.extend(config_diag::doctor_rows(
+        std::env::current_dir().ok().as_deref(),
+    ));
     out.push(note_queue_row());
     if let Some(state) = sync::legacy_doctor_state() {
         out.push(Habitat {
@@ -32854,6 +32858,13 @@ fn optional_bin(name: &str) -> bool {
 /// `ljos cloud up` rewrites.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
+    if row.name == "config" {
+        return if row.state.starts_with("warning:") {
+            "warn"
+        } else {
+            "ok"
+        };
+    }
     if cloud::cloud_age_is_unset(row.name, &row.state) {
         return "info";
     }
@@ -33144,6 +33155,7 @@ pub fn format_doctor_short(rows: &[Habitat]) -> String {
 fn shown_short(word: &str, name: &str) -> bool {
     matches!(word, "no" | "warn")
         || name == "sitting gate"
+        || name == "config"
         || name == "atoms"
         || (word == "info" && READY_PARTS.iter().any(|(_, rows)| rows.contains(&name)))
 }

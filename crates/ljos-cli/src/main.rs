@@ -2356,6 +2356,7 @@ fn run_command() -> Result<()> {
             valid_from,
             valid_to,
         } => {
+            ljos_cli::config_diag::emit();
             if transient && standing {
                 bail!("remember: pass --transient or --standing, not both");
             }
@@ -3304,6 +3305,7 @@ fn run_command() -> Result<()> {
             json,
             no_graph,
         } => {
+            ljos_cli::config_diag::emit();
             ljos_cli::log_recall("recall", &issue);
             let said = ljos_cli::tracker_recall(&issue)?;
             eprint!("{}", said.stderr);
@@ -3791,7 +3793,10 @@ fn run_command() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::GitHook { name, .. } => ljos_cli::git_hooks::run_named(&name)?,
+        Cmd::GitHook { name, .. } => {
+            ljos_cli::config_diag::emit();
+            ljos_cli::git_hooks::run_named(&name)?;
+        }
         Cmd::GitHooks { action } => ljos_cli::git_hooks::run(&action)?,
         Cmd::PersonKey { action } => ljos_cli::person_key::run(&action)?,
         Cmd::Hook {
@@ -3809,6 +3814,9 @@ fn run_command() -> Result<()> {
             apply_book,
             finish_session,
         } => {
+            if !brief_once {
+                ljos_cli::config_diag::emit();
+            }
             if text {
                 return prompt_as_text(limit);
             }
