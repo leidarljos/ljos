@@ -6986,6 +6986,7 @@ fn onboard_detected_with_lookup(
     skills: Option<&Path>,
     on_path_lookup: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<Step>> {
+    prepare_state_home(dry);
     let file = harnesses_path();
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
     let mut shapes = harnesses_with_shipped(&file)
@@ -16925,6 +16926,23 @@ pub(crate) fn state_base_dir() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos")
+}
+
+/// Make the state directory a seat setup uses. A dry run writes nothing.
+/// The first `ljos doctor` then does not warn that the directory is missing.
+fn prepare_state_home(dry: bool) {
+    if dry {
+        return;
+    }
+    let path = state_base_dir();
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    let _ = builder.create(path);
 }
 
 fn probe_lists_ljos_run(argv: &[String]) -> std::result::Result<(), String> {
@@ -63045,6 +63063,49 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "{}",
             tracker.detail
         );
+    }
+
+    /// A seat setup makes the state directory, so the first doctor does
+    /// not warn that it is missing. A dry run writes nothing.
+    #[test]
+    fn setting_up_a_seat_makes_the_state_directory() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        let prev_state = std::env::var_os("XDG_STATE_HOME");
+        super::with_env_mutation(|| {
+            // SAFETY: env_guard is held, and the restore below puts both back.
+            unsafe {
+                std::env::set_var("HOME", dir.path());
+                std::env::remove_var("XDG_STATE_HOME");
+            }
+        });
+        struct Restore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let home = self.0.clone();
+                let state = self.1.clone();
+                super::with_env_mutation(|| {
+                    // SAFETY: still under the test's lock.
+                    unsafe {
+                        match home {
+                            Some(v) => std::env::set_var("HOME", v),
+                            None => std::env::remove_var("HOME"),
+                        }
+                        match state {
+                            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                            None => std::env::remove_var("XDG_STATE_HOME"),
+                        }
+                    }
+                });
+            }
+        }
+        let _restore = Restore(prev_home, prev_state);
+        let path = dir.path().join(".local/state/ljos");
+        super::prepare_state_home(true);
+        assert!(!path.exists(), "a dry setup created the state directory");
+        super::prepare_state_home(false);
+        assert!(path.is_dir(), "the state directory was not created");
     }
 
     /// A non-zero exit is an error carrying what was said on stderr.
