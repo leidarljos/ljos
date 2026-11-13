@@ -45,7 +45,7 @@ With ``packset`` on ``PATH`` and nothing listening, a home that is not a tempora
 
 .. code:: text
 
-   no  pack    http://127.0.0.1:8761 does not answer. no pack writer is answering. Run `packset ensure`
+   no  pack    http://127.0.0.1:8761 does not answer. no pack writer is answering on 127.0.0.1:8761. Run `packset ensure`
 
 ..
    # proseguard:on

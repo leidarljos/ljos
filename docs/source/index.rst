@@ -38,9 +38,7 @@ What it has done
 8,057 tokens for the 20 core Model Context Protocol (MCP) tools, against 18,011 for all 52
 139.1 ms     warm prompt hook median on a pack of 10,000 lessons, down from 196.3 ms; ``prompt-hook.rows-10000.after`` in hook-latency.txt
 0 of 186     near-topic pairs merged; 12 of 78 duplicate pairs found
-0.949        recall@5 in packset's LongMemEval\ :sub:`S` session retrieval run, BM25+ fused with e5-large-v2, 470 questions; retrieval, not answer accuracy
 2,293        tests passed on the 0.40.0 release commit, 0 failed
-10 runners   with an onboarding shape: Claude Code, Codex, Cursor, Grok, OpenCode, Windsurf, Antigravity, Hermes, omp, shell
 MIT          licence; Rust; Linux and macOS
 ============ ==============================================================================================================================================
 
@@ -60,8 +58,10 @@ Install
    $ export PATH="$HOME/.local/bin:$PATH"
    $ ljos doctor
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
+   warn	seat source	no seat rule matched; reading every seat. Set one with --seat NAME or export LJOS_SEAT=NAME
+   ok	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
 
-``ljos doctor`` then prints a ``sitting-gate`` row. With no agent runner above the shell, that row says ``not active here``.
+With no seat named, the ``seat source`` row warns that the read uses every seat. The ``sitting-gate`` row says ``not active here`` when no agent runner is above the shell.
 
 From a checkout, that script installs the programs. A release attaches the same script as ``install.sh``.
 The copy on the 0.41.1 release asked for a vissue archive that project does not publish. The 0.41.2 script fetches the archive the vissue release publishes.
@@ -88,6 +88,7 @@ First commands
    remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    $ ljos search "lexical default"
+   ranking is lexical: encoder unavailable
    shown 1 of 1.
    score: scorer order, not whether the claim is true.
    scorers: how many of them named the hit.

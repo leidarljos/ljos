@@ -358,7 +358,7 @@ fn lane_files(dir: &Path) -> Result<Vec<PathBuf>> {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             bail!(
-                "mesh: {} does not exist. Create it, or pass --from a directory of <lane>.jsonl files",
+                "mesh: {} does not exist. Create it, or pass a directory of <lane>.jsonl files",
                 dir.display()
             );
         }

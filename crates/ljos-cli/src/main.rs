@@ -43,6 +43,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum MemoryCmd {
     /// Write this seat's memories to a local file. The file is not sent.
+    ///
+    /// A directory exits 1. `ljos memory export --out FILE` writes a file.
     Export {
         /// Where the file is written. `-` writes the file to stdout.
         #[arg(long)]
@@ -52,6 +54,8 @@ enum MemoryCmd {
         machine: Option<String>,
     },
     /// Read a portable memory file into this seat's import slot.
+    ///
+    /// A missing file or a directory exits 1.
     Import {
         /// The file to read.
         path: PathBuf,
@@ -70,7 +74,7 @@ enum MemoryCmd {
     /// `new` means this import has one copy of that text. A text the pack
     /// already holds is `held`. It does not post a text the pack already
     /// holds. `--dry-run` writes nothing. Pass an import id or `--all`.
-    /// `ljos memory imports` lists the ids.
+    /// `ljos memory imports` lists the ids. A bad id exits 1.
     Integrate {
         /// One import. The id is the input digest, or a unique prefix of it.
         import_id: Option<String>,
@@ -349,6 +353,8 @@ enum MeshCmd {
         swarms: Vec<String>,
     },
     /// Import lane JSONL files from a handoff directory into a seat and write that seat's seed.
+    ///
+    /// A missing directory, a path that is not a directory, or a writer that stops the pull exits 1.
     Pull {
         /// Seat that stores the memories.
         #[arg(long)]
@@ -436,6 +442,8 @@ enum Cmd {
     /// line says `unknown-` and the host name.
     ///
     /// Example: `ljos remember "The lexical default is BM25+."`
+    ///
+    /// A writer that is not answering exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
     Remember {
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
@@ -598,6 +606,7 @@ enum Cmd {
     /// answered with nothing is still `No hits.` A busy pack ranks by words
     /// and still returns a hit that names the subject. A pack that runs out
     /// of time prints `pack busy, try again` and exits 75.
+    /// A writer that is not answering exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
     Search {
         query: Vec<String>,
         /// Most hits to print.
@@ -1051,6 +1060,8 @@ enum Cmd {
     /// A graphify `graph.json` in the repository adds a code context section.
     ///
     /// Example: `ljos recall proj-1a2b`
+    ///
+    /// A writer that is not answering exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
     Recall {
         issue: String,
         /// Print JSON. The ranking is a field, and the mode line is left off stderr.

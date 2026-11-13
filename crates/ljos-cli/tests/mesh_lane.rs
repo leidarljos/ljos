@@ -447,8 +447,8 @@ fn help_names_pull_and_push() {
     assert!(help.contains("--lane"), "{help}");
 }
 
-/// A writer that refuses the connection stops the pull in one line and
-/// leaves the lesson for the next pull.
+/// With no packset on PATH the pull stops in one line that names the
+/// install, and the lesson stays out of the seed for the next pull.
 #[test]
 fn a_down_writer_names_the_next_pull_and_a_later_pull_imports() {
     let (home, root) = world();
@@ -471,7 +471,12 @@ fn a_down_writer_names_the_next_pull_and_a_later_pull_imports() {
     assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped));
     let err = String::from_utf8_lossy(&stopped.stderr);
     assert!(err.contains("mesh: the pull stopped:"), "{err}");
-    assert!(err.contains("not answering"), "{err}");
+    assert!(
+        err.contains("packset is not on PATH")
+            && err.contains("cargo install --locked packset"),
+        "{err}"
+    );
+    assert!(!err.contains("packset ensure"), "{err}");
     assert!(
         err.contains(&format!(
             "ljos mesh pull --seat box --from {}",

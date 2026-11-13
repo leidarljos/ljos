@@ -31760,14 +31760,13 @@ pub fn doctor_seat() -> Vec<Habitat> {
                         name: "pack",
                         state: match pack_down_message(&e) {
                             Some(line) => format!("{} does not answer. {line}", client.base()),
-                            None => match bookkeep::temp_home() {
-                                Some(_) => format!(
-                                    "{} does not answer: {e}. Under a temporary HOME the writer does not \
-                                     start on its own; run `packset ensure`",
-                                    client.base()
-                                ),
-                                None => format!("{} does not answer: {e}", client.base()),
-                            },
+                            // Same line as a memory command. A temporary home
+                            // used to add a second sentence that named
+                            // `packset ensure` even when packset was missing.
+                            None if bookkeep::temp_home().is_some() => {
+                                format!("{} does not answer. {}", client.base(), pack_down_line())
+                            }
+                            None => format!("{} does not answer: {e}", client.base()),
                         },
                         ok: false,
                     },

@@ -33,9 +33,7 @@ person can open.
   =ljos receive= checks it before import.
 - *One command, one Model Context Protocol (MCP) server.* =ljos= and
   =ljos-mcp= serve the same verbs. The server lists 20 core tools by default.
-- *Many runners.* =ljos onboard --example= prints shapes for Claude Code,
-  Codex, Cursor, Grok, OpenCode, Windsurf, Antigravity, Hermes, omp and a
-  plain shell.
+- *Many runners.* =ljos onboard --example= lists them, among them Claude Code, Codex and Cursor.
 
 * Measured
 
@@ -54,7 +52,7 @@ the commands that reproduce it.
 | Duplicate lessons, 78 duplicate pairs and 186 near-topic pairs | 0 near-topic pairs merged (precision 1.00), 12 duplicates found (recall 0.15); the pack's own rewrite test: precision 0.30, recall 0.12 | [[https://github.com/leidarljos/ljos/blob/develop/measurements/lesson-duplicates.txt][lesson-duplicates.txt]] |
 | Recall by ticket tags, 6 tickets, 48 runs a build | labelled memories shown: median 0 before, 5 after; wall median 99.1 ms before, 99.5 ms after | [[https://github.com/leidarljos/ljos/blob/develop/measurements/recall-tags.txt][recall-tags.txt]] |
 | ljos scorer, LongMemEval_S session retrieval, 470 questions, BM25+ | hit@5 0.959574, recall@5 0.909113, recall@10 0.949894; 71.881 s on one CPU | [[file:explanation.org][explanation]] |
-| packset, LongMemEval_S session retrieval, 470 questions | BM25+ alone: recall@5 0.914; BM25+ fused with e5-large-v2: recall@5 0.949, hit@1 0.889 | [[https://leidarljos.github.io/packset/explanation.html][packset explanation]] |
+| packset, LongMemEval_S session retrieval, 470 questions | recorded on the packset page; this tree does not state the figures. Retrieval, not answer accuracy. | [[https://leidarljos.github.io/packset/explanation.html][packset explanation]] |
 | Tests on the 0.40.0 release commit, Linux | 2,293 passed, 0 failed, 2 ignored | [[https://github.com/leidarljos/ljos/actions/runs/42801686714][CI run 42801686714]] |
 | packset under load | 0 errors at 32 clients; 32 clients writing 6,400 claims into one workspace kept 6,382 live and 18 closed | [[https://github.com/leidarljos/packset#readme][packset README]] |
 

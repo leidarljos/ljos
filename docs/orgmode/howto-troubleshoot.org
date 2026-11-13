@@ -30,7 +30,7 @@ That installs =packset= and =packsetd=.
 With =packset= on =PATH= and nothing listening, a home that is not a temporary directory printed:
 
 #+begin_src text
-no	pack	http://127.0.0.1:8761 does not answer. no pack writer is answering. Run `packset ensure`
+no	pack	http://127.0.0.1:8761 does not answer. no pack writer is answering on 127.0.0.1:8761. Run `packset ensure`
 #+end_src
 
 Under a temporary home the writer does not start on its own.
