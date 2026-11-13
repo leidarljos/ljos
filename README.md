@@ -75,7 +75,7 @@ It calls no model, and every store is a file a person can open.
 `ljos onboard` knows ten runners, among them Claude Code, Codex and Cursor.
 
 
-- 8,045 tokens for the 20 core Model Context Protocol (MCP) tools, against 17,999 for all 52 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
+- 8,057 tokens for the 20 core Model Context Protocol (MCP) tools, against 18,011 for all 52 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
 - 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
 - The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
 - packset, the memory writer, on LongMemEval_S session retrieval over 470 questions: recall@5 0.914 with BM25+ alone, 0.949 with BM25+ fused with e5-large-v2 ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). This scores retrieval, not answer accuracy.
@@ -175,16 +175,14 @@ allow	warn	git-force-push	a force push rewrites a published branch
 
 A push onto `main` or `develop` warns under `sitting-gate` until the ticket of the sitting has a settled consensus. When `vissue.toml` lists one active seat, that seat's own vote is enough for the push. With no seat list, the push waits for two seats.
 
-## Reference
-
-### The MCP server
+## The MCP server
 
 `ljos-mcp` serves the same verbs over stdio. By default it lists twenty core
 tools, guard and memory first: `rule`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. `measurements/mcp-size.txt` records
-8,045 tokens for the core set against 17,999 for all fifty-two.
+8,057 tokens for the core set against 18,011 for all fifty-two.
 `LJOS_MCP_TOOLS=all` lists every tool.
 
 ```json
@@ -195,7 +193,7 @@ The official MCP Registry lists the server from the crates.io page of `ljos`, an
 
 - mcp-name: io.github.leidarljos/ljos
 
-### Documentation
+## Documentation
 
 | Page | Answer |
 |---|---|
