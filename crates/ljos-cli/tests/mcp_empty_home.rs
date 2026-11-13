@@ -221,20 +221,18 @@ fn tools_list_answers_with_an_empty_home_and_no_tracker() {
 /// name the next step. The client's name is not the seat.
 #[test]
 fn a_missing_pack_names_the_next_step_and_the_client_is_not_the_seat() {
-    let home = std::path::PathBuf::from("/home/ubuntu/ljos-mcp-fresh");
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
+    let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HOME", &home)
+        .env("HOME", home.path())
         .env("USER", "walk")
         .env("LOGNAME", "walk")
         .env_remove("LJOS_SEAT")
         .env_remove("VISSUE_AGENT")
         .env_remove("PACKSET_URL")
         .env_remove("PACKSET_TOKEN")
-        .current_dir(&home)
+        .current_dir(home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -322,9 +320,7 @@ fn a_missing_pack_names_the_next_step_and_the_client_is_not_the_seat() {
 fn a_missing_pack_token_names_the_next_step_in_the_search_result() {
     use std::io::Read;
     use std::net::TcpListener;
-    let home = std::path::PathBuf::from("/home/ubuntu/ljos-mcp-token");
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
+    let home = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -358,13 +354,13 @@ fn a_missing_pack_token_names_the_next_step_in_the_search_result() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HOME", &home)
+        .env("HOME", home.path())
         .env("USER", "walk")
         .env("PACKSET_URL", format!("http://{addr}"))
         .env("PACKSET_WORKSPACE", "seat")
-        .env("PACKSET_HOME", &home)
+        .env("PACKSET_HOME", home.path())
         .env_remove("PACKSET_TOKEN")
-        .current_dir(&home)
+        .current_dir(home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -417,21 +413,20 @@ fn a_missing_pack_token_names_the_next_step_in_the_search_result() {
 /// The which crate's "cannot find binary path" is not the next step.
 #[test]
 fn a_missing_habitat_binary_names_doctor() {
-    let home = std::path::PathBuf::from("/home/ubuntu/ljos-mcp-bin");
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".config")).unwrap();
     std::fs::write(
-        home.join(".config/gitconfig"),
+        home.path().join(".config/gitconfig"),
         "[user]\n\tname = Walk User\n\temail = walk@example.com\n",
     )
     .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HOME", &home)
-        .env("GIT_CONFIG_GLOBAL", home.join(".config/gitconfig"))
+        .env("HOME", home.path())
+        .env("GIT_CONFIG_GLOBAL", home.path().join(".config/gitconfig"))
         .env("LJOS_SEAT", "alice")
-        .current_dir(&home)
+        .current_dir(home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
