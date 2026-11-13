@@ -5161,6 +5161,10 @@ fn run_command() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&doc)?);
                 return Ok(());
             }
+            print!(
+                "{}",
+                ljos_cli::consensus_verdict(&gate_json, &protected_json)
+            );
             print!("{gate}");
             print!("{protected}");
             print!("{provenance}");

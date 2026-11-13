@@ -257,6 +257,7 @@ claimed session bob, folded into alice (same shell)
 bob cast by bob, parent alice
 tracker git: committed chore(issues): demo-2f5j ballot cast by bob; no remote, kept local
 $ LJOS_SEAT=alice ljos consensus demo-2f5j --no-file
+verdict: the ballots pick keep. They do not clear a push onto `develop` or `main`.
 push cite: demo-2f5j decides keep for a push by alice; counted bob for keep
 protected push: demo-2f5j does not clear a push onto `develop` or `main`: the sitting has no settled consensus: 1 of the 2 seats a protected push needs voted on demo-2f5j; counted bob for keep
 provenance:
@@ -272,7 +273,7 @@ polarization 0.000, disagreement 0.000
 influence: bob 1.000
 #+end_src
 
-The first two lines of =ljos consensus= are the push checks. =push cite= is whether the ballots pick an option. =protected push= is whether that option clears a push onto =develop= or =main=.
+The first line is the verdict: which option the ballots pick, and whether that clears a push onto =develop= or =main=. =push cite= and =protected push= are the same checks in full.
 From one shell the two ballots are one voice, so they fold and the protected-branch check still wants a second seat. The lines under =advice= are the weighted settle. They do not clear that push. =influence= names the weight of that one voice.
 A signature line and =tracker git:= follow each vote. A ballot is its own voice when the cast has no shell, no agent runner and no earlier row that shares a session, a parent or the root session of one runner.
 The how-to [[file:howto-vote.org][Vote and settle a decision]] is that case, and =ljos learn=.

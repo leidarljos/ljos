@@ -46250,6 +46250,42 @@ pub fn protected_push_reading(issue: &str, cwd: Option<&std::path::Path>) -> (St
     (words, json)
 }
 
+/// The first line of `ljos consensus`: which option the ballots pick, and
+/// whether that clears a push onto a protected branch. The count and the
+/// weighted settle stay on the lines under it. `--json` does not use this.
+#[must_use]
+pub fn consensus_verdict(gate: &Value, protected: &Value) -> String {
+    let cite = gate.get("push_cite").unwrap_or(gate);
+    let stands = cite.get("stands").and_then(Value::as_bool).unwrap_or(false);
+    let choice = cite.get("choice").and_then(Value::as_str).unwrap_or("");
+    let branches: Vec<String> = protected
+        .get("branches")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .filter(|rows: &Vec<String>| !rows.is_empty())
+        .unwrap_or_else(|| vec!["develop".into(), "main".into()]);
+    let named = crate::sitting_gate::quoted_list(&branches);
+    if !stands || choice.is_empty() {
+        return format!(
+            "verdict: the ballots do not pick an option yet, so run `ljos vote ISSUE --for OPTION`.\n"
+        );
+    }
+    if protected
+        .get("stands")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        format!("verdict: the ballots pick {choice}, and that clears a push onto {named}.\n")
+    } else {
+        format!("verdict: the ballots pick {choice}. They do not clear a push onto {named}.\n")
+    }
+}
+
 /// [`push_cite_reading`] with the signature check already made: a refusal
 /// there is the gate's answer.
 #[must_use]

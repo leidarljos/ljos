@@ -164,6 +164,15 @@ fn the_reading_says_whether_a_protected_push_clears() {
         ),
         "{text}"
     );
+    let first = text.lines().next().unwrap_or("");
+    assert_eq!(
+        first,
+        "verdict: the ballots pick rrf. They do not clear a push onto `develop` or `main`."
+    );
+    assert!(
+        text.find("verdict:").unwrap() < text.find("settle").unwrap_or(usize::MAX),
+        "the verdict leads, and the settle stays under it:\n{text}"
+    );
 }
 
 #[test]
