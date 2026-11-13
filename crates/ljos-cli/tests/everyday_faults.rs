@@ -115,7 +115,7 @@ fn a_mistyped_command_names_the_closest_and_exits_2() {
     let line = one_line(&out.stderr);
     assert_eq!(
         line,
-        "ljos: no command serach. The closest is search. Run `ljos search fix the kiln`."
+        "ljos: no command serach, and the closest is search, so run `ljos search fix the kiln`."
     );
     assert!(out.stdout.is_empty(), "{said}");
 }
@@ -129,7 +129,7 @@ fn a_mistyped_flag_names_the_closest_and_exits_2() {
     let line = one_line(&out.stderr);
     assert_eq!(
         line,
-        "ljos: search has no flag --limt. The closest is --limit. Run `ljos search --limit 5 kiln`."
+        "ljos: search has no flag --limt, and the closest is --limit, so run `ljos search --limit 5 kiln`."
     );
 }
 
@@ -141,7 +141,7 @@ fn an_unknown_ticket_names_ready_and_exits_1() {
     let said = text(&out);
     assert_eq!(out.status.code(), Some(1), "{said}");
     let line = one_line(&out.stderr);
-    assert_eq!(line, "issue demo-none not found, so run `ljos ready`");
+    assert_eq!(line, "issue demo-none not found, so run `ljos ready`.");
     assert!(out.stdout.is_empty(), "{said}");
 }
 
@@ -155,7 +155,7 @@ fn an_ambiguous_ticket_names_one_show_and_exits_1() {
     let line = one_line(&out.stderr);
     assert_eq!(
         line,
-        "issue demo- matches demo-kiln and demo-tile, so run `ljos show demo-kiln`"
+        "issue demo- matches demo-kiln and demo-tile, so run `ljos show demo-kiln`."
     );
 }
 
@@ -186,7 +186,7 @@ fn a_ticket_in_two_trackers_names_ready_and_exits_1() {
     let line = one_line(&out.stderr);
     assert_eq!(
         line,
-        "issue demo-kiln is in more than one tracker, so run `ljos ready` with VISSUE_ROOT set to one of them"
+        "issue demo-kiln is in more than one tracker and VISSUE_ROOT must name one of them, so run `ljos ready`."
     );
 }
 
@@ -216,7 +216,7 @@ fn a_very_long_remember_names_the_command_and_exits_2() {
     assert_eq!(
         line,
         format!(
-            "remember: the text is {chars} characters, past 1000, so run `ljos remember` with one or two sentences."
+            "remember: the text is {chars} characters, past 1000, and it needs one or two sentences, so run `ljos remember`."
         )
     );
 }
@@ -324,11 +324,11 @@ fn a_write_with_no_seat_names_the_export() {
     let said = text(&out);
     assert!(
         String::from_utf8_lossy(&out.stderr)
-            .contains("ljos: no seat was named, so this write uses unknown-"),
+            .contains("ljos: no seat was named and this write uses unknown-"),
         "{said}"
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("Run `export LJOS_SEAT=NAME`."),
+        String::from_utf8_lossy(&out.stderr).contains("so run `export LJOS_SEAT=NAME`."),
         "{said}"
     );
 }
@@ -351,7 +351,7 @@ fn a_missing_seat_name_names_seat_add_and_exits_2() {
     );
     assert!(
         line.contains(
-            ", which lists alice, and nothing was written, so run `ljos seat add stranger`"
+            ", which lists alice, and nothing was written, so run `ljos seat add stranger`."
         ),
         "{line}"
     );
@@ -370,7 +370,7 @@ fn two_seats_on_one_ticket_name_send() {
     let said = ljos_cli::held_by_another_message("demo-aaaa", "brio", &hold, "still running");
     assert_eq!(
         said,
-        "claim: demo-aaaa is held by another (acme, seat acme, still running, since 2026-01-01T00:00:00.000Z), not by brio, so run `ljos send acme TEXT`"
+        "claim: demo-aaaa is held by another (acme, seat acme, still running, since 2026-01-01T00:00:00.000Z), not by brio, so run `ljos send acme TEXT`."
     );
     assert!(!said.contains('\n'));
 }
@@ -395,7 +395,7 @@ fn a_half_written_user_rules_file_names_prefer() {
         "{said}"
     );
     assert!(
-        joined.contains("so run `ljos prefer --user --why REASON TEXT` to write it again"),
+        joined.contains("so run `ljos prefer --user --why REASON TEXT`."),
         "{said}"
     );
 }
@@ -416,8 +416,5 @@ fn a_half_written_note_queue_names_finish() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(joined.contains("is damaged:"), "{said}");
-    assert!(
-        joined.contains("so run `ljos finish` to move the bad rows aside"),
-        "{said}"
-    );
+    assert!(joined.contains("so run `ljos finish`."), "{said}");
 }

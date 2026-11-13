@@ -114,7 +114,7 @@ fn doctor_warns_when_no_seat_was_named_and_names_the_export() {
     assert_eq!(code, 1, "{text}");
     assert!(
         text.contains(
-            "warn\tseat source\tno seat rule matched; reading every seat. Set one with --seat NAME or export LJOS_SEAT=NAME\n"
+            "warn\tseat source\tno seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.\n"
         ),
         "{text}"
     );
@@ -225,11 +225,14 @@ fn doctor_names_the_install_when_a_habitat_binary_is_missing() {
     );
     assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(
-        text.contains("no\tdeedar\tnot on PATH; cargo install --locked deedar-cli\n"),
+        text.contains("no\tdeedar\t")
+            && text.contains("so run `cargo install --locked deedar-cli`."),
         "{text}"
     );
     assert!(
-        text.contains("info\tdeed store\tdeedar not on PATH; cargo install --locked deedar-cli\n"),
+        text.contains(
+            "info\tdeed store\tdeedar not on PATH, so run `cargo install --locked deedar-cli`.\n"
+        ),
         "{text}"
     );
 }
@@ -280,7 +283,7 @@ fn doctor_names_onboard_when_no_tracker_exists() {
     assert_eq!(code, 1, "{text}");
     assert!(
         text.contains(
-            "info\ttracker\tvissue failed (exit 1): not inside a tracker. Run `ljos onboard` to create the tracker\n"
+            "info\ttracker\tvissue failed (exit 1): not inside a tracker, so run `ljos onboard`.\n"
         ),
         "{text}"
     );

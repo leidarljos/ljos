@@ -125,7 +125,7 @@ A second 503, a 408, or a writer that is not answering stops the pull and exits 
 The line is:
 
 ```
-Error: mesh: the pull stopped: CAUSE. Lessons already stored stay in the seed. Run `ljos mesh pull --seat SEAT --from DIR` for the rows still missing
+Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the seed with rows still missing, so run `ljos mesh pull --seat SEAT --from DIR`.
 ```
 A 408 uses `the deadline passed before this request ran` as `CAUSE`.
 A second 503 uses the writer's line, or `packsetd busy, retrying later`.

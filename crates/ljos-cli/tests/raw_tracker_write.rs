@@ -87,12 +87,12 @@ fn a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
         assert!(out.status.success(), "{line} was refused:\n{said}");
         assert!(said.contains("\nwarning: "), "{line}:\n{said}");
         assert!(
-            said.contains(&format!("Run `{instead}")),
+            said.contains(&format!("so run `{instead}")),
             "{line} did not name {instead}:\n{said}"
         );
         if instead.starts_with("ljos finish") {
             assert!(
-                said.contains(&format!("Run `{instead}` instead.")),
+                said.contains(&format!("so run `{instead}`.")),
                 "{line} still offers a close:\n{said}"
             );
             assert!(!said.contains("--close"), "{line}:\n{said}");
@@ -147,10 +147,7 @@ fn the_runner_hook_warns_on_a_raw_tracker_write() {
     assert!(out.status.success(), "{said}");
     assert!(!said.contains("permissionDecision"), "{said}");
     assert!(said.contains("\"additionalContext\":\"warning: "), "{said}");
-    assert!(
-        said.contains("Run `ljos finish ljos-ab12` instead."),
-        "{said}"
-    );
+    assert!(said.contains("so run `ljos finish ljos-ab12`."), "{said}");
     assert!(!said.contains("--close"), "{said}");
 }
 

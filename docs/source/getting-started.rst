@@ -80,7 +80,7 @@ The tracker commits each change, so git needs an identity:
    $ git config --global user.email "you@example.com"
    $ ljos doctor
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
-   warn	seat source	no seat rule matched; reading every seat. Set one with --seat NAME or export LJOS_SEAT=NAME
+   warn	seat source	no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
    info	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
    ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
 
@@ -117,7 +117,7 @@ A lesson and a search
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
-   ljos: no seat was named, so this write uses unknown-cursor. Run `export LJOS_SEAT=NAME`.
+   ljos: no seat was named and this write uses unknown-cursor, so run `export LJOS_SEAT=NAME`.
    remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    standing: the hook shows it from the next prompt it bears on

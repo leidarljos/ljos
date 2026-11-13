@@ -3265,8 +3265,8 @@ impl LjosServer {
                 was right, `ljos_learn` on {issue} with that outcome, and the personas that \
                 were wrong lose weight on this topic.\n\n\
              Equal weights with nobody anchored repeat the count. Anchors still hold each \
-             voter to its ballot. Run `ljos_calibrate` on the project once it \
-             holds a few voted issues, so the rows carry what the personas' history says."
+             voter to its ballot once the project holds a few voted issues, so the rows \
+             carry what the personas' history says, so run `ljos_calibrate`."
         )))
     }
 
@@ -3805,8 +3805,8 @@ impl ServerHandler for LjosServer {
             return Ok(attach_next(
                 &missing,
                 CallToolResult::error(vec![ContentBlock::text(format!(
-                    "{missing} is not in this server's tool set. Run `ljos {verb}` in the shell, or set \
-                     LJOS_MCP_TOOLS=all in the server's environment to list every tool"
+                    "{missing} is not in this server's tool set, and LJOS_MCP_TOOLS=all lists every tool, \
+                     so run `ljos {verb}`."
                 ))])
                 .into(),
             ));

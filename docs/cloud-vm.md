@@ -136,7 +136,7 @@ A 503 from the pack is retried once after `Retry-After`, and a second 503, a 408
 The line is:
 
 ```
-Error: mesh: the pull stopped: CAUSE. Lessons already stored stay in the seed. Run `ljos mesh pull --seat SEAT --from DIR` for the rows still missing
+Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the seed with rows still missing, so run `ljos mesh pull --seat SEAT --from DIR`.
 ```
 [mesh.md](mesh.md) names the seed path, the lock, and the `lane:` tag.
 

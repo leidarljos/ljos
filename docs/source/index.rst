@@ -58,7 +58,7 @@ Install
    $ export PATH="$HOME/.local/bin:$PATH"
    $ ljos doctor
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
-   warn	seat source	no seat rule matched; reading every seat. Set one with --seat NAME or export LJOS_SEAT=NAME
+   warn	seat source	no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
    info	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
    ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
 

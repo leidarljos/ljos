@@ -459,7 +459,7 @@ pub fn offboard(runner: Option<&str>, dry: bool) -> Result<Vec<Step>> {
 
 fn edited_after(path: &Path) -> String {
     format!(
-        "left {}; you edited it after onboarding, so the ljos entry was kept. Edit {} and delete the ljos entry, then run `ljos offboard`",
+        "left {}; you edited it after onboarding and the ljos entry was kept, and you delete the ljos entry in {}, so run `ljos offboard`.",
         path.display(),
         path.display()
     )

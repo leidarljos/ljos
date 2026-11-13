@@ -750,7 +750,7 @@ fn pull_stopped(seat: &str, from: &Path, err: anyhow::Error) -> anyhow::Error {
         crate::pack_down_line()
     };
     anyhow::anyhow!(
-        "mesh: the pull stopped: {cause}. Lessons already stored stay in the seed. Run `ljos mesh pull --seat {seat} --from {}` for the rows still missing",
+        "mesh: the pull stopped: {cause}, and lessons already stored stay in the seed with rows still missing, so run `ljos mesh pull --seat {seat} --from {}`.",
         from.display()
     )
 }

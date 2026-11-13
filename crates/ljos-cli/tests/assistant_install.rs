@@ -163,9 +163,9 @@ fn onboard_with_no_assistant_names_the_next_command() {
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(text.contains("found no coding tool"), "{text}");
-    assert!(text.contains("`ljos onboard`"), "{text}");
-    assert!(text.contains("`ljos onboard --example`"), "{text}");
-    assert!(text.contains("`ljos onboard --harness NAME`"), "{text}");
+    assert!(text.contains("so run `ljos onboard`."), "{text}");
+    assert!(text.contains("--example lists the names"), "{text}");
+    assert!(text.contains("--harness NAME registers one"), "{text}");
 }
 
 /// Claude's directory is present and the `claude` command is not.
@@ -181,7 +181,7 @@ fn a_missing_claude_command_names_the_install() {
     assert!(!onboard.status.success(), "{onboard_text}");
     assert!(
         onboard_text.contains(
-            "no\tclaude mcp\tclaude is not on PATH. Install it, then run `ljos onboard --harness claude`"
+            "no\tclaude mcp\tclaude is not on PATH and must be installed, so run `ljos onboard --harness claude`."
         ),
         "{onboard_text}"
     );
@@ -189,7 +189,7 @@ fn a_missing_claude_command_names_the_install() {
     let doctor_text = said(&doctor);
     assert!(
         doctor_text.contains(
-            "warn\trunner mcp\tclaude: not registered; claude is not on PATH. Install it, then run `ljos onboard --harness claude`"
+            "warn\trunner mcp\tclaude: not registered, and claude is not on PATH and must be installed, so run `ljos onboard --harness claude`."
         ),
         "{doctor_text}"
     );
@@ -233,7 +233,7 @@ fn detects_claude_cursor_and_codex_from_directories() {
     assert!(text.contains("found claude, codex, cursor"), "{text}");
     assert!(
         text.contains(
-            "claude is not on PATH. Install it, then run `ljos onboard --harness claude`"
+            "claude is not on PATH and must be installed, so run `ljos onboard --harness claude`."
         ),
         "{text}"
     );

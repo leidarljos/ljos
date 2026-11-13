@@ -171,7 +171,7 @@ fn clean_seat(name: &str) -> Option<String> {
 fn read_layer(path: &Path) -> Result<Option<toml::map::Map<String, toml::Value>>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| {
         format!(
-            "`{}` cannot be read ({e}). Fix the file, then retry.",
+            "`{}` cannot be read ({e}), so run `ljos doctor`.",
             path.display()
         )
     })?;
@@ -182,14 +182,14 @@ fn read_layer(path: &Path) -> Result<Option<toml::map::Map<String, toml::Value>>
         let (line, column) = crate::config_diag::toml_line_column(&e);
         let message = e.message().lines().next().unwrap_or("invalid TOML");
         format!(
-            "`{}` does not parse at line {line}, column {column} ({message}), so run `ljos doctor` once the file is valid TOML.",
+            "`{}` does not parse at line {line}, column {column} ({message}) and must be valid TOML, so run `ljos doctor`.",
             path.display()
         )
     })?;
     match value {
         toml::Value::Table(root) => Ok(Some(root)),
         _ => Err(format!(
-            "`{}` is not a table. Fix the file, then retry.",
+            "`{}` is not a table, so run `ljos doctor`.",
             path.display()
         )),
     }

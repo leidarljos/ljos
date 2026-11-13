@@ -948,13 +948,13 @@ pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
     if shallow_repo(root) == Some(false) && missing_objects(root) == Some(true) {
         return Err(format!(
             "{HISTORY_INCOMPLETE}: this checkout is not shallow, but objects its history names are missing, \
-             as a partial clone leaves them. Run `git fetch --refetch --no-filter` in the tracker, \
-             or clone the tracker again without --filter, then retry"
+             as a partial clone leaves them, and a fresh clone omits --filter, so run \
+             `git fetch --refetch --no-filter`."
         ));
     }
     Err(format!(
-        "{HISTORY_INCOMPLETE}: this checkout does not hold the commits a pin's order is read from. \
-         Add the tracker remote if it has none and run `git fetch --unshallow` in the tracker, then retry"
+        "{HISTORY_INCOMPLETE}: this checkout does not hold the commits a pin's order is read from, \
+         and the tracker remote must exist, so run `git fetch --unshallow`."
     ))
 }
 

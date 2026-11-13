@@ -1047,7 +1047,7 @@ pub fn status_text() -> (String, bool) {
     let key_env = load().map(|c| c.key_env).unwrap_or_default();
     let Ok(tailscale) = which::which("tailscale") else {
         return (
-            "mesh status: tailscale is not on PATH; ljos mesh up downloads the pinned build".into(),
+            "mesh status: tailscale is not on PATH and ljos mesh up downloads the pinned build, so run `ljos mesh up`.".into(),
             true,
         );
     };

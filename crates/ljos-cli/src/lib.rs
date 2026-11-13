@@ -1415,7 +1415,7 @@ pub(crate) fn server_path() -> Result<PathBuf> {
         .filter(|p| p.is_file());
     match beside {
         Some(p) => Ok(p),
-        None => which::which("ljos-mcp").context("ljos-mcp not on PATH; install it beside ljos"),
+        None => which::which("ljos-mcp").context("ljos-mcp not on PATH, so run `ljos upgrade`."),
     }
 }
 
@@ -4354,7 +4354,7 @@ fn seat_disagreement_line() -> Option<String> {
         other
     };
     Some(format!(
-        "ljos: LJOS_SEAT is {kept} and this conversation's seat is {other}; writing as {kept}\n"
+        "ljos: LJOS_SEAT is {kept} and this conversation's seat is {other}, writing as {kept}, so run `export LJOS_SEAT=NAME`.\n"
     ))
 }
 
@@ -4981,7 +4981,7 @@ fn notice_shared_harness(family: &str) {
         return;
     }
     eprintln!(
-        "ljos: this session has no id, so it shares the seat {family}. Run `export LJOS_SEAT=NAME`."
+        "ljos: this session has no id and it shares the seat {family}, so run `export LJOS_SEAT=NAME`."
     );
 }
 
@@ -5217,8 +5217,7 @@ pub fn write_assignee(
         return Err(policy_label::labelled(
             "assignee-mismatch",
             format!(
-                "{verb}: {assignee} is not this seat, {}; a write is recorded as the seat that makes it. \
-             Drop --assignee, or run it as that seat (`export LJOS_SEAT={slug}`); nothing was written",
+                "{verb}: {assignee} is not this seat, {}, and a write is recorded as the seat that makes it and nothing was written, and --assignee can be dropped, so run `export LJOS_SEAT={slug}`.",
                 checked.seat
             ),
         ));
@@ -5329,7 +5328,7 @@ pub fn registered_seat(seat: &str) -> Result<()> {
         seat_roster::SeatList::Absent => Ok(()),
         seat_roster::SeatList::Broken { why } => Err(policy_label::labelled(
             "seat-unlisted",
-            format!("{why}, so no seat may write. Nothing was written"),
+            format!("{why}, and no seat may write and nothing was written, so run `ljos doctor`."),
         )),
         seat_roster::SeatList::Listed { path, seats } => {
             if seats.contains(&slug) || seats.iter().any(|listed| same_memory_family(listed, &slug))
@@ -5340,7 +5339,7 @@ pub fn registered_seat(seat: &str) -> Result<()> {
                 return Err(policy_label::labelled(
                     "seat-unlisted",
                     format!(
-                        "{} lists no seat, so no seat may write. Nothing was written",
+                        "{} lists no seat and nothing was written, so run `ljos seat add NAME`.",
                         path.display()
                     ),
                 ));
@@ -5348,7 +5347,7 @@ pub fn registered_seat(seat: &str) -> Result<()> {
             Err(policy_label::labelled(
                 "seat-unlisted",
                 format!(
-                    "no seat named {slug} in {}, which lists {}, and nothing was written, so run `ljos seat add {slug}`",
+                    "no seat named {slug} in {}, which lists {}, and nothing was written, so run `ljos seat add {slug}`.",
                     path.display(),
                     seats.into_iter().collect::<Vec<_>>().join(", ")
                 ),
@@ -5481,7 +5480,7 @@ pub fn seat_source_row(who: &Seat) -> Habitat {
         return Habitat {
             name: "seat source",
             state: format!(
-                "{}. Set one with --seat NAME or export LJOS_SEAT=NAME",
+                "{}, so run `export LJOS_SEAT=NAME`.",
                 who.source.trim_end_matches('.')
             ),
             ok: false,
@@ -6116,7 +6115,7 @@ pub fn unseated_subagent() -> bool {
 
 /// What a seat-bound command says to a subagent that has no seat.
 pub const SUBAGENT_NO_SEAT: &str =
-    "this subagent has no seat of its own; export LJOS_SEAT=<the parent's seat> and run it again";
+    "this subagent has no seat of its own, so run `export LJOS_SEAT=<the parent's seat>`.";
 
 /// A subagent conversation id. Every one starts `sand-sub`, so its first
 /// eight characters named every subagent `example-host-sand-sub`.
@@ -6663,8 +6662,9 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
         }
         None => Step {
             what,
-            detail: "no register or config in harnesses.toml; paste `ljos onboard --harness json`"
-                .into(),
+            detail:
+                "no register or config in harnesses.toml, so run `ljos onboard --harness json`."
+                    .into(),
             ok: false,
         },
         Some(false) if !h.register.is_empty() => {
@@ -6674,7 +6674,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
                 return Step {
                     what,
                     detail: format!(
-                        "{} is not on PATH. Install it, then run `ljos onboard --harness {}`",
+                        "{} is not on PATH and must be installed, so run `ljos onboard --harness {}`.",
                         argv[0], h.name
                     ),
                     ok: false,
@@ -6950,9 +6950,9 @@ fn onboard_detected_with_lookup(
         // first `ljos doctor` says the tracker works before one exists.
         let mut steps = vec![Step {
             what: "runners".into(),
-            detail: "found no coding tool on this machine. Install a coding agent, then run \
-                     `ljos onboard`. `ljos onboard --example` lists the names. \
-                     `ljos onboard --harness NAME` registers one."
+            detail: "found no coding tool on this machine, and a coding agent must be installed, \
+                     and --example lists the names and --harness NAME registers one, so run \
+                     `ljos onboard`."
                 .into(),
             ok: true,
         }];
@@ -7176,7 +7176,7 @@ fn seat_lines(name: &str) -> String {
         "# An exported LJOS_SEAT is the seat. A conversation id does not name one.\n\
          # A subagent (sand-sub...) gets no seat: export the parent's LJOS_SEAT.\n\
          case \"${{CURSOR_CONVERSATION_ID:-}}\" in\n\
-         \tsand-sub*) [ -n \"${{LJOS_SEAT:-}}\" ] || echo \"ljos: a subagent has no seat of its own; export LJOS_SEAT=<the parent's seat>\" >&2 ;;\n\
+         \tsand-sub*) [ -n \"${{LJOS_SEAT:-}}\" ] || echo \"ljos: a subagent has no seat of its own, so run \\`export LJOS_SEAT=<the parent's seat>\\`.\" >&2 ;;\n\
          esac\n\
          {}",
         keep_seat_assignment(name)
@@ -7443,7 +7443,7 @@ if command -v ljos-policyd >/dev/null 2>&1; then
               [ -n "$text" ] && why="$why: $text"
               ;;
           esac
-          printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call, so it is allowed. Run \`ljos doctor\`." >&2
+          printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call and it is allowed, so run \`ljos doctor\`." >&2
           exec "$real" "$@" ;;
       esac
       # An older daemon gave no warning with the rule. These are the
@@ -7750,8 +7750,8 @@ fn onboard_in_at_inner(
     let from_file = all.harness.into_iter().find(|h| h.name == harness);
     let Some(mut h) = from_file.or(from_shipped) else {
         bail!(
-            "onboard: no runner {harness:?} in {}; it names {}. `ljos onboard --example` \
-             prints the file's shape, and `--harness json` prints the entry to paste anywhere.",
+            "onboard: no runner {harness:?} in {}, which names {}, and --harness json prints \
+             the entry to paste anywhere, so run `ljos onboard --example`.",
             file.display(),
             if names.is_empty() {
                 "none".to_string()
@@ -13172,7 +13172,7 @@ pub fn seat_stop_reason(input: &str, stop_active: bool, subagent: bool) -> Optio
         return None;
     }
     Some(format!(
-        "This conversation holds no issue, and this turn used tools without touching the seat. \
+        "This conversation holds no issue, and this turn used tools without touching the seat, \
          {OPEN_AN_ISSUE}"
     ))
 }
@@ -13272,8 +13272,8 @@ pub fn tracks_work() -> bool {
 
 /// What the hooks tell a conversation that holds no issue.
 const OPEN_AN_ISSUE: &str =
-    "Work goes on an issue: `ljos file \"TITLE\" --top -p PROJECT` prints an id, \
-     then `ljos sitting ID` opens it.";
+    "and ljos sitting opens the issue once the id prints, and subagents record on it \
+     with ljos vote or ljos note, so run `ljos file \"TITLE\" --top -p PROJECT`.";
 
 /// Whether a hook call's cue is the seat's own verbs or tools.
 #[must_use]
@@ -13329,15 +13329,11 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
     // was said.
     Some(match held {
         Some(issue) => format!(
-            "{count} tool calls on {issue} since the seat last heard from this conversation. \
-             Record what the work has shown: progress is `ljos note {issue} \"...\"`, a lesson \
-             of your own is `ljos note {issue} \"lesson: ...\"`, an artifact is `ljos deed {issue} \
-             --add ACCESSION`; the work closes with `ljos finish {issue} --lesson \"...\"`."
+            "{count} tool calls on {issue} since the seat last heard from this conversation, \
+             and progress, a lesson, an artifact and the close are recorded on it, so run \
+             `ljos note {issue} \"...\"`."
         ),
-        None => format!(
-            "This conversation holds no issue. {OPEN_AN_ISSUE} Start subagents that record on \
-             the issue with `ljos vote ID` or `ljos note ID`."
-        ),
+        None => format!("This conversation holds no issue, {OPEN_AN_ISSUE}"),
     })
 }
 
@@ -14381,8 +14377,8 @@ pub fn encoder_lexical(status: &Value) -> bool {
 
 pub(crate) fn encoder_degraded_state() -> String {
     format!(
-        "{ENCODER_DEGRADED}: packset-embed is not running, so ranking is lexical-only. \
-         Run `{ENCODER_RESTART_COMMAND}`"
+        "{ENCODER_DEGRADED}: packset-embed is not running and ranking is lexical-only, \
+         so run `{ENCODER_RESTART_COMMAND}`."
     )
 }
 
@@ -14974,7 +14970,7 @@ static SEARCH_AUTH_SAID: std::sync::Mutex<Vec<(String, String)>> =
 /// The line stderr gets when search answered `code`.
 fn search_auth_warning(code: u16) -> String {
     format!(
-        "ljos: the writer answered {code} on /v1/search, so recall is using stored memories. Run `ljos doctor`."
+        "ljos: the writer answered {code} on /v1/search and recall is using stored memories, so run `ljos doctor`."
     )
 }
 
@@ -16672,7 +16668,7 @@ fn harness_rows() -> Vec<Habitat> {
         return vec![Habitat {
             name: "runners",
             state: format!(
-                "none named in {}; `ljos onboard --example` prints the shape",
+                "none named in {}, so run `ljos onboard --example`.",
                 path.display()
             ),
             ok: false,
@@ -16715,7 +16711,7 @@ fn harness_rows() -> Vec<Habitat> {
                     (false, _) if h.register.first().is_some_and(|bin| !on_path(bin)) => {
                         let bin = h.register.first().map(String::as_str).unwrap_or("the command");
                         format!(
-                            "{}: not registered; {bin} is not on PATH. Install it, then run `ljos onboard --harness {}`",
+                            "{}: not registered, and {bin} is not on PATH and must be installed, so run `ljos onboard --harness {}`.",
                             h.name, h.name
                         )
                     }
@@ -16907,7 +16903,7 @@ fn pack_step(dry: bool) -> Step {
     if !on_path("packset") {
         return Step {
             what,
-            detail: "no writer answers and packset is not on PATH".into(),
+            detail: "no writer answers and packset is not on PATH, so run `cargo install --locked packset`.".into(),
             ok: false,
         };
     }
@@ -17327,7 +17323,7 @@ fn host_accept_detail(said: std::result::Result<String, String>) -> (String, boo
             true,
         ),
         Err(e) if e.contains("not on PATH") => (
-            "deedar is not on PATH; install it before the first deed".into(),
+            "deedar is not on PATH, so run `cargo install --locked deedar-cli`.".into(),
             false,
         ),
         // A deedar older than `host accept` answers with its status or does
@@ -17634,12 +17630,11 @@ pub const POLICY_TCB: &str =
 
 /// The line above the memories a prompt or a command recalls. The hook, the
 /// runners and `ljos policy` all print it.
-pub const RECALL_HEADER: &str =
-    "Remembered, shown 1 of 1, oldest first. `ljos search` lists the pack.";
+pub const RECALL_HEADER: &str = "Remembered, shown 1 of 1, oldest first, so run `ljos search`.";
 
 /// The line above the memories a failed tool call recalls.
 pub const FAILURE_RECALL_HEADER: &str =
-    "Remembered about this failure, shown 1 of 1. `ljos search` lists the pack.";
+    "Remembered about this failure, shown 1 of 1, so run `ljos search`.";
 
 /// What a prompt hook's JSON answer hands the model, for a person at a
 /// terminal: `hookSpecificOutput.additionalContext`, or the answer as it
@@ -18317,7 +18312,7 @@ fn render_down(facts: &DownFacts) -> String {
         return "PACKSET_URL=off: this seat has no pack on purpose".to_string();
     }
     if !facts.packset {
-        return "no pack writer is answering, and packset is not on PATH. cargo install --locked packset".to_string();
+        return "no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.".to_string();
     }
     if let Some(line) = foreign_home(facts) {
         return line;
@@ -18327,19 +18322,19 @@ fn render_down(facts: &DownFacts) -> String {
     }
     if facts.url_set {
         return format!(
-            "the pack writer at {} is not answering. Run `packset ensure`",
+            "the pack writer at {} is not answering, so run `packset ensure`.",
             facts.asked
         );
     }
     if let Some(home) = &facts.temp {
         return format!(
-            "the memory writer does not start on its own under a temporary HOME ({}); \
-             run `packset ensure` to start it",
+            "the memory writer does not start on its own under a temporary HOME ({}), \
+             so run `packset ensure`.",
             home.display()
         );
     }
     format!(
-        "no pack writer is answering on {}. Run `packset ensure`",
+        "no pack writer is answering on {}, so run `packset ensure`.",
         facts.asked
     )
 }
@@ -18361,7 +18356,7 @@ fn foreign_home(facts: &DownFacts) -> Option<String> {
             )
         };
     Some(format!(
-        "a pack writer is running for {what} {theirs}, not {ours}. Run `packset ensure`"
+        "a pack writer is running for {what} {theirs}, not {ours}, so run `packset ensure`."
     ))
 }
 
@@ -18374,7 +18369,7 @@ fn other_port(facts: &DownFacts) -> Option<String> {
             .find(|port| facts.asked_port != Some(*port))
     })?;
     Some(format!(
-        "a pack writer is listening on 127.0.0.1:{port}, not {}. Run `packset ensure`",
+        "a pack writer is listening on 127.0.0.1:{port}, not {}, so run `packset ensure`.",
         facts.asked
     ))
 }
@@ -20830,7 +20825,7 @@ fn note_queue_row() -> Habitat {
     let waiting = notes.len();
     if unread > 0 {
         return damaged(format!(
-            "the note queue at {} is damaged: {unread} row(s) are not a note and {waiting} note(s) wait, so run `ljos finish` to move the bad rows aside",
+            "the note queue at {} is damaged: {unread} row(s) are not a note and {waiting} note(s) wait, and the bad rows need moving aside, so run `ljos finish`.",
             queue.display()
         ));
     }
@@ -20839,7 +20834,7 @@ fn note_queue_row() -> Habitat {
         .unwrap_or_default();
     let state = if let Some(lock) = note_queue::busy_in(&dir) {
         format!(
-            "{QUEUE_BUSY}another process holds {}, so a note may be landing or leaving; {waiting} note(s) wait. Run `ljos doctor` again once it lets go",
+            "{QUEUE_BUSY}another process holds {}, a note may be landing or leaving, and {waiting} note(s) wait until it lets go, so run `ljos doctor`.",
             lock.display()
         )
     } else if !set_aside.is_empty() {
@@ -21048,7 +21043,7 @@ pub fn remember_note(body: &Value) -> &'static str {
     if has("horizon:standing") {
         "standing: the hook shows it from the next prompt it bears on"
     } else {
-        "episode: the hook shows it when a prompt bears on it, and `ljos due` with `ljos graded` promotes it to standing"
+        "episode: the hook shows it when a prompt bears on it, and ljos graded promotes it to standing, so run `ljos due`."
     }
 }
 
@@ -21060,7 +21055,7 @@ pub const REMEMBER_TEXT_CAP: usize = 1000;
 #[must_use]
 pub fn remember_split_line(n: usize) -> String {
     format!(
-        "remember: {n} claims from one text. A lesson is at most two sentences, so each part is stored on its own. `ljos search` lists them"
+        "remember: {n} claims from one text, and a lesson is at most two sentences so each part is stored on its own, so run `ljos search`."
     )
 }
 
@@ -28518,7 +28513,10 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
     }
     if r.verdict == "deny" {
         if let Some(cmd) = seat_command_for(line) {
-            r.reason = format!("{} Run `{cmd}` instead.", r.reason.trim_end());
+            r.reason = format!(
+                "{}, so run `{cmd}`.",
+                r.reason.trim_end().trim_end_matches('.')
+            );
         }
     }
     Some(r)
@@ -28580,8 +28578,8 @@ fn indirect_close_rule() -> Rule {
     Rule {
         pattern: "vissue close".into(),
         verdict: "deny".into(),
-        reason: "a tracker write under a runner goes through ljos. A person closes a ticket. \
-                 Run `ljos finish ID` to end the sitting; it leaves the ticket open."
+        reason: "a tracker write under a runner goes through ljos, and a person closes a ticket, \
+                 and the sitting ends while the ticket stays open, so run `ljos finish ID`."
             .into(),
     }
 }
@@ -28752,8 +28750,8 @@ fn raw_tracker_write(line: &str) -> Option<Rule> {
         verdict: "deny".into(),
         reason: format!(
             "`vissue {verb}` under an agent runner writes the tracker past the seat check, \
-             the parent's project and the tracker commit; ljos is the tracker's front end. \
-             Run `{cmd}` instead."
+             the parent's project and the tracker commit, and ljos is the tracker's front end, \
+             so run `{cmd}`."
         ),
     })
 }
@@ -31874,20 +31872,18 @@ pub fn doctor_seat() -> Vec<Habitat> {
             .map(check_vissue_ballot_protocol);
         let (mut state, mut ok) = match (found, have.as_deref(), latest.as_ref()) {
             (None, _, _) if *bin == "packset-embed" => (
-                "not on PATH; search stays lexical. Install it with `sh scripts/install.sh` \
-                 (omit --no-embed), or `cargo binstall --locked packset-embed`"
+                "not on PATH and search stays lexical, so run `cargo binstall --locked packset-embed`."
                     .to_string(),
                 false,
             ),
             (None, _, _) if *bin == "ljos-hud" => (
-                "not on PATH; `ljos statusline` works without it. `ljos hud` needs \
-                 `cargo install --locked ljos-hud`"
+                "not on PATH and ljos statusline works without it, so run `cargo install --locked ljos-hud`."
                     .to_string(),
                 false,
             ),
             (None, _, Some(cr)) => (
                 format!(
-                    "not on PATH; cargo install --locked {crate_name} (crates.io {})",
+                    "not on PATH, and crates.io lists {}, so run `cargo install --locked {crate_name}`.",
                     cr.version
                 ),
                 false,
@@ -31895,7 +31891,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
             // No crates.io answer (offline, or the lookup failed): the
             // install line still names the crate.
             (None, _, None) => (
-                format!("not on PATH; cargo install --locked {crate_name}"),
+                format!("not on PATH, so run `cargo install --locked {crate_name}`."),
                 false,
             ),
             (Some(path), have, Some(cr)) => bin_health(&path.display().to_string(), have, Some(cr)),
@@ -32239,8 +32235,8 @@ fn habitat_down_state(name: &str, err: &anyhow::Error) -> String {
     let mut state = err.to_string().lines().next().unwrap_or("").to_string();
     if let Some(fix) = missing_bin_install(&state) {
         if !state.contains("cargo install") {
-            state.push_str("; ");
-            state.push_str(&fix);
+            let trimmed = state.trim_end_matches('.').trim_end();
+            state = format!("{trimmed}, so run `{fix}`.");
         }
     }
     if name == "tracker" {
@@ -32250,7 +32246,8 @@ fn habitat_down_state(name: &str, err: &anyhow::Error) -> String {
             }
         }
         if state.contains("not inside a tracker") && !state.contains("ljos onboard") {
-            state.push_str(". Run `ljos onboard` to create the tracker");
+            let trimmed = state.trim_end_matches('.').trim_end();
+            state = format!("{trimmed}, so run `ljos onboard`.");
         }
     }
     state
@@ -35759,7 +35756,7 @@ fn is_sole_or_ancestor_parent_hold(parent: &str, seat: &str, hold_pid: u32) -> b
 #[must_use]
 pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, running: &str) -> String {
     format!(
-        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee}, so run `ljos send {} TEXT`",
+        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee}, so run `ljos send {} TEXT`.",
         hold.assignee, hold.seat, hold.since, hold.seat
     )
 }
@@ -36086,7 +36083,7 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                             return Err(policy_label::labelled(
                                 "claim-conflict",
                                 format!(
-                                    "claim: {node} is held by another conversation, not by {assignee}, and no record on this host names it, so run `ljos release {node} --assignee NAME`"
+                                    "claim: {node} is held by another conversation, not by {assignee}, and no record on this host names it, so run `ljos release {node} --assignee NAME`."
                                 ),
                             ));
                         }
@@ -37303,7 +37300,7 @@ impl ReadOnce {
             }
             [] => bail!("{id} is not in the tracker"),
             _ => bail!(
-                "issue {id} is in more than one tracker, so run `ljos ready` with VISSUE_ROOT set to one of them"
+                "issue {id} is in more than one tracker and VISSUE_ROOT must name one of them, so run `ljos ready`."
             ),
         }
     }
@@ -37894,7 +37891,7 @@ fn recall_lines(
             .max(related_matched)
             .max(1);
         out.push_str(&scan::wrap(
-            &format!("`ljos search {issue} -n {ask}` lists the rest."),
+            &format!("more on {issue} remain, so run `ljos search {issue} -n {ask}`."),
             scan::COLS,
         ));
         out.push('\n');
@@ -37974,7 +37971,7 @@ fn tracker_misses(err: &anyhow::Error, issue: &str) -> bool {
 /// A ticket id the tracker does not hold, with the commands that list
 /// lessons and tickets.
 fn unknown_ticket(issue: &str) -> anyhow::Error {
-    anyhow::anyhow!("issue {issue} not found, so run `ljos ready`")
+    anyhow::anyhow!("issue {issue} not found, so run `ljos ready`.")
 }
 
 /// Whether `err` is a ticket lookup sentence ([`unknown_ticket`] or
@@ -37993,7 +37990,7 @@ pub fn is_ticket_fault(err: &anyhow::Error) -> bool {
 pub fn ticket_refusal(id: &str) -> Option<String> {
     let id = id.trim();
     if id.is_empty() {
-        return Some("issue id is empty, so run `ljos ready`".to_string());
+        return Some("issue id is empty, so run `ljos ready`.".to_string());
     }
     let layout = vissue_core::Layout::resolve(None, None).ok()?;
     let layouts = vissue_core::Router::load(layout.clone())
@@ -38035,7 +38032,7 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
         1 => return None,
         _ => {
             return Some(format!(
-                "issue {id} is in more than one tracker, so run `ljos ready` with VISSUE_ROOT set to one of them"
+                "issue {id} is in more than one tracker and VISSUE_ROOT must name one of them, so run `ljos ready`."
             ));
         }
     }
@@ -38044,9 +38041,9 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
     }
     prefixes.sort();
     match prefixes.as_slice() {
-        [] => Some(format!("issue {id} not found, so run `ljos ready`")),
+        [] => Some(format!("issue {id} not found, so run `ljos ready`.")),
         [one] => Some(format!(
-            "issue {id} not found, and the closest is {one}, so run `ljos show {one}`"
+            "issue {id} not found, and the closest is {one}, so run `ljos show {one}`."
         )),
         many => {
             let shown = if many.len() <= 3 {
@@ -38067,7 +38064,7 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
                 format!("{}, {} and {} more", many[0], many[1], many.len() - 2)
             };
             Some(format!(
-                "issue {id} matches {shown}, so run `ljos show {}`",
+                "issue {id} matches {shown}, so run `ljos show {}`.",
                 many[0]
             ))
         }
@@ -40507,7 +40504,7 @@ fn reopen_caller() -> Result<String> {
             Err(policy_label::labelled(
                 "reopen-warning",
                 format!(
-                    "reopen: LJOS_SEAT {process} and the seat file {file} name different seats and nothing was written, so run `export LJOS_SEAT={file}`"
+                    "reopen: LJOS_SEAT {process} and the seat file {file} name different seats and nothing was written, so run `export LJOS_SEAT={file}`."
                 ),
             ))
         }
@@ -41536,8 +41533,8 @@ pub fn allow_basis() -> Result<Basis> {
     }
     if !person_at_terminal() {
         bail!(
-            "rule: an allow is the person's word, and this process has no terminal to ask at. \
-             Run `ljos rule --user ... --verdict allow` at your own terminal"
+            "rule: an allow is the person's word, and this process has no terminal to ask at, \
+             so run `ljos rule --user ... --verdict allow`."
         );
     }
     let marks = runner_marks();
@@ -45021,8 +45018,8 @@ fn said_by_label(answer: &str) -> bool {
 #[must_use]
 pub fn guard_fault_reason(why: &str) -> String {
     format!(
-        "the ljos guard failed ({why}); ask the person to run `ljos doctor` in their own \
-         terminal. Every line runs with this warning until the guard is repaired."
+        "the ljos guard failed ({why}), and every line runs with this warning until the \
+         person repairs it at their own terminal, so run `ljos doctor`."
     )
 }
 
@@ -45249,8 +45246,8 @@ fn guard_note_of(text: &str) -> Option<String> {
 #[must_use]
 pub fn unhealthy_note(why: &str) -> String {
     format!(
-        "the ljos guard is unhealthy ({why}) and did not judge this call, so it is allowed. \
-         Run `ljos doctor`."
+        "the ljos guard is unhealthy ({why}) and did not judge this call and it is allowed, \
+         so run `ljos doctor`."
     )
 }
 
@@ -51063,7 +51060,7 @@ mod tests {
         );
         assert_eq!(
             absent,
-            "vissue failed (exit 1): not inside a tracker. Run `ljos onboard` to create the tracker"
+            "vissue failed (exit 1): not inside a tracker, so run `ljos onboard`."
         );
         let info = super::Habitat {
             name: "tracker",
@@ -51077,7 +51074,7 @@ mod tests {
             super::habitat_down_state("deed store", &anyhow::anyhow!("deedar not on PATH"));
         assert_eq!(
             install,
-            "deedar not on PATH; cargo install --locked deedar-cli"
+            "deedar not on PATH, so run `cargo install --locked deedar-cli`."
         );
 
         let seat = super::seat_source_row(&super::Seat::whole(
@@ -51088,7 +51085,7 @@ mod tests {
         assert_eq!(super::doctor_word(&seat), "warn");
         assert_eq!(
             seat.state,
-            "no seat rule matched; reading every seat. Set one with --seat NAME or export LJOS_SEAT=NAME"
+            "no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`."
         );
         assert!(super::healthy(std::slice::from_ref(&seat)));
 
@@ -51481,7 +51478,7 @@ mod tests {
         let err = super::reopen_caller().unwrap_err().to_string();
         assert_eq!(
             err,
-            "reopen: LJOS_SEAT bob and the seat file alice name different seats and nothing was written, so run `export LJOS_SEAT=alice`"
+            "reopen: LJOS_SEAT bob and the seat file alice name different seats and nothing was written, so run `export LJOS_SEAT=alice`."
         );
     }
 
@@ -51544,7 +51541,7 @@ mod tests {
         let said = super::held_by_another_message("demo-aaaa", "brio", &hold, "still running");
         assert_eq!(
             said,
-            "claim: demo-aaaa is held by another (acme, seat acme, still running, since 2026-01-01T00:00:00.000Z), not by brio, so run `ljos send acme TEXT`"
+            "claim: demo-aaaa is held by another (acme, seat acme, still running, since 2026-01-01T00:00:00.000Z), not by brio, so run `ljos send acme TEXT`."
         );
     }
 
@@ -58694,10 +58691,7 @@ mod tests {
         );
         unsafe { std::env::set_var("LJOS_TRACK_WORK", "on") };
         let reason = seat_stop_reason(&input, false, false).expect("held");
-        assert!(
-            reason.contains("ljos sitting") && reason.contains("ljos file"),
-            "{reason}"
-        );
+        assert!(reason.contains("so run `ljos file"), "{reason}");
         assert!(seat_stop_reason(&input, true, false).is_none());
         assert!(seat_stop_reason(&input, false, true).is_none());
         std::fs::write(
@@ -62234,7 +62228,7 @@ box-1 is yours.
             unsafe { std::env::remove_var(key) };
         }
         let full =
-            "== doctor\nwarn\tmcp\twarning: ljos-mcp is not this install. Run `ljos cloud up`.\n";
+            "== doctor\nwarn\tmcp\twarning: ljos-mcp is not this install, so run `ljos cloud up`.\n";
         let short = compact_sitting(full, "box-1");
         assert!(
             !short.contains("ljos cloud up"),
@@ -62312,7 +62306,7 @@ ok\tpack\tanswers\n\
 no\tljos-mcp\tnot on PATH; cargo install --locked ljos (crates.io 0.36.7)\n\
 no\tljos-policyd\tnot on PATH; cargo install --locked ljos-policyd (crates.io 0.6.4)\n\
 warn\thost\t6.12.94+; 361 OOM kills since boot, the last within a day (/proc/vmstat oom_kill); 0 ljos-mcp, 0 MB resident; the kernel is killing processes, read `journalctl -k -b` before the load\n\
-no\tmcp\tljos-mcp: /home/box/.cargo/bin/ljos-mcp does not exist (/home/box/.cursor/mcp.json), so the MCP client has no tools. Run `ljos cloud up`.\n\
+no\tmcp\tljos-mcp: /home/box/.cargo/bin/ljos-mcp does not exist (/home/box/.cursor/mcp.json) and the MCP client has no tools, so run `ljos cloud up`.\n\
 warn\ttracker\tvissue 0.22.0 root=/t prefix=Software from VISSUE_ROOT=/t; 1509 unpushed; uncommitted issue edits in Software/rgsaddle/issues.org and 6 more; commit them in /t or no other host sees them\n\
 without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)\n\
 host: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next\n";
@@ -62918,7 +62912,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let split = remember_split_line(2);
         assert!(split.contains("2 claims from one text"), "{split}");
         assert!(split.contains("at most two sentences"), "{split}");
-        assert!(split.contains("`ljos search` lists them"), "{split}");
+        assert!(split.contains("so run `ljos search`."), "{split}");
         let hit = |atom: &Value| Hit {
             id: None,
             text: "Run the linter before the push.".into(),
@@ -63146,7 +63140,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let none = super::render_down(&base);
         assert_eq!(
             none,
-            "no pack writer is answering on 127.0.0.1:8761. Run `packset ensure`"
+            "no pack writer is answering on 127.0.0.1:8761, so run `packset ensure`."
         );
         assert!(!none.contains('\n'));
         assert!(super::writer_retries(&none));
@@ -69520,7 +69514,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             reason: "Use ljos sitting.".into(),
         };
         let r = redirect_seat_verb(Some(deny), "vissue claim demo-6c3z").unwrap();
-        assert!(r.reason.ends_with("Run `ljos sitting demo-6c3z` instead."));
+        assert!(r.reason.ends_with(", so run `ljos sitting demo-6c3z`."));
     }
 
     /// An exported `LJOS_SEAT` is the seat. A runner session id tags the

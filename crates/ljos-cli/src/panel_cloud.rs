@@ -39,7 +39,7 @@ LJOS_SEAT={seat}
 VISSUE_AGENT={seat}
 LJOS_TRACKER_GIT=push
 
-Set these, then run `ljos cloud up`. It appends this run's id, at most 16 \
+Set these, so run `ljos cloud up`. It appends this run's id, at most 16 \
 characters, to LJOS_SEAT and writes that seat's key under \
 `~/.local/share/ljos/seats/`. The key stays on this machine. Leave \
 LJOS_SEAT and VISSUE_AGENT as `cloud up` wrote them. The tracker URL \

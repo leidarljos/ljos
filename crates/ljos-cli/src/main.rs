@@ -2179,11 +2179,13 @@ fn usage_sentence(err: &clap::Error) -> Option<String> {
         let next = match closest(&typed, &options) {
             Some(name) => {
                 let rewritten = rewrite_arg(&args, &typed, name);
-                format!("ljos: no command {typed}. The closest is {name}. Run `{rewritten}`.")
+                format!(
+                    "ljos: no command {typed}, and the closest is {name}, so run `{rewritten}`."
+                )
             }
             None => {
                 let help = parent_help(&args, &typed);
-                format!("ljos: no command {typed}. Run `{help}`.")
+                format!("ljos: no command {typed}, so run `{help}`.")
             }
         };
         return Some(next);
@@ -2204,7 +2206,9 @@ fn usage_sentence(err: &clap::Error) -> Option<String> {
                 .map(String::as_str)
                 .unwrap_or(name);
             let rewritten = rewrite_arg(&args, &typed, flag);
-            format!("ljos: {where_} has no flag {typed}. The closest is {flag}. Run `{rewritten}`.")
+            format!(
+                "ljos: {where_} has no flag {typed}, and the closest is {flag}, so run `{rewritten}`."
+            )
         }
         None => {
             let help = if command.is_empty() {
@@ -2212,7 +2216,7 @@ fn usage_sentence(err: &clap::Error) -> Option<String> {
             } else {
                 format!("ljos {command} --help")
             };
-            format!("ljos: {where_} has no flag {typed}. Run `{help}`.")
+            format!("ljos: {where_} has no flag {typed}, so run `{help}`.")
         }
     };
     Some(next)
@@ -2820,7 +2824,7 @@ fn run_command() -> Result<()> {
             let chars = text.chars().count();
             if chars > ljos_cli::REMEMBER_TEXT_CAP {
                 eprintln!(
-                    "remember: the text is {chars} characters, past {}, so run `ljos remember` with one or two sentences.",
+                    "remember: the text is {chars} characters, past {}, and it needs one or two sentences, so run `ljos remember`.",
                     ljos_cli::REMEMBER_TEXT_CAP
                 );
                 std::process::exit(USAGE_STATUS);

@@ -1034,7 +1034,7 @@ pub fn read_pepper(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
 
 fn pepper_gone(path: &Path) -> String {
     format!(
-        "person-key: the pepper at {} is gone; run `ljos person-key set` again",
+        "person-key: the pepper at {} is gone, so run `ljos person-key set`.",
         path.display()
     )
 }
@@ -1098,7 +1098,7 @@ pub fn parse(phc: &str) -> Result<PasswordHash<'_>> {
     if params.m_cost() < M_COST_KIB || params.t_cost() < T_COST || params.p_cost() < P_COST {
         bail!(
             "person-key: the hash was made at m={},t={},p={}, below the m={M_COST_KIB},\
-             t={T_COST},p={P_COST} this ljos takes; run `ljos person-key set` again",
+             t={T_COST},p={P_COST} this ljos takes, so run `ljos person-key set`.",
             params.m_cost(),
             params.t_cost(),
             params.p_cost()
@@ -1468,7 +1468,7 @@ fn status_at(path: &Path) -> String {
             format!("person-key: set, written {when} ({})", path.display())
         }
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => format!(
-            "person-key: not set ({}); run `ljos person-key set` from your own terminal",
+            "person-key: not set ({}) and it is set from your own terminal, so run `ljos person-key set`.",
             path.display()
         ),
         Ok(Err(e)) => format!("person-key: {} does not read: {e}", path.display()),
@@ -1950,7 +1950,7 @@ mod tests {
         std::fs::remove_file(&at).unwrap();
         let asked = ask_at(dir.path(), Some("correct horse battery"), 1000);
         let why = asked.out.unwrap_err();
-        assert!(why.contains("run `ljos person-key set` again"), "{why}");
+        assert!(why.contains("so run `ljos person-key set`."), "{why}");
         assert!(asked.shown.is_empty(), "{}", asked.shown);
         assert!(!dir.path().join(FAILS_NAME).exists());
         std::fs::write(&at, [1u8; PEPPER_LEN - 1]).unwrap();
@@ -1991,7 +1991,7 @@ mod tests {
             .unwrap()
             .to_string();
         let why = format!("{:#}", parse(&old).unwrap_err());
-        assert!(why.contains("run `ljos person-key set` again"), "{why}");
+        assert!(why.contains("so run `ljos person-key set`."), "{why}");
         assert!(!verify(b"correct horse battery", &old, PEPPER));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KEY_NAME);

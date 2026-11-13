@@ -18,7 +18,7 @@ The pack writer
 ===============
 
 A checkout that had only ``ljos`` and ``ljos-mcp`` on ``PATH`` printed this summary and these pack rows.
-The other missing programs used the same shape, ``not on PATH; cargo install --locked`` and the crate name, with the crates.io version when the registry answered.
+The other missing programs used the same shape, not on PATH, then ``cargo install --locked`` and the crate name, with the crates.io version when the registry answered.
 Exit 1.
 
 ..
@@ -28,9 +28,9 @@ Exit 1.
 
    $ ljos doctor
    ljos is not ready: ljos-policyd, vissue, deedar, claimdag, packset, packsetd and memory do not answer. Optional extras: `ljos doctor --all`.
-   no  packset not on PATH; cargo install --locked packset (crates.io 0.17.10)
-   no  packsetd    not on PATH; cargo install --locked packset (crates.io 0.17.10)
-   no  pack    http://127.0.0.1:8761 does not answer. no pack writer is answering, and packset is not on PATH. cargo install --locked packset
+   no  packset not on PATH, and crates.io lists 0.17.10, so run `cargo install --locked packset`.
+   no  packsetd    not on PATH, and crates.io lists 0.17.10, so run `cargo install --locked packset`.
+   no  pack    http://127.0.0.1:8761 does not answer. no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.
 
 ..
    # proseguard:on
@@ -45,7 +45,7 @@ With ``packset`` on ``PATH`` and nothing listening, a home that is not a tempora
 
 .. code:: text
 
-   no  pack    http://127.0.0.1:8761 does not answer. no pack writer is answering on 127.0.0.1:8761. Run `packset ensure`
+   no  pack    http://127.0.0.1:8761 does not answer. no pack writer is answering on 127.0.0.1:8761, so run `packset ensure`.
 
 ..
    # proseguard:on
@@ -59,7 +59,7 @@ The printed row is:
 
 .. code:: text
 
-   no  pack    http://127.0.0.1:8761 does not answer. the memory writer does not start on its own under a temporary HOME (/tmp/seat); run `packset ensure` to start it
+   no  pack    http://127.0.0.1:8761 does not answer. the memory writer does not start on its own under a temporary HOME (/tmp/seat), so run `packset ensure`.
 
 ..
    # proseguard:on
@@ -74,7 +74,7 @@ With no ``LJOS_SEAT``, no ``--seat``, and no seat record, the short doctor print
 
 .. code:: text
 
-   warn    seat source no seat rule matched; reading every seat. Set one with --seat NAME or export LJOS_SEAT=NAME
+   warn    seat source no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
 
 ..
    # proseguard:on
@@ -93,7 +93,7 @@ With ``vissue`` installed and no tracker configured, the row is info and this fa
 
 .. code:: text
 
-   info    tracker vissue failed (exit 1): not inside a tracker. Run `ljos onboard` to create the tracker
+   info    tracker vissue failed (exit 1): not inside a tracker, so run `ljos onboard`.
 
 ..
    # proseguard:on
@@ -146,9 +146,9 @@ A missing habitat binary
 
 .. code:: text
 
-   no  deedar  not on PATH; cargo install --locked deedar-cli (crates.io 0.6.1)
-   info    tracker vissue not on PATH; cargo install --locked vissue-cli
-   no  claim graph claimdag not on PATH; cargo install --locked claimdag-cli
+   no  deedar  not on PATH, and crates.io lists 0.6.1, so run `cargo install --locked deedar-cli`.
+   info    tracker vissue not on PATH, so run `cargo install --locked vissue-cli`.
+   no  claim graph claimdag not on PATH, so run `cargo install --locked claimdag-cli`.
 
 ..
    # proseguard:on
@@ -160,7 +160,7 @@ A missing habitat binary
 
 .. code:: text
 
-   info    deed store  deedar not on PATH; cargo install --locked deedar-cli
+   info    deed store  deedar not on PATH, so run `cargo install --locked deedar-cli`.
 
 ..
    # proseguard:on
@@ -179,7 +179,7 @@ On a machine that is not a cloud VM, a missing command in ``~/.cursor/mcp.json``
 
 .. code:: text
 
-   no  mcp ljos-mcp: /no/such/ljos-mcp does not exist (/tmp/seat-probe/.cursor/mcp.json), so the MCP client has no tools. Run `ljos onboard --harness cursor`.
+   no  mcp ljos-mcp: /no/such/ljos-mcp does not exist (/tmp/seat-probe/.cursor/mcp.json) and the MCP client has no tools, so run `ljos onboard --harness cursor`.
 
 ..
    # proseguard:on
@@ -192,7 +192,7 @@ A command that exists and is not this install's ``ljos-mcp`` is a warning. The e
 
 .. code:: text
 
-   warn    mcp warning: ljos-mcp: /tmp/seat-probe/other/ljos-mcp is not this install's /agent/repos/ljos/target/debug/ljos-mcp (/tmp/seat-probe/.cursor/mcp.json). Run `ljos onboard --harness cursor`.
+   warn    mcp warning: ljos-mcp: /tmp/seat-probe/other/ljos-mcp is not this install's /agent/repos/ljos/target/debug/ljos-mcp (/tmp/seat-probe/.cursor/mcp.json), so run `ljos onboard --harness cursor`.
 
 ..
    # proseguard:on
@@ -214,6 +214,6 @@ With ``curl`` unable to reach crates.io, doctor printed:
 ..
    # proseguard:on
 
-A missing binary then has no version in parentheses: ``not on PATH; cargo install --locked packset``.
+A missing binary then has no version in parentheses: not on PATH, so run ``cargo install --locked packset``.
 The warning does not by itself exit 1.
 A copy already in the day cache is still used, and the row says ``crates.io (cached)``.

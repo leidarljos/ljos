@@ -173,7 +173,7 @@ fn a_paragraph_says_why_it_was_stored_as_more_than_one_claim() {
         stderr.contains("A lesson is at most two sentences"),
         "{stderr}"
     );
-    assert!(stderr.contains("`ljos search` lists them"), "{stderr}");
+    assert!(stderr.contains("so run `ljos search`."), "{stderr}");
 }
 
 #[test]

@@ -560,7 +560,7 @@ int main(int argc, char **argv) {
         "{said}"
     );
     assert!(said.contains(&format!("kill {pid}")), "{said}");
-    assert!(said.contains("Next: `ljos doctor`"), "{said}");
+    assert!(said.contains("so run `ljos doctor`."), "{said}");
     assert_eq!(
         version_line(&dir.join("ljos-mcp")),
         format!("ljos-mcp {}", version())

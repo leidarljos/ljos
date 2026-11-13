@@ -184,7 +184,7 @@ fn a_read_with_no_seat_covers_every_seat_and_a_write_names_unknown() {
     );
     assert!(write_text.contains("this write uses unknown-box"), "{text}");
     assert!(
-        write_text.contains("Run `export LJOS_SEAT=NAME`."),
+        write_text.contains("so run `export LJOS_SEAT=NAME`."),
         "{text}"
     );
     assert!(!write_text.contains("label seat-unresolved"), "{text}");

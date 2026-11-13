@@ -75,7 +75,7 @@ standing: the hook shows it from the next prompt it bears on
 dev@laptop:~$ printf '%s\n' 'seat the kiln door' | ljos hook --prompt --text
 label prompt-origin: not stored as the person's words (parent process is `ljos`,
 not a known runner)
-Remembered, shown 1 of 1, oldest first. `ljos search` lists the pack.
+Remembered, shown 1 of 1, oldest first, so run `ljos search`.
   lesson, agent-derived, today
     Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config
     gap.

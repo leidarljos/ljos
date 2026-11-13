@@ -234,7 +234,7 @@ fn obtain(name: &str, to: &Path, url: &str) -> Result<()> {
         let src = dir.join(name);
         std::fs::copy(&src, to).with_context(|| {
             format!(
-                "upgrade: could not read {} from the release directory. Put the archive there, or unset LJOS_RELEASE_DIR and run `ljos upgrade` again so it downloads the release",
+                "upgrade: could not read {} from the release directory, and the archive must be there or LJOS_RELEASE_DIR must be unset, so run `ljos upgrade`.",
                 src.display()
             )
         })?;
@@ -246,7 +246,7 @@ fn obtain(name: &str, to: &Path, url: &str) -> Result<()> {
 /// What a failed release download tells the person to run next.
 fn download_failed(url: &str, err: &str) -> String {
     format!(
-        "upgrade: could not download {url}: {err}. Check the network and run `ljos upgrade` again. With the archives on disk, set LJOS_RELEASE_DIR to that directory and run `ljos upgrade` again"
+        "upgrade: could not download {url}: {err}, and the network must be up or LJOS_RELEASE_DIR must name the archives, so run `ljos upgrade`."
     )
 }
 
@@ -346,7 +346,7 @@ fn executable_image(bytes: &[u8]) -> bool {
 /// No release archive for this `os` and `arch`, and the command that fixes it.
 fn unsupported_archive(os: &str, arch: &str) -> String {
     format!(
-        "no published archive for {os} {arch}. Release archives are Linux and macOS on x86_64 and aarch64 (x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin). On Windows, run `ljos upgrade` inside WSL."
+        "no published archive for {os} {arch}, and release archives are Linux and macOS on x86_64 and aarch64 (x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin), and on Windows this runs inside WSL, so run `ljos upgrade`."
     )
 }
 
@@ -400,7 +400,7 @@ fn running_note(name: &str, pids: &[u32]) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "{name} is still running (pid {list}) and is the previous binary. Restart the assistant, or run `kill {list}`, then start it again. Next: `ljos doctor`.\n"
+        "{name} is still running (pid {list}) and is the previous binary, and the assistant must be restarted (kill {list}), so run `ljos doctor`.\n"
     )
 }
 
@@ -412,18 +412,18 @@ fn replace_installed(staged: &Path, installed: &Path, held: &[u32]) -> Result<()
             .collect::<Vec<_>>()
             .join(" ");
         let next = if list.is_empty() {
-            "Stop the process using it and run `ljos upgrade` again.".to_string()
+            "and the process using it must stop, so run `ljos upgrade`.".to_string()
         } else {
-            format!("Stop the process using it (`kill {list}`) and run `ljos upgrade` again.")
+            format!("and the process using it must stop (kill {list}), so run `ljos upgrade`.")
         };
         if err.raw_os_error() == Some(26) {
             bail!(
-                "upgrade: could not replace {}: Text file busy. {next}",
+                "upgrade: could not replace {}: Text file busy, {next}",
                 installed.display()
             );
         }
         bail!(
-            "upgrade: could not replace {}: {err}. {next}",
+            "upgrade: could not replace {}: {err}, {next}",
             installed.display()
         );
     }
@@ -888,7 +888,10 @@ mod tests {
         );
         assert!(text.contains("x86_64-unknown-linux-gnu"), "{text}");
         assert!(text.contains("aarch64-apple-darwin"), "{text}");
-        assert!(text.contains("`ljos upgrade` inside WSL"), "{text}");
+        assert!(
+            text.contains("inside WSL, so run `ljos upgrade`."),
+            "{text}"
+        );
     }
 
     #[test]
@@ -898,7 +901,7 @@ mod tests {
             text.contains("could not download https://example.invalid/ljos.tar.gz: dns error"),
             "{text}"
         );
-        assert!(text.contains("run `ljos upgrade` again"), "{text}");
+        assert!(text.contains("so run `ljos upgrade`."), "{text}");
         assert!(text.contains("LJOS_RELEASE_DIR"), "{text}");
     }
 }

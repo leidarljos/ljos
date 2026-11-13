@@ -241,11 +241,10 @@ fn head(title: &str, shown: usize, matched: usize, tail: &str, more: bool) -> St
         line.push_str(", ");
         line.push_str(tail);
     }
-    line.push('.');
     if more {
-        line.push_str(" `ljos search` lists the rest.");
+        line.push_str(", and more remain, so run `ljos search`.");
     } else {
-        line.push_str(" `ljos search` lists the pack.");
+        line.push_str(", so run `ljos search`.");
     }
     wrap(&line, COLS)
 }
@@ -328,7 +327,7 @@ fn shown_line(page: &SearchPage<'_>) -> String {
         if page.capped {
             line.push_str(", or more");
         }
-        line.push_str(". ");
+        line.push_str(", ");
         line.push_str(&search_hint(
             page.query,
             next_limit(matched, page.capped),
@@ -338,7 +337,7 @@ fn shown_line(page: &SearchPage<'_>) -> String {
     }
     if page.capped && shown > 0 {
         let line = format!(
-            "shown {shown} of {shown}. {}",
+            "shown {shown} of {shown}, {}",
             search_hint(page.query, shown.saturating_mul(2).max(shown + 1), true)
         );
         return wrap(&line, COLS);
@@ -396,9 +395,9 @@ fn next_search(query: &str) -> String {
 
 fn search_hint(query: &str, limit: usize, asks: bool) -> String {
     let verb = if asks {
-        "asks for more."
+        "and the next page asks for more"
     } else {
-        "lists the rest."
+        "and the next page lists the rest"
     };
     let query = query.trim();
     let usable = !query.is_empty()
@@ -412,7 +411,7 @@ fn search_hint(query: &str, limit: usize, asks: bool) -> String {
     } else {
         format!("ljos search -n {limit}")
     };
-    format!("`{cmd}` {verb}")
+    format!("{verb}, so run `{cmd}`.")
 }
 
 fn search_row(row: &SearchRow<'_>) -> String {
@@ -459,10 +458,10 @@ pub fn ready_text(raw: &str) -> String {
     let mut out = count_line("ready", total, total, "");
     out.push('\n');
     if total == 0 {
-        out.push_str("no open ticket is free of an open blocker. `ljos file TITLE` opens one.\n");
+        out.push_str("no open ticket is free of an open blocker, so run `ljos file TITLE`.\n");
         return out;
     }
-    out.push_str("open, not waiting on an open ticket. `ljos show ID` reads one.\n");
+    out.push_str("open and not waiting on an open ticket, so run `ljos show ID`.\n");
     for row in &rows {
         out.push('\n');
         out.push_str(&ready_row(row));
@@ -564,7 +563,7 @@ mod tests {
         let raw = format!("{kiln}\n{attn}\n");
         let text = ready_text(&raw);
         assert!(text.contains("ready  shown 2 of 2"), "{text}");
-        assert!(text.contains("`ljos show ID` reads one."), "{text}");
+        assert!(text.contains("so run `ljos show ID`."), "{text}");
         assert!(
             text.contains("ufuv-kiln  TODO  [#B]  Kiln damper schedule"),
             "{text}"

@@ -1194,12 +1194,12 @@ fn book_commit(hook: &str) -> Result<()> {
         if tracker {
             refuse_tracker_commit(
                 &head,
-                "no seat is named; export LJOS_SEAT=<your seat> to write the tracker",
+                "no seat is named and the tracker write needs a seat, so run `export LJOS_SEAT=<your seat>`.",
             );
         } else if crate::unseated_subagent() {
             // Stdout: the installed hook shows that line and drops stderr.
             println!(
-                "ljos: commit {} not booked: this subagent has no seat; export LJOS_SEAT=<your seat> (the parent's) to book it",
+                "ljos: commit {} not booked, and this subagent has no seat and the parent's seat books it, so run `export LJOS_SEAT=<your seat>`.",
                 &head[..head.len().min(12)]
             );
         }

@@ -222,7 +222,7 @@ fn plain_rules_fault(path: &std::path::Path, err: &anyhow::Error) -> anyhow::Err
         raw.lines().next().unwrap_or("it does not parse")
     };
     anyhow::anyhow!(
-        "user rules: {} is half-written or does not parse ({why}), so run `ljos prefer --user --why REASON TEXT` to write it again",
+        "user rules: {} is half-written or does not parse ({why}) and needs writing again, so run `ljos prefer --user --why REASON TEXT`.",
         path.display()
     )
 }
@@ -594,7 +594,7 @@ fn fresh(text: &str, reason: &str, from: Option<String>) -> Result<UserRule> {
         bail!("prefer: a user rule needs the words it states");
     }
     if reason.is_empty() {
-        bail!("prefer: a user rule needs a reason, so say why with --why");
+        bail!("prefer: a user rule needs a reason, so run `ljos prefer --why REASON TEXT`.");
     }
     let now = super::now_utc();
     Ok(UserRule {
@@ -648,8 +648,8 @@ pub fn write_argv(rule: &Rule, basis: super::Basis) -> Result<UserRule> {
     super::validate_rule(rule)?;
     if rule.verdict == "allow" && !matches!(basis, super::Basis::Person) {
         bail!(
-            "rule: an allow is the person's word. Run `ljos rule --user {:?} --verdict allow \
-             --why ...` at your own terminal, not under a runner",
+            "rule: an allow is the person's word and must be typed at your own terminal, \
+             not under a runner, so run `ljos rule --user {:?} --verdict allow --why ...`.",
             rule.pattern
         );
     }

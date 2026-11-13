@@ -205,8 +205,10 @@ pub fn pick(
             doubt_on(&fix.command, judge).is_none().then(|| {
                 let mut warned = rule.clone();
                 warned.reason = format!(
-                    "{}. Run `{}` instead: {}",
-                    rule.reason, fix.command, fix.reason
+                    "{}, and {}, so run `{}`.",
+                    rule.reason.trim_end_matches('.'),
+                    fix.reason,
+                    fix.command
                 );
                 Outcome::Warn(warned)
             })
@@ -257,9 +259,10 @@ fn unchangeable(fix: &Rewrite) -> Rule {
         pattern: "ljos-policyd".into(),
         verdict: "warn".into(),
         reason: format!(
-            "{}. Run `{}` instead. This runner cannot take a new command, so the original \
-             line runs as written",
-            fix.reason, fix.command
+            "{}, and this runner cannot take a new command and the original line runs as \
+             written, so run `{}`.",
+            fix.reason.trim_end_matches('.'),
+            fix.command
         ),
     }
 }
@@ -532,10 +535,7 @@ mod tests {
         let v = policyd_run(&cut, false);
         assert!(!holds(&v), "{v}");
         assert!(v["hookSpecificOutput"].get("updatedInput").is_none());
-        assert!(
-            v.to_string().contains("Run `uv run x.py --n 3` instead"),
-            "{v}"
-        );
+        assert!(v.to_string().contains("so run `uv run x.py --n 3`."), "{v}");
     }
 
     /// A runner that cannot take a new command runs the original line,
@@ -556,7 +556,7 @@ mod tests {
             assert!(v["hookSpecificOutput"].get("updatedInput").is_none(), "{v}");
             assert!(v.get("updated_input").is_none(), "{v}");
             let said = v.to_string();
-            assert!(said.contains("Run `uv run x.py --n 3` instead"), "{said}");
+            assert!(said.contains("so run `uv run x.py --n 3`."), "{said}");
             assert!(said.contains("line runs as written"), "{said}");
         }
     }
@@ -588,7 +588,7 @@ mod tests {
             assert!(v["hookSpecificOutput"].get("updatedInput").is_none(), "{v}");
             assert!(v.get("updated_input").is_none(), "{v}");
             let said = v.to_string();
-            assert!(said.contains("Run `uv run x.py --n 3` instead"), "{said}");
+            assert!(said.contains("so run `uv run x.py --n 3`."), "{said}");
             assert!(said.contains("python-requires-uv: "), "{said}");
         }
         let v = local_warning(CODEX);
@@ -597,7 +597,7 @@ mod tests {
         assert!(specific["additionalContext"]
             .as_str()
             .unwrap()
-            .contains("Run `uv run x.py --n 3` instead"));
+            .contains("so run `uv run x.py --n 3`."));
     }
 
     /// A local fix the guard would warn on is not named. The policyd

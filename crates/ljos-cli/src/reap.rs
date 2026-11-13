@@ -125,8 +125,10 @@ pub fn reap(idle: Duration, apply: bool) -> Result<String> {
     for h in &idle_ones {
         let seat = seat_of(&h.holder);
         let note = format!(
-            "auto-released {}: idle since {} (over {hours:.1}h). Run `ljos claim {}` to pick it up again, or `ljos finish {} --status done` when it is done.",
-            h.id, when(h.last), h.id, h.id
+            "auto-released {}: idle since {} (over {hours:.1}h), and finish it when the work is done, so run `ljos claim {}`.",
+            h.id,
+            when(h.last),
+            h.id
         );
         if !apply {
             out.push_str(&format!(

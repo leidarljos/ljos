@@ -63,14 +63,14 @@ A policy daemon does the same with the argv:
 .. code:: console
 
    $ echo "cargo test --release" | ljos hook
-   Remembered, shown 2 of 2, oldest first. `ljos search` lists the pack.
+   Remembered, shown 2 of 2, oldest first, so run `ljos search`.
      preference
        Build and test on the cluster through Slurm, never on the laptop.
      lesson
        The lme dense run needs 40G and sessions only; windows and sessions ran past four hours.
    $ ljos policy -- cargo test --release
    cargo test --release
-   Remembered, shown 1 of 1, oldest first. `ljos search` lists the pack.
+   Remembered, shown 1 of 1, oldest first, so run `ljos search`.
 
 Ask what a task involves
 ========================

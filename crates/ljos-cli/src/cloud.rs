@@ -286,7 +286,7 @@ pub fn guard_row() -> crate::Habitat {
         return crate::Habitat {
             name: "cloud guard",
             state: format!(
-                "missing in {}; run `ljos cloud up` to install the cloud seat push rule",
+                "missing in {}, and the cloud seat push rule is not installed, so run `ljos cloud up`.",
                 path.display()
             ),
             ok: false,
@@ -520,7 +520,7 @@ fn mcp_problem() -> McpProblem {
                 Ok(found) => found,
                 Err(e) if file.strict => {
                     missing.push(format!(
-                        "ljos-mcp: {} is not readable ({e}), so the MCP client has no tools. Run `{}`.",
+                        "ljos-mcp: {} is not readable ({e}) and the MCP client has no tools, so run `{}`.",
                         file.path.display(),
                         file.advice
                     ));
@@ -538,12 +538,12 @@ fn mcp_problem() -> McpProblem {
                 ready.push(format!("{} starts {}", file.path.display(), launch.command))
             }
             LaunchCheck::Warn(why) => warned.push(format!(
-                "ljos-mcp: {why} ({}). Run `{}`.",
+                "ljos-mcp: {why} ({}), so run `{}`.",
                 file.path.display(),
                 file.advice
             )),
             LaunchCheck::Missing(why) => missing.push(format!(
-                "ljos-mcp: {why} ({}), so the MCP client has no tools. Run `{}`.",
+                "ljos-mcp: {why} ({}) and the MCP client has no tools, so run `{}`.",
                 file.path.display(),
                 file.advice
             )),
@@ -3093,7 +3093,7 @@ fn missing_cloud_age(path: &Path) -> crate::Habitat {
         NamedSecret::Unset => crate::Habitat {
             name: "cloud age",
             state: format!(
-                "unset; no identity for scope cloud. Set {CLOUD_AGE_SECRET} to the secret's name and run `ljos cloud up`"
+                "unset; no identity for scope cloud, and {CLOUD_AGE_SECRET} must name the secret, so run `ljos cloud up`.",
             ),
             ok: true,
         },
@@ -3107,7 +3107,7 @@ fn missing_cloud_age(path: &Path) -> crate::Habitat {
             let state = match problem {
                 Some(problem) => format!("{name} {problem}, and {} is missing", path.display()),
                 None => format!(
-                    "{name} is set, and {} is missing. Run `ljos cloud up`",
+                    "{name} is set and {} is missing, so run `ljos cloud up`.",
                     path.display()
                 ),
             };
@@ -3149,7 +3149,7 @@ fn ensure_cloud_age() -> Result<String> {
     let name = match named_secret() {
         NamedSecret::Unset => {
             return Ok(format!(
-                "cloud age: {CLOUD_AGE_SECRET} is unset, so scope cloud has no identity on this machine"
+                "cloud age: {CLOUD_AGE_SECRET} is unset and scope cloud has no identity on this machine, so run `ljos cloud up`."
             ));
         }
         NamedSecret::Bad(why) => bail!("cloud up: {CLOUD_AGE_SECRET} {why}"),
@@ -3157,7 +3157,9 @@ fn ensure_cloud_age() -> Result<String> {
     };
     let value = match std::env::var(&name) {
         Err(std::env::VarError::NotPresent) => {
-            bail!("cloud up: {name} is unset, so the scope cloud identity was not written")
+            bail!(
+                "cloud up: {name} is unset and the scope cloud identity was not written, so run `ljos cloud up`."
+            )
         }
         Err(std::env::VarError::NotUnicode(_)) => {
             bail!("cloud up: {name} is not text, so the scope cloud identity was not written")
@@ -3423,7 +3425,7 @@ fn write_private(path: &Path, text: &str) -> Result<()> {
     }
     if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
         bail!(
-            "cloud up: {} is a symlink, so the scope cloud identity was not written; remove it and run `ljos cloud up` again",
+            "cloud up: {} is a symlink and the scope cloud identity was not written, and the link must be removed, so run `ljos cloud up`.",
             path.display()
         );
     }
