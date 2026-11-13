@@ -10,6 +10,15 @@
 #
 #   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
 #
+# Two commands, when registration should be its own step. The first
+# installs the programs. The second finds Claude Code, Cursor and Codex,
+# among the other runners ljos knows, and registers the MCP server and
+# the skill for each. A second `ljos onboard` leaves those files as they
+# are. `--dry-run` writes nothing. `ljos offboard` removes the registration.
+#
+#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed --no-onboard
+#   export PATH="$HOME/.local/bin:$PATH" && ljos onboard
+#
 # With no flag the encoder is installed, as before. It fetches a model on
 # first use. `--with-embed` is that same install.
 #

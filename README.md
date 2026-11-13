@@ -1,5 +1,72 @@
 # ljos
 
+ljos stores a lesson. A later prompt recalls it when the prompt bears on that lesson. A coding agent does not repeat the mistake.
+
+[//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
+These notes describe ljos 0.41.11.
+[//]: # ([[[end]]])
+
+ljos is installed with two commands. The first fetches install.sh. The second is ljos onboard.
+
+```
+curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed --no-onboard
+export PATH="$HOME/.local/bin:$PATH" && ljos onboard
+```
+
+The second command, `ljos onboard`, finds Claude Code, Cursor and Codex on this machine, and any other runner it knows, and registers the MCP server and the skill for each.
+It prints each file it writes.
+Run it again and those files stay as they are.
+`ljos onboard --dry-run` prints the steps and writes nothing.
+`ljos offboard` removes the registration.
+`ljos uninstall` removes the programs.
+A pipe with no `--harness` prints the MCP entry as JSON.
+A script that should register runners passes `--harness all`.
+
+After that registration, a first recall does not need a seat, a sitting or a ticket.
+One person and one repository are enough.
+With no seat named, a write uses `unknown-` and the host name.
+
+## Thirty seconds
+
+`kiln.sh` in an empty directory:
+
+```
+#!/bin/sh
+if [ "${KILN_DOOR:-}" != cold ]; then
+  echo "kiln.sh: KILN_DOOR is unset. The door seats only when it is cold." >&2
+  exit 1
+fi
+echo "kiln door seated"
+```
+
+`packset ensure` had already started the memory writer.
+The shell prompt is `dev@laptop`, and `LJOS_SEAT` is `demo`.
+No sitting and no ticket.
+The `prompt-origin` label names the process that ran the hook.
+The lesson is the line under `Remembered`.
+
+![Recall of the kiln lesson, then the door seated](docs/demo/recall.svg)
+
+```
+dev@laptop:~$ ./kiln.sh
+kiln.sh: KILN_DOOR is unset. The door seats only when it is cold.
+
+dev@laptop:~$ ljos remember 'Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.'
+remembered (lesson): Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.
+  id 69da72d9, next review 2026-11-14 11:32 +00:00
+standing: the hook shows it from the next prompt it bears on
+
+dev@laptop:~$ printf '%s\n' 'seat the kiln door' | ljos hook --prompt --text
+label prompt-origin: not stored as the person's words (parent process is `ljos`, not a known runner)
+Remembered, oldest first (`ljos search` for more):
+- [lesson, agent-derived, today] Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.
+
+dev@laptop:~$ KILN_DOOR=cold ./kiln.sh
+kiln door seated
+```
+
+## Achievements
+
 ljos gives coding agents a shared memory and a shared tracker on one person's machines.
 A person writes what the agents should remember, and the prompt hook hands it back when a prompt bears on it.
 Agents file and claim tickets in one git repository, and a held ticket refuses a second claim.
@@ -7,11 +74,6 @@ When agents disagree, they vote, and ljos settles the vote.
 It calls no model, and every store is a file a person can open.
 `ljos onboard` knows ten runners, among them Claude Code, Codex and Cursor.
 
-[//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
-These notes describe ljos 0.41.11.
-[//]: # ([[[end]]])
-
-## What it has done
 
 - 8,045 tokens for the 20 core Model Context Protocol (MCP) tools, against 17,999 for all 52 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
 - 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
@@ -22,7 +84,7 @@ These notes describe ljos 0.41.11.
 [What ljos does](https://leidarljos.github.io/ljos/introduction.html) lists every measured number with its method.
 No row compares ljos with another memory tool on a shared benchmark. `hook-latency.txt` says so on its `third-party` line.
 
-## Where it sits
+## Comparison
 
 Mem0 and Zep run a model over what they ingest. ljos stores the sentence as written.
 beads lets an agent claim a ticket and keeps the queue in Dolt. ljos keeps tickets as Org headings in git, and one seat holds a ticket.
@@ -33,7 +95,7 @@ Of these, the ljos docs are the ones that describe a ballot per agent, a settle,
 
 [How ljos compares](https://leidarljos.github.io/ljos/compare.html) has the full table, the licences, and a link to each tool's own docs, read on 2026-11-10.
 
-## Try it
+## Tutorial
 
 Linux and macOS are supported. Windows works through Windows Subsystem for Linux (WSL) and is untested.
 
@@ -96,6 +158,10 @@ Bob's claim prints `label claim-conflict:` and names alice. The ticket stays wit
 `ljos note` writes on the ticket. `ljos timeline ID` prints that note as unverified tracker text. `vissue show ID` prints the logbook.
 Votes cast from one shell share a session, so `ljos consensus` folds them into one voice. A vote from each seat's own runner is its own voice. The getting-started page shows the fold.
 
+## How-to
+
+[How-to guides](https://leidarljos.github.io/ljos/howto.html) is one task a page: runners, memory, sittings, votes, handover.
+
 ## The command check
 
 Before an agent's shell command runs, the runner's hook asks `ljos-policyd`, which answers allow, warn or rewrite.
@@ -109,7 +175,9 @@ allow	warn	git-force-push	a force push rewrites a published branch
 
 A push onto `main` or `develop` warns under `sitting-gate` until the ticket of the sitting has a settled consensus. When `vissue.toml` lists one active seat, that seat's own vote is enough for the push. With no seat list, the push waits for two seats.
 
-## The MCP server
+## Reference
+
+### The MCP server
 
 `ljos-mcp` serves the same verbs over stdio. By default it lists twenty core
 tools, guard and memory first: `rule`, `prefer`, `remember`,
@@ -127,7 +195,7 @@ The official MCP Registry lists the server from the crates.io page of `ljos`, an
 
 - mcp-name: io.github.leidarljos/ljos
 
-## Documentation
+### Documentation
 
 | Page | Answer |
 |---|---|
