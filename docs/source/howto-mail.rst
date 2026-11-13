@@ -25,7 +25,7 @@ after a sync.
 writes to the other members. ``--interrupt`` puts the message ahead of the
 others on the next prompt. ``--issue ID`` threads it on that vissue issue,
 and a reply keeps the issue. ``ljos inbox`` lists what this seat has not
-read, and writes no receipt. A pack that does not answer is an error.
+read, and writes a receipt for each unread message it shows. A pack that does not answer is an error. A pack that runs out of time prints ``pack busy, try again`` and exits 75.
 A writer that refuses kind ``message`` is an error too: the command exits
 non-zero, names packset 0.13.0, and does not print an empty inbox.
 ``ljos send`` names the packset version that keeps mail. ``ljos read ID``

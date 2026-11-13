@@ -20,21 +20,32 @@ Memory, a work tracker and a command guard for coding runners
 Usage: ljos <COMMAND>
 
 Start:
-  doctor       Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable
+  doctor       Check that ljos is ready, and print the rows that need action
 
 Options:
   -h, --help     Print help
   -V, --version  Print version
 
-Start with `ljos doctor`, `ljos prefer "..."`, `ljos policy -- COMMAND` and `ljos onboard`. `ljos protocol` explains the rest. `ljos help --all` lists every command.
+A seat is the name in `LJOS_SEAT`: the person or agent this process acts as. Start with `ljos doctor`, `ljos prefer "..."`, `ljos policy -- COMMAND` and `ljos onboard`. `ljos protocol` explains the rest. `ljos help --all` lists every command.
 $ ljos doctor --help
-Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable
+Check that ljos is ready, and print the rows that need action.
+
+Exit 1 when a required program, the memory store or its token does not answer, the tool server a runner starts or the cloud signing key does not, the note queue is damaged, or the tracker directory is not writable. A tracker that has not been created yet does not fail this command.
+
+Example: `ljos doctor`
 
 Usage: ljos doctor [OPTIONS]
 
 Options:
-      --all   Print every row, the ones that answer included [alias: --verbose]
-      --fix   Refresh runner skills and runner env files this ljos wrote, and replace a stale cloud guard rule file. A skill edited by hand, an env file ljos did not write, and a cloud guard file that is missing or not a known older version are left in place
-  -h, --help  Print help
+      --all
+          Print every row, the ones that answer included
+          
+          [alias: --verbose]
+
+      --fix
+          Refresh runner skills and runner env files this ljos wrote, and replace a stale cloud guard rule file. A skill edited by hand, an env file ljos did not write, and a cloud guard file that is missing or not a known older version are left in place
+
+  -h, --help
+          Print help (see a summary with '-h')
 #+end_src
 # END ljos-sample help

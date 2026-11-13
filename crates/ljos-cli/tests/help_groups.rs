@@ -98,9 +98,16 @@ fn help_groups_the_short_list_and_all_lists_the_rest() {
 #[test]
 fn common_commands_include_an_example() {
     for (args, needle) in [
-        (&["remember", "--help"][..], "ljos remember"),
+        (&["recall", "--help"][..], "ljos recall"),
         (&["search", "--help"][..], "ljos search"),
+        (&["remember", "--help"][..], "ljos remember"),
         (&["file", "--help"][..], "ljos file"),
+        (&["claim", "--help"][..], "ljos claim"),
+        (&["note", "--help"][..], "ljos note"),
+        (&["finish", "--help"][..], "ljos finish"),
+        (&["doctor", "--help"][..], "ljos doctor"),
+        (&["onboard", "--help"][..], "ljos onboard"),
+        (&["mesh", "--help"][..], "ljos mesh up"),
         (&["sitting", "--help"][..], "ljos sitting --plan"),
         (&["policy", "--help"][..], "ljos policy --"),
         (&["forget", "--help"][..], "ljos forget"),

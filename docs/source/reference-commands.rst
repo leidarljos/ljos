@@ -10,27 +10,27 @@ Commands
    <span id="command-line"></span>
 
 ``sitting ISSUE [--assignee NAME] [--cards DIR] [--playbook NAME] [--anyway] [--verbose]``
-   Stores: all. Open a sitting: doctor, sync when the repository names a scope, cards, due, island, blockers, playbook, workflow when the issue carries one, panel when the issue is a decision, recall, timeline, reclaim, claim. The short form prints what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``. A pack that answers 503 or does not answer is ``memory skipped: packsetd busy``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold. Quiet claims are a count that points at ``ljos claims --mine``. ``--verbose`` prints every section. Reclaim hands back claims quiet longer than ``LJOS_LEASE_SECS`` (900; 0 is off) whose conversation is gone, and keeps one whose runner still runs. It stops at the first store down. The name defaults to this conversation's holder (``ljos seat``). ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``. The name is a tracker ``playbook:`` note until finish or release.
+   Stores: all. Open a sitting: doctor, sync when the repository names a scope, cards, due, island, blockers, playbook, workflow when the issue carries one, panel when the issue is a decision, recall, timeline, reclaim, claim. The short form prints what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``. A pack that answers 503 or does not answer is ``memory skipped: packsetd busy``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold. Quiet claims are a count that points at ``ljos claims --mine``. ``--verbose`` prints every section. Reclaim hands back claims quiet longer than ``LJOS_LEASE_SECS`` (900; 0 is off) whose conversation is gone, and keeps one whose runner still runs. It stops at the first store down. The name defaults to this conversation's holder (``ljos seat``). ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``. The name is a tracker ``playbook:`` note until finish or release. ``--cards`` is the directory of ``USER.md`` and ``MEMORY.md``; ``--dir`` is the same flag.
 ``sitting --plan TITLE [-p PROJECT] -- ITEM...``
    Stores: tracker, claim graph. File ``TITLE`` and the items after ``--`` in one tracker commit, claim the parent, and print the checklist with ids. The parent is tagged ``plan`` and ``ORDERED``. Each item is a ``checklist`` child, in the order given. The sitting names the next unfinished item. ``ljos ready --mine`` names it again. ``ljos finish ITEM`` marks that item done and names the next one.
-``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--gen G] [--assignee NAME] [--close]``
-   Stores: all. Close a sitting: complete the session node, store ``--lesson``, fire the island, then learn. With no encoder the island is not fired, and the line says the ranking is lexical. A checklist item is marked done instead, and the line names the next unfinished item of its plan. The lesson goes in at once at L0 (``derived``) with origin ``agent-derived``. It is the person's when no runner marks the environment and a terminal is on its input; ``ljos accept ID`` raises it to ``explicit``; ``--gen`` names the claim's generation (absent, the live one; a stale one is refused); ``--assignee`` names the holder (absent, this conversation's holder); a runner is refused. A person closes the ticket when the work is accepted, else the ticket stays open with no holder.
+``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--new-option] [--beta B] [--gen G] [--assignee NAME] [--close]``
+   Stores: all. Close a sitting: complete the session node (the tracker's record of who holds the ticket), store ``--lesson``, fire the island, then learn. A lesson written after the issue, with no ``--lesson``, is taken the same way. With no encoder the island is not fired, and the line says the ranking is lexical. A checklist item is marked done instead, and the line names the next unfinished item of its plan. The lesson goes in at once at L0 (``derived``, a memory a person has not accepted) with origin ``agent-derived``. It is the person's when no runner marks the environment and a terminal is on its input; ``ljos accept ID`` raises it to ``explicit``; ``--new-option`` says the outcome was none of the ballot's options; ``--gen`` names the claim's generation (absent, the live one; a stale one is refused); ``--assignee`` names the holder (absent, this conversation's holder); a runner is refused. A person closes the ticket when the work is accepted, else the ticket stays open with no holder. Example: ``ljos finish proj-1a2b --lesson "Cold metal seats."``.
 ``calibrate -p PROJECT [--rounds N]``
-   Stores: consensus, pack. Trust rows from the project's voting history (Dawid-Skene accuracy)
-``remember TEXT [--as PERSONA] [--transient|--standing]``
-   Stores: pack. One lesson, stored as written, origin ``user-declared``; as a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the hook shows it from the next prompt it bears on; run under an agent runner it is an episode, kept and not a refresher until a review promotes it; ``--transient`` or ``--standing`` picks one either way. A sentence of more than 29 words is stored as written, and ``--verbose`` prints one line to split it into two sentences. A 503, including memory pressure, queues the lesson and a later command sends it. A duplicate prints the atom id already in the pack. A content refusal names size or policy.
+   Stores: consensus, pack. Estimate how often each voter has been right, from the project's past votes. The estimate is Dawid-Skene: it uses the ballots and no separate answer key. ``--rounds`` is how many expectation-maximisation passes to run.
+``remember TEXT [--as PERSONA] [--transient|--standing] [--verbose] [--valid-from DATE] [--valid-to DATE]``
+   Stores: pack. One lesson, stored as written, origin ``user-declared``; as a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the hook shows it from the next prompt it bears on; run under an agent runner it is an episode labelled agent-derived (an agent wrote it, and a person has not accepted it), kept and not a refresher until a review promotes it; ``--transient`` or ``--standing`` picks one either way. A sentence of more than 29 words is stored as written, and ``--verbose`` prints one line to split it into two sentences. ``--valid-from`` and ``--valid-to`` are the days the claim holds in the world. A 503, including memory pressure, queues the lesson and a later command sends it. A duplicate prints the atom id already in the pack. A content refusal names size or policy. A pack that runs out of time exits 75. Example: ``ljos remember "The lexical default is BM25+."``.
 ``memories list|review|tui|prune``
    Stores: pack. Review the memories agents wrote on their own: ``list`` newest first with provenance, unreviewed agents' memories by default; ``review`` keeps, drops, edits or merges them; ``tui`` browses them; ``prune`` names duplicates and never-recalled memories and writes only with ``--apply``.
 ``prefer TEXT [--deny PATTERN] [--ask PATTERN] [--user --why REASON]``
-   Stores: pack, user config. One standing preference, origin ``user-declared``; each ``--deny`` or ``--ask`` also writes that rule with the preference as its reason, so the hook warns by it. ``--user`` writes a user rule instead, shared by every seat on this machine, never reviewed, and not also stored as a seat preference; ``--why`` is required with it. See :doc:`User rules <reference-rules>`
+   Stores: pack, user config. One standing preference, origin ``user-declared``; each ``--deny`` or ``--ask`` also writes that rule with the preference as its reason, so the hook warns by it. ``--user`` writes a user rule instead, shared by every seat on this machine, never reviewed, and not also stored as a seat preference; ``--why`` is required with it. ``--as`` stores it as that persona. ``--promote`` copies a lesson into a user rule. ``--forget`` tombstones a user rule. ``--sync`` pulls and pushes user rules through the tracker. ``--review`` lists preferences stored before a basis was kept, and ``--keep`` keeps one. ``--deny-mention``, ``--deny-name``, ``--deny-reply-to`` and ``--deny-reply-name`` refuse an outbound post, with ``--user``. See :doc:`User rules <reference-rules>`
 ``accept ID [--quote WORDS --at TIME --via SEAT]``
    Stores: pack. Raise one stored memory from L0 (``derived``) to ``explicit``, or a proposal an older ljos left open, and record a ``keep`` review. Any caller can, and the memory keeps its origin. For a yes said in chat, ``--quote`` takes the person's words, ``--at`` the time they said them as a Request for Comments (RFC) 3339 timestamp, and ``--via`` the seat that carried them. All three go together, and the acceptance keeps them. A proposal whose text ``remember`` or ``prefer`` already wrote is not written again.
-``forget ID [--why DEED]``
-   Stores: pack. Tombstone a claim, naming the deed that withdrew it.
+``forget ID [--why DEED] [--json]``
+   Stores: pack. Tombstone a claim, naming the deed that withdrew it. ``--why`` is a deed id rather than a sentence. ``--json`` prints the stored row.
 ``retire-notes``
    Stores: pack. Tombstone the note memories an older ``ljos note`` wrote; runs once per seat, and the tracker copies stay.
-``search QUERY [-n N] [--rerank] [--as-of TIME] [--explain]``
-   Stores: pack. Ranked claims with how many scorers named each and its age. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. A short list is not padded with a weaker cross-seat hit. When those were the only rows, the line is ``Nothing relevant was found.`` A search the pack answered with nothing is still ``No hits.`` A busy pack ranks by words and still returns a hit that names the subject. ``--rerank`` scores the top hits with the writer's cross-encoder; ``--as-of`` asks the pack as it stood then; ``--explain`` opens with what the score and the fraction mean.
+``search QUERY [-n N] [--rerank] [--as-of TIME] [--valid-at DATE] [--explain] [--source-machine NAME] [--source-seat SEAT] [--import-id ID] [--json] [--attempts]``
+   Stores: pack. Ranked claims with how many scorers named each and its age. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. The cosine is how close the stored text is to the query, from 0 to 1. A short list is not padded with a weaker cross-seat hit. When those were the only rows, the line is ``Nothing relevant was found.`` A search the pack answered with nothing is still ``No hits.`` A busy pack ranks by words and still returns a hit that names the subject. ``--rerank`` scores the top hits with the writer's cross-encoder; ``--as-of`` asks the pack as it stood then; ``--valid-at`` asks what held in the world that day (``any`` keeps every window); ``--explain`` opens with what the score and the fraction mean. ``--source-machine``, ``--source-seat`` and ``--import-id`` keep only those rows, before the limit. ``--json`` prints the rows. ``--attempts`` includes failed commands. A pack that runs out of time prints ``pack busy, try again`` and exits 75. Example: ``ljos search "lexical default"``.
 ``timeline ISSUE [-n N]``
    Stores: tracker, deed store, pack. The logbook, the cited deeds and the activated memories as one dated list, oldest first, each line with its age and the gap since the one before.
 ``consolidate [--apply]``
@@ -38,13 +38,13 @@ Commands
 ``conflicts [-n N]``
    Stores: pack. Candidate contradictions by geometry: the lowest passes between single memories, read by the optional ``landscape`` habitat. The habitat is not part of this repository. When it is not on ``PATH`` the command says so and writes nothing.
 ``hubs [-n N]``
-   Stores: pack. The claims this seat's memory turns on, highest first: a weighted PageRank over the links.
-``island CUE [--fire]``
-   Stores: pack. The memories a task activates: search hits spread along the links; ``--fire`` wires the strongest eight together.
-``due``
-   Stores: pack. Sweeps the pack first (reviews left due past twice their interval lapse; never-recalled claims missed three times are forgotten), then the claims whose review is due, unreviewed ones first, one line on the clock, and one on what the sweep moved.
+   Stores: pack. The memories most other memories point at, highest first. PageRank ranks a memory by how many others point at it, and by how linked those are.
+``island CUE [--fire] [--as PERSONA]``
+   Stores: pack. The memories a task activates: search hits spread along the links; ``--fire`` wires the strongest eight together. ``--as`` walks the links as that persona.
+``due [--all] [--judge]``
+   Stores: pack. Sweeps the pack first (reviews left due past twice their interval lapse; never-recalled claims missed three times are forgotten), then the claims whose review is due, unreviewed ones first, one line on the clock, and one on what the sweep moved. ``--all`` lists every due memory and grades none. ``--judge`` sends the page to the review judges.
 ``hud [--foreground] [--toggle|--show|--hide] [--install-desktop]``
-   Stores: none. Exec sibling ``ljos-hud``; missing is 127, hide-miss is 0; the musl CLI never links iced.
+   Stores: none. Exec sibling ``ljos-hud``. A missing program exits 127. ``--hide`` when that program is not installed exits 0. The musl CLI never links iced.
 ``habit [NAME [VALUE]] [--unit U] [--every 7d] [--source S]``
    Stores: pack. With a value, take a reading: the earlier reading closes and is kept as what it was, the next is due one cadence on; without, list each habit's latest reading with the change since the one before.
 ``graded ID [--lapsed]``
@@ -75,24 +75,24 @@ Commands
    Stores: tracker. A parent's workflow: stage, round and next step; ``--start feature`` notes ``workflow: feature`` and files the design child, ``--round`` files the next panel round once every child is closed.
 ``brief NAME ISSUE``
    Stores: pack, tracker. What a subagent playing the persona starts from: view, the bound playbook's full recipe, five named principles, the arena rubric, what the seat knows on its domains, the working set.
-``panel ISSUE [--out DIR] [--jev]``
-   Stores: pack, tracker. One brief per persona whose domains the issue speaks to as ``DIR/<name>.md``, then the settle line; refused until a playbook is bound. ``--jev`` asks Jev for every ballot first and casts them only when every seat is sure and all agree; otherwise it writes the briefs.
+``panel ISSUE [--out DIR] [--jev] [--harness NAME] [--designers N] [--dry-run] [--cloud]``
+   Stores: pack, tracker. One brief per persona whose domains the issue speaks to as ``DIR/<name>.md``, then the settle line; refused until a playbook is bound. ``--jev`` asks Jev for every ballot first and casts them only when every seat is sure and all agree; otherwise it writes the briefs. ``--harness`` names the runner that spawns the panel. ``--designers`` is how many designers ``run`` spawns. ``--dry-run`` prints the sessions and does not spawn. ``--cloud`` writes one prompt file per persona and does not spawn.
 ``open-panel --prompt-file FILE --log FILE [--cwd DIR] [--session ID]``
    Stores: tracker, runner. Open a panel for a decision prompt: file or reuse the issue, sit it, and start one headless member per brief. The prompt is already in the file, so the hook can return. ``--session`` keeps a second opener from starting a second panel.
 ``learn ID --outcome OPTION [--rule record|hedge] [--beta B] [--share S]``
-   Stores: tracker, pack. Reweigh voters by what turned out right: by default each voter's record of hits and misses as log-odds weights, its accuracy shrunk toward the panel's pooled accuracy; ``hedge`` shrinks refuted voters by ``B`` with ``S`` recovery; either way the outcome is kept.
+   Stores: tracker, pack. Reweigh voters by what turned out right: by default each voter's record of hits and misses as log-odds weights, its accuracy shrunk toward the panel's pooled accuracy; ``hedge`` shrinks refuted voters by ``B`` with ``S`` recovery; either way the outcome is kept. ``--new-option`` says the outcome was none of the ballot's options.
 ``evidence ACCESSION`` / ``current ACCESSION``
    Stores: deed store. Intact; still the tip.
 ``record check DIR`` / ``record check --tracker ROOT``
-   Stores: none / tracker. ``DIR`` holds schema-v1 question and ballot entries; ``--tracker`` holds every ballot under ``ROOT``, a persona's and a judge's included, to one test: the voter's newest ``ballot-sig:`` note names the choice, verifies, and is under the key ``.ljos-seat-keys`` pins for that voter and no other seat. One ``FILE:LINE: ISSUE: REASON`` line per ballot that does not stand, and exit 1. An unsigned ballot committed before signing began is legacy. It only reads, so CI can run it.
-``file TITLE [--parent ID|--top] [-p PROJECT] [-t TYPE] [--tags T] [--priority P] [--body TEXT]``
-   Stores: tracker. File work found while sitting: a child of the held issue unless ``--parent`` names another or ``--top`` none, in the parent's project; a projected board takes it into its inbox under the printed id; the tracker file is committed. A day's checklist is ``ljos sitting --plan``, which files the parent and its items in one commit.
+   Stores: none / tracker. ``DIR`` holds schema-v1 question and ballot entries; ``--tracker`` holds every ballot under ``ROOT``, a persona's and a judge's included, to one test: the voter's newest ``ballot-sig:`` note names the choice, verifies, and is under the key ``.ljos-seat-keys`` pins for that voter and no other seat. One ``FILE:LINE: ISSUE: REASON`` line per ballot that does not stand, and exits 1. An unsigned ballot committed before signing began is legacy. It only reads, so CI can run it.
+``file TITLE [--parent ID|--top] [-p PROJECT] [-t TYPE] [--tags T] [--priority P] [--body TEXT] [--options A,B] [--quorum N --deadline RFC3339] [-q]``
+   Stores: tracker. File work found while sitting: a child of the held issue unless ``--parent`` names another or ``--top`` none, in the parent's project; a projected board takes it into its inbox under the printed id; the tracker file is committed. ``--options`` writes ``Options: A, B`` as the first body line. ``--quorum`` and ``--deadline`` together say how many ballots are due, and when. ``-q`` (``--porcelain``) is accepted and changes nothing: the id is already the only line on stdout. A day's checklist is ``ljos sitting --plan``, which files the parent and its items in one commit. Example: ``LJOS_SEAT=alice ljos file "Pick a codec" -p demo``.
 ``ready [-p PROJECT] [--json] [--mine]``
    Stores: tracker. Tickets that are open and not waiting on an open ticket. ``--mine`` names the next unfinished item of each of this seat's plans. ``-p`` limits that list to one project. ``--json`` prints the rows.
 ``show ISSUE``
    Stores: tracker. One ticket: its id, state and title, then the tickets it waits on. An open blocker is ``open`` and a finished one is ``closed``. None prints ``blockers: none``. An unknown id names ``ljos ready``.
-``note ID TEXT...``
-   Stores: tracker. A dated progress note on the issue, committed; on an issue another seat holds it says so: the note is an assist, and ``ljos send`` reaches the holder; the note stays on the ticket and is never written into memory.
+``note [ID] TEXT...``
+   Stores: tracker. A dated progress note on the issue, committed. With no id, the note is written on the issue this seat holds. On an issue another seat holds it says so: the note is an assist, and ``ljos send`` reaches the holder; the note stays on the ticket and is never written into memory. Example: ``ljos note proj-1a2b "the door seats when it is cold"``.
 ``withdraw ID [--note TEXT] [--as NAME]``
    Stores: tracker. Take back this seat's own ballot, or with ``--note`` a note it wrote; nothing is deleted, and the withdrawal is a dated note beside it; ``--as`` names the persona a ballot was cast under.
 ``reopen ID``
@@ -102,11 +102,11 @@ Commands
 ``usage --since YYYY-MM-DD``
    Stores: tracker. How many tracker commits each seat made from that day on.
 ``digest [since TIME or last] [--json]``
-   Stores: tracker, deed, pack. One view of what each seat did, newest first: tickets filed, claimed and closed, votes, consensus, deeds, claims, guard warnings and rewrites, and memory. last continues from the previous run.
+   Stores: tracker, deed, pack. One view of what each seat did, newest first: tickets filed, claimed and closed, votes, consensus, deeds, claims, guard warnings and rewrites, and memory. last continues from the previous run. ``--mark`` moves that marker. JSON does not, unless ``--mark`` is set.
 ``send SEAT TEXT... [--group NAME] [--interrupt] [--issue ID]``
    Stores: pack. Write to one seat, or with ``--group`` to the other members of that group; ``--interrupt`` leads the next prompt; ``--issue`` threads the message on that vissue issue and the atom takes the issue's scope, so ``ljos sync`` carries it in that repository's sealed log.
-``inbox [--all]``
-   Stores: pack. Mail this seat has not read, then receipts on what it sent that it has not been shown; listing writes no receipt; ``ljos hook --prompt`` writes a receipt for each message it shows; a pack that does not answer is an error, and so is a writer that refuses kind ``message``; ``--all`` includes mail already read.
+``inbox [--all] [--sync [COMMIT]]``
+   Stores: pack. Mail this seat has not read, then receipts on what it sent that it has not been shown. Each unread message shown is marked read, and a receipt is written. ``ljos hook --prompt`` writes a receipt for each message it shows. A pack that does not answer is an error and the exit is non-zero, and so is a writer that refuses kind ``message``. A pack that runs out of time prints ``pack busy, try again`` and exits 75. ``--all`` includes mail already read. ``--sync`` fetches the tracker and imports its sealed logs before listing.
 ``read ID``
    Stores: pack. Write a read receipt for one message; a second read writes nothing.
 ``reply ID TEXT... [--interrupt]``
@@ -114,25 +114,25 @@ Commands
 ``group NAME [--add SEAT]... [--remove SEAT]...``
    Stores: pack. List a group, or add and drop members; membership is atoms and travels in the sealed log.
 ``wake [SEAT] [--command CMD [--timeout S]|--webhook URL [--key-file F] [--key-env VAR]|--clear|--fire]``
-   Stores: machine. How mail wakes a seat that is idle: a shell line this machine runs with ``LJOS_SEAT`` set to the seat, or a URL it posts the envelope to (never the body); ``send`` and ``reply`` start it in its own session and do not wait on it; policyd reads a command when it is set and on every run, and a rule that fires is a warning beside it while the command still runs, and block-on-warning warns with that label and the command runs. It does not block; ``--fire`` runs it now and prints what happened; alone, show the wake; kept in ``~/.config/ljos/wake.toml``.
+   Stores: machine. How mail wakes a seat that is idle: a shell line this machine runs with ``LJOS_SEAT`` set to the seat, or a URL it posts the envelope to (never the body); ``send`` and ``reply`` start it in its own session and do not wait on it; policyd reads a command when it is set and on every run, and a rule that fires is a warning beside it while the command still runs, and block-on-warning warns with that label and the command runs. It does not block; ``--fire`` runs it now and prints what happened. With ``--fire``, ``--from``, ``--msg``, ``--issue`` and ``--interrupt`` name the message. Alone, show the wake. Kept in ``~/.config/ljos/wake.toml``.
 ``deed ID [--add ACCESSION]...`` / ``--remove ACCESSION --ticket ID``
    Stores: tracker. Cite with ``--add``, or list; ``--remove`` drops one citation, appended to the ledger, and the heading is not rewritten.
 ``claims [ARGS]``
    Stores: tracker. Who has claimed what: ``vissue claims`` with its flags (``--by NAME``, ``--json``)
 ``recall ID [--json] [--no-graph]``
-   Stores: tracker. The working set. When ``graphify-out/graph.json`` is in the repository, a Code context section lists matching nodes with file and line and a few edges tagged EXTRACTED or INFERRED. ``--no-graph`` and ``LJOS_GRAPHIFY=off`` leave it out. ``--json`` puts the same text in the JSON document. A schema major other than 1 is named in that section, and the working set still prints.
+   Stores: tracker. The working set: the plan, the cited files and the notes for one ticket. A deed is a file stored for the ticket. When ``graphify-out/graph.json`` is in the repository, a Code context section lists matching nodes with file and line and a few edges tagged EXTRACTED or INFERRED. ``--no-graph`` and ``LJOS_GRAPHIFY=off`` leave it out. ``--json`` puts the same text in the JSON document. A schema major other than 1 is named in that section, and the working set still prints. Example: ``ljos recall proj-1a2b``.
 ``vote ID [--for OPTION] [--confidence P] [--used ACCESSIONS|none] [--expect OPTION|JSON] [--as PERSONA] [--jev] [--withdraw]``
-   Stores: tracker. Cast as this seat, never another, or read the tally; ``--confidence`` is a probability in (0, 1]; ``--used`` lists the deed accessions the ballot used, comma-separated, or ``none``, and is required with ``--for``; ``--expect`` records the forecast of the others on the same command; ``--withdraw`` takes back the ballot and its forecast, and the logbook keeps what it was. ``--as NAME --jev`` asks Jev for the persona's ballot: cast with the option's probability and a forecast at confidence 0.8 or above, noted and left for a subagent under it.
+   Stores: tracker. Cast as this seat, never another, or read the tally; ``--confidence`` is a probability in (0, 1]; ``--used`` lists the deed accessions the ballot used, comma-separated, or ``none``, and is required with ``--for``; ``--expect`` records the forecast of the others on the same command; ``--withdraw`` takes back the ballot and its forecast, and the logbook keeps what it was. ``--as NAME --jev`` asks Jev for the persona's ballot: cast with the option's probability and a forecast at confidence 0.8 or above, noted and left for a subagent under it. ``--against REASON`` votes no, and ``--child ID`` names the open child that no ballot links. The tracker records the voter as ``VISSUE_AGENT``, which is this seat's name.
 ``predict ID --expect OPTION|JSON [--as PERSONA]``
    Stores: pack. Forecast the others' shares; two or more and ``consensus`` names the answer more popular than forecast (Prelec, doi:10.1038/nature21054)
-``rule PATTERN [--verdict deny|ask] --why TEXT [--user]``
-   Stores: pack, user config. Argv law the hook and ``policy`` warn by, the verdict kept as a label: a glob, or a regular expression (``re:`` or a ``\b``, ``\s`` or ``(a|b)`` in it) anchored at the start, tried on the whole line and on each command it runs; :doc:`What a rule reads <reference-rules>` lists which those are. ``--why`` is the reason the warning gives. ``--user`` writes the law into the user config instead of the seat pack, shared by every seat and never reviewed.
+``rule PATTERN [--verdict deny|ask|allow] --why TEXT [--user] [--json]``
+   Stores: pack, user config. Argv law the hook and ``policy`` warn by, the verdict kept as a label: a glob, or a regular expression (``re:`` or a ``\b``, ``\s`` or ``(a|b)`` in it) anchored at the start, tried on the whole line and on each command it runs; :doc:`What a rule reads <reference-rules>` lists which those are. ``--why`` is the reason the warning gives, a sentence rather than a deed id. ``--user`` writes the law into the user config instead of the seat pack, shared by every seat and never reviewed. ``allow`` is kept only with ``--user``. ``--json`` prints the stored row.
 ``rules [--json]``
    Stores: pack. The rules the hook and ``policy`` warn by: verdict, pattern and reason, deny first.
 ``consensus ID [--compare]``
-   Stores: consensus, tracker. First what the seat ballots alone decide for the push check; then the settle under the pack's rows that apply to the issue, with every persona's anchor, as advice; an issue tagged ``broad`` runs bounded confidence; once six issues have an outcome, voters shown to err together are discounted; ``--compare`` adds the tracker's own settle, and so does a missing model crate; an issue with no ballots is refused before a settle runs; ``--json`` prints one JSON document, the seat tally at the top level and each reading under its own key.
+   Stores: consensus, tracker. First what the seat ballots alone decide for the push check; then the settle under the pack's rows that apply to the issue, with every persona's anchor, as advice; an issue tagged ``broad`` runs bounded confidence; once six issues have an outcome, voters shown to err together are discounted; ``--compare`` adds the tracker's own settle, and so does a missing model crate; an issue with no ballots is refused before a settle runs; ``--json`` prints one JSON document, the seat tally at the top level and each reading under its own key. ``--no-file`` reads only and files nothing. ``--quorum N`` exits 1 when fewer ballots are in: nothing is decided yet. With ``--deadline``, still short after that RFC 3339 time, the vote has lapsed and this exits 3.
 ``claim [ID] [--next] [--role ROLE] [--slack N] [--assignee NAME]``
-   Stores: claim graph. Claim a session node. With ``--next``, or with no id, it claims the first ready node in claimdag's order for the name, the way ``claim ID`` claims one; ``--role`` and ``--slack`` set the affinity and the depth slack. A busy refusal names what the name has still claimed.
+   Stores: claim graph. Take a ticket so this seat is the one working on it. The tracker stores the claim as a session node, its record of who holds the ticket. With ``--next``, or with no id, it claims the first ready node in claimdag's order for the name, the way ``claim ID`` claims one; ``--role`` and ``--slack`` set the affinity and the depth slack. A busy refusal names what the name has still claimed. Example: ``LJOS_SEAT=alice ljos claim demo-2f5j``.
 ``release ID [--assignee NAME]``
    Stores: claim graph. Hand the session node back unfinished: ready, generation moved; a node another conversation of this seat holds (a worker it started, or the one that started it) is released under that name.
 ``reap [--idle 6h] [--apply]``
@@ -140,11 +140,11 @@ Commands
 ``complete ID [--status done|failed|cancelled] [--gen G] [--assignee NAME]``
    Stores: claim graph. Finish the session node; does not close the ticket; ``--gen`` and ``--assignee`` as on ``finish``; a node another conversation of this seat holds is completed under that name, and another seat's is refused.
 ``cards [--dir DIR]``
-   Stores: cards. Print ``USER.md`` and ``MEMORY.md``.
+   Stores: cards. Print ``USER.md`` and ``MEMORY.md``. ``--dir`` (alias ``--cards``, the same flag ``ljos sitting --cards`` uses) names the directory. With neither file, the line names the directory. Example: ``ljos cards``.
 ``policy [--fail-on-deny] ARGV...``
    Stores: policy, pack. The line as it would run, the trusted computing base (TCB) answer if ``ljos-policyd`` gave one (from 0.35.0 that may be a rewritten line), then a matching pack rule as a warning line, then what the pack knows that bears on it; ``--fail-on-deny`` exits 1 only on the cloud seat push rule, not on ``block-on-warning``, and without the flag the exit stays 0.
 ``hook [--limit N] [--prompt [--text]] [--fail-on-deny] [--runner NAME] [--git-commit] [--git-hook post-commit|post-rewrite]``
-   Stores: policy, pack. Hook JSON or argv on stdin; ``--runner`` reads the payload of ``copilot``, ``gemini``, ``windsurf``, ``factory``, ``kiro``, ``cline``, ``qwen`` or ``crush`` and answers in that runner's shape; ``--prompt`` reads stdin as the prompt, and ``--text`` with it prints what the agent would read as plain text instead of JSON; on ``PreToolUse`` the TCB and pack rules, a rule is an allow with one warning line and block-on-warning warns with the rule's label and does not block, and from 0.35.0 a rewrite goes back as the updated input for the harnesses that accept one, including the editor harness's ``preToolUse``, and another runner runs its own line with a warning that names the new one; ``--fail-on-deny`` exits 1 only on the cloud seat push rule, not on ``block-on-warning``, and without the flag the exit stays 0; on a prompt the hits scoring at least 0.6 of the best that name its subject, or with a pack that sends cosines the encoder's first hit at 0.66 or more and a hit sharing a word within 0.05 of the best cosine, preferences first then lessons oldest first, each with its age, three at most, each once between compactions; on a failed tool, up to three that share at least two content words with the command and its error. ``--git-commit`` books the commit git just created and reads no stdin; ``--git-hook`` names ``post-commit`` or ``post-rewrite``. :doc:`Git hooks <reference-git-hooks>`
+   Stores: policy, pack. Hook JSON or argv on stdin; ``--runner`` reads the payload of ``copilot``, ``gemini``, ``windsurf``, ``factory``, ``kiro``, ``cline``, ``qwen`` or ``crush`` and answers in that runner's shape; ``--prompt`` reads stdin as the prompt, and ``--text`` with it prints what the agent would read as plain text instead of JSON; on ``PreToolUse`` the TCB and pack rules, a rule is an allow with one warning line and block-on-warning warns with the rule's label and does not block, and from 0.35.0 a rewrite goes back as the updated input for the harnesses that accept one, including the editor harness's ``preToolUse``, and another runner runs its own line with a warning that names the new one; ``--fail-on-deny`` exits 1 only on the cloud seat push rule, not on ``block-on-warning``, and without the flag the exit stays 0; on a prompt the hits scoring at least 0.6 of the best that name its subject, or with a pack that sends cosines the encoder's first hit at 0.66 or more and a hit sharing a word within 0.05 of the best cosine, preferences first then lessons oldest first, each with its age, three at most, each once between compactions; on a failed tool, up to three that share at least two content words with the command and its error. ``--git-commit`` books the commit git just created and reads no stdin; ``--git-hook`` names ``post-commit`` or ``post-rewrite``. ``--event`` names the event when the payload does not. ``--brief-once`` prints the SessionStart brief once for this conversation. ``--drain`` applies bookkeeping a hook call queued. A pack that does not answer still exits 0, because a hook must not fail the runner. :doc:`Git hooks <reference-git-hooks>`
 ``git-hooks install|uninstall|status``
    Stores: git. Install, remove, or show the global git hooks that book commits. ``install`` prints ``installed`` and the directory; ``uninstall`` prints ``uninstalled``; ``status`` prints where the hooks are and what ``core.hooksPath`` says. :doc:`Git hooks <reference-git-hooks>`
 ``bump-plan BUNDLE --project P --parent I [--generation G] [--dry-run]``
@@ -153,32 +153,71 @@ Commands
    Stores: pack, deed store, tracker. The typed findings of an eb-stack campaign state, one per line: id, status, class/disposition, stage, recipe, the fix or the summary; ``--remember`` stores one lesson per finding a person or a seat resolved at once (recipe, step, error line, fix), origin ``tool-echo`` at L0 (``derived``), under the recipe's name, its package and the class; ``ljos accept ID`` raises it to ``explicit``; ``--all`` takes the ones a later attempt superseded too; ``--issue`` cites the state file as a deed on the issue.
 ``memory export --out FILE [--machine NAME]``
    Stores: pack, tracker. Write this seat's lessons to the file. The file is not sent. ``-`` writes it to stdout. The machine is ``--machine``, else ``LJOS_SYNC_HOST`` when that is set and not empty, else the hostname. Another seat's lessons stay out.
-``memory import FILE [--as-machine NAME]``
-   Stores: tracker. Store the file in this seat's import slot under ``<tracker>/.ljos/memory/imports/<seat>/<sha256>/``. The import id is the SHA-256 of the file. ``--as-machine`` records that machine and does not change the bytes. Rows are labelled ``imported,unintegrated``. A second import of the same bytes prints ``unchanged``. A missing file names ``ljos memory export --out``.
+``memory import FILE [--source-machine NAME] [--source-seat SEAT] [--as-machine NAME]``
+   Stores: tracker. Store the file in this seat's import slot under ``<tracker>/.ljos/memory/imports/<seat>/<sha256>/``. The import id is the SHA-256 of the file. ``--source-machine`` and ``--source-seat`` name the file when it carries neither. ``--as-machine`` records that machine and does not change the bytes. Rows are labelled ``imported,unintegrated``. A second import of the same bytes prints ``unchanged``. A missing file names ``ljos memory export --out``.
 ``memory integrate [ID|--all] [--dry-run]``
    Stores: pack, tracker. Map one import, or every import with ``--all``, onto lessons already stored. The same text keeps one canonical id. ``--dry-run`` prints the mappings and writes nothing. Pass an id or ``--all``. ``ljos mesh pull`` integrates the same way and writes the seat's seed at ``<tracker>/.ljos/memory/mesh/<seat>/seed.jsonl``.
 ``memory imports [--json]``
    Stores: tracker. List the slots.
 ``sync [--key] [--import] [--export]``
-   Stores: tracker, pack. Share the seat's memory across machines through the tracker repository: pull and take other machines' sealed logs, then write and push this machine's; ``--key`` prints this machine's age public key (made on first use) and stops; ``--import`` only pulls; ``--export`` only writes and pushes.
+   Stores: tracker, pack. Share the seat's memory across machines through the tracker repository: pull and take other machines' sealed logs, then write and push this machine's; ``--key`` prints this machine's age public key (made on first use) and stops; ``--import`` only pulls; ``--export`` only writes and pushes. ``--adopt HOST`` folds a gone host's atoms into this host's log; ``--force`` adopts a host whose log was committed within 14 days; ``--dry-run`` prints that and writes nothing. ``--adopt-legacy HOST`` reads that host's logs from before the scope header. ``--compact`` folds this machine's atom segments into one snapshot.
 ``merge-atoms CURRENT PATH``
    Stores: tracker. Re-export this machine's atoms over a conflicted tracker log. git calls this as the ``ljos-atoms`` merge driver, ``%A`` then ``%P``.
 ``handover --out DIR [--project P]... [--issue I]... [--to user@host:path] [--since-size N] [--scope NAME]``
    Stores: all. Pack, seal, sign; ``--to`` copies the bag to another seat over ssh; ``--since-size`` puts the bridge from the size the receiver kept into the bag; ``--scope`` carries only the atoms tagged ``scope:NAME``, sealed with age to that scope's recipients, and no atom in plaintext.
 ``receive DIR [--since KEPT] [--keep FILE] [--import]``
    Stores: all. Check, and import the atoms with origin ``peer``; ``--since`` is the head ``--keep`` wrote at the last receive from this sender, and the bag's bridge must start there; a sealed scope file opens with the identities that scope allows, and stays closed without them.
-``doctor [--all]``
-   Stores: all. Whether ljos is ready, and the rows that need action; exit 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable. ``--all`` (alias ``--verbose``) prints every row, the ones that answer included. A probe that does not answer is a row that says it timed out, and it does not hold the report. A ``panes`` row names the tool that opens persona panes; with ``jev.toml`` present, a ``jev`` row carries the month's calls, cached answers and spend.
+``doctor [--all] [--fix]``
+   Stores: all. Check that ljos is ready, and print the rows that need action. Exit 1 when a required program, the memory store or its token does not answer, the tool server a runner starts or the cloud signing key does not, the note queue is damaged, or the tracker directory is not writable. A tracker that has not been created yet does not fail this command. ``--all`` (alias ``--verbose``) prints every row, the ones that answer included. ``--fix`` refreshes runner files this ljos wrote. A probe that does not answer is a row that says it timed out, and it does not hold the report. A ``panes`` row names the tool that opens persona panes; with ``jev.toml`` present, a ``jev`` row carries the month's calls, cached answers and spend. Example: ``ljos doctor``.
 ``seat [add NAME | grant SEAT close=own --quote TEXT --at TIME --via SEAT]``
-   Stores: tracker. Who is sitting; ``add`` writes NAME into the tracker's ``vissue.toml`` seat list; ``grant`` records a quoted yes that SEAT may close tickets it filed or holds.
-``protocol``
-   Stores: none. Print the sitting protocol.
+   Stores: tracker. Who is sitting; ``add`` writes NAME into the tracker's ``vissue.toml`` seat list; ``grant`` records a quoted yes that SEAT may close tickets it filed or holds. ``--ids-file`` names those tickets, one id a line.
+``protocol [--full]``
+   Stores: none. Print the short sitting protocol. ``--full`` prints every store and refusal.
 ``onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]``
-   Stores: runner. Alone, a terminal onboards every runner it finds and a pipe prints the one ``mcpServers`` entry any runner takes; onboard in json form prints that entry at a terminal too; with a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its skill, and write the personas into its ``agents`` directory; a shell runner (``shell = true``, ``example-host``, or ``shell``) writes the skill and an env file and registers no server and no hook; changed runner files and their previous bytes are recorded for ``offboard``.
+   Stores: runner. With no ``--harness``, a terminal onboards every runner it finds and a pipe prints the one ``mcpServers`` entry any runner takes. The Model Context Protocol (MCP) is the tool server the runner starts. Onboard in json form prints that entry at a terminal too. With a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its skill, and write the personas into its ``agents`` directory; a shell runner (``shell = true``, ``example-host``, or ``shell``) writes the skill and an env file and registers no server and no hook; changed runner files and their previous bytes are recorded for ``offboard``. A step that does not land exits 1. Example: ``ljos onboard``.
 ``offboard [--runner NAME] [--dry-run]``
-   Stores: runner. Restore runner files changed by ``onboard`` and remove files created only for ljos; ``--runner`` limits removal to one runner; ``--dry-run`` reports without writing; later edits are preserved; an older installation without a manifest is removed by its ljos markers.
+   Stores: runner. Restore runner files changed by ``onboard`` and remove files created only for ljos; ``--runner`` (alias ``--harness``, the same name ``ljos onboard`` uses) limits removal to one runner; ``--dry-run`` reports without writing; later edits are preserved; an older installation without a manifest is removed by its ljos markers. A step that does not land exits 1.
 ``uninstall [--dry-run] [--keep-programs] [--all] [--purge] [--no-stub] [--bin-dir DIR]``
    Stores: runner, programs. Offboard every runner, put the global git hooks back, stop the hook server, remove the ljos programs and leave a stub named ``ljos`` that answers every hook with an allow, so a session that cached the hook path is not blocked; ``--all`` removes the other seat programs, ``--purge`` the state, data and configuration directories; the release ships the same as ``uninstall.sh`` for a machine the binary was deleted from.
+
+``help [--all] [COMMAND...]``
+   Stores: none. Print this list, or the help of one command. ``--all`` lists every command, including those left off the short list.
+``options ISSUE A,B``
+   Stores: tracker. Append ``Options: A, B`` to an issue. Two or more, separated by commas. Fewer than two is refused.
+``block ISSUE --on ID|--off ID``
+   Stores: tracker. Record that one ticket waits on another. ``--on`` adds that edge. ``--off`` drops it.
+``export --out FILE [--machine NAME]``
+   Stores: pack, tracker. The same command as ``memory export``.
+``proposals [--seat SEAT] [--status STATUS] [--settle]``
+   Stores: pack. List lesson proposals waiting on a review. ``--seat`` keeps one seat. ``--status`` is open, accepted, refused, already-in-pack, or in-pack. ``--settle`` records already-in-pack on open rows the pack already holds, and deletes nothing.
+``proposals amend ID --text TEXT``
+   Stores: pack. Record a revised text and run the readability checks, without accepting. ``--text -`` reads stdin.
+``merge-org BASE OURS THEIRS``
+   Stores: tracker. Field-merge one issue file. git calls this as the ``ljos-org`` merge driver, ``%O`` ``%A`` ``%B``. The merged text replaces ours.
+``judge-score``
+   Stores: pack. Score the judge log against outcomes: accuracy and calibration per decision.
+``person-key set|clear|status``
+   Stores: machine. Set, clear, or show the person's passphrase. ``set`` and ``clear`` read the terminal and are the person's, with no runner variable set.
+``cloud up [--force] [--repoint]``
+   Stores: release, tracker. Install the release binaries, write the harness Model Context Protocol command, and clone ``LJOS_TRACKER_REMOTE``. ``--force`` downloads again. ``--repoint`` replaces the repository an earlier run recorded.
+``mesh up [--key-file PATH] [--login-server URL] [--hostname NAME]``
+   Stores: machine. Join the Headscale mesh. Headscale is the login server. A failure is one line on stderr and a non-zero status. Example: ``ljos mesh up --key-file ~/.config/ljos/mesh.key``.
+``mesh down``
+   Stores: machine. Log out and stop the tailscaled ``mesh up`` started. When this machine is not on the mesh, print ``mesh down: not on the mesh`` and exit 0. A failure is one line on stderr and a non-zero status.
+``mesh status``
+   Stores: machine. Print this node and the peers ``tailscale status`` reports, with their tags.
+``mesh acl [SWARM...]``
+   Stores: machine. Print the access policy ``mesh.toml`` implies. ``up`` and ``down`` do not read that file.
+``mesh pull --seat SEAT --from DIR``
+   Stores: pack, tracker. Import lane files from a handoff directory into a seat and write that seat's seed. A lane is one machine's memory file.
+``mesh push --seat SEAT --to DIR [--lane NAME]``
+   Stores: pack. Write a seat's memories into a handoff directory as one lane file.
+``mcp [ARGS...]``
+   Stores: none. Run the ``ljos-mcp`` installed beside this ``ljos``, passing these arguments through.
+``git-hook NAME``
+   Stores: git. Run the ljos part of one git hook. The block ``ljos git-hooks install`` appends calls this.
+``slot ISSUE SEAT --model MODEL --run RUN --key HEX``
+   Stores: tracker. Sign a launch slot on the issue a cloud run is launched for, before that run's first ballot.
 
 The manifest and backups are under ``${XDG_STATE_HOME:-~/.local/state}/ljos/onboard``.
 They are removed after every recorded runner is offboarded.
@@ -195,7 +234,7 @@ it was sent to; ``--new-seat`` writes to one that has not started yet.
 ``send --group NAME TEXT`` writes to the other members of that group. ``--interrupt`` leads the next prompt.
 ``--issue ID`` threads the message on that vissue issue, and the atom takes
 the issue's scope so ``ljos sync`` carries it in that repository's sealed
-log. ``inbox`` lists unread mail and writes no receipt. A pack that does
+log. ``inbox`` lists unread mail and writes a receipt for each unread message it shows. A pack that does
 not answer is an error. A writer that refuses kind ``message`` is an error
 too: the command exits non-zero, names packset 0.13.0, and does not print
 an empty inbox. When the writer reports a version, the error names that
@@ -257,7 +296,7 @@ Accepting a refused proposal again, with no amendment since, prints ``refused ID
 ``peer``, whatever origin the sender wrote.
 
 The claim graph records the held ticket too: a tracker id maps to one node
-(FNV-1a 128 of the id) and a name to one actor; a 32-hex id passes through.
+(a 128-bit FNV-1a hash of the id) and a name to one actor; a 32-hex id passes through.
 
 On Linux the pack client reads who owns the socket on its port from
 ``/proc/net/tcp``. A ``PACKSET_PORT`` that another user listens on is
@@ -267,3 +306,129 @@ refused. With nothing set and 8761 another user's, the seat uses port
 Without ``XDG_RUNTIME_DIR``, the hud socket and seat records go in
 ``ljos-UID`` under the temporary directory, mode 0700, or in
 ``~/.cache/ljos/run`` when that name is another user's or a symlink.
+
+This flag list is copied from command help.
+A test fails when this list and the binary differ.
+
+..
+   # proseguard:off
+
+.. BEGIN ljos-help-flags
+accept --at --quote --via
+agents --dry-run --harness
+ask
+block --off --on
+brief
+bump-plan --dry-run --generation --parent --project
+calibrate --project --rounds
+cards --cards --dir
+claim --assignee --next --role --slack
+claims
+cloud
+cloud up --force --repoint
+complete --assignee --gen --status
+conflicts --limit
+consensus --compare --deadline --json --no-file --quorum
+consolidate --apply
+current
+deed --add --porcelain --remove --ticket
+digest --json --mark --since
+doctor --all --fix --verbose
+due --all --judge
+evidence
+export --machine --out
+file --body --deadline --options --parent --porcelain --priority --project --quorum --tags --top --type
+findings --all --issue --remember
+finish --assignee --beta --close --gen --lesson --new-option --outcome --status
+forget --json --why
+git-hook
+git-hooks
+graded --lapsed
+group --add --remove
+habit --every --source --unit
+handover --issue --out --project --scope --since-size --to
+help --all
+hook --brief-once --drain --event --fail-on-deny --git-commit --git-hook --limit --prompt --runner --text
+hubs --limit
+hud --foreground --hide --install-desktop --show --toggle
+inbox --all --sync
+island --as --fire
+judge-score
+learn --beta --new-option --outcome --rule --share
+log --seat
+mcp
+memories
+memories list --all --json --seat --since --user
+memories prune --apply --days --json --stale
+memories review --all --drop --edit --json --keep --merge --seat --since --text --user
+memories tui --all --seat --since --user
+memory
+memory export --machine --out
+memory import --as-machine --source-machine --source-seat
+memory imports --json
+memory integrate --all --dry-run
+merge-atoms
+merge-org
+mesh
+mesh acl
+mesh down
+mesh pull --from --seat
+mesh push --lane --seat --to
+mesh status
+mesh up --hostname --key-file --login-server
+note
+offboard --dry-run --harness --runner
+onboard --dry-run --example --harness --skills
+open-panel --cwd --log --prompt-file --session
+options
+panel --cloud --designers --dry-run --harness --jev --out
+person-key
+persona --about --anchor --check --replace --retire --runner --view
+personas
+playbook
+playbooks
+policy --fail-on-deny
+predict --as --expect
+prefer --as --ask --deny --deny-mention --deny-name --deny-reply-name --deny-reply-to --forget --keep --promote --review --sync --user --why
+proposals --seat --settle --status
+proposals amend --text
+protocol --full
+read
+ready --json --mine --project
+reap --apply --idle
+recall --json --no-graph
+receive --import --keep --since
+record
+record check --tracker
+release --assignee
+remember --as --standing --transient --valid-from --valid-to --verbose
+reopen
+reply --interrupt
+retire-notes
+rule --json --user --verdict --why
+rules --json
+search --as-of --attempts --explain --import-id --json --limit --rerank --source-machine --source-seat --valid-at
+seat
+seat add
+seat grant --at --ids-file --quote --via
+send --group --interrupt --issue --new-seat
+show
+sitting --anyway --assignee --cards --dir --plan --playbook --project --verbose
+slot --key --model --run
+statusline
+supervise --at --cwd --exit --failures --harness --max-restarts --restart --script --window
+sync --adopt --adopt-legacy --compact --dry-run --export --force --import --key
+timeline --limit
+trust --about --why
+uninstall --all --bin-dir --dry-run --keep-programs --no-stub --purge
+upgrade --dir --only
+usage --since
+vote --against --as --child --confidence --expect --for --jev --used --withdraw
+wake --clear --command --fire --from --interrupt --issue --key-env --key-file --msg --timeout --webhook
+withdraw --as --note
+workflow --round --start
+.. END ljos-help-flags
+
+..
+   # proseguard:on
+
