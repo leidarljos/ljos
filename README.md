@@ -1,6 +1,6 @@
 # ljos
 
-ljos stores a lesson. A later prompt recalls it when the prompt bears on that lesson. A coding agent does not repeat the mistake.
+ljos stores a lesson. A later prompt shows it when the prompt bears on that lesson.
 
 [//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
 These notes describe ljos 0.41.11.
@@ -71,14 +71,14 @@ ljos gives coding agents a shared memory and a shared tracker on one person's ma
 A person writes what the agents should remember, and the prompt hook hands it back when a prompt bears on it.
 Agents file and claim tickets in one git repository, and a held ticket refuses a second claim.
 When agents disagree, they vote, and ljos settles the vote.
-It calls no model, and every store is a file a person can open.
-`ljos onboard` knows ten runners, among them Claude Code, Codex and Cursor.
+It stores the sentence as written. Search uses a local encoder when one is installed, and a judge sends text out only when a person configures one.
+`ljos onboard --example` lists the runners, among them Claude Code, Codex and Cursor.
 
 
 - 8,057 tokens for the 20 core Model Context Protocol (MCP) tools, against 18,011 for all 52 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
 - 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
 - The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
-- packset, the memory writer, on LongMemEval_S session retrieval over 470 questions: recall@5 0.914 with BM25+ alone, 0.949 with BM25+ fused with e5-large-v2 ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). This scores retrieval, not answer accuracy.
+- packset, the memory writer, publishes a LongMemEval_S session retrieval run ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). That page records the figures. This tree does not. The run scores retrieval, not answer accuracy.
 - 2,293 tests passed, 0 failed, 2 ignored on the 0.40.0 release commit ([CI run 42801686714](https://github.com/leidarljos/ljos/actions/runs/42801686714)).
 
 [What ljos does](https://leidarljos.github.io/ljos/introduction.html) lists every measured number with its method.
@@ -121,12 +121,12 @@ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.
 The `install.sh` attached to the 0.41.1 release asked for `vissue-cli-<target>.tar.xz`. The 0.41.2 script fetches `vissue-v<version>-<target>.tar.gz`, the archive the vissue release publishes.
 
 `--no-embed` leaves out the encoder. Search then matches words, and `ljos search` prints `ranking is lexical: encoder unavailable`.
-A cold encoder, one packsetd stopped after five minutes with no embed call, gets a longer budget. The search is asked again once the model has answered. The ranking line names the ranker that ordered the printed rows. A row whose score is only the word-rank floor, 0.20, is left out.
+A cold encoder, one the writer stopped after it sat idle with no embed call, gets a longer budget. The search is asked again once the model has answered. The ranking line names the ranker that ordered the printed rows. A row whose score is only the word-rank floor, 0.20, is left out.
 A lesson `ljos remember` queued because the pack was busy is sent again on `ljos search` and `ljos sitting`. When it is still waiting, that command says so.
 The installer checks each download against its published SHA-256 sum. It sets up the tracker, the memory writer and the deed store, then runs `ljos onboard` for each runner it finds.
 Git needs `user.name` and `user.email`, because the tracker commits each change. Without them the heading is still written, and the line is `tracker git: commit refused: Author identity unknown`.
 
-On a clean install, `ljos doctor` prints `ljos is ready: memory, tracker and command guard work`, then `Optional extras: ljos doctor --all`. A `sitting-gate` row follows. With no agent runner above the shell it says `not active here`.
+On a clean install, `ljos doctor` prints `ljos is ready: memory, tracker and command guard work`, then `Optional extras: ljos doctor --all`. With no seat named, a `seat source` row warns that the read uses every seat. A `sitting-gate` row follows. With no agent runner above the shell it says `not active here`.
 `ljos remember` prints the lesson and the first eight characters of its id. With no seat set and no conversation record, the write uses `unknown-` plus the host name, and the line says so. A conversation that already has a seat record writes as that seat.
 `ljos search "lexical default"` prints that lesson. A query that shares no word with the stored text, such as `which fusion`, prints `No hits.`
 This seat's hits come first. Another seat's lesson is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is `Nothing relevant was found.` A busy pack ranks by words and still returns a hit that names the subject.
@@ -137,7 +137,7 @@ The ticket is an Org heading in a git repository, which you can open. beads stor
 
 [Getting started](https://leidarljos.github.io/ljos/getting-started.html) has the output from one run of these commands, then a second seat on the ticket.
 
-To install by hand:
+To install by hand, with `cargo-binstall` already on `PATH`:
 
 ```
 cargo binstall --locked ljos packset deedar-cli claimdag-cli vissue-cli vissue-mcp ljos-policyd ljos-consensus
@@ -145,7 +145,7 @@ ljos onboard
 ljos doctor
 ```
 
-`ljos offboard` takes ljos out of each runner. With no runner onboarded it prints `ok offboard nothing installed by ljos onboard`. `ljos uninstall` takes the programs off the machine.
+`ljos offboard` takes ljos out of each runner. With no runner onboarded it prints `ok`, `offboard`, `nothing installed by ljos onboard`. `ljos uninstall` takes the ljos programs off the machine and leaves a stub named `ljos` that allows hook calls.
 
 ## A second seat
 
@@ -156,7 +156,7 @@ LJOS_SEAT=bob ljos claim ID --assignee bob
 
 Bob's claim prints `label claim-conflict:` and names alice. The ticket stays with alice.
 `ljos note` writes on the ticket. `ljos timeline ID` prints that note as unverified tracker text. `vissue show ID` prints the logbook.
-Votes cast from one shell share a session, so `ljos consensus` folds them into one voice. A vote from each seat's own runner is its own voice. The getting-started page shows the fold.
+Votes cast from one shell are one voice. `ljos consensus` says they were folded on that shell. A vote from each seat's own runner is its own voice. The getting-started page shows the fold.
 
 ## How-to
 
@@ -186,7 +186,7 @@ tools, guard and memory first: `rule`, `prefer`, `remember`,
 `LJOS_MCP_TOOLS=all` lists every tool.
 
 ```json
-{"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
+{"mcpServers": {"ljos": {"type": "stdio", "command": "ljos-mcp", "args": [], "env": {}}}}
 ```
 
 The official MCP Registry lists the server from the crates.io page of `ljos`, and checks this line there:

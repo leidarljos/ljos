@@ -31,10 +31,10 @@ A release attaches that script:
    $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
 
 The ``install.sh`` attached to the 0.41.1 release asked for ``vissue-cli-<target>.tar.xz``. The 0.41.2 script fetches ``vissue-v<version>-<target>.tar.gz``.
-The vissue release publishes ``vissue-v<version>-<target>.tar.gz``. Use the script in this tree until a later release.
+The vissue release publishes ``vissue-v<version>-<target>.tar.gz``.
 
 The programs go to ``~/.local/bin``. They are ``ljos``, ``ljos-mcp``, ``packset``,
-``packsetd``, ``vissue``, ``deedar``, ``claimdag``, ``ljos-policyd`` and ``ljos-consensus``.
+``packsetd``, ``packset-mcp``, ``vissue``, ``vissue-mcp``, ``deedar``, ``claimdag``, ``ljos-policyd`` and ``ljos-consensus``.
 The installer checks each download against its published SHA-256 sum.
 It builds from source with ``cargo`` where a platform has no release.
 ``--no-embed`` leaves out the encoder. Search then matches words, and a search prints ``ranking is lexical: encoder unavailable``.
@@ -51,15 +51,17 @@ The tracker commits each change, so git needs an identity:
    $ git config --global user.email "you@example.com"
    $ ljos doctor
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
+   warn	seat source	no seat rule matched; reading every seat. Set one with --seat NAME or export LJOS_SEAT=NAME
    ok	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
 
 On a clean install the ready line names memory, the tracker and the command guard.
+With no seat named, a ``seat source`` row warns that the read uses every seat.
 The ``sitting-gate`` row follows it. The person's commits, merges and pushes are not held when no agent runner is above the shell.
 Under a runner the same row names the seat and the branches a push waits on, ``develop`` or ``main``, and the number of seats that push waits for.
 A fresh tracker has no seat list, so that number is 2. When ``vissue.toml`` lists one active seat, that seat's own vote settles the push.
 A row under the ready line names anything that still needs action. Add ``--all`` to see every row.
 
-To install by hand, or to see what onboarding would write:
+To install by hand, with ``cargo-binstall`` already on ``PATH``, or to see what onboarding would write:
 
 .. code:: console
 
@@ -98,7 +100,7 @@ Typed at a terminal with no runner above it, the same command is the person's se
 Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
 ``ljos search "which fusion"`` shares no word with either sentence and prints ``No hits.``
 This seat's hits come first. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.
-That line is the one already used for a hit the encoder lists at the top: on the measured set, an unrelated prompt's best cosine stayed at 0.653.
+That floor is the one the prompt hook uses for a hit the encoder lists at the top.
 A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is ``Nothing relevant was found.``
 A busy pack ranks by words and still returns a hit that names the subject.
 
@@ -190,13 +192,15 @@ Bob can file another ticket. To help on this one, bob writes a note.
    tracker git: committed chore(issues): demo-2f5j noted by alice; no remote, kept local
    $ ljos timeline demo-2f5j
 
-``ljos timeline`` prints the note as unverified tracker text, oldest first.
-The note sits between ``[unverified …]`` and ``[end …]``. Those markers are the fence. The text inside is tracker text from the ticket.
-``vissue show demo-2f5j`` prints the same logbook. ``ljos recall`` prints the working set for the ticket: the plan, the deeds it cites, and memories. The note is tracker text, so it is on the timeline, not in that working set.
+``ljos timeline`` prints the ticket's rows oldest first.
+The note is one row: ``note: [unverified HASH]`` the text ``[end HASH]``. The hash is the fence. The text inside is tracker text from the ticket.
+``vissue show demo-2f5j`` prints the heading and the log, newest first, including the note. ``ljos recall`` prints the issue as unverified tracker text. The note is on the timeline, not in that text.
 ``ljos digest`` reads the tracker and says what each seat filed, claimed and voted on.
 
-Both seats can vote. From one shell the two ballots share a session, and ``ljos consensus`` folds them into one voice:
+Both seats can vote. From one shell the two ballots are one voice, and ``ljos consensus`` says they were folded on that shell:
 
+..
+   # proseguard:off
 .. code:: console
 
    $ LJOS_SEAT=alice ljos vote demo-2f5j --for keep --used none
@@ -205,20 +209,40 @@ Both seats can vote. From one shell the two ballots share a session, and ``ljos 
      keep                     1 (alice)
      one ballot only: keep, which nobody has agreed with yet
    recorded on the tracker: alice for keep on demo-2f5j
+   ballot signed by alice with key … session alice
+   unverified session: nothing named the run but seat alice, so every run of that seat is one session
+   alice cast by alice, parent alice
+   tracker git: committed chore(issues): demo-2f5j ballot cast by alice; no remote, kept local
    $ LJOS_SEAT=bob ljos vote demo-2f5j --for keep --used none
    demo-2f5j: bob voted keep
+   demo-2f5j: 2 votes from 1 option
+     keep                     2 (alice, bob)
+     unanimous: keep (2 of 2); `vissue consensus demo-2f5j` weighs it
+   recorded on the tracker: bob for keep on demo-2f5j
+   ballot signed by bob with key … session alice
+   claimed session bob, folded into alice (same shell)
+   bob cast by bob, parent alice
+   tracker git: committed chore(issues): demo-2f5j ballot cast by bob; no remote, kept local
    $ LJOS_SEAT=alice ljos consensus demo-2f5j --no-file
    push cite: demo-2f5j decides keep for a push by alice; counted bob for keep
    protected push: demo-2f5j does not clear a push onto `develop` or `main`: the sitting has no settled consensus: 1 of the 2 seats a protected push needs voted on demo-2f5j; counted bob for keep
-   folded into one voice (same session ...): alice, bob
+   provenance:
+     alice cast by alice, parent alice
+     bob cast by bob, parent alice
+   shared parent alice: alice, bob
+   folded into one voice (same shell alice): alice, bob
    counted bob
    advice, which does not decide a push: the weighted settle over every ballot
    settle (DeGroot, 1 voters): keep 1.000
    every voter is on keep: the settle is unanimous
    polarization 0.000, disagreement 0.000
+   influence: bob 1.000
+
+..
+   # proseguard:on
 
 The first two lines of ``ljos consensus`` are the push checks. ``push cite`` is whether the ballots pick an option. ``protected push`` is whether that option clears a push onto ``develop`` or ``main``.
-From one shell the two ballots share a session, so they fold into one voice and the protected-branch check still wants a second seat. The lines under ``advice`` are the weighted settle. They do not clear that push.
+From one shell the two ballots are one voice, so they fold and the protected-branch check still wants a second seat. The lines under ``advice`` are the weighted settle. They do not clear that push. ``influence`` names the weight of that one voice.
 A signature line and ``tracker git:`` follow each vote. A ballot is its own voice when the cast has no shell, no agent runner and no earlier row that shares a session, a parent or the root session of one runner.
 The how-to :doc:`Vote and settle a decision <howto-vote>` is that case, and ``ljos learn``.
 The docs of beads, Mem0, Letta, Zep, Basic Memory and git-bug, read on 2026-11-10, describe no vote. The comparison is :doc:`How ljos compares <compare>`.
