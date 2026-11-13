@@ -5,6 +5,23 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.41.11 (2026-11-13)
+
+### Fixes
+
+- A tool-call record is kept under the home cache as well as `$XDG_RUNTIME_DIR/ljos`.
+  A later ljos whose `XDG_RUNTIME_DIR` differs from the hook that wrote the record still finds it.
+- A write names `unknown-` plus the host only when that is the seat it uses.
+  A conversation that already has a seat record is not described as unknown.
+- Protected branch names are joined with "or", so two branches read as `develop` or `main`.
+- `ljos search` says the encoder is unavailable when packset reports it is not installed.
+  A cold encoder that is still loading keeps the loading line.
+
+### Documentation
+
+- The getting-started transcript includes the sitting-gate row, the degraded-memory line, and the push lines `ljos consensus` prints before the settle.
+
+
 ## 0.41.10 (2026-11-12)
 
 ### Fixes
