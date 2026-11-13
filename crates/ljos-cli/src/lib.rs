@@ -40319,10 +40319,9 @@ fn seat_key(name: &str, node: &str) -> String {
     seat_slug(&seat)
 }
 
-/// Refusal when this shell's holder is not the name that holds the node:
-/// names the holder from the hold record, else from the tracker, and the
-/// `--assignee` that finishes under it. A shell runner without a session id
-/// gets a new holder per shell, which is the usual cause.
+/// Refusal when this shell's holder is not the name that holds the node.
+/// Another seat is told to `ljos send`. Another conversation of this seat
+/// is told to `ljos claim`, then finish.
 #[must_use]
 pub fn not_assignee_message(
     node: &str,
@@ -40344,7 +40343,11 @@ pub fn not_assignee_message(
         })
         .or_else(|| tracker.map(|t| (unscoped(t), " (the tracker's claim)".to_string())));
     let mine = unscoped(assignee);
-    let fix = "A shell runner's env file gives every shell of a conversation one holder, the runner's conversation id or else LJOS_SESSION_ID; `ljos onboard` writes it";
+    let who = hold
+        .map(|h| h.seat.clone())
+        .or_else(|| named.as_ref().map(|(name, _)| name.clone()))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| mine.clone());
     match named {
         Some((name, whence))
             if hold.is_some_and(|h| {
@@ -40357,9 +40360,8 @@ pub fn not_assignee_message(
                  The seat name does not move the claim graph: it names the conversation."
             )
         }
-        Some((name, whence)) => format!(
-            "complete: {node} is held by {name}{whence}, not by {mine}, this shell's holder (`ljos seat` says where it came from). \
-             Run it again with `--assignee {name}` to finish under the name that holds it. {fix}"
+        Some(_) => format!(
+            "{node} is held by another ({who}), not by {mine}, so run `ljos send {who} TEXT`."
         ),
         None => format!(
             "complete: {node} is not held by {mine}, this shell's holder (`ljos seat` says where it came from), and no record on this host names the holder. \
@@ -41040,6 +41042,10 @@ pub fn finish(
     let completed = match complete_as(issue, Some(status), assignee, gen, reopen) {
         Ok(done) => done,
         Err(e) => {
+            let text = e.to_string();
+            if text.contains("so run `ljos send ") {
+                bail!("{text}");
+            }
             bail!("finish: the session node for {issue} was not completed: {e:#}")
         }
     };
@@ -59942,12 +59948,10 @@ mod tests {
         assert!(said.contains("LJOS_SESSION_ID per conversation"), "{said}");
     }
 
-    /// a finish refused as not the assignee names the holder
-    /// and the `--assignee` that finishes under it. A claim this seat
-    /// already holds names `ljos claim` instead: `--assignee` of the seat
-    /// does not move the claim graph.
+    /// A finish another seat holds names `ljos send`. A claim this seat
+    /// already holds names `ljos claim`. A missing holder does the same.
     #[test]
-    fn not_the_assignee_names_the_holder_and_the_flag() {
+    fn not_the_assignee_names_send_or_claim() {
         let _env = env_guard();
         std::env::set_var("LJOS_SEAT", "saddle");
         let hold = super::Hold {
@@ -59959,12 +59963,15 @@ mod tests {
         };
         let said =
             super::not_assignee_message("demo-dlnj", "seat-bravo:demo-dlnj", Some(&hold), None);
-        assert!(said.contains("held by seat-alfa (seat example"), "{said}");
-        assert!(said.contains("not by seat-bravo,"), "{said}");
-        assert!(said.contains("`--assignee seat-alfa`"), "{said}");
-        assert!(said.contains("LJOS_SESSION_ID"), "{said}");
+        assert_eq!(
+            said,
+            "demo-dlnj is held by another (example), not by seat-bravo, so run `ljos send example TEXT`."
+        );
         let said = super::not_assignee_message("demo-dlnj", "seat-bravo", None, Some("seat-alfa"));
-        assert!(said.contains("`--assignee seat-alfa`"), "{said}");
+        assert_eq!(
+            said,
+            "demo-dlnj is held by another (seat-alfa), not by seat-bravo, so run `ljos send seat-alfa TEXT`."
+        );
         let said = super::not_assignee_message("demo-dlnj", "seat-bravo", None, None);
         assert!(
             said.contains("`ljos claim demo-dlnj`"),
