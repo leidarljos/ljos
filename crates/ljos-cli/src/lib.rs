@@ -63080,8 +63080,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 std::env::remove_var("XDG_STATE_HOME");
             }
         });
-        struct Restore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
-        impl Drop for Restore {
+        struct PutBack(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+        impl Drop for PutBack {
             fn drop(&mut self) {
                 let home = self.0.clone();
                 let state = self.1.clone();
@@ -63100,7 +63100,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 });
             }
         }
-        let _restore = Restore(prev_home, prev_state);
+        let _restore = PutBack(prev_home, prev_state);
         let path = dir.path().join(".local/state/ljos");
         super::prepare_state_home(true);
         assert!(!path.exists(), "a dry setup created the state directory");
