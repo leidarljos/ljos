@@ -207,6 +207,21 @@ fn text_of(out: &Output) -> String {
     )
 }
 
+/// The one line a failed mesh verb printed on stderr. The exit is non-zero.
+fn fault_line(out: &Output, what: &str) -> String {
+    assert!(!out.status.success(), "{what} exited 0\n{}", text_of(out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "",
+        "{what} printed on stdout\n{}",
+        text_of(out)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 1, "{what}: not one line\n{}", text_of(out));
+    lines[0].to_string()
+}
+
 /// The one line a mesh verb printed, after asserting it printed one and exited 0.
 fn one_line(out: &Output, what: &str) -> String {
     assert!(out.status.success(), "{what}\n{}", text_of(out));
@@ -522,10 +537,10 @@ fn down_kills_a_tailscaled_that_ignores_sigterm_after_the_grace() {
 }
 
 #[test]
-fn every_failure_is_one_line_and_exit_0() {
+fn every_failure_is_one_line_and_exits_nonzero() {
     let world = World::new();
     let no_key = world.ljos(&["mesh", "up"]).output().unwrap();
-    let no_key = one_line(&no_key, "no key");
+    let no_key = fault_line(&no_key, "no key");
     assert!(no_key.contains("key file"), "{no_key}");
 
     let wait = 2;
@@ -537,7 +552,7 @@ fn every_failure_is_one_line_and_exit_0() {
         .output()
         .unwrap();
     let took = started.elapsed();
-    let line = one_line(&hung, "a tailscale that hangs");
+    let line = fault_line(&hung, "a tailscale that hangs");
     assert!(line.contains("did not finish within 2 s"), "{line}");
     // The bound and the kill grace `timeout -k 5` would give it.
     assert!(took < Duration::from_secs(wait + 5), "up took {took:?}");
@@ -555,7 +570,7 @@ fn the_key_never_appears_in_output_or_any_file() {
         .env("FAKE_REJECT", "1")
         .output()
         .unwrap();
-    let line = one_line(&rejected, "a rejected key");
+    let line = fault_line(&rejected, "a rejected key");
     assert!(line.contains("invalid key"), "{line}");
     assert!(
         !text_of(&rejected).contains(KEY),
@@ -587,10 +602,10 @@ fn the_key_never_appears_in_output_or_any_file() {
 }
 
 #[test]
-fn a_failing_join_exits_0_and_names_the_step() {
+fn a_failing_join_exits_nonzero_and_names_the_step() {
     let world = World::new();
     let no_key = world.ljos(&["mesh", "up"]).output().unwrap();
-    let no_key = one_line(&no_key, "no key");
+    let no_key = fault_line(&no_key, "no key");
     assert!(no_key.contains("key file"), "{no_key}");
     assert_eq!(
         String::from_utf8_lossy(&world.ljos(&["mesh", "up"]).output().unwrap().stdout).trim(),
@@ -599,7 +614,7 @@ fn a_failing_join_exits_0_and_names_the_step() {
     );
 
     let rejected = world.up_cmd().env("FAKE_REJECT", "1").output().unwrap();
-    let line = one_line(&rejected, "a rejected key");
+    let line = fault_line(&rejected, "a rejected key");
     assert!(line.contains("tailscale up"), "{line}");
     assert!(line.contains("invalid key"), "{line}");
     assert!(
@@ -620,12 +635,43 @@ fn a_failing_join_exits_0_and_names_the_step() {
         .output()
         .unwrap();
     let took = started.elapsed();
-    let line = one_line(&hung, "a tailscale that hangs");
+    let line = fault_line(&hung, "a tailscale that hangs");
     assert!(line.contains("tailscale up"), "{line}");
     assert!(line.contains("did not finish within 2 s"), "{line}");
     assert!(took < Duration::from_secs(wait + 5), "up took {took:?}");
     let pid = world.daemon_pid().expect("the daemon recorded its pid");
     assert!(gone(&pid), "a timed out join left tailscaled {pid} running");
+}
+
+#[test]
+fn status_without_tailscale_exits_nonzero_and_down_off_the_mesh_exits_0() {
+    let world = World::new();
+    let up = world.ljos(&["mesh", "up"]).output().unwrap();
+    assert_eq!(up.status.code(), Some(1), "{}", text_of(&up));
+    let err = String::from_utf8_lossy(&up.stderr);
+    assert!(
+        err.contains("mesh up: key file: set --key-file or LJOS_MESH_KEY_FILE"),
+        "{err}"
+    );
+
+    let status = world
+        .ljos(&["mesh", "status"])
+        .env("PATH", world.path("empty"))
+        .output()
+        .unwrap();
+    assert_eq!(status.status.code(), Some(1), "{}", text_of(&status));
+    let said = String::from_utf8_lossy(&status.stdout);
+    assert!(said.contains("tailscale is not on PATH"), "{said}");
+    assert!(said.contains("ljos mesh up"), "{said}");
+    assert!(said.contains("downloads the pinned build"), "{said}");
+
+    let down = world.down();
+    assert!(down.status.success(), "{}", text_of(&down));
+    assert!(
+        String::from_utf8_lossy(&down.stdout).contains("not on the mesh"),
+        "{}",
+        text_of(&down)
+    );
 }
 
 #[test]
@@ -637,7 +683,7 @@ fn the_key_never_appears_in_output_or_any_other_file() {
         .env("FAKE_REJECT", "1")
         .output()
         .unwrap();
-    let line = one_line(&echoed, "a rejected key that is echoed");
+    let line = fault_line(&echoed, "a rejected key that is echoed");
     assert!(line.contains("[key]"), "{line}");
     assert!(
         !text_of(&echoed).contains(KEY),

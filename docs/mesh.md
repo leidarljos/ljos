@@ -59,7 +59,7 @@ That is the `timeout -k 5 30` a sitting already runs under.
 `LJOS_MESH_WAIT` sets the same bound in seconds.
 A stopped tailscaled has 5 seconds to exit, the `-k 5` of that bound, and is then killed.
 
-A failure prints one line on stderr, names the step, and exits 0.
+A failure prints one line on stderr, names the step, and exits non-zero.
 The caller is not stopped.
 The socket, the pid and the log live in the state directory above, outside any checkout.
 The pid file records tailscaled's start time next to its pid.
@@ -77,7 +77,7 @@ A pid file an older ljos wrote holds no start time either.
 It signals the process in its pid file, and only when that pid still has the start time the file recorded.
 Any other pid is left alone, and the line says so.
 A second `mesh down`, or a `mesh down` before any `mesh up`, prints `mesh down: not on the mesh` and exits 0.
-A failure here is also one line on stderr and exit 0.
+A failure here is also one line on stderr, and the exit is non-zero.
 
 ## The label
 

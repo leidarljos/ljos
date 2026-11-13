@@ -1,8 +1,9 @@
 //! `ljos mesh up`, `ljos mesh down`, `ljos mesh status` and `ljos mesh acl`:
 //! join this machine to the Headscale mesh, leave it, print the nodes the
 //! daemon reports, and print the policy `mesh.toml` describes. `up` takes a
-//! key file, a login server and a hostname. A seat works without the mesh,
-//! so `up` and `down` end every failure with one line and exit 0.
+//! key file, a login server and a hostname. A seat works without the mesh.
+//! A command that could not do what was asked prints one line and exits
+//! non-zero. `mesh down` when this machine is not on the mesh exits 0.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
@@ -107,8 +108,8 @@ pub struct UpArgs {
     pub hostname: Option<String>,
 }
 
-/// What `up` or `down` prints. `error` goes to stderr. The process still
-/// exits 0: the line names the step and does not stop the caller.
+/// What `up` or `down` prints. `error` goes to stderr and the process
+/// exits non-zero: the command could not do what was asked.
 #[must_use]
 pub struct MeshOut {
     text: String,
@@ -140,6 +141,12 @@ impl MeshOut {
         } else {
             println!("{}", self.text);
         }
+    }
+
+    /// Whether the command could not do what was asked.
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.error
     }
 }
 
@@ -958,7 +965,8 @@ fn clear_run(dir: &Path) {
 }
 
 /// `ljos mesh down`: log out, then stop the tailscaled this command
-/// started, and only that pid. One line. The caller exits 0.
+/// started, and only that pid. One line. Not being on the mesh exits 0.
+/// A logout that failed exits non-zero.
 pub fn down() -> MeshOut {
     let key = std::env::var_os("LJOS_MESH_KEY_FILE")
         .map(PathBuf::from)
@@ -1029,19 +1037,25 @@ fn logout_bin(dir: &Path) -> Option<PathBuf> {
 }
 
 /// `ljos mesh status`: the nodes `tailscale status --json` reports, each
-/// with the tags, addresses and id the daemon gave it. A node the JSON
-/// marks ephemeral says so. Nothing here names a particular host.
+/// with the tags, addresses and id the daemon gave it, and whether the
+/// command could not read them. A node the JSON marks ephemeral says so.
+/// Nothing here names a particular host. `true` is a missing `tailscale`
+/// or a status call that did not finish. Not being on the mesh is an
+/// answer, so that line is `false`.
 #[must_use]
-pub fn status_text() -> String {
+pub fn status_text() -> (String, bool) {
     let key_env = load().map(|c| c.key_env).unwrap_or_default();
     let Ok(tailscale) = which::which("tailscale") else {
-        return "mesh status: tailscale is not on PATH".into();
+        return (
+            "mesh status: tailscale is not on PATH; ljos mesh up downloads the pinned build".into(),
+            true,
+        );
     };
     let socket = state_dir().join(SOCKET);
     match status_for_text(&tailscale, &socket, &key_env) {
-        Ok(Some(value)) => format_status(&value),
-        Ok(None) => "mesh status: not on the mesh".into(),
-        Err(e) => format!("mesh status: {e:#}"),
+        Ok(Some(value)) => (format_status(&value), false),
+        Ok(None) => ("mesh status: not on the mesh".into(), false),
+        Err(e) => (format!("mesh status: {e:#}"), true),
     }
 }
 

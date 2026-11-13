@@ -323,7 +323,7 @@ enum CloudCmd {
 
 #[derive(Subcommand)]
 enum MeshCmd {
-    /// Join the Headscale mesh. On success, print this node's name, its mesh IPv4 and IPv6, and each peer's name and addresses. Any failure is one line on stderr and exit 0.
+    /// Join the Headscale mesh. On success, print this node's name, its mesh IPv4 and IPv6, and each peer's name and addresses. Any failure is one line on stderr and a non-zero status.
     Up {
         /// Path of the join key. `LJOS_MESH_KEY_FILE` when omitted.
         #[arg(long, value_name = "PATH", env = "LJOS_MESH_KEY_FILE")]
@@ -2546,14 +2546,33 @@ fn run_command() -> Result<()> {
                 key_file,
                 login_server,
                 hostname,
-            } => ljos_cli::mesh::up(ljos_cli::mesh::UpArgs {
-                key_file,
-                login_server,
-                hostname,
-            })
-            .write(),
-            MeshCmd::Down => ljos_cli::mesh::down().write(),
-            MeshCmd::Status => println!("{}", ljos_cli::mesh::status_text()),
+            } => {
+                let out = ljos_cli::mesh::up(ljos_cli::mesh::UpArgs {
+                    key_file,
+                    login_server,
+                    hostname,
+                });
+                let failed = out.failed();
+                out.write();
+                if failed {
+                    std::process::exit(1);
+                }
+            }
+            MeshCmd::Down => {
+                let out = ljos_cli::mesh::down();
+                let failed = out.failed();
+                out.write();
+                if failed {
+                    std::process::exit(1);
+                }
+            }
+            MeshCmd::Status => {
+                let (text, failed) = ljos_cli::mesh::status_text();
+                println!("{text}");
+                if failed {
+                    std::process::exit(1);
+                }
+            }
             MeshCmd::Acl { swarms } => println!("{}", ljos_cli::mesh::acl(&swarms)?),
             MeshCmd::Pull { seat, from } => {
                 let store = ljos_cli::mesh_lane::SeatStore::open(&seat)?;
