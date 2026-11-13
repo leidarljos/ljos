@@ -5477,12 +5477,20 @@ fn occupancy_scope(assignee: &str, issue: &str) -> String {
 #[must_use]
 pub fn seat_source_row(who: &Seat) -> Habitat {
     if who.source.starts_with("no seat rule matched") {
+        let detail = who.source.trim_end_matches('.');
+        // A write that matched nothing is `unknown-<host>`. The phrase
+        // names that seat, so a short doctor still says which host.
+        let state = if who.seat.starts_with("unknown-") {
+            format!(
+                "{detail}; the seat is {}, so run `export LJOS_SEAT=NAME`.",
+                who.seat
+            )
+        } else {
+            format!("{detail}, so run `export LJOS_SEAT=NAME`.")
+        };
         return Habitat {
             name: "seat source",
-            state: format!(
-                "{}, so run `export LJOS_SEAT=NAME`.",
-                who.source.trim_end_matches('.')
-            ),
+            state,
             ok: false,
         };
     }
@@ -33464,9 +33472,13 @@ pub fn format_doctor_short(rows: &[Habitat]) -> String {
 /// as a cloud guard on a machine that never ran `cloud up`, stay behind
 /// `ljos doctor --all`. The sitting gate row is always printed: whether
 /// this seat's git is gated is the first thing a runner needs to know.
+/// The seat source row is always printed too: a new seat has to see where
+/// the name came from, including a login user, a recent write, every seat,
+/// or `unknown-<host>`.
 fn shown_short(word: &str, name: &str) -> bool {
     matches!(word, "no" | "warn")
         || name == "sitting gate"
+        || name == "seat source"
         || name == "config"
         || name == "atoms"
         || (word == "info" && READY_PARTS.iter().any(|(_, rows)| rows.contains(&name)))
@@ -61938,6 +61950,52 @@ mod tests {
             "ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.\n"
         );
         assert!(format_doctor(&rows).contains("host key"));
+    }
+
+    #[test]
+    fn the_short_doctor_names_where_the_seat_came_from() {
+        let named = seat_source_row(&Seat::whole("ada", "LJOS_SEAT"));
+        assert!(named.ok, "{named:?}");
+        let short = format_doctor_short(std::slice::from_ref(&named));
+        assert!(
+            short.contains("ok\tseat source\tada named by LJOS_SEAT\n"),
+            "{short}"
+        );
+
+        let recent = seat_source_row(&Seat::whole(
+            "unknown-box",
+            "most recent write from this machine",
+        ));
+        assert!(recent.ok, "{recent:?}");
+        let short = format_doctor_short(std::slice::from_ref(&recent));
+        assert!(
+            short.contains(
+                "ok\tseat source\tunknown-box named by most recent write from this machine\n"
+            ),
+            "{short}"
+        );
+
+        let fallen = seat_source_row(&Seat::whole(
+            "unknown-box",
+            "no seat rule matched; using an unknown seat",
+        ));
+        assert!(!fallen.ok, "{fallen:?}");
+        assert_eq!(doctor_word(&fallen), "warn");
+        let short = format_doctor_short(std::slice::from_ref(&fallen));
+        assert!(
+            short.contains(
+                "warn\tseat source\tno seat rule matched; using an unknown seat; the seat is unknown-box, so run `export LJOS_SEAT=NAME`.\n"
+            ),
+            "{short}"
+        );
+
+        let every = seat_source_row(&Seat::whole(
+            "every-seat",
+            "no seat rule matched; reading every seat",
+        ));
+        let short = format_doctor_short(std::slice::from_ref(&every));
+        assert!(short.contains("every seat"), "{short}");
+        assert!(short.contains("seat source"), "{short}");
     }
 
     #[test]

@@ -32,7 +32,6 @@ const DOCTOR: &[&str] = &[
     "ljos is ready: memory, tracker and command guard work",
     "ljos doctor --all",
     "seat source",
-    "every seat",
     "sitting gate",
     "not active here",
 ];
@@ -426,6 +425,13 @@ fn expect_output(cmd: &str, output: &str) {
             {
                 assert!(output.contains(key), "{cmd}\nmissing {key:?}\n{output}");
             }
+            // No named seat. A read that matched no rule says every seat.
+            // A write that had to pick one is `unknown-` plus the host, and
+            // a later read names that write. Install may have done either.
+            assert!(
+                output.contains("every seat") || output.contains("unknown-"),
+                "{cmd}\nseat source named neither every seat nor the unknown host\n{output}"
+            );
         }
         Some("remember") => {
             assert!(output.contains(LESSON), "{cmd}\n{output}");

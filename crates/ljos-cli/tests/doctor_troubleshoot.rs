@@ -121,6 +121,59 @@ fn doctor_warns_when_no_seat_was_named_and_names_the_export() {
 }
 
 #[test]
+fn doctor_names_a_seat_someone_exported() {
+    let (home, bin) = layout("named-seat");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .arg("doctor")
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("HOME", &home)
+        .env("USER", "ada")
+        .env("LJOS_SEAT", "ada")
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env("TMPDIR", home.join("tmp"))
+        .env("PACKSET_TIMEOUT_MS", "200")
+        .env("LJOS_HOOKD", "off")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("seat source") && text.contains("ada named by LJOS_SEAT"),
+        "{text}"
+    );
+}
+
+#[test]
+fn doctor_names_an_unknown_host_left_by_the_last_write() {
+    let (home, bin) = layout("unknown-write");
+    let host = ljos_cli::sync::host();
+    assert!(!host.is_empty(), "this machine has no host name");
+    let seat = format!("unknown-{host}");
+    let dir = home.join(".local/state/ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("seat-writes.log"),
+        format!("2026-11-13T00:00:00Z\t{seat}\t{host}\n"),
+    )
+    .unwrap();
+    let (code, text) = doctor(&home, &format!("{}:/usr/bin:/bin", bin.display()));
+    assert_eq!(code, 1, "{text}");
+    assert!(
+        text.contains("seat source") && text.contains(&seat),
+        "{text}"
+    );
+}
+
+#[test]
 fn doctor_fails_an_unwritable_tracker_and_names_chmod() {
     let (home, bin) = layout("ro");
     let tracker = home.join("tracker");
