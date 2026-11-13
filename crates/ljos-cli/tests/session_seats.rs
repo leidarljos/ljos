@@ -178,6 +178,26 @@ fn the_source_names_this_process_and_a_missing_id_says_so() {
         "the fix is one export: {text}"
     );
 
+    std::fs::write(&log, format!("2026-11-13T00:00:00.000Z\t{seat}\tbox\n")).unwrap();
+    let cursor = world.ljos(
+        &["seat"],
+        &[("CURSOR_CONVERSATION_ID", "0199c0de-cursor-conversation-one")],
+    );
+    let text = said(&cursor);
+    assert!(cursor.status.success(), "{text}");
+    let cursor_out = String::from_utf8_lossy(&cursor.stdout);
+    let cursor_seat = field(&cursor_out, "seat");
+    assert!(
+        cursor_seat.starts_with("cursor-"),
+        "another runner's session is not the last write: {text}"
+    );
+    assert_ne!(cursor_seat, seat, "{text}");
+    assert_eq!(
+        field(&cursor_out, "source"),
+        "CURSOR_CONVERSATION_ID in this process",
+        "{text}"
+    );
+
     let wrote = world.ljos(
         &["remember", "The lexical default is BM25+."],
         &[("CLAUDE_CODE_SESSION_ID", id)],

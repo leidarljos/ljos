@@ -4970,15 +4970,6 @@ fn named_seat_record(seat: &Seat) -> bool {
         || source.contains("VISSUE_AGENT")
 }
 
-fn unnamed_fallback(seat: &Seat) -> bool {
-    seat.source.contains("unknown seat")
-        || seat.source.contains("reading every seat")
-        || seat.source.contains("the login user")
-        || seat.seat == seat_resolve::EVERY_SEAT
-        || seat.seat.starts_with("unknown-")
-        || seat.seat == login_user()
-}
-
 fn notice_shared_harness(family: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static ONCE: AtomicBool = AtomicBool::new(false);
@@ -5030,10 +5021,10 @@ fn distinguish_harness_session(seat: Seat) -> Seat {
         }
         return seat;
     };
-    let same = family_key(&seat.seat) == Some(session.family);
-    if !same && !unnamed_fallback(&seat) {
-        return seat;
-    }
+    // A session id in this process names the seat. A parent record or the
+    // last write on this machine does not, including a write from another
+    // runner's session. `LJOS_SEAT`, `--seat`, a `seat=` line and a seats
+    // file already returned above.
     let source = session_seat_source(session.key);
     if seat.seat == session.name {
         if seat.source == source {
