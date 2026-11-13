@@ -1788,7 +1788,7 @@ enum Cmd {
     ///
     /// With `LJOS_SEAT` unset, a session id in this process names the seat.
     /// Claude Code, Codex and Cursor each sit as the runner plus a short id,
-    /// and the source line names that variable. `LJOS_SEAT` or `--seat` is
+    /// and the source line names that variable. An exported `LJOS_SEAT` is
     /// the seat as written. With no seat and no session id, a read prints
     /// `every-seat` and a write uses `unknown-` and the host name. A session
     /// with no id that would share the bare runner name says so.
