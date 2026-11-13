@@ -1746,7 +1746,7 @@ enum Cmd {
         /// Print every row, the ones that answer included.
         #[arg(long, visible_alias = "verbose")]
         all: bool,
-        /// Refresh runner skills and runner env files this ljos wrote, and replace a stale cloud guard rule file. A skill edited by hand, an env file ljos did not write, and a cloud guard file that is missing or not a known older version are left in place.
+        /// Refresh runner skills and runner env files this ljos wrote, and replace a stale cloud guard rule file. Also create a missing ljos home and config file, move a stale lock or pid file aside, start packsetd with `packset ensure`, and record a runner session seat. A skill edited by hand, an env file ljos did not write, a cloud guard file that is missing or not a known older version, git hooks, runner hooks, policy, credentials and keys are left in place. A stale file is moved aside with a `.bak` suffix.
         #[arg(long)]
         fix: bool,
     },
@@ -2808,6 +2808,7 @@ fn run_command() -> Result<()> {
             ljos_cli::runner_skills::refresh_for_fix();
             ljos_cli::runner_env::refresh_for_fix();
             ljos_cli::cloud::replace_stale_guard();
+            ljos_cli::doctor_apply_fixes();
         }
         Cmd::Doctor { .. }
         | Cmd::Record { .. }

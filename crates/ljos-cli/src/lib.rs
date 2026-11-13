@@ -29,6 +29,7 @@ pub mod config_diag;
 pub mod converge;
 mod deedbag;
 pub mod digest;
+mod doctor_fix;
 pub mod extract;
 pub mod gates;
 pub mod git_hooks;
@@ -4500,7 +4501,7 @@ fn whoami_resolved() -> Seat {
         // larger set into a new name. The tests stamp ids of their own
         // into one process and must not leave records for each other.
         #[cfg(not(test))]
-        if std::env::var_os("LJOS_IN_HOOK").is_none() {
+        if std::env::var_os("LJOS_IN_HOOK").is_none() && !doctor_fix::session_seat_is_recorded() {
             for (_, id) in stamped_sessions() {
                 write_record(&session_record_path(&id), &seat);
             }
@@ -30780,6 +30781,11 @@ fn cmp_semver(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     Some(parse(a)?.cmp(&parse(b)?))
 }
 
+/// Repairs `ljos doctor --fix` makes, and prints one line for each.
+pub fn doctor_apply_fixes() {
+    doctor_fix::apply();
+}
+
 /// Which habitats answer: binaries on `PATH`, the pack over `PACKSET_URL`, the
 /// deed store, the tracker, the claim graph.
 pub fn doctor() -> Vec<Habitat> {
@@ -30822,6 +30828,7 @@ pub fn doctor() -> Vec<Habitat> {
             ok: true,
         });
     }
+    out.extend(doctor_fix::rows());
     out
 }
 
@@ -32113,7 +32120,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
                     },
                     Err(e) => Habitat {
                         name: "pack",
-                        state: match pack_down_message(&e) {
+                        state: doctor_fix::hint_pack(match pack_down_message(&e) {
                             Some(line) => format!("{} does not answer. {line}", client.base()),
                             // Same line as a memory command. A temporary home
                             // used to add a second sentence that named
@@ -32122,14 +32129,14 @@ pub fn doctor_seat() -> Vec<Habitat> {
                                 format!("{} does not answer. {}", client.base(), pack_down_line())
                             }
                             None => format!("{} does not answer: {e}", client.base()),
-                        },
+                        }),
                         ok: false,
                     },
                 }
             }
             Err(e) => Habitat {
                 name: "pack",
-                state: e.to_string(),
+                state: doctor_fix::hint_pack(e.to_string()),
                 ok: false,
             },
         });
@@ -33322,6 +33329,10 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         || (row.name == "runner env" && runner_env::is_env_warning(&row.state))
         || WARN_ROWS.contains(&row.name)
         || row.name == "guard"
+        || matches!(
+            row.name,
+            "ljos home" | "ljos config" | "stale lock" | "session seat"
+        )
     {
         "warn"
     } else {
