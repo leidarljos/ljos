@@ -13,6 +13,8 @@ use std::process::{Command, Output};
 
 #[path = "common/sibling.rs"]
 mod sibling;
+#[path = "common/tools.rs"]
+mod tools;
 
 const CLOUD_TEXT: &str = "Cloud seats clone the tracker before they vote.";
 const BOX_TEXT: &str = "The passphrase hash lives only on the box.";
@@ -210,6 +212,9 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn a_cloud_handover_seals_only_cloud_memory_and_a_cloud_vm_opens_it() {
+    if tools::halt(tools::Tool::Packsetd) {
+        return;
+    }
     let w = World::new();
     let bag = w.bag("bag");
     let bag_arg = bag.display().to_string();
@@ -280,6 +285,9 @@ fn a_cloud_handover_seals_only_cloud_memory_and_a_cloud_vm_opens_it() {
 
 #[test]
 fn a_scope_with_no_recipients_writes_no_atoms() {
+    if tools::halt(tools::Tool::Packsetd) {
+        return;
+    }
     let w = World::new();
     let bag = w.bag("nowhere");
     let bag_arg = bag.display().to_string();
@@ -309,6 +317,9 @@ fn a_scope_with_no_recipients_writes_no_atoms() {
 /// cannot carry it. An export that cannot be removed stops the handover.
 #[test]
 fn a_plaintext_export_that_cannot_be_removed_stops_the_handover() {
+    if tools::halt(tools::Tool::Packsetd) {
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     let w = World::new();
     let wrap = w.root.path().join("wrap");
@@ -373,6 +384,9 @@ fn a_plaintext_export_that_cannot_be_removed_stops_the_handover() {
 
 #[test]
 fn a_handover_without_a_scope_still_carries_the_workspace() {
+    if tools::halt(tools::Tool::Packsetd) {
+        return;
+    }
     let w = World::new();
     let bag = w.bag("whole");
     let bag_arg = bag.display().to_string();

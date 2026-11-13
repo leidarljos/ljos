@@ -722,6 +722,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_TEST_REQUIRE_TOOLS",
+        default: "unset",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_TEST_SESSION",
         default: "unset",
         group: "ljos",

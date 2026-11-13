@@ -2311,6 +2311,9 @@ body b
     /// and its digest names no sealed file.
     #[test]
     fn a_conflicted_chunk_seals_this_hosts_log_whole() {
+        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+            return;
+        }
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe {
@@ -2422,6 +2425,9 @@ body b
     /// an absolute path errors, and catch-up's merge aborts on the conflict.
     #[test]
     fn a_real_merge_reexports_a_conflicted_log_from_a_relative_temp() {
+        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+            return;
+        }
         if !crate::tool_installed("packsetd") {
             eprintln!("skipped: packsetd is not installed");
             return;

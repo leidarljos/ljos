@@ -4,6 +4,10 @@
 #![cfg(unix)]
 
 ljos_test_boot::harness!();
+
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -261,6 +265,9 @@ fn refusing_hooks(dir: &Path, marks: &Path, who: &str, names: &[&str]) {
 /// merges, commits and pushes without running any of them.
 #[test]
 fn the_login_hooks_do_not_run_on_user_rules_git() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let s = Scratch::new();
     let (remote, tracker) = s.tracker();
     let marks = s.path("marks");
@@ -288,6 +295,9 @@ fn the_login_hooks_do_not_run_on_user_rules_git() {
 /// `user.email`.
 #[test]
 fn the_user_rules_commit_takes_no_identity_from_the_environment() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let s = Scratch::new();
     let (remote, tracker) = s.tracker();
     let name = Path::new("caller");
@@ -318,6 +328,9 @@ fn the_user_rules_commit_takes_no_identity_from_the_environment() {
 /// user-rules commit.
 #[test]
 fn an_exported_git_dir_does_not_take_the_user_rules_commit() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let s = Scratch::new();
     let (caller_remote, caller) = s.caller();
     let git_dir = caller.join(".git");

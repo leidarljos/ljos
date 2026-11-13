@@ -8,6 +8,8 @@ use std::process::{Command, Output};
 
 #[path = "common/sibling.rs"]
 mod sibling;
+#[path = "common/tools.rs"]
+mod tools;
 
 fn vissue_bin() -> PathBuf {
     sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"))
@@ -177,7 +179,9 @@ fn said(out: &Output) -> String {
 
 #[test]
 fn a_reopen_without_a_person_is_refused() -> Result<(), String> {
-    sibling::require("vissue")?;
+    if tools::halt(tools::Tool::Vissue) {
+        return Ok(());
+    }
     let b = Board::new();
     let id = b.issue("restore prior");
     b.vissue(&["note", &id, "keep this sentence"]);
@@ -199,7 +203,9 @@ fn a_reopen_without_a_person_is_refused() -> Result<(), String> {
 /// person, not the writer of the close.
 #[test]
 fn a_hand_close_is_not_refused_for_its_writer() -> Result<(), String> {
-    sibling::require("vissue")?;
+    if tools::halt(tools::Tool::Vissue) {
+        return Ok(());
+    }
     let b = Board::new();
     let id = b.issue("hand close");
     b.vissue(&["update", &id, "-s", "STARTED"]);
@@ -219,7 +225,9 @@ fn a_hand_close_is_not_refused_for_its_writer() -> Result<(), String> {
 /// A ticket that is neither finished nor cancelled has nothing to undo.
 #[test]
 fn an_open_ticket_is_not_reopened() -> Result<(), String> {
-    sibling::require("vissue")?;
+    if tools::halt(tools::Tool::Vissue) {
+        return Ok(());
+    }
     let b = Board::new();
     let id = b.issue("still open");
     b.vissue(&["update", &id, "-s", "STARTED"]);

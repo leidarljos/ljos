@@ -7,6 +7,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::process::Command;
 
 use serde_json::Value;
@@ -30,8 +33,8 @@ const LEFT_OUT: &str = "shown 10 of 46";
 
 #[test]
 fn recall_of_ufuv_kiln_lists_ten_own_memories_and_says_how_many_remain() {
-    if !ljos_cli::tool_installed("packsetd") {
-        panic!("packsetd");
+    if tools::halt(tools::Tool::Packsetd) {
+        return;
     }
     let daemon = ljos_test_boot::Packsetd::build().spawn();
     let fixture: Value =

@@ -7,6 +7,8 @@ use std::sync::Mutex;
 
 #[path = "common/sibling.rs"]
 mod sibling;
+#[path = "common/tools.rs"]
+mod tools;
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -117,7 +119,9 @@ impl Drop for Tracker {
 
 #[test]
 fn objections_past_the_child_cap_are_not_dropped() -> Result<(), String> {
-    sibling::require("vissue")?;
+    if tools::halt(tools::Tool::Vissue) {
+        return Ok(());
+    }
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let t = Tracker::new(None);
     let parent = t.vissue(&["q", "-p", "probe", "split reading"]);
@@ -162,7 +166,9 @@ fn objections_past_the_child_cap_are_not_dropped() -> Result<(), String> {
 
 #[test]
 fn the_descendant_limit_pauses_and_does_not_close() -> Result<(), String> {
-    sibling::require("vissue")?;
+    if tools::halt(tools::Tool::Vissue) {
+        return Ok(());
+    }
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let t = Tracker::new(Some("[panel]\nmax_descendants = 1\n"));
     let parent = t.vissue(&["q", "-p", "probe", "wide tree"]);
@@ -202,7 +208,9 @@ fn the_descendant_limit_pauses_and_does_not_close() -> Result<(), String> {
 /// The descendant limit is the whole tree.
 #[test]
 fn a_nested_split_pauses_at_the_descendant_limit() -> Result<(), String> {
-    sibling::require("vissue")?;
+    if tools::halt(tools::Tool::Vissue) {
+        return Ok(());
+    }
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let t = Tracker::new(None);
     let limits = ljos_cli::converge::ScopeBudget::panel();

@@ -6,6 +6,10 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::io::Write as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
@@ -40,6 +44,9 @@ fn git(cwd: &Path, args: &[&str]) {
 
 #[test]
 fn a_large_log_for_another_machine_is_skipped() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     let config = home.join(".config");

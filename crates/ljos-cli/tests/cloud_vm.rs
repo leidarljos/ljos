@@ -2,6 +2,10 @@
 //! stand in for two cloud VMs. Nothing here talks to GitHub.
 
 ljos_test_boot::harness!();
+
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -3068,6 +3072,9 @@ fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
 
 #[test]
 fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");

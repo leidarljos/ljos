@@ -4,6 +4,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -115,8 +118,7 @@ impl Seat {
 }
 
 fn pack() -> Option<ljos_test_boot::Packsetd> {
-    if !ljos_cli::tool_installed("packsetd") {
-        eprintln!("skipped: packsetd is not installed");
+    if tools::halt(tools::Tool::Packsetd) {
         return None;
     }
     Some(ljos_test_boot::Packsetd::open())

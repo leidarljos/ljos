@@ -6,6 +6,10 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::collections::BTreeSet;
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
@@ -281,6 +285,9 @@ const LINE: usize = 1200;
 
 #[test]
 fn ten_one_atom_syncs_grow_the_tracker_by_less_than_one_log() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let w = world();
     for n in 0..BASE {
         w.add(lesson(n, LINE));
@@ -328,6 +335,9 @@ fn ten_one_atom_syncs_grow_the_tracker_by_less_than_one_log() {
 
 #[test]
 fn a_sync_with_no_new_atoms_leaves_git_log_unchanged() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let w = world();
     for n in 0..50 {
         w.add(lesson(n, LINE));
@@ -359,6 +369,9 @@ fn a_sync_with_no_new_atoms_leaves_git_log_unchanged() {
 
 #[test]
 fn a_single_file_log_from_before_chunks_imports_every_atom() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let w = world();
     let atoms: Vec<Value> = (0..300).map(|n| lesson(n, LINE)).collect();
     let mut plain = String::from("{\"ljos_log\":1,\"host\":\"peer\",\"scope\":\"probe\"}\n");

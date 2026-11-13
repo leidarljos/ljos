@@ -188,7 +188,11 @@ jobs:
       # the next commit here runs hooks from a temp home that is gone.
       # Without --no-fail-fast one failing lib test stopped cargo before
       # any tests/*.rs ran (run 41565021207).
+      # A missing age-keygen, packsetd or vissue skips unless this is set,
+      # so this job cannot pass a test that did not run.
       - name: Workspace tests
+        env:
+          LJOS_TEST_REQUIRE_TOOLS: "1"
         run: |
           set -euo pipefail
           git config --local --list > "${{ runner.temp }}/git-config-before"

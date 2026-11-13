@@ -4,6 +4,10 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -247,6 +251,9 @@ fn assert_synced(delay: &str) {
 /// outside the 250 ms side budget. The rule arrives and the write warns.
 #[test]
 fn a_slow_tracker_fetch_still_syncs_the_user_rule() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     assert_synced("0.35");
     assert_synced("0.8");
 }
@@ -338,6 +345,9 @@ fn healthy_pack(hits: Arc<AtomicUsize>) -> String {
 /// and the session line still counts the five memories.
 #[test]
 fn a_slow_tracker_fetch_does_not_drop_memory() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let hits = Arc::new(AtomicUsize::new(0));
     let url = healthy_pack(Arc::clone(&hits));
     let h = hab("syncmem");

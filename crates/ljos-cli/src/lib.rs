@@ -106,6 +106,9 @@ mod sibling_bin;
 #[cfg(test)]
 #[path = "../tests/common/seat_root.rs"]
 mod test_seat_root;
+#[cfg(test)]
+#[path = "../tests/common/tools.rs"]
+mod test_tools;
 
 /// Working-core files this seat will print. Nothing else, and never write.
 pub const CARD_NAMES: &[&str] = &["USER.md", "MEMORY.md"];
@@ -75820,6 +75823,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// holding the three atoms of its ticket.
     #[test]
     fn finish_seals_the_atoms_of_its_ticket_alone() {
+        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+            return;
+        }
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");

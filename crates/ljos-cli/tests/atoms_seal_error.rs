@@ -6,6 +6,10 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::os::unix::process::ExitStatusExt as _;
@@ -84,6 +88,9 @@ fn pack(atoms: String) -> String {
 
 #[test]
 fn a_recipient_age_refuses_is_named_on_a_large_log() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     let config = home.join(".config");

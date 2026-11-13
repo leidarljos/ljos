@@ -21,8 +21,14 @@ It installs the binaries into DEST and checks each `--version` against its pin.
 `ljos-policyd version` must contain `(phronesis)`, because the guard tests ask that build how a shell line reads.
 The script needs `git`, the Rust toolchain in `rust-toolchain.toml`, and the packages `g++`, `meson`, `ninja-build`, `capnproto` and `pkg-config`.
 `g++` is the C++ compiler phronesis's c-capnproto wrap needs; without it `meson setup` stops with `Compiler c++ cannot compile programs.`
-`age` and `age-keygen` come from your package manager; the script does not build them.
-A test that finds one missing panics with its name; that run does not count.
+`age` and `age-keygen` 1.1.1 come from the `age` package.
+`apt-get install age` installs that package on Ubuntu 24.04, and `brew install age` installs it on macOS.
+The script does not build them.
+`source scripts/sibling-tools.sh` builds the pinned `vissue` 0.23.1 and `packsetd` 0.17.3 and puts them on `PATH`.
+A test that needs `age-keygen`, `packsetd` or that `vissue` checks for the tool first.
+When it is missing the test prints one line naming the tool, the version and that command, and the test does not fail.
+`LJOS_TEST_REQUIRE_TOOLS=1` fails the test with that same line.
+The cargo test job sets that variable.
 Run the suite from a shell with no `LJOS_OFF` set and outside an agent runner.
 
 ## Commit identity

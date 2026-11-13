@@ -174,6 +174,7 @@ LJOS_ variables
 - ``LJOS_TEST_HARNESS`` default unset
 - ``LJOS_TEST_HISTORY_ROOT`` default unset
 - ``LJOS_TEST_HOSTNAME`` default unset
+- ``LJOS_TEST_REQUIRE_TOOLS`` default unset
 - ``LJOS_TEST_SESSION`` default unset
 - ``LJOS_TRACKER_DIR`` default unset
 - ``LJOS_TRACKER_GIT`` default push
