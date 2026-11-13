@@ -23,9 +23,13 @@ Paste it where the runner keeps its MCP servers. The ``env`` is empty on
 purpose. The server does not take the seat from the client that connects.
 Set ``LJOS_SEAT`` in that entry's ``env``, or a ``seat=`` line in
 ``~/.config/ljos/env``, or a row in ``~/.config/ljos/seats.toml``.
-A shell the runner opens finds the same seat through ``LJOS_SEAT``.
-The process tree is not a seat. Each conversation keeps its claims as
-the seat tagged with its session, so two conversations of one runner hold two tickets.
+A shell the runner opens finds its seat through ``LJOS_SEAT`` when that is set.
+The process tree is not a seat. With ``LJOS_SEAT`` unset, Claude Code, Codex and Cursor each take a seat from the session id the runner stamps.
+Two sessions are ``claude-`` and a short id, not one shared ``claude``.
+Mail from one names that session, so the other can answer it.
+Search and recall keep the runner's lessons together. The bare runner name is the family, and every session of that runner reads it.
+Set ``LJOS_SEAT`` when the sessions should sit as one seat.
+``ljos seat`` prints the name in use.
 
 .. code:: console
 

@@ -568,9 +568,6 @@ pub fn check_known(seat: &str, known: &BTreeSet<String>, new_seat: bool) -> Resu
     ))
 }
 
-/// The most seat names an error lists after its guess.
-const SEAT_HINT_MAX: usize = 4;
-
 /// Whether `name` reads as a seat name. A conversation id that an older
 /// ljos wrote as a holder does not: a UUID, a long hex run, or `sess-`
 /// and a hex run. Such a name helps nobody pick a seat.
@@ -586,26 +583,35 @@ pub fn named_seat(name: &str) -> bool {
     !conversation_id
 }
 
-/// The hint an unknown seat gets: the seat it most likely meant, then a
-/// few other named seats. Conversation ids are left out
-/// ([`named_seat`]), and past [`SEAT_HINT_MAX`] the rest are counted.
+/// `a, b and c`. Every name is written. A count with no command is not.
+fn english_list(names: &[&str]) -> String {
+    let mut out = String::new();
+    for (i, name) in names.iter().enumerate() {
+        if i == 0 {
+            out.push_str(name);
+        } else if i + 1 == names.len() {
+            out.push_str(" and ");
+            out.push_str(name);
+        } else {
+            out.push_str(", ");
+            out.push_str(name);
+        }
+    }
+    out
+}
+
+/// The hint an unknown seat gets: the seat it most likely meant, then
+/// every other named seat. Conversation ids are left out ([`named_seat`]).
 #[must_use]
 pub fn seat_hint(seat: &str, known: &BTreeSet<String>) -> String {
     let named: BTreeSet<String> = known.iter().filter(|s| named_seat(s)).cloned().collect();
     let guess = closest_seat(seat, &named).map(str::to_string);
-    let others: Vec<&String> = named
+    let others: Vec<&str> = named
         .iter()
         .filter(|s| guess.as_deref() != Some(s.as_str()))
+        .map(String::as_str)
         .collect();
-    let mut shown = others
-        .iter()
-        .take(SEAT_HINT_MAX)
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    if others.len() > SEAT_HINT_MAX {
-        shown.push_str(&format!(" and {} more", others.len() - SEAT_HINT_MAX));
-    }
+    let shown = english_list(&others);
     match (guess, shown.is_empty()) {
         (Some(g), true) => format!("Did you mean {g}?"),
         (Some(g), false) => format!("Did you mean {g}? Other seats: {shown}."),
@@ -874,7 +880,12 @@ pub fn send(args: &Send<'_>) -> Result<String> {
     let mut atom = message_atom(&outgoing, &workspace_of(Some(&client.workspace())));
     stamp_source(&mut atom);
     post(&atom, "send")?;
-    let mut said = format!("sent {} to {}\n", outgoing.id, to.join(", "));
+    let mut said = format!(
+        "sent {} from {} to {}\n",
+        outgoing.id,
+        outgoing.from,
+        to.join(", ")
+    );
     said.push_str(&wake_after(&outgoing));
     Ok(said)
 }
@@ -1132,8 +1143,8 @@ pub fn reply(id: &str, text: &str, interrupt: bool) -> Result<String> {
     stamp_source(&mut atom);
     post(&atom, "reply")?;
     let mut line = format!(
-        "sent {} to {}\nreply {}\n",
-        outgoing.id, parent.from, parent.id
+        "sent {} from {} to {}\nreply {}\n",
+        outgoing.id, outgoing.from, parent.from, parent.id
     );
     if let Some(issue) = &outgoing.issue {
         line.push_str(&format!("issue {issue}\n"));
@@ -1558,6 +1569,32 @@ mod tests {
     }
 
     #[test]
+    fn two_sessions_of_one_runner_can_mail_each_other() {
+        let a = format!(
+            "claude-{}",
+            super::super::session_tag("0199a1b2-claude-session-one")
+        );
+        let b = format!(
+            "claude-{}",
+            super::super::session_tag("0199a1b2-claude-session-two")
+        );
+        assert_ne!(a, b);
+        let letter = outgoing("m-session", &a, &[&b], "probe from this session");
+        let atoms = [message_atom(&letter, "seat")];
+        let inbox = inbox_letters(&atoms, &b, false);
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+        assert_eq!(inbox[0].from, a);
+        let back = outgoing("m-back", &b, &[&a], "and back");
+        let both = [atoms[0].clone(), message_atom(&back, "seat")];
+        let home = inbox_letters(&both, &a, false);
+        assert_eq!(home.len(), 1);
+        assert_eq!(home[0].from, b);
+        let (text, _) = render_inbox(&both, &a, false, &BTreeSet::new());
+        assert!(text.contains(&b), "{text}");
+        assert!(text.contains("and back"), "{text}");
+    }
+
+    #[test]
     fn a_seat_hint_names_a_few_seats_and_no_ids() {
         let known: BTreeSet<String> = [
             "alpha",
@@ -1580,10 +1617,14 @@ mod tests {
         let hint = seat_hint("sadle", &known);
         assert_eq!(
             hint,
-            "Did you mean saddle? Other seats: alpha, bravo, charlie, delta and 2 more."
+            "Did you mean saddle? Other seats: alpha, bravo, charlie, delta, echo and foxtrot."
         );
         let hint = seat_hint("zzz", &known);
-        assert_eq!(hint, "Seats here: alpha, bravo, charlie, delta and 3 more.");
+        assert_eq!(
+            hint,
+            "Seats here: alpha, bravo, charlie, delta, echo, foxtrot and saddle."
+        );
+        assert!(!hint.contains("more"), "{hint}");
         let ids: BTreeSet<String> = ["01a0dab3-895e-7533-93ca-c9807d5cb680".to_string()].into();
         assert_eq!(
             seat_hint("codex", &ids),

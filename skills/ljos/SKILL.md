@@ -782,12 +782,7 @@ and so does a `seat=` line in `~/.config/ljos/env` or a row in `~/.config/ljos/s
 The same runner's shell finds that name through `LJOS_SEAT`, not through the process tree,
 so a runner's tools and its command-line verbs claim and vote as one.
 A read with none of those set looks at every seat. A write uses `unknown-` plus the host name,
-and the command says to set `LJOS_SEAT`. Two names come from that. The
-seat (`alice`) collects memory, ballots and trust rows across every
-conversation of that runner. The holder (`alice-39u`) owns this
-conversation's claims. A `*_SESSION_ID` the runner wrote names the holder
-ahead of the process tag, as the seat and a short tag for that conversation
-(`alice@k3j9x0a1b2`), so a board says whose claim it is. A
+and the command says to set `LJOS_SEAT`. With `LJOS_SEAT` unset, Claude Code, Codex and Cursor each sit as the runner's name plus a short id of that session (`claude-k3j9x0a1b2`). Mail, claims and notes use that name, so two sessions can write to each other. Search and recall still read the runner as one family, so a lesson is not split. An exported `LJOS_SEAT` is the seat for every session that carries it. The holder (`alice@k3j9x0a1b2`) owns this conversation's claims. A `*_SESSION_ID` the runner wrote names the session, so a board says whose claim it is. A
 `LJOS_SESSION_ID` a person or an env file set is kept as written. Occupancy is `{holder}:{issue}`, so two
 conversations of one runner hold two tickets, and a second sitting does not
 release the first. `ljos seat` prints both names

@@ -945,7 +945,7 @@ marker = "[mcp_servers.ljos]"
 # Codex gives its MCP server only the variables env_vars names: the seat
 # records' directory, and the session the prompt hook binds the kept
 # prompt to.
-snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv_vars = [\"XDG_RUNTIME_DIR\", \"CODEX_SESSION_ID\", \"CODEX_THREAD_ID\"]\nenv = { LJOS_SEAT = \"{name}\" }\n"
+snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv_vars = [\"XDG_RUNTIME_DIR\", \"CODEX_SESSION_ID\", \"CODEX_THREAD_ID\"]\n"
 skills = "~/.codex/skills"
 hooks = "~/.codex/hooks.json"
 hook_events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"]
@@ -961,7 +961,7 @@ name = "antigravity"
 # hooks file of named hooks whose payload names no event.
 config_json = "~/.gemini/config/mcp_config.json"
 json_pointer = "/mcpServers/ljos"
-json_entry = '{"command": "{server}", "args": [], "env": {"LJOS_SEAT": "{name}"}}'
+json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.gemini/config/skills"
 hooks = "~/.gemini/config/hooks.json"
 hooks_named = "ljos"
@@ -1062,7 +1062,7 @@ name = "gemini"
 # Gemini reads a hook answer that is not JSON as an allow.
 config_json = "~/.gemini/settings.json"
 json_pointer = "/mcpServers/ljos"
-json_entry = '{"command": "{server}", "args": [], "env": {"LJOS_SEAT": "{name}"}}'
+json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.gemini/skills"
 hooks = "~/.gemini/settings.json"
 hooks_format = "gemini"
@@ -3095,14 +3095,25 @@ pub async fn with_call_seat<F: std::future::Future>(seat: Seat, f: F) -> F::Outp
 /// The seat for a thread a runner named on a call. The holder is the one a
 /// shell of that thread already took, found by the thread's record; else
 /// the thread id whole, recorded so the thread's shells find it.
+///
+/// With `LJOS_SEAT` unset, a harness session uses the same `family-tag`
+/// name a shell of that id resolves.
 #[must_use]
 pub fn seat_for_thread(thread: &str) -> Seat {
     let thread = thread.trim();
-    let seat = named_var("LJOS_SEAT")
+    let mut seat = named_var("LJOS_SEAT")
         .and_then(|raw| seated_name(&raw))
         .or_else(|| ANNOUNCED.get().map(|s| s.seat.clone()))
         .or_else(mapped_box_seat)
         .unwrap_or_else(login_user);
+    if named_var("LJOS_SEAT").is_none() {
+        if let Some(session) = live_harness_session() {
+            if family_key(&seat).is_some() || seat == login_user() {
+                let id = usable_session_id(thread).unwrap_or(session.id.as_str());
+                seat = session_seat_name(session.family, id);
+            }
+        }
+    }
     let path = session_record_path(thread);
     if let Some(holder) = std::fs::read_to_string(&path)
         .ok()
@@ -4285,14 +4296,11 @@ fn conversation_derived_seat() -> Option<String> {
     if let Some(seat) = recorded {
         return Some(seat.seat);
     }
+    if let Some(session) = live_harness_session() {
+        return Some(session.name);
+    }
     if let Some(seat) = seat_from_runner_env() {
         return Some(seat.seat);
-    }
-    if stamped_id("ANTIGRAVITY_CONVERSATION_ID").is_some() {
-        return Some("antigravity".to_string());
-    }
-    if stamped_id("OPENCODE_SESSION_ID").is_some() {
-        return Some("opencode".to_string());
     }
     None
 }
@@ -4341,7 +4349,7 @@ fn seat_disagreement_line() -> Option<String> {
     let derived = conversation_derived_seat()?;
     let kept = canonical_seat_name(&seat_for_env(&env_seat));
     let other = canonical_seat_name(&derived);
-    if kept.is_empty() || other.is_empty() || kept == other {
+    if kept.is_empty() || other.is_empty() || kept == other || same_memory_family(&kept, &other) {
         return None;
     }
     // `seat` is the placeholder, not a name. The line names the conversation
@@ -4376,11 +4384,24 @@ fn warn_seat_disagreement() {
 /// is the seat and a short tag for any `*_SESSION_ID` the runner stamped
 /// ([`holder_for_session`]), so MCP sitting and CLI sitting of one
 /// conversation are one occupancy name.
+///
+/// A harness default (`claude`, `codex`, `cursor`, and the same names
+/// from a runner variable) is not shared by two live sessions. With
+/// `LJOS_SEAT` unset, the seat is that runner plus [`session_tag`] of the
+/// session id. Search and recall still treat the runner's name as one family.
 #[must_use]
 pub fn whoami() -> Seat {
     if let Ok(seat) = CALL_SEAT.try_with(Clone::clone) {
         return seat;
     }
+    let seat = whoami_resolved();
+    if named_var("LJOS_SEAT").is_some() || seat_resolve::cli_seat_flag().is_some() {
+        return seat;
+    }
+    distinguish_harness_session(seat)
+}
+
+fn whoami_resolved() -> Seat {
     // A helper that hardcodes LJOS_SEAT would otherwise book another
     // conversation's writes under that name with no word said. The named
     // seat still wins. The warning is one line and does not ask anyone.
@@ -4691,20 +4712,20 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
             if let Some((seat, rule)) = seat_resolve::named_from_env() {
                 (seat, true, rule)
             } else {
-                return Ok(seat_resolve::unresolved_seat());
+                return Ok(distinguish_harness_session(seat_resolve::unresolved_seat()));
             }
         }
     };
     if is_raw_subagent_name(&raw) {
-        return Ok(seat_resolve::unresolved_seat());
+        return Ok(distinguish_harness_session(seat_resolve::unresolved_seat()));
     }
     let slug_source = raw.split('@').next().unwrap_or(raw.as_str()).trim();
     if slug_source.is_empty() || omitted_actor_name(slug_source) {
-        return Ok(seat_resolve::unresolved_seat());
+        return Ok(distinguish_harness_session(seat_resolve::unresolved_seat()));
     }
     let named_slug = canonical_seat_name(&raw);
     if named_slug.is_empty() || named_slug == "runner" || omitted_actor_name(&named_slug) {
-        return Ok(seat_resolve::unresolved_seat());
+        return Ok(distinguish_harness_session(seat_resolve::unresolved_seat()));
     }
     let known = seat_roster(&named_slug);
     // The initialized connection names its own seat even when this tracker
@@ -4739,11 +4760,11 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
         Some((holder, keys)) => (holder, format!("{rule}; session {keys}")),
         None => (slug.clone(), rule.to_string()),
     };
-    Ok(Seat {
+    Ok(distinguish_harness_session(Seat {
         seat: slug,
         holder,
         source,
-    })
+    }))
 }
 
 /// The seat each of [`HARNESS_NAMES`] sits as on a tracker that names a
@@ -4798,6 +4819,201 @@ pub fn unknown_seat_error(slug: &str, known: &std::collections::BTreeSet<String>
         "no seat named {slug} on this tracker. {} Pass your own seat name, or set LJOS_SEAT in this server's environment",
         mail::seat_hint(slug, known)
     )
+}
+
+/// One live session of a harness, taken from the id the runner stamped.
+struct LiveSession {
+    /// The bare runner name. Search and recall share this family.
+    family: &'static str,
+    /// The variable the id was read from.
+    key: &'static str,
+    id: String,
+    /// `family` plus [`session_tag`] of `id`. This is the seat.
+    name: String,
+}
+
+/// The runner a seat name belongs to. A session seat is `family` and
+/// the ten-character [`session_tag`]. `claude-code` is the claude family.
+/// A name a person chose, such as `codex-laptop`, is not a session seat.
+fn family_key(name: &str) -> Option<&'static str> {
+    let name = name.trim();
+    if let Some((family, _)) = split_session_seat(name) {
+        return Some(family);
+    }
+    match name {
+        "claude" | "claude-code" => Some("claude"),
+        "codex" => Some("codex"),
+        "cursor" | "cursor-agent" => Some("cursor"),
+        "opencode" | "opencode-ai" => Some("opencode"),
+        "agy" | "antigravity" => Some("antigravity"),
+        "grok" => Some("grok"),
+        "gemini" => Some("gemini"),
+        _ => None,
+    }
+}
+
+/// `family` and the tag when `name` is a session seat.
+fn split_session_seat(name: &str) -> Option<(&'static str, &str)> {
+    const KEYS: &[&str] = &[
+        "antigravity",
+        "opencode",
+        "claude",
+        "cursor",
+        "gemini",
+        "codex",
+        "grok",
+        "agy",
+    ];
+    for key in KEYS {
+        let Some(rest) = name.strip_prefix(key) else {
+            continue;
+        };
+        let Some(tag) = rest.strip_prefix('-') else {
+            continue;
+        };
+        if tag.len() == 10
+            && tag
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        {
+            return Some((*key, tag));
+        }
+    }
+    None
+}
+
+/// Whether two seats share a harness's lessons. The bare runner name and
+/// each of its session seats are one family. A name that is not a harness
+/// is its own.
+#[must_use]
+pub fn same_memory_family(a: &str, b: &str) -> bool {
+    match (family_key(a), family_key(b)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn session_seat_name(family: &str, id: &str) -> String {
+    format!("{family}-{}", session_tag(id))
+}
+
+fn stamp_has(key: &str) -> bool {
+    stamp_env().iter().any(|(k, _)| k == key)
+}
+
+fn stamped_usable(key: &str) -> Option<String> {
+    stamp_env().into_iter().find_map(|(k, v)| {
+        let id = v.trim();
+        (k == key && usable_session_id(id).is_some() && !subagent_id(id)).then(|| id.to_string())
+    })
+}
+
+fn live_from(family: &'static str, key: &'static str, id: String) -> LiveSession {
+    LiveSession {
+        name: session_seat_name(family, &id),
+        family,
+        key,
+        id,
+    }
+}
+
+/// The harness session this process belongs to, when the runner stamped an id.
+/// Claude Code, Codex and Cursor each expose one. A bound hook payload is
+/// used when the environment names the runner and not the id.
+fn live_harness_session() -> Option<LiveSession> {
+    if let Some(id) = stamped_usable("CODEX_THREAD_ID") {
+        return Some(live_from("codex", "CODEX_THREAD_ID", id));
+    }
+    if let Some(id) = stamped_usable("CODEX_SESSION_ID") {
+        return Some(live_from("codex", "CODEX_SESSION_ID", id));
+    }
+    if let Some(id) = stamped_usable("CLAUDE_CODE_SESSION_ID") {
+        return Some(live_from("claude", "CLAUDE_CODE_SESSION_ID", id));
+    }
+    if let Some(id) = stamped_usable("OPENCODE_SESSION_ID") {
+        return Some(live_from("opencode", "OPENCODE_SESSION_ID", id));
+    }
+    if let Some(id) = stamped_usable("ANTIGRAVITY_CONVERSATION_ID") {
+        return Some(live_from("antigravity", "ANTIGRAVITY_CONVERSATION_ID", id));
+    }
+    if let Some(id) = stamped_usable("CURSOR_CONVERSATION_ID") {
+        return Some(live_from("cursor", "CURSOR_CONVERSATION_ID", id));
+    }
+    let id = call_cursor_conversation().filter(|id| !subagent_id(id))?;
+    let family =
+        if stamp_has("CLAUDECODE") || stamp_env().iter().any(|(k, _)| k.starts_with("CLAUDE_")) {
+            "claude"
+        } else if stamp_has("CURSOR_AGENT") {
+            "cursor"
+        } else if stamp_has("CODEX_SANDBOX") {
+            "codex"
+        } else if stamp_has("GEMINI_CLI") {
+            "gemini"
+        } else {
+            return None;
+        };
+    Some(live_from(family, "hook session", id))
+}
+
+/// A seat a file or a person named. The harness default is not one of these.
+fn named_seat_record(seat: &Seat) -> bool {
+    let source = seat.source.as_str();
+    source.contains("LJOS_SEAT")
+        || source.contains("seat=")
+        || source.contains("seats.map")
+        || source.contains("seats.toml")
+        || source.contains("VISSUE_AGENT")
+}
+
+fn unnamed_fallback(seat: &Seat) -> bool {
+    seat.source.contains("unknown seat")
+        || seat.source.contains("reading every seat")
+        || seat.source.contains("the login user")
+        || seat.seat == seat_resolve::EVERY_SEAT
+        || seat.seat.starts_with("unknown-")
+        || seat.seat == login_user()
+}
+
+fn notice_shared_harness(family: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ONCE: AtomicBool = AtomicBool::new(false);
+    if ONCE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!(
+        "ljos: this session has no id, so it shares the seat {family}. Run `export LJOS_SEAT=NAME`."
+    );
+}
+
+/// Give a harness default its own seat when this session has an id.
+/// `LJOS_SEAT`, `--seat`, a `seat=` line and a seats file are left as named.
+fn distinguish_harness_session(seat: Seat) -> Seat {
+    if named_seat_record(&seat) {
+        return seat;
+    }
+    let Some(session) = live_harness_session() else {
+        let bare = family_key(&seat.seat).is_some() && split_session_seat(&seat.seat).is_none();
+        let shared_default = seat.source.contains("runner's own variable")
+            || seat.source.contains("parent process")
+            || seat.source.contains("most recent write")
+            || seat.source.contains("conversation");
+        if bare && shared_default {
+            notice_shared_harness(&seat.seat);
+        }
+        return seat;
+    };
+    let same = family_key(&seat.seat) == Some(session.family);
+    if !same && !unnamed_fallback(&seat) {
+        return seat;
+    }
+    if seat.seat == session.name {
+        return seat;
+    }
+    Seat {
+        holder: holder_for_session(&session.name, &session.id),
+        seat: session.name,
+        source: format!("{} session {}", session.family, session.key),
+    }
 }
 
 /// Runners whose shells cannot see the runner's process, named by a
@@ -5116,7 +5332,8 @@ pub fn registered_seat(seat: &str) -> Result<()> {
             format!("{why}, so no seat may write. Nothing was written"),
         )),
         seat_roster::SeatList::Listed { path, seats } => {
-            if seats.contains(&slug) {
+            if seats.contains(&slug) || seats.iter().any(|listed| same_memory_family(listed, &slug))
+            {
                 return Ok(());
             }
             if seats.is_empty() {
@@ -5846,10 +6063,9 @@ fn seated_name(raw: &str) -> Option<String> {
 }
 
 /// The seat a git hook may book as. `LJOS_SEAT`, then the box seat map,
-/// then `antigravity` when `ANTIGRAVITY_CONVERSATION_ID` is set, then
-/// `opencode` when `OPENCODE_SESSION_ID` is set. A conversation id with
-/// no map entry does not name a seat. Nothing here reads the process
-/// tree. `None` means the hook does not book.
+/// then the session seat of a harness that stamped an id. A conversation
+/// id with no harness and no map entry does not name a seat. Nothing here
+/// reads the process tree. `None` means the hook does not book.
 #[must_use]
 pub fn git_hook_seat() -> Option<String> {
     if let Some(name) = named_var("LJOS_SEAT") {
@@ -5869,11 +6085,8 @@ pub fn git_hook_seat() -> Option<String> {
             return Some(seat);
         }
     }
-    if stamped_id("ANTIGRAVITY_CONVERSATION_ID").is_some() {
-        return Some("antigravity".to_string());
-    }
-    if stamped_id("OPENCODE_SESSION_ID").is_some() {
-        return Some("opencode".to_string());
+    if let Some(session) = live_harness_session() {
+        return Some(session.name);
     }
     None
 }
@@ -19758,8 +19971,12 @@ mod validity_tests {
 #[must_use]
 pub fn atom_source() -> Value {
     let seat = whoami();
-    // The runner that connected, when the seat was renamed over it.
-    let harness = seat_from_runner_env().map_or_else(|| seat.seat.clone(), |s| s.seat);
+    // A session seat is its own name. The bare runner name is not a mailbox.
+    let harness = if split_session_seat(&seat.seat).is_some() {
+        seat.seat.clone()
+    } else {
+        seat_from_runner_env().map_or_else(|| seat.seat.clone(), |s| s.seat)
+    };
     let mut source = serde_json::json!({
         "harness": harness,
         "seat": seat.seat,
@@ -38736,7 +38953,10 @@ fn process_note(atom: &Value, seat: &str) -> bool {
     let kind = atom["kind"].as_str().unwrap_or("");
     // This seat's own preference is a rule it stored. Another seat's
     // preference stays a working note and fades.
-    if kind == "preference" && stored_by(atom) == StoredBy::Agent && atom_seat(atom) == Some(seat) {
+    if kind == "preference"
+        && stored_by(atom) == StoredBy::Agent
+        && atom_seat(atom).is_some_and(|stored| stored == seat || same_memory_family(stored, seat))
+    {
         return false;
     }
     kind == "note" || (kind != "lesson" && kind != "rule" && !person_stored(atom))
@@ -38756,10 +38976,13 @@ fn sitting_memory_weight(issue: &str, atom: &Value, now: &str, seat: &str) -> Op
     }
     let mut weight = 1.0;
     let kind = atom["kind"].as_str().unwrap_or("");
-    let here = atom_seat(atom) == Some(seat);
-    let elsewhere = atom_seat(atom).is_some_and(|other| other != seat);
-    let own_pref =
-        kind == "preference" && stored_by(atom) == StoredBy::Agent && atom_seat(atom) == Some(seat);
+    let here =
+        atom_seat(atom).is_some_and(|stored| stored == seat || same_memory_family(stored, seat));
+    let elsewhere =
+        atom_seat(atom).is_some_and(|other| other != seat && !same_memory_family(other, seat));
+    let own_pref = kind == "preference"
+        && stored_by(atom) == StoredBy::Agent
+        && atom_seat(atom).is_some_and(|stored| stored == seat || same_memory_family(stored, seat));
     let rule = kind == "rule" || (kind == "preference" && person_stored(atom)) || own_pref;
     if junk_preference(kind, text) {
         weight *= 0.45;
@@ -43019,6 +43242,7 @@ pub fn other_seat(entities: &[String], mine: &str) -> Option<String> {
         // copy this seat integrated. They are not another seat's lesson.
         if rest.is_empty()
             || rest == mine
+            || same_memory_family(rest, mine)
             || rest == "unresolved"
             || rest.starts_with("import")
             || rest.starts_with("iid:")
@@ -52273,10 +52497,8 @@ mod tests {
         );
         let seat = with_config_home(config.path(), || resolve_call_seat(None))
             .expect("a missing seat still resolves");
-        assert!(
-            seat.source.contains("no seat rule matched") || seat.seat.starts_with("unknown-"),
-            "{seat:?}"
-        );
+        assert!(seat.seat.starts_with("cursor-"), "{seat:?}");
+        assert_ne!(seat.seat, "t", "{seat:?}");
         assert!(!seat.seat.contains(id), "{seat:?}");
     }
 
@@ -69340,10 +69562,15 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             std::env::set_var("CODEX_THREAD_ID", "019a7c3e-55aa-7b10-9c2d-3e4f5a6b7c8d");
         }
         let who = whoami();
-        assert_eq!(who.seat, "codex", "{who:?}");
-        assert!(who.holder.starts_with("codex@"), "{who:?}");
+        let expect = format!(
+            "codex-{}",
+            session_tag("019a7c3e-55aa-7b10-9c2d-3e4f5a6b7c8d")
+        );
+        assert_eq!(who.seat, expect, "{who:?}");
+        assert!(who.holder.starts_with(&format!("{expect}@")), "{who:?}");
+        assert!(who.source.contains("CODEX_THREAD_ID"), "{who:?}");
         let voter = with_config_home(rt.path(), || write_seat("vote"));
-        assert_eq!(voter.unwrap().seat, "codex");
+        assert_eq!(voter.unwrap().seat, expect);
         unsafe {
             std::env::remove_var("CODEX_THREAD_ID");
             std::env::set_var("ACME_SESSION_ID", "a-runner-nobody-names-0001");
@@ -69354,6 +69581,82 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
         unsafe {
             std::env::remove_var("ACME_SESSION_ID");
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    /// Two Claude Code sessions with no `LJOS_SEAT` mail as different seats.
+    /// Recall still treats them as one family. An exported seat wins.
+    #[test]
+    fn two_unset_sessions_are_distinct_and_recall_stays_one_family() {
+        let _env = env_guard();
+        let keys = [
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "CLAUDE_CODE_SESSION_ID",
+            "CODEX_THREAD_ID",
+            "CODEX_SESSION_ID",
+            "CURSOR_CONVERSATION_ID",
+            "OPENCODE_SESSION_ID",
+            "ANTIGRAVITY_CONVERSATION_ID",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let one = "0199a1b2-claude-session-one";
+        let two = "0199a1b2-claude-session-two";
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("CLAUDE_CODE_SESSION_ID", one);
+        }
+        let login = login_user();
+        let first = distinguish_harness_session(Seat {
+            seat: login.clone(),
+            holder: login.clone(),
+            source: "the login user".into(),
+        });
+        let parent = distinguish_harness_session(Seat {
+            seat: "claude".into(),
+            holder: "claude".into(),
+            source: "parent process seat record".into(),
+        });
+        unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", two) };
+        let second = distinguish_harness_session(Seat {
+            seat: login.clone(),
+            holder: login,
+            source: "the login user".into(),
+        });
+        assert_ne!(first.seat, second.seat, "{first:?} {second:?}");
+        assert_eq!(first.seat, parent.seat, "{first:?} {parent:?}");
+        assert!(first.seat.starts_with("claude-"), "{first:?}");
+        assert!(second.seat.starts_with("claude-"), "{second:?}");
+        assert!(same_memory_family(&first.seat, &second.seat));
+        assert!(same_memory_family(&first.seat, "claude"));
+        assert!(same_memory_family("claude-code", &first.seat));
+        assert!(!same_memory_family(&first.seat, "grok"));
+        let lesson = vec![format!("seat:{}", first.seat)];
+        assert!(other_seat(&lesson, &second.seat).is_none());
+        assert!(other_seat(&lesson, "claude").is_none());
+        assert_eq!(
+            other_seat(&lesson, "grok").as_deref(),
+            Some(first.seat.as_str())
+        );
+        let kept = distinguish_harness_session(Seat {
+            seat: "ada".into(),
+            holder: "ada".into(),
+            source: "LJOS_SEAT".into(),
+        });
+        assert_eq!(kept.seat, "ada");
+        unsafe { std::env::set_var("LJOS_SEAT", "ada") };
+        let named = whoami();
+        assert_eq!(named.seat, "ada", "{named:?}");
+        assert!(named.source.contains("LJOS_SEAT"), "{named:?}");
+        unsafe {
             for (k, v) in saved {
                 match v {
                     Some(v) => std::env::set_var(k, v),

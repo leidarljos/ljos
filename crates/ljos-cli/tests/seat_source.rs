@@ -97,6 +97,10 @@ fn only_a_named_seat_or_a_call_argument_names_the_seat() {
         "ISSUE_ROOT",
         "HOME",
         "XDG_CONFIG_HOME",
+        "CURSOR_CONVERSATION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
     ]
     .into_iter()
     .map(|key| (key, std::env::var_os(key)))
@@ -111,6 +115,10 @@ fn only_a_named_seat_or_a_call_argument_names_the_seat() {
         std::env::remove_var("LJOS_SEAT");
         std::env::remove_var("VISSUE_AGENT");
         std::env::remove_var("LJOS_HOLD");
+        std::env::remove_var("CURSOR_CONVERSATION_ID");
+        std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+        std::env::remove_var("CODEX_THREAD_ID");
+        std::env::remove_var("CODEX_SESSION_ID");
     }
     let missing = ljos_cli::resolve_call_seat(None);
     let from_arg = ljos_cli::resolve_call_seat(Some("inky"));

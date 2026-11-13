@@ -179,8 +179,11 @@ the seat from the client that connected. A read with none of those set looks at 
 A write uses ``unknown-`` plus the host name, and says to set ``LJOS_SEAT``.
 ``ljos seat`` prints the seat, the holder, and where each name came from.
 
-Claims belong to one conversation. Memory, ballots and trust belong to the seat. The holder
-is ``SEAT@session``, and the session id is the one the runner gives.
+With ``LJOS_SEAT`` unset, a session of Claude Code, Codex or Cursor sits as the runner's name plus a short id of that session.
+Mail, claims and notes use that name, so two sessions can tell each other apart.
+Search and recall use the runner's name as the family, so a lesson is not split across that runner's sessions.
+An exported ``LJOS_SEAT`` is the seat for every session that carries it.
+The holder is ``SEAT@session``, and the session id is the one the runner gives.
 
 On a fresh tracker with no seat list, any seat may write. An unset seat with no conversation
 record writes as ``unknown-`` plus the host name, and says so. A conversation that already has a

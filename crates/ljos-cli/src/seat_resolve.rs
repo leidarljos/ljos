@@ -30,6 +30,11 @@ thread_local! {
     static NOTICED: Cell<bool> = const { Cell::new(false) };
 }
 
+/// The `--seat` flag for this command, when one was passed.
+pub(crate) fn cli_seat_flag() -> Option<String> {
+    FLAG.with(|slot| slot.borrow().clone())
+}
+
 /// Remember `--seat` and whether this command reads or writes.
 /// The unknown-host line is printed later, from the seat the write
 /// actually uses, so a conversation record is not described as unknown.

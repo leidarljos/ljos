@@ -163,8 +163,11 @@ The seat is the name an agent works under. =LJOS_SEAT= sets it. When it is unset
 name from the runner, and a derived name is a seat. =ljos-mcp= names the seat after the client that
 connected. =ljos seat= prints the seat, the holder, and where each name came from.
 
-Claims belong to one conversation. Memory, ballots and trust belong to the seat. The holder
-is =SEAT@session=, and the session id is the one the runner gives.
+With =LJOS_SEAT= unset, a session of Claude Code, Codex or Cursor sits as the runner's name plus a short id of that session.
+Mail, claims and notes use that name, so two sessions can tell each other apart.
+Search and recall use the runner's name as the family, so a lesson is not split across that runner's sessions.
+An exported =LJOS_SEAT= is the seat for every session that carries it.
+The holder is =SEAT@session=, and the session id is the one the runner gives.
 
 On a fresh tracker with no seat list, any seat may write. An unset seat writes under its login
 seat with a warning. Once the tracker's =vissue.toml= lists seats, a tracker write from a seat it
