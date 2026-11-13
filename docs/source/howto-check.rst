@@ -6,7 +6,7 @@ Check the seat
 ==============
 
 
-``ljos doctor`` prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer or the note queue is damaged.
+``ljos doctor`` prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable.
 ``ljos doctor --all`` prints every row.
 
 .. [[[cog import ljos_version as v; v.lines("", "The block is the ``ljos`` row from that command on a scratch seat, taken from ljos {version}.", "")]]]
@@ -45,13 +45,16 @@ runner above the shell it says the person's git is not gated.
 
 .. END ljos-sample doctor
 
-Exit 1 when the tracker, the deed store, or the pack does not answer. The
-tracker row names how many commits origin lacks, and fails when that count
+Exit 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable.
+A tracker that has not been created is an info row and names ``ljos onboard``.
+The deed store is reported and does not by itself exit 1.
+The tracker row names how many commits origin lacks, and fails when that count
 sits through the push wait. It also fails when another remote of the
 tracker has a different head of the branch, as of the last fetch: two
 seats pushing to two remotes each read only their own writes. A sitting's own tracker push goes to
 every remote that carries the branch. A missing
 claim graph is reported and is not a failure: the first claim creates it.
-A seat nobody named is a derived seat, and a derived seat is a seat. The ``seat source`` row says where the name came from.
+A seat nobody named is a warning. The ``seat source`` row says to set one with ``--seat NAME`` or ``export LJOS_SEAT=NAME``. It does not by itself exit 1.
 A damaged note queue is a ``no`` row and fails: it holds lessons the pack has not taken.
 An empty or missing log of either is whole.
+The rows for a missing writer, seat, tracker, binary, Model Context Protocol entry and a registry that did not answer are on :doc:`Troubleshoot doctor <howto-troubleshoot>`.

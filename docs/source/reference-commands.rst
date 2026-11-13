@@ -168,7 +168,7 @@ Commands
 ``receive DIR [--since KEPT] [--keep FILE] [--import]``
    Stores: all. Check, and import the atoms with origin ``peer``; ``--since`` is the head ``--keep`` wrote at the last receive from this sender, and the bag's bridge must start there; a sealed scope file opens with the identities that scope allows, and stays closed without them.
 ``doctor [--all]``
-   Stores: all. Whether ljos is ready, and the rows that need action; exit 1 when a required part does not answer or the note queue is damaged. ``--all`` (alias ``--verbose``) prints every row, the ones that answer included. A probe that does not answer is a row that says it timed out, and it does not hold the report. A ``panes`` row names the tool that opens persona panes; with ``jev.toml`` present, a ``jev`` row carries the month's calls, cached answers and spend.
+   Stores: all. Whether ljos is ready, and the rows that need action; exit 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable. ``--all`` (alias ``--verbose``) prints every row, the ones that answer included. A probe that does not answer is a row that says it timed out, and it does not hold the report. A ``panes`` row names the tool that opens persona panes; with ``jev.toml`` present, a ``jev`` row carries the month's calls, cached answers and spend.
 ``seat [add NAME | grant SEAT close=own --quote TEXT --at TIME --via SEAT]``
    Stores: tracker. Who is sitting; ``add`` writes NAME into the tracker's ``vissue.toml`` seat list; ``grant`` records a quoted yes that SEAT may close tickets it filed or holds.
 ``protocol``

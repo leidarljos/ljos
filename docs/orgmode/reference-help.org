@@ -20,7 +20,7 @@ Memory, a work tracker and a command guard for coding runners
 Usage: ljos <COMMAND>
 
 Start:
-  doctor       Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer or the note queue is damaged
+  doctor       Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable
 
 Options:
   -h, --help     Print help
@@ -28,7 +28,7 @@ Options:
 
 Start with `ljos doctor`, `ljos prefer "..."`, `ljos policy -- COMMAND` and `ljos onboard`. `ljos protocol` explains the rest. `ljos help --all` lists every command.
 $ ljos doctor --help
-Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer or the note queue is damaged
+Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable
 
 Usage: ljos doctor [OPTIONS]
 
