@@ -175,7 +175,9 @@ fn next_step(tool: &str) -> &'static str {
 fn attach_next(name: &str, response: CallToolResponse) -> CallToolResponse {
     match response {
         CallToolResponse::Complete(mut result) => {
-            let line = if name == "ljos_finish" {
+            let line = if name == "ljos_finish" && result.is_error == Some(true) {
+                "next: the sitting is still open; fix the line above and call ljos_finish again"
+            } else if name == "ljos_finish" {
                 let body = result
                     .content
                     .iter()
@@ -4768,6 +4770,30 @@ mod tests {
         assert!(next_step("ljos_prefer").contains("ljos_finish"));
         assert!(!ljos_cli::bookkeep::mcp_tool_writes("ljos_start"));
         assert!(!ljos_cli::bookkeep::mcp_tool_writes("ljos_guard_check"));
+    }
+
+    /// A finish that did not run must not tell the model the claim is released.
+    #[test]
+    fn a_failed_finish_does_not_say_the_claim_is_released() {
+        let CallToolResponse::Complete(done) = attach_next(
+            "ljos_finish",
+            CallToolResult::error(vec![ContentBlock::text(
+                "failed to deserialize parameters: unknown field `node`",
+            )])
+            .into(),
+        ) else {
+            panic!("a finish error completes");
+        };
+        let last = done
+            .content
+            .last()
+            .unwrap()
+            .as_text()
+            .expect("text")
+            .text
+            .clone();
+        assert!(last.contains("still open"), "{last}");
+        assert!(!last.contains("released"), "{last}");
     }
 
     /// Memory writes are what the person stated; the agent's own findings,
