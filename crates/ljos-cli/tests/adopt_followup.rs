@@ -472,14 +472,20 @@ fn a_refused_pack_search_is_one_line_and_exits_75() {
         ],
     );
     let said = text(&out);
-    assert_eq!(out.status.code(), Some(75), "{said}");
     assert!(out.stdout.is_empty(), "{said}");
     let err = String::from_utf8_lossy(&out.stderr);
     let lines: Vec<&str> = err.lines().filter(|line| !line.is_empty()).collect();
-    assert_eq!(
-        lines,
-        ["packsetd is unreachable (connection refused)"],
+    assert_eq!(lines.len(), 1, "{said}");
+    assert!(
+        lines[0].contains("packset ensure") || lines[0].contains("cargo install --locked packset"),
         "{said}"
     );
+    assert!(!lines[0].contains("packsetd is unreachable"), "{said}");
+    let code = if lines[0].contains("packset ensure") {
+        75
+    } else {
+        1
+    };
+    assert_eq!(out.status.code(), Some(code), "{said}");
     assert!(!err.contains("Caused by"), "{said}");
 }

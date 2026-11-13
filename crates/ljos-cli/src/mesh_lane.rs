@@ -777,11 +777,27 @@ fn push_with(store: &SeatStore, to: &Path, lane: &str, extra: &[Value]) -> Resul
     let dest = to.join(format!("{lane}.jsonl"));
     let bytes = document("export", &store.seat, &lane, &rows, &row_ids)?;
     write_bytes(&dest, &bytes)?;
-    Ok(format!(
-        "pushed {} memories to {}\n",
-        rows.len(),
-        dest.display()
-    ))
+    let queued = crate::note_queue::pending_in(&crate::note_queue::state_dir())
+        .iter()
+        .filter(|note| note.kind == "lesson")
+        .count();
+    Ok(push_summary(rows.len(), &dest, queued))
+}
+
+/// What `ljos mesh push` prints. A queue of lessons and an empty pack is
+/// the queue, not `pushed 0 memories`.
+fn push_summary(rows: usize, dest: &Path, queued: usize) -> String {
+    if rows == 0 && queued > 0 {
+        let word = if queued == 1 { "lesson" } else { "lessons" };
+        return format!("{queued} {word} queued, not pushed\n");
+    }
+    let mut line = format!("pushed {rows} memories to {}", dest.display());
+    if queued > 0 {
+        let word = if queued == 1 { "lesson" } else { "lessons" };
+        line.push_str(&format!("; {queued} {word} still queued"));
+    }
+    line.push('\n');
+    line
 }
 
 /// Write this seat's seed and its stored lessons to `to` as `<lane>.jsonl`.

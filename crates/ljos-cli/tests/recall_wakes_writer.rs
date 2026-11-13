@@ -1,7 +1,7 @@
 //! Recall and a new session start the memory store themselves.
 //!
-//! A down writer used to be handed back as `packset ensure` for the agent
-//! to run. Doctor already starts it. These two do too.
+//! Doctor already starts it. These two do too. A session start does not
+//! name the command. A recall whose writer stays down does.
 
 ljos_test_boot::harness!();
 use std::io::Write;
@@ -133,5 +133,12 @@ fn a_session_and_a_recall_start_the_writer_without_naming_the_command() {
         calls.lines().any(|l| l.trim() == "ensure"),
         "recall did not start the writer; calls: {calls:?}\n{recall_text}"
     );
-    assert!(!recall_text.contains("packset ensure"), "{recall_text}");
+    assert!(
+        recall_text.contains("packset ensure"),
+        "a writer that stayed down did not name the command:\n{recall_text}"
+    );
+    assert!(
+        !recall_text.contains("packsetd is unreachable"),
+        "{recall_text}"
+    );
 }

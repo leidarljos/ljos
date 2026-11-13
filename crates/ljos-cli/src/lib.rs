@@ -10728,8 +10728,16 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
     let atoms = with_pack_timeout(1_500, || {
         let client = pack()?;
         rows_read(&client, &client.workspace())
-    })
-    .ok();
+    });
+    let atoms = match atoms {
+        Ok(atoms) => Some(atoms),
+        Err(err) => {
+            if pack_unreachable(&err) || writer_unreachable(&err) {
+                mark_writer_down();
+            }
+            None
+        }
+    };
     let mut hits = Vec::new();
     if let Some(atoms) = atoms {
         record_listed_origins(&atoms);
@@ -14585,6 +14593,14 @@ fn search_relevant(
     timeout: std::time::Duration,
 ) -> Result<(Value, usize)> {
     if seat_has_no_token(client) {
+        // Nothing is listening. The missing token is not the failure,
+        // and saying it hides the command that starts the writer.
+        if let Err(err) = client.health().map_err(anyhow::Error::from) {
+            if pack_unreachable(&err) || writer_unreachable(&err) {
+                mark_writer_down();
+                return Err(err);
+            }
+        }
         say_search_miss();
         return Ok(stored_only(client, cue, limit));
     }
@@ -17966,42 +17982,364 @@ pub fn longest_call_timeout() -> std::time::Duration {
         .max(tool_bound::budget())
 }
 
-/// What to say when the pack writer is not there. The same sentences
-/// [`ensure_writer`] refuses with. It does not start a writer.
+/// A packsetd this user already has running.
+#[derive(Clone)]
+struct SeenWriter {
+    ports: Vec<u16>,
+    home: String,
+    pack_home: String,
+}
+
+/// Facts [`pack_down_line`] reads. Split out so a test can name each case.
+#[derive(Clone)]
+struct DownFacts {
+    url_off: bool,
+    url_set: bool,
+    asked: String,
+    asked_port: Option<u16>,
+    packset: bool,
+    our_home: String,
+    our_pack: String,
+    writers: Vec<SeenWriter>,
+    temp: Option<PathBuf>,
+}
+
+/// What to say when the pack writer is not there. One line. It names what
+/// is down and the one command that fixes it: `packset ensure`, or
+/// `cargo install --locked packset` when that program is missing. It does
+/// not start a writer.
 #[must_use]
 pub fn pack_down_line() -> String {
-    if std::env::var("PACKSET_URL").ok().as_deref() == Some("off") {
+    render_down(&down_facts())
+}
+
+fn down_facts() -> DownFacts {
+    let url = std::env::var("PACKSET_URL")
+        .ok()
+        .map(|url| url.trim().to_string())
+        .unwrap_or_default();
+    let url_off = url == "off";
+    let url_set = !url.is_empty() && !url_off;
+    let asked = if url_set {
+        url.trim_end_matches('/').to_string()
+    } else {
+        let port = std::env::var("PACKSET_PORT")
+            .ok()
+            .or_else(|| std::env::var("LJOS_MEM_PORT").ok())
+            .and_then(|raw| raw.trim().parse::<u16>().ok())
+            .unwrap_or(PACK_DEFAULT_PORT);
+        format!("127.0.0.1:{port}")
+    };
+    let asked_port = asked
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok());
+    let our_home = std::env::var("HOME").unwrap_or_default();
+    let our_pack = std::env::var("PACKSET_HOME")
+        .ok()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| pack_home_under(&our_home));
+    let packset = on_path("packset");
+    DownFacts {
+        url_off,
+        url_set,
+        asked,
+        asked_port,
+        packset,
+        our_home,
+        our_pack,
+        writers: if packset && !url_off {
+            seen_writers()
+        } else {
+            Vec::new()
+        },
+        temp: bookkeep::temp_home(),
+    }
+}
+
+fn pack_home_under(home: &str) -> String {
+    Path::new(home)
+        .join(".local/share/packset")
+        .display()
+        .to_string()
+}
+
+fn home_paths_match(left: &str, right: &str) -> bool {
+    left.trim().trim_end_matches('/') == right.trim().trim_end_matches('/')
+}
+
+fn render_down(facts: &DownFacts) -> String {
+    if facts.url_off {
         return "PACKSET_URL=off: this seat has no pack on purpose".to_string();
     }
-    if std::env::var("PACKSET_URL")
-        .ok()
-        .is_some_and(|url| !url.is_empty())
-    {
-        return "the pack writer at PACKSET_URL is not answering. This seat is not pointed at the default writer, so it was not started".to_string();
-    }
-    if !on_path("packset") {
+    if !facts.packset {
         return "no pack writer is answering, and packset is not on PATH. cargo install --locked packset".to_string();
     }
-    if let Some(home) = bookkeep::temp_home() {
+    if let Some(line) = foreign_home(facts) {
+        return line;
+    }
+    if let Some(line) = other_port(facts) {
+        return line;
+    }
+    if facts.url_set {
+        return format!(
+            "the pack writer at {} is not answering. Run `packset ensure`",
+            facts.asked
+        );
+    }
+    if let Some(home) = &facts.temp {
         return format!(
             "the memory writer does not start on its own under a temporary HOME ({}); \
              run `packset ensure` to start it",
             home.display()
         );
     }
-    "no pack writer is answering. Run `packset ensure`".to_string()
+    format!(
+        "no pack writer is answering on {}. Run `packset ensure`",
+        facts.asked
+    )
 }
 
-/// [`pack_down_line`] when `err` is a writer that refused the connection.
-/// `None` for any other failure, so a refusal the writer actually sent
-/// keeps its own words.
+fn foreign_home(facts: &DownFacts) -> Option<String> {
+    let writer = facts.writers.iter().find(|writer| {
+        (!writer.home.is_empty() && !home_paths_match(&writer.home, &facts.our_home))
+            || (!writer.pack_home.is_empty()
+                && !home_paths_match(&writer.pack_home, &facts.our_pack))
+    })?;
+    let (theirs, ours, what) =
+        if !writer.home.is_empty() && !home_paths_match(&writer.home, &facts.our_home) {
+            (writer.home.as_str(), facts.our_home.as_str(), "home")
+        } else {
+            (
+                writer.pack_home.as_str(),
+                facts.our_pack.as_str(),
+                "pack home",
+            )
+        };
+    Some(format!(
+        "a pack writer is running for {what} {theirs}, not {ours}. Run `packset ensure`"
+    ))
+}
+
+fn other_port(facts: &DownFacts) -> Option<String> {
+    let port = facts.writers.iter().find_map(|writer| {
+        writer
+            .ports
+            .iter()
+            .copied()
+            .find(|port| facts.asked_port != Some(*port))
+    })?;
+    Some(format!(
+        "a pack writer is listening on 127.0.0.1:{port}, not {}. Run `packset ensure`",
+        facts.asked
+    ))
+}
+
+/// Lessons waiting in the note queue. A missing queue is zero, and the
+/// read does not create the directory.
+fn queued_lesson_count() -> usize {
+    note_queue::pending_in(&note_queue::state_dir())
+        .iter()
+        .filter(|note| note.kind == "lesson")
+        .count()
+}
+
+/// [`pack_down_line`], and, on the same line, that a lesson is queued.
+fn fault_line() -> String {
+    let mut line = pack_down_line();
+    let waiting = queued_lesson_count();
+    if waiting > 0 && !line.contains("queued") {
+        if waiting == 1 {
+            line.push_str("; 1 lesson is queued for the next send");
+        } else {
+            line.push_str(&format!("; {waiting} lessons are queued for the next send"));
+        }
+    }
+    line
+}
+
+fn text_is_down(text: &str) -> bool {
+    let full = text.to_ascii_lowercase();
+    full.contains("connection refused")
+        || full.contains("connect error")
+        || full.contains("not answering")
+        || full.contains("no pack writer")
+        || full.contains("packset ensure")
+        || full.contains("packset is not on path")
+}
+
+fn writer_is_down(err: &anyhow::Error) -> bool {
+    text_is_down(&format!("{err:#}"))
+}
+
+static WRITER_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static FAULT_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn mark_writer_down() {
+    WRITER_REFUSED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The one line a prompt hook adds when a pack call was refused.
+/// `None` when this process has not seen a down writer.
+#[must_use]
+pub fn prompt_writer_line() -> Option<String> {
+    WRITER_REFUSED
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .then(fault_line)
+}
+
+/// Print `line` once. A flush and the command that follows share it, so
+/// a down writer is one line.
+pub fn say_fault(line: &str) {
+    if !FAULT_SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("{line}");
+    }
+}
+
+/// Whether `line` is a writer that a later run can reach. The install
+/// line is not: packset has to be installed first.
+#[must_use]
+pub fn writer_retries(line: &str) -> bool {
+    line.contains("packset ensure")
+}
+
+/// [`pack_down_line`] when `err` is a writer that is not answering,
+/// including a lesson queued while it was down. `None` for any other
+/// failure, so a refusal the writer actually sent keeps its own words.
 #[must_use]
 pub fn pack_down_message(err: &anyhow::Error) -> Option<String> {
-    if pack_unreachable(err) {
-        Some(pack_down_line())
-    } else {
-        None
+    writer_is_down(err).then(fault_line)
+}
+
+#[cfg(target_os = "linux")]
+fn listen_inodes() -> std::collections::BTreeMap<u64, u16> {
+    let mut out = std::collections::BTreeMap::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(text) = std::fs::read_to_string(table) else {
+            continue;
+        };
+        for line in text.lines().skip(1) {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            let (Some(local), Some(state), Some(inode)) = (cols.get(1), cols.get(3), cols.get(9))
+            else {
+                continue;
+            };
+            if *state != "0A" {
+                continue;
+            }
+            let Ok(inode) = inode.parse::<u64>() else {
+                continue;
+            };
+            let Some((_, port)) = local.rsplit_once(':') else {
+                continue;
+            };
+            let Ok(port) = u16::from_str_radix(port, 16) else {
+                continue;
+            };
+            if port != 0 {
+                out.entry(inode).or_insert(port);
+            }
+        }
     }
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn proc_uid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status.lines().find_map(|line| {
+        let rest = line.strip_prefix("Uid:")?;
+        rest.split_whitespace().next()?.parse().ok()
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn proc_env(pid: u32, key: &str) -> String {
+    let Ok(bytes) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return String::new();
+    };
+    let prefix = format!("{key}=");
+    bytes
+        .split(|byte| *byte == 0)
+        .find_map(|item| item.strip_prefix(prefix.as_bytes()))
+        .map(|value| String::from_utf8_lossy(value).into_owned())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn proc_ports(pid: u32, listening: &std::collections::BTreeMap<u64, u16>) -> Vec<u16> {
+    let mut held = Vec::new();
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return held;
+    };
+    for fd in fds.flatten() {
+        let Ok(target) = std::fs::read_link(fd.path()) else {
+            continue;
+        };
+        let text = target.to_string_lossy();
+        let Some(rest) = text.strip_prefix("socket:[") else {
+            continue;
+        };
+        let Some(inode) = rest.strip_suffix(']') else {
+            continue;
+        };
+        let Ok(inode) = inode.parse::<u64>() else {
+            continue;
+        };
+        if let Some(port) = listening.get(&inode) {
+            if !held.contains(port) {
+                held.push(*port);
+            }
+        }
+    }
+    held.sort_unstable();
+    held
+}
+
+/// packsetd processes of this user. Another user's writer is not this
+/// seat's, and this process is not one.
+#[cfg(target_os = "linux")]
+fn seen_writers() -> Vec<SeenWriter> {
+    let listening = listen_inodes();
+    let me = euid();
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in dir.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == std::process::id() {
+            continue;
+        }
+        let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
+            continue;
+        };
+        if comm.trim() != "packsetd" || proc_uid(pid) != Some(me) {
+            continue;
+        }
+        let home = proc_env(pid, "HOME");
+        let mut pack_home = proc_env(pid, "PACKSET_HOME");
+        if pack_home.is_empty() && !home.is_empty() {
+            pack_home = pack_home_under(&home);
+        }
+        out.push(SeenWriter {
+            ports: proc_ports(pid, &listening),
+            home,
+            pack_home,
+        });
+    }
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+fn seen_writers() -> Vec<SeenWriter> {
+    Vec::new()
 }
 
 /// Start the default writer when a memory verb could not connect.
@@ -18024,6 +18362,7 @@ fn ensure_writer() -> Result<()> {
         || !on_path("packset")
         || bookkeep::temp_home().is_some()
     {
+        mark_writer_down();
         bail!("{}", pack_down_line());
     }
     // `packset ensure` detaches the writer. A hook process is short and that
@@ -18049,10 +18388,19 @@ fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
         Err(err) if pack_link::clock_armed() && (is_pack_busy(&err) || writer_busy(&err)) => {
             Err(pack_busy_err())
         }
-        Err(err) if writer_unreachable(&err) => {
-            ensure_writer()?;
-            op()
-        }
+        Err(err) if writer_unreachable(&err) => match ensure_writer() {
+            Ok(()) => match op() {
+                Err(err) if writer_unreachable(&err) => {
+                    mark_writer_down();
+                    Err(err)
+                }
+                other => other,
+            },
+            Err(err) => {
+                mark_writer_down();
+                Err(err)
+            }
+        },
         other => other,
     }
 }
@@ -19442,7 +19790,10 @@ fn post_or_reinforce(client: &PacksetClient, atom: &Value, prefix: &str) -> Resu
     if let Some(held) = memories::reinforce_held(client, atom) {
         return Ok(held);
     }
-    with_writer(|| admit::post_kept(client, atom).map_err(|e| with_post_failure(prefix, e)))
+    match with_writer(|| admit::post_kept(client, atom).map_err(|e| with_post_failure(prefix, e))) {
+        Ok(posted) => Ok(posted),
+        Err(err) => Err(queue_waiting_lesson(atom, err, prefix)),
+    }
 }
 
 /// Write a claim an agent made, at once. No person approves it first: it
@@ -19739,23 +20090,33 @@ fn agent_sourced_atom(
 fn store_agent_atom(client: &PacksetClient, atom: Value, prefix: &str) -> Result<Value> {
     match with_writer(|| admit::write_agent(client, atom.clone())) {
         Ok(posted) => Ok(posted),
-        Err(e) if note_can_wait(&e) && atom["kind"].as_str() == Some("lesson") => {
-            let text = atom["text"].as_str().unwrap_or("");
-            let copies = pack_copy::pack_copies(text);
-            let err = with_post_failure(prefix, e);
-            if copies.is_empty() {
-                return Err(err);
-            }
-            let issue = atom["issue"].as_str().unwrap_or("");
-            let workspace = atom["workspace"].as_str().unwrap_or("");
-            let closes = atom_supersedes(&atom);
-            Err(with_queue_outcome(
-                err,
-                queue_copies(issue, &copies, workspace, "lesson", &closes),
-            ))
-        }
-        Err(e) => Err(with_post_failure(prefix, e)),
+        Err(err) => Err(queue_waiting_lesson(&atom, err, prefix)),
     }
+}
+
+/// Queue a lesson the writer did not take. A refusal is not queued. The
+/// error keeps the words that say the copy is waiting.
+fn queue_waiting_lesson(atom: &Value, err: anyhow::Error, prefix: &str) -> anyhow::Error {
+    let err = if format!("{err:#}").contains(prefix) {
+        err
+    } else {
+        with_post_failure(prefix, err)
+    };
+    if atom["kind"].as_str() != Some("lesson") || !note_can_wait(&err) {
+        return err;
+    }
+    let text = atom["text"].as_str().unwrap_or("");
+    let copies = pack_copy::pack_copies(text);
+    if copies.is_empty() {
+        return err;
+    }
+    let issue = atom["issue"].as_str().unwrap_or("");
+    let workspace = atom["workspace"].as_str().unwrap_or("");
+    let closes = atom_supersedes(atom);
+    with_queue_outcome(
+        err,
+        queue_copies(issue, &copies, workspace, "lesson", &closes),
+    )
 }
 
 /// Fold how queueing a down pack's lesson went into the error the caller
@@ -20225,14 +20586,10 @@ pub fn note_unattached_line(text: &str) -> String {
 /// `None` when `err` is some other failure.
 #[must_use]
 pub fn plain_server_fault(err: &anyhow::Error) -> Option<String> {
-    let full = format!("{err:#}").to_ascii_lowercase();
-    if full.contains("connection refused")
-        || full.contains("connect error")
-        || full.contains("not answering")
-        || full.contains("no pack writer")
-    {
-        return Some("packsetd is unreachable (connection refused)".to_string());
+    if let Some(line) = pack_down_message(err) {
+        return Some(line);
     }
+    let full = format!("{err:#}").to_ascii_lowercase();
     if full.contains("not on path") {
         let line = err.to_string();
         let line = line
@@ -20569,14 +20926,19 @@ pub fn flush_queued_lessons() {
         Err(err) => {
             let waiting = note_queue::pending_in(&dir).len();
             if waiting > 0 {
-                eprintln!(
-                    "memory: {waiting} note(s) still queued (the lesson is safe and will be sent automatically; the pack did not answer: {err:#})"
-                );
+                if let Some(line) = pack_down_message(&err) {
+                    say_fault(&line);
+                } else {
+                    eprintln!(
+                        "memory: {waiting} note(s) still queued (the lesson is safe and will be sent automatically; the pack did not answer: {err:#})"
+                    );
+                }
             }
             return;
         }
     };
     let done = if done.left > 0
+        && !queue_waits_on_writer(&done)
         && pack_link::clock_left().is_some_and(|left| left > std::time::Duration::from_millis(50))
     {
         let _quiet = pack_link::QuietPack::enter();
@@ -20592,10 +20954,26 @@ pub fn flush_queued_lessons() {
     } else {
         done
     };
+    if queue_waits_on_writer(&done) {
+        say_fault(&fault_line());
+        let mut rest = done;
+        rest.left = 0;
+        rest.waiting_on = None;
+        let lines = note_queue::drained_lines(&rest);
+        if !lines.is_empty() {
+            eprint!("{lines}");
+        }
+        return;
+    }
     let lines = note_queue::drained_lines(&done);
     if !lines.is_empty() {
         eprint!("{lines}");
     }
+}
+
+/// The drain left lessons because the writer refused the connection.
+fn queue_waits_on_writer(done: &note_queue::Drained) -> bool {
+    done.left > 0 && done.waiting_on.as_deref().is_some_and(text_is_down)
 }
 
 /// The preference `ljos prefer` writes, stored at once from any caller.
@@ -36705,6 +37083,9 @@ pub const EMPTY_ISSUE_MEMORY: &str = "\nMemory\n  (no lesson on this issue. `ljo
 /// stays quiet.
 pub fn recall_for_command(issue: &str) -> Result<String> {
     let text = recall_memories(issue)?;
+    if writer_fault_text(&text) {
+        bail!("{text}");
+    }
     if text.trim().is_empty() {
         Ok(EMPTY_ISSUE_MEMORY.to_string())
     } else {
@@ -37122,12 +37503,29 @@ fn recall_lines(
 }
 
 /// The one line a recall shows when the store stayed down after it was
-/// started. No command for the agent: the start already ran.
+/// started. It names what is down and the command that starts it.
 fn recall_down(err: &anyhow::Error) -> String {
-    let mut msg = format!("{err:#}");
-    msg = msg.replace("(`packset ensure` starts it)", "");
-    msg = msg.replace("`packset ensure`", "the writer");
-    format!("\nMemory\n  (the pack did not answer: {msg})\n")
+    if let Some(line) = pack_down_message(err) {
+        return line;
+    }
+    let msg = err
+        .to_string()
+        .lines()
+        .next()
+        .unwrap_or("the pack did not answer")
+        .to_string();
+    format!("the pack did not answer: {msg}")
+}
+
+/// Whether `text` is the one line [`recall_down`] returns for a writer
+/// that is not answering. A memory block is not this.
+fn writer_fault_text(text: &str) -> bool {
+    let text = text.trim();
+    !text.contains('\n')
+        && (text.contains("packset ensure")
+            || text.contains("cargo install --locked packset")
+            || text.contains("not answering")
+            || text.contains("no pack writer"))
 }
 
 /// Whether the tracker answered that `issue` is not one of its tickets.
@@ -62115,6 +62513,75 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             queued.contains(text),
             "the lesson was dropped instead of queued:\n{queued}"
         );
+    }
+
+    /// Each way a writer is missing names that fact and one command.
+    #[test]
+    fn a_down_writer_names_what_is_down_and_one_command() {
+        let base = super::DownFacts {
+            url_off: false,
+            url_set: false,
+            asked: "127.0.0.1:8761".into(),
+            asked_port: Some(8761),
+            packset: true,
+            our_home: "/home/ada".into(),
+            our_pack: "/home/ada/.local/share/packset".into(),
+            writers: Vec::new(),
+            temp: None,
+        };
+        let none = super::render_down(&base);
+        assert_eq!(
+            none,
+            "no pack writer is answering on 127.0.0.1:8761. Run `packset ensure`"
+        );
+        assert!(!none.contains('\n'));
+        assert!(super::writer_retries(&none));
+
+        let mut missing = base.clone();
+        missing.packset = false;
+        let missing = super::render_down(&missing);
+        assert!(
+            missing.contains("packset is not on PATH")
+                && missing.contains("cargo install --locked packset"),
+            "{missing}"
+        );
+        assert!(!missing.contains("packset ensure"), "{missing}");
+        assert!(!super::writer_retries(&missing));
+
+        let mut other = base.clone();
+        other.writers.push(super::SeenWriter {
+            ports: vec![18761],
+            home: "/home/ada".into(),
+            pack_home: "/home/ada/.local/share/packset".into(),
+        });
+        let other = super::render_down(&other);
+        assert!(
+            other.contains("listening on 127.0.0.1:18761")
+                && other.contains("not 127.0.0.1:8761")
+                && other.contains("packset ensure"),
+            "{other}"
+        );
+        assert_eq!(other.lines().count(), 1, "{other}");
+
+        let mut home = base.clone();
+        home.writers.push(super::SeenWriter {
+            ports: vec![18761],
+            home: "/home/other".into(),
+            pack_home: "/home/other/.local/share/packset".into(),
+        });
+        let home = super::render_down(&home);
+        assert!(
+            home.contains("running for home /home/other, not /home/ada")
+                && home.contains("packset ensure"),
+            "{home}"
+        );
+        assert!(!home.contains("18761"), "{home}");
+
+        let mut off = base.clone();
+        off.url_off = true;
+        let off = super::render_down(&off);
+        assert_eq!(off, "PACKSET_URL=off: this seat has no pack on purpose");
+        assert!(!off.contains("packsetd is unreachable"), "{off}");
     }
 
     /// A duplicate is the atom the pack already holds, not an error and

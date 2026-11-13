@@ -64,7 +64,12 @@ fn assert_one_fault(out: &Output, args: &[&str]) {
     );
     assert_eq!(stderr.len(), 1, "{args:?} was not one line: {stderr:?}");
     assert!(
-        stderr[0].contains("packsetd is unreachable") || stderr[0].contains("not on PATH"),
+        stderr[0].contains("packset ensure")
+            || stderr[0].contains("cargo install --locked packset"),
+        "{args:?}: {stderr:?}"
+    );
+    assert!(
+        !stderr[0].contains("packsetd is unreachable"),
         "{args:?}: {stderr:?}"
     );
     assert!(
@@ -81,22 +86,34 @@ fn search_and_remember_say_one_line_when_the_pack_is_down() {
     let url = format!("http://127.0.0.1:{port}");
     let pack = [("PACKSET_URL", url.as_str())];
     let search = run(&["search", "fix the broken links on the docs"], &pack);
-    assert_eq!(
-        search.status.code(),
-        Some(75),
-        "{:?}",
-        lines(&search.stderr)
-    );
+    let search_err = lines(&search.stderr);
+    let search_code = if search_err
+        .first()
+        .is_some_and(|line| line.contains("packset ensure"))
+    {
+        75
+    } else {
+        1
+    };
+    assert_eq!(search.status.code(), Some(search_code), "{search_err:?}");
     assert_one_fault(&search, &["search"]);
     let remember = run(
         &["remember", "The kiln fires at dusk on the north bench."],
         &pack,
     );
+    let remember_err = lines(&remember.stderr);
+    let remember_code = if remember_err
+        .first()
+        .is_some_and(|line| line.contains("packset ensure"))
+    {
+        75
+    } else {
+        1
+    };
     assert_eq!(
         remember.status.code(),
-        Some(75),
-        "{:?}",
-        lines(&remember.stderr)
+        Some(remember_code),
+        "{remember_err:?}"
     );
     assert_one_fault(&remember, &["remember"]);
 }
@@ -149,7 +166,9 @@ fn file_and_finish_do_not_ask_and_name_a_missing_tool_in_one_line() {
         assert!(
             err[0].contains("not on PATH")
                 || err[0].contains("unreachable")
-                || err[0].contains("not found"),
+                || err[0].contains("not found")
+                || err[0].contains("packset ensure")
+                || err[0].contains("cargo install --locked packset"),
             "{err:?}"
         );
     }

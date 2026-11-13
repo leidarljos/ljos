@@ -2105,9 +2105,12 @@ fn main() -> Result<()> {
             std::process::exit(ljos_cli::PACK_BUSY_EXIT);
         }
         if let Some(line) = ljos_cli::plain_server_fault(e) {
-            eprintln!("{line}");
-            let down = line.starts_with("packsetd is unreachable");
-            std::process::exit(if down { ljos_cli::PACK_BUSY_EXIT } else { 1 });
+            ljos_cli::say_fault(&line);
+            std::process::exit(if ljos_cli::writer_retries(&line) {
+                ljos_cli::PACK_BUSY_EXIT
+            } else {
+                1
+            });
         }
         // A gate whose hook fails answers allow in the runner's JSON with
         // the note that says why, and exits 0: a broken ljos blocks nothing.
@@ -2813,8 +2816,14 @@ fn run_command() -> Result<()> {
                     }),
                 ),
                 Err(err) if !dated && ljos_cli::pack_unreachable(&err) => {
-                    eprintln!("packsetd is unreachable (connection refused)");
-                    std::process::exit(ljos_cli::PACK_BUSY_EXIT);
+                    let line =
+                        ljos_cli::plain_server_fault(&err).unwrap_or_else(ljos_cli::pack_down_line);
+                    ljos_cli::say_fault(&line);
+                    std::process::exit(if ljos_cli::writer_retries(&line) {
+                        ljos_cli::PACK_BUSY_EXIT
+                    } else {
+                        1
+                    });
                 }
                 Err(err)
                     if !dated
@@ -4381,6 +4390,11 @@ fn run_command() -> Result<()> {
                     }
                     if !call.shape.holds_prompt_note() {
                         seen_later.extend(ids.clone());
+                    }
+                    if call.event == "UserPromptSubmit" {
+                        if let Some(line) = ljos_cli::prompt_writer_line() {
+                            ctx = line;
+                        }
                     }
                     prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)
                 }
