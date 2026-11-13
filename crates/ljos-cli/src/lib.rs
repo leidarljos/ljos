@@ -34608,7 +34608,15 @@ pub fn file_issue(
     if quiet {
         argv.push("-q".into());
     }
-    let said = run_captured_as("vissue", &argv, Some(agent))?;
+    let said = match run_captured_as("vissue", &argv, Some(agent)) {
+        Ok(said) => said,
+        Err(err)
+            if parent.is_some() && err.to_string().contains("does not refer to any known id") =>
+        {
+            return Err(unknown_ticket(parent.unwrap_or("")));
+        }
+        Err(err) => return Err(err),
+    };
     let text = said.stdout;
     let id = created_issue_id(&text);
     if let (Some((n, d)), false) = (quorum_deadline, id.is_empty()) {
@@ -36838,6 +36846,13 @@ fn tracker_misses(err: &anyhow::Error, issue: &str) -> bool {
     err.chain().any(|cause| cause.to_string() == missing)
 }
 
+/// A ticket id the tracker does not hold, with the command that lists the ones it does.
+fn unknown_ticket(issue: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "issue {issue} not found. `ljos ready` lists the open tickets, and `ljos file` prints a new id"
+    )
+}
+
 /// The issue's title, for a cue, from the tracker.
 fn issue_title(issue: &str) -> Result<String> {
     let v = tracker_show_json(issue)?;
@@ -37530,7 +37545,11 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
 ///
 /// The tracker cannot be read, or `issue` is not in it.
 pub fn show_issue(issue: &str) -> Result<String> {
-    let card = tracker_show_json(issue)?;
+    let card = match tracker_show_json(issue) {
+        Ok(card) => card,
+        Err(err) if tracker_misses(&err, issue) => return Err(unknown_ticket(issue)),
+        Err(err) => return Err(err),
+    };
     let id = card["id"].as_str().unwrap_or(issue);
     let state = card["state"].as_str().unwrap_or("");
     let title = card["title"].as_str().unwrap_or("");
@@ -39665,7 +39684,11 @@ pub fn finish(
     if !terminal.contains(&status) {
         bail!("finish: status {status:?} is not one of done, failed, cancelled");
     }
-    let title = issue_title(issue)?;
+    let title = match issue_title(issue) {
+        Ok(title) => title,
+        Err(err) if tracker_misses(&err, issue) => return Err(unknown_ticket(issue)),
+        Err(err) => return Err(err),
+    };
     // The lesson is filed before the node completes. A complete that
     // refuses used to return first and the lesson never reached the pack
     // `ljos memories list` reads. The refusal says nothing about the
