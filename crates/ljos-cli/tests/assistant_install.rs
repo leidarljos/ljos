@@ -163,9 +163,15 @@ fn onboard_with_no_assistant_names_the_next_command() {
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(text.contains("found no coding tool"), "{text}");
-    assert!(text.contains("so run `ljos onboard`."), "{text}");
-    assert!(text.contains("--example lists the names"), "{text}");
-    assert!(text.contains("--harness NAME registers one"), "{text}");
+    assert!(
+        text.contains("Install an agent, then run `ljos onboard`."),
+        "{text}"
+    );
+    assert!(text.contains("`ljos onboard --example` lists the names."), "{text}");
+    assert!(
+        !text.contains("so run `ljos onboard`."),
+        "onboard must not tell you to run the command you just ran: {text}"
+    );
 }
 
 /// Claude's directory is present and the `claude` command is not.
