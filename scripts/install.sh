@@ -66,7 +66,10 @@
 #                   it there, once
 #   --version VER   install ljos VER (such as 0.29.0) instead of the latest
 #   --pin REPO=VER  install REPO at VER (such as packset=0.14.0); repeat
-#                   for each repository to hold
+#                   for each repository to hold. vissue, claimdag and deedar
+#                   default to the versions in .github/sibling-pin
+#   --latest        do not apply those default pins; each unpinned
+#                   repository is its latest release
 #   --attest        refuse a tarball whose GitHub build attestation is
 #                   missing or does not verify
 #   --cloud         install the binaries, skip onboarding and packset's
@@ -111,6 +114,7 @@ CLOUD=0
 FORCE=0
 NO_BUILD=0
 PRINT_ASSETS=0
+LATEST=0
 SOURCE_ONLY=0
 SHADOW=0
 
@@ -190,6 +194,7 @@ while [ $# -gt 0 ]; do
     --version=*) PINS="$PINS ljos=${1#--version=}"; shift ;;
     --pin) [ $# -ge 2 ] || die "--pin needs REPO=VER"; PINS="$PINS $2"; shift 2 ;;
     --pin=*) PINS="$PINS ${1#--pin=}"; shift ;;
+    --latest) LATEST=1; shift ;;
     --attest) ATTEST=1; shift ;;
     --cloud) CLOUD=1; ONBOARD=0; WITH_EMBED=0; shift ;;
     --force) FORCE=1; shift ;;
@@ -205,6 +210,59 @@ pinned() {
   done
 }
 
+# vissue, claimdag and deedar follow .github/sibling-pin when this script
+# sits in the repository. A downloaded script carries the same versions.
+# --pin for one of them wins. --latest leaves every unpinned repository
+# at its latest release.
+# Three dot-separated numbers, such as 0.23.1. No grep: a PATH that
+# cannot fetch a release still has to name curl before anything else.
+version_ok() {
+  case $1 in
+    '' | *[!0-9.]*) return 1 ;;
+  esac
+  case $1 in
+    *.*.*.*) return 1 ;;
+  esac
+  case $1 in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  rest=${1#*.*.}
+  case $rest in
+    *[!0-9]*) return 1 ;;
+  esac
+}
+
+apply_sibling_pins() {
+  [ "$LATEST" = 1 ] && return 0
+  here=${0%/*}
+  [ "$here" = "$0" ] && here=.
+  pinfile=$here/../.github/sibling-pin
+  if [ -f "$pinfile" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      trim=${line#"${line%%[![:space:]]*}"}
+      case "$trim" in
+        '' | \#*) continue ;;
+      esac
+      read -r name _repo _commit ver _extra <<EOF
+$trim
+EOF
+      [ -n "${ver:-}" ] || continue
+      [ -z "$(pinned "$name")" ] || continue
+      PINS="$PINS $name=$ver"
+    done < "$pinfile"
+    return 0
+  fi
+  # The versions in .github/sibling-pin. release-install-check.sh
+  # refuses a copy that has drifted.
+  for item in vissue=0.23.1 claimdag=0.8.0 deedar=0.4.0; do
+    name=${item%%=*}
+    [ -z "$(pinned "$name")" ] || continue
+    PINS="$PINS $item"
+  done
+}
+apply_sibling_pins
+
 for pin in $PINS; do
   ver=${pin#*=}
   ver=${ver#v}
@@ -212,7 +270,7 @@ for pin in $PINS; do
     *=*) ;;
     *) die "--pin takes REPO=VER, not $pin" ;;
   esac
-  printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+  version_ok "$ver" ||
     die "${pin%%=*}: $ver is not a version such as 0.29.0"
 done
 

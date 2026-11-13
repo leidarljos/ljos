@@ -66,6 +66,87 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
+/// vissue, claimdag and deedar come from `.github/sibling-pin` unless
+/// `--latest` or `--pin` names them.
+#[test]
+fn print_assets_uses_the_sibling_pin_unless_latest() {
+    let pin = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/sibling-pin"),
+    )
+    .unwrap();
+    let mut pinned = Vec::new();
+    for line in pin.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let name = parts.next().unwrap();
+        let ver = parts.nth(2).unwrap();
+        pinned.push((name.to_string(), ver.to_string()));
+    }
+    assert!(!pinned.is_empty());
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .args([
+            "--print-assets",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--pin",
+            "ljos=0.41.11",
+            "--pin",
+            "packset=0.17.3",
+            "--pin",
+            "ljos-policyd=0.7.0",
+            "--pin",
+            "consensus=0.10.1",
+        ])
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    for (name, ver) in &pinned {
+        let asset = format!("{name}-v{ver}-x86_64-unknown-linux-gnu.tar.gz");
+        assert!(text.lines().any(|line| line == asset), "{text}\nmissing {asset}");
+    }
+    let latest = Command::new("sh")
+        .arg(install_sh())
+        .args([
+            "--print-assets",
+            "--latest",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--pin",
+            "ljos=0.41.11",
+            "--pin",
+            "packset=0.17.3",
+            "--pin",
+            "ljos-policyd=0.7.0",
+            "--pin",
+            "consensus=0.10.1",
+            "--pin",
+            "vissue=9.9.9",
+            "--pin",
+            "claimdag=9.9.9",
+            "--pin",
+            "deedar=9.9.9",
+        ])
+        .output()
+        .unwrap();
+    let text = said(&latest);
+    assert!(latest.status.success(), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line == "vissue-v9.9.9-x86_64-unknown-linux-gnu.tar.gz"),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .all(|line| !line.starts_with("vissue-v0.23.1-")),
+        "{text}"
+    );
+}
+
 #[test]
 fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     let dir = tempfile::tempdir().unwrap();

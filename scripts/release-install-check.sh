@@ -53,6 +53,21 @@ $want"
 grep -F -q 'ljos-${TAG}-${{ matrix.target }}' "$REL" ||
   die "release.yml no longer names the archive ljos-TAG-target"
 
+# The versions install.sh uses when nobody passes --pin or --latest.
+# The file is the source. The fallback in the script is for a download
+# that does not sit next to this tree, and it has to name the same ones.
+while IFS= read -r line || [ -n "$line" ]; do
+  trim=${line#"${line%%[![:space:]]*}"}
+  case "$trim" in
+    '' | \#*) continue ;;
+  esac
+  read -r name _repo _commit ver _extra <<EOF
+$trim
+EOF
+  grep -F -q "$name=$ver" "$INSTALL" ||
+    die "install.sh fallback does not pin $name=$ver from .github/sibling-pin"
+done < "$ROOT/.github/sibling-pin"
+
 LJOS_VER=$(sed -n 's/^version *= *"\([0-9.]*\)".*/\1/p' "$ROOT/Cargo.toml" | head -n 1)
 [ -n "$LJOS_VER" ] || die "Cargo.toml has no version"
 MIN_RUST=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' "$ROOT/Cargo.toml" | head -n 1)
