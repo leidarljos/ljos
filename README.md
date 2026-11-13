@@ -182,7 +182,7 @@ Votes cast from one shell are one voice. `ljos consensus` says they were folded 
 
 ## How-to
 
-[How-to guides](https://leidarljos.github.io/ljos/howto.html) is one task a page: runners, memory, sittings, votes, handover.
+[How-to guides](https://leidarljos.github.io/ljos/howto.html) is one task a page: runners, memory, sittings, votes, handover. [Two agents on one repository](https://leidarljos.github.io/ljos/howto-agents.html) is the page for more than one session on that repository.
 
 ## The command check
 
@@ -223,6 +223,7 @@ The official MCP Registry lists the server from the crates.io page of `ljos`, an
 | [How ljos compares](https://leidarljos.github.io/ljos/compare.html) | beads, Mem0, Letta, Zep, Basic Memory, git-bug |
 | [Getting started](https://leidarljos.github.io/ljos/getting-started.html) | Tutorial: install, remember, search, a ticket, a second seat |
 | [How-to guides](https://leidarljos.github.io/ljos/howto.html) | One task a page: runners, memory, sittings, votes, handover |
+| [Two agents on one repository](https://leidarljos.github.io/ljos/howto-agents.html) | The seat each session gets, mail between them, and how they split the tickets |
 | [Reference](https://leidarljos.github.io/ljos/reference.html) | Commands, MCP tools, hooks, rules and variables |
 | [Explanation](https://leidarljos.github.io/ljos/explanation.html) | The reason for the design |
 

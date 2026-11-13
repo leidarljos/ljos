@@ -30,6 +30,7 @@ Mail from one names that session, so the other can answer it.
 Search and recall keep the runner's lessons together. The bare runner name is the family, and every session of that runner reads it.
 Set ``LJOS_SEAT`` when the sessions should sit as one seat.
 ``ljos seat`` prints the name in use.
+The how-to :doc:`Run two agents on one repository <howto-agents>` is two sessions mailing each other and splitting the tickets.
 
 .. code:: console
 

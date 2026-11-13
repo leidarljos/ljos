@@ -12,6 +12,7 @@ How-to guides
 Each page is one task. Start with the first two; the rest stand alone.
 
 - :doc:`Connect an agent runner <howto-runner>`: wire ljos into a runner, an editor or a shell-only agent. The page also puts the seat in the status bar.
+- :doc:`Run two agents on one repository <howto-agents>`: each session gets a seat, they mail each other, and they split the tickets.
 - :doc:`Check the seat <howto-check>`: read what ljos doctor prints, which rows fail, and when it exits 1.
 - :doc:`Troubleshoot doctor <howto-troubleshoot>`: the row ljos doctor prints for a missing writer, seat, tracker, binary, Model Context Protocol entry or registry, and the command that fixes it.
 - :doc:`Add a seat and let it close tickets <howto-seats>`: add a seat to the tracker and grant it the right to close named tickets.
@@ -33,6 +34,7 @@ Each page is one task. Start with the first two; the rest stand alone.
    :hidden:
 
    howto-runner
+   howto-agents
    howto-check
    howto-troubleshoot
    howto-seats

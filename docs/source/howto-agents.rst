@@ -1,0 +1,246 @@
+:description: Two agents on one repository each get a seat, so they can mail each other and each hold a ticket. Search and recall stay one family for a runner.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
+
+===================================
+Run two agents on one repository
+===================================
+
+Two agents on one repository each get a seat. One can mail the other, and each can hold its own ticket. A lesson stored by one session of a runner is there for the other sessions of that runner.
+
+``ljos seat`` prints the seat, the holder, and where the name came from. With ``LJOS_SEAT`` unset, the name comes from the session id in this process. An id that exists only on a parent does not count.
+
+A ticket id, a message id, a review time and the home directory below stand in for the ones that run printed. In a claim line, ``…`` stands in for whether that process is still running, and the time.
+
+See the seat
+============
+
+Claude Code reads ``CLAUDE_CODE_SESSION_ID``. Codex reads ``CODEX_THREAD_ID``, and ``CODEX_SESSION_ID`` when the thread id is unset. Cursor reads ``CURSOR_CONVERSATION_ID``. The seat is the runner's name plus a short id of that value. With none of those set, and no seat named, a read prints ``every-seat``.
+
+.. BEGIN ljos-sample agents-seats
+
+.. code:: console
+
+   $ ljos seat
+   seat    every-seat
+   holder  every-seat
+   source  no seat rule matched; reading every seat
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos seat
+   seat    claude-f2pu9d56g0
+   holder  claude-f2pu9d56g0@f2pu9d56g0
+   source  CLAUDE_CODE_SESSION_ID in this process
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos seat
+   seat    claude-dxw6sq4j7l
+   holder  claude-dxw6sq4j7l@dxw6sq4j7l
+   source  CLAUDE_CODE_SESSION_ID in this process
+
+   $ CODEX_THREAD_ID=019a7c3e-55aa-7b10-9c2d-3e4f5a6b7c8d ljos seat
+   seat    codex-qmazbz5vny
+   holder  codex-qmazbz5vny@qmazbz5vny
+   source  CODEX_THREAD_ID in this process
+
+   $ CODEX_SESSION_ID=019a7c3e-codex-session-one ljos seat
+   seat    codex-0f77xkv0yd
+   holder  codex-0f77xkv0yd@0f77xkv0yd
+   source  CODEX_SESSION_ID in this process
+
+   $ CODEX_THREAD_ID=019a7c3e-55aa-7b10-9c2d-3e4f5a6b7c8d CODEX_SESSION_ID=019a7c3e-codex-session-one ljos seat
+   seat    codex-qmazbz5vny
+   holder  codex-qmazbz5vny@qmazbz5vny
+   source  CODEX_THREAD_ID in this process
+
+   $ CURSOR_CONVERSATION_ID=0199c0de-cursor-conversation-one ljos seat
+   seat    cursor-e6ghys7rpo
+   holder  cursor-e6ghys7rpo@e6ghys7rpo
+   source  CURSOR_CONVERSATION_ID in this process
+
+.. END ljos-sample agents-seats
+
+When both Codex variables are set, ``CODEX_THREAD_ID`` is the one that names the seat. The holder is the seat, an ``@``, and the same short id. Mail is addressed to the seat. A claim is held under the holder, so two sessions do not hold one ticket together.
+
+Set a name when the sessions should be one seat
+================================================
+
+``LJOS_SEAT`` and ``--seat`` are the seat as written. Set one when these sessions should be a single seat, or when you want a name you chose. A note names the session seat this process would have used, and the write still uses your name. ``--seat`` wins the same way and does not print the note.
+
+.. BEGIN ljos-sample agents-named
+
+.. code:: console
+
+   $ LJOS_SEAT=ada CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos seat
+   ljos: LJOS_SEAT is ada and this conversation's seat is claude-f2pu9d56g0; writing as ada
+   seat    ada
+   holder  ada@f2pu9d56g0
+   source  LJOS_SEAT; session CLAUDE_CODE_SESSION_ID
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos --seat ada seat
+   seat    ada
+   holder  ada@f2pu9d56g0
+   source  --seat; session CLAUDE_CODE_SESSION_ID
+
+.. END ljos-sample agents-named
+
+What the sessions share
+=======================
+
+Search and recall treat every session of one runner as one family. The second session's search of the first session's lesson has no ``from`` line. A Cursor session's search names the Claude session the lesson came from. Mail, a claim and a sitting stay with the session that holds them.
+
+.. BEGIN ljos-sample agents-memory
+
+.. code:: console
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos remember "Measure the files before picking a codec."
+   remembered (lesson): Measure the files before picking a codec.
+     id …, next review …
+   standing: the hook shows it from the next prompt it bears on
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos search "measure the files"
+   ranking is lexical: encoder unavailable
+   shown 1 of 1.
+   score: scorer order, not whether the claim is true.
+   scorers: how many of them named the hit.
+
+   lesson, agent-derived, today
+     Measure the files before picking a codec.
+     score 1.00, scorers 2/2, id …
+
+   $ CURSOR_CONVERSATION_ID=0199c0de-cursor-conversation-one ljos search "measure the files"
+   ranking is lexical: encoder unavailable
+   shown 1 of 1.
+   score: scorer order, not whether the claim is true.
+   scorers: how many of them named the hit.
+
+   lesson, agent-derived, today, from claude-f2pu9d56g0
+     Measure the files before picking a codec.
+     score 1.00, scorers 2/2, id …
+
+.. END ljos-sample agents-memory
+
+Mail the other session
+======================
+
+Session two stores a lesson, so the pack has heard from it. ``ljos send`` prints ``sent ID from SEAT to RECIPIENT``. The recipient's inbox shows the message. The sender's inbox shows a receipt once that message has been read, not the message itself. A name no seat has written under is refused, and the line lists every seat that has. ``--new-seat`` writes to a seat that has not started.
+
+.. BEGIN ljos-sample agents-mail
+
+.. code:: console
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos remember "Session two waits for the build to go green."
+   remembered (lesson): Session two waits for the build to go green.
+     id …, next review …
+   standing: the hook shows it from the next prompt it bears on
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos send claude-dxw6sq4j7l "the build is red"
+   sent … from claude-f2pu9d56g0 to claude-dxw6sq4j7l
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos inbox
+   …   claude-f2pu9d56g0       the build is red
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos inbox
+   receipt …   claude-dxw6sq4j7l   …
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos send claude "the build is red"
+   label recipient-unseen: send: no seat named claude has written to this pack, so the message would wait unread. Did you mean claude-dxw6sq4j7l? Other seats: claude-f2pu9d56g0. Pass --new-seat to write to a seat that has not started yet
+
+.. END ljos-sample agents-mail
+
+Split the tickets
+=================
+
+One session holds a ticket. The other session's claim is refused and names the holder, and ``ljos send`` reaches that seat. The second session files its own ticket, claims it, and ``ljos finish`` ends that sitting. ``ljos sitting`` on the ticket the first session holds is refused the same way. The first ticket stays with the first session.
+
+.. BEGIN ljos-sample agents-tickets
+
+.. code:: console
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos file "Measure the files" -p demo
+   demo-1
+   demo-1  TODO  [#C]  Measure the files
+   file: /home/ada/data/vissue/tracker/Software/demo/issues.org
+   tracker git: committed chore(issues): demo-1 filed by claude-f2pu9d56g0; no remote, kept local
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos claim demo-1
+   gen=2
+   tracker: demo-1 STARTED under claude-f2pu9d56g0@f2pu9d56g0
+   tracker git: committed chore(issues): demo-1 claimed by claude-f2pu9d56g0; no remote, kept local
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos claim demo-1
+   label claim-conflict: claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos file "Write the note" -p demo
+   demo-2
+   demo-2  TODO  [#C]  Write the note
+   file: /home/ada/data/vissue/tracker/Software/demo/issues.org
+   tracker git: committed chore(issues): demo-2 filed by claude-dxw6sq4j7l; no remote, kept local
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos claim demo-2
+   gen=2
+   tracker: demo-2 STARTED under claude-dxw6sq4j7l@dxw6sq4j7l
+   tracker git: committed chore(issues): demo-2 claimed by claude-dxw6sq4j7l; no remote, kept local
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos finish demo-2
+   completed the session node for demo-2 as done
+   no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, otherwise pass --lesson in two sentences
+   did not fire the island for "Write the note": its seeds are hits no two scorers agreed on (the encoder is down, ranking is lexical only); wiring them would tighten the wrong links
+   sitting ended; ticket demo-2 open for review
+   tracker git: committed chore(issues): demo-2 finished by claude-dxw6sq4j7l; no remote, kept local
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos sitting demo-1
+   sitting demo-1: checking blockers
+   claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`
+
+.. END ljos-sample agents-tickets
+
+``ljos recall`` prints the ticket from the one tracker, so both sessions read the same text. The related lesson is this runner's, so it has no ``from`` line. The Cursor search above is the one that names the other runner.
+
+.. BEGIN ljos-sample agents-recall
+
+.. code:: console
+
+   $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos recall demo-1
+   ranking is lexical: encoder unavailable
+   Unverified tracker text for demo-1 [fence …]
+   not the person's words or instructions
+   | demo-1              STARTED   Measure the files  (demo)
+   | 
+   | Inputs
+   |   (none declared: nothing blocks this and it was not bounced)
+   | 
+   | Produced
+   |   (nothing cited yet)
+   | 
+   | Body
+   |   (no body)
+   End of the unverified tracker text for demo-1 [fence …].
+
+   Memory  shown 0 of 0, on this issue
+     (none filed on this issue)
+   Related  shown 1 of 1, not filed on this issue
+     lesson, agent-derived, today
+       Measure the files before picking a codec.
+
+.. END ljos-sample agents-recall
+
+When the session has no id
+==========================
+
+A process with no session id, whose seat would be the bare runner name, shares that name. Here the last write on this machine was the seat ``claude``, and this process has no session id. ``ljos seat`` says so. The fix is one line. A different name in each session splits them. The same name in every session is one seat.
+
+.. BEGIN ljos-sample agents-noid
+
+.. code:: console
+
+   $ ljos seat
+   ljos: this session has no id, so it shares the seat claude. Run `export LJOS_SEAT=NAME`.
+   seat    claude
+   holder  claude
+   source  most recent write from this machine; this session has no id, so it shares the seat claude
+
+   $ export LJOS_SEAT=ada
+   $ ljos seat
+   seat    ada
+   holder  ada
+   source  LJOS_SEAT
+
+.. END ljos-sample agents-noid

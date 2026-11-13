@@ -201,9 +201,9 @@ jobs:
           python3 -m venv "${{ runner.temp }}/tok"
           "${{ runner.temp }}/tok/bin/pip" install --disable-pip-version-check 'tiktoken==0.12.0'
           PATH="${{ runner.temp }}/tok/bin:${PATH}" scripts/mcp-size.sh --check
-      # The samples in the docs are this binary's doctor, version and help.
-      # A committed block that was typed by hand, or that a command no longer
-      # prints, fails the diff.
+      # The samples in the docs are this binary's doctor, version, help and
+      # the two-agents how-to. A committed block that was typed by hand, or
+      # that a command no longer prints, fails the diff.
       - name: Doc samples
         run: |
           set -euo pipefail

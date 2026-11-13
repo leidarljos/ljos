@@ -91,7 +91,7 @@ Under a runner the same row names the seat and the branches a push waits on, ``d
 A fresh tracker has no seat list, so that number is 2. When ``vissue.toml`` lists one active seat, that seat's own vote settles the push.
 A ``warn`` or ``no`` row under the ready line names anything that still needs action. The config row is always printed. With nothing set it says the defaults stand. Add ``--all`` to see every row.
 
-Two sessions of one runner do not share a seat. With ``LJOS_SEAT`` unset, Claude Code, Codex and Cursor each take a name from the session id in this process, such as ``claude-k3j9x0a1b2``. An id that exists only on a parent does not count. Mail, claims and notes use that name, so one session can write to the other. Search and recall still read the whole runner: a lesson stored by one session is there for the next. Set ``LJOS_SEAT`` to a name of your own when the sessions should be one seat. ``ljos seat`` prints the name and where it came from.
+Two sessions of one runner do not share a seat. With ``LJOS_SEAT`` unset, Claude Code, Codex and Cursor each take a name from the session id in this process, such as ``claude-k3j9x0a1b2``. An id that exists only on a parent does not count. Mail, claims and notes use that name, so one session can write to the other. Search and recall still read the whole runner: a lesson stored by one session is there for the next. Set ``LJOS_SEAT`` to a name of your own when the sessions should be one seat. ``ljos seat`` prints the name and where it came from. The how-to :doc:`Run two agents on one repository <howto-agents>` walks that case.
 
 To install by hand, with ``cargo-binstall`` already on ``PATH``, or to see what onboarding would write:
 
@@ -314,7 +314,8 @@ does the same.
 Where next
 ==========
 
-- :doc:`How-to guides <howto>`: one task a page. Runners, the review clock, a sitting, mail, a signed handover, votes, and the command check.
+- :doc:`How-to guides <howto>`: one task a page. Runners, two agents on one repository, the review clock, a sitting, mail, a signed handover, votes, and the command check.
+- :doc:`Run two agents on one repository <howto-agents>`: the seat each session gets, mail between them, and how they split the tickets.
 - :doc:`Reference <reference>`: every verb, the MCP tools, the hooks and the variables.
 - :doc:`Explanation <explanation>`: why the stores are split the way they are.
 - :doc:`How ljos compares <compare>`: the tables behind the comparisons above.
