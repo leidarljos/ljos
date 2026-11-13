@@ -84,6 +84,8 @@ alice weighs carol at 0.643
 ...
 #+end_src
 
+The command needs one project issue with two or more ballots. With fewer it
+names that and exits 1.
 Every issue of the project with two or more ballots is an item; Dawid and
 Skene's estimate gives each voter an accuracy from how often it agrees with
 the answer the others make likely, and each accuracy becomes the weight

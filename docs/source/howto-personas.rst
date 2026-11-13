@@ -14,8 +14,9 @@ Open persona panes in another tool
 .. code:: console
 
    $ ljos doctor --all | grep panes
-   ok  panes   herdr opens persona panes; tmux also here
+   ok  panes   tmux opens persona panes
 
+With herdr installed the same row says ``herdr opens persona panes; tmux also here``.
 herdr opens one workspace a persona, in the persona's home and as its
 seat, and types the pane script into the root pane. It hands the runner
 each task through ``herdr agent prompt``, or as typed keys when herdr does

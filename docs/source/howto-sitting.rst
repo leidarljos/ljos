@@ -10,6 +10,7 @@ Open the day's work
 ====================
 
 A plan files the parent and its checklist in one tracker commit, claims the parent, and prints each item with its id.
+Set ``LJOS_SEAT`` to the seat that files it. Once ``vissue.toml`` lists seats, that seat has to be on the list. ``ljos seat add`` writes the row.
 
 .. code:: console
 

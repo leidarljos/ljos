@@ -28,6 +28,16 @@ the seat tagged with its session, so two conversations of one runner hold two ti
 .. code:: console
 
    $ ljos seat
+   seat    every-seat
+   holder  every-seat
+   source  no seat rule matched; reading every seat
+
+A read with no seat named looks at every seat. Set one with ``export LJOS_SEAT=NAME``.
+After a client connects, the source is the name that client sent:
+
+.. code:: console
+
+   $ ljos seat
    seat    acme-cli
    holder  acme-cli-39u
    source  the client name the MCP server received
@@ -64,7 +74,12 @@ from a config file, can be described once in
    ok  runner-with-a-command mcp   ran runner mcp add -s user ljos -- ljos-mcp
    ok  skill   wrote /home/you/.runner/skills/ljos/SKILL.md
 
-``--dry-run`` reports what would be written.
+``--dry-run`` reports what would be written. The name ``runner`` in the example
+is not a program. Until that program is on ``PATH``, the mcp line is
+``no`` and says ``runner not on PATH``, and the command exits 1. The skill
+line can still be ``ok``. Copy the tables from ``ljos onboard --example``.
+That file also passes ``XDG_RUNTIME_DIR`` for a runner that rebuilds its
+environment.
 
 The command harness runs a hook only after you trust it. After ``ljos onboard --harness codex``,
 open ``/hooks`` and trust each ljos hook before it runs.

@@ -30,6 +30,7 @@ Add ``hooks`` to the runner's table and onboard again:
 
 From then on, before each prompt, the runner pipes it to ``ljos hook`` and
 the memories it activates return as context, preferences first.
+A prompt that matches nothing prints nothing.
 Do not add ``PreToolUse`` as a search event. A turn issues many tool
 calls and one prompt. On a tool call the hook asks ``ljos-policyd``, the
 Trusted Computing Base (TCB), and then applies pack rules. A rule that fires
@@ -60,7 +61,7 @@ A policy daemon does the same with the argv:
    $ echo "cargo test --release" | ljos hook
    - [preference] Build and test on the cluster through Slurm, never on the laptop.
    - [lesson] The lme dense run needs 40G and sessions only; windows and sessions ran past four hours.
-   $ ljos policy cargo test --release
+   $ ljos policy -- cargo test --release
    cargo test --release
    Remembered, oldest first (`ljos search` for more):
 
@@ -74,8 +75,9 @@ Ask what a task involves
    0.899  seed  51778929d855529fcb8df3f4d1c4d692  yesterday    A new claim enters the review clock on write. Tr
    0.890  seed  27e39df0198b67538f8487b1b44e9dfd  today        The decay slot reads the review clock when PACKS
 
-The first column is activation relative to the strongest; ``seed`` marks a
-claim search found itself, the rest were reached along the pack's links;
+The command prints two lines before the rows: what an island is, and that
+this one was not fired. The first column is activation relative to the strongest; ``seed`` is the
+claim the search found, the rest were reached along the pack's links;
 the age column says when each was written. Add ``--fire`` when you go on to
 use the island: the strongest eight fire together and their links gain
 weight.
@@ -94,6 +96,8 @@ Ask when
    2026-09-05 16:02    7 days ago  +3 d    deed    deed-run-fuse-at-ten produced by you
    2026-09-12 08:30    today   +7 d    tracker note: the fused panel held at ten conversations
 
+``proj-1a2b`` is a sample id ``ljos file`` printed. An unknown id says
+``issue ID not found``.
 Three stores, one dated list, oldest first: the tracker's logbook, the
 deeds the issue cites with the time each was produced, and the memories the
 issue's title activates with the time each was written. Each line carries

@@ -17,7 +17,9 @@ Pull lane exports into a seat
    $ LJOS_SEAT=box ljos mesh pull --seat box --from /srv/handoff
    imported 12, unchanged 0, skipped 3 duplicates
 
-``--from`` is the handoff directory. Each ``*.jsonl`` file is one lane, and the
+``--from`` is the handoff directory. A missing directory says so and exits 1.
+Create it, or pass a directory that exists. An empty directory prints
+``imported 0, unchanged 0, skipped 0 duplicates``. Each ``*.jsonl`` file is one lane, and the
 lane name is the file name with ``.jsonl`` removed. A file whose name ends in
 ``.seed.jsonl`` is a seed already written for a seat, and ``pull`` leaves it
 unread. A line that is a header, or a line that is not a lesson, is left

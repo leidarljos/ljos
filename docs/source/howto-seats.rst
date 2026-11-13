@@ -7,15 +7,26 @@ Add a seat and let it close tickets
 
 
 The tracker's ``vissue.toml`` lists the seats. ``ljos seat add NAME`` writes the row,
-so nobody edits the file by hand.
+so nobody edits the file by hand. With no list, any seat can write. The first
+``seat add`` starts the list, and a seat that is not on it cannot write.
+
+Name the seat you are, and add it before any other:
 
 .. code:: console
 
+   $ export LJOS_SEAT=alice
+   $ ljos seat add alice
    $ ljos seat add carol
+
+``ljos seat`` prints the name in use. A read with no name set prints ``every-seat``.
+A write with no name set uses ``unknown-`` and the host name, and the command says so.
+If you added another seat first, the next line tells you to run ``ljos seat add`` for your own seat.
+That row is how you get back on the list.
 
 By default a seat cannot close a ticket. ``ljos finish`` leaves the ticket open, and a person closes it.
 A grant changes that for one seat. Here a person says in their own words that carol may close
-the tickets she filed or has claimed, and a recorder writes it down:
+the tickets she filed or has claimed, and alice writes it down. ``--via`` has to be the seat
+this command runs as:
 
 .. code:: console
 

@@ -4,14 +4,26 @@
 
 * Sign what you hand over
 
+=ljos onboard= writes =~/.config/deedar/host.key= when that file is missing.
+Leave it in place. Replacing it makes =ljos doctor= say the key is not a
+signer. Create one only when the file is absent:
+
 #+begin_src console
-$ head -c 32 /dev/urandom > ~/.config/deedar/host.key && chmod 600 ~/.config/deedar/host.key
+$ test -f ~/.config/deedar/host.key || { head -c 32 /dev/urandom > ~/.config/deedar/host.key && chmod 600 ~/.config/deedar/host.key; }
 $ export DEEDAR_HOST_SIGNING_KEY=~/.config/deedar/host.key
 $ ljos doctor --all | grep 'host key'
 ok	host key	/home/you/.config/deedar/host.key (32-byte seed)
 #+end_src
 
-=handover= then signs the manifest and the log head. A receiver adds
+=handover= then signs the manifest and the log head. Write the bag, then
+the other seat receives it:
+
+#+begin_src console
+$ ljos handover --out /tmp/bag --issue proj-1a2b
+$ ljos receive /tmp/bag --keep ~/.local/share/ljos/peer.head
+#+end_src
+
+=proj-1a2b= is an id this seat filed. A receiver adds
 =signer = ed25519:<hex>= to their deed store's =layout= and =receive=
 reports =(accepted)=. Two seats share one ticket by this walk, in
 sequence: A sits and hands over, B imports and sits after A releases,

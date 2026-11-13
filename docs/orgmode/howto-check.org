@@ -13,6 +13,15 @@ The block is the =ljos= row from that command on a scratch seat, taken from ljos
 The scratch seat's day cache already holds that version, so the row says =crates.io (cached)= and neither =behind= nor =ahead of=.
 The path stands in for the binary.
 The scratch =PATH= holds only this =ljos=, so the sample does not show the other seat binaries.
+A release newer than the crates.io copy says =ahead of crates.io= on that program's row.
+That is the release you installed. Search without the encoder is the =encoder= row:
+=off; search is lexical=. The =packset-embed= row names =sh scripts/install.sh=
+without =--no-embed=, or =cargo binstall=. =ljos statusline= works without =ljos-hud=.
+=ljos doctor= with no =--all= also prints the sitting gate. Under a runner it
+names the seat and what a push onto a protected branch waits for. With no
+runner above the shell it says the person's git is not gated.
+=info= rows, including a missing cloud guard, are optional. A cloud seat runs
+=ljos cloud up= for that row. A machine that is not one can leave it.
 # BEGIN ljos-sample doctor
 #+begin_src text
 $ ljos --version

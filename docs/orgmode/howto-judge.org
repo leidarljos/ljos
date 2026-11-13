@@ -36,6 +36,8 @@ $ ljos doctor --all | grep jev
 ok	jev	on  jev jev-1.13.0  0 calls, 0 cached  $0.0000 of $4.00 this month
 #+end_src
 
+With no =jev.toml=, =ljos doctor= prints no jev row.
+
 The hook runs the key command once per login, with no terminal and
 three seconds to answer, and keeps the key in
 =$XDG_RUNTIME_DIR/ljos/jev-key= (mode 0600). =key_file= names a file

@@ -16,6 +16,9 @@ One sitting on the ticket, one island per recipe before it is touched:
    ljos sitting demo-319z
    ljos island "eOn 2.17.10 foss 2026.1"
 
+``out`` is a directory eb-stack wrote, with ``locks/default.lock.json`` and
+``package.sbom.cdx.json`` inside it, and ``out/campaign.json`` when the campaign
+has run. Without those files the command names the missing path.
 Then the ladder, each rung its own artifact: ``eb-stack recipe check``,
 ``eb-stack package bump`` (the lock under ``out/locks`` is ``resolves``),
 ``eb-stack recipe lint``, ``eb-stack target doctor``, ``eb-stack campaign run`` and ``campaign status`` (``builds``, ``binary-verified``). Over MCP the

@@ -13,6 +13,9 @@ Remember a lesson
 most. The pack's limit is 29 words a sentence: a longer one is kept.
 ``ljos remember --verbose`` prints one line, naming the count and the limit,
 to split that sentence into two sentences.
+With no ``LJOS_SEAT``, the command says no seat was named and uses
+``unknown-`` plus the host name. Set the seat before a lesson you want
+under your own name.
 
 A pack that answers 503, including ``packsetd is busy: memory pressure``,
 queues the lesson in ``~/.local/state/ljos/note-queue.jsonl``. The next
@@ -25,9 +28,10 @@ already in the pack prints that atom id.
 Keep the cards
 ==============
 
-Cards are two files a person writes: ``USER.md`` and ``MEMORY.md``. The seat
-reads them and never writes them; ``ljos cards`` prints them. The pack is
-where the seat writes.
+Cards are two files you write in the working directory: ``USER.md`` and
+``MEMORY.md``. ``LJOS_CARDS_DIR``, or ``ljos cards --dir``, names another directory.
+``ljos cards`` prints the files. It does not write them. With neither file
+it names the directory. The pack is where the seat writes.
 
 Keep a number
 =============
@@ -78,8 +82,12 @@ Retire a claim with its reason
 
 .. code:: console
 
-   $ ljos forget 3f9c... --why deed-review-2026-09
+   $ ljos search "lexical default"
+   $ ljos forget a6ae2751 --why deed-review-2026-09
 
+Copy the id from ``ljos search``. A prefix of 8 or more characters is enough.
+``--why`` is a deed id. Omit it when you have no deed. An id the pack does
+not hold names ``ljos search`` again.
 The pack tombstones the claim and records the deed that withdrew it.
 Disagreeing with a claim is not showing it wrong; a retraction names its
 evidence.

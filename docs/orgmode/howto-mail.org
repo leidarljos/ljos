@@ -70,6 +70,7 @@ A Example Host wakes this way: make a routine with a webhook trigger, copy its U
 
 A wake that fails or runs past its timeout is a line in =~/.local/state/ljos/mail/wake.log=, and the message is still in the pack.
 =ljos wake SEAT --fire= runs the wake now and prints what happened.
+A command that fails includes its own output in the error.
 
 A session that is still working needs no wake.
 When it is about to stop, its =Stop= hook holds the turn once for unread interrupt mail.
