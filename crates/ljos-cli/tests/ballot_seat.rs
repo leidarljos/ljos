@@ -3,6 +3,10 @@
 //! and nothing said so (Software-o9bu).
 
 ljos_test_boot::harness!();
+
+#[path = "common/seat_env.rs"]
+mod seat_env;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -48,6 +52,7 @@ fn a_persona_ballot_is_recorded_when_no_seat_is_named() {
             .env("SEAT_SESSION_ID", "2c12969d-0000-4000-8000-000000000000")
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off");
+        seat_env::clear(&mut cmd);
         if let Some(seat) = seat {
             cmd.env("LJOS_SEAT", seat);
         }

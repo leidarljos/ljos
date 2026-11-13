@@ -8,7 +8,7 @@
 |---+---|
 | =PACKSET_URL= | the pack client; unset, =http://127.0.0.1:8761= (=PACKSET_PORT= moves the port), or this user's own port when 8761 is another user's; =off= means no pack |
 | =PACKSET_WORKSPACE= | the pack workspace; unset, =seat= |
-| =LJOS_SEAT= | override for who is sitting. Unset, a harness default becomes the runner's name plus a short id of the session when Claude Code, Codex or Cursor has stamped one, so two sessions do not share a seat. Search and recall still read that runner's family. An exported name is the seat. The process tree is not a seat. When =vissue.toml= lists seats, a tracker write from a seat it does not list is refused, and a session seat of a listed runner is that runner's seat |
+| =LJOS_SEAT= | override for who is sitting. Unset, a harness default becomes the runner's name plus a short id of the session when this process has one from Claude Code, Codex or Cursor, so two sessions do not share a seat. An id that exists only on a parent does not name the seat. Search and recall still read that runner's family. An exported name is the seat. The process tree is not a seat. When =vissue.toml= lists seats, a tracker write from a seat it does not list is refused, and a session seat of a listed runner is that runner's seat |
 | =VISSUE_ROOT=, =VISSUE_AGENT= | the tracker |
 | =DEEDAR_URL=, =DEEDAR_HOST_SIGNING_KEY= | the deed store; the key signs handovers, and =~/.config/deedar/host.key= is used when the variable is unset |
 | =CLAIMDAG_DIR= | the claim graph |

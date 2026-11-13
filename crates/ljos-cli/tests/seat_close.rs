@@ -2,6 +2,10 @@
 //! The owner's quoted yes is the grant. A hand edit is not.
 
 ljos_test_boot::harness!();
+
+#[path = "common/seat_env.rs"]
+mod seat_env;
+
 use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -141,8 +145,9 @@ impl World {
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .env("XDG_STATE_HOME", self.home.join(".state"))
             .env("XDG_RUNTIME_DIR", self.root.join("run"))
-            .env("VISSUE_ROOT", &self.tracker)
-            .env("LJOS_SEAT", seat)
+            .env("VISSUE_ROOT", &self.tracker);
+        seat_env::clear(&mut cmd);
+        cmd.env("LJOS_SEAT", seat)
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off");
         if runner {
@@ -206,8 +211,9 @@ fn runner_cmd(w: &World, args: &[&str]) -> Command {
         .env("LJOS_ASK_PACK", "off")
         .env("LJOS_GUARD", "on")
         .env("LJOS_USER_RULES_SYNC", "off")
-        .env("CURSOR_AGENT", "1")
-        .stdin(Stdio::null());
+        .env("CURSOR_AGENT", "1");
+    seat_env::clear(&mut cmd);
+    cmd.stdin(Stdio::null());
     // SAFETY: setsid is async-signal-safe and the closure touches nothing
     // of the parent's.
     unsafe {

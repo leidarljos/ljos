@@ -4897,15 +4897,17 @@ fn session_seat_name(family: &str, id: &str) -> String {
     format!("{family}-{}", session_tag(id))
 }
 
-fn stamp_has(key: &str) -> bool {
-    stamp_env().iter().any(|(k, _)| k == key)
+/// A session id in this process's own environment. An ancestor is not
+/// read. A parent that did not pass the variable in does not name the
+/// seat. A variable this process inherited is its own.
+fn own_session_id(key: &str) -> Option<String> {
+    let id = std::env::var(key).ok()?;
+    let id = id.trim();
+    (usable_session_id(id).is_some() && !subagent_id(id)).then(|| id.to_string())
 }
 
-fn stamped_usable(key: &str) -> Option<String> {
-    stamp_env().into_iter().find_map(|(k, v)| {
-        let id = v.trim();
-        (k == key && usable_session_id(id).is_some() && !subagent_id(id)).then(|| id.to_string())
-    })
+fn own_mark(key: &str) -> bool {
+    std::env::var_os(key).is_some_and(|value| !value.is_empty())
 }
 
 fn live_from(family: &'static str, key: &'static str, id: String) -> LiveSession {
@@ -4917,41 +4919,43 @@ fn live_from(family: &'static str, key: &'static str, id: String) -> LiveSession
     }
 }
 
-/// The harness session this process belongs to, when the runner stamped an id.
-/// Claude Code, Codex and Cursor each expose one. A bound hook payload is
-/// used when the environment names the runner and not the id.
+/// The harness session in this process's own environment.
+/// Claude Code, Codex and Cursor each expose one. A bound hook payload in
+/// this process is used when this process names the runner and not the id.
+/// An ancestor's environment is not read.
 fn live_harness_session() -> Option<LiveSession> {
-    if let Some(id) = stamped_usable("CODEX_THREAD_ID") {
+    if let Some(id) = own_session_id("CODEX_THREAD_ID") {
         return Some(live_from("codex", "CODEX_THREAD_ID", id));
     }
-    if let Some(id) = stamped_usable("CODEX_SESSION_ID") {
+    if let Some(id) = own_session_id("CODEX_SESSION_ID") {
         return Some(live_from("codex", "CODEX_SESSION_ID", id));
     }
-    if let Some(id) = stamped_usable("CLAUDE_CODE_SESSION_ID") {
+    if let Some(id) = own_session_id("CLAUDE_CODE_SESSION_ID") {
         return Some(live_from("claude", "CLAUDE_CODE_SESSION_ID", id));
     }
-    if let Some(id) = stamped_usable("OPENCODE_SESSION_ID") {
+    if let Some(id) = own_session_id("OPENCODE_SESSION_ID") {
         return Some(live_from("opencode", "OPENCODE_SESSION_ID", id));
     }
-    if let Some(id) = stamped_usable("ANTIGRAVITY_CONVERSATION_ID") {
+    if let Some(id) = own_session_id("ANTIGRAVITY_CONVERSATION_ID") {
         return Some(live_from("antigravity", "ANTIGRAVITY_CONVERSATION_ID", id));
     }
-    if let Some(id) = stamped_usable("CURSOR_CONVERSATION_ID") {
+    if let Some(id) = own_session_id("CURSOR_CONVERSATION_ID") {
         return Some(live_from("cursor", "CURSOR_CONVERSATION_ID", id));
     }
     let id = call_cursor_conversation().filter(|id| !subagent_id(id))?;
-    let family =
-        if stamp_has("CLAUDECODE") || stamp_env().iter().any(|(k, _)| k.starts_with("CLAUDE_")) {
-            "claude"
-        } else if stamp_has("CURSOR_AGENT") {
-            "cursor"
-        } else if stamp_has("CODEX_SANDBOX") {
-            "codex"
-        } else if stamp_has("GEMINI_CLI") {
-            "gemini"
-        } else {
-            return None;
-        };
+    let family = if own_mark("CLAUDECODE")
+        || std::env::vars().any(|(key, value)| key.starts_with("CLAUDE_") && !value.is_empty())
+    {
+        "claude"
+    } else if own_mark("CURSOR_AGENT") {
+        "cursor"
+    } else if own_mark("CODEX_SANDBOX") {
+        "codex"
+    } else if own_mark("GEMINI_CLI") {
+        "gemini"
+    } else {
+        return None;
+    };
     Some(live_from(family, "hook session", id))
 }
 

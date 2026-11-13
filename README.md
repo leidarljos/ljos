@@ -40,7 +40,7 @@ If install stops, the script names the cause and the command that fixes it.
 
 After that registration, a first recall does not need a seat, a sitting or a ticket.
 One person and one repository are enough.
-With no seat named, a write uses `unknown-` and the host name.
+With no seat named, a write uses `unknown-` and the host name. A session id in this process names the seat instead: the runner plus a short id, such as `claude-k3j9x0a1b2`. An id that exists only on a parent does not.
 
 ## Thirty seconds
 
@@ -148,7 +148,7 @@ The installer checks each download against its published SHA-256 sum. It sets up
 Git needs `user.name` and `user.email`, because the tracker commits each change. Without them the heading is still written, and the line is `tracker git: commit refused: Author identity unknown`.
 
 On a clean install, `ljos doctor` prints `ljos is ready: memory, tracker and command guard work`, then `Optional extras: ljos doctor --all`. With no seat named, a `seat source` row warns that the read uses every seat. A `sitting gate` row follows. With no agent runner above the shell it says `not active here`.
-`ljos remember` prints the lesson and the first eight characters of its id. With no seat set and no conversation record, the write uses `unknown-` plus the host name, and the line says so. A conversation that already has a seat record writes as that seat.
+`ljos remember` prints the lesson and the first eight characters of its id. With no seat set and no session id in this process, the write uses `unknown-` plus the host name, and the line says so. A conversation that already has a seat record writes as that seat. A session id only on a parent does not name the seat.
 `ljos search "lexical default"` prints that lesson. A query that shares no word with the stored text, such as `which fusion`, prints `` No hits for "which fusion", so run `ljos search fusion`. ``
 This seat's hits come first. Another seat's lesson is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is `Nothing relevant was found.` A busy pack ranks by words and still returns a hit that names the subject.
 `ljos file` prints the new id, then `project:`, the heading, the path, and `tracker git: committed ... no remote, kept local`.

@@ -5,6 +5,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/seat_env.rs"]
+mod seat_env;
+
 use std::process::Command;
 
 struct World {
@@ -37,6 +40,7 @@ impl World {
             .env("LJOS_SYNC_HOST", "box")
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off");
+        seat_env::clear(&mut cmd);
         for (key, value) in extra {
             cmd.env(key, value);
         }
@@ -98,4 +102,28 @@ fn two_sessions_differ_and_an_explicit_seat_wins() {
     let stdout = String::from_utf8_lossy(&named.stdout);
     assert_eq!(field(&stdout, "seat"), "ada", "{text}");
     assert!(field(&stdout, "source").contains("LJOS_SEAT"), "{text}");
+}
+
+/// The parent has a Claude session id. This process is started without it,
+/// so the parent's id does not name the seat.
+#[test]
+fn a_parent_session_id_does_not_name_this_process() {
+    let world = World::new();
+    let id = "0199a1b2-claude-parent-only";
+    let forbidden = format!("claude-{}", ljos_cli::session_tag(id));
+    let previous = std::env::var_os("CLAUDE_CODE_SESSION_ID");
+    std::env::set_var("CLAUDE_CODE_SESSION_ID", id);
+    let out = world.ljos(&["seat"], &[]);
+    match previous {
+        Some(value) => std::env::set_var("CLAUDE_CODE_SESSION_ID", value),
+        None => std::env::remove_var("CLAUDE_CODE_SESSION_ID"),
+    }
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_ne!(field(&stdout, "seat"), forbidden.as_str(), "{text}");
+    assert!(
+        stdout.contains("every-seat") || stdout.contains("reading every seat"),
+        "{text}"
+    );
 }

@@ -3,6 +3,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/seat_env.rs"]
+mod seat_env;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Output};
@@ -99,6 +102,7 @@ impl World {
             .env("USER", "probe-login")
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", &self.pack);
+        seat_env::clear(&mut cmd);
         for (key, value) in env {
             cmd.env(key, value);
         }

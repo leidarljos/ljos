@@ -179,7 +179,7 @@ the seat from the client that connected. A read with none of those set looks at 
 A write uses ``unknown-`` plus the host name, and says to set ``LJOS_SEAT``.
 ``ljos seat`` prints the seat, the holder, and where each name came from.
 
-With ``LJOS_SEAT`` unset, a session of Claude Code, Codex or Cursor sits as the runner's name plus a short id of that session.
+With ``LJOS_SEAT`` unset, a session of Claude Code, Codex or Cursor sits as the runner's name plus a short id of the session id in this process. An id that exists only on a parent does not count.
 Mail, claims and notes use that name, so two sessions can tell each other apart.
 Search and recall use the runner's name as the family, so a lesson is not split across that runner's sessions.
 An exported ``LJOS_SEAT`` is the seat for every session that carries it.

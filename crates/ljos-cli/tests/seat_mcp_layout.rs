@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "common/seat_env.rs"]
+mod seat_env;
+
 #[path = "common/seat_root.rs"]
 mod seat_root;
 
@@ -70,8 +73,9 @@ fn hook(hab: &Hab, pack: Option<u16>) -> Command {
         .env("XDG_STATE_HOME", hab.home.join(".local/state"))
         .env("XDG_RUNTIME_DIR", &hab.run)
         .env("VISSUE_NO_ROUTE", "1")
-        .env("LJOS_PROJECT", "probe")
-        .env("LJOS_SEAT", "probe-seat")
+        .env("LJOS_PROJECT", "probe");
+    seat_env::clear(&mut cmd);
+    cmd.env("LJOS_SEAT", "probe-seat")
         .env("LJOS_HOOKD", "off")
         .current_dir(&hab.repo)
         .stdin(Stdio::piped())

@@ -3,6 +3,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/seat_env.rs"]
+mod seat_env;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -46,6 +49,7 @@ fn seat_out(daemon: &Path, config: &Path, extra: &[(&str, &str)]) -> String {
         .env("XDG_CONFIG_HOME", config)
         .env("XDG_RUNTIME_DIR", config.join("run"))
         .env("USER", "probe-login");
+    seat_env::clear(&mut cmd);
     for (key, value) in extra {
         cmd.env(key, value);
     }

@@ -3,6 +3,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/seat_env.rs"]
+mod seat_env;
+
 use std::process::Command;
 
 struct World {
@@ -35,6 +38,7 @@ impl World {
             .env("LJOS_SYNC_HOST", "box")
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off");
+        seat_env::clear(&mut cmd);
         for (key, value) in extra {
             cmd.env(key, value);
         }

@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
+#[path = "common/seat_env.rs"]
+mod seat_env;
+
 #[path = "common/seat_root.rs"]
 mod seat_root;
 
@@ -198,8 +201,9 @@ fn apply_env(cmd: &mut Command, h: &Hab, launch: &Launch) {
         .env("XDG_STATE_HOME", h.home.join(".local/state"))
         .env("XDG_RUNTIME_DIR", &h.run)
         .env("VISSUE_NO_ROUTE", "1")
-        .env("LJOS_PROJECT", "probe")
-        .env("LJOS_SEAT", "probe-seat")
+        .env("LJOS_PROJECT", "probe");
+    seat_env::clear(cmd);
+    cmd.env("LJOS_SEAT", "probe-seat")
         .env("LJOS_HOOKD", "off")
         .env("PACKSET_URL", "off")
         .env("LJOS_USER_RULES_SYNC", "off");

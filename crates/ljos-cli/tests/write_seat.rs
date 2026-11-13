@@ -3,6 +3,10 @@
 //! The tracker's roster, when it lists seats, still has to name it.
 
 ljos_test_boot::harness!();
+
+#[path = "common/seat_env.rs"]
+mod seat_env;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -69,8 +73,9 @@ impl Bench {
             .env("SEAT_SESSION_ID", "2c12969d-0000-4000-8000-000000000000")
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
-            .env("VISSUE_ROOT", &self.tracker)
-            .envs(env.iter().copied());
+            .env("VISSUE_ROOT", &self.tracker);
+        seat_env::clear(&mut cmd);
+        cmd.envs(env.iter().copied());
         cmd.output().unwrap()
     }
 

@@ -8,6 +8,10 @@
 //! refuses a name the call made up, in one short line with named seats.
 
 ljos_test_boot::harness!();
+
+#[path = "common/seat_env.rs"]
+mod seat_env;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -27,8 +31,8 @@ fn the_guard_answers_for_a_seat_the_tracker_does_not_know() {
         ),
     )
     .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
-        .env_clear()
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+    cmd.env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
@@ -39,7 +43,9 @@ fn the_guard_answers_for_a_seat_the_tracker_does_not_know() {
         .env("VISSUE_ROOT", &tracker)
         .env("VISSUE_NO_ROUTE", "1")
         .env("PACKSET_URL", "off")
-        .env("LJOS_ASK_PACK", "off")
+        .env("LJOS_ASK_PACK", "off");
+    seat_env::clear(&mut cmd);
+    let mut child = cmd
         .current_dir(home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
