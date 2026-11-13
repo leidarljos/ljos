@@ -159,7 +159,7 @@ fn the_reading_says_whether_a_protected_push_clears() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains(
-            "protected push: proj-v0te does not clear a push onto `develop`, `main`: \
+            "protected push: proj-v0te does not clear a push onto `develop` or `main`: \
              the sitting has no settled consensus: 2 of the 3 seats"
         ),
         "{text}"

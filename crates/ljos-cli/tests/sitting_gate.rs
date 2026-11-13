@@ -414,7 +414,7 @@ fn the_doctor_says_whether_the_gate_holds_this_seat() {
     assert!(line.starts_with("ok\t"), "{line}");
     assert!(line.contains("active for inky"), "{line}");
     assert!(line.contains("holds no live sitting"), "{line}");
-    assert!(line.contains("`develop`, `main`"), "{line}");
+    assert!(line.contains("`develop` or `main`"), "{line}");
 
     seat.sit();
     let line = gate_row(&seat.runner(&["doctor"], &[]));

@@ -44780,12 +44780,7 @@ pub fn protected_push_reading(issue: &str, cwd: Option<&std::path::Path>) -> (St
             )
         }
     };
-    let named = cfg
-        .branches
-        .iter()
-        .map(|b| format!("`{b}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let named = crate::sitting_gate::quoted_list(&cfg.branches);
     let mut json = serde_json::json!({
         "issue": issue, "quorum": cfg.quorum, "branches": cfg.branches,
     });

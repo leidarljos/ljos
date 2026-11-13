@@ -143,15 +143,11 @@ fn protected_branch_ask(calls: &[GitCall], line: &str) -> Option<Rule> {
 }
 
 fn protected_ask(dest: &str, branches: &[String]) -> String {
-    let named: Vec<String> = branches
-        .iter()
-        .map(|branch| format!("`{branch}`"))
-        .collect();
     format!(
         "`git push` may land on {dest}, and a push onto {} warns until the sitting's ticket \
          has a settled consensus. One active seat settles on its own vote. Two or more seats \
          use the ordinary quorum. Run `ljos consensus` on the ticket, then push again",
-        named.join(", ")
+        quoted_list(branches)
     )
 }
 
@@ -170,14 +166,13 @@ pub fn no_sitting(verb: &str, why: &str) -> String {
 /// that names no conversation: no ticket's seats can clear it.
 #[must_use]
 pub fn unattributed_push(dest: &str, branches: &[String]) -> String {
-    let named: Vec<String> = branches.iter().map(|b| format!("`{b}`")).collect();
     format!(
         "`git push` {dest}, and a runner's push onto {} waits for the seats on the ticket \
          it sits on, but this call names no conversation, so it holds no live sitting and \
          sits on no ticket. Pass the conversation id in the hook payload or the session \
          environment, open a sitting with `ljos sitting ID`, and run it again. A push onto a \
          topic branch is not held. {NOT_GATED}",
-        named.join(", ")
+        quoted_list(branches)
     )
 }
 
@@ -224,14 +219,24 @@ pub fn unread_settings(why: &str) -> String {
 /// `issue`, from [`crate::protected_push_stands`]'s `why`.
 #[must_use]
 pub fn seats_wait(dest: &str, branches: &[String], issue: &str, why: &str) -> String {
-    let named: Vec<String> = branches.iter().map(|b| format!("`{b}`")).collect();
     format!(
         "`git push` {dest}, and a runner's push onto {} waits for the seats on the ticket \
          it sits on: {why}. Run `ljos consensus {issue} --no-file` to see where they stand, \
          then run it again once they clear it. A push onto this seat's own topic branch \
          needs only the sitting. {NOT_GATED}",
-        named.join(", ")
+        quoted_list(branches)
     )
+}
+
+/// Branch names as a reader says them: `` `develop` or `main` ``.
+#[must_use]
+pub(crate) fn quoted_list(items: &[String]) -> String {
+    let named: Vec<String> = items.iter().map(|item| format!("`{item}`")).collect();
+    match named.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
 }
 
 /// How the doctor's `sitting gate` row begins where no runner is above
@@ -277,12 +282,11 @@ pub fn doctor_row(cwd: Option<&Path>) -> crate::Habitat {
             "{why}; a commit, merge, rebase, cherry-pick or push opens a sitting or names the open one"
         ),
     };
-    let named: Vec<String> = cfg.branches.iter().map(|b| format!("`{b}`")).collect();
     row(
         format!(
             "active for {seat}: {sitting}; a push onto {} also waits for a quorum of {} seats \
              on that ticket",
-            named.join(", "),
+            quoted_list(&cfg.branches),
             cfg.quorum
         ),
         true,
@@ -457,6 +461,20 @@ mod tests {
         let row = doctor_row(None);
         assert_eq!(crate::doctor_word(&row), "info", "{}", row.state);
         assert!(crate::healthy(&[row]));
+    }
+
+    #[test]
+    fn two_branches_are_read_with_or() {
+        assert_eq!(super::quoted_list(&[]), "");
+        assert_eq!(super::quoted_list(&["develop".into()]), "`develop`");
+        assert_eq!(
+            super::quoted_list(&["develop".into(), "main".into()]),
+            "`develop` or `main`"
+        );
+        assert_eq!(
+            super::quoted_list(&["develop".into(), "main".into(), "release".into()]),
+            "`develop`, `main` or `release`"
+        );
     }
 
     #[test]
