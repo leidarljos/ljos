@@ -33,3 +33,8 @@ email = "rgoswami@ieee.org"
 # rewrites the hook scripts and leaves this file alone.
 # [git_hooks]
 # skip = ["/srv/mirrors"]
+
+# Path to a graphify graph.json. Unset, ljos recall reads
+# graphify-out/graph.json from the working directory up to the repository
+# root. off leaves that section out. LJOS_GRAPHIFY overrides this key.
+# graphify = "graphify-out/graph.json"

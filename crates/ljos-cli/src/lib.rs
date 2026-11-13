@@ -31,6 +31,7 @@ pub mod digest;
 pub mod extract;
 pub mod gates;
 pub mod git_hooks;
+pub mod graphify;
 mod handover_scope;
 pub mod hookd;
 pub mod hud;

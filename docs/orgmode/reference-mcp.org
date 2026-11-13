@@ -26,6 +26,10 @@ to a tool the server does not list is refused with the shell command to
 run instead. A tool that fails answers with =isError= set and the reason
 as text, so the model reads it as a tool result.
 
+=ljos_recall= adds a Code context section when =graphify-out/graph.json= is in the working directory's repository.
+The section is the same one =ljos recall= prints.
+=LJOS_GRAPHIFY=off= leaves it out. =LJOS_GRAPHIFY= set to a path reads that file.
+
 =ljos_start= takes an optional =items= list. The =task= is the parent title.
 One call files that parent and the items in one tracker commit, claims the
 parent, and returns the checklist with ids. Pass =issue= with =items= to

@@ -1,0 +1,94 @@
+// Copyright 2026 Safi Shamsi and the Graphify contributors.
+// SPDX-License-Identifier: Apache-2.0
+// Minimised from Graphify-Labs/graphify tests/fixtures/extraction.json
+// https://github.com/Graphify-Labs/graphify
+// The node-link shape matches graphify/export.py to_json:
+// graph.schema_version 1, graph.graphify_version, and links.
+// Communities are filled in. The extraction fixture does not carry them.
+// Degree is not stored. ljos counts edges.
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {
+    "schema_version": 1,
+    "graphify_version": "0.9.108",
+    "hyperedges": []
+  },
+  "nodes": [
+    {
+      "id": "n_transformer",
+      "label": "Transformer",
+      "file_type": "code",
+      "source_file": "model.py",
+      "source_location": "L1",
+      "community": 0,
+      "norm_label": "transformer"
+    },
+    {
+      "id": "n_attention",
+      "label": "MultiHeadAttention",
+      "file_type": "code",
+      "source_file": "model.py",
+      "source_location": "L10",
+      "community": 0,
+      "norm_label": "multiheadattention"
+    },
+    {
+      "id": "n_layernorm",
+      "label": "LayerNorm",
+      "file_type": "code",
+      "source_file": "model.py",
+      "source_location": "L20",
+      "community": 0,
+      "norm_label": "layernorm"
+    },
+    {
+      "id": "n_concept_attn",
+      "label": "attention mechanism",
+      "file_type": "document",
+      "source_file": "paper.md",
+      "source_location": "§3.1",
+      "community": 1,
+      "norm_label": "attention mechanism"
+    }
+  ],
+  "links": [
+    {
+      "source": "n_transformer",
+      "target": "n_attention",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "model.py",
+      "weight": 1.0
+    },
+    {
+      "source": "n_transformer",
+      "target": "n_layernorm",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "model.py",
+      "weight": 1.0
+    },
+    {
+      "source": "n_attention",
+      "target": "n_concept_attn",
+      "relation": "implements",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "source_file": "model.py",
+      "weight": 0.8
+    },
+    {
+      "source": "n_layernorm",
+      "target": "n_concept_attn",
+      "relation": "referenced",
+      "confidence": "AMBIGUOUS",
+      "confidence_score": 0.2,
+      "source_file": "paper.md",
+      "weight": 0.5
+    }
+  ],
+  "hyperedges": []
+}

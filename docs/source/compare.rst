@@ -91,6 +91,16 @@ three of these together:
   and no model.
 - A handover the receiving machine checks before it imports.
 
+Code maps
+=========
+
+graphify maps the code.
+It writes a knowledge graph of the repository to ``graphify-out/graph.json``, with a source file and line on each node and EXTRACTED or INFERRED on each edge.
+ljos remembers what agents learned and tracks their work.
+It does not build that graph.
+When the file is present, ``ljos recall`` adds the matching nodes.
+See :doc:`Use ljos with graphify <howto-graphify>`.
+
 Pick by job
 ===========
 
@@ -102,6 +112,7 @@ an agent that edits its own long-term memory                          Letta
 a shared notebook of Markdown for you and the agent                   Basic Memory
 a ticket queue for agents with a SQL store                            beads
 bugs that travel with the code in git                                 git-bug
+a map of the code in this repository                                  graphify
 two or more agents on one tracker, voting, with memory a person wrote ljos
 ===================================================================== ============
 
@@ -116,3 +127,4 @@ Read on 2026-11-10.
 - Zep and Graphiti: `Zep concepts <https://help.getzep.com/concepts>`__ (fact invalidation, provenance), `Graphiti README <https://github.com/getzep/graphiti>`__ (graph databases, model and embedder, Apache-2.0).
 - Basic Memory: `README <https://github.com/basicmachines-co/basic-memory>`__ (Markdown files, Model Context Protocol server, semantic search, optional cloud, AGPL-3.0).
 - git-bug: `README <https://github.com/git-bug/git-bug>`__ (issues in git, bridges, GPL-3.0).
+- graphify, read on 2026-11-13: `README <https://github.com/Graphify-Labs/graphify>`__ (``graphify-out/graph.json``, ``graph.schema_version``, the ``/graphify`` skill, Apache-2.0).

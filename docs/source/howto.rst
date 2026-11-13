@@ -25,6 +25,7 @@ Each page is one task. Start with the first two; the rest stand alone.
 - :doc:`Put the judgments to a model <howto-judge>`: turn on Jev, or point the same judgments at a local model or a runner, and cast persona ballots through it.
 - :doc:`Read the command check <howto-command-check>`: what the command check warns on, the rewrite, block-on-warning, and which branches the push check covers.
 - :doc:`Bump a recipe with eb-stack <howto-eb-stack>`: bump an EasyBuild recipe with eb-stack in a sitting, plan a whole generation, and keep what the campaign taught.
+- :doc:`Use ljos with graphify <howto-graphify>`: install graphify, run /graphify, and read the code context ljos recall adds.
 
 .. toctree::
    :maxdepth: 1
@@ -44,3 +45,4 @@ Each page is one task. Start with the first two; the rest stand alone.
    howto-judge
    howto-command-check
    howto-eb-stack
+   howto-graphify

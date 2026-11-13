@@ -998,11 +998,16 @@ enum Cmd {
         args: Vec<String>,
     },
     /// The working set for an issue: plan, its inputs' deeds, its own citations.
+    ///
+    /// A graphify `graph.json` in the repository adds a code context section.
     Recall {
         issue: String,
         /// Print JSON. The ranking is a field, and the mode line is left off stderr.
         #[arg(long)]
         json: bool,
+        /// Leave out the graphify code context section.
+        #[arg(long)]
+        no_graph: bool,
     },
     /// Release claims idle past a window and mail each seat. A dry run without --apply.
     Reap {
@@ -3158,20 +3163,33 @@ fn run_command() -> Result<()> {
             argv.extend(mapped.iter().map(String::as_str));
             run("vissue", &argv)?;
         }
-        Cmd::Recall { issue, json } => {
+        Cmd::Recall {
+            issue,
+            json,
+            no_graph,
+        } => {
             ljos_cli::log_recall("recall", &issue);
             let said = ljos_cli::tracker_recall(&issue)?;
             eprint!("{}", said.stderr);
             let memories = ljos_cli::recall_memories(&issue)?;
+            let code = if no_graph {
+                String::new()
+            } else {
+                ljos_cli::graphify::recall_section(&issue)
+            };
             let ranking = ljos_cli::ranking_now();
             if json {
-                print!("{}", ljos_cli::recall_json(&memories, ranking.as_ref()));
+                print!(
+                    "{}",
+                    ljos_cli::recall_json(&format!("{memories}{code}"), ranking.as_ref())
+                );
             } else {
                 if let Some(ranking) = ranking.as_ref() {
                     eprint!("{}", ljos_cli::ranking_line(ranking));
                 }
                 print!("{}", said.stdout);
                 print!("{memories}");
+                print!("{code}");
             }
         }
         Cmd::Reap { idle, apply } => {

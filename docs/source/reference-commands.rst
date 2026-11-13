@@ -119,8 +119,8 @@ Commands
    Stores: tracker. Cite with ``--add``, or list; ``--remove`` drops one citation, appended to the ledger, and the heading is not rewritten.
 ``claims [ARGS]``
    Stores: tracker. Who has claimed what: ``vissue claims`` with its flags (``--by NAME``, ``--json``)
-``recall ID``
-   Stores: tracker. The working set.
+``recall ID [--json] [--no-graph]``
+   Stores: tracker. The working set. When ``graphify-out/graph.json`` is in the repository, a Code context section lists matching nodes with file and line and a few edges tagged EXTRACTED or INFERRED. ``--no-graph`` and ``LJOS_GRAPHIFY=off`` leave it out. ``--json`` puts the same text in the JSON document. A schema major other than 1 is named in that section, and the working set still prints.
 ``vote ID [--for OPTION] [--confidence P] [--used ACCESSIONS|none] [--expect OPTION|JSON] [--as PERSONA] [--jev] [--withdraw]``
    Stores: tracker. Cast as this seat, never another, or read the tally; ``--confidence`` is a probability in (0, 1]; ``--used`` lists the deed accessions the ballot used, comma-separated, or ``none``, and is required with ``--for``; ``--expect`` records the forecast of the others on the same command; ``--withdraw`` takes back the ballot and its forecast, and the logbook keeps what it was. ``--as NAME --jev`` asks Jev for the persona's ballot: cast with the option's probability and a forecast at confidence 0.8 or above, noted and left for a subagent under it.
 ``predict ID --expect OPTION|JSON [--as PERSONA]``
