@@ -1482,7 +1482,7 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         about: Vec<String>,
     },
-    /// Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer or the note queue is damaged.
+    /// Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable.
     Doctor {
         /// Print every row, the ones that answer included.
         #[arg(long, visible_alias = "verbose")]

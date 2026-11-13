@@ -5254,14 +5254,18 @@ fn occupancy_scope(assignee: &str, issue: &str) -> String {
 
 /// The doctor's `seat source` row: where the seat tracker writes go under
 /// came from. A seat nobody named is a warning, not a failure: reads work,
-/// and only the writes [`write_seat`] guards are refused.
+/// and only the writes [`write_seat`] guards are refused. The warning names
+/// the same next step a write prints.
 #[must_use]
 pub fn seat_source_row(who: &Seat) -> Habitat {
     if who.source.starts_with("no seat rule matched") {
         return Habitat {
             name: "seat source",
-            state: who.source.clone(),
-            ok: true,
+            state: format!(
+                "{}. Set one with --seat NAME or export LJOS_SEAT=NAME",
+                who.source.trim_end_matches('.')
+            ),
+            ok: false,
         };
     }
     match derived_seat(who) {
@@ -31004,6 +31008,30 @@ fn bin_health(path: &str, have: Option<&str>, latest: Option<&CrateVersion>) -> 
     )
 }
 
+/// One warn row when crates.io answered none of the seat crates and at
+/// least one lookup missed. A day-cache hit is an answer. The seat still
+/// starts: the version check is the only thing that needed the network.
+fn registry_skipped_row() -> Option<Habitat> {
+    let mut misses = 0u32;
+    let mut hits = 0u32;
+    let mut seen = std::collections::BTreeSet::new();
+    for (_, name) in SEAT_BINS {
+        if !seen.insert(*name) {
+            continue;
+        }
+        match crate_max_version(name, false) {
+            Some(version) if !version.cached => hits += 1,
+            None => misses += 1,
+            Some(_) => {}
+        }
+    }
+    (misses > 0 && hits == 0).then(|| Habitat {
+        name: "crates.io",
+        state: "did not answer, so the version check was skipped".to_string(),
+        ok: false,
+    })
+}
+
 /// The registry answer for a seat binary. A cached answer the binary on
 /// `PATH` is already ahead of is stale by construction, so the registry
 /// is asked again before the row is written.
@@ -31142,6 +31170,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
             state,
             ok,
         });
+    }
+    if let Some(row) = registry_skipped_row() {
+        out.push(row);
     }
     // The host the seat runs on: a kernel that OOM-kills keeps killing the
     // encoder, the runners and the desktop, and every other row stays green.
@@ -31426,19 +31457,11 @@ pub fn doctor_seat() -> Vec<Habitat> {
                     state: said.stdout.lines().next().unwrap_or("").to_string(),
                     ok: true,
                 },
-                Err(e) if name == "tracker" => {
-                    let mut state = e.to_string().lines().next().unwrap_or("").to_string();
-                    if let Some(root) = std::env::var_os("VISSUE_ROOT").filter(|v| !v.is_empty()) {
-                        if let Some((extra, _)) = tracker_git_drift(Path::new(&root)) {
-                            state = format!("{state}; {extra}");
-                        }
-                    }
-                    Habitat {
-                        name,
-                        state,
-                        ok: false,
-                    }
-                }
+                Err(e) if name == "tracker" => Habitat {
+                    name,
+                    state: habitat_down_state(name, &e),
+                    ok: false,
+                },
                 Err(e) if name == "claim graph" && claim_graph_absent(&e.to_string()).is_some() => {
                     let dir = claim_graph_absent(&e.to_string()).unwrap_or_default();
                     Habitat {
@@ -31449,13 +31472,47 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 }
                 Err(e) => Habitat {
                     name,
-                    state: e.to_string().lines().next().unwrap_or("").to_string(),
+                    state: habitat_down_state(name, &e),
                     ok: false,
                 },
             },
         );
     }
     out
+}
+
+/// What a habitat probe that exited prints, plus the one command that
+/// installs a missing binary. A tracker nobody has created yet names
+/// `ljos onboard`.
+fn habitat_down_state(name: &str, err: &anyhow::Error) -> String {
+    let mut state = err.to_string().lines().next().unwrap_or("").to_string();
+    if let Some(fix) = missing_bin_install(&state) {
+        if !state.contains("cargo install") {
+            state.push_str("; ");
+            state.push_str(&fix);
+        }
+    }
+    if name == "tracker" {
+        if let Some(root) = std::env::var_os("VISSUE_ROOT").filter(|v| !v.is_empty()) {
+            if let Some((extra, _)) = tracker_git_drift(Path::new(&root)) {
+                state = format!("{state}; {extra}");
+            }
+        }
+        if state.contains("not inside a tracker") && !state.contains("ljos onboard") {
+            state.push_str(". Run `ljos onboard` to create the tracker");
+        }
+    }
+    state
+}
+
+/// `cargo install --locked CRATE` when `state` says a seat binary is not
+/// on `PATH`. `None` for any other refusal.
+fn missing_bin_install(state: &str) -> Option<String> {
+    SEAT_BINS.iter().find_map(|(bin, crate_name)| {
+        state
+            .contains(&format!("{bin} not on PATH"))
+            .then(|| format!("cargo install --locked {crate_name}"))
+    })
 }
 
 /// The directory claimdag would create, when its refusal says the seat has
@@ -31500,13 +31557,19 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
     };
     let path = std::path::Path::new(root);
     let problem = if !path.is_absolute() {
-        Some("relative root: tickets land under the working directory")
+        Some(
+            "relative root: tickets land under the working directory. Set VISSUE_ROOT to an absolute path"
+                .to_string(),
+        )
     } else if !path.is_dir() {
-        Some("root is not a directory")
+        Some(missing_root_fix(path, prefix, source))
     } else if !path.join(prefix).is_dir() {
-        Some("no prefix directory under the root")
+        Some(format!(
+            "no prefix directory under the root. `mkdir -p {}` creates it",
+            path.join(prefix).display()
+        ))
     } else {
-        None
+        tracker_not_writable(path, prefix)
     };
     let base = format!("{version} root={root} prefix={prefix} from {source}");
     let (state, ok) = match problem {
@@ -31520,6 +31583,95 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
         Some(edits) => (format!("{state}; {edits}"), ok),
         None => (state, ok),
     }
+}
+
+/// A configured root that is not a directory, and the one command that
+/// makes the prefix directory. When the seat's vissue config names that
+/// root, the line names the file.
+fn missing_root_fix(root: &Path, prefix: &str, source: &str) -> String {
+    let made = root.join(prefix);
+    if source == "seat config or working directory" {
+        if let Some(cfg) = tracker_place::config_path() {
+            if tracker_place::configured().as_deref() == Some(root) {
+                return format!(
+                    "{} names {}, which is not a directory. `mkdir -p {}` creates it",
+                    cfg.display(),
+                    root.display(),
+                    made.display()
+                );
+            }
+        }
+    }
+    format!(
+        "root is not a directory. `mkdir -p {}` creates it",
+        made.display()
+    )
+}
+
+/// The first of the tracker root and its prefix that this account cannot
+/// write. `None` when a probe file can be created in both.
+fn tracker_not_writable(root: &Path, prefix: &str) -> Option<String> {
+    [root, &root.join(prefix)]
+        .into_iter()
+        .find(|dir| !dir_writable(dir))
+        .map(|dir| {
+            if owns_dir(dir) {
+                format!(
+                    "{} is not writable. `chmod u+w {}` lets this account file tickets",
+                    dir.display(),
+                    dir.display()
+                )
+            } else {
+                format!("{} is not writable by this user", dir.display())
+            }
+        })
+}
+
+/// Whether this account can create a file in `dir`. The probe is removed.
+fn dir_writable(dir: &Path) -> bool {
+    let probe = dir.join(".ljos-doctor-write");
+    for _ in 0..2 {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                return true;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = std::fs::remove_file(&probe);
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// Whether this account owns `dir`.
+fn owns_dir(dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(dir).is_ok_and(|meta| meta.uid() == euid())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        false
+    }
+}
+
+/// A tracker row that means tickets cannot be filed there. A tracker that
+/// has not been created yet, and a missing `vissue`, stay info: the binary
+/// row or `ljos onboard` covers them, and they do not fail `ljos doctor`.
+fn tracker_blocks(state: &str) -> bool {
+    state.contains("is not writable")
+        || state.contains("root is not a directory")
+        || state.contains("which is not a directory")
+        || state.contains("no prefix directory")
+        || state.contains("relative root")
 }
 
 /// What the tracker row says when issue files hold uncommitted edits.
@@ -32129,7 +32281,8 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
                     || h.name == "pack token"
                     || h.name == "mcp"
                     || h.name == "cloud age"
-                    || h.name == "note queue")
+                    || h.name == "note queue"
+                    || (h.name == "tracker" && tracker_blocks(&h.state)))
         })
         .map(|h| h.name)
         .collect()
@@ -32338,6 +32491,15 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         && !row.ok
     {
         return "warn";
+    }
+    // The registry check is the only thing that needed the network.
+    if row.name == "crates.io" {
+        return "warn";
+    }
+    // A named tracker that cannot take a ticket fails the doctor. A
+    // tracker that has not been created yet stays info.
+    if row.name == "tracker" && tracker_blocks(&row.state) {
+        return "no";
     }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
         "warn"
@@ -32744,7 +32906,11 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                         if cloud_only_advice(name, state) {
                             continue;
                         }
-                        if *word == "no" && (REQUIRED.contains(name) || *name == "pack") {
+                        if *word == "no"
+                            && (REQUIRED.contains(name)
+                                || *name == "pack"
+                                || (*name == "tracker" && tracker_blocks(state)))
+                        {
                             down.push(*name);
                         }
                         act.push_str(l);
@@ -38704,19 +38870,11 @@ fn sitting_hard_down() -> Vec<String> {
                     state: said.stdout.lines().next().unwrap_or("").to_string(),
                     ok: true,
                 },
-                Err(e) if name == "tracker" => {
-                    let mut state = e.to_string().lines().next().unwrap_or("").to_string();
-                    if let Some(root) = std::env::var_os("VISSUE_ROOT").filter(|v| !v.is_empty()) {
-                        if let Some((extra, _)) = tracker_git_drift(Path::new(&root)) {
-                            state = format!("{state}; {extra}");
-                        }
-                    }
-                    Habitat {
-                        name,
-                        state,
-                        ok: false,
-                    }
-                }
+                Err(e) if name == "tracker" => Habitat {
+                    name,
+                    state: habitat_down_state(name, &e),
+                    ok: false,
+                },
                 Err(e) if name == "claim graph" && claim_graph_absent(&e.to_string()).is_some() => {
                     let dir = claim_graph_absent(&e.to_string()).unwrap_or_default();
                     Habitat {
@@ -38727,7 +38885,7 @@ fn sitting_hard_down() -> Vec<String> {
                 }
                 Err(e) => Habitat {
                     name,
-                    state: e.to_string().lines().next().unwrap_or("").to_string(),
+                    state: habitat_down_state(name, &e),
                     ok: false,
                 },
             },
@@ -49751,6 +49909,136 @@ mod tests {
         assert!(state.contains("no prefix directory"), "{state}");
 
         assert!(!super::tracker_state("vissue 0.16.1\n", "cwd").1);
+    }
+
+    /// A missing or unwritable tracker names the command that fixes it and
+    /// fails the doctor. A seat nobody named is a warning that names the
+    /// same step a write prints. A registry that did not answer is a warning.
+    #[test]
+    fn doctor_names_the_fix_for_a_tracker_a_seat_and_the_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = |root: &str| format!("vissue 0.23.1\nroot={root}\nprefix=Software\n");
+        let missing = dir.path().join("gone");
+        let (state, ok) = super::tracker_state(&id(&missing.display().to_string()), "cwd");
+        assert!(!ok);
+        let mkdir = format!(
+            "`mkdir -p {}` creates it",
+            missing.join("Software").display()
+        );
+        assert!(state.contains("root is not a directory"), "{state}");
+        assert!(state.contains(&mkdir), "{state}");
+        let row = super::Habitat {
+            name: "tracker",
+            state: state.clone(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&row), "no");
+        assert!(!super::healthy(std::slice::from_ref(&row)));
+
+        let root = dir.path().join("ro");
+        std::fs::create_dir_all(root.join("Software")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let (state, ok) = super::tracker_state(&id(&root.display().to_string()), "cwd");
+            assert!(!ok, "{state}");
+            assert!(
+                state.contains(&format!(
+                    "{} is not writable. `chmod u+w {}` lets this account file tickets",
+                    root.display(),
+                    root.display()
+                )),
+                "{state}"
+            );
+            assert_eq!(
+                super::doctor_word(&super::Habitat {
+                    name: "tracker",
+                    state: state.clone(),
+                    ok: false,
+                }),
+                "no"
+            );
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let absent = super::habitat_down_state(
+            "tracker",
+            &anyhow::anyhow!("vissue failed (exit 1): not inside a tracker"),
+        );
+        assert_eq!(
+            absent,
+            "vissue failed (exit 1): not inside a tracker. Run `ljos onboard` to create the tracker"
+        );
+        let info = super::Habitat {
+            name: "tracker",
+            state: absent,
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&info), "info");
+        assert!(super::healthy(std::slice::from_ref(&info)));
+
+        let install =
+            super::habitat_down_state("deed store", &anyhow::anyhow!("deedar not on PATH"));
+        assert_eq!(
+            install,
+            "deedar not on PATH; cargo install --locked deedar-cli"
+        );
+
+        let seat = super::seat_source_row(&super::Seat::whole(
+            "every-seat",
+            "no seat rule matched; reading every seat",
+        ));
+        assert!(!seat.ok);
+        assert_eq!(super::doctor_word(&seat), "warn");
+        assert_eq!(
+            seat.state,
+            "no seat rule matched; reading every seat. Set one with --seat NAME or export LJOS_SEAT=NAME"
+        );
+        assert!(super::healthy(std::slice::from_ref(&seat)));
+
+        let registry = super::Habitat {
+            name: "crates.io",
+            state: "did not answer, so the version check was skipped".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&registry), "warn");
+        assert!(super::healthy(std::slice::from_ref(&registry)));
+        let short = super::format_doctor_short(&[registry]);
+        assert!(
+            short.contains("warn\tcrates.io\tdid not answer, so the version check was skipped\n"),
+            "{short}"
+        );
+    }
+
+    #[test]
+    fn a_stale_vissue_config_names_the_file_and_the_directory_to_create() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_dir = dir.path().join("config");
+        let root = dir.path().join("old-tracker");
+        std::fs::create_dir_all(cfg_dir.join("vissue")).unwrap();
+        let cfg = cfg_dir.join("vissue/config.toml");
+        std::fs::write(&cfg, format!("root = \"{}\"\n", root.display())).unwrap();
+        let _hold = HoldEnv::set(&[
+            ("VISSUE_CONFIG", ""),
+            ("VISSUE_ROOT", ""),
+            ("ISSUE_ROOT", ""),
+        ]);
+        let id = format!("vissue 0.23.1\nroot={}\nprefix=Software\n", root.display());
+        let (state, ok) = super::with_config_home(&cfg_dir, || {
+            super::tracker_state(&id, "seat config or working directory")
+        });
+        assert!(!ok);
+        assert!(
+            state.contains(&format!(
+                "{} names {}, which is not a directory. `mkdir -p {}` creates it",
+                cfg.display(),
+                root.display(),
+                root.join("Software").display()
+            )),
+            "{state}"
+        );
     }
 
     fn git_scratch(root: &std::path::Path) {
