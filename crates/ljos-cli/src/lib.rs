@@ -40693,13 +40693,19 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
     }
 }
 
-/// Worktree root, and the paths to commit there: `paths` (relative to
-/// `dir`) plus any deferred paths. `None` when `dir` is not a worktree
+/// Worktree root, and the paths to commit there. A named write commits
+/// those paths and no others: another seat's deferred files stay on the
+/// pending list until that seat's own write or a flush of an empty list.
+/// An empty `paths` is that flush. `None` when `dir` is not a worktree
 /// ljos locks, so the caller commits `paths` from `dir` unchanged.
 fn paths_for_commit(dir: &Path, paths: &[&str]) -> Option<(PathBuf, Vec<String>)> {
     let root = worktree_root(dir)?;
     let prefix = worktree_prefix(dir);
-    let mut rels = read_pending(&root);
+    let mut rels = if paths.is_empty() {
+        read_pending(&root)
+    } else {
+        Vec::new()
+    };
     // A path that left the tree cannot be staged, and one bad path would
     // refuse every later commit that tried to carry the rest.
     let missing: Vec<String> = rels
@@ -40833,10 +40839,6 @@ pub(crate) fn note_deferred_paths(dir: &Path, rels: &[&str]) {
         .filter(|rel| !rel.is_empty())
         .collect();
     pending_add(&root, &owned);
-}
-
-fn has_deferred_paths(dir: &Path) -> bool {
-    worktree_root(dir).is_some_and(|root| !read_pending(&root).is_empty())
 }
 
 fn mentions_index_lock(text: &str) -> bool {
@@ -41359,13 +41361,13 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
     }
     let mut status_args = vec!["status", "--porcelain", "--"];
     status_args.extend(live.iter().copied());
-    let mut only_pending = false;
     match git(&status_args) {
         Ok(o) if o.status.success() && o.stdout.is_empty() => {
             // An ignored file has an empty status, the same shape as a
             // clean tracked file. The ignore rule is what keeps the write
-            // on this machine. A clean file still commits paths an earlier
-            // write had to leave on disk.
+            // on this machine. A clean file does not take another seat's
+            // deferred paths with it; those wait for the write that named
+            // them, or for a flush that names no path.
             if also.is_empty() {
                 match git(&["check-ignore", "-v", "--", live[0]]) {
                     Ok(ignored) if ignored.status.success() => {
@@ -41375,17 +41377,12 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
                             first_line(&ignored.stdout)
                         );
                     }
-                    _ if !has_deferred_paths(dir) => {
-                        return "tracker git: nothing to commit\n".into();
-                    }
-                    _ => only_pending = true,
+                    _ => return "tracker git: nothing to commit\n".into(),
                 }
-            } else if ignored_note.is_empty() && !has_deferred_paths(dir) {
+            } else if ignored_note.is_empty() {
                 return "tracker git: nothing to commit\n".into();
-            } else if !has_deferred_paths(dir) {
-                return ignored_note;
             } else {
-                only_pending = true;
+                return ignored_note;
             }
         }
         Ok(o) if o.status.success() => {}
@@ -41393,22 +41390,15 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
         Err(e) => return format!("tracker git: {e}\n"),
     }
     let seat = tracker_seat();
-    let (message, committed) = if only_pending {
-        let message = "chore(tracker): commit writes deferred while git held the index".to_string();
-        let committed = commit_paths(dir, &[], &message);
-        (message, committed)
-    } else {
-        for (issue, verb) in writes {
-            stamp_seat_logbook(path, issue, verb, &seat);
-        }
-        let named: Vec<String> = writes
-            .iter()
-            .map(|(issue, verb)| format!("{issue} {verb}"))
-            .collect();
-        let message = format!("chore(issues): {} by {seat}", named.join(", "));
-        let committed = commit_paths(dir, &live, &message);
-        (message, committed)
-    };
+    for (issue, verb) in writes {
+        stamp_seat_logbook(path, issue, verb, &seat);
+    }
+    let named: Vec<String> = writes
+        .iter()
+        .map(|(issue, verb)| format!("{issue} {verb}"))
+        .collect();
+    let message = format!("chore(issues): {} by {seat}", named.join(", "));
+    let committed = commit_paths(dir, &live, &message);
     if matches!(committed, PathCommit::Made | PathCommit::AlreadyIn) {
         commit_seat_pin(dir, &seat);
     }
@@ -48389,6 +48379,31 @@ mod tests {
         assert_eq!(
             run(&["diff", "--cached", "--name-only"]).trim(),
             "other.org"
+        );
+
+        // Another seat's uncommitted file, including one an earlier deferral
+        // left on the shared pending list, stays out of this write's commit.
+        std::fs::write(root.join("other.org"), "three\n").unwrap();
+        std::fs::write(root.join(super::TRACKER_PENDING), "other.org\n").unwrap();
+        std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
+        let said = super::persist_tracker("probe-a1b2", "finished");
+        assert!(
+            said.contains("committed chore(issues): probe-a1b2 finished by saddle"),
+            "{said}"
+        );
+        let files = run(&["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            files.lines().all(|line| line != "other.org"),
+            "another seat's file was committed:\n{files}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("other.org")).unwrap(),
+            "three\n"
+        );
+        assert_eq!(
+            run(&["diff", "--name-only"]).trim(),
+            "other.org",
+            "the other seat's edit was staged or reverted"
         );
 
         std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
