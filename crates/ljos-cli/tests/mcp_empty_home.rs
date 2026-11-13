@@ -412,3 +412,63 @@ fn a_missing_pack_token_names_the_next_step_in_the_search_result() {
     assert!(said.contains("PACKSET_TOKEN"), "{said}");
     assert!(said.contains("PACKSET_HOME"), "{said}");
 }
+
+/// A missing habitat binary names the program and points at doctor.
+/// The which crate's "cannot find binary path" is not the next step.
+#[test]
+fn a_missing_habitat_binary_names_doctor() {
+    let home = std::path::PathBuf::from("/home/ubuntu/ljos-mcp-bin");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    std::fs::write(
+        home.join(".config/gitconfig"),
+        "[user]\n\tname = Walk User\n\temail = walk@example.com\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .env("GIT_CONFIG_GLOBAL", home.join(".config/gitconfig"))
+        .env("LJOS_SEAT", "alice")
+        .current_dir(&home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(30));
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    });
+    let lines = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "acme-cli", "version": "1"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "ljos_recall", "arguments": {"issue": "demo-2f5j"}}}),
+    ];
+    let mut stdin = child.stdin.take().unwrap();
+    for line in &lines {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let answers: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let call = answers
+        .iter()
+        .find(|answer| answer["id"] == 2)
+        .unwrap_or_else(|| panic!("no recall answer\nstdout:\n{stdout}\nstderr:\n{stderr}"));
+    assert_eq!(call["result"]["isError"], true, "{call}");
+    let said = call.to_string();
+    assert!(said.contains("vissue not on PATH"), "{said}");
+    assert!(said.contains("ljos doctor"), "{said}");
+    assert!(!said.contains("cannot find binary path"), "{said}");
+}

@@ -1280,6 +1280,15 @@ fn refused(e: anyhow::Error) -> McpError {
         return McpError::internal_error(line, None);
     }
     let text = format!("{e:#}");
+    // `which` adds "cannot find binary path". The program name is the
+    // useful part, and doctor names the install.
+    let text = if text.contains("not on PATH") && text.contains("cannot find binary path") {
+        let head = text.lines().next().unwrap_or(text.as_str());
+        let head = head.trim_end_matches(": cannot find binary path").trim();
+        format!("{head}. `ljos doctor` names the install")
+    } else {
+        text
+    };
     // The pack's prose rule refuses a hard sentence; the seat that hit it
     // is told what passes, so the second try is not a guess.
     let text = if text.contains("readability grade") || text.contains("sentences; one claim") {
