@@ -5,6 +5,17 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.41.10 (2026-11-12)
+
+### Fixes
+
+- A tracker commit refused the tracker's own checkout, and named that checkout as a product.
+  A checkout counts as the tracker when VISSUE_ROOT names it, when it is the seat's tracker, or when is_tracker holds.
+  A checkout that already holds an issue id counts as well, and a board with no id stays a product.
+- A tracker verb run from a product checkout uses the seat's tracker when VISSUE_ROOT is unset.
+  When the seat has no tracker outside that checkout, the verb refuses in one line that says to set VISSUE_ROOT, and it does not write or commit there.
+
+
 ## 0.41.9 (2026-11-12)
 
 ### Fixes

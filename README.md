@@ -8,7 +8,7 @@ It calls no model, and every store is a file a person can open.
 `ljos onboard` knows ten runners, among them Claude Code, Codex and Cursor.
 
 [//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
-These notes describe ljos 0.41.9.
+These notes describe ljos 0.41.10.
 [//]: # ([[[end]]])
 
 ## What it has done
