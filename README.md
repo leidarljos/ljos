@@ -121,6 +121,7 @@ Linux and macOS are supported. Windows works through Windows Subsystem for Linux
 
 From a checkout of this repository:
 
+<!-- ljos-quickstart:start -->
 ```
 sh scripts/install.sh --no-embed
 export PATH="$HOME/.local/bin:$PATH"
@@ -164,6 +165,7 @@ cargo binstall --locked ljos packset deedar-cli claimdag-cli vissue-cli vissue-m
 ljos onboard
 ljos doctor
 ```
+<!-- ljos-quickstart:end -->
 
 `ljos offboard` takes ljos out of each runner. With no runner onboarded it prints `ok`, `offboard`, `nothing installed by ljos onboard`. `ljos uninstall` takes the ljos programs off the machine and leaves a stub named `ljos` that allows hook calls.
 

@@ -6,7 +6,7 @@
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::process::CommandExt as _;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,23 @@ impl Pty {
             slave,
             shown: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Point `cmd`'s stdout and stderr at this terminal, so `is_terminal`
+    /// is true and the text is what a person at a prompt sees. Call this
+    /// before [`Self::spawn`].
+    pub fn attach_output(&self, cmd: &mut Command) {
+        cmd.stdout(Self::stdio_dup(self.slave.as_raw_fd()));
+        cmd.stderr(Self::stdio_dup(self.slave.as_raw_fd()));
+    }
+
+    /// A copy of `fd` owned by a `Stdio`. The original stays open.
+    fn stdio_dup(fd: i32) -> Stdio {
+        // SAFETY: `fd` is open. `dup` returns a new descriptor, which
+        // `Stdio` owns and closes.
+        let duped = unsafe { libc::dup(fd) };
+        assert!(duped >= 0, "dup: {}", std::io::Error::last_os_error());
+        unsafe { Stdio::from_raw_fd(duped) }
     }
 
     /// Start `cmd` in a new session whose controlling terminal is this
@@ -137,6 +154,7 @@ impl Pty {
 }
 
 /// Wait for `child` to exit, killing it after `secs` seconds.
+#[allow(dead_code)]
 pub fn wait_output(child: Child, secs: u64) -> std::process::Output {
     let pid = child.id();
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
