@@ -319,7 +319,7 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
 
     let (text, err) = run(&["doctor"]);
     assert!(!log.exists(), "doctor started packset without --fix\n{err}");
-    let pack = row(&text, "pack").unwrap_or("");
+    let pack = row(&text, "memory").unwrap_or("");
     assert!(
         pack.contains("packset ensure") && pack.ends_with("run ljos doctor --fix"),
         "{text}"
@@ -339,7 +339,7 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
         "{err}"
     );
     assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "ensure");
-    assert!(row(&after, "pack").is_none(), "{after}\n{err}");
+    assert!(row(&after, "memory").is_none(), "{after}\n{err}");
     assert!(after.contains("seat source"), "{after}");
 }
 

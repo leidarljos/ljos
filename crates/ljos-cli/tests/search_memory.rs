@@ -144,7 +144,7 @@ fn a_cold_encoder_is_asked_again_and_the_line_says_semantic() {
         pack.searches.load(Ordering::SeqCst) >= 2,
         "the cold search was not retried: {said}"
     );
-    assert!(stderr.contains("ranking is semantic"), "{said}");
+    assert!(stderr.contains("matched by meaning"), "{said}");
     assert!(
         stdout.contains("Oak Tree on Nov 23 is the morning plan."),
         "{said}"
@@ -390,7 +390,7 @@ fn unrelated_cross_seat_hits_are_not_a_search_answer() {
     assert!(stdout.contains(OWN_RINGS), "{said}");
     assert!(!stdout.contains("disk fill"), "{said}");
     assert!(!stdout.contains("morning train"), "{said}");
-    assert!(stderr.contains("ranking is semantic"), "{said}");
+    assert!(stderr.contains("matched by meaning"), "{said}");
 }
 
 #[test]

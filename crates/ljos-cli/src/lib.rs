@@ -49271,7 +49271,8 @@ mod tests {
         let own_hit = atom_as_hit(&own).unwrap();
         assert!(shown_on_prompt(&own_hit), "own preference hidden");
         assert!(
-            kind_label(&own_hit).contains("agent-derived"),
+            kind_label(&own_hit).contains("from an agent")
+                && kind_label(&own_hit).contains("not checked"),
             "{}",
             kind_label(&own_hit)
         );
@@ -49309,7 +49310,11 @@ mod tests {
             shown_on_prompt(&lesson_hit),
             "accept did not hand the lesson over"
         );
-        assert!(kind_label(&lesson_hit).contains("agent-derived"));
+        assert!(
+            kind_label(&lesson_hit).contains("from an agent"),
+            "{}",
+            kind_label(&lesson_hit)
+        );
         let now = "2026-11-08T16:00:00Z";
         let ticket = "delete files on the box";
         let ranked =
@@ -62260,7 +62265,7 @@ mod tests {
         );
         assert!(short.contains("warn\tencoder\t"), "{short}");
         assert!(short.contains(ENCODER_RESTART_COMMAND), "{short}");
-        assert!(short.contains("lexical-only"), "{short}");
+        assert!(short.contains("search is a word match"), "{short}");
         let full = format!(
             "== doctor\nok\tmemory\tanswers\nwarn\tencoder\t{}\n{LEXICAL_ONLY_LINE}== claim\nclaimed Software-x for seat\n",
             encoder_degraded_state()
@@ -72901,7 +72906,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             .unwrap_or_else(|| panic!("the agent lesson was dropped:\n{text}"));
         let key = lines.get(at.saturating_sub(1)).copied().unwrap_or("");
         assert!(
-            key.contains("agent-derived") && !key.contains("person's words"),
+            key.contains("from an agent") && !key.contains("person's words"),
             "a non-person claim stood as the person's:\n{text}"
         );
     }
@@ -73113,7 +73118,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             .expect("own lesson");
         let own_label = lines.get(own_at.saturating_sub(1)).copied().unwrap_or("");
         assert!(
-            !own_label.contains("from "),
+            own_label.contains("from an agent")
+                && !own_label.contains("inky")
+                && !own_label.contains("hlebot")
+                && !own_label.contains("fortranbot"),
             "this seat's lesson was labelled as another seat: {own_label}\n{printed}"
         );
         let mut ranked = hits.clone();

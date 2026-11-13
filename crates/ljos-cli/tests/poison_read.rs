@@ -976,7 +976,7 @@ fn search_and_island_label_an_agents_claims() {
     let island = seat.ljos(&["island", "deploy"]);
     for line in island.lines().filter(|l| l.contains("aaaaaaaa")) {
         assert!(
-            line.contains("[not checked"),
+            line.contains("from an agent") && line.contains("not checked"),
             "an island row gave no origin for an agent's claim: {line}"
         );
     }

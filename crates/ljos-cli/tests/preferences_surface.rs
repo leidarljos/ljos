@@ -290,7 +290,7 @@ fn a_bot_seat_preference_is_injected_on_a_fresh_prompt() {
         "the fresh prompt did not receive the preference:\n{note}"
     );
     assert!(
-        note.contains("agent-derived"),
+        note.contains("from an agent"),
         "the origin was not named beside the preference:\n{note}"
     );
     let lesson = note
@@ -336,7 +336,7 @@ fn accept_promotes_a_lesson_onto_the_prompt() {
         "accept did not put the lesson on the next prompt:\n{after}"
     );
     assert!(
-        after.contains("agent-derived"),
+        after.contains("from an agent"),
         "the accepted lesson hid its origin:\n{after}"
     );
 }

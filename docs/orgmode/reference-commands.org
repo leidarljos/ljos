@@ -232,7 +232,7 @@ evidence
 export --machine --out
 file --body --deadline --options --parent --porcelain --priority --project --quorum --tags --top --type
 findings --all --issue --remember
-finish --assignee --beta --close --gen --lesson --new-option --outcome --status
+finish --assignee --beta --close --gen --lesson --new-option --outcome --status --verbose
 forget --json --why
 git-hook
 git-hooks
