@@ -183,3 +183,48 @@ fn a_read_with_no_seat_covers_every_seat_and_a_write_names_unknown() {
     assert!(write_text.contains("LJOS_SEAT"), "{text}");
     assert!(!write_text.contains("label seat-unresolved"), "{text}");
 }
+
+/// A conversation that already has a seat is that seat. The unknown-host
+/// line must not name a different one.
+#[test]
+fn a_recorded_conversation_seat_is_not_called_unknown() {
+    let world = World::new();
+    let id = "conv-abc-12345678";
+    // `policy` is not a read or a write, so it keeps the login seat and
+    // leaves the conversation record. `seat` would not: a read with no
+    // rule returns before that record is written.
+    let primed = world.ljos(
+        &["policy", "--", "true"],
+        &[
+            ("USER", "ubuntu"),
+            ("CURSOR_CONVERSATION_ID", id),
+            ("CURSOR_AGENT", "1"),
+        ],
+    );
+    assert!(primed.status.success(), "{}", said(&primed));
+
+    let write = world.ljos(
+        &["remember", "The lexical default is BM25+."],
+        &[
+            ("CURSOR_CONVERSATION_ID", id),
+            ("CURSOR_AGENT", "1"),
+            ("USER", "ubuntu"),
+            ("PACKSET_URL", "off"),
+        ],
+    );
+    let text = said(&write);
+    let err = String::from_utf8_lossy(&write.stderr);
+    assert!(
+        !err.contains("unknown-"),
+        "the line named a seat the write does not use:\n{text}"
+    );
+
+    let seat = world.ljos(
+        &["seat"],
+        &[("CURSOR_CONVERSATION_ID", id), ("CURSOR_AGENT", "1")],
+    );
+    let text = said(&seat);
+    assert!(seat.status.success(), "{text}");
+    let stdout = String::from_utf8_lossy(&seat.stdout);
+    assert_eq!(field(&stdout, "seat"), "ubuntu", "{text}");
+}

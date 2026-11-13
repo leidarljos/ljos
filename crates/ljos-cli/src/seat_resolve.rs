@@ -31,17 +31,26 @@ thread_local! {
 }
 
 /// Remember `--seat` and whether this command reads or writes.
-/// A write with no seat prints one line.
+/// The unknown-host line is printed later, from the seat the write
+/// actually uses, so a conversation record is not described as unknown.
 pub fn prepare(flag: Option<String>, kind: Kind) {
     let flag = flag.and_then(|name| usable(&name));
     FLAG.with(|slot| *slot.borrow_mut() = flag);
     KIND.with(|cell| cell.set(kind));
-    if kind == Kind::Write && named_from_env().is_none() {
-        let seat = unknown_for(&crate::sync::host());
-        if !NOTICED.with(|cell| cell.replace(true)) {
-            eprintln!("{}", notice(&seat));
-        }
+}
+
+/// Print the unknown-host line once, when `seat` is that fallback on a write.
+pub(crate) fn announce_unknown(seat: &crate::Seat) {
+    if KIND.with(|cell| cell.get()) != Kind::Write {
+        return;
     }
+    if !seat.source.contains("unknown seat") {
+        return;
+    }
+    if NOTICED.with(|cell| cell.replace(true)) {
+        return;
+    }
+    eprintln!("{}", notice(&seat.seat));
 }
 
 /// The seat and the rule phrase, when one of the six rules matches.

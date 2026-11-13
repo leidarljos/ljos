@@ -4414,6 +4414,10 @@ pub fn whoami() -> Seat {
         && agent.as_deref().and_then(seat_resolve::usable).is_none()
     {
         if let Some(seat) = seat_resolve::command_fallback() {
+            // The line names this seat, not a guess made before the
+            // conversation record was read. A record that already names a
+            // seat never reaches here.
+            seat_resolve::announce_unknown(&seat);
             return seat;
         }
     }
