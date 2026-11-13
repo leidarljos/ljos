@@ -64,8 +64,8 @@ A lesson `ljos remember` queued because the pack was busy is sent again on `ljos
 The installer checks each download against its published SHA-256 sum. It sets up the tracker, the memory writer and the deed store, then runs `ljos onboard` for each runner it finds.
 Git needs `user.name` and `user.email`, because the tracker commits each change. Without them the heading is still written, and the line is `tracker git: commit refused: Author identity unknown`.
 
-On a clean install, `ljos doctor` prints `ljos is ready: memory, tracker and command guard work`.
-`ljos remember` prints the lesson and the first eight characters of its id. With no seat set, the write uses `unknown-` plus the host name.
+On a clean install, `ljos doctor` prints `ljos is ready: memory, tracker and command guard work`, then `Optional extras: ljos doctor --all`. A `sitting-gate` row follows. With no agent runner above the shell it says `not active here`.
+`ljos remember` prints the lesson and the first eight characters of its id. With no seat set and no conversation record, the write uses `unknown-` plus the host name, and the line says so. A conversation that already has a seat record writes as that seat.
 `ljos search "lexical default"` prints that lesson. A query that shares no word with the stored text, such as `which fusion`, prints `No hits.`
 This seat's hits come first. Another seat's lesson is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is `Nothing relevant was found.` A busy pack ranks by words and still returns a hit that names the subject.
 `ljos file` prints the new id, then `project:`, the heading, the path, and `tracker git: committed ... no remote, kept local`.
@@ -107,7 +107,7 @@ git push --force origin topic
 allow	warn	git-force-push	a force push rewrites a published branch
 ```
 
-A push onto `main` or `develop` warns under `sitting-gate` until the ticket of the sitting has a settled consensus. With one active seat, that seat's own vote settles it.
+A push onto `main` or `develop` warns under `sitting-gate` until the ticket of the sitting has a settled consensus. When `vissue.toml` lists one active seat, that seat's own vote is enough for the push. With no seat list, the push waits for two seats.
 
 ## The MCP server
 

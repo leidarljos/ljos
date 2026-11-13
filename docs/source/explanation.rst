@@ -180,9 +180,10 @@ connected. ``ljos seat`` prints the seat, the holder, and where each name came f
 Claims belong to one conversation. Memory, ballots and trust belong to the seat. The holder
 is ``SEAT@session``, and the session id is the one the runner gives.
 
-On a fresh tracker with no seat list, any seat may write. An unset seat writes under its login
-seat with a warning. Once the tracker's ``vissue.toml`` lists seats, a tracker write from a seat it
-does not list is refused.
+On a fresh tracker with no seat list, any seat may write. An unset seat with no conversation
+record writes as ``unknown-`` plus the host name, and says so. A conversation that already has a
+seat record writes as that seat. Once the tracker's ``vissue.toml`` lists seats, a tracker write
+from a seat it does not list is refused.
 
 - ``ljos seat add NAME`` writes the seat's row in ``vissue.toml``.
 - Solo mode: when ``vissue.toml`` lists one active seat, that seat's own vote settles consensus for

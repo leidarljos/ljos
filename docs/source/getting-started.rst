@@ -51,9 +51,13 @@ The tracker commits each change, so git needs an identity:
    $ git config --global user.email "you@example.com"
    $ ljos doctor
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
+   ok	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
 
 On a clean install the ready line names memory, the tracker and the command guard.
-A row under it names anything that still needs action. Add ``--all`` to see every row.
+The ``sitting-gate`` row follows it. The person's commits, merges and pushes are not held when no agent runner is above the shell.
+Under a runner the same row names the seat and the branches a push waits on, ``develop`` or ``main``, and the number of seats that push waits for.
+A fresh tracker has no seat list, so that number is 2. When ``vissue.toml`` lists one active seat, that seat's own vote settles the push.
+A row under the ready line names anything that still needs action. Add ``--all`` to see every row.
 
 To install by hand, or to see what onboarding would write:
 
@@ -88,6 +92,7 @@ A lesson and a search
    1.0000	2/2	lesson, agent-derived	a6ae2751564de44a99c5915a6d9ea7f2	today	The lexical default is BM25+. It beat BM25 by two points on turns.
 
 The id and the review time are the ones that run printed. The name after ``unknown-`` is the host name.
+That line is printed only when the write uses that seat. A conversation that already has a seat record writes as that seat and does not print the line.
 This run sat under an agent runner, so the search row says ``lesson, agent-derived``.
 Typed at a terminal with no runner above it, the same command is the person's sentence.
 Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
@@ -118,11 +123,12 @@ A ticket
    demo-2f5j
    project: demo
    demo-2f5j  TODO  [#C]  Pick a codec
-   file: ~/.local/share/vissue/tracker/Software/demo/issues.org
+   file: /home/you/.local/share/vissue/tracker/Software/demo/issues.org
    tracker git: committed chore(issues): demo-2f5j filed by alice; no remote, kept local
 
 The id is the only line on standard output, so ``id=$(LJOS_SEAT=alice ljos file ...)`` captures it.
 The heading, the path and the commit line are on standard error. The id in the heading is the same one.
+The ``file:`` line is the absolute path. ``/home/you`` above names the home directory.
 Under a runner that already recorded a seat, ljos names both and writes as ``LJOS_SEAT``.
 With no git identity the heading is still written, and the last line is ``tracker git: commit refused: Author identity unknown. Set git user.name and user.email, then run the command again``.
 ``ljos doctor`` then warns that the issue file is uncommitted.
@@ -144,15 +150,21 @@ A plan files one parent and its checklist in a single tracker commit, claims the
    next: day-cd34  measure the files
    tracker git: committed chore(issues): day-ab12 filed, day-cd34 filed, day-ef56 filed, day-gh78 filed by alice; no remote, kept local
    sitting day-ab12: checking blockers
-   day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
+   tracker: day-ab12 STARTED under alice
+   tracker git: committed chore(issues): day-ab12 claimed by alice; no remote, kept local
+   ljos is ready: memory, tracker and command guard work.
+   memory degraded: ranked by words
    next: day-cd34  measure the files
+   day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
    $ LJOS_SEAT=alice ljos finish day-cd34
    ticked day-cd34
    next: day-ef56  pick a default
+   tracker git: committed chore(issues): day-cd34 ticked by alice; no remote, kept local
    $ LJOS_SEAT=alice ljos ready --mine
    next: day-ef56  pick a default
 
-The ids are the ones that run printed. The parent is claimed. Each item stays open until ``ljos finish`` ticks it. A sitting with no ``--verbose`` prints what needs action. A degraded pack is one line, ``memory degraded: ranked by words``. Quiet claims are a count that points at ``ljos claims --mine``. ``ljos sitting ISSUE --verbose`` prints every section.
+The ids are the ones that run printed. The parent is claimed. Each item stays open until ``ljos finish`` ticks it. A sitting with no ``--verbose`` prints what needs action. With ``--no-embed`` the pack has no encoder, so the sitting prints ``memory degraded: ranked by words``. Quiet claims are a count that points at ``ljos claims --mine``. ``ljos sitting ISSUE --verbose`` prints every section.
+Under a runner the holder on the ``STARTED`` line can be ``alice`` plus ``@`` and a session tag. The claim command below prints the seat name.
 
 A second seat
 =============
@@ -177,7 +189,8 @@ Bob can file another ticket. To help on this one, bob writes a note.
    tracker git: committed chore(issues): demo-2f5j noted by alice; no remote, kept local
    $ ljos timeline demo-2f5j
 
-``ljos timeline`` prints the note as unverified tracker text, fenced, oldest first.
+``ljos timeline`` prints the note as unverified tracker text, oldest first.
+The note sits between ``[unverified …]`` and ``[end …]``. Those markers are the fence. The text inside is tracker text from the ticket.
 ``vissue show demo-2f5j`` prints the same logbook. ``ljos recall`` prints the working set for the ticket: the plan, the deeds it cites, and memories. The note is tracker text, so it is on the timeline, not in that working set.
 ``ljos digest`` reads the tracker and says what each seat filed, claimed and voted on.
 
@@ -186,15 +199,26 @@ Both seats can vote. From one shell the two ballots share a session, and ``ljos 
 .. code:: console
 
    $ LJOS_SEAT=alice ljos vote demo-2f5j --for keep --used none
+   demo-2f5j: alice voted keep
+   demo-2f5j: 1 vote from 1 option
+     keep                     1 (alice)
+     one ballot only: keep, which nobody has agreed with yet
+   recorded on the tracker: alice for keep on demo-2f5j
    $ LJOS_SEAT=bob ljos vote demo-2f5j --for keep --used none
+   demo-2f5j: bob voted keep
    $ LJOS_SEAT=alice ljos consensus demo-2f5j --no-file
+   push cite: demo-2f5j decides keep for a push by alice; counted bob for keep
+   protected push: demo-2f5j does not clear a push onto `develop` or `main`: the sitting has no settled consensus: 1 of the 2 seats a protected push needs voted on demo-2f5j; counted bob for keep
    folded into one voice (same session ...): alice, bob
    counted bob
+   advice, which does not decide a push: the weighted settle over every ballot
    settle (DeGroot, 1 voters): keep 1.000
    every voter is on keep: the settle is unanimous
    polarization 0.000, disagreement 0.000
 
-A ballot is its own voice when the cast has no shell, no agent runner and no earlier row that shares a session, a parent or the root session of one runner.
+The first two lines of ``ljos consensus`` are the push checks. ``push cite`` is whether the ballots pick an option. ``protected push`` is whether that option clears a push onto ``develop`` or ``main``.
+From one shell the two ballots share a session, so they fold into one voice and the protected-branch check still wants a second seat. The lines under ``advice`` are the weighted settle. They do not clear that push.
+A signature line and ``tracker git:`` follow each vote. A ballot is its own voice when the cast has no shell, no agent runner and no earlier row that shares a session, a parent or the root session of one runner.
 The how-to :doc:`Vote and settle a decision <howto-vote>` is that case, and ``ljos learn``.
 The docs of beads, Mem0, Letta, Zep, Basic Memory and git-bug, read on 2026-11-10, describe no vote. The comparison is :doc:`How ljos compares <compare>`.
 

@@ -61,6 +61,8 @@ Install
    $ ljos doctor
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
 
+``ljos doctor`` then prints a ``sitting-gate`` row. With no agent runner above the shell, that row says ``not active here``.
+
 From a checkout, that script installs the programs. A release attaches the same script as ``install.sh``.
 The copy on the 0.41.1 release asked for a vissue archive that project does not publish. The 0.41.2 script fetches the archive the vissue release publishes.
 ``--no-embed`` leaves out the encoder, and search matches words.
