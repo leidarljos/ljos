@@ -174,6 +174,31 @@ fn onboard_with_no_assistant_names_the_next_command() {
     );
 }
 
+/// A real deed store prints the signing key. Onboard says the store lists
+/// it and does not print the key.
+#[test]
+fn onboard_does_not_print_the_signing_key() {
+    let home = Home::new();
+    let bin = home.path().join("bin");
+    script(
+        &bin,
+        "packset",
+        "#!/bin/sh\n[ \"$1\" = ensure ] && echo writer up && exit 0\necho \"packset stub: $*\" >&2\nexit 1\n",
+    );
+    script(
+        &bin,
+        "deedar",
+        "#!/bin/sh\n[ \"$1 $2\" = \"host accept\" ] && echo 'host key: ed25519:abcd, already a signer /store/layout lists' && exit 0\necho \"deedar stub: $*\" >&2\nexit 1\n",
+    );
+    let out = home.ljos(&["onboard", "--harness", "all"]);
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("wrote a signing key to "), "{text}");
+    assert!(text.contains("The deed store lists this key."), "{text}");
+    assert!(!text.contains("ed25519:"), "{text}");
+    assert!(!text.contains("32-byte"), "{text}");
+}
+
 /// Claude's directory is present and the `claude` command is not.
 /// Onboard and doctor both name the install, and doctor keeps the seat ready.
 #[test]
