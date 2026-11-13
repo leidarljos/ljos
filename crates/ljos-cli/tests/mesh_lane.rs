@@ -472,8 +472,7 @@ fn a_down_writer_names_the_next_pull_and_a_later_pull_imports() {
     let err = String::from_utf8_lossy(&stopped.stderr);
     assert!(err.contains("mesh: the pull stopped:"), "{err}");
     assert!(
-        err.contains("packset is not on PATH")
-            && err.contains("cargo install --locked packset"),
+        err.contains("packset is not on PATH") && err.contains("cargo install --locked packset"),
         "{err}"
     );
     assert!(!err.contains("packset ensure"), "{err}");
