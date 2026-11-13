@@ -20586,6 +20586,7 @@ pub fn note_can_wait(err: &anyhow::Error) -> bool {
     if text.contains("empty text is not a memory")
         || text.contains("empty text is not a claim")
         || text.contains("another ticket's memory")
+        || text.contains("refused this seat's token")
     {
         return false;
     }
@@ -63198,6 +63199,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             )));
             assert!(super::note_can_wait(&busy), "{code}");
         }
+        let token = anyhow::anyhow!(
+            "the writer at http://127.0.0.1:8761/v1/atoms refused this seat's token, so run `packset ensure`."
+        );
+        assert!(
+            !super::note_can_wait(&token),
+            "a token mismatch is not queued: {token:#}"
+        );
         let empty = anyhow::anyhow!("remember: empty text is not a claim");
         assert!(!super::note_can_wait(&empty));
         let folded = anyhow::anyhow!("note: the pack returned another ticket's memory");

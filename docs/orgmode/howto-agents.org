@@ -55,12 +55,11 @@ When both Codex variables are set, =CODEX_THREAD_ID= is the one that names the s
 
 * Set a name when the sessions should be one seat
 
-=LJOS_SEAT= and =--seat= are the seat as written. Set one when these sessions should be a single seat, or when you want a name you chose. A note names the session seat this process would have used, and the write still uses your name. =--seat= wins the same way and does not print the note.
+=LJOS_SEAT= and =--seat= are the seat as written. Set one when these sessions should be a single seat, or when you want a name you chose. The session id tags the holder and is named in the source. It does not print a note, and the write uses your name.
 
 # BEGIN ljos-sample agents-named
 #+begin_src console
 $ LJOS_SEAT=ada CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos seat
-ljos: LJOS_SEAT is ada and this conversation's seat is claude-f2pu9d56g0; writing as ada
 seat	ada
 holder	ada@f2pu9d56g0
 source	LJOS_SEAT; session CLAUDE_CODE_SESSION_ID
@@ -138,6 +137,7 @@ One session holds a ticket. The other session's claim is refused and names the h
 #+begin_src console
 $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos file "Measure the files" -p demo
 demo-1
+project: demo
 demo-1  TODO  [#C]  Measure the files
 file: /home/ada/data/vissue/tracker/Software/demo/issues.org
 tracker git: committed chore(issues): demo-1 filed by claude-f2pu9d56g0; no remote, kept local
@@ -148,10 +148,11 @@ tracker: demo-1 STARTED under claude-f2pu9d56g0@f2pu9d56g0
 tracker git: committed chore(issues): demo-1 claimed by claude-f2pu9d56g0; no remote, kept local
 
 $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos claim demo-1
-label claim-conflict: claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`
+label claim-conflict: claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`.
 
 $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos file "Write the note" -p demo
 demo-2
+project: demo
 demo-2  TODO  [#C]  Write the note
 file: /home/ada/data/vissue/tracker/Software/demo/issues.org
 tracker git: committed chore(issues): demo-2 filed by claude-dxw6sq4j7l; no remote, kept local
@@ -170,7 +171,7 @@ tracker git: committed chore(issues): demo-2 finished by claude-dxw6sq4j7l; no r
 
 $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos sitting demo-1
 sitting demo-1: checking blockers
-claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`
+claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`.
 #+end_src
 # END ljos-sample agents-tickets
 
@@ -209,7 +210,7 @@ A process with no session id, whose seat would be the bare runner name, shares t
 # BEGIN ljos-sample agents-noid
 #+begin_src console
 $ ljos seat
-ljos: this session has no id, so it shares the seat claude. Run `export LJOS_SEAT=NAME`.
+ljos: this session has no id and it shares the seat claude, so run `export LJOS_SEAT=NAME`.
 seat	claude
 holder	claude
 source	most recent write from this machine; this session has no id, so it shares the seat claude

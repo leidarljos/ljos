@@ -1840,9 +1840,10 @@ fn refused(url: &str, code: u16, body: &str) -> Error {
         .unwrap_or_else(|| body.to_string());
     let reason = reason.trim();
     if code == 401 {
+        // A token mismatch will not clear on the next send. The line names
+        // the one command that starts this seat's own writer.
         return Error::Bad(format!(
-            "{url}: 401: {reason}; this seat's token does not match the writer's, \
-             so it is another user's writer or PACKSET_HOME names another pack"
+            "the writer at {url} refused this seat's token, so run `packset ensure`."
         ));
     }
     if reason.is_empty() {
@@ -1920,10 +1921,25 @@ fn send_once(
 
 #[cfg(test)]
 mod tests {
-    use super::{foreign, OwnerOnce, TABLE_READS};
+    use super::{foreign, refused, OwnerOnce, TABLE_READS};
 
     fn reads() -> usize {
         TABLE_READS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_token_mismatch_names_packset_ensure() {
+        let err = refused(
+            "http://127.0.0.1:8761/v1/atoms",
+            401,
+            r#"{"error":"packsetd answers its owner only"}"#,
+        );
+        let text = err.to_string();
+        assert_eq!(
+            text,
+            "bad response: the writer at http://127.0.0.1:8761/v1/atoms refused this seat's token, so run `packset ensure`."
+        );
+        assert!(!crate::note_can_wait(&anyhow::anyhow!("{text}")));
     }
 
     /// The requests of one search share one read of the socket tables for

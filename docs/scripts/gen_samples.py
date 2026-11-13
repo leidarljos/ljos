@@ -10,6 +10,10 @@ The LongMemEval_S encoder named in the explanation is the one recorded in
 ``docs/scripts/packset-longmemeval-s.txt``, copied from the public packset
 docs. The private bench repo is not read.
 
+The how-to samples start their own writer. It listens on a free port, never
+the default 8761, and its pack home is the sample home's. A writer already
+on 8761, owned by another home, is left alone.
+
     python3 docs/scripts/gen_samples.py            rewrite the samples
     python3 docs/scripts/gen_samples.py --check    fail when they differ
     python3 docs/scripts/gen_samples.py --no-build skip the rewrite when no binary is built
@@ -166,6 +170,9 @@ def samples_from(ljos: Path) -> tuple[str, str]:
         stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
         stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
         env = scratch_env(home, f"{home / 'stub'}:{home / 'bin'}")
+        # A writer already on the default port belongs to another home.
+        # Doctor on this scratch seat does not talk to it.
+        env["PACKSET_URL"] = "off"
         doctor = run([str(link), "doctor", "--all"], env, DOCTOR_BUDGET_S)
         row = ljos_row(doctor.stdout, link, ljos, cargo)
         if doctor.returncode not in (0, 1):
@@ -301,6 +308,18 @@ _FENCE = re.compile(r"fence [0-9a-f]+")
 _REVIEW = re.compile(r"next review \d{4}-\d{2}-\d{2} \d{2}:\d{2} [+-]\d{2}:\d{2}")
 _SINCE = re.compile(r"(?:still running|its runner is gone), since [^,)]+")
 _STAMP = re.compile(r"\t\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z")
+
+
+def free_loopback_port() -> int:
+    """A free port on 127.0.0.1, never the default pack port."""
+    import socket
+
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        if port != 8761:
+            return port
 
 
 def _need_tool(name: str) -> None:
@@ -467,6 +486,13 @@ def agent_samples(ljos: Path) -> dict[str, str]:
     for name in ("vissue", "claimdag", "packset", "packsetd"):
         _need_tool(name)
     home = Path(tempfile.mkdtemp(prefix="ljos-doc-agents-"))
+    pack_home = home / "pack"
+    pack_port = free_loopback_port()
+    pack = {
+        "PACKSET_HOME": str(pack_home),
+        "PACKSET_PORT": str(pack_port),
+        "PACKSET_URL": f"http://127.0.0.1:{pack_port}",
+    }
     try:
         for rel in (
             ".config/ljos",
@@ -478,6 +504,7 @@ def agent_samples(ljos: Path) -> dict[str, str]:
             "work",
         ):
             (home / rel).mkdir(parents=True)
+        pack_home.mkdir(parents=True)
         subprocess.run(
             ["git", "config", "--file", str(home / "gitconfig"), "user.name", "Ada Example"],
             check=True,
@@ -487,7 +514,13 @@ def agent_samples(ljos: Path) -> dict[str, str]:
             check=True,
         )
         cwd = home / "work"
-        base = _agent_env(home, ljos)
+        # One writer for every sample in this run, including each session
+        # id. It is not the default port, so a stray writer on 8761 is
+        # not this seat's.
+        base = _agent_env(home, ljos, pack)
+        code, text = _pty_run(["packset", "ensure"], base, cwd, 120)
+        if code != 0:
+            raise SystemExit(f"packset ensure exited {code}:\n{text}")
         c1 = {"CLAUDE_CODE_SESSION_ID": AGENT_C1}
         c2 = {"CLAUDE_CODE_SESSION_ID": AGENT_C2}
         cursor = {"CURSOR_CONVERSATION_ID": AGENT_CURSOR}
@@ -555,9 +588,6 @@ def agent_samples(ljos: Path) -> dict[str, str]:
                 ),
             ]
         )
-        code, text = _pty_run(["packset", "ensure"], base, cwd, 120)
-        if code != 0:
-            raise SystemExit(f"packset ensure exited {code}:\n{text}")
         code, text = _pty_run(["ljos", "onboard", "--harness", "all"], base, cwd, 120)
         if code != 0:
             raise SystemExit(f"ljos onboard exited {code}:\n{text}")
@@ -687,10 +717,15 @@ def agent_samples(ljos: Path) -> dict[str, str]:
                 "2026-11-13T00:00:00.000Z\tclaude\tbox\n",
                 encoding="utf-8",
             )
-            bare = _show(["ljos", "seat"], _agent_env(side, ljos), side, "ljos seat")
+            bare = _show(
+                ["ljos", "seat"],
+                _agent_env(side, ljos, pack),
+                side,
+                "ljos seat",
+            )
             fix_code, fix_text = _pty_run(
                 ["ljos", "seat"],
-                _agent_env(side, ljos, {"LJOS_SEAT": "ada"}),
+                _agent_env(side, ljos, {**pack, "LJOS_SEAT": "ada"}),
                 side,
                 30,
             )
@@ -714,7 +749,7 @@ def agent_samples(ljos: Path) -> dict[str, str]:
         subprocess.run(
             ["packset", "stop"],
             cwd=home / "work",
-            env=_agent_env(home, ljos),
+            env=_agent_env(home, ljos, pack),
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
