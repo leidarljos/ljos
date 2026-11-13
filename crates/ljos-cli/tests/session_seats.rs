@@ -102,6 +102,10 @@ fn two_sessions_differ_and_an_explicit_seat_wins() {
     let stdout = String::from_utf8_lossy(&named.stdout);
     assert_eq!(field(&stdout, "seat"), "ada", "{text}");
     assert!(field(&stdout, "source").contains("LJOS_SEAT"), "{text}");
+    assert!(
+        !String::from_utf8_lossy(&named.stderr).contains("writing as"),
+        "an exported seat warned against the session name:\n{text}"
+    );
 }
 
 /// The parent has a Claude session id. This process is started without it,

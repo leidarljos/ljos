@@ -3556,7 +3556,7 @@ fn run_command() -> Result<()> {
                 qd,
             )
             .map_err(ticket_error)?;
-            let mut rest = text;
+            let mut rest = ljos_cli::ensure_project_line(&text, &project);
             if let (Some((n, d)), false) = (qd, id.is_empty()) {
                 let note = format!("{}{n} by {}", ljos_cli::reap::QUORUM_NOTE, d.trim());
                 let _ = std::fmt::Write::write_fmt(

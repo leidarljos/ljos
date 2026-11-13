@@ -4269,13 +4269,14 @@ fn named_var(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty() && !omitted_actor_name(v))
 }
 
-/// The seat this conversation would be, with `LJOS_SEAT` out of the way:
-/// the seat this server was given, the box seat map, the record under a
-/// conversation id, a runner variable that names its own seat, or the
-/// seat an agy or opencode conversation id books as. The client's name
-/// is not a seat, and the login user is not one of these. A record that
-/// only says `seat` is kept here so the disagreement line can name the
-/// conversation id that did not resolve.
+/// The seat this conversation was given, with `LJOS_SEAT` out of the way:
+/// the seat this server was given, the box seat map, or the record under a
+/// conversation id. A runner session name is not one of these. It is the
+/// seat the conversation would take with `LJOS_SEAT` unset, and an exported
+/// `LJOS_SEAT` stays quiet against it. The session id still tags the holder.
+/// The client's name is not a seat, and the login user is not one of these.
+/// A record that only says `seat` is kept here so the disagreement line can
+/// name the conversation id that did not resolve.
 fn conversation_derived_seat() -> Option<String> {
     let recorded = seat_from_session_records();
     if let Some(seat) = ANNOUNCED
@@ -4293,16 +4294,7 @@ fn conversation_derived_seat() -> Option<String> {
     if let Some(seat) = mapped_box_seat() {
         return Some(seat);
     }
-    if let Some(seat) = recorded {
-        return Some(seat.seat);
-    }
-    if let Some(session) = live_harness_session() {
-        return Some(session.name);
-    }
-    if let Some(seat) = seat_from_runner_env() {
-        return Some(seat.seat);
-    }
-    None
+    recorded.map(|seat| seat.seat)
 }
 
 /// `~/.config/ljos/seats.toml`: conversation id to seat. A `seats` key is
@@ -4344,6 +4336,8 @@ pub fn missing_seat_value() -> String {
 
 /// One line when `LJOS_SEAT` and the conversation's seat are both set and
 /// are not the same seat. `None` when either is missing or they agree.
+/// [`conversation_derived_seat`] does not treat a runner session name as
+/// that seat, so an exported `LJOS_SEAT` stays quiet against it.
 fn seat_disagreement_line() -> Option<String> {
     let env_seat = named_var("LJOS_SEAT")?;
     let derived = conversation_derived_seat()?;
@@ -4402,9 +4396,11 @@ pub fn whoami() -> Seat {
 }
 
 fn whoami_resolved() -> Seat {
-    // A helper that hardcodes LJOS_SEAT would otherwise book another
-    // conversation's writes under that name with no word said. The named
-    // seat still wins. The warning is one line and does not ask anyone.
+    // A helper that hardcodes LJOS_SEAT would otherwise book a conversation
+    // another seat was given under that name with no word said. The named
+    // seat still wins. A runner session name is not that other seat: an
+    // exported LJOS_SEAT is the seat, and the session id tags the holder.
+    // The warning is one line and does not ask anyone.
     warn_seat_disagreement();
     // Both variables are a person naming the seat: the seat's own, and the
     // tracker's name for the same thing. A legacy holder is the seat it
@@ -42470,6 +42466,24 @@ fn git_refusal(out: &std::process::Output) -> String {
     }
 }
 
+/// `project: NAME` when the tracker did not print one.
+///
+/// vissue 0.24 printed this line and then the heading. A later tracker
+/// prints the heading and the path and leaves the project out. The id
+/// stays on standard output. This line is the first of the rest, so the
+/// project is named before the heading.
+#[must_use]
+pub fn ensure_project_line(text: &str, project: &str) -> String {
+    let project = project.trim();
+    let present = text
+        .lines()
+        .any(|line| line.trim_start().starts_with("project:"));
+    if project.is_empty() || present {
+        return text.to_string();
+    }
+    format!("project: {project}\n{text}")
+}
+
 /// The id `vissue create` printed.
 ///
 /// vissue 0.24 prints `project: NAME` and then the heading line
@@ -42510,7 +42524,7 @@ fn explain_git_refusal(said: &str) -> String {
 
 #[cfg(test)]
 mod created_issue_id_tests {
-    use super::{created_issue_id, explain_git_refusal};
+    use super::{created_issue_id, ensure_project_line, explain_git_refusal};
 
     #[test]
     fn the_project_line_is_not_the_id() {
@@ -42525,6 +42539,34 @@ file: /tmp/tracker/Software/demo/issues.org
     #[test]
     fn a_quiet_create_is_the_id_alone() {
         assert_eq!(created_issue_id("demo-zcre\n"), "demo-zcre");
+    }
+
+    #[test]
+    fn a_missing_project_line_is_printed_before_the_heading() {
+        let text = "\
+demo-zcre  TODO  [#C]  Pick a parser
+file: /tmp/tracker/Software/demo/issues.org
+";
+        let out = ensure_project_line(text, "demo");
+        assert_eq!(
+            out,
+            "\
+project: demo
+demo-zcre  TODO  [#C]  Pick a parser
+file: /tmp/tracker/Software/demo/issues.org
+"
+        );
+        assert_eq!(created_issue_id(&out), "demo-zcre");
+    }
+
+    #[test]
+    fn a_project_line_the_tracker_printed_is_left_alone() {
+        let text = "\
+project: demo
+demo-zcre  TODO  [#C]  Pick a parser
+";
+        assert_eq!(ensure_project_line(text, "other"), text);
+        assert_eq!(ensure_project_line(text, "  "), text);
     }
 
     #[test]
@@ -69481,35 +69523,32 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(r.reason.ends_with("Run `ljos sitting demo-6c3z` instead."));
     }
 
+    /// An exported `LJOS_SEAT` is the seat. A runner session id tags the
+    /// holder and does not name a second seat, so it does not change the
+    /// disagreement line. A seat a map, a record or the client already
+    /// named still does. The exported name is the one that writes.
     #[test]
-    fn a_set_seat_that_disagrees_with_the_conversation_is_kept() {
+    fn an_exported_seat_is_quiet_against_the_session_name() {
         let _env = env_guard();
-        unsafe {
-            std::env::set_var("OPENCODE_SESSION_ID", "ses_opencode_note_0001");
-        }
-        let derived = super::conversation_derived_seat().expect("a conversation seat");
-        let kept = if super::canonical_seat_name(&derived) == "papers" {
-            "ink"
-        } else {
-            "papers"
-        };
-        unsafe { std::env::set_var("LJOS_SEAT", kept) };
-        let line = super::seat_disagreement_line().expect("one warning");
-        assert_eq!(line.lines().count(), 1, "{line}");
-        assert!(line.contains(kept), "{line}");
-        assert!(
-            line.contains(&super::canonical_seat_name(&derived)),
-            "{line}"
-        );
-        assert!(line.contains("writing as"), "{line}");
-        let who = super::whoami();
+        let id = "ses_opencode_note_0001";
+        let before = super::conversation_derived_seat();
+        unsafe { std::env::set_var("OPENCODE_SESSION_ID", id) };
+        let after = super::conversation_derived_seat();
         assert_eq!(
-            super::canonical_seat_name(&who.seat),
-            super::canonical_seat_name(kept),
+            before, after,
+            "a runner session id is not a seat this conversation was given"
+        );
+        unsafe { std::env::set_var("LJOS_SEAT", "papers") };
+        if after.is_none() {
+            assert_eq!(super::seat_disagreement_line(), None);
+        }
+        let who = super::whoami();
+        assert_eq!(super::canonical_seat_name(&who.seat), "papers", "{who:?}");
+        assert_eq!(
+            who.holder,
+            super::holder_for_session("papers", id),
             "{who:?}"
         );
-        unsafe { std::env::set_var("LJOS_SEAT", &derived) };
-        assert_eq!(super::seat_disagreement_line(), None);
         unsafe { std::env::remove_var("OPENCODE_SESSION_ID") };
         unsafe { std::env::remove_var("LJOS_SEAT") };
         assert_eq!(super::seat_disagreement_line(), None);
