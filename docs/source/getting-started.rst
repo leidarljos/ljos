@@ -176,10 +176,11 @@ One seat holds a ticket at a time. Bob's claim is refused, and the refusal names
    $ LJOS_SEAT=alice ljos claim demo-2f5j --assignee alice
    gen=2
    tracker: demo-2f5j STARTED under alice
+   tracker git: committed chore(issues): demo-2f5j claimed by alice; no remote, kept local
    $ LJOS_SEAT=bob ljos claim demo-2f5j --assignee bob
    label claim-conflict: claim: demo-2f5j is held by another (alice, seat alice, still running, ...), not by bob (this one).
 
-The rest of bob's line names ``ljos release``, ``ljos note`` and ``ljos send``. The ticket stays with alice.
+The rest of bob's line names ``ljos release``, ``ljos complete``, ``ljos note`` and ``ljos send``. The ticket stays with alice.
 Bob can file another ticket. To help on this one, bob writes a note.
 
 .. code:: console

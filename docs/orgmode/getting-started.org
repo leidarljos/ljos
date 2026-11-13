@@ -108,12 +108,13 @@ $ LJOS_SEAT=alice ljos file "Pick a codec" -p demo -t decision --options keep,dr
 demo-2f5j
 project: demo
 demo-2f5j  TODO  [#C]  Pick a codec
-file: ~/.local/share/vissue/tracker/Software/demo/issues.org
+file: /home/you/.local/share/vissue/tracker/Software/demo/issues.org
 tracker git: committed chore(issues): demo-2f5j filed by alice; no remote, kept local
 #+end_src
 
 The id is the only line on standard output, so =id=$(LJOS_SEAT=alice ljos file ...)= captures it.
 The heading, the path and the commit line are on standard error. The id in the heading is the same one.
+The =file:= line is the absolute path. =/home/you= above names the home directory.
 Under a runner that already recorded a seat, ljos names both and writes as =LJOS_SEAT=.
 With no git identity the heading is still written, and the last line is =tracker git: commit refused: Author identity unknown. Set git user.name and user.email, then run the command again=.
 =ljos doctor= then warns that the issue file is uncommitted.
@@ -133,16 +134,22 @@ day-ab12  Ship the codec
 next: day-cd34  measure the files
 tracker git: committed chore(issues): day-ab12 filed, day-cd34 filed, day-ef56 filed, day-gh78 filed by alice; no remote, kept local
 sitting day-ab12: checking blockers
-day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
+tracker: day-ab12 STARTED under alice
+tracker git: committed chore(issues): day-ab12 claimed by alice; no remote, kept local
+ljos is ready: memory, tracker and command guard work.
+memory degraded: ranked by words
 next: day-cd34  measure the files
+day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
 $ LJOS_SEAT=alice ljos finish day-cd34
 ticked day-cd34
 next: day-ef56  pick a default
+tracker git: committed chore(issues): day-cd34 ticked by alice; no remote, kept local
 $ LJOS_SEAT=alice ljos ready --mine
 next: day-ef56  pick a default
 #+end_src
 
-The ids are the ones that run printed. The parent is claimed. Each item stays open until =ljos finish= ticks it. A sitting with no =--verbose= prints what needs action. A degraded pack is one line, =memory degraded: ranked by words=. Quiet claims are a count that points at =ljos claims --mine=. =ljos sitting ISSUE --verbose= prints every section.
+The ids are the ones that run printed. The parent is claimed. Each item stays open until =ljos finish= ticks it. A sitting with no =--verbose= prints what needs action. With =--no-embed= the pack has no encoder, so the sitting prints =memory degraded: ranked by words=. Quiet claims are a count that points at =ljos claims --mine=. =ljos sitting ISSUE --verbose= prints every section.
+Under a runner the holder on the =STARTED= line can be =alice= plus =@= and a session tag. The claim command below prints the seat name.
 
 * A second seat
 
@@ -152,11 +159,12 @@ One seat holds a ticket at a time. Bob's claim is refused, and the refusal names
 $ LJOS_SEAT=alice ljos claim demo-2f5j --assignee alice
 gen=2
 tracker: demo-2f5j STARTED under alice
+tracker git: committed chore(issues): demo-2f5j claimed by alice; no remote, kept local
 $ LJOS_SEAT=bob ljos claim demo-2f5j --assignee bob
 label claim-conflict: claim: demo-2f5j is held by another (alice, seat alice, still running, ...), not by bob (this one).
 #+end_src
 
-The rest of bob's line names =ljos release=, =ljos note= and =ljos send=. The ticket stays with alice.
+The rest of bob's line names =ljos release=, =ljos complete=, =ljos note= and =ljos send=. The ticket stays with alice.
 Bob can file another ticket. To help on this one, bob writes a note.
 
 #+begin_src console
