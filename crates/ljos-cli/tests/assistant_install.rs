@@ -168,6 +168,37 @@ fn onboard_with_no_assistant_names_the_next_command() {
     assert!(text.contains("`ljos onboard --harness NAME`"), "{text}");
 }
 
+/// Claude's directory is present and the `claude` command is not.
+/// Onboard and doctor both name the install, and doctor keeps the seat ready.
+#[test]
+fn a_missing_claude_command_names_the_install() {
+    let home = Home::new();
+    stubs(&home);
+    std::fs::remove_file(home.path().join("bin").join("claude")).unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    let onboard = home.ljos(&["onboard", "--harness", "claude"]);
+    let onboard_text = said(&onboard);
+    assert!(!onboard.status.success(), "{onboard_text}");
+    assert!(
+        onboard_text.contains(
+            "no\tclaude mcp\tclaude is not on PATH. Install it, then run `ljos onboard --harness claude`"
+        ),
+        "{onboard_text}"
+    );
+    let doctor = home.ljos(&["doctor"]);
+    let doctor_text = said(&doctor);
+    assert!(
+        doctor_text.contains(
+            "warn\trunner mcp\tclaude: not registered; claude is not on PATH. Install it, then run `ljos onboard --harness claude`"
+        ),
+        "{doctor_text}"
+    );
+    assert!(
+        !doctor_text.contains("no\trunner mcp"),
+        "a missing command failed the ready seat: {doctor_text}"
+    );
+}
+
 /// Commands on `PATH`, and no config directory yet, are enough to find the three.
 #[test]
 fn detects_claude_cursor_and_codex_from_commands() {
@@ -200,7 +231,12 @@ fn detects_claude_cursor_and_codex_from_directories() {
     let out = home.ljos(&["onboard", "--harness", "all", "--dry-run"]);
     let text = said(&out);
     assert!(text.contains("found claude, codex, cursor"), "{text}");
-    assert!(text.contains("claude not on PATH"), "{text}");
+    assert!(
+        text.contains(
+            "claude is not on PATH. Install it, then run `ljos onboard --harness claude`"
+        ),
+        "{text}"
+    );
     for path in registration(home.path()) {
         assert!(!path.exists(), "dry-run wrote {}", path.display());
     }

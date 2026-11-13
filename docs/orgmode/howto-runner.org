@@ -71,7 +71,7 @@ ok	skill	wrote /home/you/.runner/skills/ljos/SKILL.md
 
 =--dry-run= reports what would be written. The name =runner= in the example
 is not a program. Until that program is on =PATH=, the mcp line is
-=no= and says =runner not on PATH=, and the command exits 1. The skill
+=no= and says =runner is not on PATH=. The same line names =ljos onboard --harness runner= as the command to run after that program is installed, and the command exits 1. The skill
 line can still be =ok=. Copy the tables from =ljos onboard --example=.
 That file also passes =XDG_RUNTIME_DIR= for a runner that rebuilds its
 environment.

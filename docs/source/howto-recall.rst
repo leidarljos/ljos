@@ -45,6 +45,10 @@ The bypass log keeps the label.
    $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
    {"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"allow\twarn\tgit-force-push\ta force push rewrites a published branch"}}
 
+That JSON is what the runner reads. The same warning is also written on standard error, for the person at the terminal.
+The sample is from inside a repository, on a branch other than ``develop`` or ``main``.
+Outside a repository the JSON also names ``sitting-gate``, because the branch cannot be read.
+
 A warning is the only thing between a runner and a destructive command.
 Keep backups, protect branches on the forge, and keep a runner where it
 cannot reach what it must not touch.

@@ -71,14 +71,15 @@ The tracker commits each change, so git needs an identity:
    $ ljos doctor
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
    warn	seat source	no seat rule matched; reading every seat. Set one with --seat NAME or export LJOS_SEAT=NAME
-   ok	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
+   info	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
+   ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
 
 On a clean install the ready line names memory, the tracker and the command guard.
 With no seat named, a ``seat source`` row warns that the read uses every seat.
-The ``sitting-gate`` row follows it. The person's commits, merges and pushes are not held when no agent runner is above the shell.
+The ``sitting-gate`` row follows it. With no agent runner above the shell the word is ``info``, and the person's commits, merges and pushes are not held.
 Under a runner the same row names the seat and the branches a push waits on, ``develop`` or ``main``, and the number of seats that push waits for.
 A fresh tracker has no seat list, so that number is 2. When ``vissue.toml`` lists one active seat, that seat's own vote settles the push.
-A row under the ready line names anything that still needs action. Add ``--all`` to see every row.
+A ``warn`` or ``no`` row under the ready line names anything that still needs action. The config row is always printed. With nothing set it says the defaults stand. Add ``--all`` to see every row.
 
 To install by hand, with ``cargo-binstall`` already on ``PATH``, or to see what onboarding would write:
 

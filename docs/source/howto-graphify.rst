@@ -25,6 +25,8 @@ A named platform is the same command with a flag, for example ``graphify cursor 
    $ graphify install
 
 ``pipx install graphifyy`` is the other install.
+If neither ``uv`` nor ``pipx`` is a command, ``python3 -m pip install --user graphifyy`` installs ``graphify`` into ``~/.local/bin``.
+The ljos installer adds that directory to ``PATH``.
 ljos is installed on its own. :doc:`Getting started <getting-started>` covers that.
 
 Build the graph
@@ -37,6 +39,10 @@ In the repository, in the assistant:
    /graphify .
 
 Codex uses ``$graphify`` for the same skill.
+With no assistant, ``graphify update .`` writes the same files and does not call a model.
+``graphify install`` with no assistant found still writes ``~/.claude`` and tells you to type ``/graphify .``.
+That directory is enough for ``ljos onboard`` to try to register Claude Code.
+If ``claude`` is not a command, the mcp line names that and the command to run once it is installed.
 The run writes three files under ``graphify-out/``: ``graph.html``, ``GRAPH_REPORT.md`` and ``graph.json``.
 ``graph.json`` is a NetworkX node-link graph.
 ``graph.schema_version`` is the major. This ljos reads major 1.

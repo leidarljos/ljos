@@ -6460,7 +6460,10 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             if !on_path(&argv[0]) {
                 return Step {
                     what,
-                    detail: format!("{} not on PATH", argv[0]),
+                    detail: format!(
+                        "{} is not on PATH. Install it, then run `ljos onboard --harness {}`",
+                        argv[0], h.name
+                    ),
                     ok: false,
                 };
             }
@@ -16496,6 +16499,13 @@ fn harness_rows() -> Vec<Habitat> {
             rows.push(Habitat {
                 name: "runner mcp",
                 state: match (registered, &probed) {
+                    (false, _) if h.register.first().is_some_and(|bin| !on_path(bin)) => {
+                        let bin = h.register.first().map(String::as_str).unwrap_or("the command");
+                        format!(
+                            "{}: not registered; {bin} is not on PATH. Install it, then run `ljos onboard --harness {}`",
+                            h.name, h.name
+                        )
+                    }
                     (false, _) => format!(
                         "{}: not registered; ljos onboard --harness {}",
                         h.name, h.name
@@ -32875,6 +32885,11 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         && (names_unpushed(&row.state) || row.state.contains(UNCOMMITTED_EDITS))
     {
         return "warn";
+    }
+    // A runner that is not registered, or a hook the person has not
+    // trusted yet, needs a step and does not stop the seat.
+    if matches!(row.name, "runner mcp" | "runner hook trust") {
+        return if row.ok { "ok" } else { "warn" };
     }
     // An idle gate on the person's machine is no fault. Under a runner,
     // settings that do not read refuse every protected push: a warning.
