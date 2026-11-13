@@ -5,6 +5,21 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.41.8 (2026-11-12)
+
+### Fixes
+
+- Rerank tests and the guard home test create their own directory instead of /home/ubuntu.
+- The mcp lifetime lists a process's children on macOS with proc_listchildpids.
+  Linux still reads /proc.
+- The seat hook takes a flight lock per seat.
+  A lock whose process has exited is taken again.
+- `ljos_sitting` on an issue the tracker does not hold returns an error that names that issue.
+  The call writes nothing in the product checkout.
+- `ljos_start` files and claims one issue for the conversation.
+  The next write notes on that issue, so a second issue is not filed.
+
+
 ## 0.41.7 (2026-11-12)
 
 ### Fixes
