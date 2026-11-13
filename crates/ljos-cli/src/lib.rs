@@ -39927,22 +39927,29 @@ fn tracker_git_at(dir: &Path) -> std::process::Command {
 /// `git status` by the repository's `info/exclude`. Not in `.git`, where a
 /// hand clearing `*.lock` after a crash would unlink it under a live holder
 /// and the next seat would lock a new file beside it. `None` outside a git
-/// checkout. An exported `GIT_DIR` does not choose the checkout, in a hook
-/// or out of one.
+/// checkout. The work tree is the one `dir` sits in. An exported `GIT_DIR`,
+/// `GIT_WORK_TREE` or `GIT_INDEX_FILE` does not choose it, in a hook or out
+/// of one: those variables are dropped on the git call that finds the
+/// common directory.
 fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
-    let mut cmd = git_at(dir);
-    cmd.args(["rev-parse", "--show-toplevel", "--git-common-dir"])
+    let top = tracker_place::work_tree(dir)?;
+    let mut cmd = git_at(&top);
+    cmd.args(["rev-parse", "--git-common-dir"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     git_hooks::hook_child_env(&mut cmd);
-    let out = bounded_output(&mut cmd)
-        .ok()
-        .filter(|o| o.status.success())?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = text.lines().map(str::trim);
-    let top = PathBuf::from(lines.next().filter(|l| !l.is_empty())?);
-    if let Some(common) = lines.next().filter(|l| !l.is_empty()) {
-        exclude_tracker_lock(&dir.join(common));
+    if let Some(out) = bounded_output(&mut cmd).ok().filter(|o| o.status.success()) {
+        let common = String::from_utf8_lossy(&out.stdout);
+        let common = common.trim();
+        if !common.is_empty() {
+            let path = Path::new(common);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                top.join(path)
+            };
+            exclude_tracker_lock(&path);
+        }
     }
     Some(top.join(TRACKER_LOCK))
 }
@@ -40365,9 +40372,7 @@ pub fn tracker_log(seat: Option<&str>) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .root()
         .to_path_buf();
-    let out = git_cmd()
-        .arg("-C")
-        .arg(&root)
+    let out = git_at(&root)
         .args(["log", "--format=%h %s"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -40411,9 +40416,7 @@ pub fn tracker_usage(since: &str) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .root()
         .to_path_buf();
-    let out = git_cmd()
-        .arg("-C")
-        .arg(&root)
+    let out = git_at(&root)
         .args(["log", &format!("--since={since}"), "--format=%s"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -40932,13 +40935,10 @@ const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 /// git process working in the checkout. A git killed outright leaves one,
 /// and every later commit fails on it until a person removes it.
 pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
-    let mut cmd = git_cmd();
-    cmd.arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
+    let mut cmd = git_at(dir);
+    cmd.args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    apply_git_command_env(&mut cmd);
     git_hooks::hook_child_env(&mut cmd);
     let out = bounded_output(&mut cmd)
         .ok()
@@ -48729,12 +48729,19 @@ mod tests {
             std::fs::read_to_string(root.join(".git/info/exclude")).unwrap_or_default()
         };
         let decoy_exclude = exclude(&decoy);
+        let index = decoy.join(".git/index");
+        std::env::set_var("GIT_DIR", decoy.join(".git"));
+        std::env::set_var("GIT_WORK_TREE", &decoy);
+        std::env::set_var("GIT_INDEX_FILE", &index);
         let _decoy = super::GitCommandEnv::set([
             ("GIT_DIR", decoy.join(".git").as_os_str()),
             ("GIT_WORK_TREE", decoy.as_os_str()),
+            ("GIT_INDEX_FILE", index.as_os_str()),
         ]);
+        // The lock follows the checkout that holds the path, including a
+        // subdirectory of it, not the repository named by GIT_DIR.
         assert_eq!(
-            super::tracker_lock_path(&real),
+            super::tracker_lock_path(&real.join("Software/probe")),
             Some(real.join(TRACKER_LOCK))
         );
         let held = tracker_commit_lock(&real);
