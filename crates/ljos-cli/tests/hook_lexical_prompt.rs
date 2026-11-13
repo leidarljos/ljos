@@ -133,9 +133,23 @@ fn executable(path: &Path, text: &str) {
 }
 
 /// `echo PROMPT | ljos hook --prompt` against the fixture store.
+fn hook_argv(home: &Path, path: &str, port: &str, line: &str) -> std::process::Output {
+    hook_with(home, path, port, line, &["hook"])
+}
+
 fn hook_prompt(home: &Path, path: &str, port: &str, prompt: &str) -> std::process::Output {
+    hook_with(home, path, port, prompt, &["hook", "--prompt"])
+}
+
+fn hook_with(
+    home: &Path,
+    path: &str,
+    port: &str,
+    line: &str,
+    args: &[&str],
+) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
-        .args(["hook", "--prompt"])
+        .args(args)
         .env_clear()
         .env("HOME", home)
         .env("XDG_RUNTIME_DIR", home.join("run"))
@@ -158,8 +172,8 @@ fn hook_prompt(home: &Path, path: &str, port: &str, prompt: &str) -> std::proces
         .stdin
         .take()
         .expect("stdin")
-        .write_all(prompt.as_bytes())
-        .expect("write prompt");
+        .write_all(line.as_bytes())
+        .expect("write stdin");
     child.wait_with_output().expect("wait")
 }
 
@@ -225,4 +239,38 @@ fn a_lexical_prompt_keeps_the_distinctive_lesson_and_drops_the_generic_ones() {
         !stderr.to_ascii_lowercase().contains("refus"),
         "stderr:\n{stderr}"
     );
+}
+
+/// A bare command on stdin is an argv. The guard is unchanged, and the
+/// lessons that bear on the line are printed, as they are for a prompt.
+#[test]
+fn a_bare_command_on_stdin_prints_the_lesson_it_bears_on() {
+    let fixture = fixture();
+    let home = SeatHome::new("hook-argv-recall");
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin");
+    executable(
+        &bin.join("vissue"),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'vissue 0.23.0' ;;\n  *) echo '{}' ;;\nesac\nexit 0\n",
+    );
+    executable(&bin.join("packset"), "#!/bin/sh\nexit 0\n");
+    let port = lexical_store(fixture["lessons"].clone());
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let line = fixture["prompt"].as_str().expect("prompt");
+    let out = hook_argv(home.path(), &path, &port, line);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    let show = fixture["show"].as_str().expect("show");
+    assert!(
+        stdout.contains(show),
+        "the related lesson was not printed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    for hidden in fixture["hide"].as_array().expect("hide") {
+        let text = hidden.as_str().expect("hide text");
+        assert!(
+            !stdout.contains(text),
+            "an unrelated lesson was printed: {text}\nstdout:\n{stdout}"
+        );
+    }
 }

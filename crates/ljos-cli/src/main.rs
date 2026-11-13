@@ -4015,7 +4015,9 @@ fn run_command() -> Result<()> {
             // Search on the prompt. A camel-case runner discards that
             // stdout, so each held note goes out on the next tool result.
             // Stop additionalContext starts another round, so that runner
-            // does not print a held note on Stop. PreToolUse / argv only decide.
+            // does not print a held note on Stop. PreToolUse only decides.
+            // A bare command is an argv. The guard above is unchanged, and
+            // the note is the recall a prompt would hand that line.
             // Printed after the recalled lessons, once. A label, not a refusal.
             let mut origin_note: Option<String> = None;
             let mut context = match call.event.as_str() {
@@ -4034,7 +4036,9 @@ fn run_command() -> Result<()> {
                         seen_later.extend(keys);
                         note
                     } else {
-                        String::new()
+                        let (note, keys) = hook_note(&call, limit);
+                        seen_later.extend(keys);
+                        note
                     };
                     // A timed-out or crashed guard allowed this call. Say so.
                     let note = match ljos_cli::take_guard_note() {
