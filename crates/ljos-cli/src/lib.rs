@@ -18077,13 +18077,13 @@ fn down_facts() -> DownFacts {
         asked,
         asked_port,
         packset,
-        our_home,
-        our_pack,
         writers: if packset && !url_off {
-            seen_writers()
+            seen_writers(asked_port, &our_home, &our_pack)
         } else {
             Vec::new()
         },
+        our_home,
+        our_pack,
         temp: bookkeep::temp_home(),
     }
 }
@@ -18276,6 +18276,15 @@ fn listen_inodes() -> std::collections::BTreeMap<u64, u16> {
 }
 
 #[cfg(target_os = "linux")]
+fn proc_ppid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status.lines().find_map(|line| {
+        let rest = line.strip_prefix("PPid:")?;
+        rest.split_whitespace().next()?.parse().ok()
+    })
+}
+
+#[cfg(target_os = "linux")]
 fn proc_uid(pid: u32) -> Option<u32> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     status.lines().find_map(|line| {
@@ -18327,10 +18336,74 @@ fn proc_ports(pid: u32, listening: &std::collections::BTreeMap<u64, u16>) -> Vec
     held
 }
 
-/// packsetd processes of this user. Another user's writer is not this
-/// seat's, and this process is not one.
+/// Whether `pid` was started by this seat. A hook is a shell and another
+/// `ljos` between the seat and the process that asks, and a stand-in
+/// writer is the seat's child. The walk stops at the seat: the process
+/// above it is cargo or a runner, and a writer that process started is
+/// not this seat's. A writer another home detached is not in the chain.
 #[cfg(target_os = "linux")]
-fn seen_writers() -> Vec<SeenWriter> {
+fn started_with_us(pid: u32) -> bool {
+    let Some(theirs) = proc_ppid(pid) else {
+        return false;
+    };
+    let me = std::process::id();
+    if theirs == me {
+        return true;
+    }
+    let mut cur = me;
+    for _ in 0..8 {
+        let Some(parent) = proc_ppid(cur) else {
+            return false;
+        };
+        if parent <= 1 {
+            return false;
+        }
+        if theirs == parent {
+            return true;
+        }
+        if cur != me && !in_seat_chain(&proc_comm(cur)) {
+            return false;
+        }
+        cur = parent;
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn proc_comm(pid: u32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// A shell or this program, sitting between the seat and the ask.
+#[cfg(target_os = "linux")]
+fn in_seat_chain(comm: &str) -> bool {
+    comm == "ljos"
+        || comm == "ljos-mcp"
+        || matches!(comm, "sh" | "bash" | "dash" | "zsh" | "ash" | "ksh")
+}
+
+/// A running packsetd explains the port this seat asked when it listens
+/// there, when its home or its pack home is this seat's, or when this
+/// seat started it. Another home's writer on another port does not: the
+/// default port is not an exception.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn counts_for_this_seat(
+    on_asked_port: bool,
+    same_home: bool,
+    same_pack: bool,
+    started_here: bool,
+) -> bool {
+    on_asked_port || same_home || same_pack || started_here
+}
+
+/// packsetd processes of this user that explain the port this seat asked.
+/// Another user's writer is not this seat's, and this process is not one.
+/// A writer for another home, on a port this seat did not ask, and not
+/// started with this seat, is that home's writer.
+#[cfg(target_os = "linux")]
+fn seen_writers(asked_port: Option<u16>, our_home: &str, our_pack: &str) -> Vec<SeenWriter> {
     let listening = listen_inodes();
     let me = euid();
     let Ok(dir) = std::fs::read_dir("/proc") else {
@@ -18359,8 +18432,15 @@ fn seen_writers() -> Vec<SeenWriter> {
         if pack_home.is_empty() && !home.is_empty() {
             pack_home = pack_home_under(&home);
         }
+        let ports = proc_ports(pid, &listening);
+        let on_asked = asked_port.is_some_and(|port| ports.contains(&port));
+        let same_home = !home.is_empty() && home_paths_match(&home, our_home);
+        let same_pack = !pack_home.is_empty() && home_paths_match(&pack_home, our_pack);
+        if !counts_for_this_seat(on_asked, same_home, same_pack, started_with_us(pid)) {
+            continue;
+        }
         out.push(SeenWriter {
-            ports: proc_ports(pid, &listening),
+            ports,
             home,
             pack_home,
         });
@@ -18369,7 +18449,7 @@ fn seen_writers() -> Vec<SeenWriter> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn seen_writers() -> Vec<SeenWriter> {
+fn seen_writers(_asked_port: Option<u16>, _our_home: &str, _our_pack: &str) -> Vec<SeenWriter> {
     Vec::new()
 }
 
@@ -62848,6 +62928,21 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let off = super::render_down(&off);
         assert_eq!(off, "PACKSET_URL=off: this seat has no pack on purpose");
         assert!(!off.contains("packsetd is unreachable"), "{off}");
+    }
+
+    /// The default port belonging to another home is not the port this
+    /// seat asked. A writer counts when it listens on the asked port,
+    /// when the home is this seat's, or when this seat started it.
+    #[test]
+    fn another_homes_writer_on_the_default_port_is_not_this_seat() {
+        assert!(
+            !super::counts_for_this_seat(false, false, false, false),
+            "a writer on 127.0.0.1:8761 for another home does not explain a different port"
+        );
+        assert!(super::counts_for_this_seat(true, false, false, false));
+        assert!(super::counts_for_this_seat(false, true, false, false));
+        assert!(super::counts_for_this_seat(false, false, true, false));
+        assert!(super::counts_for_this_seat(false, false, false, true));
     }
 
     /// A duplicate is the atom the pack already holds, not an error and

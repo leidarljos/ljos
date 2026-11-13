@@ -5,6 +5,10 @@
 //! that, and the process stays up.
 
 ljos_test_boot::harness!();
+
+#[path = "common/refused_port.rs"]
+mod refused_port;
+
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -222,12 +226,18 @@ fn tools_list_answers_with_an_empty_home_and_no_tracker() {
 #[test]
 fn a_missing_pack_names_the_next_step_and_the_client_is_not_the_seat() {
     let home = tempfile::tempdir().unwrap();
+    // Held closed, and not the default port. A writer already listening
+    // there belongs to another home and is not this seat's pack.
+    let held = refused_port::RefusedPort::reserve();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("USER", "walk")
         .env("LOGNAME", "walk")
+        .env("PACKSET_PORT", held.port().to_string())
+        .env("PACKSET_TIMEOUT_MS", "400")
+        .env("LJOS_PACK_TIMEOUT_MS", "400")
         .env_remove("LJOS_SEAT")
         .env_remove("VISSUE_AGENT")
         .env_remove("PACKSET_URL")

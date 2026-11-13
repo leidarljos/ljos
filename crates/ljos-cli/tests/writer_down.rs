@@ -4,8 +4,15 @@
 //! different home, and packset missing from PATH. Remember, search, recall,
 //! the prompt hook and every MCP tool are walked. A lesson queued while the
 //! writer is down is said to be queued and is sent on the next run.
+//!
+//! The port under test is held closed, so it is never the default port and
+//! nothing else can bind it. A detached writer for another home stands in
+//! for a writer already running on the machine: it is not this seat's.
 
 ljos_test_boot::harness!();
+
+#[path = "common/refused_port.rs"]
+mod refused_port;
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -28,8 +35,24 @@ const STANDIN_C: &str = r#"
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
+    int detach = argc > 2 && strcmp(argv[2], "daemon") == 0;
+    if (detach) {
+        pid_t mid = fork();
+        if (mid < 0) return 1;
+        if (mid > 0) {
+            int st = 1;
+            if (waitpid(mid, &st, 0) < 0) return 1;
+            if (!WIFEXITED(st)) return 1;
+            return WEXITSTATUS(st);
+        }
+        if (setsid() < 0) return 1;
+        pid_t grand = fork();
+        if (grand < 0) return 1;
+        if (grand > 0) _exit(0);
+    }
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return 1;
     struct sockaddr_in addr;
@@ -45,6 +68,7 @@ int main(int argc, char **argv) {
     FILE *out = fopen(argv[1], "w");
     if (!out) return 1;
     fprintf(out, "%u\n", (unsigned) ntohs(bound.sin_port));
+    if (detach) fprintf(out, "%d\n", (int) getpid());
     fclose(out);
     for (;;) pause();
 }
@@ -107,11 +131,88 @@ impl Drop for Seat {
     }
 }
 
-fn dead_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
+/// A packsetd for another home, detached the way a machine's writer is.
+/// Its parent is init, not this test, so it is not a writer this seat started.
+struct Decoy {
+    pid: u32,
+}
+
+impl Drop for Decoy {
+    fn drop(&mut self) {
+        let _ = Command::new("kill")
+            .args(["-9", &self.pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+fn proc_ppid(pid: u32) -> Option<u32> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    text.lines().find_map(|line| {
+        let rest = line.strip_prefix("PPid:")?;
+        rest.split_whitespace().next()?.parse().ok()
+    })
+}
+
+fn spawn_decoy(bin: &Path, home: &Path, root: &Path) -> Decoy {
+    std::fs::create_dir_all(home).unwrap();
+    let port_file = root.join(format!("decoy-{}", std::process::id()));
+    let _ = std::fs::remove_file(&port_file);
+    let mut child = Command::new(bin)
+        .arg(&port_file)
+        .arg("daemon")
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("decoy");
+    let start = std::time::Instant::now();
+    let pid = loop {
+        if let Ok(text) = std::fs::read_to_string(&port_file) {
+            let mut lines = text.lines();
+            let port = lines.next().unwrap_or("").trim().parse::<u16>().ok();
+            let pid = lines.next().unwrap_or("").trim().parse::<u32>().ok();
+            if port.is_some_and(|port| port != 0) {
+                if let Some(pid) = pid.filter(|pid| *pid != 0) {
+                    break pid;
+                }
+            }
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            if !status.success() || start.elapsed() > Duration::from_secs(2) {
+                panic!("decoy exited {status} before it wrote a pid");
+            }
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "decoy did not write a pid"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let _ = child.wait();
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+    assert_eq!(comm.trim(), "packsetd", "decoy comm was {comm:?}");
+    // `ljos` is this process or one shell under it, so a writer counts as
+    // started here when its parent is this process or this process's parent.
+    let me = std::process::id();
+    let parent = proc_ppid(me).unwrap_or(0);
+    let theirs = proc_ppid(pid).unwrap_or(0);
+    assert!(
+        theirs != 0 && theirs != me && theirs != parent,
+        "decoy parent {theirs} is in this seat's chain (me {me}, parent {parent})"
+    );
+    let env = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+    let marked = format!("HOME={}", home.display());
+    assert!(
+        env.split(|byte| *byte == 0)
+            .any(|item| item == marked.as_bytes()),
+        "decoy was not given {marked}"
+    );
+    Decoy { pid }
 }
 
 fn standin_bin(root: &Path) -> PathBuf {
@@ -697,8 +798,10 @@ fn serve_pack() -> (u16, Arc<Mutex<String>>) {
 #[test]
 fn every_surface_names_the_down_writer_and_one_command() {
     let seat = Seat::new("walk");
-    let dead = dead_port();
+    let held = refused_port::RefusedPort::reserve();
+    let dead = held.port();
     let bin = standin_bin(&seat.root);
+    let _decoy = spawn_decoy(&bin, &seat.root.join("runner-home"), &seat.root);
     let same = Writer::spawn(&bin, &seat.home(), &seat.root);
     let other = Writer::spawn(&bin, &seat.other(), &seat.root);
     let cases = cases(&seat, dead, same.port, &seat.other());
@@ -737,7 +840,10 @@ fn every_surface_names_the_down_writer_and_one_command() {
 #[test]
 fn a_queued_lesson_reaches_the_pack_on_the_next_run() {
     let seat = Seat::new("again");
-    let dead = dead_port();
+    let held = refused_port::RefusedPort::reserve();
+    let dead = held.port();
+    let bin = standin_bin(&seat.root);
+    let _decoy = spawn_decoy(&bin, &seat.root.join("runner-home"), &seat.root);
     let state = seat.root.join("state");
     let remember = ljos(
         &seat,
@@ -791,6 +897,7 @@ fn a_queued_lesson_reaches_the_pack_on_the_next_run() {
 #[test]
 fn mesh_push_names_a_queued_lesson_instead_of_zero_memories() {
     let seat = Seat::new("mesh");
+    let held = refused_port::RefusedPort::reserve();
     let state = seat.root.join("state");
     std::fs::create_dir_all(state.join("ljos")).unwrap();
     std::fs::create_dir_all(seat.root.join("tracker/.ljos/memory")).unwrap();
@@ -808,7 +915,7 @@ fn mesh_push_names_a_queued_lesson_instead_of_zero_memories() {
         &seat,
         &seat.path_without_packset(),
         &state,
-        dead_port(),
+        held.port(),
         &[
             "mesh",
             "push",
