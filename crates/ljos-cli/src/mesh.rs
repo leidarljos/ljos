@@ -291,8 +291,12 @@ fn load() -> Result<Config> {
         .context("no config directory: HOME and XDG_CONFIG_HOME are unset")?
         .join("ljos")
         .join("mesh.toml");
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("no mesh config at {}", path.display()))?;
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "no mesh config at {}. Copy examples/mesh.toml from the ljos repository to that path. `ljos mesh up` does not read this file",
+            path.display()
+        )
+    })?;
     let config: Config =
         toml::from_str(&text).with_context(|| format!("{} does not read", path.display()))?;
     check_swarm(&config.swarm)?;

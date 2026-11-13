@@ -156,6 +156,153 @@ fn file_and_finish_do_not_ask_and_name_a_missing_tool_in_one_line() {
 }
 
 #[test]
+fn cards_name_the_directory_when_both_files_are_missing() {
+    let out = run(&["cards"], &[]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{text} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("no USER.md or MEMORY.md"), "{text}");
+    assert!(
+        text.contains("ljos reads them and does not write them"),
+        "{text}"
+    );
+}
+
+#[test]
+fn mesh_pull_names_a_missing_directory() {
+    let out = run(
+        &[
+            "mesh",
+            "pull",
+            "--seat",
+            "box",
+            "--from",
+            "/no/such-ljos-handoff",
+        ],
+        &[],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("does not exist"), "{err}");
+    assert!(err.contains(".jsonl"), "{err}");
+}
+
+#[test]
+fn mesh_acl_names_the_example_file() {
+    let out = run(&["mesh", "acl"], &[]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("examples/mesh.toml"), "{err}");
+    assert!(err.contains("ljos mesh up"), "{err}");
+}
+
+#[test]
+fn bump_plan_and_findings_name_the_eb_stack_files() {
+    let plan = run(
+        &[
+            "bump-plan",
+            "out",
+            "--project",
+            "demo",
+            "--parent",
+            "demo-319z",
+            "--dry-run",
+        ],
+        &[],
+    );
+    let plan_err = String::from_utf8_lossy(&plan.stderr);
+    assert!(!plan.status.success(), "{plan_err}");
+    assert!(plan_err.contains("eb-stack"), "{plan_err}");
+    let findings = run(&["findings", "out/campaign.json"], &[]);
+    let findings_err = String::from_utf8_lossy(&findings.stderr);
+    assert!(!findings.status.success(), "{findings_err}");
+    assert!(findings_err.contains("campaign.json"), "{findings_err}");
+}
+
+#[test]
+fn a_failed_wake_shows_the_command_output() {
+    let home = tempfile::tempdir().unwrap();
+    for sub in [".config/ljos", ".local/state", "run", "tmp"] {
+        std::fs::create_dir_all(home.path().join(sub)).unwrap();
+    }
+    let mut base = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    base.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_STATE_HOME", home.path().join(".local/state"))
+        .env("XDG_RUNTIME_DIR", home.path().join("run"))
+        .env("TMPDIR", home.path().join("tmp"))
+        .env("LJOS_SEAT", "seat-a")
+        .env("LJOS_TRACKER_GIT", "off")
+        .current_dir(home.path())
+        .stdin(Stdio::null());
+    let set = base
+        .args([
+            "wake",
+            "--timeout",
+            "5",
+            "--command",
+            "echo woke-fail >&2; exit 2",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let fired = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["wake", "seat-a", "--fire"])
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_STATE_HOME", home.path().join(".local/state"))
+        .env("XDG_RUNTIME_DIR", home.path().join("run"))
+        .env("TMPDIR", home.path().join("tmp"))
+        .env("LJOS_SEAT", "seat-a")
+        .env("LJOS_TRACKER_GIT", "off")
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&fired.stderr);
+    assert!(!fired.status.success(), "{err}");
+    assert!(err.contains("woke-fail"), "{err}");
+    assert!(err.contains("exited"), "{err}");
+}
+
+#[test]
+fn seat_grant_names_this_seat_when_via_does_not_match() {
+    let out = run(
+        &[
+            "seat",
+            "grant",
+            "carol",
+            "close=own",
+            "--quote",
+            "carol may close what she files",
+            "--at",
+            "2026-10-29T02:00:00Z",
+            "--via",
+            "bob",
+        ],
+        &[],
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("this seat is saddle"), "{text}");
+    assert!(text.contains("--via names bob"), "{text}");
+}
+
+#[test]
 fn a_question_is_not_read_from_stdin() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join("run")).unwrap();

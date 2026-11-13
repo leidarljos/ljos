@@ -47,20 +47,42 @@ pub(crate) fn seat_list() -> SeatList {
 /// No seat is named, this seat may not write, `name` is not a seat, or
 /// the tracker file cannot be written.
 pub fn add(name: &str) -> Result<String> {
-    let _caller = crate::write_seat("seat add")?;
     let slug = seat_slug_of(name).context("seat add")?;
+    crate::tracker_place::aim_tracker().map_err(anyhow::Error::msg)?;
+    let caller = crate::resolve_seat();
+    let caller_slug = crate::canonical_seat_name(&caller.seat);
     let path = config_path().context("seat add: no tracker; set VISSUE_ROOT")?;
+    let listed = match seat_list() {
+        SeatList::Listed { seats, .. } => seats,
+        SeatList::Absent => std::collections::BTreeSet::new(),
+        SeatList::Broken { why } => bail!("seat add: {why}"),
+    };
+    // A list that does not name this seat still accepts a row for this seat.
+    // That is how a seat that added someone else first gets back on the list.
+    if caller_slug != slug && !listed.contains(&caller_slug) && !listed.is_empty() {
+        bail!(
+            "seat add: this seat is {caller_slug}, and it is not on the list. \
+             `ljos seat add {caller_slug}` lists it, then add {slug}. Nothing was written"
+        );
+    }
     let mut doc = load_doc(&path).context("seat add")?;
     let fresh = insert_seat(&mut doc, &slug);
     write_doc(&path, &doc).context("seat add")?;
     if let Err(why) = commit_if_repo(&path, &commit_subject("add", &slug)) {
         bail!("seat add: {why}");
     }
-    if fresh {
-        Ok(format!("added {slug} to {}\n", path.display()))
+    let mut said = if fresh {
+        format!("added {slug} to {}\n", path.display())
     } else {
-        Ok(format!("{slug} is already in {}\n", path.display()))
+        format!("{slug} is already in {}\n", path.display())
+    };
+    if fresh && caller_slug != slug && !listed.contains(&caller_slug) {
+        said.push_str(&format!(
+            "only listed seats can write now. This seat is {caller_slug}. \
+             `ljos seat add {caller_slug}` lists it.\n"
+        ));
     }
+    Ok(said)
 }
 
 /// Record a close grant for `seat`.
@@ -780,5 +802,31 @@ via = \"bea\"
             honored_grant("ada").is_none(),
             "via must be a seat listed in the grant commit"
         );
+    }
+
+    /// The first `seat add` of another name starts the list and names this
+    /// seat. Adding this seat then works, even though the list omitted it.
+    #[test]
+    fn adding_another_seat_first_names_this_one() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.email", "ada@example.invalid"]);
+        git(root, &["config", "user.name", "ada"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("ISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::set_var("LJOS_SEAT", "alice");
+        let said = super::add("carol").unwrap();
+        assert!(said.contains("added carol"), "{said}");
+        assert!(said.contains("`ljos seat add alice`"), "{said}");
+        let back = super::add("alice").unwrap();
+        assert!(back.contains("added alice"), "{back}");
+        assert!(!back.contains("only listed seats"), "{back}");
+        let err = crate::registered_seat("bob").unwrap_err().to_string();
+        assert!(err.contains("`ljos seat add bob`"), "{err}");
+        assert!(err.contains("Nothing was written"), "{err}");
     }
 }

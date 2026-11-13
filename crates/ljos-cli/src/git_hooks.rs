@@ -366,7 +366,7 @@ pub fn hooks_state(ours: &Path, configured: Option<&str>) -> (bool, String) {
     let Some(path) = nonempty(configured) else {
         return (
             false,
-            format!("{HOOKS_UNSET}, so commits are not booked; {HOOKS_FIX}"),
+            format!("{HOOKS_UNSET}, so a commit is not written on the open ticket; {HOOKS_FIX}"),
         );
     };
     let dir = Path::new(path);

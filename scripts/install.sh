@@ -668,7 +668,10 @@ say "The guard lets a force push run, with a warning:"
   cd "$HOME" || exit 1
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX \
     GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE
-  ljos policy -- git push --force origin topic
+  # The sample is a warning to read. It is not a command this person ran,
+  # so it does not land in their bypass log.
+  mkdir -p "$TMP/policy-demo"
+  XDG_DATA_HOME="$TMP/policy-demo" ljos policy -- git push --force origin topic
 ) || true
 if [ "$CLOUD" = 1 ]; then
   if "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then

@@ -94,3 +94,29 @@ fn help_groups_the_short_list_and_all_lists_the_rest() {
         assert!(out.status.success(), "{}: {}", args.join(" "), text(&out));
     }
 }
+
+#[test]
+fn common_commands_include_an_example() {
+    for (args, needle) in [
+        (&["remember", "--help"][..], "ljos remember"),
+        (&["search", "--help"][..], "ljos search"),
+        (&["file", "--help"][..], "ljos file"),
+        (&["sitting", "--help"][..], "ljos sitting --plan"),
+        (&["policy", "--help"][..], "ljos policy --"),
+        (&["forget", "--help"][..], "ljos forget"),
+        (&["onboard", "--help"][..], "ljos onboard"),
+        (&["seat", "--help"][..], "ljos seat add"),
+        (&["cards", "--help"][..], "ljos cards"),
+        (&["handover", "--help"][..], "ljos handover"),
+        (&["receive", "--help"][..], "ljos receive"),
+        (&["memory", "integrate", "--help"][..], "does not post"),
+    ] {
+        let out = run(args);
+        let help = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && help.contains(needle),
+            "{args:?}\n{help}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

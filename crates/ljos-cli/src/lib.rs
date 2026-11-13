@@ -5126,7 +5126,7 @@ pub fn registered_seat(seat: &str) -> Result<()> {
             Err(policy_label::labelled(
                 "seat-unlisted",
                 format!(
-                    "no seat named {slug} in {}, which lists {}. Nothing was written",
+                    "no seat named {slug} in {}, which lists {}. `ljos seat add {slug}` adds it. Nothing was written",
                     path.display(),
                     seats.into_iter().collect::<Vec<_>>().join(", ")
                 ),
@@ -20698,10 +20698,8 @@ pub fn packset_forget(id: &str, why: Option<&str>) -> Result<Value> {
             }
             for target in targets {
                 if let Err(err) = client.delete_atom(&workspace, &target, why) {
-                    if !err.to_string().contains("no current atom") {
-                        return Err(err).with_context(|| {
-                            format!("forget: POST /v1/atoms/delete failed for {target}")
-                        });
+                    if !missing_atom(&err) {
+                        return Err(forget_delete_error(&target, err));
                     }
                 }
             }
@@ -20712,7 +20710,24 @@ pub fn packset_forget(id: &str, why: Option<&str>) -> Result<Value> {
     let workspace = client.workspace();
     client
         .delete_atom(&workspace, &resolved, why)
-        .with_context(|| format!("forget: POST /v1/atoms/delete failed for {resolved}"))
+        .map_err(|err| forget_delete_error(&resolved, err))
+}
+
+/// A pack delete that did not find the id, as the person reads it.
+fn missing_atom(err: &impl std::fmt::Display) -> bool {
+    let text = err.to_string();
+    text.contains("no current atom") || text.contains("no atom ")
+}
+
+fn forget_delete_error(id: &str, err: impl Into<anyhow::Error>) -> anyhow::Error {
+    let err = err.into();
+    if missing_atom(&err) {
+        anyhow::anyhow!(
+            "forget: no memory has id {id}. `ljos search` prints the id. A prefix of 8 or more characters is enough"
+        )
+    } else {
+        err.context(format!("forget: the pack did not retire {id}"))
+    }
 }
 
 /// One row of the influence graph: `from` listens to `to` with `weight`.
@@ -31030,6 +31045,18 @@ pub fn doctor_seat() -> Vec<Habitat> {
             .filter(|_| *bin == "vissue")
             .map(check_vissue_ballot_protocol);
         let (mut state, mut ok) = match (found, have.as_deref(), latest.as_ref()) {
+            (None, _, _) if *bin == "packset-embed" => (
+                "not on PATH; search stays lexical. Install it with `sh scripts/install.sh` \
+                 (omit --no-embed), or `cargo binstall --locked packset-embed`"
+                    .to_string(),
+                false,
+            ),
+            (None, _, _) if *bin == "ljos-hud" => (
+                "not on PATH; `ljos statusline` works without it. `ljos hud` needs \
+                 `cargo install --locked ljos-hud`"
+                    .to_string(),
+                false,
+            ),
             (None, _, Some(cr)) => (
                 format!(
                     "not on PATH; cargo install --locked {crate_name} (crates.io {})",
@@ -45652,8 +45679,12 @@ fn text_of(v: &Value, key: &str) -> String {
 ///
 /// The file is missing, not JSON, or not a campaign state.
 pub fn read_campaign(state: &Path) -> Result<Campaign> {
-    let text = std::fs::read_to_string(state)
-        .with_context(|| format!("findings: cannot read {}", state.display()))?;
+    let text = std::fs::read_to_string(state).with_context(|| {
+        format!(
+            "findings: cannot read {}. Pass the campaign.json eb-stack wrote",
+            state.display()
+        )
+    })?;
     let doc: Value = serde_json::from_str(&text)
         .with_context(|| format!("findings: {} is not JSON", state.display()))?;
     let rows = doc
@@ -46028,8 +46059,12 @@ pub fn bump_rows(
     let lock_path = bundle.join("locks").join("default.lock.json");
     let sbom_path = bundle.join("package.sbom.cdx.json");
     let lock: Value = serde_json::from_str(
-        &std::fs::read_to_string(&lock_path)
-            .with_context(|| format!("bump-plan: cannot read {}", lock_path.display()))?,
+        &std::fs::read_to_string(&lock_path).with_context(|| {
+            format!(
+                "bump-plan: cannot read {}. eb-stack writes that lock under the campaign directory. Pass that directory",
+                lock_path.display()
+            )
+        })?,
     )
     .with_context(|| format!("bump-plan: {} is not JSON", lock_path.display()))?;
     let sbom: Value = serde_json::from_str(
@@ -72257,6 +72292,24 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn forget_refuses_an_empty_id() {
         let err = packset_forget("   ", None).unwrap_err();
         assert!(err.to_string().contains("atom id is required"), "{err}");
+    }
+
+    /// An id the pack does not hold names `ljos search`, not the HTTP path.
+    #[test]
+    fn forget_names_a_missing_id() {
+        let _env = env_guard();
+        let (url, _) = serve_http(|req| {
+            if req.contains("POST /v1/atoms/delete") {
+                return (400, r#"{"error":"no current atom nope"}"#.into());
+            }
+            (200, r#"{"atoms":[]}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let err = packset_forget("nope-not-a-memory", None).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("no memory has id"), "{text}");
+        assert!(text.contains("`ljos search`"), "{text}");
+        assert!(!text.contains("POST /v1"), "{text}");
     }
 
     /// An imported row is current for search and absent from the pack's

@@ -168,8 +168,18 @@ fn require_name(name: &str, what: &str) -> Result<String> {
 }
 
 fn require_dir(path: &Path) -> Result<()> {
-    let meta = std::fs::symlink_metadata(path)
-        .with_context(|| format!("mesh: cannot read {}", path.display()))?;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "mesh: {} does not exist. Create it, or pass a directory of <lane>.jsonl files",
+                path.display()
+            );
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("mesh: cannot read {}", path.display()));
+        }
+    };
     if meta.file_type().is_symlink() {
         bail!("mesh: {} is a symlink", path.display());
     }
@@ -338,8 +348,18 @@ fn values_of(bytes: &[u8]) -> Vec<Value> {
 
 fn lane_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    let entries =
-        std::fs::read_dir(dir).with_context(|| format!("mesh: cannot read {}", dir.display()))?;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "mesh: {} does not exist. Create it, or pass --from a directory of <lane>.jsonl files",
+                dir.display()
+            );
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("mesh: cannot read {}", dir.display()));
+        }
+    };
     for entry in entries {
         let entry = entry.with_context(|| format!("mesh: cannot read {}", dir.display()))?;
         let path = entry.path();

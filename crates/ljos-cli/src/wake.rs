@@ -672,6 +672,7 @@ fn run_command(command: &str, event: &Event, timeout: Duration) -> Result<String
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    let logged_at = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
     if let Ok(mut out) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -689,16 +690,36 @@ fn run_command(command: &str, event: &Event, timeout: Duration) -> Result<String
             if status.success() {
                 return Ok(format!("ran in {} ms", started.elapsed().as_millis()));
             }
-            bail!("exited {status}");
+            bail!("exited {status}{}", command_output(&path, logged_at));
         }
         if started.elapsed() >= timeout {
             // The child's own pid, which this process started.
             let _ = child.kill();
             let _ = child.wait();
-            bail!("stopped after {} ms", timeout.as_millis());
+            bail!(
+                "stopped after {} ms{}",
+                timeout.as_millis(),
+                command_output(&path, logged_at)
+            );
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// What the wake command wrote since `from`, trimmed, so a failed `--fire`
+/// shows the command's own words. Empty when it wrote nothing.
+fn command_output(path: &Path, from: u64) -> String {
+    let Ok(bytes) = std::fs::read(path) else {
+        return String::new();
+    };
+    let start = usize::try_from(from).unwrap_or(0).min(bytes.len());
+    let text = String::from_utf8_lossy(&bytes[start..]);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let shown: String = trimmed.chars().take(400).collect();
+    format!(": {shown}")
 }
 
 fn post(url: &str, wake: &Wake, event: &Event, via: Option<&str>) -> Result<String> {
