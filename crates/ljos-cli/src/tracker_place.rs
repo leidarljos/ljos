@@ -293,10 +293,218 @@ pub fn pin_root() {
     let Some(root) = configured.or_else(default_root) else {
         return;
     };
+    // A pin inside the checkout this command was run from is how a later
+    // commit landed in that product. Leave the root unset and let
+    // [`aim_tracker`] name a tracker outside it, or refuse.
+    if product_checkout(&root).is_some() {
+        return;
+    }
     std::env::set_var("VISSUE_ROOT", &root);
     *PINNED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(root);
+}
+
+/// The checkout a commit of `dir` would land in, when that checkout is not
+/// a tracker. A directory in no checkout, a tracker that is its own
+/// checkout, and a path the checkout ignores are `None`.
+///
+/// A root [`pin_root`] invented does not count: naming the product makes
+/// [`is_tracker`] agree with it, and the commit would still be that
+/// product's.
+#[must_use]
+pub fn product_checkout(dir: &Path) -> Option<PathBuf> {
+    let top = work_tree(dir)?;
+    if intrinsic_tracker(&top) {
+        return None;
+    }
+    if top != dir && kept_out(&top, dir) {
+        return None;
+    }
+    Some(top)
+}
+
+/// A tracker from its own files or from a root the person named. A pin is
+/// not a person: it is this process choosing a directory, and a product
+/// checkout must not become a tracker by being chosen.
+fn intrinsic_tracker(dir: &Path) -> bool {
+    let Some(here) = std::fs::canonicalize(dir).ok() else {
+        return false;
+    };
+    let same = |root: &Path| {
+        std::fs::canonicalize(root)
+            .ok()
+            .is_some_and(|canon| canon == here)
+    };
+    if configured().is_some_and(|root| same(&root)) {
+        return true;
+    }
+    for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
+        let Ok(raw) = std::env::var(key) else {
+            continue;
+        };
+        if raw.is_empty() || pinned(&raw) {
+            continue;
+        }
+        if same(&crate::expand(&raw)) {
+            return true;
+        }
+    }
+    committed_layout(dir) || serves_named_remote(dir)
+}
+
+/// Drop a pin that sits in a product checkout, so vissue does not write
+/// there because this process named it.
+fn drop_pin_inside_product() {
+    let pinned = PINNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(root) = pinned else {
+        return;
+    };
+    if product_checkout(&root).is_none() {
+        return;
+    }
+    let text = root.display().to_string();
+    for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
+        if std::env::var(key).ok().as_deref() == Some(text.as_str()) {
+            std::env::remove_var(key);
+        }
+    }
+    *PINNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+/// The root vissue would use from `here`, and whether that root is only a
+/// guess. The order is vissue's: the environment, a `vissue.toml` in
+/// `here`, the seat's configured root, then `here`.
+fn root_vissue_would_use(here: &Path) -> (PathBuf, bool) {
+    for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
+        if let Ok(raw) = std::env::var(key) {
+            if !raw.is_empty() {
+                return (crate::expand(&raw), false);
+            }
+        }
+    }
+    if here.join("vissue.toml").is_file() {
+        return (here.to_path_buf(), false);
+    }
+    if let Some(root) = configured().filter(|path| path.is_dir()) {
+        return (root, false);
+    }
+    (here.to_path_buf(), true)
+}
+
+/// Whether vissue would create or edit issues under `root`. A missing
+/// directory is not written. A guess is written only when it already
+/// looks like a tracker; a named root that exists is written.
+fn accepts_writes(root: &Path, guessed: bool) -> bool {
+    if !root.is_dir() {
+        return false;
+    }
+    if !guessed {
+        return true;
+    }
+    root.join("vissue.toml").is_file()
+        || prefix_at(root).is_some_and(|prefix| root.join(prefix).is_dir())
+}
+
+/// A tracker the seat already has, outside `product`. The configured root
+/// comes first, then the directory `ljos onboard` makes.
+fn seat_outside(product: &Path) -> Option<PathBuf> {
+    let mut found = Vec::new();
+    if let Some(root) = configured() {
+        found.push(root);
+    }
+    if let Some(root) = default_root() {
+        found.push(root);
+    }
+    found.into_iter().find(|root| {
+        root.is_dir()
+            && !rooted_in(product, root)
+            && product_checkout(root).is_none()
+            && (intrinsic_tracker(root)
+                || root.join("vissue.toml").is_file()
+                || root.join("Software").is_dir())
+    })
+}
+
+/// Whether `root` is `product` or a directory inside it.
+fn rooted_in(product: &Path, root: &Path) -> bool {
+    let canon = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let product = canon(product);
+    let root = canon(root);
+    root == product || root.starts_with(&product)
+}
+
+/// One line a tracker verb prints instead of writing `repo`. It names the
+/// setting that chooses the tracker.
+#[must_use]
+pub fn product_write_refusal(repo: &Path) -> String {
+    format!(
+        "set VISSUE_ROOT=DIR to name the tracker; {} is a product checkout and this command will not write there",
+        repo.display()
+    )
+}
+
+/// Point a tracker verb at the seat's tracker, or refuse when the write
+/// would land in the product checkout it was run from.
+///
+/// A root the person named is kept. A pin inside that checkout is dropped.
+/// The seat's configured tracker, then the onboard directory, is used when
+/// it sits outside the checkout. With neither, the verb stops before vissue
+/// runs. A directory vissue would not write is left alone, so a command
+/// standing in an ordinary checkout still runs.
+///
+/// # Errors
+///
+/// The write would enter a product checkout and the seat has no tracker
+/// outside it. The error is one line.
+pub fn aim_tracker() -> Result<(), String> {
+    let here = std::env::current_dir().map_err(|err| err.to_string())?;
+    aim_tracker_from(&here)
+}
+
+/// [`aim_tracker`] for a command whose working directory is `here`.
+///
+/// # Errors
+///
+/// As [`aim_tracker`].
+pub fn aim_tracker_from(here: &Path) -> Result<(), String> {
+    drop_pin_inside_product();
+    let (root, guessed) = root_vissue_would_use(here);
+    if !accepts_writes(&root, guessed) {
+        return Ok(());
+    }
+    let Some(product) = product_checkout(&root) else {
+        return Ok(());
+    };
+    if person_named_root().is_none() {
+        if let Some(seat) = seat_outside(&product) {
+            std::env::set_var("VISSUE_ROOT", &seat);
+            *PINNED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(seat);
+            return Ok(());
+        }
+    }
+    Err(product_write_refusal(&product))
+}
+
+/// `ISSUE_ROOT` or `VISSUE_ROOT` when the person set it. A pin is not that.
+fn person_named_root() -> Option<PathBuf> {
+    for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
+        let Ok(raw) = std::env::var(key) else {
+            continue;
+        };
+        if raw.is_empty() || pinned(&raw) {
+            continue;
+        }
+        return Some(crate::expand(&raw));
+    }
+    None
 }
 
 /// Whether `value` is the root [`pin_root`] named on this process.
@@ -468,6 +676,94 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         assert!(kept_out(&product, &root));
         assert!(!kept_out(&product, &product.join("src/tracker")));
+    }
+
+    /// ljos-76mj: a product checkout is not where a tracker verb writes
+    /// when nothing names a tracker outside it.
+    #[test]
+    fn a_verb_in_a_product_checkout_refuses_instead_of_using_it() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::TempDir::new().unwrap();
+        let product = dir.path().join("myapp");
+        git(&product, &["init", "-q"]);
+        std::fs::create_dir_all(product.join("Software")).unwrap();
+        let inside = product.join("data/vissue/tracker");
+        std::fs::create_dir_all(inside.join("Software")).unwrap();
+        let saved = (
+            std::env::var_os("XDG_DATA_HOME"),
+            std::env::var_os("VISSUE_ROOT"),
+            std::env::var_os("ISSUE_ROOT"),
+            std::env::var_os("VISSUE_CONFIG"),
+        );
+        std::env::set_var("XDG_DATA_HOME", product.join("data"));
+        std::env::remove_var("VISSUE_ROOT");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::remove_var("VISSUE_CONFIG");
+        let err = aim_tracker_from(&product).unwrap_err();
+        let named = std::env::var("VISSUE_ROOT").ok();
+        let restore = |key: &str, value: Option<std::ffi::OsString>| match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        };
+        restore("XDG_DATA_HOME", saved.0);
+        restore("VISSUE_ROOT", saved.1);
+        restore("ISSUE_ROOT", saved.2);
+        restore("VISSUE_CONFIG", saved.3);
+        assert_eq!(err.lines().count(), 1, "{err}");
+        assert!(err.contains("set VISSUE_ROOT=DIR"), "{err}");
+        assert!(err.contains("myapp"), "{err}");
+        assert!(
+            named.is_none_or(|root| !root.contains("myapp")),
+            "the product was named as the tracker"
+        );
+    }
+
+    /// The seat's tracker, outside the checkout, is the one a verb uses.
+    #[test]
+    fn a_verb_in_a_product_checkout_uses_the_seat_tracker() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::TempDir::new().unwrap();
+        let product = dir.path().join("myapp");
+        git(&product, &["init", "-q"]);
+        std::fs::create_dir_all(product.join("Software")).unwrap();
+        // vissue takes this checkout before the seat file, because
+        // `vissue.toml` is here. The verb has to name the seat's tracker.
+        std::fs::write(product.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        let tracker = dir.path().join("vault");
+        std::fs::create_dir_all(tracker.join("Software")).unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg,
+            format!(
+                "root = {}\n",
+                toml::Value::String(tracker.display().to_string())
+            ),
+        )
+        .unwrap();
+        let saved = (
+            std::env::var_os("VISSUE_ROOT"),
+            std::env::var_os("ISSUE_ROOT"),
+            std::env::var_os("VISSUE_CONFIG"),
+        );
+        std::env::remove_var("VISSUE_ROOT");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::set_var("VISSUE_CONFIG", &cfg);
+        let aimed = aim_tracker_from(&product);
+        let set = std::env::var("VISSUE_ROOT").ok();
+        match saved.0 {
+            Some(value) => std::env::set_var("VISSUE_ROOT", value),
+            None => std::env::remove_var("VISSUE_ROOT"),
+        }
+        match saved.1 {
+            Some(value) => std::env::set_var("ISSUE_ROOT", value),
+            None => std::env::remove_var("ISSUE_ROOT"),
+        }
+        match saved.2 {
+            Some(value) => std::env::set_var("VISSUE_CONFIG", value),
+            None => std::env::remove_var("VISSUE_CONFIG"),
+        }
+        assert!(aimed.is_ok(), "{aimed:?}");
+        assert_eq!(set.as_deref(), Some(tracker.to_str().unwrap()));
     }
 
     #[test]

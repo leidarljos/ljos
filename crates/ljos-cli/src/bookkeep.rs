@@ -237,13 +237,11 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
 /// path component of `repo`, else `work`.
 fn file_task(task: &str, repo: Option<&str>) -> Result<String, String> {
     super::tracker_place::pin_root();
+    super::tracker_place::aim_tracker()?;
     let layout =
         vissue_core::Layout::resolve(None, None).map_err(|err| format!("ljos_start: {err}"))?;
-    if super::tracker_place::product_repo(layout.root()).is_some() {
-        return Err(format!(
-            "ljos_start: {} is a product checkout, not the tracker",
-            layout.root().display()
-        ));
+    if let Some(repo) = super::tracker_place::product_checkout(layout.root()) {
+        return Err(super::tracker_place::product_write_refusal(&repo));
     }
     let project = repo
         .map(std::path::Path::new)

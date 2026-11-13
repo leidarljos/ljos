@@ -208,6 +208,109 @@ fn a_write_from_a_product_checkout_goes_to_the_configured_tracker() {
     }
 }
 
+/// ljos-76mj: `VISSUE_ROOT` is unset and the only tracker directory is inside
+/// the product checkout. A tracker verb refuses in one line and does not
+/// write or commit there. The stand-in `vissue` would write if it ran.
+#[test]
+fn a_file_does_not_commit_into_the_product_when_vissue_root_is_unset() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let product = dir.path().join("myapp");
+    git_repo(&product);
+    std::fs::write(product.join("README"), "a product\n").unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&product)
+            .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    std::fs::write(
+        dir.path().join("gitconfig"),
+        "[user]\n\tname = seat\n\temail = seat@example.test\n\
+         [core]\n\thooksPath = /dev/null\n[commit]\n\tgpgsign = false\n",
+    )
+    .unwrap();
+    git(&["add", "README"]);
+    git(&["commit", "-q", "-m", "product"]);
+    let head = git_stdout(&product, &["rev-parse", "HEAD"]);
+    std::fs::create_dir_all(product.join("Software")).unwrap();
+    let inside = product.join("data/vissue/tracker");
+    std::fs::create_dir_all(inside.join("Software")).unwrap();
+    let bin = dir.path().join("bin");
+    let log = dir.path().join("vissue.log");
+    script(
+        &bin,
+        "vissue",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"ran root=${{VISSUE_ROOT-unset}}\" >> '{}'\n\
+             root=${{VISSUE_ROOT:-$(pwd)}}\nmkdir -p \"$root/wrote\"\n\
+             printf 'x\\n' > \"$root/wrote/marker\"\nexit 0\n",
+            log.display()
+        ),
+    );
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["file", "-p", "app", "crash on start"])
+        .current_dir(&product)
+        .env_clear()
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", product.join("data"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", dir.path().join("run"))
+        .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("PACKSET_URL", "off")
+        .env("LJOS_SEAT", "saddle")
+        .env("LJOS_HOOKD", "off")
+        .env("LJOS_TRACKER_GIT", "commit")
+        .env("LJOS_USER_RULES_SYNC", "off")
+        .env("VISSUE_NO_ROUTE", "1")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    let after = git_stdout(&product, &["rev-parse", "HEAD"]);
+    assert_eq!(after, head, "the product gained a commit:\n{text}");
+    assert!(
+        !product.join("wrote").exists(),
+        "vissue wrote into the product:\n{text}"
+    );
+    assert!(
+        !product.join("Software/app").exists(),
+        "an issue was filed in the product:\n{text}"
+    );
+    assert!(!out.status.success(), "{text}");
+    let lines: Vec<_> = text.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(lines[0].contains("set VISSUE_ROOT=DIR"), "{text}");
+    assert!(
+        std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+        "vissue ran:\n{text}"
+    );
+}
+
+fn git_stdout(at: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(at)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 /// vissue's own rule: standing in a tracker means that tracker. A seat
 /// run there is not told another one.
 #[test]

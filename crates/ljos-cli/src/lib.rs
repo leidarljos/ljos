@@ -4910,6 +4910,11 @@ pub fn write_seat(verb: &str) -> Result<Seat> {
             source: "the git hook".into(),
         });
     }
+    // A commit hook books the product checkout it ran in. Tracker verbs
+    // must not. `commit` is that hook's verb.
+    if verb != "commit" {
+        tracker_place::aim_tracker().map_err(anyhow::Error::msg)?;
+    }
     let who = resolve_seat();
     // A seat taken from the process or the login is still the seat that
     // writes. The tracker roster, when it lists seats, is a separate check.
@@ -41400,6 +41405,9 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
         tracker_push::repo_root(parent)
     };
     let dir: &Path = &git_dir;
+    if let Some(repo) = tracker_place::product_checkout(dir) {
+        return format!("{}\n", tracker_place::product_write_refusal(&repo));
+    }
     let git = |args: &[&str]| {
         let mut cmd = tracker_git_at(dir);
         cmd.args(args).stdin(std::process::Stdio::null());
