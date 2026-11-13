@@ -315,3 +315,100 @@ fn a_missing_pack_names_the_next_step_and_the_client_is_not_the_seat() {
     );
     assert!(!doctor.contains("acme-cli"), "{doctor}");
 }
+
+/// A writer that answers, with no token file, puts the next step in the
+/// search result. Stderr is not what the model reads.
+#[test]
+fn a_missing_pack_token_names_the_next_step_in_the_search_result() {
+    use std::io::Read;
+    use std::net::TcpListener;
+    let home = std::path::PathBuf::from("/home/ubuntu/ljos-mcp-token");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let path = req.lines().next().unwrap_or("");
+            let body = if path.starts_with("GET /health") {
+                "{}"
+            } else if path.starts_with("GET /v1/atoms") {
+                r#"{"atoms":[{"id":"old","kind":"lesson","text":"The lexical default is BM25+.","ts":"2026-01-01T00:00:00Z","entities":["horizon:standing"]}]}"#
+            } else if path.starts_with("GET /v1/status") {
+                r#"{"search":{"ranks":["lexical"]}}"#
+            } else {
+                r#"{"error":"token"}"#
+            };
+            let code = if path.starts_with("GET /v1/search") {
+                401
+            } else {
+                200
+            };
+            let msg = format!(
+                "HTTP/1.1 {code} OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, msg.as_bytes());
+        }
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .env("USER", "walk")
+        .env("PACKSET_URL", format!("http://{addr}"))
+        .env("PACKSET_WORKSPACE", "seat")
+        .env("PACKSET_HOME", &home)
+        .env_remove("PACKSET_TOKEN")
+        .current_dir(&home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(30));
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    });
+    let lines = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "acme-cli", "version": "1"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "ljos_search", "arguments": {"query": "lexical default"}}}),
+    ];
+    let mut stdin = child.stdin.take().unwrap();
+    for line in &lines {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("panicked"),
+        "stderr:\n{stderr}\nstdout:\n{stdout}"
+    );
+    let answers: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let call = answers
+        .iter()
+        .find(|answer| answer["id"] == 2)
+        .unwrap_or_else(|| panic!("no search answer\nstdout:\n{stdout}\nstderr:\n{stderr}"));
+    assert_ne!(call["result"]["isError"], true, "{call}");
+    let said = call.to_string();
+    assert!(
+        said.contains("no token for the search"),
+        "{said}\nstderr:\n{stderr}"
+    );
+    assert!(said.contains("PACKSET_TOKEN"), "{said}");
+    assert!(said.contains("PACKSET_HOME"), "{said}");
+}

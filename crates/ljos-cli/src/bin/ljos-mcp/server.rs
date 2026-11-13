@@ -1599,11 +1599,15 @@ impl LjosServer {
         note_lookups(&hits);
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
-        let reading = if hits.is_empty() && unrelated {
+        let mut reading = if hits.is_empty() && unrelated {
             ljos_cli::NOTHING_RELEVANT.trim().to_string()
         } else {
             search_reading(hits.len()).to_string()
         };
+        if let Some(note) = ljos_cli::search_token_note() {
+            reading.push('\n');
+            reading.push_str(note);
+        }
         Ok(Json(SearchPage {
             reading,
             rows: hits

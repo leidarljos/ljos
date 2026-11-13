@@ -14860,10 +14860,24 @@ fn note_search_trust(client: &PacksetClient, trusted: bool) {
     }
 }
 
+/// What a search says when this seat cannot show a token. The tool result
+/// carries it: stderr is not what the model reads.
+pub const SEARCH_TOKEN_MISS: &str = "\
+ljos: no token for the search: this seat has none, the token file cannot be read, or another user holds the pack's port. \
+Set PACKSET_HOME to the writer's pack home, PACKSET_TOKEN_FILE to its token file, or PACKSET_TOKEN";
+
+/// [`SEARCH_TOKEN_MISS`] when the writer this process would ask has no
+/// token to show. `None` when the pack is off or the token can be sent.
+#[must_use]
+pub fn search_token_note() -> Option<&'static str> {
+    let client = pack().ok()?;
+    seat_has_no_token(&client).then_some(SEARCH_TOKEN_MISS)
+}
+
 /// Say that this seat cannot show a token. That used to be read as an
 /// open listener, and the recall then followed whatever it answered.
 fn say_search_miss() {
-    let line = "ljos: no token the search: this seat has none, the token file cannot be read, or another user holds the pack's port";
+    let line = SEARCH_TOKEN_MISS;
     *SEARCH_MISS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(line.to_string());
