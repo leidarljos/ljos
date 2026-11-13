@@ -2359,7 +2359,7 @@ fn run_command() -> Result<()> {
             // its own, where the whole was refused at the pack's cap.
             let chunks = ljos_cli::claim_chunks(&text);
             if chunks.len() > 1 {
-                eprintln!("remember: {} claims from one text", chunks.len());
+                eprintln!("{}", ljos_cli::remember_split_line(chunks.len()));
             }
             for text in chunks {
                 // A person at the terminal, and words from their latest
@@ -3268,7 +3268,7 @@ fn run_command() -> Result<()> {
             ljos_cli::log_recall("recall", &issue);
             let said = ljos_cli::tracker_recall(&issue)?;
             eprint!("{}", said.stderr);
-            let memories = ljos_cli::recall_memories(&issue)?;
+            let memories = ljos_cli::recall_for_command(&issue)?;
             let code = if no_graph {
                 String::new()
             } else {

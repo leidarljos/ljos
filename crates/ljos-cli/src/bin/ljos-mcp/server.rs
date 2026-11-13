@@ -1888,7 +1888,7 @@ impl LjosServer {
             .map_err(refused)?;
         said.0
             .text
-            .push_str(&ljos_cli::recall_memories(&args.issue).map_err(refused)?);
+            .push_str(&ljos_cli::recall_for_command(&args.issue).map_err(refused)?);
         said.0
             .text
             .push_str(&ljos_cli::graphify::recall_section(&args.issue));

@@ -71,6 +71,11 @@ pub(crate) fn keep(atom: &Value, warning: &str) -> Result<Value> {
     if let Some(map) = stored.as_object_mut() {
         map.insert("id".into(), Value::String(id));
         map.insert("text".into(), Value::String(text.to_string()));
+        map.insert("kept".into(), Value::String("local".into()));
+        map.insert(
+            "note".into(),
+            Value::String(crate::KEPT_LOCAL_NOTE.to_string()),
+        );
         let mut prose = map
             .get("prose")
             .and_then(Value::as_object)

@@ -11268,7 +11268,11 @@ fn atom_as_hit(atom: &impl Claim) -> Option<Hit> {
         ballots: None,
         of: None,
         rerank_score: None,
-        labels: Vec::new(),
+        labels: if atom.field("kept").and_then(Value::as_str) == Some("local") {
+            vec!["kept-local".to_string()]
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -14071,12 +14075,16 @@ pub fn search_json_empty(hits: &[Hit], ranking: Option<&Ranking>, empty: Option<
     let rows: Vec<Value> = hits
         .iter()
         .map(|hit| {
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "id": hit.id,
                 "kind": hit.kind,
                 "text": hit.text,
                 "score": hit.score,
-            })
+            });
+            if hit.labels.iter().any(|label| label == "kept-local") {
+                row["kept"] = Value::String("local".into());
+            }
+            row
         })
         .collect();
     let mut doc = serde_json::json!({ "hits": rows });
@@ -14871,7 +14879,8 @@ fn note_search_trust(client: &PacksetClient, trusted: bool) {
 /// carries it: stderr is not what the model reads.
 pub const SEARCH_TOKEN_MISS: &str = "\
 ljos: no token for the search: this seat has none, the token file cannot be read, or another user holds the pack's port. \
-Set PACKSET_HOME to the writer's pack home, PACKSET_TOKEN_FILE to its token file, or PACKSET_TOKEN";
+Set PACKSET_HOME to the writer's pack home, PACKSET_TOKEN_FILE to its token file, or PACKSET_TOKEN. \
+The rows are stored lessons, not the writer's ranking";
 
 /// [`SEARCH_TOKEN_MISS`] when the writer this process would ask has no
 /// token to show. `None` when the pack is off or the token can be sent.
@@ -14885,9 +14894,13 @@ pub fn search_token_note() -> Option<&'static str> {
 /// open listener, and the recall then followed whatever it answered.
 fn say_search_miss() {
     let line = SEARCH_TOKEN_MISS;
-    *SEARCH_MISS
+    let mut said = SEARCH_MISS
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(line.to_string());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if said.is_some() {
+        return;
+    }
+    *said = Some(line.to_string());
     eprintln!("{line}");
 }
 
@@ -20323,10 +20336,19 @@ pub fn remember_horizon(transient: bool, standing: bool, under_runner: bool) -> 
     }
 }
 
+/// What `ljos remember` prints when the pack refused the sentence and the
+/// copy lives only in this seat's state directory. Search still finds it.
+/// The hook does not: it reads the pack.
+pub const KEPT_LOCAL_NOTE: &str = "the hook does not show a lesson the pack refused. \
+`ljos search` still finds this copy";
+
 /// The line `ljos remember` prints after the write, saying when the hook
 /// shows the lesson.
 #[must_use]
 pub fn remember_note(body: &Value) -> &'static str {
+    if body["kept"].as_str() == Some("local") {
+        return KEPT_LOCAL_NOTE;
+    }
     let has = |tag: &str| {
         body["entities"]
             .as_array()
@@ -20342,6 +20364,14 @@ pub fn remember_note(body: &Value) -> &'static str {
     } else {
         "episode: the hook shows it when a prompt bears on it, and `ljos due` with `ljos graded` promotes it to standing"
     }
+}
+
+/// What `ljos remember` prints when one text is more than one claim.
+#[must_use]
+pub fn remember_split_line(n: usize) -> String {
+    format!(
+        "remember: {n} claims from one text. A lesson is at most two sentences, so each part is stored on its own. `ljos search` lists them"
+    )
 }
 
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
@@ -29694,10 +29724,14 @@ pub fn prose_warning_line(body: &Value) -> Option<String> {
     if warning.is_empty() {
         return None;
     }
-    let how = match body["copies"].as_u64() {
-        Some(1) => "stored as a shorter copy".to_string(),
-        Some(n) => format!("stored as {n} shorter copies"),
-        None => "stored as written".to_string(),
+    let how = if body["kept"].as_str() == Some("local") {
+        "kept locally, not in the pack".to_string()
+    } else {
+        match body["copies"].as_u64() {
+            Some(1) => "stored as a shorter copy".to_string(),
+            Some(n) => format!("stored as {n} shorter copies"),
+            None => "stored as written".to_string(),
+        }
     };
     if let Some((index, words, limit)) = sentence_word_limit(warning) {
         let which = match index {
@@ -29722,7 +29756,11 @@ pub fn prose_warning_shown(body: &Value, verbose: bool) -> Option<String> {
     if warning.is_empty() {
         return None;
     }
-    if !verbose && sentence_word_limit(warning).is_some() {
+    // A sentence the pack kept is still in the pack, so the word-count
+    // line waits for `--verbose`. A sentence the pack refused is only on
+    // this machine, and the count is the reason.
+    if !verbose && sentence_word_limit(warning).is_some() && body["kept"].as_str() != Some("local")
+    {
         return None;
     }
     prose_warning_line(body)
@@ -36566,7 +36604,11 @@ pub fn is_decision(v: &Value) -> bool {
 /// reach the tracker, an agent included, so they are handed on as that and
 /// never as the person's words.
 pub fn tracker_recall(issue: &str) -> Result<Said> {
-    let mut said = run_captured("vissue", &["recall", issue])?;
+    let mut said = match run_captured("vissue", &["recall", issue]) {
+        Ok(said) => said,
+        Err(err) if issue_missing(&err, issue) => return Err(unknown_ticket(issue)),
+        Err(err) => return Err(err),
+    };
     said.stdout = fence_unverified(&format!("tracker text for {issue}"), &said.stdout);
     Ok(said)
 }
@@ -36651,6 +36693,23 @@ pub const ISSUE_MEMORY_CAP: usize = 10;
 /// F1 under the cap of 5. Wall medians were 952560386.0 ns, 948712885.5
 /// ns and 911271854.5 ns.
 pub const RELATED_MEMORY_CAP: usize = 5;
+
+/// What `ljos recall` and `ljos_recall` add when the pack has nothing on
+/// the issue. The prompt hook stays quiet instead: an issue with no
+/// memories adds no line there.
+pub const EMPTY_ISSUE_MEMORY: &str = "\nMemory\n  (no lesson on this issue. `ljos search` lists the pack, and `ljos remember` stores one.)\n";
+
+/// [`recall_memories`] for a person or an agent who asked. An empty pack
+/// answer names the next command. The hook uses [`recall_memories`] and
+/// stays quiet.
+pub fn recall_for_command(issue: &str) -> Result<String> {
+    let text = recall_memories(issue)?;
+    if text.trim().is_empty() {
+        Ok(EMPTY_ISSUE_MEMORY.to_string())
+    } else {
+        Ok(text)
+    }
+}
 
 /// What the seat remembers that bears on an issue, for `ljos recall` and
 /// for the hooks that recall a claimed issue. First the memories tagged
@@ -37008,6 +37067,11 @@ fn recall_lines(
         }
     };
     let mut out = String::from("\nMemory\n");
+    // Related hits are not this issue's lessons. With none of its own,
+    // printing them under Memory alone reads as if they were filed on it.
+    if own_facts.is_empty() && !related_facts.is_empty() {
+        out.push_str("  (none filed on this issue)\n");
+    }
     for h in most_relevant(&own_facts, cue, ISSUE_MEMORY_CAP) {
         note_shown(h);
         out.push_str("  ");
@@ -37021,9 +37085,7 @@ fn recall_lines(
         ));
     }
     if !related_facts.is_empty() {
-        if !own_facts.is_empty() {
-            out.push_str("  related:\n");
-        }
+        out.push_str("  related:\n");
         for h in &related_facts {
             note_shown(h);
             out.push_str("  ");
@@ -37076,11 +37138,20 @@ fn tracker_misses(err: &anyhow::Error, issue: &str) -> bool {
     err.chain().any(|cause| cause.to_string() == missing)
 }
 
-/// A ticket id the tracker does not hold, with the command that lists the ones it does.
+/// A ticket id the tracker does not hold, with the commands that list
+/// lessons and tickets.
 fn unknown_ticket(issue: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "issue {issue} not found. `ljos ready` lists the open tickets, and `ljos file` prints a new id"
+        "issue {issue} not found. `ljos search` looks for a lesson. `ljos ready` lists the open tickets, and `ljos file` prints a new id"
     )
+}
+
+/// Whether `err` is the tracker's miss for `issue`. `vissue recall` wraps
+/// the miss as `vissue failed (exit 1): issue ID not found`.
+fn issue_missing(err: &anyhow::Error, issue: &str) -> bool {
+    let missing = format!("issue {issue} not found");
+    err.chain()
+        .any(|cause| cause.to_string().contains(&missing))
 }
 
 /// The issue's title, for a cue, from the tracker.
@@ -42177,9 +42248,19 @@ pub fn format_hits(hits: &[Hit], explain: bool) -> String {
     };
     for h in hits {
         let id = h.id.as_deref().unwrap_or("-");
-        let named = match (h.ballots, h.of) {
-            (Some(b), Some(of)) => format!("{b}/{of}"),
-            _ => "-".to_string(),
+        let local = h.labels.iter().any(|label| label == "kept-local");
+        let named = if local {
+            "local".to_string()
+        } else {
+            match (h.ballots, h.of) {
+                (Some(b), Some(of)) => format!("{b}/{of}"),
+                _ => "-".to_string(),
+            }
+        };
+        let age = if local {
+            "not in the pack".to_string()
+        } else {
+            age_of(h.ts.as_deref(), &now)
         };
         let from = other_seat(&h.entities, &mine)
             .map(|s| format!(" (from {s})"))
@@ -42190,7 +42271,7 @@ pub fn format_hits(hits: &[Hit], explain: bool) -> String {
             named,
             kind_label(h),
             id,
-            age_of(h.ts.as_deref(), &now),
+            age,
             from,
             h.text
         ));
@@ -42975,12 +43056,17 @@ pub fn kind_label(h: &Hit) -> String {
     } else {
         h.kind.as_str()
     };
-    if said_by_person(h) {
+    let labeled = if said_by_person(h) {
         format!("{kind}, the person's words")
     } else if kind == "lesson" && !person_origin(h) {
         format!("lesson, {}", hit_stored_by(h).origin())
     } else {
         kind.to_string()
+    };
+    if h.labels.iter().any(|label| label == "kept-local") {
+        format!("{labeled}, kept locally")
+    } else {
+        labeled
     }
 }
 
@@ -47750,8 +47836,23 @@ mod tests {
         );
         assert_eq!(
             alone,
-            "\nMemory\n  - [lesson, agent-derived] a related lesson\n"
+            "\nMemory\n  (none filed on this issue)\n  related:\n  - [lesson, agent-derived] a related lesson\n"
         );
+    }
+
+    #[test]
+    fn an_unknown_issue_names_search_ready_and_file() {
+        let err = super::unknown_ticket("kiln");
+        let text = err.to_string();
+        assert!(text.contains("issue kiln not found"), "{text}");
+        assert!(text.contains("`ljos search` looks for a lesson"), "{text}");
+        assert!(text.contains("`ljos ready`"), "{text}");
+        assert!(text.contains("`ljos file`"), "{text}");
+        let wrapped = anyhow::anyhow!("vissue failed (exit 1): issue kiln not found");
+        assert!(super::issue_missing(&wrapped, "kiln"));
+        assert!(!super::issue_missing(&wrapped, "other"));
+        assert!(super::EMPTY_ISSUE_MEMORY.contains("no lesson on this issue"));
+        assert!(super::EMPTY_ISSUE_MEMORY.contains("`ljos remember`"));
     }
 
     /// An issue's own memories past the cap and the related hits past
@@ -53794,6 +53895,11 @@ mod tests {
                 .clone()
                 .unwrap_or_default();
             assert!(said.contains("no token"), "{token_file:?} {said}");
+            assert!(
+                said.contains("stored lessons, not the writer's ranking"),
+                "{said}"
+            );
+            assert!(said.contains("PACKSET_TOKEN"), "{said}");
         }
     }
 
@@ -61784,6 +61890,22 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
         assert!(remember_note(&person).starts_with("standing"));
         assert!(remember_note(&agent).starts_with("episode"));
+        let mut local = person.clone();
+        local["kept"] = serde_json::json!("local");
+        local["prose"] = serde_json::json!({
+            "warning": "atom sentence 1 is very hard to read: 37 words, the limit is 29"
+        });
+        let note = remember_note(&local);
+        assert!(note.contains("hook does not show"), "{note}");
+        assert!(!note.contains("the hook shows it"), "{note}");
+        let shown = prose_warning_shown(&local, false).expect("warning");
+        assert!(shown.contains("kept locally, not in the pack"), "{shown}");
+        assert!(shown.contains("37 words"), "{shown}");
+        assert!(shown.contains("limit 29"), "{shown}");
+        let split = remember_split_line(2);
+        assert!(split.contains("2 claims from one text"), "{split}");
+        assert!(split.contains("at most two sentences"), "{split}");
+        assert!(split.contains("`ljos search` lists them"), "{split}");
         let hit = |atom: &Value| Hit {
             id: None,
             text: "Run the linter before the push.".into(),
@@ -73925,6 +74047,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(explained.ends_with(&plain), "{explained}");
         assert_eq!(format_hits(&[], false), "No hits.\n");
         assert!(format_hits(&[], true).contains("A failure would say"));
+        let mut local = signal_hit("lesson", "The door thermocouple reads low.", 1.0, 0);
+        local.labels.push("kept-local".into());
+        let line = format_hits(&[local], false);
+        assert!(line.contains("\tlocal\t"), "{line}");
+        assert!(line.contains("kept locally"), "{line}");
+        assert!(line.contains("not in the pack"), "{line}");
+        assert!(line.contains("The door thermocouple reads low."), "{line}");
     }
 
     /// A pack that refuses the lesson after the work is done leaves the

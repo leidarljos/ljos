@@ -5,9 +5,19 @@
 * Remember a lesson
 
 =ljos remember= stores one lesson as written. A claim is two sentences at
-most. The pack's limit is 29 words a sentence: a longer one is kept.
-=ljos remember --verbose= prints one line, naming the count and the limit,
-to split that sentence into two sentences.
+most. A longer text is stored as one claim per pair of sentences, and the
+line names that and =ljos search=.
+The pack's limit is 29 words a sentence. A sentence the person types is
+kept, and =ljos remember --verbose= names the count and the limit.
+A sentence from anywhere else that passes that limit is kept on this
+machine only. The command says the pack refused it, that =ljos search=
+still finds the copy, and that the hook does not show it. Split the
+sentence and remember each part.
+=ljos recall ISSUE= with no lesson on that issue says so and names
+=ljos search= and =ljos remember=. Lessons that matched the title or
+the issue's tags, and were not filed on the issue, are listed under
+=related=. An id the tracker does not hold names =ljos search=,
+=ljos ready= and =ljos file=.
 With no =LJOS_SEAT=, the command says no seat was named and uses
 =unknown-= plus the host name. Set the seat before a lesson you want
 under your own name.
@@ -79,6 +89,11 @@ $ ljos forget a6ae2751 --why deed-review-2026-09
 Copy the id from =ljos search=. A prefix of 8 or more characters is enough.
 =--why= is a deed id. Omit it when you have no deed. An id the pack does
 not hold names =ljos search= again.
+=ljos memories review --edit ID --text TEXT= writes a new row and keeps
+it. =ljos memories list= leaves that row out. =ljos memories list --all=
+shows it, and the edit line names =ljos forget= for the new id. An id
+that matches nothing names =ljos memories list --all --user= and
+=ljos search=.
 The pack tombstones the claim and records the deed that withdrew it.
 Disagreeing with a claim is not showing it wrong; a retraction names its
 evidence.

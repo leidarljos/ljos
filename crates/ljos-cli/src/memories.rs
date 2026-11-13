@@ -375,12 +375,14 @@ pub fn resolve(short: &str, all: &[Memory]) -> Result<String> {
         [one] => Ok(one.id.clone()),
         [] => Err(crate::policy_label::labelled(
             "review-input-warning",
-            format!("memories: no memory starts with {short}"),
+            format!(
+                "memories: no memory starts with {short}. `ljos memories list --all --user` prints ids, and so does `ljos search`"
+            ),
         )),
         _ => Err(crate::policy_label::labelled(
             "review-input-warning",
             format!(
-                "memories: {short} starts {} memories; give more of the id",
+                "memories: {short} starts {} memories; give more of the id. `ljos memories list --all --user` prints them",
                 hits.len()
             ),
         )),
@@ -468,13 +470,13 @@ fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
     if !new_id.is_empty() {
         record(&new_id, "keep", None)?;
     }
+    let short_new = new_id.get(..8).unwrap_or(&new_id);
     Ok(format!(
-        "{verdict} {} into {}\n",
+        "{verdict} {} into {short_new}\n`ljos memories list` leaves a kept row out. `ljos memories list --all` shows {short_new}. `ljos forget {short_new}` retires it.\n",
         olds.iter()
             .map(|m| m.short_id())
             .collect::<Vec<_>>()
             .join(", "),
-        new_id.get(..8).unwrap_or(&new_id)
     ))
 }
 
