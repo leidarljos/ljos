@@ -56,7 +56,7 @@ The script names the cause and the command that fixes it.
 - Running the script again replaces the programs in place and says what was there.
 - A running ``ljos-mcp`` keeps the previous binary. Restart the assistant, or ``kill`` the pid the script prints, then run ``ljos doctor``.
 
-``ljos onboard`` with no coding tool installed says so. It still sets up the tracker, the memory writer and the deed store. Install an agent, then run ``ljos onboard``. ``ljos onboard --example`` lists the names.
+``ljos onboard`` with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store. The deed store keeps signed records of the work. Install an agent, then run ``ljos onboard``. ``ljos onboard --example`` lists the tools.
 
 ``ljos offboard`` after a hand edit that it cannot undo names the file and leaves the ljos entry. Edit that file, delete the ljos entry, and run ``ljos offboard`` again.
 
@@ -70,7 +70,7 @@ It builds from source with ``cargo`` where a platform has no release.
 
 Read the script before you run it. It is ``scripts/install.sh`` in this repository.
 It runs ``ljos onboard`` for each coding runner it finds. With none found, it still sets up
-the tracker, the pack writer and the deed store.
+the ticket tracker, the memory writer and the deed store.
 
 The tracker commits each change, so git needs an identity:
 
@@ -86,6 +86,7 @@ The tracker commits each change, so git needs an identity:
    warn	ljos config	/home/you/.config/ljos/ljos.toml is missing, so run ljos doctor --fix
 
 On a clean install the ready line names memory, the tracker and the command guard.
+Run ``ljos doctor`` from your home directory. In a checkout that has ``.ljos/gates.toml``, the config row names that file.
 With no seat named, a ``seat source`` row warns that the read uses every seat.
 The ``sitting-gate`` row follows it. With no agent runner above the shell the word is ``info``, and the person's commits, merges and pushes are not held.
 Under a runner the same row names the seat and the branches a push waits on, ``develop`` or ``main``, and the number of seats that push waits for.
@@ -107,7 +108,7 @@ To install by hand, with ``cargo-binstall`` already on ``PATH``, or to see what 
 ``ljos onboard --example`` lists the runners ljos knows.
 
 Nothing else needs a variable set. ``ljos onboard`` makes a deed store, a tracker and a
-config file for ``vissue``, and it starts the pack writer.
+config file for ``vissue``, and it starts the memory writer.
 
 The runner runs a hook only after you trust it. Trust each ljos hook in the runner.
 Trust it again after an upgrade rewrites one.
@@ -135,7 +136,7 @@ A lesson and a search
 The id and the review time are the ones that run printed. The name after ``unknown-`` is the host name.
 That line is printed only when the write uses that seat. A conversation that already has a seat record writes as that seat and does not print the line.
 This run sat under an agent runner, so the search row says ``lesson, from an agent``.
-Typed at a terminal with no runner above it, the same command is the person's sentence.
+Typed at a terminal with no runner above it, that row says ``lesson, today``.
 Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
 ``ljos search "which fusion"`` shares no word with either sentence and prints ``No hits for "which fusion", so run `ljos search fusion`.``
 This seat's hits come first. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.
@@ -225,9 +226,9 @@ One seat holds a ticket at a time. Bob's claim is refused, and the refusal names
    tracker: demo-2f5j STARTED under alice
    tracker git: committed chore(issues): demo-2f5j claimed by alice; no remote, kept local
    $ LJOS_SEAT=bob ljos claim demo-2f5j --assignee bob
-   label claim-conflict: claim: demo-2f5j is held by another (alice, seat alice, still running, ...), not by bob (this one).
+   label claim-conflict: claim: demo-2f5j is held by another (alice, seat alice, still running, ...), not by bob, so run `ljos send alice TEXT`.
 
-The rest of bob's line names ``ljos release``, ``ljos complete``, ``ljos note`` and ``ljos send``. The ticket stays with alice.
+The line names ``ljos send``. The ticket stays with alice.
 Bob can file another ticket. To help on this one, bob writes a note.
 
 .. code:: console

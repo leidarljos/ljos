@@ -32,7 +32,7 @@ If install stops, the script names the cause and the command that fixes it.
 - Running the script again replaces the programs in place and says what was there.
 - A running `ljos-mcp` keeps the previous binary. Restart the assistant, or `kill` the pid the script prints, then run `ljos doctor`.
 
-`ljos onboard` with no coding tool installed says so. It still sets up the tracker, the memory writer and the deed store. Install an agent, then run `ljos onboard`. `ljos onboard --example` lists the names.
+`ljos onboard` with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store. The deed store keeps signed records of the work. Install an agent, then run `ljos onboard`. `ljos onboard --example` lists the tools.
 
 `ljos offboard` after a hand edit that it cannot undo names the file and leaves the ljos entry. Edit that file, delete the ljos entry, and run `ljos offboard` again.
 
@@ -144,10 +144,10 @@ The `install.sh` attached to the 0.41.1 release asked for `vissue-cli-<target>.t
 `--no-embed` leaves out the encoder. Search then matches words, and `ljos search` prints `matched by words: the encoder is not installed`.
 A cold encoder, one the writer stopped after it sat idle with no embed call, gets a longer budget. The search is asked again once the model has answered. The ranking line names the ranker that ordered the printed rows. A row whose score is only the word-rank floor, 0.20, is left out.
 A lesson `ljos remember` queued because the pack was busy is sent again on `ljos search` and `ljos sitting`. When it is still waiting, that command says so.
-The installer checks each download against its published SHA-256 sum. It sets up the tracker, the memory writer and the deed store, then runs `ljos onboard` for each runner it finds.
+The installer checks each download against its published SHA-256 sum. It sets up the ticket tracker, the memory writer and the deed store, then runs `ljos onboard` for each runner it finds. The deed store keeps signed records of the work.
 Git needs `user.name` and `user.email`, because the tracker commits each change. Without them the heading is still written, and the line is `tracker git: commit refused: Author identity unknown`.
 
-On a clean install, `ljos doctor` prints `ljos is ready: memory, tracker and command guard work`, then `Optional extras: ljos doctor --all`. A `seat source` row says where the seat came from. With no seat named and no earlier write, it warns that the read uses every seat. A write that had to pick a seat is `unknown-` plus the host name, and the row names that seat. A `sitting gate` row follows. With no agent runner above the shell it says `not active here`. A missing `ljos.toml` is a warn that names `ljos doctor --fix`. That file is empty, and the defaults stand. The next command is still `ljos remember`.
+Run `ljos doctor` from your home directory. In a checkout that has `.ljos/gates.toml`, the config row names that file. On a clean install, `ljos doctor` prints `ljos is ready: memory, tracker and command guard work`, then `Optional extras: ljos doctor --all`. A `seat source` row says where the seat came from. With no seat named and no earlier write, it warns that the read uses every seat. A write that had to pick a seat is `unknown-` plus the host name, and the row names that seat. A `sitting gate` row follows. With no agent runner above the shell it says `not active here`. A missing `ljos.toml` is a warn that names `ljos doctor --fix`. That file is empty, and the defaults stand. The next command is still `ljos remember`.
 `ljos remember` prints the lesson and the first eight characters of its id. With no seat set and no session id in this process, the write uses `unknown-` plus the host name, and the line says so. A conversation that already has a seat record writes as that seat. A session id only on a parent does not name the seat.
 `ljos search "lexical default"` prints that lesson. A query that shares no word with the stored text, such as `which fusion`, prints `` No hits for "which fusion", so run `ljos search fusion`. ``
 This seat's hits come first. Another seat's lesson is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is `Nothing relevant was found.` A busy pack ranks by words and still returns a hit that names the subject.
@@ -176,7 +176,7 @@ LJOS_SEAT=alice ljos claim ID --assignee alice
 LJOS_SEAT=bob ljos claim ID --assignee bob
 ```
 
-Bob's claim prints `label claim-conflict:` and names alice. The ticket stays with alice.
+Bob's claim prints `label claim-conflict:`, names alice, and tells him to run `ljos send`. The ticket stays with alice.
 `ljos note` writes on the ticket. `ljos timeline ID` prints that note as unverified tracker text. `vissue show ID` prints the logbook.
 Votes cast from one shell are one voice. `ljos consensus` says they were folded on that shell. A vote from each seat's own runner is its own voice. The getting-started page shows the fold.
 
