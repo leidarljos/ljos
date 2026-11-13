@@ -542,7 +542,10 @@ mod tests {
 2026-11-11T00:00:01.000Z\talice\tbox
 2026-11-11T00:00:01Z\tbob\tbox
 ";
-        assert!(recent_line(tied, "box").is_none(), "equal stamps stay a tie");
+        assert!(
+            recent_line(tied, "box").is_none(),
+            "equal stamps stay a tie"
+        );
         let stamp = write_stamp();
         let frac = stamp
             .trim_end_matches('Z')

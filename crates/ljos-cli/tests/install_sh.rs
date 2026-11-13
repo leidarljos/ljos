@@ -107,7 +107,10 @@ fn print_assets_uses_the_sibling_pin_unless_latest() {
     assert!(out.status.success(), "{text}");
     for (name, ver) in &pinned {
         let asset = format!("{name}-v{ver}-x86_64-unknown-linux-gnu.tar.gz");
-        assert!(text.lines().any(|line| line == asset), "{text}\nmissing {asset}");
+        assert!(
+            text.lines().any(|line| line == asset),
+            "{text}\nmissing {asset}"
+        );
     }
     let latest = Command::new("sh")
         .arg(install_sh())
