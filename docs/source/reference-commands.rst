@@ -14,7 +14,7 @@ Commands
 ``sitting --plan TITLE [-p PROJECT] -- ITEM...``
    Stores: tracker, claim graph. File ``TITLE`` and the items after ``--`` in one tracker commit, claim the parent, and print the checklist with ids. The parent is tagged ``plan`` and ``ORDERED``. Each item is a ``checklist`` child, in the order given. The sitting names the next unfinished item. ``ljos ready --mine`` names it again. ``ljos finish ITEM`` marks that item done and names the next one.
 ``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--gen G] [--assignee NAME] [--close]``
-   Stores: all. Close a sitting: complete the session node, store ``--lesson``, fire the island, then learn. A checklist item is marked done instead, and the line names the next unfinished item of its plan. The lesson goes in at once at L0 (``derived``) with origin ``agent-derived``. It is the person's when no runner marks the environment and a terminal is on its input; ``ljos accept ID`` raises it to ``explicit``; ``--gen`` names the claim's generation (absent, the live one; a stale one is refused); ``--assignee`` names the holder (absent, this conversation's holder); a runner is refused. A person closes the ticket when the work is accepted, else the ticket stays open with no holder.
+   Stores: all. Close a sitting: complete the session node, store ``--lesson``, fire the island, then learn. With no encoder the island is not fired, and the line says the ranking is lexical. A checklist item is marked done instead, and the line names the next unfinished item of its plan. The lesson goes in at once at L0 (``derived``) with origin ``agent-derived``. It is the person's when no runner marks the environment and a terminal is on its input; ``ljos accept ID`` raises it to ``explicit``; ``--gen`` names the claim's generation (absent, the live one; a stale one is refused); ``--assignee`` names the holder (absent, this conversation's holder); a runner is refused. A person closes the ticket when the work is accepted, else the ticket stays open with no holder.
 ``calibrate -p PROJECT [--rounds N]``
    Stores: consensus, pack. Trust rows from the project's voting history (Dawid-Skene accuracy)
 ``remember TEXT [--as PERSONA] [--transient|--standing]``
@@ -88,7 +88,9 @@ Commands
 ``file TITLE [--parent ID|--top] [-p PROJECT] [-t TYPE] [--tags T] [--priority P] [--body TEXT]``
    Stores: tracker. File work found while sitting: a child of the held issue unless ``--parent`` names another or ``--top`` none, in the parent's project; a projected board takes it into its inbox under the printed id; the tracker file is committed. A day's checklist is ``ljos sitting --plan``, which files the parent and its items in one commit.
 ``ready [-p PROJECT] [--json] [--mine]``
-   Stores: tracker. Tickets that are open and not waiting on an open ticket. ``--mine`` names the next unfinished item of each plan this seat holds. ``--json`` prints the rows.
+   Stores: tracker. Tickets that are open and not waiting on an open ticket. ``--mine`` names the next unfinished item of each of this seat's plans. ``-p`` limits that list to one project. ``--json`` prints the rows.
+``show ISSUE``
+   Stores: tracker. One ticket: its id, state and title, then the tickets it waits on. An open blocker is ``open`` and a finished one is ``closed``. None prints ``blockers: none``. An unknown id names ``ljos ready``.
 ``note ID TEXT...``
    Stores: tracker. A dated progress note on the issue, committed; on an issue another seat holds it says so: the note is an assist, and ``ljos send`` reaches the holder; the note stays on the ticket and is never written into memory.
 ``withdraw ID [--note TEXT] [--as NAME]``
@@ -149,6 +151,14 @@ Commands
    Stores: tracker. One child issue per module the bundle's lock builds, under ``I``, blocked by the modules built before it along the edges of its software bill of materials; ids are a hash of module and generation, so a rerun keeps what exists and adds what is missing; ``--dry-run`` prints the rows.
 ``findings STATE [--remember] [--all] [--issue I]``
    Stores: pack, deed store, tracker. The typed findings of an eb-stack campaign state, one per line: id, status, class/disposition, stage, recipe, the fix or the summary; ``--remember`` stores one lesson per finding a person or a seat resolved at once (recipe, step, error line, fix), origin ``tool-echo`` at L0 (``derived``), under the recipe's name, its package and the class; ``ljos accept ID`` raises it to ``explicit``; ``--all`` takes the ones a later attempt superseded too; ``--issue`` cites the state file as a deed on the issue.
+``memory export --out FILE [--machine NAME]``
+   Stores: pack, tracker. Write this seat's lessons to the file. The file is not sent. ``-`` writes it to stdout. The machine is ``--machine``, else ``LJOS_SYNC_HOST`` when that is set and not empty, else the hostname. Another seat's lessons stay out.
+``memory import FILE [--as-machine NAME]``
+   Stores: tracker. Store the file in this seat's import slot under ``<tracker>/.ljos/memory/imports/<seat>/<sha256>/``. The import id is the SHA-256 of the file. ``--as-machine`` records that machine and does not change the bytes. Rows are labelled ``imported,unintegrated``. A second import of the same bytes prints ``unchanged``. A missing file names ``ljos memory export --out``.
+``memory integrate [ID|--all] [--dry-run]``
+   Stores: pack, tracker. Map one import, or every import with ``--all``, onto lessons already stored. The same text keeps one canonical id. ``--dry-run`` prints the mappings and writes nothing. Pass an id or ``--all``. ``ljos mesh pull`` integrates the same way and writes the seat's seed at ``<tracker>/.ljos/memory/mesh/<seat>/seed.jsonl``.
+``memory imports [--json]``
+   Stores: tracker. List the slots.
 ``sync [--key] [--import] [--export]``
    Stores: tracker, pack. Share the seat's memory across machines through the tracker repository: pull and take other machines' sealed logs, then write and push this machine's; ``--key`` prints this machine's age public key (made on first use) and stops; ``--import`` only pulls; ``--export`` only writes and pushes.
 ``merge-atoms CURRENT PATH``
