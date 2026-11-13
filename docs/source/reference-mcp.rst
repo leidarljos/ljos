@@ -10,9 +10,9 @@ The seat serves these over the Model Context Protocol (MCP).
 
 Writers: ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
 ``ljos_learn``, ``ljos_graded``, ``ljos_island``, ``ljos_deed``, ``ljos_vote``, ``ljos_predict``, ``ljos_rule``, ``ljos_claim``,
-``ljos_release``, ``ljos_complete``, ``ljos_consolidate``, ``ljos_findings`` (a reader without ``remember``), ``ljos_bump_plan`` (a reader with ``dry_run``), ``ljos_handover``, ``ljos_receive``, ``ljos_send``, ``ljos_read``, ``ljos_reply``, ``ljos_group``. Readers: ``ljos_search`` (with ``as_of``), ``ljos_conflicts``, ``ljos_inbox``,
-``ljos_timeline``, ``ljos_digest``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_recall``,
-``ljos_consensus``, ``ljos_brief``, ``ljos_personas``, ``ljos_playbooks``, ``ljos_cards``, ``ljos_policy``, ``ljos_doctor``. Resources:
+``ljos_release``, ``ljos_complete``, ``ljos_consolidate``, ``ljos_findings`` (a reader without ``remember``), ``ljos_bump_plan`` (a reader with ``dry_run``), ``ljos_handover``, ``ljos_receive``, ``ljos_send``, ``ljos_read``, ``ljos_reply``, ``ljos_group``. Readers: ``ljos_search`` (with ``query`` and optional ``as_of``), ``ljos_conflicts``, ``ljos_inbox``,
+``ljos_timeline``, ``ljos_digest``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_recall`` (with ``issue``),
+``ljos_consensus``, ``ljos_brief``, ``ljos_personas``, ``ljos_playbooks``, ``ljos_cards``, ``ljos_policy``, ``ljos_doctor``, ``ljos_mail_search``, ``ljos_mail_show``. Resources:
 ``ljos://protocol``, ``ljos://cards/USER.md``, ``ljos://cards/MEMORY.md``. Prompts:
 ``start_a_sitting``, ``run_a_panel``, ``check_a_handover``. Every tool description opens with
 when to call it.
@@ -38,8 +38,8 @@ file the items under that ticket instead. ``ljos_sitting`` takes the same
 sends no conversation id still sits, bound to this seat.
 That holder is the same sitting ``ljos sitting`` takes when ``LJOS_SEAT``
 is set and no conversation is named. ``_meta.conversation_id`` sits as that conversation. ``ljos_claim``
-uses the same holder. ``ljos_finish``
-on a checklist id marks it done and names the next item.
+uses the same holder. ``ljos_finish`` takes ``issue``, the checklist id, and ``lesson``.
+It marks that id done and names the next item. ``node`` is not a field.
 
 ``ljos_search`` keeps this seat's hits first. Another seat's hit is kept
 when it names the subject, or when the encoder's cosine is at least 0.66.
