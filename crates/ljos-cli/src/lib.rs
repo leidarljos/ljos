@@ -35428,6 +35428,21 @@ fn with_unstamp(said: String, node: &str, id: &str, holder: &str, reopen: bool) 
     out
 }
 
+/// The holder `ljos claim` would take over: this seat's record, and either
+/// that conversation is gone or the name is this seat under its other form.
+/// The claim-graph scope is not required. Two conversations of one seat
+/// share a checkout, and a record written for another spelling of the same
+/// graph still names this seat's claim.
+fn gone_same_seat_hold(id: &str, assignee: &str) -> Option<(String, Hold)> {
+    let holder = run_captured("claimdag", &["get", id])
+        .ok()
+        .and_then(|g| holder_of(&g.stdout))?;
+    let hold = read_hold(&holder)?;
+    let mine = hold.seat == seat_name();
+    let take = !hold_alive(&hold) || same_holder(&hold.assignee, assignee);
+    (mine && take).then_some((holder, hold))
+}
+
 /// The holder and hold record of node `id` when another conversation of
 /// this seat holds it: a background worker the seat started, or the
 /// conversation that started this worker. The seat owns its
@@ -38818,6 +38833,31 @@ pub fn complete_as(
                     reopen,
                 ));
             }
+            // Another conversation of this seat holds the node, and `ljos
+            // claim` would take it over: the conversation is gone, or the
+            // holder is this seat under its other name. Finish does that
+            // takeover, then completes. `--assignee <seat>` does not, because
+            // the claim graph names the conversation.
+            if gone_same_seat_hold(&id, assignee).is_some() {
+                claim(node, assignee)?;
+                let gen_now = live_gen(&id, None)?.to_string();
+                let mut args = vec![
+                    "complete",
+                    id.as_str(),
+                    "--actor",
+                    actor.as_str(),
+                    "--gen",
+                    gen_now.as_str(),
+                ];
+                if let Some(s) = status {
+                    args.push("--status");
+                    args.push(s);
+                }
+                let said = run_captured("claimdag", &args)?;
+                drop_hold(&actor);
+                drop_playbook(node);
+                return Ok(with_unstamp(said.stdout, node, &id, assignee, reopen));
+            }
             let holder = run_captured("claimdag", &["get", id.as_str()])
                 .ok()
                 .and_then(|g| holder_of(&g.stdout));
@@ -38921,13 +38961,24 @@ pub fn not_assignee_message(
     let mine = unscoped(assignee);
     let fix = "A shell runner's env file gives every shell of a conversation one holder, the runner's conversation id or else LJOS_SESSION_ID; `ljos onboard` writes it";
     match named {
+        Some((name, whence))
+            if hold.is_some_and(|h| {
+                canonical_seat_name(&h.seat) == canonical_seat_name(&seat_name())
+            }) =>
+        {
+            format!(
+                "complete: {node} is held by {name}{whence}, another conversation of this seat, not by {mine}. \
+                 `ljos claim {node}` takes that claim over, then `ljos finish {node}` finishes it. \
+                 The seat name does not move the claim graph: it names the conversation."
+            )
+        }
         Some((name, whence)) => format!(
             "complete: {node} is held by {name}{whence}, not by {mine}, this shell's holder (`ljos seat` says where it came from). \
              Run it again with `--assignee {name}` to finish under the name that holds it. {fix}"
         ),
         None => format!(
             "complete: {node} is not held by {mine}, this shell's holder (`ljos seat` says where it came from), and no record on this host names the holder. \
-             Pass `--assignee NAME` with the name it was claimed under. {fix}"
+             `ljos claim {node}` takes over a claim this seat already holds, then `ljos finish {node}` finishes it."
         ),
     }
 }
@@ -58258,9 +58309,13 @@ mod tests {
     }
 
     /// a finish refused as not the assignee names the holder
-    /// and the `--assignee` that finishes under it.
+    /// and the `--assignee` that finishes under it. A claim this seat
+    /// already holds names `ljos claim` instead: `--assignee` of the seat
+    /// does not move the claim graph.
     #[test]
     fn not_the_assignee_names_the_holder_and_the_flag() {
+        let _env = env_guard();
+        std::env::set_var("LJOS_SEAT", "saddle");
         let hold = super::Hold {
             assignee: "seat-alfa:demo-dlnj".into(),
             seat: "example".into(),
@@ -58277,7 +58332,114 @@ mod tests {
         let said = super::not_assignee_message("demo-dlnj", "seat-bravo", None, Some("seat-alfa"));
         assert!(said.contains("`--assignee seat-alfa`"), "{said}");
         let said = super::not_assignee_message("demo-dlnj", "seat-bravo", None, None);
-        assert!(said.contains("--assignee NAME"), "{said}");
+        assert!(
+            said.contains("`ljos claim demo-dlnj`"),
+            "a missing holder names the claim that takes it over: {said}"
+        );
+        assert!(said.contains("`ljos finish demo-dlnj`"), "{said}");
+        assert!(
+            !said.contains("--assignee NAME"),
+            "passing --assignee does not finish this claim: {said}"
+        );
+        std::env::set_var("LJOS_SEAT", "example");
+        let said =
+            super::not_assignee_message("demo-dlnj", "example@other:demo-dlnj", Some(&hold), None);
+        assert!(
+            said.contains("`ljos claim demo-dlnj`"),
+            "this seat's own claim names claim, not --assignee: {said}"
+        );
+        assert!(
+            !said.contains("--assignee"),
+            "this seat's own claim must not offer --assignee: {said}"
+        );
+        std::env::remove_var("LJOS_SEAT");
+    }
+
+    /// A claim another conversation of this seat left, named on the tracker
+    /// as `Claimed by <seat>`, is taken over the way `ljos claim` takes it
+    /// over. Passing `--assignee` of the seat does not.
+    #[test]
+    fn finish_takes_over_a_claim_another_conversation_of_this_seat_left() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("holder");
+        let log = dir.path().join("claimdag.log");
+        let issue = "proj-ovuh";
+        let old_name = "cursor-conv-9f3a";
+        let new_name = "saddle@bbbb";
+        let old_actor = super::work_id(&format!("{old_name}:{issue}"));
+        let new_actor = super::work_id(&format!("{new_name}:{issue}"));
+        std::fs::write(&state, &old_actor).unwrap();
+        let script = format!(
+            "#!/bin/sh\nset -eu\nstate='{state}'\nlog='{log}'\ncmd=\"$1\"\nid=\"$2\"\nshift 2\nactor=\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --assignee|--actor) actor=$2; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nprintf '%s %s\\n' \"$cmd\" \"$actor\" >> \"$log\"\nh=$(cat \"$state\")\ncase \"$cmd\" in\n  get)\n    echo \"$id claimed task gen=3 assignee=$h\" ;;\n  claim)\n    if [ \"$h\" = \"$actor\" ] || [ -z \"$h\" ]; then printf '%s' \"$actor\" > \"$state\"; echo claimed; exit 0; fi\n    echo 'claim: status claimed' >&2; exit 1 ;;\n  release)\n    if [ \"$h\" != \"$actor\" ]; then echo 'release: not assignee' >&2; exit 1; fi\n    printf '' > \"$state\"; echo released ;;\n  complete)\n    if [ \"$h\" != \"$actor\" ]; then echo 'complete: not assignee' >&2; exit 1; fi\n    echo completed ;;\n  *) echo \"unexpected $cmd\" >&2; exit 1 ;;\nesac\n",
+            state = state.display(),
+            log = log.display(),
+        );
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claimdag = bin.join("claimdag");
+        std::fs::write(&claimdag, script).unwrap();
+        std::fs::write(bin.join("vissue"), "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for name in ["claimdag", "vissue"] {
+                std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+        }
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        std::env::set_var("LJOS_SEAT", "saddle");
+        std::env::set_var("VISSUE_ROOT", dir.path().join("tracker"));
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::set_var("LJOS_TRACKER_GIT", "off");
+        std::env::remove_var("CLAIMDAG_DIR");
+        std::fs::create_dir_all(dir.path().join("tracker")).unwrap();
+        let hold = super::hold_record_path(&old_actor);
+        if let Some(parent) = hold.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        // The graph line is not this process's scope, so the finish path
+        // that completes as the old actor does not apply. The seat line is
+        // what `ljos claim` uses.
+        std::fs::write(
+            &hold,
+            format!(
+                "{old_name}\nsaddle\n1\nnot-init\n2026-01-01T00:00:00Z\n{issue}\nother-graph\n"
+            ),
+        )
+        .unwrap();
+        let said = with_fake_on_path(&bin, || {
+            super::complete_as(issue, Some("done"), new_name, None, true)
+        });
+        let said = said.expect("finish takes over this seat's claim");
+        assert!(
+            said.contains("completed"),
+            "the claim graph did not complete under this conversation: {said}"
+        );
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains(&format!("release {old_actor}")),
+            "the old conversation was not released: {calls}"
+        );
+        assert!(
+            calls.contains(&format!("claim {new_actor}")),
+            "this conversation did not take the claim: {calls}"
+        );
+        assert!(
+            calls.contains(&format!("complete {new_actor}")),
+            "finish did not complete as this conversation: {calls}"
+        );
+        assert_eq!(std::fs::read_to_string(&state).unwrap(), new_actor);
+        for var in [
+            "XDG_RUNTIME_DIR",
+            "LJOS_SEAT",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+        ] {
+            std::env::remove_var(var);
+        }
     }
 
     /// A note that still carries an old `Claimed-by` stamp has to render and
