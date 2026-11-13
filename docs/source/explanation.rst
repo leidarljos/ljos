@@ -173,9 +173,11 @@ Branch protection on the remote does the rest.
 Who is sitting
 ==============
 
-The seat is the name an agent works under. ``LJOS_SEAT`` sets it. When it is unset, ljos derives a
-name from the runner, and a derived name is a seat. ``ljos-mcp`` names the seat after the client that
-connected. ``ljos seat`` prints the seat, the holder, and where each name came from.
+The seat is the name an agent works under. ``LJOS_SEAT`` sets it, and so does a ``seat=`` line
+in ``~/.config/ljos/env`` or a row in ``~/.config/ljos/seats.toml``. ``ljos-mcp`` does not take
+the seat from the client that connected. A read with none of those set looks at every seat.
+A write uses ``unknown-`` plus the host name, and says to set ``LJOS_SEAT``.
+``ljos seat`` prints the seat, the holder, and where each name came from.
 
 Claims belong to one conversation. Memory, ballots and trust belong to the seat. The holder
 is ``SEAT@session``, and the session id is the one the runner gives.

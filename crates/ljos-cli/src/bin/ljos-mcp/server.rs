@@ -849,7 +849,7 @@ pub struct TakeArgs {
     pub node: String,
     /// Your name; a named worker occupies one slot per issue. Absent, this
     /// conversation's holder: the session the runner stamped, else the seat
-    /// named after the client that connected, tagged with the runner's process.
+    /// from LJOS_SEAT or seats.toml. The client's name is not a seat.
     #[serde(default)]
     pub assignee: Option<String>,
 }
@@ -1002,7 +1002,7 @@ pub struct SittingArgs {
     pub items: Vec<String>,
     /// Your name; a named worker occupies one slot per issue. Absent, this
     /// conversation's holder: the session the runner stamped, else the seat
-    /// named after the client that connected, tagged with the runner's process.
+    /// from LJOS_SEAT or seats.toml. The client's name is not a seat.
     #[serde(default)]
     pub assignee: Option<String>,
     /// Accepted and ignored. A blocked issue is sat and labelled `blocked-by`.
@@ -3971,9 +3971,10 @@ impl ServerHandler for LjosServer {
         Some(tool)
     }
 
-    /// The client has said who it is: name the seat after it and leave the
-    /// record a shell below the same runner reads. A missing name is not
-    /// recorded; the next call that carries one does.
+    /// The client has said who it is. That name is not the seat. Record
+    /// `LJOS_SEAT`, `VISSUE_AGENT` or the box seat map, so a shell below
+    /// the same runner reads it. A missing name is not recorded; the next
+    /// call that carries one does.
     async fn on_initialized(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
         let client = context
             .peer
@@ -4740,6 +4741,27 @@ mod tests {
                     "{} requires seat",
                     tool.name
                 );
+            }
+            if let Some(assignee) = props
+                .get("assignee")
+                .and_then(|value| value.get("description"))
+                .and_then(|value| value.as_str())
+            {
+                assert!(
+                    !assignee.contains("client that connected"),
+                    "{} assignee says the client name is the seat: {assignee}",
+                    tool.name
+                );
+                if matches!(
+                    tool.name.as_ref(),
+                    "ljos_claim" | "ljos_release" | "ljos_sitting"
+                ) {
+                    assert!(
+                        assignee.contains("LJOS_SEAT"),
+                        "{} assignee does not name LJOS_SEAT: {assignee}",
+                        tool.name
+                    );
+                }
             }
         }
         let CallToolResponse::Complete(done) = attach_next(

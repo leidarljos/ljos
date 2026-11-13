@@ -1652,9 +1652,10 @@ pub fn seat_conversation_key(seat: &str) -> String {
     format!("ljos-seat:{}", seat.trim())
 }
 
-/// Who is sitting. The seat is the program that connected: the name a
+/// Who is sitting. The seat is the name an agent works under: the name a
 /// runner remembers, votes and earns trust under, the same across its
-/// conversations. The holder is that seat in one conversation: the name
+/// conversations. `LJOS_SEAT` sets it. The client's name is not a seat.
+/// The holder is that seat in one conversation: the name
 /// its claims are held under, so two conversations of one runner hold two
 /// tickets while a vote from either counts for the one voter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4255,11 +4256,12 @@ fn named_var(key: &str) -> Option<String> {
 }
 
 /// The seat this conversation would be, with `LJOS_SEAT` out of the way:
-/// the client that connected, the box seat map, the record under a
+/// the seat this server was given, the box seat map, the record under a
 /// conversation id, a runner variable that names its own seat, or the
-/// seat an agy or opencode conversation id books as. The login user is
-/// not one of these. A record that only says `seat` is kept here so the
-/// disagreement line can name the conversation id that did not resolve.
+/// seat an agy or opencode conversation id books as. The client's name
+/// is not a seat, and the login user is not one of these. A record that
+/// only says `seat` is kept here so the disagreement line can name the
+/// conversation id that did not resolve.
 fn conversation_derived_seat() -> Option<String> {
     let recorded = seat_from_session_records();
     if let Some(seat) = ANNOUNCED
@@ -4713,7 +4715,7 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
         named_slug
     } else if ANNOUNCED.get().is_some_and(|seat| seat.seat == named_slug) {
         bookkeep::log_line(&format!(
-            "note: the tracker lists no seat {named_slug}; sitting it as the client that connected"
+            "note: the tracker lists no seat {named_slug}; sitting it as the seat this server was given"
         ));
         named_slug
     } else if is_harness_name(&named_slug) {

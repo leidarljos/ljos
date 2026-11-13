@@ -776,15 +776,18 @@ or on this user's own port when another user's writer has 8761, and the seat's m
 stand in (`PACKSET_WORKSPACE` names another). The deed store and claim
 graph live in the user's state directories, the tracker at the root
 `vissue identity` prints, and the host key at `~/.config/deedar/host.key`
-when it exists. The seat is the program that connected: `ljos-mcp` names
-it after the client that initialised it, and a shell the same runner opens
-finds the same name through the process tree, so a runner's tools and its
-command-line verbs claim and vote as one. Two names come from that. The
-seat (`acme-cli`) collects memory, ballots and trust rows across every
-conversation of that runner. The holder (`acme-cli-39u`) owns this
+when it exists. The seat is the name an agent works under. `LJOS_SEAT` sets it,
+and so does a `seat=` line in `~/.config/ljos/env` or a row in `~/.config/ljos/seats.toml`.
+`ljos-mcp` does not take the seat from the client that initialised it.
+The same runner's shell finds that name through `LJOS_SEAT`, not through the process tree,
+so a runner's tools and its command-line verbs claim and vote as one.
+A read with none of those set looks at every seat. A write uses `unknown-` plus the host name,
+and the command says to set `LJOS_SEAT`. Two names come from that. The
+seat (`alice`) collects memory, ballots and trust rows across every
+conversation of that runner. The holder (`alice-39u`) owns this
 conversation's claims. A `*_SESSION_ID` the runner wrote names the holder
 ahead of the process tag, as the seat and a short tag for that conversation
-(`acme-cli@k3j9x0a1b2`), so a board says whose claim it is. A
+(`alice@k3j9x0a1b2`), so a board says whose claim it is. A
 `LJOS_SESSION_ID` a person or an env file set is kept as written. Occupancy is `{holder}:{issue}`, so two
 conversations of one runner hold two tickets, and a second sitting does not
 release the first. `ljos seat` prints both names

@@ -18,11 +18,11 @@ over stdio:
    {"mcpServers": {"ljos": {"type": "stdio", "command": "ljos-mcp", "args": [], "env": {}}}}
 
 Paste it where the runner keeps its MCP servers. The ``env`` is empty on
-purpose. The server names the seat after the client that connects, so a
-runner that calls itself ``acme-cli`` is the seat ``acme-cli`` and a
-runner that calls itself ``brio`` is ``brio``, with nothing set per runner.
-A shell the runner opens finds the same seat through ``LJOS_SEAT``, or through the markers the
-runner leaves in the environment. A derived name is a seat. Each conversation keeps its claims as
+purpose. The server does not take the seat from the client that connects.
+Set ``LJOS_SEAT`` in that entry's ``env``, or a ``seat=`` line in
+``~/.config/ljos/env``, or a row in ``~/.config/ljos/seats.toml``.
+A shell the runner opens finds the same seat through ``LJOS_SEAT``.
+The process tree is not a seat. Each conversation keeps its claims as
 the seat tagged with its session, so two conversations of one runner hold two tickets.
 
 .. code:: console
@@ -33,14 +33,9 @@ the seat tagged with its session, so two conversations of one runner hold two ti
    source  no seat rule matched; reading every seat
 
 A read with no seat named looks at every seat. Set one with ``export LJOS_SEAT=NAME``.
-After a client connects, the source is the name that client sent:
-
-.. code:: console
-
-   $ ljos seat
-   seat    acme-cli
-   holder  acme-cli-39u
-   source  the client name the MCP server received
+After a client connects, ``ljos seat`` in that server's environment still
+reads ``LJOS_SEAT``. The name the client sent is not the source. A write
+with none set uses ``unknown-`` and the host name, and says to set ``LJOS_SEAT``.
 
 The protocol goes where the agent reads its instructions: ``ljos protocol``
 prints it, the server serves the same text at ``ljos://protocol`` and names
