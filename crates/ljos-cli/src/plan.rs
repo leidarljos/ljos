@@ -95,19 +95,26 @@ pub fn add_items(parent: &str, items: &[String]) -> Result<Opened> {
 
 /// The next unfinished child of a plan this seat holds.
 ///
-/// Empty of plans: one line that says so.
+/// `project` limits the list to that project. Empty of plans: one line
+/// that says so.
 ///
 /// # Errors
 ///
 /// The tracker cannot be read.
-pub fn ready_mine() -> Result<String> {
+pub fn ready_mine(project: Option<&str>) -> Result<String> {
     let layout = vissue_core::Layout::resolve(None, None)?;
     layout.require_tracker()?;
     let recs =
         vissue_core::catalog::load_recs(&layout).context("ready: the tracker could not be read")?;
     let seat = crate::canonical_seat_name(&crate::seat_name());
+    let want = project.map(str::trim).filter(|name| !name.is_empty());
     let mut out = String::new();
     for rec in &recs {
+        if let Some(want) = want {
+            if !rec.project.eq_ignore_ascii_case(want) {
+                continue;
+            }
+        }
         if !held_by(&rec.heading, &seat) || !plan_heading(&rec.heading) {
             continue;
         }
@@ -485,11 +492,13 @@ mod tests {
             Ok::<(), vissue_core::Error>(())
         })
         .unwrap();
-        let mine = ready_mine().unwrap();
+        let mine = ready_mine(None).unwrap();
         assert_eq!(
             mine,
             format!("next: {}  measure the files\n", opened.children[0].0)
         );
+        assert_eq!(ready_mine(Some("day")).unwrap(), mine);
+        assert_eq!(ready_mine(Some("other")).unwrap(), "no unfinished item\n");
 
         let ticked = tick_checklist(&opened.children[0].0).unwrap().unwrap();
         assert!(ticked.starts_with(&format!("ticked {}", opened.children[0].0)));

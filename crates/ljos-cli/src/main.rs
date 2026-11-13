@@ -3134,7 +3134,7 @@ fn run_command() -> Result<()> {
             mine,
         } => {
             if mine {
-                print!("{}", ljos_cli::plan::ready_mine()?);
+                print!("{}", ljos_cli::plan::ready_mine(project.as_deref())?);
             } else {
                 print!("{}", ljos_cli::ready_view(project.as_deref(), json)?);
             }
