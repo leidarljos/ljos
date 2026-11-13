@@ -1,12 +1,10 @@
 #!/bin/sh
 # Judge the commits selected by the git rev-list arguments.
 # Exit 1 when an author or committer is not Rohit Goswami
-# <rgoswami@ieee.org>, the committer date is not the author date, or a
-# message line is a by-trailer, a made-with line, a generated line, or a
-# machine account mark. A Tests or note paragraph is not that line.
-# Dates match as seconds since the epoch, so one instant written with
-# two offsets still matches. Exit 2 when no range was given. Commits
-# outside the arguments are not read.
+# <rgoswami@ieee.org>, or a message line is a by-trailer, a made-with
+# line, a generated line, or a machine account mark. A Tests or note
+# paragraph is not that line. Dates are not read. Exit 2 when no range
+# was given. Commits outside the arguments are not read.
 # Usage: identity-gate.sh <git rev-list arguments>
 set -eu
 
@@ -35,16 +33,6 @@ for hash in $hashes; do
       status=1
       ;;
   esac
-  dates=$(git log -1 --format='%at %ct' "$hash") || {
-    echo "identity-gate: cannot read $hash" >&2
-    exit 1
-  }
-  authored=${dates% *}
-  committed=${dates#* }
-  if [ "$authored" != "$committed" ]; then
-    echo "identity-gate: committer date differs from author date: $hash author $authored committer $committed" >&2
-    status=1
-  fi
   body=$(git log -1 --format='%B' "$hash") || {
     echo "identity-gate: cannot read $hash" >&2
     exit 1

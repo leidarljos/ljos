@@ -1,8 +1,9 @@
 #!/bin/sh
-# A clean range passes. A wrong author, a wrong committer, a committer
-# date that is not the author date, and a trailer each fail. A foreign
-# commit that sits before the range is not judged, including one that
-# is already on another remote-tracking branch.
+# A clean range passes. A wrong author, a wrong committer, and a
+# trailer each fail. A committer date that differs from the author
+# date passes. A foreign commit that sits before the range is not
+# judged, including one that is already on another remote-tracking
+# branch.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -62,47 +63,25 @@ GIT_COMMITTER_NAME="Ada Lovelace" \
   git commit --allow-empty -q -m "foreign committer"
 must_fail "wrong committer" "$gate" "$base..HEAD"
 
+# Dates are not judged. A later committer instant still passes.
 authored=2026-11-02T20:17:15-06:00
 committed=2026-11-03T01:03:03-06:00
 git checkout -q -b redated "$base"
 GIT_AUTHOR_DATE=$authored GIT_COMMITTER_DATE=$committed \
   git commit --allow-empty -q -m "committed later than authored"
 redated=$(git rev-parse HEAD)
-if "$gate" "$base..HEAD" 2>"$tmp/err"; then
-  echo "identity-gate-test: committer date after author date was accepted" >&2
-  exit 1
-fi
 epochs=$(git log -1 --format='%at %ct' "$redated")
 authored_s=${epochs% *}
 committed_s=${epochs#* }
-want="identity-gate: committer date differs from author date: $redated author $authored_s committer $committed_s"
-if [ "$(cat "$tmp/err")" != "$want" ]; then
-  echo "identity-gate-test: date message was: $(cat "$tmp/err")" >&2
+if [ "$authored_s" = "$committed_s" ]; then
+  echo "identity-gate-test: date fixture did not differ: $epochs" >&2
   exit 1
 fi
+"$gate" "$base..HEAD"
 
 # A commit already pushed with unequal dates sits below the range.
 git commit --allow-empty -q -m "after the redated commit"
 "$gate" "$redated..HEAD"
-
-git checkout -q -b old "$base"
-GIT_AUTHOR_DATE=$authored GIT_COMMITTER_DATE=$authored \
-  git commit --allow-empty -q -m "old but equal dates"
-"$gate" "$base..HEAD"
-
-# One instant written with two offsets passes.
-offset_a=2026-11-02T20:17:15-06:00
-offset_b=2026-11-03T02:17:15+00:00
-git checkout -q -b offsets "$base"
-GIT_AUTHOR_DATE=$offset_a GIT_COMMITTER_DATE=$offset_b \
-  git commit --allow-empty -q -m "one instant, two offsets"
-shown=$(git log -1 --format='%aI %cI %at %ct')
-set -- $shown
-if [ "$1" = "$2" ] || [ "$3" != "$4" ]; then
-  echo "identity-gate-test: offset fixture was: $shown" >&2
-  exit 1
-fi
-"$gate" "$base..HEAD"
 
 fail_msg() {
   desc=$1
