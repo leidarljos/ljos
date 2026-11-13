@@ -181,9 +181,8 @@ One session holds a ticket. The other session's claim is refused and names the h
    tracker git: committed chore(issues): demo-2 claimed by claude-dxw6sq4j7l; no remote, kept local
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos finish demo-2
-   completed the session node for demo-2 as done
+   finished demo-2 as done
    no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, otherwise pass --lesson in two sentences
-   did not fire the island for "Write the note": its seeds are hits no two scorers agreed on (the encoder is down, ranking is lexical only); wiring them would tighten the wrong links
    sitting ended; ticket demo-2 open for review
    tracker git: committed chore(issues): demo-2 finished by claude-dxw6sq4j7l; no remote, kept local
 

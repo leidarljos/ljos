@@ -2066,6 +2066,9 @@ enum Cmd {
         /// Close the tracker ticket. A runner is refused. CANCELLED with `--status cancelled`. Only when the work is accepted or dropped, not when the sitting ends.
         #[arg(long)]
         close: bool,
+        /// Print whether related memories were linked. Without it, finish says the ticket and the next command.
+        #[arg(long)]
+        verbose: bool,
     },
     /// Put a finished or cancelled issue back to the state the close took it from.
     /// A person has to be present. The close stays on the logbook, with the reopen under it. The caller does not take the claim.
@@ -5531,6 +5534,7 @@ fn run_command() -> Result<()> {
             gen,
             assignee,
             close,
+            verbose,
         } => {
             stop_ticket(&issue);
             match ljos_cli::flush_note_queue() {
@@ -5548,7 +5552,8 @@ fn run_command() -> Result<()> {
                     beta,
                     &assignee_for("finish", assignee.as_deref(), false)?,
                     gen,
-                    close
+                    close,
+                    verbose,
                 )
                 .map_err(ticket_error)?
             );

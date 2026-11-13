@@ -40954,6 +40954,7 @@ pub fn finish(
     assignee: &str,
     gen: Option<u64>,
     close: bool,
+    verbose: bool,
 ) -> Result<String> {
     if let Some(mut ticked) = plan::tick_checklist(issue)? {
         if let Some(text) = lesson.map(str::trim).filter(|text| !text.is_empty()) {
@@ -41060,7 +41061,7 @@ pub fn finish(
             bail!("finish: the session node for {issue} was not completed: {e:#}")
         }
     };
-    let mut out = format!("{pending}completed the session node for {issue} as {status}\n");
+    let mut out = format!("{pending}finished {issue} as {status}\n");
     // "back to TODO" is the tracker returning the heading to the state it
     // had before the claim. The work was not undone: the sitting ended and
     // the ticket stays open for a person to review.
@@ -41087,24 +41088,28 @@ pub fn finish(
             "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, otherwise pass --lesson in two sentences\n",
         );
     }
-    match packset_island(&title, true) {
-        Err(e) => out.push_str(&format!(
-            "did not fire the island for {title:?}: {e:#}\n"
-        )),
-        Ok(island) if island["weak"].as_bool().unwrap_or(false) => out.push_str(&format!(
-            "did not fire the island for {title:?}: its seeds are hits no two scorers agreed on{}; wiring them would tighten the wrong links\n",
-            if island["dense"].as_bool().unwrap_or(true) { "" } else { " (the encoder is down, ranking is lexical only)" }
-        )),
-        // Another sitting on this issue, or another persona's, fired the
-        // same claims within the hour; the pack tightened them once.
-        Ok(island) if island["held"].as_bool().unwrap_or(false) => out.push_str(&format!(
-            "the island for {title:?} fired within the hour; not fired again\n"
-        )),
-        Ok(island) => {
-            let fired = island["island"].as_array().map_or(0, Vec::len);
-            out.push_str(&format!(
-                "fired the island for {title:?}: {fired} memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.\n"
-            ));
+    if verbose {
+        match packset_island(&title, true) {
+            Err(e) => out.push_str(&format!(
+                "did not link related memories for {title:?}: {e:#}\n"
+            )),
+            Ok(island) if island["weak"].as_bool().unwrap_or(false) => out.push_str(&format!(
+                "did not link related memories for {title:?}: no two checks agreed{}\n",
+                if island["dense"].as_bool().unwrap_or(true) {
+                    ""
+                } else {
+                    " (the encoder is not installed, so this was a word match)"
+                }
+            )),
+            Ok(island) if island["held"].as_bool().unwrap_or(false) => out.push_str(&format!(
+                "related memories for {title:?} were linked within the hour; not linked again\n"
+            )),
+            Ok(island) => {
+                let fired = island["island"].as_array().map_or(0, Vec::len);
+                out.push_str(&format!(
+                    "linked {fired} related memories for {title:?}. `ljos search {title:?}` follows them.\n"
+                ));
+            }
         }
     }
     if let Some(option) = outcome.map(str::trim).filter(|o| !o.is_empty()) {
@@ -58091,6 +58096,7 @@ mod tests {
             "seat",
             None,
             true,
+            false,
         )
         .unwrap_err()
         .to_string();
@@ -58197,6 +58203,7 @@ mod tests {
             "seat",
             None,
             true,
+            false,
         )
         .unwrap_err()
         .to_string();
@@ -75583,6 +75590,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 "alice",
                 Some(2),
                 false,
+                false,
             )
         });
         match result {
@@ -75620,6 +75628,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "alice",
             None,
             false,
+            false,
         )
         .unwrap_err()
         .to_string();
@@ -75634,9 +75643,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn a_successful_finish_prints_a_missing_lesson_once() {
         let none = r#"{"atoms":[]}"#;
         let said = run_finish_lesson(none, None, true).unwrap();
+        assert!(said.contains("finished probe-lsn1 as done"), "{said}");
         assert!(
-            said.contains("completed the session node for probe-lsn1 as done"),
-            "{said}"
+            !said.contains("island") && !said.contains("seed"),
+            "the memory links stay behind --verbose: {said}"
         );
         assert_eq!(lesson_lines_in(&said), 1, "{said}");
 
@@ -75645,7 +75655,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
         let other = r#"{"atoms":[{"id":"les-o","kind":"lesson","text":"Another ticket taught this.","issue":"probe-othr","entities":["issue:probe-othr"]}]}"#;
         let said = run_finish_lesson(other, None, true).unwrap();
-        assert!(said.contains("completed the session node"), "{said}");
+        assert!(said.contains("finished probe-lsn1 as done"), "{said}");
         assert_eq!(lesson_lines_in(&said), 1, "{said}");
 
         let tomb = r#"{"atoms":[{"id":"les-t","kind":"lesson","text":"Withdrawn.","issue":"probe-lsn1","entities":["issue:probe-lsn1"],"tombstone":true}]}"#;
@@ -75662,7 +75672,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
         let own = r#"{"atoms":[{"id":"les-1","kind":"lesson","text":"The codec is one file.","issue":"probe-lsn1","entities":["issue:probe-lsn1"]}]}"#;
         let said = run_finish_lesson(own, None, true).unwrap();
-        assert!(said.contains("completed the session node"), "{said}");
+        assert!(said.contains("finished probe-lsn1 as done"), "{said}");
         assert_eq!(lesson_lines_in(&said), 0, "{said}");
 
         let entity = r#"{"atoms":[{"id":"les-e","kind":"lesson","text":"Tagged only.","entities":["issue:probe-lsn1"]}]}"#;
@@ -75753,6 +75763,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 "alice",
                 Some(2),
                 false,
+                false,
             )
         })
         .unwrap_or_else(|e| panic!("finish failed after the work was done: {e:#}"));
@@ -75763,7 +75774,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "the node was not completed: {log}"
         );
         assert!(
-            said.contains("completed the session node for probe-f1n5 as done"),
+            said.contains("finished probe-f1n5 as done"),
             "{said}"
         );
         assert!(said.contains("the lesson was not kept"), "{said}");
@@ -75889,6 +75900,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 LEARN_BETA,
                 "alice",
                 Some(2),
+                false,
                 false,
             )
         })
@@ -76031,6 +76043,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 LEARN_BETA,
                 "alice",
                 Some(2),
+                false,
                 false,
             )
         })
@@ -77225,6 +77238,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 "cloudseat",
                 Some(2),
                 false,
+                false,
             )
             .unwrap_or_else(|e| panic!("box finish: {e:#}"));
             assert!(!box_said.contains("deeds:"), "{box_said}");
@@ -77246,6 +77260,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 LEARN_BETA,
                 "cloudseat",
                 Some(2),
+                false,
                 false,
             )
             .unwrap_or_else(|e| panic!("cloud finish: {e:#}"))

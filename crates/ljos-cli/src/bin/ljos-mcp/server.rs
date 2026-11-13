@@ -2236,6 +2236,7 @@ impl LjosServer {
             &call_assignee("finish", args.assignee.as_deref())?,
             args.gen,
             false,
+            false,
         )
         .map_err(refused)?;
         ljos_cli::bookkeep::note_finished(&issue);
