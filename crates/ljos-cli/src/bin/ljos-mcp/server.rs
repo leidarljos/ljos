@@ -1272,6 +1272,11 @@ fn refused(e: anyhow::Error) -> McpError {
     if let Some(label) = ljos_cli::policy_label::as_policy(&e) {
         return McpError::internal_error(format!("label {}: {}", label.label, label.detail), None);
     }
+    // A down writer is one sentence that names the next step. The chain
+    // under it is `Connection refused (os error 111)`, which does not.
+    if let Some(line) = ljos_cli::pack_down_message(&e) {
+        return McpError::internal_error(line, None);
+    }
     let text = format!("{e:#}");
     // The pack's prose rule refuses a hard sentence; the seat that hit it
     // is told what passes, so the second try is not a guess.

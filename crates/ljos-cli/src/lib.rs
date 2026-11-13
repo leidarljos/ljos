@@ -17931,6 +17931,44 @@ pub fn longest_call_timeout() -> std::time::Duration {
         .max(tool_bound::budget())
 }
 
+/// What to say when the pack writer is not there. The same sentences
+/// [`ensure_writer`] refuses with. It does not start a writer.
+#[must_use]
+pub fn pack_down_line() -> String {
+    if std::env::var("PACKSET_URL").ok().as_deref() == Some("off") {
+        return "PACKSET_URL=off: this seat has no pack on purpose".to_string();
+    }
+    if std::env::var("PACKSET_URL")
+        .ok()
+        .is_some_and(|url| !url.is_empty())
+    {
+        return "the pack writer at PACKSET_URL is not answering. This seat is not pointed at the default writer, so it was not started".to_string();
+    }
+    if !on_path("packset") {
+        return "no pack writer is answering, and packset is not on PATH. cargo install --locked packset".to_string();
+    }
+    if let Some(home) = bookkeep::temp_home() {
+        return format!(
+            "the memory writer does not start on its own under a temporary HOME ({}); \
+             run `packset ensure` to start it",
+            home.display()
+        );
+    }
+    "no pack writer is answering. Run `packset ensure`".to_string()
+}
+
+/// [`pack_down_line`] when `err` is a writer that refused the connection.
+/// `None` for any other failure, so a refusal the writer actually sent
+/// keeps its own words.
+#[must_use]
+pub fn pack_down_message(err: &anyhow::Error) -> Option<String> {
+    if pack_unreachable(err) {
+        Some(pack_down_line())
+    } else {
+        None
+    }
+}
+
 /// Start the default writer when a memory verb could not connect.
 /// `PACKSET_URL=off` is left alone. A URL pointed somewhere else is not
 /// replaced with the default writer. `LJOS_OFF` gets no daemon and no
@@ -17948,20 +17986,10 @@ fn ensure_writer() -> Result<()> {
     if std::env::var("PACKSET_URL")
         .ok()
         .is_some_and(|url| !url.is_empty())
+        || !on_path("packset")
+        || bookkeep::temp_home().is_some()
     {
-        bail!(
-            "the pack writer at PACKSET_URL is not answering. This seat is not pointed at the default writer, so it was not started"
-        );
-    }
-    if !on_path("packset") {
-        bail!("no pack writer is answering, and packset is not on PATH. cargo install --locked packset");
-    }
-    if let Some(home) = bookkeep::temp_home() {
-        bail!(
-            "the memory writer does not start on its own under a temporary HOME ({}); \
-             run `packset ensure` to start it",
-            home.display()
-        );
+        bail!("{}", pack_down_line());
     }
     // `packset ensure` detaches the writer. A hook process is short and that
     // writer is the seat's. A test process stays up for the whole suite:
@@ -24335,7 +24363,10 @@ fn preferences_row() -> Habitat {
                 preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms, true));
             preferences_line(enforced, could, total)
         }
-        Err(e) => format!("not counted: {e:#}"),
+        Err(e) => match pack_down_message(&e) {
+            Some(line) => format!("not counted: {line}"),
+            None => format!("not counted: {e:#}"),
+        },
     };
     Habitat {
         name: "preferences",
@@ -31190,7 +31221,10 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 }
                 Err(e) => Habitat {
                     name: "encoder",
-                    state: format!("pack does not answer: {e}"),
+                    state: match pack_down_message(&e) {
+                        Some(line) => format!("pack does not answer. {line}"),
+                        None => format!("pack does not answer: {e}"),
+                    },
                     ok: false,
                 },
             },
@@ -31235,13 +31269,16 @@ pub fn doctor_seat() -> Vec<Habitat> {
                     },
                     Err(e) => Habitat {
                         name: "pack",
-                        state: match bookkeep::temp_home() {
-                            Some(_) => format!(
-                            "{} does not answer: {e}. Under a temporary HOME the writer does not \
-                             start on its own; run `packset ensure`",
-                            client.base()
-                        ),
-                            None => format!("{} does not answer: {e}", client.base()),
+                        state: match pack_down_message(&e) {
+                            Some(line) => format!("{} does not answer. {line}", client.base()),
+                            None => match bookkeep::temp_home() {
+                                Some(_) => format!(
+                                    "{} does not answer: {e}. Under a temporary HOME the writer does not \
+                                     start on its own; run `packset ensure`",
+                                    client.base()
+                                ),
+                                None => format!("{} does not answer: {e}", client.base()),
+                            },
                         },
                         ok: false,
                     },
@@ -31257,16 +31294,26 @@ pub fn doctor_seat() -> Vec<Habitat> {
         // with no token meets a 401 on every memory, mail and recall call while
         // `/health` still says ok.
         if let Ok(client) = pack() {
-            let refused = client
-                .status(None)
+            let status = client.status(None);
+            if status
+                .as_ref()
                 .err()
-                .map(|e| format!("{e:#}").contains("401"));
-            out.push(pack_token_row(
-                client.has_token(),
-                std::env::var_os("PACKSET_TOKEN").is_some_and(|v| !v.is_empty()),
-                packset_client::token_path(),
-                refused,
-            ));
+                .is_some_and(|e| pack_unreachable(&anyhow::Error::msg(e.to_string())))
+            {
+                out.push(Habitat {
+                    name: "pack token",
+                    state: format!("not checked. {}", pack_down_line()),
+                    ok: true,
+                });
+            } else {
+                let refused = status.err().map(|e| format!("{e:#}").contains("401"));
+                out.push(pack_token_row(
+                    client.has_token(),
+                    std::env::var_os("PACKSET_TOKEN").is_some_and(|v| !v.is_empty()),
+                    packset_client::token_path(),
+                    refused,
+                ));
+            }
         }
         // A search that keeps answering 401 or 403 is using stored memories
         // only. Asked when the pack answers, so a seat whose search is fine

@@ -216,3 +216,102 @@ fn tools_list_answers_with_an_empty_home_and_no_tracker() {
         );
     }
 }
+
+/// A fresh home with no pack writer: search, a pack write and the doctor
+/// name the next step. The client's name is not the seat.
+#[test]
+fn a_missing_pack_names_the_next_step_and_the_client_is_not_the_seat() {
+    let home = std::path::PathBuf::from("/home/ubuntu/ljos-mcp-fresh");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .env("USER", "walk")
+        .env("LOGNAME", "walk")
+        .env_remove("LJOS_SEAT")
+        .env_remove("VISSUE_AGENT")
+        .env_remove("PACKSET_URL")
+        .env_remove("PACKSET_TOKEN")
+        .current_dir(&home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(60));
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    });
+    let lines = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "acme-cli", "version": "1"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "ljos_search", "arguments": {"query": "lexical default"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "ljos_rule", "arguments": {"pattern": "*--force*", "verdict": "deny", "why": "a force push rewrites a published branch"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+            "name": "ljos_doctor", "arguments": {}}}),
+    ];
+    let mut stdin = child.stdin.take().unwrap();
+    for line in &lines {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("panicked"),
+        "stderr:\n{stderr}\nstdout:\n{stdout}"
+    );
+    let answers: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let by_id = |id: u64| {
+        answers
+            .iter()
+            .find(|answer| answer["id"] == id)
+            .unwrap_or_else(|| panic!("no answer {id}\nstdout:\n{stdout}\nstderr:\n{stderr}"))
+            .clone()
+    };
+    let text = |value: &serde_json::Value| {
+        value["result"]["content"]
+            .as_array()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|block| block["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_else(|| value.to_string())
+    };
+    for id in [2, 3] {
+        let call = by_id(id);
+        assert!(call.get("error").is_none(), "{call}");
+        assert_eq!(call["result"]["isError"], true, "{call}");
+        let said = text(&call);
+        assert!(
+            said.contains("packset is not on PATH")
+                && said.contains("cargo install --locked packset"),
+            "id {id}: {said}"
+        );
+        assert!(!said.contains("os error"), "id {id}: {said}");
+        assert!(said.contains("next:"), "id {id}: {said}");
+        assert!(!said.contains("acme-cli"), "id {id}: {said}");
+    }
+    let doctor = text(&by_id(4));
+    assert!(doctor.contains("packset is not on PATH"), "{doctor}");
+    assert!(!doctor.contains("os error"), "{doctor}");
+    assert!(
+        !doctor.contains("this writer does not ask for one"),
+        "{doctor}"
+    );
+    assert!(!doctor.contains("acme-cli"), "{doctor}");
+}
