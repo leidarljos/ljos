@@ -5131,7 +5131,7 @@ pub fn registered_seat(seat: &str) -> Result<()> {
             Err(policy_label::labelled(
                 "seat-unlisted",
                 format!(
-                    "no seat named {slug} in {}, which lists {}. `ljos seat add {slug}` adds it. Nothing was written",
+                    "no seat named {slug} in {}, which lists {}, and nothing was written, so run `ljos seat add {slug}`",
                     path.display(),
                     seats.into_iter().collect::<Vec<_>>().join(", ")
                 ),
@@ -5256,8 +5256,8 @@ fn occupancy_scope(assignee: &str, issue: &str) -> String {
 
 /// The doctor's `seat source` row: where the seat tracker writes go under
 /// came from. A seat nobody named is a warning, not a failure: reads work,
-/// and only the writes [`write_seat`] guards are refused. The warning names
-/// the same next step a write prints.
+/// and only the writes [`write_seat`] guards are refused. A write that had
+/// to pick a seat names `export LJOS_SEAT=NAME` on its own line.
 #[must_use]
 pub fn seat_source_row(who: &Seat) -> Habitat {
     if who.source.starts_with("no seat rule matched") {
@@ -20523,7 +20523,7 @@ fn note_queue_row() -> Habitat {
     let waiting = notes.len();
     if unread > 0 {
         return damaged(format!(
-            "the note queue at {} is damaged: {unread} row(s) are not a note; {waiting} note(s) wait. `ljos finish` or the next session start moves those rows to a dated `.damaged` file beside it",
+            "the note queue at {} is damaged: {unread} row(s) are not a note and {waiting} note(s) wait, so run `ljos finish` to move the bad rows aside",
             queue.display()
         ));
     }
@@ -20744,6 +20744,10 @@ pub fn remember_note(body: &Value) -> &'static str {
         "episode: the hook shows it when a prompt bears on it, and `ljos due` with `ljos graded` promotes it to standing"
     }
 }
+
+/// The most characters `ljos remember` stores. A longer paste is not a
+/// lesson, and the command names the shorter one to run.
+pub const REMEMBER_TEXT_CAP: usize = 1000;
 
 /// What `ljos remember` prints when one text is more than one claim.
 #[must_use]
@@ -35443,12 +35447,8 @@ fn is_sole_or_ancestor_parent_hold(parent: &str, seat: &str, hold_pid: u32) -> b
 #[must_use]
 pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, running: &str) -> String {
     format!(
-        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee} (this one). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; when it is gone, `ljos release {node} --assignee {}` releases it under the name it held. To help without a sitting, `ljos note {node} TEXT` adds to its logbook and `ljos send {} TEXT` reaches the holder",
-        hold.assignee,
-        hold.seat,
-        hold.since,
-        hold.assignee,
-        hold.seat
+        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee}, so run `ljos send {} TEXT`",
+        hold.assignee, hold.seat, hold.since, hold.seat
     )
 }
 
@@ -35774,7 +35774,7 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                             return Err(policy_label::labelled(
                                 "claim-conflict",
                                 format!(
-                                    "claim: {node} is held by another conversation, not by {assignee} (this one; `ljos seat` says where the name came from), and no record on this host names it. That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; a conversation that is gone is released with `ljos release {node} --assignee NAME` under the name it held"
+                                    "claim: {node} is held by another conversation, not by {assignee}, and no record on this host names it, so run `ljos release {node} --assignee NAME`"
                                 ),
                             ));
                         }
@@ -36990,7 +36990,9 @@ impl ReadOnce {
                 Ok(serde_json::to_value(detail)?)
             }
             [] => bail!("{id} is not in the tracker"),
-            _ => bail!("{id} is in more than one tracker"),
+            _ => bail!(
+                "issue {id} is in more than one tracker, so run `ljos ready` with VISSUE_ROOT set to one of them"
+            ),
         }
     }
 }
@@ -37135,11 +37137,11 @@ pub const RELATED_MEMORY_CAP: usize = 5;
 /// What `ljos recall` and `ljos_recall` add when the pack has nothing on
 /// the issue. The prompt hook stays quiet instead: an issue with no
 /// memories adds no line there.
-pub const EMPTY_ISSUE_MEMORY: &str = "\
-\nMemory  shown 0 of 0, on this issue
-  (no lesson on this issue.
-  `ljos search` lists the pack, and `ljos remember` stores one.)
-";
+/// What `ljos recall` prints when the pack has no lesson on `issue`.
+#[must_use]
+pub fn empty_issue_memory(issue: &str) -> String {
+    format!("The pack has no lesson on {issue}, so run `ljos remember \"TEXT\"`.\n")
+}
 
 /// [`recall_memories`] for a person or an agent who asked. An empty pack
 /// answer names the next command. The hook uses [`recall_memories`] and
@@ -37150,7 +37152,7 @@ pub fn recall_for_command(issue: &str) -> Result<String> {
         bail!("{text}");
     }
     if text.trim().is_empty() {
-        Ok(EMPTY_ISSUE_MEMORY.to_string())
+        Ok(empty_issue_memory(issue))
     } else {
         Ok(text)
     }
@@ -37660,9 +37662,104 @@ fn tracker_misses(err: &anyhow::Error, issue: &str) -> bool {
 /// A ticket id the tracker does not hold, with the commands that list
 /// lessons and tickets.
 fn unknown_ticket(issue: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "issue {issue} not found. `ljos search` looks for a lesson. `ljos ready` lists the open tickets, and `ljos file` prints a new id"
-    )
+    anyhow::anyhow!("issue {issue} not found, so run `ljos ready`")
+}
+
+/// Whether `err` is a ticket lookup sentence ([`unknown_ticket`] or
+/// [`ticket_refusal`]). The CLI prints it and exits 1.
+#[must_use]
+pub fn is_ticket_fault(err: &anyhow::Error) -> bool {
+    let text = err.to_string();
+    text.starts_with("issue ") && text.contains(", so run `ljos ")
+}
+
+/// The sentence for an id the tracker does not hold as one ticket.
+///
+/// `None` when `id` is one ticket in one tracker, or when the tracker
+/// cannot be listed and the caller should ask it itself.
+#[must_use]
+pub fn ticket_refusal(id: &str) -> Option<String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Some("issue id is empty, so run `ljos ready`".to_string());
+    }
+    let layout = vissue_core::Layout::resolve(None, None).ok()?;
+    let layouts = vissue_core::Router::load(layout.clone())
+        .map(|router| {
+            router
+                .unique_layouts()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|_| vec![layout]);
+    let mut exact = Vec::new();
+    let mut prefixes = Vec::new();
+    let mut saw_file = false;
+    for layout in &layouts {
+        let Ok(projects) = vissue_core::store::list_projects(layout) else {
+            continue;
+        };
+        for project in projects {
+            let path = layout.project_issues_path(&project);
+            let Ok(doc) = vissue_core::IssueDoc::parse_file(&project, &path) else {
+                continue;
+            };
+            saw_file = true;
+            for heading in doc.headings {
+                if heading.id == id {
+                    let root = layout.root().display().to_string();
+                    if !exact.contains(&root) {
+                        exact.push(root);
+                    }
+                } else if heading.id.starts_with(id) && !prefixes.contains(&heading.id) {
+                    prefixes.push(heading.id);
+                }
+            }
+        }
+    }
+    match exact.len() {
+        0 => {}
+        1 => return None,
+        _ => {
+            return Some(format!(
+                "issue {id} is in more than one tracker, so run `ljos ready` with VISSUE_ROOT set to one of them"
+            ));
+        }
+    }
+    if !saw_file {
+        return None;
+    }
+    prefixes.sort();
+    match prefixes.as_slice() {
+        [] => Some(format!("issue {id} not found, so run `ljos ready`")),
+        [one] => Some(format!(
+            "issue {id} not found, and the closest is {one}, so run `ljos show {one}`"
+        )),
+        many => {
+            let shown = if many.len() <= 3 {
+                match many {
+                    [a, b] => format!("{a} and {b}"),
+                    _ => {
+                        let (last, rest) = many.split_last().unwrap_or((&many[0], &[]));
+                        format!(
+                            "{} and {last}",
+                            rest.iter()
+                                .map(String::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }
+                }
+            } else {
+                format!("{}, {} and {} more", many[0], many[1], many.len() - 2)
+            };
+            Some(format!(
+                "issue {id} matches {shown}, so run `ljos show {}`",
+                many[0]
+            ))
+        }
+    }
 }
 
 /// Whether `err` is the tracker's miss for `issue`. `vissue recall` wraps
@@ -40092,7 +40189,7 @@ fn reopen_caller() -> Result<String> {
             Err(policy_label::labelled(
                 "reopen-warning",
                 format!(
-                    "reopen: LJOS_SEAT {process} does not match the seat file {file}; nothing was written"
+                    "reopen: LJOS_SEAT {process} and the seat file {file} name different seats and nothing was written, so run `export LJOS_SEAT={file}`"
                 ),
             ))
         }
@@ -42746,7 +42843,7 @@ pub fn calibrate(project: &str, rounds: usize) -> Result<Vec<Trust>> {
 #[must_use]
 pub fn search_reading(n: usize) -> &'static str {
     if n == 0 {
-        "No hits. The pack holds nothing on this query. A failure would say the writer did not answer."
+        "No hits, so the pack holds nothing on this query, so run `ljos remember \"TEXT\"`."
     } else {
         "Score is how the scorers ranked this query. The fraction is how many of them named the hit. Neither is whether the claim is true. A later line on the same matter supersedes an earlier one."
     }
@@ -42754,7 +42851,8 @@ pub fn search_reading(n: usize) -> &'static str {
 
 /// The human search page. `explain` (`ljos search --explain`) opens with
 /// [`search_reading`]; without it the page names score and scorers in two
-/// lines. An empty answer is `No hits.` and `shown 0 of 0.` The id on each
+/// lines. An empty answer is one sentence that starts `No hits` and names
+/// the next command. The id on each
 /// row is the eight-character prefix. `--json` does not use this.
 pub fn format_hits(hits: &[Hit], explain: bool) -> String {
     format_search(hits, hits.len(), false, explain, "")
@@ -48382,14 +48480,14 @@ mod tests {
         let err = super::unknown_ticket("kiln");
         let text = err.to_string();
         assert!(text.contains("issue kiln not found"), "{text}");
-        assert!(text.contains("`ljos search` looks for a lesson"), "{text}");
-        assert!(text.contains("`ljos ready`"), "{text}");
-        assert!(text.contains("`ljos file`"), "{text}");
+        assert!(text.contains("so run `ljos ready`"), "{text}");
+        assert!(!text.contains("`ljos file`"), "{text}");
         let wrapped = anyhow::anyhow!("vissue failed (exit 1): issue kiln not found");
         assert!(super::issue_missing(&wrapped, "kiln"));
         assert!(!super::issue_missing(&wrapped, "other"));
-        assert!(super::EMPTY_ISSUE_MEMORY.contains("no lesson on this issue"));
-        assert!(super::EMPTY_ISSUE_MEMORY.contains("`ljos remember`"));
+        let empty = super::empty_issue_memory("kiln");
+        assert!(empty.contains("no lesson on kiln"), "{empty}");
+        assert!(empty.contains("`ljos remember \"TEXT\"`"), "{empty}");
     }
 
     /// An issue's own memories past the cap and the related hits past
@@ -51005,6 +51103,23 @@ mod tests {
         }
     }
 
+    /// `LJOS_SEAT` and the seat file name different seats. The reopen stops
+    /// and names the export that makes them the same.
+    #[test]
+    fn a_seat_file_that_disagrees_names_one_export() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", dir.path());
+        std::fs::create_dir_all(dir.path().join(".config/ljos")).unwrap();
+        std::fs::write(dir.path().join(".config/ljos/env"), "LJOS_SEAT=alice\n").unwrap();
+        std::env::set_var("LJOS_SEAT", "bob");
+        let err = super::reopen_caller().unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "reopen: LJOS_SEAT bob and the seat file alice name different seats and nothing was written, so run `export LJOS_SEAT=alice`"
+        );
+    }
+
     /// A board shows whose claim it is: the seat, then a short tag for the
     /// conversation, never the runner's bare conversation id. A name the
     /// person chose with `LJOS_SESSION_ID` is kept as written.
@@ -51062,9 +51177,10 @@ mod tests {
             since: "2026-01-01T00:00:00.000Z".into(),
         };
         let said = super::held_by_another_message("demo-aaaa", "brio", &hold, "still running");
-        assert!(said.contains("held by another"), "{said}");
-        assert!(said.contains("acme"), "{said}");
-        assert!(said.contains("not by brio"), "{said}");
+        assert_eq!(
+            said,
+            "claim: demo-aaaa is held by another (acme, seat acme, still running, since 2026-01-01T00:00:00.000Z), not by brio, so run `ljos send acme TEXT`"
+        );
     }
 
     /// Another seat sits on the issue: a note is an assist and says so,
@@ -51085,8 +51201,8 @@ mod tests {
         assert!(line.contains("`ljos send eessi TEXT`"), "{line}");
         assert!(super::assist_line("proj-jz8x", &hold, "eessi").is_none());
         let refused = super::held_by_another_message("proj-jz8x", "inky-2", &hold, "still running");
-        assert!(refused.contains("`ljos note proj-jz8x TEXT`"), "{refused}");
         assert!(refused.contains("`ljos send eessi TEXT`"), "{refused}");
+        assert!(!refused.contains("`ljos note"), "{refused}");
     }
 
     /// Two seats on one ticket: LJOS_SEAT plus a distinct session id each.
@@ -74672,8 +74788,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "{explained}"
         );
         assert!(!explained.contains("score: scorer order"), "{explained}");
-        assert_eq!(format_hits(&[], false), "No hits.\nshown 0 of 0.\n");
-        assert!(format_hits(&[], true).contains("A failure would say"));
+        assert_eq!(
+            format_hits(&[], false),
+            "No hits, so run `ljos remember \"TEXT\"`.\n"
+        );
+        assert!(format_hits(&[], true).contains("the pack holds nothing"));
         let mut local = signal_hit("lesson", "The door thermocouple reads low.", 1.0, 0);
         local.labels.push("kept-local".into());
         let line = format_hits(&[local], false);

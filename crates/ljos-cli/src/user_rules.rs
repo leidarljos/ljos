@@ -160,13 +160,7 @@ pub(crate) fn read_all() -> Result<Vec<UserRule>> {
                         &mut stable_since,
                         started,
                     ) {
-                        return held_or(
-                            &path,
-                            err.context(format!(
-                                "user rules: {} is not a user-rules file",
-                                path.display()
-                            )),
-                        );
+                        return held_or(&path, err);
                     }
                 }
             },
@@ -211,10 +205,26 @@ fn remember_good(path: &std::path::Path, text: &str) {
 /// The last whole document when this seat has read one. Otherwise `err`,
 /// which is what a file that was never valid still returns.
 fn held_or(path: &std::path::Path, err: anyhow::Error) -> Result<Vec<UserRule>> {
+    let fault = plain_rules_fault(path, &err);
     let Ok(text) = std::fs::read_to_string(good_copy(path)) else {
-        return Err(err);
+        return Err(fault);
     };
-    parse_rules(&text).map_err(|_| err)
+    parse_rules(&text).map_err(|_| fault)
+}
+
+/// The line a person sees when the rules file never parsed. A rewrite that
+/// is still empty says so, and a JSON fragment names the parser's reason.
+fn plain_rules_fault(path: &std::path::Path, err: &anyhow::Error) -> anyhow::Error {
+    let raw = err.to_string();
+    let why = if raw.contains(" is empty") {
+        "the file is empty"
+    } else {
+        raw.lines().next().unwrap_or("it does not parse")
+    };
+    anyhow::anyhow!(
+        "user rules: {} is half-written or does not parse ({why}), so run `ljos prefer --user --why REASON TEXT` to write it again",
+        path.display()
+    )
 }
 
 /// How long an unchanged bad file is treated as corrupt. A rewrite is

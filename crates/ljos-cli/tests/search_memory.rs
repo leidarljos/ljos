@@ -251,7 +251,11 @@ fn a_search_that_stays_cold_says_the_rows_were_ranked_by_words() {
         !stdout.contains("ferry timetable"),
         "a floor score was printed as a hit: {said}"
     );
-    assert!(stdout.contains("No hits."), "{said}");
+    assert!(
+        stdout.contains("No hits for \"Carrollton Nov 23 morning timing\""),
+        "{said}"
+    );
+    assert!(stdout.contains("`ljos search Carrollton`"), "{said}");
 }
 
 #[test]

@@ -100,7 +100,7 @@ Ask when
    2026-09-12 08:30    today   +7 d    tracker note: the fused panel held at ten conversations
 
 ``proj-1a2b`` is a sample id ``ljos file`` printed. An unknown id says
-``issue ID not found``.
+``issue ID not found, so run ljos ready``.
 Three stores, one dated list, oldest first: the tracker's logbook, the
 deeds the issue cites with the time each was produced, and the memories the
 issue's title activates with the time each was written. Each line carries

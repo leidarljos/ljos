@@ -100,9 +100,7 @@ pub fn reads_every(mine: &str) -> bool {
 /// One plain line for a write that had to pick a seat.
 #[must_use]
 pub fn notice(seat: &str) -> String {
-    format!(
-        "ljos: no seat was named; this write uses {seat}. Set one with --seat NAME or export LJOS_SEAT=NAME."
-    )
+    format!("ljos: no seat was named, so this write uses {seat}. Run `export LJOS_SEAT=NAME`.")
 }
 
 /// Append one write so a later command can see the most recent seat.
@@ -526,9 +524,10 @@ mod tests {
         assert_eq!(rule, "no seat rule matched; using an unknown seat");
         assert!(choose(&inputs, Kind::Keep).is_none());
         let line = notice("unknown-box");
-        assert!(line.contains("unknown-box"), "{line}");
-        assert!(line.contains("--seat"), "{line}");
-        assert!(line.contains("LJOS_SEAT"), "{line}");
+        assert_eq!(
+            line,
+            "ljos: no seat was named, so this write uses unknown-box. Run `export LJOS_SEAT=NAME`."
+        );
         assert!(!line.contains('\n'), "{line}");
     }
 

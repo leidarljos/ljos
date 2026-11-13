@@ -312,6 +312,7 @@ fn invalid_toml_names_the_file_line_and_column() {
         &[],
         &format!("{}:1:12: invalid TOML", path.display()),
     );
+    shows(&world, &[], "Run `ljos doctor` once the file is valid TOML");
 }
 
 #[test]

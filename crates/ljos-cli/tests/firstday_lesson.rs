@@ -236,9 +236,7 @@ fn recall_of_an_unknown_id_names_search_and_file() {
     assert_ne!(code, 0, "{stdout}{stderr}");
     let said = format!("{stdout}{stderr}");
     assert!(said.contains("issue kiln not found"), "{said}");
-    assert!(said.contains("`ljos search` looks for a lesson"), "{said}");
-    assert!(said.contains("`ljos file`"), "{said}");
-    assert!(said.contains("`ljos ready`"), "{said}");
+    assert!(said.contains("so run `ljos ready`"), "{said}");
 }
 
 #[test]
@@ -257,9 +255,11 @@ fn recall_of_an_issue_with_no_lesson_names_the_next_command() {
     assert!(!id.is_empty(), "{filed}");
     let (code, recall, err) = seat.run(&["recall", id]);
     assert_eq!(code, 0, "{recall}{err}");
-    assert!(recall.contains("no lesson on this issue"), "{recall}{err}");
-    assert!(recall.contains("`ljos search`"), "{recall}");
-    assert!(recall.contains("`ljos remember`"), "{recall}");
+    assert!(
+        recall.contains(&format!("no lesson on {id}")),
+        "{recall}{err}"
+    );
+    assert!(recall.contains("`ljos remember \"TEXT\"`"), "{recall}");
 }
 
 #[test]

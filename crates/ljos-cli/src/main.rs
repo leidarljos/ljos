@@ -443,6 +443,7 @@ enum Cmd {
     ///
     /// Example: `ljos remember "The lexical default is BM25+."`
     ///
+    /// An empty text exits 2. A text past 1000 characters exits 2.
     /// A writer that is not answering exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
     Remember {
         text: Vec<String>,
@@ -603,7 +604,9 @@ enum Cmd {
     /// how close the stored text is to the query, from 0 to 1. A short list
     /// is not padded with a weaker cross-seat hit. When those were the only
     /// rows, the line is `Nothing relevant was found.` A search the pack
-    /// answered with nothing is still `No hits.` A busy pack ranks by words
+    /// answered with nothing prints `No hits for QUERY` and the next command:
+    /// `ljos search WORD` when QUERY has more than one word, otherwise
+    /// `ljos remember "TEXT"`. A busy pack ranks by words
     /// and still returns a hit that names the subject. A pack that runs out
     /// of time prints `pack busy, try again` and exits 75.
     /// A writer that is not answering exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
@@ -1025,6 +1028,9 @@ enum Cmd {
         off: Option<String>,
     },
     /// One ticket, including the tickets it waits on.
+    ///
+    /// An unknown id exits 1 and names `ljos ready`. An id that matches more
+    /// than one ticket exits 1 and names one `ljos show` command.
     Show {
         /// The tracker id.
         issue: String,
@@ -1061,6 +1067,7 @@ enum Cmd {
     ///
     /// Example: `ljos recall proj-1a2b`
     ///
+    /// When the pack has no lesson on the issue, the line names `ljos remember`.
     /// A writer that is not answering exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
     Recall {
         issue: String,
@@ -1947,6 +1954,200 @@ enum Cmd {
 /// The status clap uses when the arguments could not be read.
 const USAGE_STATUS: i32 = 2;
 
+/// One sentence for a mistyped command or flag. Other parse errors stay
+/// with clap. Exit [`USAGE_STATUS`].
+fn usage_sentence(err: &clap::Error) -> Option<String> {
+    use clap::error::{ContextKind, ErrorKind};
+    let kind = err.kind();
+    if !matches!(
+        kind,
+        ErrorKind::InvalidSubcommand | ErrorKind::UnknownArgument
+    ) {
+        return None;
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if kind == ErrorKind::InvalidSubcommand {
+        let typed = context_one(err, ContextKind::InvalidSubcommand)?;
+        let options = context_list(err, ContextKind::SuggestedSubcommand);
+        let next = match closest(&typed, &options) {
+            Some(name) => {
+                let rewritten = rewrite_arg(&args, &typed, name);
+                format!("ljos: no command {typed}. The closest is {name}. Run `{rewritten}`.")
+            }
+            None => {
+                let help = parent_help(&args, &typed);
+                format!("ljos: no command {typed}. Run `{help}`.")
+            }
+        };
+        return Some(next);
+    }
+    let typed = context_one(err, ContextKind::InvalidArg)?;
+    let options = context_list(err, ContextKind::SuggestedArg);
+    let command = command_before(&args, &typed);
+    let where_ = if command.is_empty() {
+        "ljos".to_string()
+    } else {
+        command.clone()
+    };
+    let next = match closest(typed.trim_start_matches('-'), &flag_names(&options)) {
+        Some(name) => {
+            let flag = options
+                .iter()
+                .find(|option| option.trim_start_matches('-') == name)
+                .map(String::as_str)
+                .unwrap_or(name);
+            let rewritten = rewrite_arg(&args, &typed, flag);
+            format!("ljos: {where_} has no flag {typed}. The closest is {flag}. Run `{rewritten}`.")
+        }
+        None => {
+            let help = if command.is_empty() {
+                "ljos --help".to_string()
+            } else {
+                format!("ljos {command} --help")
+            };
+            format!("ljos: {where_} has no flag {typed}. Run `{help}`.")
+        }
+    };
+    Some(next)
+}
+
+fn context_one(err: &clap::Error, kind: clap::error::ContextKind) -> Option<String> {
+    let value = err.get(kind)?;
+    let text = match value {
+        clap::error::ContextValue::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let text = text.trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+fn context_list(err: &clap::Error, kind: clap::error::ContextKind) -> Vec<String> {
+    let Some(value) = err.get(kind) else {
+        return Vec::new();
+    };
+    match value {
+        clap::error::ContextValue::Strings(list) => list.clone(),
+        clap::error::ContextValue::String(text) => vec![text.clone()],
+        other => {
+            let text = other.to_string();
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![text]
+            }
+        }
+    }
+}
+
+fn flag_names(options: &[String]) -> Vec<String> {
+    options
+        .iter()
+        .map(|option| option.trim_start_matches('-').to_string())
+        .collect()
+}
+
+fn closest<'a>(typed: &str, options: &'a [String]) -> Option<&'a str> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return None;
+    }
+    let mut best: Option<(&str, usize)> = None;
+    for option in options {
+        let name = option.trim();
+        if name.is_empty() || name == typed {
+            continue;
+        }
+        let distance = edits(typed, name);
+        if distance == 0 || distance > 3 {
+            continue;
+        }
+        match best {
+            Some((_, have)) if distance >= have => {}
+            _ => best = Some((name, distance)),
+        }
+    }
+    best.map(|(name, _)| name)
+}
+
+fn edits(left: &str, right: &str) -> usize {
+    let a: Vec<char> = left.chars().collect();
+    let b: Vec<char> = right.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut next = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        next[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            next[j + 1] = (prev[j + 1] + 1).min(next[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut next);
+    }
+    prev[b.len()]
+}
+
+fn command_before(args: &[String], flag: &str) -> String {
+    args.iter()
+        .take_while(|arg| arg.as_str() != flag)
+        .filter(|arg| !arg.starts_with('-'))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parent_help(args: &[String], typed: &str) -> String {
+    let parent = command_before(args, typed);
+    if parent.is_empty() {
+        "ljos help".to_string()
+    } else {
+        format!("ljos {parent} --help")
+    }
+}
+
+fn rewrite_arg(args: &[String], from: &str, to: &str) -> String {
+    let mut words = vec!["ljos".to_string()];
+    let mut replaced = false;
+    for arg in args {
+        if !replaced && arg == from {
+            words.push(shell_word(to));
+            replaced = true;
+        } else {
+            words.push(shell_word(arg));
+        }
+    }
+    if !replaced {
+        words.push(shell_word(to));
+    }
+    words.join(" ")
+}
+
+fn shell_word(word: &str) -> String {
+    if word.is_empty()
+        || word
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '\\'))
+    {
+        format!("\"{}\"", word.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        word.to_string()
+    }
+}
+
+/// Print a ticket lookup failure and exit 1.
+fn stop_ticket(id: &str) {
+    if let Some(line) = ljos_cli::ticket_refusal(id) {
+        eprintln!("{line}");
+        std::process::exit(1);
+    }
+}
+
+fn ticket_error(err: anyhow::Error) -> anyhow::Error {
+    if ljos_cli::is_ticket_fault(&err) {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+    err
+}
+
 /// Where a `ljos note` line goes, and whether the issue was inferred.
 ///
 /// A default mint is the issue. Any other vissue id is the issue when
@@ -2088,7 +2289,10 @@ fn main() -> Result<()> {
             // failed command. 2 is the status a bad invocation already
             // uses, so a script that checks the status sees the failure.
             // Other labels are notes and still exit 0.
-            if matches!(label.label, "seat-unresolved" | "seat-unlisted") {
+            if matches!(label.label, "seat-unresolved" | "seat-unlisted")
+                || (label.label == "reopen-warning"
+                    && label.detail.contains("name different seats"))
+            {
                 std::process::exit(USAGE_STATUS);
             }
             return Ok(());
@@ -2287,6 +2491,10 @@ fn run_command() -> Result<()> {
         Err(err) => {
             let args: Vec<String> = std::env::args().skip(1).collect();
             ljos_cli::memory_port::record_memory_error(&args, &err.to_string());
+            if let Some(line) = usage_sentence(&err) {
+                eprintln!("{line}");
+                std::process::exit(USAGE_STATUS);
+            }
             err.exit();
         }
     };
@@ -2373,7 +2581,15 @@ fn run_command() -> Result<()> {
             }
             let text = join(&text);
             if text.trim().is_empty() {
-                eprintln!("remember: pass the text to store");
+                eprintln!("remember: the text is empty, so run `ljos remember \"TEXT\"`.");
+                std::process::exit(USAGE_STATUS);
+            }
+            let chars = text.chars().count();
+            if chars > ljos_cli::REMEMBER_TEXT_CAP {
+                eprintln!(
+                    "remember: the text is {chars} characters, past {}, so run `ljos remember` with one or two sentences.",
+                    ljos_cli::REMEMBER_TEXT_CAP
+                );
                 std::process::exit(USAGE_STATUS);
             }
             ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
@@ -3039,6 +3255,9 @@ fn run_command() -> Result<()> {
             deadline,
             porcelain: _,
         } => {
+            if let Some(parent) = parent.as_deref() {
+                stop_ticket(parent);
+            }
             if let Some(d) = &deadline {
                 chrono::DateTime::parse_from_rfc3339(d.trim())
                     .map_err(|e| anyhow::anyhow!("--deadline {d:?} is not RFC 3339: {e}"))?;
@@ -3102,7 +3321,8 @@ fn run_command() -> Result<()> {
                 &ljos_cli::seat_name(),
                 false,
                 qd,
-            )?;
+            )
+            .map_err(ticket_error)?;
             let mut rest = text;
             if let (Some((n, d)), false) = (qd, id.is_empty()) {
                 let note = format!("{}{n} by {}", ljos_cli::reap::QUORUM_NOTE, d.trim());
@@ -3274,7 +3494,10 @@ fn run_command() -> Result<()> {
             };
             print!("{said}");
         }
-        Cmd::Show { issue } => print!("{}", ljos_cli::show_issue(&issue)?),
+        Cmd::Show { issue } => {
+            stop_ticket(&issue);
+            print!("{}", ljos_cli::show_issue(&issue).map_err(ticket_error)?);
+        }
         Cmd::Ready {
             project,
             json,
@@ -3316,9 +3539,10 @@ fn run_command() -> Result<()> {
             json,
             no_graph,
         } => {
+            stop_ticket(&issue);
             ljos_cli::config_diag::emit();
             ljos_cli::log_recall("recall", &issue);
-            let said = ljos_cli::tracker_recall(&issue)?;
+            let said = ljos_cli::tracker_recall(&issue).map_err(ticket_error)?;
             eprint!("{}", said.stderr);
             let memories = ljos_cli::recall_for_command(&issue)?;
             let code = if no_graph {
@@ -4997,6 +5221,7 @@ fn run_command() -> Result<()> {
             assignee,
             close,
         } => {
+            stop_ticket(&issue);
             match ljos_cli::flush_note_queue() {
                 Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
                 Err(e) => eprintln!("ljos finish: note queue: {e:#}"),
@@ -5013,7 +5238,8 @@ fn run_command() -> Result<()> {
                     &assignee_for("finish", assignee.as_deref(), false)?,
                     gen,
                     close
-                )?
+                )
+                .map_err(ticket_error)?
             );
         }
         Cmd::Reopen { issue } => {

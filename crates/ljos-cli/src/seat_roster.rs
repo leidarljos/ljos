@@ -832,7 +832,7 @@ via = \"bea\"
         assert!(!back.contains("only listed seats"), "{back}");
         let err = crate::registered_seat("bob").unwrap_err().to_string();
         assert!(err.contains("`ljos seat add bob`"), "{err}");
-        assert!(err.contains("Nothing was written"), "{err}");
+        assert!(err.contains("nothing was written"), "{err}");
     }
 
     /// Adding another name while this seat is off the list is `seat-unlisted`.

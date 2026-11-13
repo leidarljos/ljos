@@ -304,7 +304,7 @@ encoder lists a hit at the top and the hit shares no word with the query: on
 that measured set, an unrelated prompt's best cosine stayed at 0.653.
 A cross-seat row under the line does not fill a short list. When those
 were the only rows, the command prints ``Nothing relevant was found.``
-A search the pack answered with nothing is still ``No hits.`` When the
+A search the pack answered with nothing prints ``No hits for "which fusion", so run ljos search fusion``. When the
 pack is busy, search ranks by words. Cosine is not required then, and a
 hit that names the subject still answers.
 

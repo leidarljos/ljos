@@ -288,7 +288,10 @@ fn an_empty_remember_exits_with_one_line() {
             1,
             "{args:?} was not one line:\n{stderr}"
         );
-        assert_eq!(stderr.trim(), "remember: pass the text to store");
+        assert_eq!(
+            stderr.trim(),
+            "remember: the text is empty, so run `ljos remember \"TEXT\"`."
+        );
     }
 }
 

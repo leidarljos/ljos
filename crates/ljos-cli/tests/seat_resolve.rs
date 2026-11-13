@@ -179,8 +179,10 @@ fn a_read_with_no_seat_covers_every_seat_and_a_write_names_unknown() {
         String::from_utf8_lossy(&write.stderr)
     );
     assert!(write_text.contains("this write uses unknown-box"), "{text}");
-    assert!(write_text.contains("--seat"), "{text}");
-    assert!(write_text.contains("LJOS_SEAT"), "{text}");
+    assert!(
+        write_text.contains("Run `export LJOS_SEAT=NAME`."),
+        "{text}"
+    );
     assert!(!write_text.contains("label seat-unresolved"), "{text}");
 }
 

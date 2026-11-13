@@ -93,7 +93,7 @@ timeline of proj-1a2b: Ship the fuse change?
 #+end_src
 
 =proj-1a2b= is a sample id =ljos file= printed. An unknown id says
-=issue ID not found=.
+=issue ID not found, so run ljos ready=.
 Three stores, one dated list, oldest first: the tracker's logbook, the
 deeds the issue cites with the time each was produced, and the memories the
 issue's title activates with the time each was written. Each line carries

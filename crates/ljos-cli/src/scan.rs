@@ -291,17 +291,9 @@ pub struct SearchPage<'a> {
 #[must_use]
 pub fn search_page(page: &SearchPage<'_>) -> String {
     if page.rows.is_empty() {
-        let mut out = String::from("No hits.\nshown 0 of 0.\n");
-        if page.explain {
-            let rest = page
-                .reading
-                .strip_prefix("No hits.")
-                .unwrap_or(page.reading)
-                .trim();
-            if !rest.is_empty() {
-                out.push_str(&wrap(rest, COLS));
-                out.push('\n');
-            }
+        let mut out = wrap(&no_hits_line(page.query, page.explain), COLS);
+        if !out.ends_with('\n') {
+            out.push('\n');
         }
         return out;
     }
@@ -360,6 +352,46 @@ fn next_limit(matched: usize, capped: bool) -> usize {
     } else {
         matched
     }
+}
+
+/// One sentence when a search matched nothing, and the command to run next.
+#[must_use]
+pub fn no_hits_line(query: &str, explain: bool) -> String {
+    let query = query.trim();
+    let next = next_search(query);
+    let head = if query.is_empty()
+        || query
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '"' | '`' | '\\'))
+    {
+        "No hits".to_string()
+    } else if query.contains(char::is_whitespace) {
+        format!("No hits for \"{query}\"")
+    } else {
+        format!("No hits for {query}")
+    };
+    if explain {
+        format!("{head}, so the pack holds nothing on this query and the next command is `{next}`.")
+    } else {
+        format!("{head}, so run `{next}`.")
+    }
+}
+
+fn next_search(query: &str) -> String {
+    let words: Vec<&str> = query
+        .split_whitespace()
+        .filter(|word| word.len() >= 3 && word.chars().all(|ch| ch.is_ascii_alphanumeric()))
+        .collect();
+    if words.len() > 1 {
+        let mut best = words[0];
+        for word in &words[1..] {
+            if word.len() > best.len() {
+                best = word;
+            }
+        }
+        return format!("ljos search {best}");
+    }
+    "ljos remember \"TEXT\"".to_string()
 }
 
 fn search_hint(query: &str, limit: usize, asks: bool) -> String {

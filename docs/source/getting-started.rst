@@ -104,7 +104,7 @@ A lesson and a search
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
-   ljos: no seat was named; this write uses unknown-cursor. Set one with --seat NAME or export LJOS_SEAT=NAME.
+   ljos: no seat was named, so this write uses unknown-cursor. Run `export LJOS_SEAT=NAME`.
    remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    standing: the hook shows it from the next prompt it bears on
@@ -123,7 +123,7 @@ That line is printed only when the write uses that seat. A conversation that alr
 This run sat under an agent runner, so the search row says ``lesson, agent-derived``.
 Typed at a terminal with no runner above it, the same command is the person's sentence.
 Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
-``ljos search "which fusion"`` shares no word with either sentence and prints ``No hits.``
+``ljos search "which fusion"`` shares no word with either sentence and prints ``No hits for "which fusion", so run ljos search fusion``.
 This seat's hits come first. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.
 That floor is the one the prompt hook uses for a hit the encoder lists at the top.
 A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is ``Nothing relevant was found.``

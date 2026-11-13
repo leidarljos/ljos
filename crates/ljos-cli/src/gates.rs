@@ -182,7 +182,7 @@ fn read_layer(path: &Path) -> Result<Option<toml::map::Map<String, toml::Value>>
         let (line, column) = crate::config_diag::toml_line_column(&e);
         let message = e.message().lines().next().unwrap_or("invalid TOML");
         format!(
-            "`{}` does not parse at line {line}, column {column} ({message}). Fix the file, then retry.",
+            "`{}` does not parse at line {line}, column {column} ({message}), so run `ljos doctor` once the file is valid TOML.",
             path.display()
         )
     })?;

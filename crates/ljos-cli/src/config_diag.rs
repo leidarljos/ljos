@@ -1225,7 +1225,7 @@ fn parse_file(layer: &Layer, warnings: &mut Vec<String>, found: &mut Vec<Found>)
             let (line, column) = toml_line_column(&err);
             let message = err.message().lines().next().unwrap_or("invalid TOML");
             warnings.push(format!(
-                "{}:{line}:{column}: invalid TOML: {message}",
+                "{}:{line}:{column}: invalid TOML: {message}. Run `ljos doctor` once the file is valid TOML",
                 layer.path.display()
             ));
             return;

@@ -186,7 +186,10 @@ fn a_failed_command_is_left_out_of_search_until_asked() {
     let said = text(&plain);
     assert!(plain.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&plain.stdout);
-    assert!(!stdout.contains("zircon-missing"), "{said}");
+    assert!(
+        stdout.contains("No hits for zircon-missing, so run `ljos remember \"TEXT\"`."),
+        "{said}"
+    );
     assert!(!stdout.contains("attempt,"), "{said}");
     let asked = world.ljos(
         &["search", "--attempts", "zircon-missing"],
@@ -326,7 +329,7 @@ fn default_search_keeps_this_seats_topic_and_drops_routine_logs() {
     assert!(hourly.status.success(), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&hourly.stdout).trim(),
-        "No hits.\nshown 0 of 0.",
+        "No hits for hourly, so run `ljos remember \"TEXT\"`.",
         "{said}"
     );
 
@@ -343,7 +346,7 @@ fn default_search_keeps_this_seats_topic_and_drops_routine_logs() {
     assert!(stop.status.success(), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&stop.stdout).trim(),
-        "No hits.\nshown 0 of 0.",
+        "No hits for the, so run `ljos remember \"TEXT\"`.",
         "{said}"
     );
 }
