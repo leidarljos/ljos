@@ -128,8 +128,10 @@ fn porcelain_file_under_a_hold_prints_only_the_id() {
     assert!(err.contains("--top -p"), "{err}");
 }
 
+/// `vissue identity` still prints a prefix when this directory is not a
+/// git checkout. The line names that default and the `-p` command.
 #[test]
-fn a_checkout_prefix_is_the_project_when_nothing_is_held() {
+fn a_prefix_outside_a_checkout_names_the_flag() {
     let seat = Seat::new("'vissue test' 'root=/tmp/tracker' 'prefix=ljos'");
     let out = seat.file(&["x"]);
     let err = String::from_utf8_lossy(&out.stderr);
@@ -141,8 +143,13 @@ fn a_checkout_prefix_is_the_project_when_nothing_is_held() {
         "{creates:?}"
     );
     assert!(!creates[0].contains("--parent"), "{creates:?}");
-    assert!(err.contains("this checkout's project"), "{err}");
-    assert!(err.contains("filed in ljos"), "{err}");
+    assert!(
+        err.contains(
+            "filed in ljos. This directory is not a git checkout, so run `ljos file TITLE -p NAME`."
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("this checkout's project"), "{err}");
 }
 
 #[test]
