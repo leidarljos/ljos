@@ -399,10 +399,31 @@ fn promised_in_readme(cmd: &str) -> Vec<&'static str> {
     }
 }
 
+/// The README quotes the ready line from a home where the guard is on.
+/// This seat's home is a temporary directory, so the guard stays out and
+/// the line names memory and tracker. Either line is this doctor.
+fn doctor_ready(output: &str) -> bool {
+    const WITH_GUARD: &str = "ljos is ready: memory, tracker and command guard work";
+    const SANDBOX: &str = "ljos is ready: memory and tracker work";
+    if output.contains(WITH_GUARD) {
+        return true;
+    }
+    output.contains(SANDBOX) && output.contains("ljos stays out of test sandboxes")
+}
+
 fn expect_output(cmd: &str, output: &str) {
     match ljos_verb(cmd).as_deref() {
         Some("doctor") => {
-            for key in DOCTOR {
+            assert!(
+                doctor_ready(output),
+                "{cmd}\nexpected the ready line with the command guard, or without it \
+                 because this home is a temporary directory\n{output}"
+            );
+            for key in DOCTOR
+                .iter()
+                .copied()
+                .filter(|key| !key.starts_with("ljos is ready"))
+            {
                 assert!(output.contains(key), "{cmd}\nmissing {key:?}\n{output}");
             }
         }
