@@ -174,7 +174,7 @@ Commands
 ``protocol``
    Stores: none. Print the sitting protocol.
 ``onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]``
-   Stores: runner. Alone, print the one ``mcpServers`` entry any runner takes; with a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its skill, and write the personas into its ``agents`` directory; a shell runner (``shell = true``, ``example-host``, or ``shell``) writes the skill and an env file and registers no server and no hook; changed runner files and their previous bytes are recorded for ``offboard``.
+   Stores: runner. Alone, a terminal onboards every runner it finds and a pipe prints the one ``mcpServers`` entry any runner takes; onboard in json form prints that entry at a terminal too; with a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its skill, and write the personas into its ``agents`` directory; a shell runner (``shell = true``, ``example-host``, or ``shell``) writes the skill and an env file and registers no server and no hook; changed runner files and their previous bytes are recorded for ``offboard``.
 ``offboard [--runner NAME] [--dry-run]``
    Stores: runner. Restore runner files changed by ``onboard`` and remove files created only for ljos; ``--runner`` limits removal to one runner; ``--dry-run`` reports without writing; later edits are preserved; an older installation without a manifest is removed by its ljos markers.
 ``uninstall [--dry-run] [--keep-programs] [--all] [--purge] [--no-stub] [--bin-dir DIR]``

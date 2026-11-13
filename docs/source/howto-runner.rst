@@ -14,9 +14,11 @@ over stdio:
 
 .. code:: console
 
-   $ ljos onboard
+   $ ljos onboard --harness json
    {"mcpServers": {"ljos": {"type": "stdio", "command": "ljos-mcp", "args": [], "env": {}}}}
 
+``ljos onboard`` at a terminal, with no output format named, onboards every runner it finds.
+A pipe prints the same JSON, and onboard in json form prints it at a terminal too.
 Paste it where the runner keeps its MCP servers. The ``env`` is empty on
 purpose. The server does not take the seat from the client that connects.
 Set ``LJOS_SEAT`` in that entry's ``env``, or a ``seat=`` line in
