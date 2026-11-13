@@ -17290,11 +17290,7 @@ fn host_key_step(dry: bool) -> Step {
             };
         }
         let (listed, ok) = accept_host_key();
-        let note = if ok {
-            signer_note(&listed)
-        } else {
-            listed
-        };
+        let note = if ok { signer_note(&listed) } else { listed };
         return Step {
             what: "host key".into(),
             detail: format!("{} exists. {note}", path.display()),
@@ -17343,11 +17339,7 @@ fn host_key_step(dry: bool) -> Step {
             // so every deed the key signs would fail evidence. deedar adds
             // it; a store made after this lists it on its own.
             let (listed, ok) = accept_host_key();
-            let note = if ok {
-                signer_note(&listed)
-            } else {
-                listed
-            };
+            let note = if ok { signer_note(&listed) } else { listed };
             Step {
                 what: "host key".into(),
                 detail: format!("wrote a signing key to {}. {note}", path.display()),
@@ -60127,17 +60119,15 @@ mod tests {
             "host key: ed25519:ab, added as a signer to /s/layout\n".into(),
         ));
         assert!(ok && said == "host key: ed25519:ab, added as a signer to /s/layout");
+        assert_eq!(super::signer_note(&said), "The deed store lists this key.");
         assert_eq!(
-            super::signer_note(&said),
+            super::signer_note("host key: ed25519:ab, already a signer /s/layout lists"),
             "The deed store lists this key."
         );
-        assert_eq!(
-            super::signer_note(
-                "host key: ed25519:ab, already a signer /s/layout lists"
-            ),
-            "The deed store lists this key."
+        assert!(
+            !super::signer_note("host key: ed25519:ab, already a signer /s/layout lists")
+                .contains("ed25519:")
         );
-        assert!(!super::signer_note("host key: ed25519:ab, already a signer /s/layout lists").contains("ed25519:"));
         let (said, ok) = super::host_accept_detail(Err(
             "deedar: set DEEDAR_URL or pass --url; no store at /s".into(),
         ));

@@ -2368,8 +2368,7 @@ fn cwd_is_checkout() -> bool {
     else {
         return false;
     };
-    out.status.success()
-        && String::from_utf8_lossy(&out.stdout).trim() == "true"
+    out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
 }
 
 fn ticket_error(err: anyhow::Error) -> anyhow::Error {
