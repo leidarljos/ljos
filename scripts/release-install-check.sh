@@ -4,6 +4,11 @@
 # archive names, for every target the release workflow builds, and refuses
 # a script that asks for a different name.
 #
+# A missing archive in that directory is one line naming the archive and
+# the next command. It does not fall through into a source build. With no
+# --asset-dir, a missing download names the rustc a source build needs.
+# --no-build on that download stops before the rustc question.
+#
 #   scripts/release-install-check.sh
 #   scripts/release-install-check.sh --release-dist dist
 #
@@ -50,6 +55,8 @@ grep -F -q 'ljos-${TAG}-${{ matrix.target }}' "$REL" ||
 
 LJOS_VER=$(sed -n 's/^version *= *"\([0-9.]*\)".*/\1/p' "$ROOT/Cargo.toml" | head -n 1)
 [ -n "$LJOS_VER" ] || die "Cargo.toml has no version"
+MIN_RUST=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' "$ROOT/Cargo.toml" | head -n 1)
+[ -n "$MIN_RUST" ] || die "Cargo.toml has no rust-version"
 
 # Archive names the publishers upload. install.sh has to ask for these,
 # not for a crate-TARGET.tar.xz name that was never published.
@@ -169,50 +176,71 @@ $(cat "$home/out" "$home/err")"
   rm -rf "$home"
 done
 
-# A missing archive must not fall through into cargo. The line names the
-# rustc a source build would need, and cargo is not started.
+# A missing archive in --asset-dir stops in that directory. The line names
+# the archive and the next command. cargo is not started.
 fake=$(mktemp -d "${TMPDIR:-/tmp}/ljos-release-fake.XXXXXX")
 trap 'rm -rf "$STAGE" "$ASSETS" "$fake"; rm -f "$PINS"' EXIT INT TERM
 printf '%s\n' '#!/bin/sh' 'echo rustc 1.83.0 \(fake\)' > "$fake/rustc"
 printf '%s\n' '#!/bin/sh' 'echo cargo-was-run >> "$CARGO_MARKER"' 'exit 1' > "$fake/cargo"
-chmod 755 "$fake/rustc" "$fake/cargo"
+# install.sh reads curl's stdout as the HTTP status. 404 is a missing archive.
+printf '%s\n' '#!/bin/sh' 'printf %s 404' > "$fake/curl"
+chmod 755 "$fake/rustc" "$fake/cargo" "$fake/curl"
 gone="$ASSETS/vissue-v$VISSUE_VER-x86_64-unknown-linux-gnu.tar.gz"
 rm -f "$gone" "$gone.sha256"
 marker=$fake/cargo-ran
-home=$(mktemp -d "${TMPDIR:-/tmp}/ljos-release-home.XXXXXX")
-set +e
-CARGO_MARKER=$marker PATH="$fake:$PATH" \
-  sh "$INSTALL" --asset-dir "$ASSETS" --target x86_64-unknown-linux-gnu \
-    --no-embed --no-onboard --no-modify-path --bin-dir "$home/bin" $(cat "$PINS") \
-    > "$home/out" 2> "$home/err"
-status=$?
-set -e
-[ "$status" != 0 ] || die "a missing vissue archive installed anyway"
-grep -q 'needs rustc 1.89' "$home/err" || die "source build did not name rustc 1.89:
-$(cat "$home/err")"
-grep -q 'found rustc 1.83.0' "$home/err" || die "source build did not name the rustc it found:
-$(cat "$home/err")"
-[ ! -e "$marker" ] || die "cargo ran though rustc is older than 1.89"
-# The refusal is one line.
-lines=$(grep -c . "$home/err" || true)
-[ "$lines" = 1 ] || die "source build printed $lines lines, wanted 1:
-$(cat "$home/err")"
+target=x86_64-unknown-linux-gnu
+asset="vissue-v$VISSUE_VER-$target.tar.gz"
+asset_line="install.sh: no $asset in $ASSETS. That is the archive name for $target."
+asset_line="$asset_line Put the release archive and its .sha256 in that directory and run \`sh install.sh --asset-dir $ASSETS\` again, or unpack the programs and run \`sh install.sh --from-dir DIR\`."
 
-# --no-build stops before any rustc question.
-rm -rf "$home"
-home=$(mktemp -d "${TMPDIR:-/tmp}/ljos-release-home.XXXXXX")
-set +e
-CARGO_MARKER=$marker PATH="$fake:$PATH" \
-  sh "$INSTALL" --asset-dir "$ASSETS" --target x86_64-unknown-linux-gnu \
-    --no-embed --no-onboard --no-modify-path --no-build --bin-dir "$home/bin" \
-    $(cat "$PINS") > "$home/out" 2> "$home/err"
-status=$?
-set -e
-[ "$status" != 0 ] || die "--no-build installed from a missing archive"
-grep -q "no vissue-v$VISSUE_VER-x86_64-unknown-linux-gnu.tar.gz for x86_64-unknown-linux-gnu" "$home/err" ||
-  die "--no-build did not name the missing archive:
+run_missing() {
+  [ -z "$home" ] || rm -rf "$home"
+  home=$(mktemp -d "${TMPDIR:-/tmp}/ljos-release-home.XXXXXX")
+  rm -f "$marker"
+  set +e
+  CARGO_MARKER=$marker PATH="$fake:$PATH" \
+    sh "$INSTALL" "$@" --bin-dir "$home/bin" > "$home/out" 2> "$home/err"
+  status=$?
+  set -e
+}
+
+expect_line() {
+  label=$1
+  want=$2
+  [ "$status" != 0 ] || die "$label installed anyway"
+  grep -F -x -q "$want" "$home/err" || die "$label printed:
+$(cat "$home/err")
+wanted:
+$want"
+  [ ! -e "$marker" ] || die "$label started cargo"
+  lines=$(grep -c . "$home/err" || true)
+  [ "$lines" = 1 ] || die "$label printed $lines lines, wanted 1:
 $(cat "$home/err")"
-[ ! -e "$marker" ] || die "cargo ran under --no-build"
+}
+
+home=
+run_missing --asset-dir "$ASSETS" --target "$target" \
+  --no-embed --no-onboard --no-modify-path $(cat "$PINS")
+expect_line "a missing vissue archive" "$asset_line"
+
+# --no-build does not change that refusal.
+run_missing --asset-dir "$ASSETS" --target "$target" \
+  --no-embed --no-onboard --no-modify-path --no-build $(cat "$PINS")
+expect_line "--no-build with --asset-dir" "$asset_line"
+
+# No --asset-dir. A 404 is the source-build path. The line names the
+# rustc a source build needs, and cargo is not started.
+ljos_asset="ljos-v$LJOS_VER-$target.tar.gz"
+source_line="install.sh: no $ljos_asset for $target; a source build needs rustc $MIN_RUST or newer (found rustc 1.83.0). Install Rust from https://rustup.rs and run \`sh install.sh\` again."
+run_missing --target "$target" \
+  --no-embed --no-onboard --no-modify-path $(cat "$PINS")
+expect_line "source build" "$source_line"
+
+# --no-build on that download stops before any rustc question.
+nobuild_line="install.sh: no $ljos_asset for $target. The release has no archive for this machine. Supported archives: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin. To build from source, install Rust $MIN_RUST or newer from https://rustup.rs and run \`sh install.sh\` without --no-build."
+run_missing --target "$target" \
+  --no-embed --no-onboard --no-modify-path --no-build $(cat "$PINS")
+expect_line "--no-build with no archive" "$nobuild_line"
 rm -rf "$home" "$fake"
 
 echo "release-install-check: install.sh matches the published archives for all 4 targets"

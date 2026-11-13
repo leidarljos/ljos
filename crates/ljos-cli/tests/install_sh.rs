@@ -600,8 +600,24 @@ fn a_missing_tar_names_the_install_command() {
     let sys = dir.path().join("sys");
     std::fs::create_dir_all(&sys).unwrap();
     for name in [
-        "sh", "mktemp", "date", "cp", "chmod", "mkdir", "rm", "mv", "cat", "grep", "sed", "awk",
-        "find", "uname", "head", "sort", "dirname", "sha256sum",
+        "sh",
+        "mktemp",
+        "date",
+        "cp",
+        "chmod",
+        "mkdir",
+        "rm",
+        "mv",
+        "cat",
+        "grep",
+        "sed",
+        "awk",
+        "find",
+        "uname",
+        "head",
+        "sort",
+        "dirname",
+        "sha256sum",
     ] {
         for root in ["/usr/bin", "/bin"] {
             let found = Path::new(root).join(name);
