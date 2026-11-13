@@ -234,9 +234,7 @@ fn an_onboarded_tracker_keeps_the_import() {
     assert!(
         slot.is_dir(),
         "import landed outside the tracker\nstate: {}\n{}",
-        home.path()
-            .join(".local/state/ljos/memory")
-            .display(),
+        home.path().join(".local/state/ljos/memory").display(),
         text(&imported)
     );
     assert!(
@@ -246,4 +244,39 @@ fn an_onboarded_tracker_keeps_the_import() {
             .exists(),
         "a second copy was written under the state directory"
     );
+}
+
+/// A path that is not there is one line, and it names the command that writes the file.
+#[test]
+fn a_missing_import_names_export() {
+    let home = tempfile::tempdir().expect("home");
+    std::fs::create_dir_all(home.path().join("tmp")).unwrap();
+    let missing = home.path().join("no-such.jsonl");
+    let imported = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["memory", "import", missing.to_str().unwrap()])
+        .current_dir(home.path())
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8")
+        .env("TMPDIR", home.path().join("tmp"))
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_STATE_HOME", home.path().join(".local/state"))
+        .env("LJOS_SEAT", "bob")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("PACKSET_URL", "off")
+        .env("LJOS_OFF", "1")
+        .output()
+        .expect("ljos");
+    assert!(!imported.status.success());
+    let said = text(&imported);
+    assert!(
+        !said.contains("Caused by"),
+        "the failure is a chain:\n{said}"
+    );
+    assert!(
+        said.contains("ljos memory export --out"),
+        "no next step:\n{said}"
+    );
+    assert!(said.contains("no-such.jsonl"), "{said}");
 }

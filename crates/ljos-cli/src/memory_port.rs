@@ -1818,6 +1818,19 @@ fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
     Ok(refused)
 }
 
+/// Read an export file. A missing path is one line that names `ljos memory export`.
+fn read_import_file(path: &Path) -> Result<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => bail!(
+            "memory: {} is not a file. `ljos memory export --out {}` writes one on the machine that has the lessons",
+            path.display(),
+            path.display()
+        ),
+        Err(err) => bail!("memory: cannot read {}: {err}", path.display()),
+    }
+}
+
 /// Import the file at `path`.
 ///
 /// # Errors
@@ -1835,10 +1848,12 @@ pub fn import_path(
         .map(|meta| meta.file_type().is_symlink())
         .unwrap_or(false)
     {
-        bail!("memory: {} is a symlink", path.display());
+        bail!(
+            "memory: {} is a symlink. Pass the file `ljos memory export --out` wrote",
+            path.display()
+        );
     }
-    let bytes =
-        std::fs::read(path).with_context(|| format!("memory: cannot read {}", path.display()))?;
+    let bytes = read_import_file(path)?;
     let Some(lane) = path
         .file_stem()
         .and_then(|stem| stem.to_str())
