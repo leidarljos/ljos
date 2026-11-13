@@ -59,7 +59,7 @@ echo "kiln door seated"
 The shell prompt is `dev@laptop`, and `LJOS_SEAT` is `demo`.
 No sitting and no ticket.
 The `prompt-origin` label names the process that ran the hook.
-The lesson is the line under `Remembered`.
+The lesson is the indented text under `Remembered`.
 
 ![Recall of the kiln lesson, then the door seated](docs/demo/recall.svg)
 
@@ -69,11 +69,12 @@ kiln.sh: KILN_DOOR is unset. The door seats only when it is cold.
 
 dev@laptop:~$ ljos remember 'Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.'
 remembered (lesson): Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.
-  id 69da72d9, next review 2026-11-14 11:32 +00:00
+  id fcd167c8, next review 2026-11-14 15:08 +00:00
 standing: the hook shows it from the next prompt it bears on
 
 dev@laptop:~$ printf '%s\n' 'seat the kiln door' | ljos hook --prompt --text
-label prompt-origin: not stored as the person's words (parent process is `ljos`, not a known runner)
+label prompt-origin: not stored as the person's words (parent process is `ljos`,
+not a known runner)
 Remembered, shown 1 of 1, oldest first. `ljos search` lists the pack.
   lesson, agent-derived, today
     Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config
