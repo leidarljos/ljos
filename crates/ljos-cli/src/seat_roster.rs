@@ -59,11 +59,16 @@ pub fn add(name: &str) -> Result<String> {
     };
     // A list that does not name this seat still accepts a row for this seat.
     // That is how a seat that added someone else first gets back on the list.
+    // Adding a different name is the same roster refusal as any other write.
     if caller_slug != slug && !listed.contains(&caller_slug) && !listed.is_empty() {
-        bail!(
-            "seat add: this seat is {caller_slug}, and it is not on the list. \
-             `ljos seat add {caller_slug}` lists it, then add {slug}. Nothing was written"
-        );
+        return Err(crate::policy_label::labelled(
+            "seat-unlisted",
+            format!(
+                "seat add: this seat is {caller_slug}, and it is not on the list in {}. \
+                 `ljos seat add {caller_slug}` lists it, then add {slug}. Nothing was written",
+                path.display()
+            ),
+        ));
     }
     let mut doc = load_doc(&path).context("seat add")?;
     let fresh = insert_seat(&mut doc, &slug);
@@ -828,5 +833,34 @@ via = \"bea\"
         let err = crate::registered_seat("bob").unwrap_err().to_string();
         assert!(err.contains("`ljos seat add bob`"), "{err}");
         assert!(err.contains("Nothing was written"), "{err}");
+    }
+
+    /// Adding another name while this seat is off the list is `seat-unlisted`.
+    /// The line names the file and still says to add this seat first.
+    #[test]
+    fn an_unlisted_seat_that_adds_another_name_is_seat_unlisted() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.email", "ada@example.invalid"]);
+        git(root, &["config", "user.name", "ada"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("ISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::set_var("LJOS_SEAT", "alice");
+        super::add("alice").unwrap();
+        std::env::set_var("LJOS_SEAT", "bob");
+        let err = super::add("dave").unwrap_err();
+        let label = crate::policy_label::as_policy(&err).expect("a roster refusal is a label");
+        assert_eq!(label.label, "seat-unlisted");
+        let said = &label.detail;
+        assert!(said.contains("vissue.toml"), "{said}");
+        assert!(said.contains("`ljos seat add bob`"), "{said}");
+        assert!(said.contains("then add dave"), "{said}");
+        assert!(said.contains("Nothing was written"), "{said}");
+        let roster = std::fs::read_to_string(root.join("vissue.toml")).unwrap();
+        assert!(!roster.contains("dave"), "{roster}");
     }
 }
