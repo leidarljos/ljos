@@ -760,6 +760,44 @@ fn a_missing_curl_names_how_to_install_one() {
     assert!(text.contains("--from-dir DIR"), "{text}");
 }
 
+/// The force-push sample keeps its bypass log out of the seat's data
+/// directory, and still reads the pack home onboard made. A sample that
+/// loses that home prints a token warning the seat does not have.
+#[test]
+fn the_policy_sample_keeps_the_pack_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+    script(
+        &progs,
+        "ljos",
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --version) echo ljos-test 0; exit 0 ;;\n\
+           policy)\n\
+             printf '%s\\n' \"PACKSET_HOME=${PACKSET_HOME-unset}\"\n\
+             printf '%s\\n' \"XDG_DATA_HOME=${XDG_DATA_HOME-unset}\"\n\
+             exit 0 ;;\n\
+         esac\n\
+         exit 0\n",
+    );
+    let home = dir.path().join("home");
+    let text = install(&home, &progs, "/usr/bin:/bin", &[]);
+    let pack = home.join(".local/share/packset");
+    assert!(
+        text.contains(&format!("PACKSET_HOME={}", pack.display())),
+        "{text}"
+    );
+    assert!(text.contains("/policy-demo"), "{text}");
+    assert!(
+        !text.contains("no token"),
+        "the sample said the search had no token:\n{text}"
+    );
+}
+
 /// An older ljos earlier on PATH is named, and this install is put first.
 #[test]
 fn an_older_ljos_earlier_on_path_is_named() {

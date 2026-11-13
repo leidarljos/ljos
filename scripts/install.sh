@@ -897,9 +897,13 @@ say "The guard lets a force push run, with a warning:"
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX \
     GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE
   # The sample is a warning to read. It is not a command this person ran,
-  # so it does not land in their bypass log.
+  # so it does not land in their bypass log. The token stays in the pack
+  # home onboard made. Pointing the sample at the empty directory made
+  # the search say it had no token.
   mkdir -p "$TMP/policy-demo"
-  XDG_DATA_HOME="$TMP/policy-demo" ljos policy -- git push --force origin topic
+  pack_home=${XDG_DATA_HOME:-$HOME/.local/share}/packset
+  XDG_DATA_HOME="$TMP/policy-demo" PACKSET_HOME="$pack_home" \
+    ljos policy -- git push --force origin topic
 ) || true
 if [ "$CLOUD" = 1 ]; then
   if "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
