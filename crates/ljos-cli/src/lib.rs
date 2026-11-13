@@ -6971,6 +6971,24 @@ pub fn guard_bin_dir() -> PathBuf {
         .join("guard-bin")
 }
 
+/// The line the guard shim prints when neither the passwd entry nor
+/// `$HOME` names a home. The command still runs.
+pub const NO_HOME_RESTRICTION: &str =
+    "ljos: no home from the passwd entry or HOME, so this command is not limited to a home";
+
+/// The home a restriction is measured from: the passwd home when that
+/// lookup names an absolute directory, otherwise an absolute `$HOME`.
+/// `None` when both are missing, which is not a refusal.
+#[must_use]
+pub fn guard_home_from(passwd: Option<&Path>, env_home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(home) = passwd.filter(|path| path.is_absolute()) {
+        return Some(home.to_path_buf());
+    }
+    env_home
+        .filter(|path| path.is_absolute())
+        .map(Path::to_path_buf)
+}
+
 /// The shim each guarded command is: ask ljos-policyd about the argv, print
 /// the rule's warning on stderr when one fires, then exec the next binary
 /// of that name on PATH. A deny, including one a named `policyd_config`
@@ -7015,6 +7033,28 @@ case ",1,true,TRUE,yes,YES,on,ON," in
   *,"${LJOS_GUARD:-}",*) ;;
   *) if under_temp "$(cd -- "$HOME" 2>/dev/null && pwd -P)"; then exec "$real" "$@"; fi ;;
 esac
+# A uid with no passwd entry, as in some containers, is not a reason to
+# refuse rm, git or find. The passwd home wins; $HOME is the fallback.
+# With neither, there is no home to limit the command to, and it runs.
+guard_home=
+if command -v getent >/dev/null 2>&1 && command -v id >/dev/null 2>&1; then
+  pw=$(getent passwd "$(id -u)" 2>/dev/null || true)
+  rest=$pw
+  i=0
+  while [ "$i" -lt 5 ]; do
+    rest=${rest#*:}
+    i=$((i + 1))
+  done
+  guard_home=${rest%%:*}
+fi
+if [ -z "$guard_home" ]; then
+  case ${HOME-} in
+    /*) guard_home=$HOME ;;
+  esac
+fi
+if [ -z "$guard_home" ]; then
+  echo "ljos: no home from the passwd entry or HOME, so this command is not limited to a home" >&2
+fi
 # Drop leading and trailing whitespace. The same characters sed's
 # [[:space:]] class drops, and no other process.
 trim_ws() {
@@ -46644,6 +46684,86 @@ mod tests {
             assert!(!target.exists(), "{name}: the command did not run");
         }
         assert!(super::seat_env_text("example-host").contains("ljos/guard-bin"));
+    }
+
+    /// A uid with no passwd entry still runs rm, git and find. `$HOME` is
+    /// the home when the lookup fails. With neither, one warning line is
+    /// printed and the command runs.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_passwd_home_does_not_refuse_rm_git_or_find() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let guard = dir.path().join("guard-bin");
+        let fake = dir.path().join("fake");
+        std::fs::create_dir_all(&guard).unwrap();
+        std::fs::create_dir_all(&fake).unwrap();
+        let marker = dir.path().join("ran");
+        let record = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$0\" >> '{}'\nexit 0\n",
+            marker.display()
+        );
+        for cmd in ["rm", "git", "find"] {
+            publish_exe(&guard.join(cmd), super::GUARD_SHIM);
+            publish_exe(&fake.join(cmd), &record);
+        }
+        publish_exe(
+            &fake.join("ljos-policyd"),
+            "#!/bin/sh\nprintf 'deny\\thome-missing\\n'; exit 2\n",
+        );
+        assert!(super::GUARD_SHIM.contains(super::NO_HOME_RESTRICTION));
+        assert_eq!(
+            super::guard_home_from(None, Some(std::path::Path::new("/home/u"))),
+            Some(std::path::PathBuf::from("/home/u"))
+        );
+        assert_eq!(super::guard_home_from(None, None), None);
+        assert_eq!(
+            super::guard_home_from(None, Some(std::path::Path::new("relative"))),
+            None
+        );
+        let run = |cmd: &str, home: Option<&std::path::Path>| {
+            let mut child = std::process::Command::new(guard.join(cmd));
+            child
+                .arg("notes")
+                .env("PATH", format!("{}:{}", guard.display(), fake.display()))
+                .env_remove("LJOS_OFF")
+                .env("LJOS_GUARD", "on");
+            match home {
+                Some(path) => {
+                    child.env("HOME", path);
+                }
+                None => {
+                    child.env_remove("HOME");
+                }
+            }
+            child.output().unwrap()
+        };
+        let home = SeatDir::new("shim-home");
+        for cmd in ["rm", "git", "find"] {
+            let _ = std::fs::remove_file(&marker);
+            let out = run(cmd, Some(home.path()));
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{cmd} with HOME: {err}");
+            assert!(
+                !err.contains(super::NO_HOME_RESTRICTION),
+                "{cmd} warned about a missing home: {err}"
+            );
+            assert!(
+                err.contains("allow\twarn\thome-missing"),
+                "{cmd} did not keep the policyd warning: {err}"
+            );
+            let ran = std::fs::read_to_string(&marker).unwrap_or_default();
+            assert!(ran.contains(cmd), "{cmd} did not run: {ran}");
+        }
+        for cmd in ["rm", "git", "find"] {
+            let _ = std::fs::remove_file(&marker);
+            let out = run(cmd, None);
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{cmd} with no home: {err}");
+            assert!(err.contains(super::NO_HOME_RESTRICTION), "{cmd}: {err}");
+            let ran = std::fs::read_to_string(&marker).unwrap_or_default();
+            assert!(ran.contains(cmd), "{cmd} was refused: {ran} {err}");
+        }
     }
 
     /// A directory this test creates, outside the temp roots, mode `0o755`.
