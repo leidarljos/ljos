@@ -35269,6 +35269,54 @@ fn unheld_refusal(text: &str) -> Option<&str> {
     (said.starts_with("status ") || said == "not found").then_some(said)
 }
 
+/// Whether `line` is a logbook row that still carries an old claim stamp.
+/// vissue folds that stamp into the note and writes a different line back.
+fn line_carries_claim_stamp(line: &str) -> bool {
+    let line = line.trim();
+    line.contains("Claimed-by:") || line.contains("Claimed by ")
+}
+
+/// Keep logbook lines that carry an old `Claimed-by` stamp. vissue's render
+/// folds the stamp into the note and the next parse does not read the same
+/// line. The original line is stored as the entry's raw text, which render
+/// writes back unchanged.
+pub(crate) fn keep_claim_stamp_lines(doc: &mut vissue_core::IssueDoc, source: &str) {
+    let stamps: Vec<&str> = source
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| line_carries_claim_stamp(line))
+        .collect();
+    if stamps.is_empty() {
+        return;
+    }
+    for heading in &mut doc.headings {
+        for entry in &mut heading.logbook {
+            let rendered = entry.render();
+            if stamps.iter().any(|src| src.trim() == rendered.trim()) {
+                continue;
+            }
+            let Some(src) = stamps
+                .iter()
+                .copied()
+                .find(|src| !entry.timestamp.is_empty() && src.contains(entry.timestamp.as_str()))
+            else {
+                continue;
+            };
+            if src.trim() != rendered.trim() {
+                entry.raw = Some(src.trim().to_string());
+            }
+        }
+    }
+}
+
+/// [`keep_claim_stamp_lines`] for the file `doc` was parsed from.
+pub(crate) fn keep_claim_stamps_on_disk(doc: &mut vissue_core::IssueDoc) {
+    let Ok(source) = std::fs::read_to_string(&doc.path) else {
+        return;
+    };
+    keep_claim_stamp_lines(doc, &source);
+}
+
 /// Drop the tracker's claim on `issue` when `holder` holds it. The claim
 /// graph frees a node on release and on completion; the tracker kept
 /// `CLAIMED_BY`, so `ljos claims` listed every finished sitting as still
@@ -35302,6 +35350,7 @@ pub fn unstamp_tracker(issue: &str, holder: &str, reopen: bool) -> Result<Option
     };
     let said = vissue_core::store::with_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &path)?;
+        keep_claim_stamps_on_disk(&mut doc);
         let Some(h) = doc.headings.iter_mut().find(|h| h.id == issue) else {
             return Ok(None);
         };
@@ -37355,6 +37404,7 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
     let file_path = path.clone();
     let changed = vissue_core::store::with_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &file_path)?;
+        keep_claim_stamps_on_disk(&mut doc);
         let heading = doc
             .headings
             .iter_mut()
@@ -58228,6 +58278,44 @@ mod tests {
         assert!(said.contains("`--assignee seat-alfa`"), "{said}");
         let said = super::not_assignee_message("demo-dlnj", "seat-bravo", None, None);
         assert!(said.contains("--assignee NAME"), "{said}");
+    }
+
+    /// A note that still carries an old `Claimed-by` stamp has to render and
+    /// parse back as the same line. Folding the stamp into the note text
+    /// drops it on the next rewrite.
+    #[test]
+    fn a_note_with_an_old_claimed_by_stamp_round_trips() {
+        let board = "\
+#+TITLE: sample issues
+#+TODO: TODO STARTED BLOCKED | DONE CANCELLED
+
+* TODO [#C] Probe
+:PROPERTIES:
+:ID:         probe-a1b2
+:END:
+:LOGBOOK:
+- Note: \"kept the drawer\" Claimed-by: saddle [2026-10-18 Sun 07:00]
+:END:
+";
+        let path = std::path::PathBuf::from("issues.org");
+        let mut doc = vissue_core::IssueDoc::parse("sample", path.clone(), board).unwrap();
+        super::keep_claim_stamp_lines(&mut doc, board);
+        let rendered = doc.render_string();
+        let stamp = "- Note: \"kept the drawer\" Claimed-by: saddle [2026-10-18 Sun 07:00]";
+        assert!(
+            rendered.lines().any(|line| line == stamp),
+            "render dropped the Claimed-by stamp: {rendered}"
+        );
+        let mut again = vissue_core::IssueDoc::parse("sample", path, &rendered).unwrap();
+        super::keep_claim_stamp_lines(&mut again, &rendered);
+        assert_eq!(again.render_string(), rendered);
+        assert!(
+            again.headings[0].logbook[0]
+                .render()
+                .contains("Claimed-by: saddle"),
+            "import lost the stamp: {:?}",
+            again.headings[0].logbook[0]
+        );
     }
 
     #[test]

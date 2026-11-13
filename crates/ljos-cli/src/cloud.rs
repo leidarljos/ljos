@@ -3587,6 +3587,7 @@ fn release_started(id: &str, holder: &str) -> Result<Option<String>, String> {
     };
     crate::with_wall_bounded_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &path)?;
+        crate::keep_claim_stamps_on_disk(&mut doc);
         let Some(heading) = doc.headings.iter_mut().find(|h| h.id == id) else {
             return Ok(None);
         };
