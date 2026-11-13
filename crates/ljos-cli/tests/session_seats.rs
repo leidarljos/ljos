@@ -178,6 +178,16 @@ fn the_source_names_this_process_and_a_missing_id_says_so() {
         "the fix is one export: {text}"
     );
 
+    let wrote = world.ljos(
+        &["remember", "The lexical default is BM25+."],
+        &[("CLAUDE_CODE_SESSION_ID", id)],
+    );
+    let wrote_err = String::from_utf8_lossy(&wrote.stderr);
+    assert!(
+        !wrote_err.contains("unknown-") && !wrote_err.contains("no seat was named"),
+        "a session id is the seat, so the write does not say unknown: {wrote_err}"
+    );
+
     let help = world.ljos(&["seat", "--help"], &[]);
     let text = said(&help);
     assert!(help.status.success(), "{text}");

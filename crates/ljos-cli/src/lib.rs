@@ -4389,10 +4389,16 @@ pub fn whoami() -> Seat {
         return seat;
     }
     let seat = whoami_resolved();
-    if named_var("LJOS_SEAT").is_some() || seat_resolve::cli_seat_flag().is_some() {
-        return seat;
-    }
-    distinguish_harness_session(seat)
+    let seat = if named_var("LJOS_SEAT").is_some() || seat_resolve::cli_seat_flag().is_some() {
+        seat
+    } else {
+        distinguish_harness_session(seat)
+    };
+    // `unknown-<host>` is what a write uses when nothing named a seat.
+    // A session id replaces that name, so the line waits until here and
+    // names the seat the write actually uses.
+    seat_resolve::announce_unknown(&seat);
+    seat
 }
 
 fn whoami_resolved() -> Seat {
@@ -4436,10 +4442,9 @@ fn whoami_resolved() -> Seat {
         && agent.as_deref().and_then(seat_resolve::usable).is_none()
     {
         if let Some(seat) = seat_resolve::command_fallback() {
-            // The line names this seat, not a guess made before the
-            // conversation record was read. A record that already names a
-            // seat never reaches here.
-            seat_resolve::announce_unknown(&seat);
+            // The line is printed from [`whoami`], after a session id has
+            // had its chance to replace this fallback. A record that
+            // already names a seat never reaches here.
             return seat;
         }
     }
