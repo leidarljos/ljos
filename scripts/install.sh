@@ -858,16 +858,23 @@ if [ "$ONBOARD" = 1 ]; then
     fi
   done < "$TMP/runners"
   if [ "$found_any" = 0 ]; then
-    say "  none found. Setting up the tracker, memory and deed store."
+    say "  none found. Setting up the ticket tracker, the memory writer, and the deed store."
+    say "  The deed store keeps signed records of the work."
     say "  No coding tool is installed, so no runner was registered."
     say "  After you install an agent, run \`ljos onboard\`."
-    say "  \`ljos onboard --example\` lists the names. \`ljos onboard --harness NAME\` registers one."
+    say "  \`ljos onboard --example\` lists those tools. \`ljos onboard --harness NAME\` registers the one you name."
     if ! ljos onboard --harness all > "$TMP/onboard-seat" 2>&1; then
       say "  seat setup reported a problem:"
       sed 's/^/    /' "$TMP/onboard-seat"
     fi
   fi
 fi
+
+# The first doctor looks for this directory. Create it here so that
+# row does not warn on a machine that just installed.
+state_root=${XDG_STATE_HOME:-$HOME/.local/state}
+mkdir -p "$state_root/ljos"
+chmod 700 "$state_root/ljos" 2>/dev/null || true
 
 # The encoder fetches its model on first use. Fetch it now, while the
 # network is known to work, so the first search is not lexical.

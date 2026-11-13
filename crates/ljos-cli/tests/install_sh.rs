@@ -493,7 +493,13 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
     let installed = said(&out);
     assert!(out.status.success(), "{installed}");
     assert!(
-        installed.contains("none found. Setting up the tracker, memory and deed store."),
+        installed.contains(
+            "none found. Setting up the ticket tracker, the memory writer, and the deed store."
+        ),
+        "{installed}"
+    );
+    assert!(
+        installed.contains("The deed store keeps signed records of the work."),
         "{installed}"
     );
     assert!(!installed.contains("reported a problem"), "{installed}");
@@ -790,6 +796,10 @@ fn the_policy_sample_keeps_the_pack_home() {
     assert!(
         text.contains(&format!("PACKSET_HOME={}", pack.display())),
         "{text}"
+    );
+    assert!(
+        home.join(".local/state/ljos").is_dir(),
+        "the install left the state directory missing"
     );
     assert!(text.contains("/policy-demo"), "{text}");
     assert!(
