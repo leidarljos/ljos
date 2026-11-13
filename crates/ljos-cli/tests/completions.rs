@@ -127,15 +127,20 @@ fn bare_ljos_prints_the_first_commands() {
     let body = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{}", text(&out));
     for line in [
-        "ljos remember",
-        "ljos search",
-        "ljos recall",
-        "ljos file",
+        "Memory, a work tracker and a command guard for coding runners.",
+        "no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.",
+        "ljos search QUERY",
+        "ljos remember TEXT",
+        "ljos file TITLE",
         "ljos doctor",
-        "https://leidarljos.github.io/ljos/reference-commands.html",
+        "The docs are at https://leidarljos.github.io/ljos/reference-commands.html.",
     ] {
         assert!(body.contains(line), "missing {line}\n{body}");
     }
+    assert!(
+        !body.contains("ljos recall"),
+        "bare ljos listed recall\n{body}"
+    );
     assert!(
         !body.contains("Usage:") && !body.contains("Start:"),
         "bare ljos printed the command list\n{body}"

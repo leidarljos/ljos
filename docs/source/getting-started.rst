@@ -30,7 +30,7 @@ A release attaches that script:
 
    $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
 
-``ljos`` with no arguments prints the first commands: ``remember``, ``search``, ``recall``, ``file`` and ``doctor``, and where the command reference is. ``ljos help`` lists the rest.
+``ljos`` with no arguments prints what ljos is, the seat it would use and where that came from, then ``search``, ``remember``, ``file`` and ``doctor``, and where the command reference is. ``ljos help`` lists the rest.
 
 Shell completion is one line in the shell's startup file. ``install.sh`` prints that line and does not write the file.
 

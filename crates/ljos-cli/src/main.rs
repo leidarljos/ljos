@@ -2555,20 +2555,60 @@ fn main() -> Result<()> {
     ran
 }
 
-/// What `ljos` with no arguments prints.
-fn first_commands() -> &'static str {
-    "\
-First commands:
-  ljos remember TEXT   store one lesson
-  ljos search QUERY    find what is stored
-  ljos recall ID       the working set for one ticket
-  ljos file TITLE      open a ticket
-  ljos doctor          check that ljos is ready
+/// What ljos is. The same words as the command's about line.
+const ABOUT_LINE: &str = "Memory, a work tracker and a command guard for coding runners";
 
-`ljos help` lists the commands. `ljos COMMAND --help` explains one.
-The command reference:
-  https://leidarljos.github.io/ljos/reference-commands.html
-"
+/// The command reference a bare `ljos` names.
+const DOCS_URL: &str = "https://leidarljos.github.io/ljos/reference-commands.html";
+
+/// The first commands, in the order the bare screen prints them.
+const FIRST_COMMANDS: &[(&str, &str)] = &[
+    ("ljos search QUERY", "find what is stored"),
+    ("ljos remember TEXT", "store one lesson"),
+    ("ljos file TITLE", "open a ticket"),
+    ("ljos doctor", "check that ljos is ready"),
+];
+
+/// What `ljos` with no arguments prints.
+///
+/// One line for what ljos is, the seat a read would use and where that
+/// came from, the first commands, and where the docs are. Load the env
+/// file and prepare a read before calling this, so the seat line is the
+/// one [`ljos_cli::doctor_seat_source`] prints.
+fn opening_screen() -> String {
+    let seat = seat_screen_line(&ljos_cli::doctor_seat_source().state);
+    let width = FIRST_COMMANDS
+        .iter()
+        .map(|(cmd, _)| cmd.len())
+        .max()
+        .unwrap_or(0);
+    let mut commands = String::new();
+    for (cmd, about) in FIRST_COMMANDS {
+        let pad = width + 2 - cmd.len();
+        commands.push_str("  ");
+        commands.push_str(cmd);
+        commands.push_str(&" ".repeat(pad));
+        commands.push_str(about);
+        commands.push('\n');
+    }
+    format!("{ABOUT_LINE}.\n\n{seat}\n\n{commands}\nThe docs are at {DOCS_URL}.\n")
+}
+
+/// The seat line on the bare screen.
+///
+/// A named seat keeps the doctor's `named by` phrase. A miss is already
+/// one sentence and names the next command, so it is printed as it stands.
+fn seat_screen_line(state: &str) -> String {
+    if let Some((name, source)) = state.split_once(" named by ") {
+        if !name.is_empty() && !name.contains(' ') && !source.is_empty() {
+            return format!("This seat is {name}, named by {source}.");
+        }
+    }
+    if state.ends_with('.') {
+        state.to_string()
+    } else {
+        format!("{state}.")
+    }
 }
 
 /// True when the only argument is the help flag. A subcommand's own
@@ -2709,7 +2749,10 @@ fn run_command() -> Result<()> {
         return Ok(());
     }
     if std::env::args_os().len() == 1 {
-        print!("{}", first_commands());
+        // The same seat a read names, including where it came from.
+        ljos_cli::load_seat_env();
+        ljos_cli::seat_resolve::prepare(None, ljos_cli::seat_resolve::Kind::Read);
+        print!("{}", opening_screen());
         return Ok(());
     }
     let raw: Vec<std::ffi::OsString> = std::env::args_os().collect();
@@ -5769,5 +5812,9 @@ mod help_list {
             );
         }
         assert!(short.contains("`ljos help --all` lists every command."));
+        assert_eq!(
+            cmd.get_about().map(|text| text.to_string()).as_deref(),
+            Some(ABOUT_LINE)
+        );
     }
 }

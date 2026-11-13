@@ -183,7 +183,7 @@ Commands
 ``completions bash|zsh|fish``
    Stores: none. Print a shell completion script. Seat names and open ticket ids are included when the tracker is small enough to read while the shell waits. A larger tracker completes commands and flags only. ``install.sh`` prints the line that enables the script and does not write a shell startup file. Example: ``ljos completions bash``.
 ``help [--all] [COMMAND...]``
-   Stores: none. Print this list, or the help of one command. ``--all`` lists every command, including those left off the short list. ``ljos`` with no arguments prints ``remember``, ``search``, ``recall``, ``file`` and ``doctor``, and names this page.
+   Stores: none. Print this list, or the help of one command. ``--all`` lists every command, including those left off the short list. ``ljos`` with no arguments prints what ljos is, the seat and where it came from, then ``search``, ``remember``, ``file`` and ``doctor``, and names this page.
 ``options ISSUE A,B``
    Stores: tracker. Append ``Options: A, B`` to an issue. Two or more, separated by commas. Fewer than two is refused.
 ``block ISSUE --on ID|--off ID``
