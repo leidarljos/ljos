@@ -13935,11 +13935,18 @@ pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
     }
     match search_direct(query, limit) {
         Ok(hits) => {
-            let ranking = if encoder_has_answered_now() {
-                ranking_now().unwrap_or_else(semantic_ranking)
-            } else {
-                lexical_ranking("encoder is still loading")
-            };
+            // An encoder that is not installed is lexical for good. Saying
+            // it is still loading sends the reader to wait for a model
+            // that will not start. A cold encoder, one that is present and
+            // has not answered, is handled above.
+            let ranking =
+                if let Some(ranking) = ranking_now().filter(|ranking| ranking.mode == "lexical") {
+                    ranking
+                } else if encoder_has_answered_now() {
+                    ranking_now().unwrap_or_else(semantic_ranking)
+                } else {
+                    lexical_ranking("encoder is still loading")
+                };
             Ok((hits, ranking))
         }
         Err(err) => Err(err),

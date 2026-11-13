@@ -155,6 +155,81 @@ fn a_cold_encoder_is_asked_again_and_the_line_says_semantic() {
     );
 }
 
+/// An encoder the writer reports as not installed is not "still loading".
+/// `--no-embed` leaves packset in this state, and the line is the one the
+/// install notes promise.
+#[test]
+fn a_missing_encoder_is_unavailable_not_still_loading() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            thread::spawn(move || {
+                let mut sock = conn;
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                let path = path.split('?').next().unwrap_or("/");
+                let body = if path == "/v1/search" {
+                    r#"{"hits":[],"rank":"fused"}"#
+                } else if path == "/v1/status" {
+                    r#"{"embedder":{"enabled":true,"binary":null,"available":false,"answering":null}}"#
+                } else {
+                    "ok"
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            });
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}");
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["search", "lexical default"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("LJOS_SEAT", "travel")
+        .env("PACKSET_AUTH", "off")
+        .env("PACKSET_URL", &url)
+        .env("PACKSET_WORKSPACE", "seat")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!("{stdout}{stderr}");
+    assert!(out.status.success(), "{said}");
+    assert!(
+        stderr.contains("ranking is lexical: encoder unavailable"),
+        "{said}"
+    );
+    assert!(
+        !stderr.contains("still loading"),
+        "a missing encoder was described as loading: {said}"
+    );
+}
+
 #[test]
 fn a_search_that_stays_cold_says_the_rows_were_ranked_by_words() {
     let root = tempfile::tempdir().unwrap();
