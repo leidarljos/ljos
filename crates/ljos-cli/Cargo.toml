@@ -52,6 +52,9 @@ ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 url = "2"
 anyhow.workspace = true
 clap.workspace = true
+# Completion scripts. Seat and ticket names are filled by this binary when
+# the tracker is small; the unstable dynamic feature is left off.
+clap_complete = { version = "4.6.11", default-features = false }
 packset-client.workspace = true
 packset-core = "0.17.6"
 serde.workspace = true

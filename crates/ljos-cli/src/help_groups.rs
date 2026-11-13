@@ -118,6 +118,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "cloud",
             "mesh",
             "mcp",
+            "completions",
             "hook",
             "git-hook",
             "statusline",

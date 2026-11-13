@@ -58,7 +58,16 @@ fn help_and_version_do_not_write_a_memory() {
         );
     }
     let missing = run(&[]);
-    assert!(!missing.status.success(), "a bare ljos is a usage error");
+    let bare = String::from_utf8_lossy(&missing.stdout);
+    assert!(
+        missing.status.success() && bare.contains("ljos remember") && bare.contains("ljos doctor"),
+        "a bare ljos prints the first commands:\n{bare}{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    assert!(
+        !bare.contains("Usage:"),
+        "a bare ljos printed the full help:\n{bare}"
+    );
     let state = home.join(".state").join("ljos");
     assert!(
         !state.join("note-queue.jsonl").exists(),

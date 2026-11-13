@@ -34,6 +34,12 @@
 # install first. A running ljos-mcp is still the previous binary until
 # that process is restarted.
 #
+# Shell completion is one line in the shell's startup file. The script
+# prints the line and does not write that file:
+#   bash: source <(ljos completions bash)
+#   zsh:  source <(ljos completions zsh)
+#   fish: ljos completions fish | source
+#
 # Options:
 #   --bin-dir DIR   where the programs go (default: $LJOS_BIN_DIR or ~/.local/bin)
 #   --no-embed      skip packset-embed, the encoder for dense search; by
@@ -864,3 +870,7 @@ if [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; then
 else
   say "Done in $secs s. Next: \`ljos doctor\`."
 fi
+say "Shell completion is one line in the shell's startup file. This script does not write that file."
+say "  bash: source <(ljos completions bash)"
+say "  zsh: source <(ljos completions zsh)"
+say "  fish: ljos completions fish | source"

@@ -180,8 +180,10 @@ Commands
 ``uninstall [--dry-run] [--keep-programs] [--all] [--purge] [--no-stub] [--bin-dir DIR]``
    Stores: runner, programs. Offboard every runner, put the global git hooks back, stop the hook server, remove the ljos programs and leave a stub named ``ljos`` that answers every hook with an allow, so a session that cached the hook path is not blocked; ``--all`` removes the other seat programs, ``--purge`` the state, data and configuration directories; the release ships the same as ``uninstall.sh`` for a machine the binary was deleted from. A file that still runs ljos after offboard is named. Edit it and delete the ljos entry. The programs are still removed.
 
+``completions bash|zsh|fish``
+   Stores: none. Print a shell completion script. Seat names and open ticket ids are included when the tracker is small enough to read while the shell waits. A larger tracker completes commands and flags only. ``install.sh`` prints the line that enables the script and does not write a shell startup file. Example: ``ljos completions bash``.
 ``help [--all] [COMMAND...]``
-   Stores: none. Print this list, or the help of one command. ``--all`` lists every command, including those left off the short list.
+   Stores: none. Print this list, or the help of one command. ``--all`` lists every command, including those left off the short list. ``ljos`` with no arguments prints ``remember``, ``search``, ``recall``, ``file`` and ``doctor``, and names this page.
 ``options ISSUE A,B``
    Stores: tracker. Append ``Options: A, B`` to an issue. Two or more, separated by commas. Fewer than two is refused.
 ``block ISSUE --on ID|--off ID``
@@ -327,6 +329,7 @@ claims
 cloud
 cloud up --force --repoint
 complete --assignee --gen --status
+completions
 conflicts --limit
 consensus --compare --deadline --json --no-file --quorum
 consolidate --apply

@@ -92,6 +92,12 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
         assert_eq!(text.matches(PATH_LINE).count(), 1, "{rc}:\n{text}");
     }
     assert!(read(&home.join(".zshrc")).starts_with("# mine\n\n"));
+    assert!(first.contains("source <(ljos completions bash)"), "{first}");
+    assert!(
+        !read(&home.join(".bashrc")).contains("ljos completions"),
+        "install wrote a completion line into ~/.bashrc:\n{}",
+        read(&home.join(".bashrc"))
+    );
     let found = Command::new("sh")
         .args(["-c", ". \"$HOME/.profile\"; command -v ljos"])
         .env_clear()
