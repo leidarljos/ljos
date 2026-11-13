@@ -137,8 +137,15 @@ enum Stop {
     Indexed,
 }
 
-/// The memory directory. `VISSUE_ROOT` wins, then the vissue layout, then
-/// the state directory. A missing directory means recall has nothing to add.
+/// The memory directory. `VISSUE_ROOT` wins, then the vissue layout when
+/// that root is a tracker, then the state directory. A missing directory
+/// means recall has nothing to add.
+///
+/// `ljos onboard` writes the tracker into vissue's config and does not
+/// add `vissue.toml` until a seat is listed. That tracker is still where
+/// an import and a mesh seed go. A directory that only resolved because
+/// it is the working directory stays out of this, so a cargo package is
+/// not treated as the tracker.
 fn memory_home() -> PathBuf {
     if let Some(root) = std::env::var_os("VISSUE_ROOT") {
         if !root.is_empty() {
@@ -146,14 +153,29 @@ fn memory_home() -> PathBuf {
         }
     }
     if let Ok(layout) = vissue_core::Layout::resolve(None, None) {
-        let root = layout.root();
-        // A cargo package can resolve as a layout with no tracker file.
-        // Keep those writes in the state directory, beside the note queue.
-        if root.join("vissue.toml").is_file() {
+        let root = layout.root().to_path_buf();
+        if root.join("vissue.toml").is_file() || configured_tracker(&root) {
+            return root.join(".ljos").join("memory");
+        }
+    }
+    if let Some(root) = crate::tracker_place::configured() {
+        if root.is_dir() {
             return root.join(".ljos").join("memory");
         }
     }
     crate::note_queue::state_dir().join("memory")
+}
+
+/// Whether `root` is the tracker `vissue/config.toml` names.
+fn configured_tracker(root: &Path) -> bool {
+    crate::tracker_place::configured().is_some_and(|named| same_dir(root, &named))
+}
+
+fn same_dir(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 impl Place {

@@ -185,3 +185,65 @@ fn sync_host_names_the_export_and_as_machine_names_the_import() {
         "{list}"
     );
 }
+
+/// A fresh `ljos onboard` names the tracker in vissue's config and does not
+/// write `vissue.toml`. The import still belongs under that tracker, which
+/// is the path the memory pages name.
+#[test]
+fn an_onboarded_tracker_keeps_the_import() {
+    let home = tempfile::tempdir().expect("home");
+    let root = home.path().join("tracker");
+    std::fs::create_dir_all(root.join("Software")).unwrap();
+    std::fs::create_dir_all(home.path().join(".config/vissue")).unwrap();
+    std::fs::create_dir_all(home.path().join(".local/state")).unwrap();
+    std::fs::create_dir_all(home.path().join("tmp")).unwrap();
+    std::fs::write(
+        home.path().join(".config/vissue/config.toml"),
+        format!("root = \"{}\"\n", root.display()),
+    )
+    .unwrap();
+    let file = home.path().join("lesson.jsonl");
+    std::fs::write(
+        &file,
+        concat!(
+            "{\"format\":\"ljos-memory-1\",\"record\":\"export\",\"machine\":\"desk\",\"seat\":\"alice\",\"exported_at\":\"2026-11-13T00:00:00Z\",\"exporter_revision\":\"0.41.11\"}\n",
+            "{\"format\":\"ljos-memory-1\",\"kind\":\"lesson\",\"text\":\"kiln brick stays dry\",\"origin\":\"agent-derived\",\"level\":\"explicit\",\"entities\":[],\"source\":{},\"atom_id\":\"abc\",\"content_sha256\":\"cd\",\"origin_hash\":\"ef\",\"exported_at\":\"2026-11-13T00:00:00Z\"}\n",
+        ),
+    )
+    .unwrap();
+    let imported = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["memory", "import", file.to_str().unwrap()])
+        .current_dir(home.path())
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8")
+        .env("TMPDIR", home.path().join("tmp"))
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env("XDG_STATE_HOME", home.path().join(".local/state"))
+        .env("XDG_CACHE_HOME", home.path().join(".cache"))
+        .env("LJOS_SEAT", "bob")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("PACKSET_URL", "off")
+        .env("LJOS_OFF", "1")
+        .output()
+        .expect("ljos");
+    assert!(imported.status.success(), "{}", text(&imported));
+    let slot = root.join(".ljos/memory/imports/bob");
+    assert!(
+        slot.is_dir(),
+        "import landed outside the tracker\nstate: {}\n{}",
+        home.path()
+            .join(".local/state/ljos/memory")
+            .display(),
+        text(&imported)
+    );
+    assert!(
+        !home
+            .path()
+            .join(".local/state/ljos/memory/imports")
+            .exists(),
+        "a second copy was written under the state directory"
+    );
+}
