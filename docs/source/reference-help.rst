@@ -19,7 +19,7 @@ They still run.
 .. code:: text
 
    $ ljos --version
-   ljos 0.41.8
+   ljos 0.41.9
    $ ljos --help
    Memory, a work tracker and a command guard for coding runners
 

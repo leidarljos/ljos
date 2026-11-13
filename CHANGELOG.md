@@ -5,6 +5,24 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.41.9 (2026-11-12)
+
+### Fixes
+
+- A logbook note that still carries an old `Claimed-by` stamp renders back as the same line.
+  The stamp is no longer folded into the note, so a later import reads the line it was given.
+- A tracker commit stages and commits only the paths that write changed.
+  Another seat's dirty file, including one left on the shared pending list, stays in the worktree.
+- Read-only `du` is allowed with any flags and with globs, including `du -sh ~/.local/share/*`.
+  `wc`, `stat`, `ls`, `file` and `head` stay allowed over those same globs.
+- The rm, git and find shims keep running when the passwd home lookup fails.
+  They use `$HOME` when that entry is missing, and with neither home they print one warning and do not refuse the command.
+- The tracker lock stays on the checkout that holds the tracker's path.
+  Tracker git calls ignore an inherited `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE`.
+- `ljos finish` takes over a claim another conversation of the same seat left, by the same rule as `ljos claim`.
+  When it cannot, the error names `ljos claim` and then `ljos finish`, which is the sequence that does.
+
+
 ## 0.41.8 (2026-11-12)
 
 ### Fixes
