@@ -3843,6 +3843,9 @@ mod tests {
 
     #[test]
     fn integrate_names_the_text_it_maps() {
+        // Another test may point PACKSET_URL at its own writer. The env
+        // lock puts that back before this integrate reads the pack.
+        let _env = crate::test_env_lock();
         let (_dir, target) = place("text");
         let bytes = header_and_row(
             "host-a",
@@ -3896,6 +3899,9 @@ mod tests {
 
     #[test]
     fn search_finds_a_row_before_integrate_and_after_a_restart() {
+        // Another test may point PACKSET_URL at its own writer. The env
+        // lock puts that back before this integrate reads the pack.
+        let _env = crate::test_env_lock();
         let (dir, target) = place("read");
         let bytes = header_and_row(
             "host-a",
@@ -3928,6 +3934,9 @@ mod tests {
 
     #[test]
     fn exact_union_near_conflict_and_version_keep_both_texts() {
+        // Another test may point PACKSET_URL at its own writer. The env
+        // lock puts that back before this integrate reads the pack.
+        let _env = crate::test_env_lock();
         let (_dir, target) = place("map");
         let first = header_with_id(
             "host-a",
@@ -4041,6 +4050,9 @@ mod tests {
 
     #[test]
     fn dry_run_changes_no_file() {
+        // Another test may point PACKSET_URL at its own writer. The env
+        // lock puts that back before this integrate reads the pack.
+        let _env = crate::test_env_lock();
         let (_dir, target) = place("dry");
         let bytes = header_and_row("host-a", "seat-a", "dry firing", "2026-02-02T00:00:00Z");
         let done = import_bytes(&target, &bytes, None, None, None, None).unwrap();
@@ -4554,6 +4566,9 @@ mod tests {
 
     #[test]
     fn a_second_lane_export_is_unchanged_and_integrate_makes_it_searchable() {
+        // Another test may point PACKSET_URL at its own writer. The env
+        // lock puts that back before this integrate reads the pack.
+        let _env = crate::test_env_lock();
         let (dir, target) = place("paper");
         let text = "the brine lane keeps the zircon shelf";
         let lane = dir.path().join("handoff");
@@ -4620,6 +4635,9 @@ mod tests {
 
     #[test]
     fn an_empty_import_names_the_list() {
+        // Another test may point PACKSET_URL at its own writer. The env
+        // lock puts that back before this integrate reads the pack.
+        let _env = crate::test_env_lock();
         let (_dir, place) = place("empty-slot");
         let id = "only";
         let slot = place
@@ -4642,6 +4660,9 @@ mod tests {
     /// and a second integrate do after the first has stored every row.
     #[test]
     fn a_reimport_of_two_hundred_eighty_one_rows_counts_work() {
+        // Another test may point PACKSET_URL at its own writer. The env
+        // lock puts that back before this integrate reads the pack.
+        let _env = crate::test_env_lock();
         let (dir, target) = place("reimport");
         let handoff = dir.path().join("handoff");
         std::fs::create_dir(&handoff).unwrap();
