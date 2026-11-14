@@ -114,6 +114,12 @@ fn uninstall_takes_the_seat_off_and_leaves_the_stub() {
     assert!(!manifest.exists(), "the onboard manifest is spent");
     assert!(!bin.join("ljos-mcp").exists());
     assert!(bin.join("packset").is_file(), "other seat programs stay");
+    assert!(text.contains("packset stays."), "{text}");
+    assert!(text.contains("`packset stop`"), "{text}");
+    assert!(
+        text.contains("`ljos uninstall --all` removes the seat programs."),
+        "{text}"
+    );
     assert!(
         home.join(".local/state/ljos/keep.txt").is_file(),
         "state stays without --purge"

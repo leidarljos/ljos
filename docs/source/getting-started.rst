@@ -334,7 +334,9 @@ With no runner onboarded it prints ``ok``, ``offboard``, ``nothing installed by 
 
 ``ljos uninstall`` goes further: every runner is offboarded, the global git hooks go back,
 the ljos programs are removed, and a stub named ``ljos`` stays behind to answer every hook
-with an allow until each running agent session restarts. With the binary already gone,
+with an allow until each running agent session restarts. packset, vissue, deedar and claimdag stay.
+The memory writer keeps running until ``packset stop``. ``ljos uninstall --all`` removes the seat programs.
+With the binary already gone,
 ``curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/uninstall.sh && sh uninstall.sh``
 does the same.
 

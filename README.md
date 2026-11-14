@@ -179,7 +179,7 @@ ljos doctor
 ```
 <!-- ljos-quickstart:end -->
 
-`ljos offboard` takes ljos out of each runner. With no runner onboarded it prints `ok`, `offboard`, `nothing installed by ljos onboard`. `ljos uninstall` takes the ljos programs off the machine and leaves a stub named `ljos` that allows hook calls.
+`ljos offboard` takes ljos out of each runner. With no runner onboarded it prints `ok`, `offboard`, `nothing installed by ljos onboard`. `ljos uninstall` takes the ljos programs off the machine and leaves a stub named `ljos` that allows hook calls. packset, vissue, deedar and claimdag stay. The memory writer keeps running until `packset stop`. `ljos uninstall --all` removes the seat programs.
 
 ## A second seat
 

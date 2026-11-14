@@ -101,6 +101,11 @@ pub fn uninstall(opts: &Options) -> Result<Vec<Step>> {
                 steps.push(step);
             }
         }
+        if !opts.all {
+            if let Some(step) = seat_programs_stay(&bin, opts.dry) {
+                steps.push(step);
+            }
+        }
     }
     if opts.purge {
         for dir in purge_dirs() {
@@ -228,6 +233,48 @@ fn bin_dir(dir: Option<&Path>) -> Result<PathBuf> {
     exe.parent()
         .map(Path::to_path_buf)
         .context("uninstall: the running ljos has no directory")
+}
+
+/// Seat programs the installer put beside ljos. They stay unless `--all`.
+/// A memory writer among them keeps running until `packset stop`.
+fn seat_programs_stay(bin: &Path, dry: bool) -> Option<Step> {
+    let left: Vec<&str> = SEAT_PROGRAMS
+        .iter()
+        .copied()
+        .filter(|name| bin.join(name).exists())
+        .collect();
+    if left.is_empty() {
+        return None;
+    }
+    let names = if let [one] = left.as_slice() {
+        (*one).to_string()
+    } else {
+        let last = left[left.len() - 1];
+        let rest = &left[..left.len() - 1];
+        format!("{} and {last}", rest.join(", "))
+    };
+    let verb = if dry {
+        "would stay"
+    } else if left.len() == 1 {
+        "stays"
+    } else {
+        "stay"
+    };
+    let writer = if left
+        .iter()
+        .any(|name| *name == "packset" || *name == "packsetd")
+    {
+        " The memory writer keeps running until `packset stop`."
+    } else {
+        ""
+    };
+    Some(Step {
+        what: "programs".into(),
+        detail: format!(
+            "{names} {verb}.{writer} `ljos uninstall --all` removes the seat programs."
+        ),
+        ok: true,
+    })
 }
 
 fn program_step(bin: &Path, name: &str, opts: &Options) -> Option<Step> {
@@ -469,5 +516,42 @@ mod tests {
             .contains("stub"));
         assert!(!bin.join("ljos-mcp").exists());
         assert!(bin.join("packset").exists(), "other seat programs stay");
+    }
+
+    #[test]
+    fn seat_programs_that_stay_name_the_writer_and_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("packset"), "x").unwrap();
+        std::fs::write(bin.join("packsetd"), "x").unwrap();
+        std::fs::write(bin.join("vissue"), "x").unwrap();
+        let step = seat_programs_stay(&bin, false).unwrap();
+        assert_eq!(step.what, "programs");
+        assert!(step.ok);
+        assert!(
+            step.detail.contains("packset, packsetd and vissue stay."),
+            "{}",
+            step.detail
+        );
+        assert!(step.detail.contains("`packset stop`"), "{}", step.detail);
+        assert!(
+            step.detail
+                .contains("`ljos uninstall --all` removes the seat programs."),
+            "{}",
+            step.detail
+        );
+        let dry = seat_programs_stay(&bin, true).unwrap();
+        assert!(dry.detail.contains("would stay"), "{}", dry.detail);
+        std::fs::remove_file(bin.join("packset")).unwrap();
+        std::fs::remove_file(bin.join("packsetd")).unwrap();
+        let vissue = seat_programs_stay(&bin, false).unwrap();
+        assert!(
+            vissue.detail.starts_with("vissue stays."),
+            "{}",
+            vissue.detail
+        );
+        assert!(!vissue.detail.contains("packset stop"), "{}", vissue.detail);
+        assert!(seat_programs_stay(dir.path(), false).is_none());
     }
 }

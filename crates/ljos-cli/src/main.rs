@@ -1996,7 +1996,9 @@ enum Cmd {
     ///
     /// Offboard every runner, put the global git hooks back, remove the
     /// ljos programs, and leave a stub named ljos that answers a cached hook
-    /// with an allow. State, data and configuration stay unless --purge is set.
+    /// with an allow. packset, vissue, deedar and claimdag stay unless --all
+    /// is set. Stop packsetd with `packset stop`. State, data and configuration
+    /// stay unless --purge is set.
     ///
     /// Example: `ljos uninstall --dry-run`
     Uninstall {
