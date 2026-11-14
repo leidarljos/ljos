@@ -25,7 +25,7 @@ Set ``LJOS_SEAT`` to the seat that files it. Once ``vissue.toml`` lists seats, t
    $ ljos ready --mine
    next: day-ef56  pick a default
 
-``ljos ready --mine`` names the next unfinished item. ``ljos finish ITEM`` ticks that item off. A sitting without ``--verbose`` is the short form: what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``. A pack that answers 503, or does not answer, is one line, ``memory skipped: packsetd busy``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold, and about a second otherwise. Quiet claims are a count of the project file already opened for the ticket.
+``ljos ready --mine`` names the next unfinished item. ``ljos finish ITEM`` ticks that item off. A sitting without ``--verbose`` is the short form: what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``. A pack that answers 503, or does not answer, is one line, ``memory skipped: packsetd busy``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold, and about a second otherwise. Quiet claims are a count of the project file already opened for the ticket. A claim untouched for longer than ``LJOS_STALE_DAYS`` (7) is left out of that count. The line is ``N claims untouched for 7+ days: ljos claims --stale``. ``ljos claims --stale`` lists them, oldest first. ``ljos release --stale`` prints the same list, and ``ljos release --stale --yes`` hands each claim back. The ticket goes back to TODO.
 
 Start a sitting, and end one
 ============================

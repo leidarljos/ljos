@@ -1286,11 +1286,33 @@ enum Cmd {
     ///
     /// This is `vissue claims`, with its flags. `--mine` lists this seat's
     /// claims that have had no note, stored file or finish for a day.
+    /// `--stale` lists the ones untouched for longer than `--days`
+    /// (`LJOS_STALE_DAYS`, 7 when unset), oldest first.
     ///
     /// Example: `ljos claims`
     Claims {
-        /// Passed to `vissue claims` as given (`--by NAME`, `--json`, `-p PROJECT`).
-        /// `--mine` lists this seat's claims with no note, stored file or finish for a day.
+        /// This seat's claims with no note, stored file or finish for a day.
+        #[arg(long)]
+        mine: bool,
+        /// This seat's claims untouched for `--days` or longer.
+        #[arg(long, conflicts_with = "mine")]
+        stale: bool,
+        /// Days untouched before a claim is stale. The default is `LJOS_STALE_DAYS`, or 7.
+        #[arg(long, value_name = "N", requires = "stale")]
+        days: Option<i64>,
+        /// Print the stale claims as a JSON array. With neither `--mine` nor `--stale`, passed to `vissue claims`.
+        #[arg(long)]
+        json: bool,
+        /// Only claims held by this name. Passed to `vissue claims`.
+        #[arg(long, conflicts_with = "agent")]
+        by: Option<String>,
+        /// Same as `--by`. Passed to `vissue claims`.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Only claims in this project. Passed to `vissue claims`.
+        #[arg(short = 'p', short_alias = 'P', long)]
+        project: Option<String>,
+        /// Further arguments passed to `vissue claims`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1602,13 +1624,27 @@ enum Cmd {
     },
     /// Give a ticket back. It is open again, and the claim generation moves.
     ///
+    /// `--stale` lists this seat's claims untouched for longer than `--days`
+    /// (`LJOS_STALE_DAYS`, 7 when unset) and writes nothing. `--yes` hands
+    /// each one back. The ticket stays open.
+    ///
     /// Example: `ljos release proj-1a2b`
     Release {
-        /// A tracker id, or a 32-hex claim-graph id.
-        node: String,
+        /// A tracker id, or a 32-hex claim-graph id. Omit it with `--stale`.
+        #[arg(required_unless_present = "stale", conflicts_with = "stale")]
+        node: Option<String>,
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
+        /// This seat's claims untouched for `--days` or longer.
+        #[arg(long)]
+        stale: bool,
+        /// Days untouched before a claim is stale. The default is `LJOS_STALE_DAYS`, or 7.
+        #[arg(long, value_name = "N", requires = "stale")]
+        days: Option<i64>,
+        /// Hand the listed claims back. Without this, the command only prints them.
+        #[arg(long, requires = "stale")]
+        yes: bool,
     },
     /// Mark the claim finished. The ticket stays open.
     ///
@@ -3098,6 +3134,12 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
         ..
     } = cmd
     {
+        return false;
+    }
+    // A stale release writes only after it has found a claim to hand
+    // back. The check is a tracker read. An empty list does not open
+    // the pack, so the lesson queue stays where it is.
+    if let Cmd::Release { stale: true, .. } = cmd {
         return false;
     }
     !matches!(
@@ -5049,10 +5091,36 @@ fn run_command() -> Result<()> {
                 );
             }
         }
-        Cmd::Claims { args } => {
-            if args.iter().any(|arg| arg == "--mine") {
+        Cmd::Claims {
+            mine,
+            stale,
+            days,
+            json,
+            by,
+            agent,
+            project,
+            args,
+        } => {
+            let forwarded =
+                by.is_some() || agent.is_some() || project.is_some() || !args.is_empty();
+            if (mine || stale) && forwarded {
+                bail!(
+                    "claims: --by and -p belong to `vissue claims`, so drop them with --mine and --stale"
+                );
+            }
+            if mine {
+                if json {
+                    bail!("claims: --json is for --stale");
+                }
                 print!("{}", ljos_cli::quiet_claims::list_mine()?);
                 return Ok(());
+            }
+            if stale {
+                print!("{}", ljos_cli::quiet_claims::list_stale(days, json)?);
+                return Ok(());
+            }
+            if days.is_some() {
+                bail!("claims: --days is for --stale");
             }
             // vissue names the holder filter `--by`; `--agent` is ljos's word.
             let mapped: Vec<String> = args
@@ -5064,9 +5132,21 @@ fn run_command() -> Result<()> {
                         .map_or_else(|| a.to_string(), |v| format!("--by={v}")),
                 })
                 .collect();
-            let mut argv = vec!["claims"];
-            argv.extend(mapped.iter().map(String::as_str));
-            run("vissue", &argv)?;
+            let mut argv = vec!["claims".to_string()];
+            if json {
+                argv.push("--json".to_string());
+            }
+            if let Some(name) = by.or(agent) {
+                argv.push("--by".to_string());
+                argv.push(name);
+            }
+            if let Some(project) = project {
+                argv.push("--project".to_string());
+                argv.push(project);
+            }
+            argv.extend(mapped);
+            let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            run("vissue", &refs)?;
         }
         Cmd::Recall {
             issue,
@@ -5458,12 +5538,28 @@ fn run_command() -> Result<()> {
                 }
             }
         }
-        Cmd::Release { node, assignee } => {
+        Cmd::Release {
+            node,
+            assignee,
+            stale,
+            days,
+            yes,
+        } => {
             // `release HEX --assignee NAME` hands back a claim another
-            // name still holds.
+            // name still holds. `--stale` hands back the untouched pile,
+            // and only after `--yes`.
             let assignee = assignee_for("release", assignee.as_deref(), true)?;
-            print!("{}", release(&node, &assignee)?);
-            print!("{}", ljos_cli::persist_tracker(&node, "released"));
+            if stale {
+                print!(
+                    "{}",
+                    ljos_cli::quiet_claims::release_stale(&assignee, days, yes)?
+                );
+            } else if let Some(node) = node {
+                print!("{}", release(&node, &assignee)?);
+                print!("{}", ljos_cli::persist_tracker(&node, "released"));
+            } else {
+                bail!("release: pass an id, or --stale");
+            }
         }
         Cmd::Complete {
             node,
@@ -6242,6 +6338,7 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Finish { .. } => "finish",
         Cmd::Reopen { .. } => "reopen",
         Cmd::Withdraw { .. } => "withdraw",
+        Cmd::Release { stale: true, .. } => return None,
         Cmd::Release { .. } => "release",
         Cmd::Complete { .. } => "complete",
         Cmd::File { .. } => "file",

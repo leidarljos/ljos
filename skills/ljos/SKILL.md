@@ -110,7 +110,9 @@ sitting that gets that far.
    pack or recall is asked. Claims this seat already has in this
    project, with no note, deed or finish for a day, are named here,
    the oldest three, then `+N more (ljos claims --mine)` when more
-   remain. Nothing is released.
+   remain. Claims untouched for longer than `LJOS_STALE_DAYS` (7 when
+   unset) are one line, `N claims untouched for D+ days: ljos claims --stale`,
+   and those three are the newer ones. Nothing is released.
 4. `== doctor`. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
    A `warn` on `host` means the kernel killed a process within a day. The

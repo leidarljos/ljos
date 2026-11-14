@@ -7,6 +7,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -29,13 +31,20 @@ fn respond(sock: &mut impl Write, body: &str) {
 }
 
 /// A pack that answers at once with nothing stored.
-fn empty_pack() -> String {
+///
+/// The count is every request the process made. A command that does not
+/// open the pack leaves it at zero.
+fn empty_pack() -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&hits);
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut sock) = stream else { break };
+            let count = Arc::clone(&count);
             thread::spawn(move || {
+                count.fetch_add(1, Ordering::SeqCst);
                 let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
                 let mut buf = [0u8; 4096];
                 let _ = sock.read(&mut buf);
@@ -51,7 +60,7 @@ fn empty_pack() -> String {
             });
         }
     });
-    format!("http://127.0.0.1:{port}")
+    (format!("http://127.0.0.1:{port}"), hits)
 }
 
 fn stamp(day: NaiveDate) -> String {
@@ -109,6 +118,7 @@ struct World {
     home: PathBuf,
     path: String,
     pack: String,
+    pack_hits: Arc<AtomicUsize>,
     org: PathBuf,
     today: NaiveDate,
 }
@@ -143,6 +153,7 @@ impl World {
             ids.push(id);
         }
         let today = chrono::Local::now().date_naive();
+        let (pack, pack_hits) = empty_pack();
         let path = layout.project_issues_path("work");
         let mut doc = vissue_core::IssueDoc::parse_file("work", &path).unwrap();
         for (claim, id) in claims.iter().zip(ids.iter()) {
@@ -217,7 +228,8 @@ impl World {
             tracker,
             home,
             path: format!("{}:/usr/bin:/bin", bin.display()),
-            pack: empty_pack(),
+            pack,
+            pack_hits,
             org: path,
             today,
             root,
@@ -225,9 +237,9 @@ impl World {
         (world, ids)
     }
 
-    fn ljos(&self, seat: &str, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
-            .args(args)
+    fn ljos_env(&self, seat: &str, args: &[&str], extra: &[(&str, &str)]) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        cmd.args(args)
             .current_dir(self.root.path())
             .env_clear()
             .env("PATH", &self.path)
@@ -246,13 +258,19 @@ impl World {
             .env("LJOS_USER_RULES_SYNC", "off")
             .env("LJOS_LEASE_SECS", "0")
             .env("PACKSET_URL", &self.pack)
-            .env("PACKSET_AUTH", "off")
-            .output()
-            .unwrap()
+            .env("PACKSET_AUTH", "off");
+        for (key, value) in extra {
+            cmd.env(key, value);
+        }
+        cmd.output().unwrap()
     }
 
     fn ok(&self, seat: &str, args: &[&str]) -> String {
-        let out = self.ljos(seat, args);
+        self.ok_env(seat, args, &[])
+    }
+
+    fn ok_env(&self, seat: &str, args: &[&str], extra: &[(&str, &str)]) -> String {
+        let out = self.ljos_env(seat, args, extra);
         let text = format!(
             "stdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&out.stdout),
@@ -431,4 +449,206 @@ fn claims_past_the_handful_end_on_one_more_line() {
         verbose.contains("+1 more (ljos claims --mine)"),
         "{verbose}"
     );
+    assert!(
+        !verbose.contains("untouched for"),
+        "a claim under 7 days was called stale:\n{verbose}"
+    );
+}
+
+/// The three banner rows are the claims still inside the window.
+/// A claim untouched for 7 days or more is one line.
+#[test]
+fn the_banner_keeps_fresh_claims_and_folds_stale_ones() {
+    let (world, ids) = World::new(&[
+        claim("still in hand", "ada", 3, None, None, None, "STARTED"),
+        claim("left last month", "ada", 12, None, None, None, "STARTED"),
+        claim("touched today", "ada", 0, None, None, None, "STARTED"),
+        Claim {
+            title: "the sitting",
+            holder: "",
+            claim_days: None,
+            state: "TODO",
+            note_days: None,
+            deed_days: None,
+            finished_days: None,
+        },
+    ]);
+    let fresh = &ids[0];
+    let stale = &ids[1];
+    let today = &ids[2];
+    let sitting = &ids[3];
+    let inbox = world.ok("ada", &["inbox"]);
+    assert_eq!(
+        quiet_lines(&inbox),
+        vec![line(
+            fresh,
+            "still in hand",
+            &age(world.today - Days::days(3), world.today)
+        )],
+        "{inbox}"
+    );
+    assert!(
+        inbox.contains("1 claim untouched for 7+ days: ljos claims --stale"),
+        "{inbox}"
+    );
+    assert!(!inbox.contains(stale), "{inbox}");
+    assert!(!inbox.contains(today), "{inbox}");
+    assert!(!inbox.contains("more (ljos claims --mine)"), "{inbox}");
+
+    let verbose = world.ok("ada", &["sitting", sitting, "--verbose"]);
+    assert!(verbose.contains(fresh), "{verbose}");
+    assert!(
+        verbose.contains("1 claim untouched for 7+ days: ljos claims --stale"),
+        "{verbose}"
+    );
+    assert!(!verbose.contains(stale), "{verbose}");
+
+    let short = world.ok("ada", &["sitting", sitting]);
+    assert!(
+        short.contains("1 quiet claim (`ljos claims --mine`)"),
+        "{short}"
+    );
+    assert!(
+        short.contains("1 claim untouched for 7+ days: ljos claims --stale"),
+        "{short}"
+    );
+    assert!(quiet_lines(&short).is_empty(), "{short}");
+}
+
+/// A wider window puts the same claim back in the rows.
+#[test]
+fn a_wider_stale_window_leaves_the_banner_as_it_was() {
+    let (world, ids) = World::new(&[
+        claim("ten days", "ada", 10, None, None, None, "STARTED"),
+        Claim {
+            title: "the sitting",
+            holder: "",
+            claim_days: None,
+            state: "TODO",
+            note_days: None,
+            deed_days: None,
+            finished_days: None,
+        },
+    ]);
+    let inbox = world.ok_env("ada", &["inbox"], &[("LJOS_STALE_DAYS", "14")]);
+    assert_eq!(
+        quiet_lines(&inbox),
+        vec![line(
+            &ids[0],
+            "ten days",
+            &age(world.today - Days::days(10), world.today)
+        )],
+        "{inbox}"
+    );
+    assert!(!inbox.contains("untouched for"), "{inbox}");
+}
+
+#[test]
+fn claims_stale_lists_the_oldest_first_and_json_matches() {
+    let (world, ids) = World::new(&[
+        claim("middle", "ada", 12, None, None, None, "STARTED"),
+        claim("oldest", "ada", 20, None, None, None, "STARTED"),
+        claim("newer", "ada", 8, None, None, None, "STARTED"),
+        claim("recent", "ada", 2, None, None, None, "STARTED"),
+    ]);
+    let listed = world.ok("ada", &["claims", "--stale"]);
+    let lines = quiet_stale_lines(&listed);
+    assert_eq!(lines.len(), 3, "{listed}");
+    assert!(lines[0].contains(&ids[1]), "{listed}");
+    assert!(lines[1].contains(&ids[0]), "{listed}");
+    assert!(lines[2].contains(&ids[2]), "{listed}");
+    assert!(!listed.contains(&ids[3]), "{listed}");
+    for (line, id) in lines.iter().zip([&ids[1], &ids[0], &ids[2]]) {
+        assert!(line.contains(&format!("ljos finish {id}")), "{line}");
+        assert!(line.contains(&format!("ljos release {id}")), "{line}");
+        assert!(line.contains(&format!("ljos note {id} \"...\"")), "{line}");
+    }
+    let json = world.ok("ada", &["claims", "--stale", "--json"]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).unwrap();
+    assert_eq!(rows.len(), 3, "{json}");
+    assert_eq!(rows[0]["id"], ids[1], "{json}");
+    assert_eq!(rows[1]["id"], ids[0], "{json}");
+    assert_eq!(rows[2]["id"], ids[2], "{json}");
+    assert_eq!(rows[0]["age_days"], 20, "{json}");
+    assert_eq!(rows[0]["title"], "oldest", "{json}");
+    assert_eq!(
+        rows[0]["finish"],
+        format!("ljos finish {}", ids[1]),
+        "{json}"
+    );
+    assert_eq!(
+        rows[0]["release"],
+        format!("ljos release {}", ids[1]),
+        "{json}"
+    );
+    let narrowed = world.ok("ada", &["claims", "--stale", "--days", "15", "--json"]);
+    let few: Vec<serde_json::Value> = serde_json::from_str(narrowed.trim()).unwrap();
+    assert_eq!(few.len(), 1, "{narrowed}");
+    assert_eq!(few[0]["id"], ids[1], "{narrowed}");
+}
+
+#[test]
+fn release_stale_prints_the_list_until_yes_and_then_returns_the_ticket_to_todo() {
+    let (world, ids) = World::new(&[claim("old work", "ada", 11, None, None, None, "STARTED")]);
+    let before = std::fs::read(&world.org).unwrap();
+    let dry = world.ok("ada", &["release", "--stale"]);
+    assert!(dry.contains(&ids[0]), "{dry}");
+    assert!(dry.contains(&format!("ljos release {}", ids[0])), "{dry}");
+    assert!(
+        dry.contains("1 claim would go back to TODO. ljos release --stale --yes releases them."),
+        "{dry}"
+    );
+    assert_eq!(std::fs::read(&world.org).unwrap(), before);
+    assert!(!dry.contains("--close"), "{dry}");
+
+    let yes = world.ok("ada", &["release", "--stale", "--yes"]);
+    let org = String::from_utf8(std::fs::read(&world.org).unwrap()).unwrap();
+    assert!(
+        org.contains("* TODO") && !org.contains("CLAIMED_BY") && !org.contains("* DONE"),
+        "{org}\n{yes}"
+    );
+    assert!(yes.contains("back to TODO"), "{yes}");
+    assert!(
+        yes.contains("released 1 claim. Each ticket is TODO again."),
+        "{yes}"
+    );
+    assert!(!yes.contains("--close"), "{yes}");
+    assert!(!yes.contains("finish"), "{yes}");
+}
+
+#[test]
+fn release_stale_with_nothing_to_hand_back_writes_nothing_and_skips_the_pack() {
+    let (world, ids) = World::new(&[claim(
+        "touched today",
+        "ada",
+        0,
+        None,
+        None,
+        None,
+        "STARTED",
+    )]);
+    let before = std::fs::read(&world.org).unwrap();
+    assert_eq!(world.pack_hits.load(Ordering::SeqCst), 0);
+    let said = world.ok("ada", &["release", "--stale", "--yes"]);
+    assert!(said.contains("no claims untouched for 7+ days"), "{said}");
+    assert_eq!(std::fs::read(&world.org).unwrap(), before);
+    assert_eq!(
+        world.pack_hits.load(Ordering::SeqCst),
+        0,
+        "an empty stale release called the pack"
+    );
+    let bin = PathBuf::from(world.path.split(':').next().unwrap());
+    script(&bin, "claimdag", "#!/bin/sh\necho called >&2\nexit 1\n");
+    let again = world.ok("ada", &["release", "--stale"]);
+    assert!(again.contains("no claims untouched"), "{again}");
+    assert_eq!(std::fs::read(&world.org).unwrap(), before);
+    assert!(!again.contains(&ids[0]), "{again}");
+}
+
+/// Lines of `ljos claims --stale`: the id, the age and the three commands.
+fn quiet_stale_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| line.contains("ljos finish ") && line.contains("ljos release "))
+        .map(str::to_string)
+        .collect()
 }

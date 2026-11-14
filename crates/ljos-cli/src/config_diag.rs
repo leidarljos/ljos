@@ -707,6 +707,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_STALE_DAYS",
+        default: "7",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_SYNC_HOST",
         default: "unset",
         group: "ljos",

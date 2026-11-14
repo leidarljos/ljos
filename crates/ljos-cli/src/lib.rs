@@ -39651,7 +39651,9 @@ has it. The claim is taken and this section is printed before the\n   \
 pack or recall is asked. Claims this seat already has in this\n   \
 project, with no note, deed or finish for a day, are named here,\n   \
 the oldest three, then `+N more (ljos claims --mine)` when more\n   \
-remain. Nothing is released.",
+remain. Claims untouched for longer than `LJOS_STALE_DAYS` (7 when\n   \
+unset) are one line, `N claims untouched for D+ days: ljos claims --stale`,\n   \
+and those three are the newer ones. Nothing is released.",
     },
     SittingSection {
         name: "doctor",
@@ -63605,6 +63607,22 @@ next: day-2  measure the files
         assert!(short.contains("next: day-2  measure the files"), "{short}");
         assert!(!short.contains("ljos finish day-old"), "{short}");
         assert!(!short.contains("+29 more"), "{short}");
+        let stale = "\
+== claim
+claimed day-1 for ada
+day-new  fresh title  2 days  ljos finish day-new / ljos note day-new \"...\"
+12 claims untouched for 7+ days: ljos claims --stale
+";
+        let folded = compact_sitting(stale, "day-1");
+        assert!(
+            folded.contains("1 quiet claim (`ljos claims --mine`)"),
+            "{folded}"
+        );
+        assert!(
+            folded.contains("12 claims untouched for 7+ days: ljos claims --stale"),
+            "{folded}"
+        );
+        assert!(!folded.contains("ljos finish day-new"), "{folded}");
         assert!(!short.contains("unpushed"), "{short}");
         assert!(!short.contains("mcp.json"), "{short}");
         assert!(!short.contains("GET /v1/atoms"), "{short}");

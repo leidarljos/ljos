@@ -216,7 +216,7 @@ $ LJOS_SEAT=alice ljos ready --mine
 next: day-ef56  pick a default
 #+end_src
 
-The ids are the ones that run printed. The parent is claimed. Each item stays open until =ljos finish= ticks it. A sitting with no =--verbose= prints what needs action. With =--no-embed= the pack has no encoder, so the sitting prints =memory degraded: ranked by words=. Quiet claims are a count that points at =ljos claims --mine=. =ljos sitting ISSUE --verbose= prints every section.
+The ids are the ones that run printed. The parent is claimed. Each item stays open until =ljos finish= ticks it. A sitting with no =--verbose= prints what needs action. With =--no-embed= the pack has no encoder, so the sitting prints =memory degraded: ranked by words=. Quiet claims are a count that points at =ljos claims --mine=. Claims untouched for longer than =LJOS_STALE_DAYS= (7) are one line, =ljos claims --stale=. =ljos sitting ISSUE --verbose= prints every section.
 Under a runner the holder on the =STARTED= line can be =alice= plus =@= and a session tag. The claim command below prints the seat name.
 
 * A second seat

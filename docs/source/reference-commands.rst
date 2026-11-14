@@ -21,7 +21,7 @@ The line says what went wrong and the command that fixes it.
 ``LJOS_DEBUG=1`` or ``--verbose`` prints the cause chain after that line.
 
 ``sitting ISSUE [--assignee NAME] [--cards DIR] [--playbook NAME] [--anyway] [--verbose]``
-   Stores: all. Open a sitting: doctor, sync when the repository names a scope, cards, due, island, blockers, playbook, workflow when the issue carries one, panel when the issue is a decision, recall, timeline, reclaim, claim. The short form prints what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``. A pack that answers 503 or does not answer is ``memory skipped: packsetd busy``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold. Quiet claims are a count that points at ``ljos claims --mine``. ``--verbose`` prints every section. Reclaim hands back claims quiet longer than ``LJOS_LEASE_SECS`` (900; 0 is off) whose conversation is gone, and keeps one whose runner still runs. It stops at the first store down. The name defaults to this conversation's holder (``ljos seat``). ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``. The name is a tracker ``playbook:`` note until finish or release. ``--cards`` is the directory of ``USER.md`` and ``MEMORY.md``; ``--dir`` is the same flag.
+   Stores: all. Open a sitting: doctor, sync when the repository names a scope, cards, due, island, blockers, playbook, workflow when the issue carries one, panel when the issue is a decision, recall, timeline, reclaim, claim. The short form prints what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``. A pack that answers 503 or does not answer is ``memory skipped: packsetd busy``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold. Quiet claims are a count that points at ``ljos claims --mine``. Claims untouched for longer than ``LJOS_STALE_DAYS`` (7) are one line, ``N claims untouched for 7+ days: ljos claims --stale``. ``--verbose`` prints every section. Reclaim hands back claims quiet longer than ``LJOS_LEASE_SECS`` (900; 0 is off) whose conversation is gone, and keeps one whose runner still runs. It stops at the first store down. The name defaults to this conversation's holder (``ljos seat``). ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``. The name is a tracker ``playbook:`` note until finish or release. ``--cards`` is the directory of ``USER.md`` and ``MEMORY.md``; ``--dir`` is the same flag.
 ``sitting --plan TITLE [-p PROJECT] -- ITEM...``
    Stores: tracker, claim graph. File ``TITLE`` and the items after ``--`` in one tracker commit, claim the parent, and print the checklist with ids. The parent is tagged ``plan`` and ``ORDERED``. Each item is a ``checklist`` child, in the order given. The sitting names the next unfinished item. ``ljos ready --mine`` names it again. ``ljos finish ITEM`` marks that item done and names the next one.
 ``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--new-option] [--beta B] [--gen G] [--assignee NAME] [--close]``
@@ -128,8 +128,8 @@ The line says what went wrong and the command that fixes it.
    Stores: machine. How mail wakes a seat that is idle: a shell line this machine runs with ``LJOS_SEAT`` set to the seat, or a URL it posts the envelope to (never the body); ``send`` and ``reply`` start it in its own session and do not wait on it; policyd reads a command when it is set and on every run, and a rule that fires is a warning beside it while the command still runs, and block-on-warning warns with that label and the command runs. It does not block; ``--fire`` runs it now and prints what happened. With ``--fire``, ``--from``, ``--msg``, ``--issue`` and ``--interrupt`` name the message. Alone, show the wake. Kept in ``~/.config/ljos/wake.toml``.
 ``deed ID [--add ACCESSION]...`` / ``--remove ACCESSION --ticket ID``
    Stores: tracker. Cite with ``--add``, or list; ``--remove`` drops one citation, appended to the ledger, and the heading is not rewritten.
-``claims [ARGS]``
-   Stores: tracker. Who has claimed what: ``vissue claims`` with its flags (``--by NAME``, ``--json``)
+``claims [--mine | --stale [--days N] [--json]] [ARGS]``
+   Stores: tracker. Who has claimed what: ``vissue claims`` with its flags (``--by NAME``, ``--json``, ``-p PROJECT``). ``--mine`` lists this seat's claims with no note, stored file or finish for a day. ``--stale`` lists the ones untouched for ``--days`` or longer (``LJOS_STALE_DAYS``, 7 when unset), oldest first, with the age and the command to finish, release or note each one. ``--json`` prints that list as an array.
 ``recall ID [--json] [--no-graph]``
    Stores: tracker. The working set: the plan, the cited files and the notes for one ticket. When no lesson is stored on the issue, the line names ``ljos remember``. Lessons matched by the title or the issue's tags, and not filed on the issue, are listed under Related, with shown N of M. An id the tracker does not hold exits 1 and names ``ljos ready``. When ``graphify-out/graph.json`` is in the repository, a Code context section lists matching nodes with file and line and a few edges tagged EXTRACTED or INFERRED. ``--no-graph`` and ``LJOS_GRAPHIFY=off`` leave it out. ``--json`` puts the same text in the JSON document. A schema major other than 1 is named in that section, and the working set still prints. When nothing is storing memories, the command exits 75 when the line names ``packset ensure``, and exits 1 when packset is not on PATH. Example: ``ljos recall proj-1a2b``.
 ``vote ID [--for OPTION] [--confidence P] [--used ACCESSIONS|none] [--expect OPTION|JSON] [--as PERSONA] [--jev] [--withdraw]``
@@ -144,8 +144,8 @@ The line says what went wrong and the command that fixes it.
    Stores: consensus, tracker. First what the seat ballots alone decide for the push check; then the settle under the pack's rows that apply to the issue, with every persona's anchor, as advice; an issue tagged ``broad`` runs bounded confidence; once six issues have an outcome, voters shown to err together are discounted; ``--compare`` adds the tracker's own settle, and so does a missing model crate; an issue with no ballots is refused before a settle runs; ``--json`` prints one JSON document, the seat tally at the top level and each reading under its own key. ``--no-file`` reads only and files nothing. ``--quorum N`` exits 1 when fewer ballots are in: nothing is decided yet. With ``--deadline``, still short after that RFC 3339 time, the vote has lapsed and this exits 3.
 ``claim [ID] [--next] [--role ROLE] [--slack N] [--assignee NAME]``
    Stores: claim graph. Take a ticket so this seat is the one working on it. The tracker stores the claim as a session node, its record of who holds the ticket. With ``--next``, or with no id, it claims the first ready node in claimdag's order for the name, the way ``claim ID`` claims one; ``--role`` and ``--slack`` set the affinity and the depth slack. A busy refusal names what the name has still claimed. Example: ``LJOS_SEAT=alice ljos claim demo-2f5j``.
-``release ID [--assignee NAME]``
-   Stores: claim graph. Hand the session node back unfinished: ready, generation moved; a node another conversation of this seat holds (a worker it started, or the one that started it) is released under that name.
+``release ID [--assignee NAME]`` / ``release --stale [--days N] [--yes]``
+   Stores: claim graph. Hand the session node back unfinished: ready, generation moved; a node another conversation of this seat holds (a worker it started, or the one that started it) is released under that name. ``--stale`` lists this seat's claims untouched for ``--days`` or longer and writes nothing. ``--yes`` hands each one back. The ticket goes back to TODO.
 ``reap [--idle 6h] [--apply]``
    Stores: claim graph. Release claims idle past a window and mail each seat. Without ``--apply`` it prints what would happen. ``--idle`` is how long a claim may sit with no claim or tracker commit: ``6h``, ``90m``, ``2d``.
 ``complete ID [--status done|failed|cancelled] [--gen G] [--assignee NAME]``
@@ -337,7 +337,7 @@ bump-plan --dry-run --generation --parent --project
 calibrate --project --rounds
 cards --cards --dir
 claim --assignee --next --role --slack
-claims
+claims --agent --by --days --json --mine --project --stale
 cloud
 cloud up --force --repoint
 complete --assignee --gen --status
@@ -415,7 +415,7 @@ recall --json --no-graph
 receive --import --keep --since
 record
 record check --tracker
-release --assignee
+release --assignee --days --stale --yes
 remember --as --standing --transient --valid-from --valid-to --verbose
 reopen
 reply --interrupt

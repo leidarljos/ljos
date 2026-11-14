@@ -172,6 +172,7 @@ LJOS_ variables
 - ``LJOS_SHARE_WAIT`` default 60 seconds
 - ``LJOS_SHELL_SESSION`` default unset
 - ``LJOS_SITTING_CLAIM_WAIT`` default 10 seconds
+- ``LJOS_STALE_DAYS`` default 7
 - ``LJOS_SYNC_HOST`` default unset
 - ``LJOS_TEST_ARGV`` default unset
 - ``LJOS_TEST_CANON`` default unset
