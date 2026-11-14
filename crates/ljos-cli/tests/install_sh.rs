@@ -1517,7 +1517,9 @@ fn sha256_of(path: &Path) -> String {
 /// The archive name is on stdout before curl is asked for the body, and
 /// the size from the headers is on that same line. A pipe stays one line
 /// per archive. With no gh and no cosign, the closing line names where
-/// to get each.
+/// to get each. PATH is the stand-in curl and the programs the script
+/// runs, so a gh or cosign already installed on the machine is not
+/// consulted.
 #[test]
 fn the_archive_name_is_printed_before_the_download() {
     let dir = tempfile::tempdir().unwrap();
@@ -1556,6 +1558,38 @@ fn the_archive_name_is_printed_before_the_download() {
     }
     let bin = dir.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
+    let sys = dir.path().join("sys");
+    link_tools(
+        &sys,
+        &[
+            "sh",
+            "mktemp",
+            "date",
+            "cp",
+            "chmod",
+            "mkdir",
+            "rm",
+            "mv",
+            "cat",
+            "grep",
+            "sed",
+            "awk",
+            "find",
+            "uname",
+            "wc",
+            "tr",
+            "head",
+            "cut",
+            "sort",
+            "dirname",
+            "basename",
+            "readlink",
+            "tar",
+            "gzip",
+            "sha256sum",
+            "shasum",
+        ],
+    );
     let order = dir.path().join("order");
     let watch = dir.path().join("stdout.txt");
     script(
@@ -1633,7 +1667,7 @@ exit 0
         .arg(home.join(".local/bin"))
         .env_clear()
         .env("HOME", &home)
-        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("PATH", format!("{}:{}", bin.display(), sys.display()))
         .env("LJOS_FAKE_ASSETS", &assets)
         .env("LJOS_ORDER", &order)
         .env("LJOS_WATCH", &watch)
