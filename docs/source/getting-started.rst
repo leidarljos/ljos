@@ -87,6 +87,7 @@ The tracker commits each change, so git needs an identity:
    $ git config --global user.email "you@example.com"
    $ ljos doctor
    warn	seat source	no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
+   info	encoder	not installed. Search matches words, so run `cargo binstall --locked packset-embed`.
    info	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
    ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
    warn	ljos config	/home/you/.config/ljos/ljos.toml is missing, so run `ljos doctor --fix`
@@ -95,7 +96,8 @@ The tracker commits each change, so git needs an identity:
 On a clean install the ready line names memory, the tracker and the command guard.
 Run ``ljos doctor`` from your home directory. In a checkout that has ``.ljos/gates.toml``, the config row names that file.
 With no seat named, a ``seat source`` row warns that the read uses every seat.
-The ``sitting-gate`` row follows it. With no agent runner above the shell the word is ``info``, and the person's commits, merges and pushes are not held.
+When the encoder is not installed, an ``encoder`` row follows and names ``cargo binstall --locked packset-embed``.
+The ``sitting-gate`` row follows that. With no agent runner above the shell the word is ``info``, and the person's commits, merges and pushes are not held.
 Under a runner the same row names the seat and the branches a push waits on, ``develop`` or ``main``, and the number of seats that push waits for.
 A fresh tracker has no seat list, so that number is 2. When ``vissue.toml`` lists one active seat, that seat's own vote settles the push.
 A ``warn`` or ``no`` row names anything that still needs action, and the ready line follows those rows. The config row is always printed. With nothing set it says the defaults stand. The ``ljos config`` row is the empty config file, which a new install does not have yet. ``ljos doctor --fix`` creates it, and the defaults stand. The next command is still ``ljos remember``. Add ``--all`` to see every row.

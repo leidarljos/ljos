@@ -760,6 +760,23 @@ fn expect_documented(command: &str, output: &str) {
         ] {
             assert!(output.contains(key), "{command}\nmissing {key:?}\n{output}");
         }
+        if !ljos_cli::tool_installed("packset-embed") {
+            let seat = output.find("seat source").expect("seat source");
+            let encoder = output
+                .find("encoder")
+                .unwrap_or_else(|| panic!("{command}\nno encoder row:\n{output}"));
+            let gate = output.find("sitting gate").expect("sitting gate");
+            assert!(
+                seat < encoder && encoder < gate,
+                "{command}\nencoder row is not between the seat and the gate:\n{output}"
+            );
+            assert!(
+                output.contains(
+                    "not installed. Search matches words, so run `cargo binstall --locked packset-embed`."
+                ),
+                "{command}\n{output}"
+            );
+        }
     }
     if command.contains("ljos remember") && command.contains("lexical default") {
         assert!(
@@ -852,6 +869,30 @@ fn documented_commands() -> Vec<DocStep> {
         );
     }
     steps
+}
+
+#[test]
+fn the_getting_started_doctor_sample_names_the_missing_encoder() {
+    for rel in [
+        "../../docs/source/getting-started.rst",
+        "../../docs/orgmode/getting-started.org",
+        "../../docs/source/index.rst",
+        "../../docs/orgmode/index.org",
+    ] {
+        let text = repo_file(rel);
+        assert!(
+            text.contains(
+                "info\tencoder\tnot installed. Search matches words, so run `cargo binstall --locked packset-embed`."
+            ),
+            "{rel} dropped the encoder row a clean install prints"
+        );
+    }
+    let readme = repo_file("../../README.md");
+    assert!(
+        readme
+            .contains("an `encoder` row follows and names `cargo binstall --locked packset-embed`"),
+        "README dropped the encoder row"
+    );
 }
 
 #[test]

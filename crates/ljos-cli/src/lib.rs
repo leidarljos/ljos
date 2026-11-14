@@ -63795,6 +63795,14 @@ mod tests {
             "{}",
             missing.state
         );
+        assert!(
+            doctor_shows_in_short(&missing),
+            "a missing encoder stays on the short doctor"
+        );
+        assert!(
+            !doctor_shows_in_short(&loaded),
+            "a loaded encoder stays off the short doctor"
+        );
     }
 
     #[test]
