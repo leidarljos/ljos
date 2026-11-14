@@ -58,7 +58,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   vissue 0.23.1 published no GitHub release, so the script used to build that crate or take a later tag.
   CI builds packset and packsetd at 0.17.10 in place of 0.17.3, which published none.
   A listing from that writer is chunked, and a sentence past the word limit is stored with a warning instead of refused.
-  `ljos upgrade` installs packset from its latest release, and packset 0.18.0 starts the encoder when packsetd begins listening.
+  `ljos upgrade` installs packset from its latest release, and packset 0.18.1 starts the encoder when packsetd begins listening.
 
 ### Documentation
 
