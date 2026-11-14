@@ -11,13 +11,13 @@ Check the seat
 
 .. [[[cog import ljos_version as v; v.lines("", "The block is the ``ljos`` row from that command on a scratch seat, taken from ljos {version}.", "")]]]
 
-The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.42.1.
+The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.43.0.
 
 .. [[[end]]]
 
 .. [[[cog import ljos_version as v; v.lines("", "``ljos --version`` printed ``ljos {version}``.", "")]]]
 
-``ljos --version`` printed ``ljos 0.42.1``.
+``ljos --version`` printed ``ljos 0.43.0``.
 
 .. [[[end]]]
 
@@ -39,9 +39,9 @@ runner above the shell it says the person's git is not gated.
 .. code:: text
 
    $ ljos --version
-   ljos 0.42.1
+   ljos 0.43.0
    $ ljos doctor --all
-   ok  ljos    /path/to/ljos  0.42.1  crates.io (cached) 0.42.1
+   ok  ljos    /path/to/ljos  0.43.0  crates.io (cached) 0.43.0
 
 .. END ljos-sample doctor
 

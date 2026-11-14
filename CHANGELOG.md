@@ -5,6 +5,69 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.43.0 (2026-11-14)
+
+### Features
+
+- A mistyped command or flag prints one line naming the closest real command or flag and the corrected command, and exits 2.
+  `ljos find` names `ljos search`, `ljos add` names `ljos remember`, and `ljos note-add` names `ljos note`.
+  `ljos help search` prints the help for search.
+  `ljos completions` prints a script for bash, zsh, fish, powershell and elvish, with seat names and open ticket ids when the tracker is small enough to read.
+  Getting started and the command reference name the file each shell reads.
+- Search, recall, memories list, show, ready, due, timeline, hubs and island fit an 80-column terminal.
+  Each page names the place or the age, the seat and the ticket, and how to see rows past the limit.
+  `ljos show`, `ljos due`, `ljos timeline`, `ljos hubs` and `ljos island` take `--json` for the same rows.
+- `ljos mesh pull` stats each lane export and skips a file whose size and modification time are unchanged, instead of reading it again.
+  A file whose time changed but whose bytes did not is hashed and not imported again.
+  Each export is stored before the next is read, so a pull that stops keeps the finished exports and the next pull continues.
+  On a terminal, one line per export shows the count.
+  The seed is rewritten only when its bytes change.
+
+### Fixes
+
+- A failed `install.sh` names the next step.
+  An unsupported system names Linux and macOS on x86_64 and aarch64, and `cargo install --locked` for the seat programs.
+  A missing curl, wget, tar, sha256sum or shasum names that tool.
+  A checksum mismatch or a truncated download removes the partial file and says to run `sh install.sh` again.
+  A bin directory that is not writable names `--bin-dir`.
+  A bin directory that is not on PATH names the line for bash, zsh and fish, and the script leaves shell profiles unchanged unless `--modify-path` is given.
+  A second run over the same version says that version was reinstalled, and a run over an older one names both versions.
+  A pinned version with no release says so and names the releases page.
+- A failed command prints one plain sentence on stderr, then the command that fixes it.
+  A bad flag value exits 2.
+  A missing program, an unknown ticket, a pack turned off, a store that is not writable, a full disk, and a failed upgrade download each name that next command.
+  `LJOS_DEBUG=1` or `--verbose` prints the cause chain after the line.
+- A search before anything is stored names `ljos remember` as the next command.
+  Remembering a lesson that is already stored names `ljos search`, and does not call that lesson unreviewed.
+  A remember while the memory writer is busy names `ljos search` when the lesson is queued, and `ljos doctor` when the lesson could not be kept.
+- A search that ranked by words because that is how the source is read says `matched by words (local snapshot)` or `matched by words (encoder not installed)`.
+  The line that says to rerun stays for an encoder that is still loading.
+  `ljos search --json` keeps `lexical` or `semantic` in `ranking`.
+- A search while the encoder is still loading waits a few seconds for semantic ranking, and the fallback line says to rerun and about how long that takes.
+  `LJOS_SEARCH_WAIT` sets that wait, in seconds. The default is 3. `0` does not wait.
+  Starting the memory writer starts the encoder load, instead of leaving it until the first search.
+  `ljos doctor` says whether the encoder is loaded, loading, or failed, and a failed row names the reason.
+  `ljos search --json` keeps the ranking mode in `ranking`.
+- A version this script names, when that release is not published, no longer stops `install.sh`.
+  With Rust installed, that version is built from source.
+  Without Rust, the latest release of that program is installed, and the line says so.
+  A version you name that has no release names the releases page and `sh install.sh --version VER` or `sh install.sh --pin REPO=VER`.
+  A directory that exists and still refuses a new file is named, and that check does not need `touch` on `PATH`.
+- `install.sh` installs vissue 0.24.0 from its release archive.
+  The sibling pin and the script's fallback name that version, whose tag is 42b15346589fee20cdf62e5984452e099fe67b35.
+  vissue 0.23.1 published no GitHub release, so the script used to build that crate or take a later tag.
+  CI builds packset and packsetd at 0.17.10 in place of 0.17.3, which published none.
+  A listing from that writer is chunked, and a sentence past the word limit is stored with a warning instead of refused.
+  `ljos upgrade` installs packset from its latest release, and packset 0.18.0 starts the encoder when packsetd begins listening.
+
+### Documentation
+
+- The getting-started settle sample is the weighted settle this build prints, with social power and holds.
+  `cd "$HOME"` comes before `ljos doctor`, so a checkout's gate file is not the config row in the sample.
+  The homepage doctor sample includes the missing `ljos.toml` row.
+  A claim conflict names the time the holder took the ticket, and a wrapped timeline row continues after `|`.
+
+
 ## 0.42.1 (2026-11-14)
 
 ### Fixes

@@ -1,7 +1,7 @@
 {
   "name": "ljos",
   "displayName": "ljos",
-  "version": "0.42.1",
+  "version": "0.43.0",
   "description": "Tell your coding runner a rule once. ljos remembers it, brings it back when it matters, and warns on the shell commands you ruled out, such as a force push. Local memory, a work tracker and a command guard, shared with Claude Code, Codex and other agents on the same machine.",
   "author": {
     "name": "leidarljos"

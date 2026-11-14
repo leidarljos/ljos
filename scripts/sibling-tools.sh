@@ -58,7 +58,7 @@ root=$(CDPATH= cd -- "$(dirname "$script_path")/.." && pwd)
 pin=$root/.github/sibling-pin
 
 # The commit the cargo test job built for packset and packsetd.
-# v0.17.10 is the newest tag with a GitHub release. 0.17.3 published none.
+# v0.17.10 has a GitHub release. 0.17.3 published none.
 packset_repo=https://github.com/leidarljos/packset.git
 packset_sha=84a2b0f0e7393011d324c00ab3ecc003169212a4
 # workspace.package.version at that commit.
