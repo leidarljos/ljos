@@ -21,9 +21,12 @@
 //! accept`. [`import_open`] stores each open one once, labelled as it was
 //! filed.
 
-use std::collections::BTreeMap;
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
+
+use sha2::{Digest, Sha256};
 
 use crate::quoted_yes::Yes;
 use crate::PacksetClient;
@@ -99,6 +102,7 @@ struct Amendment {
 }
 
 fn gate() -> std::sync::MutexGuard<'static, ()> {
+    note_list_lock();
     static GATE: Mutex<()> = Mutex::new(());
     GATE.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -923,13 +927,94 @@ fn measured(why: &str) -> (String, Option<String>, Option<String>) {
     (why.to_string(), None, None)
 }
 
+/// Pack calls, stored rows walked, and writer-lock acquisitions made by
+/// the proposal list that just returned on this thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProposalListWork {
+    pub packset_calls: u64,
+    pub rows_scanned: u64,
+    pub lock_acquisitions: u64,
+}
+
+thread_local! {
+    static LISTING: Cell<u32> = const { Cell::new(0) };
+    static LIST_CALLS: Cell<u64> = const { Cell::new(0) };
+    static LIST_ROWS: Cell<u64> = const { Cell::new(0) };
+    static LIST_LOCKS: Cell<u64> = const { Cell::new(0) };
+}
+
+struct ListingGuard;
+
+impl ListingGuard {
+    fn enter() -> Self {
+        LISTING.with(|listing| listing.set(listing.get().saturating_add(1)));
+        LIST_CALLS.with(|calls| calls.set(0));
+        LIST_ROWS.with(|rows| rows.set(0));
+        LIST_LOCKS.with(|locks| locks.set(0));
+        Self
+    }
+}
+
+impl Drop for ListingGuard {
+    fn drop(&mut self) {
+        LISTING.with(|listing| listing.set(listing.get().saturating_sub(1)));
+    }
+}
+
+fn listing_now() -> bool {
+    LISTING.with(|listing| listing.get() > 0)
+}
+
+pub(crate) fn note_list_pack_call() {
+    if listing_now() {
+        LIST_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+    }
+}
+
+pub(crate) fn note_list_rows(n: u64) {
+    if n == 0 || !listing_now() {
+        return;
+    }
+    LIST_ROWS.with(|rows| rows.set(rows.get().saturating_add(n)));
+}
+
+pub(crate) fn note_list_lock() {
+    if listing_now() {
+        LIST_LOCKS.with(|locks| locks.set(locks.get().saturating_add(1)));
+    }
+}
+
+/// What the proposal list on this thread just did.
+#[must_use]
+pub fn proposal_list_work() -> ProposalListWork {
+    ProposalListWork {
+        packset_calls: LIST_CALLS.with(Cell::get),
+        rows_scanned: LIST_ROWS.with(Cell::get),
+        lock_acquisitions: LIST_LOCKS.with(Cell::get),
+    }
+}
+
+/// How long a proposal list waits on the memory service. Past this the
+/// list is the local snapshot, and one line says so. A full pack read
+/// used to sit behind the writer's lock for as long as that lock was held.
+const PROPOSAL_LIST_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Printed when the list did not wait out a busy memory service.
+pub const PROPOSAL_SNAPSHOT_LINE: &str = "memory service busy; listed from the local snapshot\n";
+
 /// The latest proposal per id, filtered by seat and status. A row that
 /// names no seat is `seat unknown`. With no status, open rows the pack
 /// does not already hold come first, then refused rows, then one count
 /// line. `--status in-pack` lists the rows the pack already holds.
+///
+/// An empty queue does not ask the pack. Open rows are matched through
+/// the local lesson index or one filtered search each, not a scan of
+/// every memory. A busy service is not waited out: the list is the local
+/// snapshot and [`PROPOSAL_SNAPSHOT_LINE`] is the first line. The read
+/// does not take the writer lock.
 #[must_use]
 pub fn list_proposals(seat: Option<&str>, status: Option<&str>) -> String {
-    let held = live_atoms().unwrap_or_default();
+    let _listing = ListingGuard::enter();
     let want_seat = seat.map(str::trim).filter(|s| !s.is_empty());
     let want_status = status.map(str::trim).filter(|s| !s.is_empty());
     let mut rows: Vec<Record> = read_latest().into_values().collect();
@@ -938,13 +1023,27 @@ pub fn list_proposals(seat: Option<&str>, status: Option<&str>) -> String {
     if rows.is_empty() {
         return "no proposals\n".to_string();
     }
+    let (held, from_snapshot) = if pack_needed(&rows, want_status) {
+        membership(&rows)
+    } else {
+        (Vec::new(), false)
+    };
+    let body = render_proposals(&rows, want_status, &held);
+    if from_snapshot {
+        format!("{PROPOSAL_SNAPSHOT_LINE}{body}")
+    } else {
+        body
+    }
+}
+
+fn render_proposals(rows: &[Record], want_status: Option<&str>, held: &[Value]) -> String {
     if let Some(status) = want_status {
         let mut out = String::new();
-        for rec in &rows {
-            if !status_selected(rec, status, &held) {
+        for rec in rows {
+            if !status_selected(rec, status, held) {
                 continue;
             }
-            out.push_str(&proposal_line(rec, &held));
+            out.push_str(&proposal_line(rec, held));
         }
         if out.is_empty() {
             out.push_str("no proposals\n");
@@ -956,18 +1055,18 @@ pub fn list_proposals(seat: Option<&str>, status: Option<&str>) -> String {
     let mut open_n = 0usize;
     let mut new_n = 0usize;
     let mut pack_n = 0usize;
-    for rec in &rows {
+    for rec in rows {
         let open = matches!(rec.status.as_str(), "open" | "proposed");
         if open {
             open_n += 1;
-            if atom_in_pack(rec, &held) {
+            if atom_in_pack(rec, held) {
                 pack_n += 1;
             } else {
                 new_n += 1;
-                fresh.push_str(&proposal_line(rec, &held));
+                fresh.push_str(&proposal_line(rec, held));
             }
         } else if rec.status == "refused" {
-            refused.push_str(&proposal_line(rec, &held));
+            refused.push_str(&proposal_line(rec, held));
         }
     }
     let mut out = fresh;
@@ -1008,9 +1107,224 @@ pub fn settle_proposals(seat: Option<&str>) -> Result<String> {
 
 /// Live atoms, when the pack answers. `None` is a pack that does not, so a
 /// list still prints and does not pretend a row is already held.
+///
+/// A proposal list does not call this. It is the full scan the list used
+/// to pay for, kept so a test can count that scan.
 fn live_atoms() -> Option<Vec<Value>> {
     let client = crate::pack().ok()?;
     crate::atoms_lean(&client, &client.workspace()).ok()
+}
+
+fn open_like(rec: &Record) -> bool {
+    matches!(rec.status.as_str(), "open" | "proposed")
+}
+
+/// Whether the printed lines need to know which open rows the pack holds.
+fn pack_needed(rows: &[Record], status: Option<&str>) -> bool {
+    if status.is_some_and(wants_in_pack) {
+        return true;
+    }
+    if let Some(status) = status {
+        if status != "open" && status != "proposed" {
+            return false;
+        }
+    }
+    rows.iter().any(open_like)
+}
+
+/// Atoms the open rows can be matched against, and whether the service
+/// was busy so the atoms are the local snapshot.
+fn membership(rows: &[Record]) -> (Vec<Value>, bool) {
+    let mut held = Vec::new();
+    let mut missing = Vec::new();
+    let mut seen = BTreeSet::new();
+    for rec in rows.iter().filter(|rec| open_like(rec)) {
+        let key = crate::memories::lesson_key(&proposal_kind(rec), &proposal_text(rec));
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        if held_index_has(&key) {
+            held.push(atom_from_record(rec));
+        } else {
+            missing.push(rec);
+        }
+    }
+    if missing.is_empty() {
+        return (held, false);
+    }
+    match probe_missing(&missing) {
+        Probe::Answered(found) => {
+            held.extend(found);
+            (held, false)
+        }
+        Probe::Busy(found) => {
+            held.extend(found);
+            if let Ok(client) = crate::pack() {
+                held.extend(crate::local_listing_atoms(&client.workspace()));
+            }
+            (held, true)
+        }
+        Probe::Down => (held, false),
+    }
+}
+
+enum Probe {
+    Answered(Vec<Value>),
+    Busy(Vec<Value>),
+    Down,
+}
+
+/// One filtered search per text still missing from the index. The searches
+/// share [`PROPOSAL_LIST_WAIT`]. The first busy or silent answer stops the
+/// rest and the caller reads the snapshot. A refused connection is not
+/// that: the list stays the local rows and does not claim the service was busy.
+fn probe_missing(missing: &[&Record]) -> Probe {
+    let Ok(client) = crate::pack() else {
+        return Probe::Down;
+    };
+    let workspace = client.workspace();
+    let _clock = crate::pack_link::PackClock::enter(PROPOSAL_LIST_WAIT);
+    let mut found = Vec::new();
+    for rec in missing {
+        match search_one(&client, &workspace, rec) {
+            Ok(atoms) => found.extend(atoms),
+            Err(err) if probe_is_busy(&err) => return Probe::Busy(found),
+            Err(_) => return Probe::Down,
+        }
+    }
+    Probe::Answered(found)
+}
+
+fn probe_is_busy(err: &packset_client::Error) -> bool {
+    match err {
+        packset_client::Error::Unavailable(_) => true,
+        packset_client::Error::Io(io) => {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) || io.to_string().contains("did not answer")
+                || io.to_string().contains("timed out")
+        }
+        packset_client::Error::Http(inner) => {
+            let text = inner.to_string();
+            text.contains("timed out") || text.contains("timeout") || text.contains("503")
+        }
+        packset_client::Error::Bad(text) => {
+            let lower = text.to_ascii_lowercase();
+            lower.contains("503")
+                || lower.contains("408")
+                || lower.contains("busy")
+                || lower.contains("timed out")
+        }
+        packset_client::Error::NoUrl | packset_client::Error::Json(_) => false,
+    }
+}
+
+/// Hits whose folded text and kind are the proposal. Other hits are walked
+/// and counted, then left out. A match is remembered in the lesson index
+/// so the next list does not ask again.
+fn search_one(
+    client: &crate::PacksetClient,
+    workspace: &str,
+    rec: &Record,
+) -> Result<Vec<Value>, packset_client::Error> {
+    let text = proposal_text(rec);
+    let kind = proposal_kind(rec);
+    let limit = "8";
+    let query = [
+        ("workspace", workspace),
+        ("q", text.as_str()),
+        ("limit", limit),
+        ("kind", kind.as_str()),
+    ];
+    let answer = client.roundtrip("GET", "/v1/search", &query, None, true, PROPOSAL_LIST_WAIT)?;
+    if matches!(answer.status, 408 | 503) {
+        return Err(packset_client::Error::Unavailable(
+            "memory service busy".into(),
+        ));
+    }
+    if !(200..300).contains(&answer.status) {
+        return Err(packset_client::Error::Bad(format!(
+            "search status {}",
+            answer.status
+        )));
+    }
+    let body: Value = serde_json::from_str(&answer.body).unwrap_or(Value::Null);
+    let hits = body
+        .get("hits")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    note_list_rows(hits.len() as u64);
+    let want = crate::memories::lesson_key(&kind, &text);
+    let mut matched = false;
+    let mut out = Vec::new();
+    for hit in &hits {
+        let hit_kind = hit["kind"].as_str().filter(|kind| !kind.is_empty());
+        let hit_text = hit["text"].as_str().unwrap_or("");
+        let same = |words: &str| {
+            crate::memories::lesson_key(hit_kind.unwrap_or(kind.as_str()), words) == want
+                || crate::memories::lesson_key(&kind, words) == want
+        };
+        let alias = hit["aliases"]
+            .as_array()
+            .is_some_and(|aliases| aliases.iter().filter_map(Value::as_str).any(same));
+        if !same(hit_text) && !alias {
+            continue;
+        }
+        matched = true;
+        out.push(serde_json::json!({
+            "kind": hit_kind.unwrap_or(kind.as_str()),
+            "text": hit_text,
+            "aliases": hit["aliases"].clone(),
+        }));
+    }
+    if matched {
+        remember_held(&kind, &text);
+    }
+    Ok(out)
+}
+
+fn atom_from_record(rec: &Record) -> Value {
+    serde_json::json!({
+        "kind": proposal_kind(rec),
+        "text": proposal_text(rec),
+    })
+}
+
+fn held_index_dir() -> Option<PathBuf> {
+    crate::data_base().map(|root| root.join("ljos").join("proposal-held"))
+}
+
+fn held_index_path(key: &str) -> Option<PathBuf> {
+    let digest = hex::encode(Sha256::digest(key.as_bytes()));
+    let (prefix, rest) = digest.split_at(2);
+    Some(held_index_dir()?.join(prefix).join(rest))
+}
+
+fn held_index_has(key: &str) -> bool {
+    held_index_path(key).is_some_and(|path| path.is_file())
+}
+
+/// Remember one confirmed lesson without the writer lock. The next list
+/// stats this file instead of asking the service.
+fn remember_held(kind: &str, text: &str) {
+    let Some(path) = held_index_path(&crate::memories::lesson_key(kind, text)) else {
+        return;
+    };
+    if path.is_file() {
+        return;
+    }
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let tmp = dir.join(format!(".{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, b"1\n").is_ok() && std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 fn proposal_kind(rec: &Record) -> String {
@@ -1513,5 +1827,371 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &path).unwrap();
         assert!(append(&record("a".into())).is_err());
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept\n");
+    }
+
+    struct Env {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl Env {
+        fn set(pairs: &[(&'static str, &str)]) -> Self {
+            const CLEAR: &[&str] = &[
+                "PACKSET_TOKEN",
+                "PACKSET_TOKEN_FILE",
+                "PACKSET_HOME",
+                "LJOS_IN_HOOK",
+                "LJOS_SEAT",
+            ];
+            let mut keys: Vec<&str> = pairs.iter().map(|(key, _)| *key).collect();
+            keys.extend_from_slice(CLEAR);
+            let saved = keys
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect();
+            unsafe {
+                for key in CLEAR {
+                    std::env::remove_var(key);
+                }
+                for (key, value) in pairs {
+                    std::env::set_var(key, value);
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for Env {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    fn seat_env(home: &std::path::Path, pack: &str) -> Env {
+        let home_s = home.to_str().unwrap();
+        Env::set(&[
+            ("HOME", home_s),
+            ("XDG_STATE_HOME", home_s),
+            ("XDG_DATA_HOME", home_s),
+            ("XDG_CONFIG_HOME", home_s),
+            ("PACKSET_URL", pack),
+            ("PACKSET_WORKSPACE", "seat"),
+            ("PACKSET_AUTH", "off"),
+        ])
+    }
+
+    fn reply(stream: &mut std::net::TcpStream, body: &str) {
+        let msg = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = std::io::Write::write_all(stream, msg.as_bytes());
+    }
+
+    fn read_req(stream: &mut std::net::TcpStream) -> String {
+        let mut buf = [0u8; 8192];
+        let n = std::io::Read::read(stream, &mut buf).unwrap_or(0);
+        String::from_utf8_lossy(&buf[..n])
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// `n` lessons on `GET /v1/atoms`, and no hits on a search.
+    fn serve_corpus(n: usize) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            let atoms: Vec<_> = (0..n)
+                .map(|i| {
+                    serde_json::json!({
+                        "id": format!("m{i:04}"),
+                        "kind": "lesson",
+                        "text": format!("Stored lesson number {i} stays in the pack."),
+                    })
+                })
+                .collect();
+            let corpus = serde_json::json!({ "atoms": atoms }).to_string();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let line = read_req(&mut stream);
+                record.lock().unwrap().push(line.clone());
+                let body = if line.contains("GET /v1/atoms") {
+                    corpus.clone()
+                } else {
+                    r#"{"hits":[]}"#.to_string()
+                };
+                reply(&mut stream, &body);
+            }
+        });
+        (url, seen)
+    }
+
+    fn serve_search(text: &'static str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            let hit = serde_json::json!({
+                "hits": [{
+                    "id": "atom-held",
+                    "kind": "lesson",
+                    "text": text,
+                    "score": 1.0
+                }]
+            })
+            .to_string();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let line = read_req(&mut stream);
+                record.lock().unwrap().push(line.clone());
+                let body = if line.contains("GET /v1/search") && line.contains("Pin+the+north") {
+                    hit.clone()
+                } else if line.contains("GET /v1/atoms") {
+                    let atoms: Vec<_> = (0..40)
+                        .map(|i| {
+                            serde_json::json!({
+                                "id": format!("bulk{i}"),
+                                "kind": "lesson",
+                                "text": format!("bulk row {i}"),
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({ "atoms": atoms }).to_string()
+                } else {
+                    r#"{"hits":[]}"#.to_string()
+                };
+                reply(&mut stream, &body);
+            }
+        });
+        (url, seen)
+    }
+
+    struct SlowPack {
+        url: String,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SlowPack {
+        fn start() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let stop_flag = std::sync::Arc::clone(&stop);
+            let call_count = std::sync::Arc::clone(&calls);
+            std::thread::spawn(move || {
+                use std::sync::atomic::Ordering::Relaxed;
+                while !stop_flag.load(Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            call_count.fetch_add(1, Relaxed);
+                            let _ = stream
+                                .set_read_timeout(Some(std::time::Duration::from_millis(200)));
+                            let mut buf = [0u8; 1024];
+                            let _ = std::io::Read::read(&mut stream, &mut buf);
+                            let mut waited = std::time::Duration::ZERO;
+                            while waited < std::time::Duration::from_secs(30)
+                                && !stop_flag.load(Relaxed)
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                waited += std::time::Duration::from_millis(50);
+                            }
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self { url, stop, calls }
+        }
+    }
+
+    impl Drop for SlowPack {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn plant(home: &std::path::Path, id: &str, text: &str) {
+        let path = home.join("ljos/proposals.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let row = serde_json::json!({
+            "id": id,
+            "status": "open",
+            "remote": false,
+            "text": text,
+            "kind": "lesson",
+            "origin": "agent-derived",
+            "seat": "ada",
+            "atom": {"kind": "lesson", "text": text},
+        });
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{row}").unwrap();
+    }
+
+    /// The list used to read every atom before it could say the queue was empty.
+    #[test]
+    fn an_empty_queue_does_not_scan_or_lock() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (url, seen) = serve_corpus(40);
+        let _env = seat_env(dir.path(), &url);
+
+        let before = {
+            let _listing = ListingGuard::enter();
+            let _held = live_atoms();
+            proposal_list_work()
+        };
+        assert_eq!(
+            (
+                before.packset_calls,
+                before.rows_scanned,
+                before.lock_acquisitions
+            ),
+            (1, 40, 0),
+            "full scan before the list change: {before:?}"
+        );
+        let asked = seen.lock().unwrap().len();
+
+        let listed = list_proposals(None, None);
+        assert_eq!(listed, "no proposals\n");
+        let after = proposal_list_work();
+        assert_eq!(
+            (
+                after.packset_calls,
+                after.rows_scanned,
+                after.lock_acquisitions
+            ),
+            (0, 0, 0),
+            "empty queue after: {after:?}"
+        );
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            asked,
+            "the empty list must not call the pack: {:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    /// One open row is one filtered search. The corpus is not fetched.
+    #[test]
+    fn an_open_row_is_a_filtered_search_not_a_pack_scan() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let text = "Pin the north fuse before the dusk firing.";
+        let (url, seen) = serve_search(text);
+        let _env = seat_env(dir.path(), &url);
+        plant(dir.path(), "aaaa1111bbbb2222", text);
+
+        let listed = list_proposals(None, None);
+        assert!(
+            listed.contains("1 open: 0 new, 1 already in pack"),
+            "{listed}"
+        );
+        assert!(!listed.contains(PROPOSAL_SNAPSHOT_LINE), "{listed}");
+        let work = proposal_list_work();
+        assert_eq!(work.lock_acquisitions, 0, "{work:?}");
+        assert_eq!(work.packset_calls, 1, "{work:?}");
+        assert_eq!(work.rows_scanned, 1, "{work:?}");
+        let lines = seen.lock().unwrap().clone();
+        assert!(
+            lines.iter().all(|line| line.contains("GET /v1/search")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("GET /v1/atoms")),
+            "{lines:?}"
+        );
+    }
+
+    /// A lesson the index already holds is not asked of a silent service.
+    #[test]
+    fn the_lesson_index_answers_without_another_pack_call() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let text = "Pin the north fuse before the dusk firing.";
+        let (url, _) = serve_search(text);
+        let _env = seat_env(dir.path(), &url);
+        plant(dir.path(), "aaaa1111bbbb2222", text);
+        let first = list_proposals(None, None);
+        assert!(first.contains("already in pack"), "{first}");
+
+        let slow = SlowPack::start();
+        unsafe { std::env::set_var("PACKSET_URL", &slow.url) };
+        let started = std::time::Instant::now();
+        let second = list_proposals(None, None);
+        let took = started.elapsed();
+        assert!(second.contains("already in pack"), "{second}");
+        assert!(!second.contains(PROPOSAL_SNAPSHOT_LINE), "{second}");
+        let work = proposal_list_work();
+        assert_eq!(
+            (
+                work.packset_calls,
+                work.rows_scanned,
+                work.lock_acquisitions
+            ),
+            (0, 0, 0),
+            "{work:?}"
+        );
+        assert_eq!(slow.calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(
+            took < std::time::Duration::from_secs(1),
+            "index lookup waited {took:?}"
+        );
+    }
+
+    /// A silent service does not hold the list. The line names the snapshot.
+    #[test]
+    fn a_busy_service_lists_from_the_snapshot_within_the_timeout() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let slow = SlowPack::start();
+        let _env = seat_env(dir.path(), &slow.url);
+        plant(
+            dir.path(),
+            "bbbb2222cccc3333",
+            "Name the relay key before publishing the pack.",
+        );
+        let started = std::time::Instant::now();
+        let listed = list_proposals(None, None);
+        let took = started.elapsed();
+        assert!(listed.starts_with(PROPOSAL_SNAPSHOT_LINE), "{listed}");
+        assert!(
+            listed.contains("Name the relay key before publishing the pack."),
+            "{listed}"
+        );
+        assert!(
+            listed.contains("1 open: 1 new, 0 already in pack"),
+            "{listed}"
+        );
+        let work = proposal_list_work();
+        assert_eq!(work.lock_acquisitions, 0, "{work:?}");
+        assert_eq!(work.rows_scanned, 0, "{work:?}");
+        assert_eq!(work.packset_calls, 1, "{work:?}");
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "busy list waited {took:?}"
+        );
+        assert!(took < std::time::Duration::from_secs(30));
     }
 }

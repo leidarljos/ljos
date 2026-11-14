@@ -7,6 +7,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::Command;
 
+use serde_json::Value;
+
 const HELD: &str = "Pin the north fuse before the dusk firing.";
 const FRESH: &str = "Name the relay key before publishing the pack.";
 const LONG: &str = "git push needs to run inside the worktree before the pack is published and the seat is named in the log so the other machine can pull the same branch without a second.";
@@ -21,7 +23,9 @@ fn serve(atoms: String) -> String {
             let mut buf = [0u8; 8192];
             let n = stream.read(&mut buf).unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]).into_owned();
-            let body = if req.contains("GET /v1/atoms") {
+            let body = if req.contains("GET /v1/search") {
+                search_hits(&req, &atoms)
+            } else if req.contains("GET /v1/atoms") {
                 atoms.clone()
             } else if req.contains("POST /v1/atoms") {
                 r#"{"id":"atom-kept","kind":"lesson","text":"kept","origin":"agent-derived"}"#
@@ -37,6 +41,65 @@ fn serve(atoms: String) -> String {
         }
     });
     url
+}
+
+fn search_hits(req: &str, atoms: &str) -> String {
+    let asked = query_value(req, "q");
+    let parsed: Value = serde_json::from_str(atoms).unwrap_or(Value::Null);
+    let hits: Vec<Value> = parsed["atoms"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|atom| atom["text"].as_str() == Some(asked.as_str()))
+        .map(|atom| {
+            serde_json::json!({
+                "id": atom["id"],
+                "text": atom["text"],
+                "kind": atom["kind"],
+                "score": 1.0,
+            })
+        })
+        .collect();
+    serde_json::json!({ "hits": hits }).to_string()
+}
+
+fn query_value(req: &str, key: &str) -> String {
+    let Some(line) = req.lines().next() else {
+        return String::new();
+    };
+    let Some(query) = line.split('?').nth(1) else {
+        return String::new();
+    };
+    let query = query.split(' ').next().unwrap_or("");
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        if parts.next() == Some(key) {
+            return form_decode(parts.next().unwrap_or(""));
+        }
+    }
+    String::new()
+}
+
+fn form_decode(raw: &str) -> String {
+    let raw = raw.replace('+', " ");
+    let bytes = raw.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or(""),
+                16,
+            ) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn held_atoms() -> String {

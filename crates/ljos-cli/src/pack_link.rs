@@ -1854,6 +1854,7 @@ fn refused(url: &str, code: u16, body: &str) -> Error {
 }
 
 fn send(live: &mut Slot, origin: &Url, call: &Wire<'_>, timeout: Duration) -> std::io::Result<Raw> {
+    crate::admit::note_list_pack_call();
     if pack_quiet() {
         return Err(quiet_io());
     }

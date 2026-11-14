@@ -19072,6 +19072,7 @@ fn ensure_writer() -> Result<()> {
 }
 
 fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
+    admit::note_list_lock();
     // A shed or a passed deadline already had its one retry. Asking again
     // here is what turned one timeout into a minute.
     match op() {
@@ -19770,6 +19771,7 @@ thread_local! {
 /// the pack's size.
 fn read_claims(n: usize) {
     CLAIMS_READ.with(|read| read.set(read.get() + n));
+    admit::note_list_rows(n as u64);
 }
 
 /// [`atoms_listed`] narrowed to one `kind` when given: the writer filters
@@ -19918,6 +19920,49 @@ fn listed_of<T: Listed>(
     memo_keep(&ATOM_LISTINGS, key, &atoms, answered.trusted);
     memo_keep(T::memo(), key, &listed, answered.trusted);
     Ok((listed, answered.trusted))
+}
+
+/// The newest on-disk listing for `workspace`, texts and kinds only.
+///
+/// A proposal list reads this when the memory service does not answer in
+/// time. It does not ask the service, and it does not walk export files.
+pub(crate) fn local_listing_atoms(workspace: &str) -> Vec<Value> {
+    let mut found: Option<(std::time::SystemTime, PathBuf)> = None;
+    for token in [true, false] {
+        let Some(path) = listing_cache_path(workspace, token) else {
+            continue;
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if found.as_ref().is_none_or(|(at, _)| modified > *at) {
+            found = Some((modified, path));
+        }
+    }
+    let Some((_, path)) = found else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(atoms) = value.get("atoms").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    read_claims(atoms.len());
+    atoms
+        .iter()
+        .map(|atom| {
+            serde_json::json!({
+                "kind": atom["kind"],
+                "text": atom["text"],
+                "aliases": atom.get("aliases").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect()
 }
 
 /// `$XDG_DATA_HOME/ljos/listing-<workspace>-<token>.json`: the last whole
@@ -32029,6 +32074,7 @@ fn with_locked_row_file(
         // The lock is advisory, so the row is written on this same
         // descriptor while it is held, or not at all.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            admit::note_list_lock();
             break;
         }
         let err = std::io::Error::last_os_error();
@@ -42221,6 +42267,9 @@ impl CommitLock {
         };
         // SAFETY: flock on a descriptor this struct owns until drop.
         let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0;
+        if ok {
+            admit::note_list_lock();
+        }
         Self(ok.then_some(file))
     }
 
@@ -42250,6 +42299,9 @@ impl CommitLock {
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         // SAFETY: flock on a descriptor this struct owns until drop.
         let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0;
+        if ok {
+            admit::note_list_lock();
+        }
         Self(ok.then_some(file))
     }
 
@@ -42290,6 +42342,7 @@ impl CommitLock {
         loop {
             // SAFETY: flock on a descriptor this function owns.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                admit::note_list_lock();
                 return Some(Self(Some(file)));
             }
             match std::io::Error::last_os_error().raw_os_error() {
@@ -42327,6 +42380,7 @@ impl CommitLock {
         loop {
             // SAFETY: flock on a descriptor this function owns.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                admit::note_list_lock();
                 return Some(Self(Some(file)));
             }
             match std::io::Error::last_os_error().raw_os_error() {

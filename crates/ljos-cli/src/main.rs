@@ -690,6 +690,8 @@ enum Cmd {
     /// Open rows not already stored come first, then refused rows, then a
     /// count of how many open rows are new and how many are already stored.
     /// A refused row quotes the sentence and names `ljos proposals amend`.
+    /// An empty queue does not ask the memory service. When that service is
+    /// busy, the list is the local snapshot, and one line says so.
     ///
     /// Example: `ljos proposals`
     Proposals {
@@ -3086,6 +3088,16 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
 /// offboard, uninstall and doctor do not create the queue or its lock,
 /// and they do not rewrite a queue that is already there.
 fn queued_lesson_may_go(cmd: &Cmd) -> bool {
+    // A read-only proposal list must not drain the note queue. That drain
+    // takes the queue lock and waits on the writer.
+    if let Cmd::Proposals {
+        cmd: None,
+        settle: false,
+        ..
+    } = cmd
+    {
+        return false;
+    }
     !matches!(
         cmd,
         Cmd::Remember { .. }
