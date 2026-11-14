@@ -5,6 +5,39 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.43.2 (2026-11-14)
+
+### Features
+
+- A sitting and an inbox fold claims untouched for longer than `LJOS_STALE_DAYS` (7) into one line that names `ljos claims --stale`.
+  `ljos claims --stale` lists those claims, oldest first, and `ljos release --stale --yes` hands each one back to TODO.
+
+### Fixes
+
+- A cgroup path that spells a runner is not a runner by itself: a person at a terminal stays the person unless a runner process is an ancestor or, away from that terminal, the runner's session variable is set.
+  `ljos finish` with no lesson names `ljos finish ISSUE --lesson "..."`, with that issue's id filled in.
+- A repeated `ljos memory import` and `ljos memory integrate --all` still do no packset calls and take no writer lock, including when a lesson is queued and packsetd is busy.
+  `ljos memory export` leaves the file in place when its lessons are unchanged, prints `seed unchanged: N memories`, and reports `memories`, `unchanged` and `path` with `--json`.
+  A busy packsetd is not waited out on that path.
+  `ljos mesh pull` of unchanged lane files does the same: no packset call and no writer lock.
+- `install.sh` prints each archive name, and its size when the server sends one, before that download starts.
+  When no checker is installed, the closing line names https://cli.github.com for `gh` 2.49+ and the cosign installation page.
+  `ljos doctor` prints each row as that check finishes, and prints the ready line when the checks are done.
+- `ljos finish` on a TODO ticket that nobody has claimed, and with no lesson, leaves the ticket as it is, exits 1, and names `ljos sitting ISSUE`.
+  A lesson passed to that finish is still stored, and the ticket is not closed.
+- `ljos search` and `ljos doctor` name `packset stop && packset ensure`, or a free `PACKSET_PORT`, when a writer for another home answers 401.
+  `ljos onboard` does not report that writer as up.
+  A search that shares no word prints the no-hits line and does not add the encoder install line.
+  A missing ljos.toml row puts `ljos doctor --fix` in backticks.
+- `ljos uninstall` names the seat programs it leaves, `packset stop` while the memory writer is still running, and `ljos uninstall --all` to remove those programs.
+
+### Documentation
+
+- A preference stored at a terminal is `preference, today`.
+  The getting-started page names that row, and the runner's `preference, from an agent, not checked`.
+- The short doctor prints an encoder row when search matches words, and the getting-started sample shows that row between the seat and the sitting gate.
+
+
 ## 0.43.1 (2026-11-14)
 
 ### Fixes
