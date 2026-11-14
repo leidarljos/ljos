@@ -609,6 +609,11 @@ struct Fold {
     seed_changed: bool,
 }
 
+struct Known {
+    hashes: BTreeSet<String>,
+    ids: BTreeSet<String>,
+}
+
 /// Merge one export into the seat. On `Err` the caller drops this export's
 /// rows, so a stop does not leave a half-imported export in the seed.
 fn fold_export(
@@ -617,8 +622,7 @@ fn fold_export(
     have: &mut BTreeMap<String, Kept>,
     row_ids: &mut BTreeSet<String>,
     known_hashes: &mut BTreeSet<String>,
-    baseline_hashes: &BTreeSet<String>,
-    baseline_ids: &BTreeSet<String>,
+    baseline: &Known,
     post: &mut impl FnMut(&Kept) -> Result<()>,
 ) -> Result<Fold> {
     let mut fold = Fold {
@@ -636,8 +640,8 @@ fn fold_export(
         let hash_known = known_hashes.contains(&row.content_sha256);
         let id_known = row.row_ids.iter().any(|id| row_ids.contains(id));
         if hash_known || id_known {
-            let introduced = !baseline_hashes.contains(&row.content_sha256)
-                && row.row_ids.iter().all(|id| !baseline_ids.contains(id));
+            let introduced = !baseline.hashes.contains(&row.content_sha256)
+                && row.row_ids.iter().all(|id| !baseline.ids.contains(id));
             if hash_known && introduced {
                 fold.skipped += 1;
             } else {
@@ -791,23 +795,17 @@ fn pull_with(
 ) -> Result<Summary> {
     let share = Share::mesh_pull(&store.seat, from);
     let source = ShareRead { share: &share };
-    pull_body(
-        store,
-        from,
-        already_hashes,
-        already_ids,
-        &share,
-        &source,
-        post,
-        |_| Ok(()),
-    )
+    let already = Known {
+        hashes: already_hashes.clone(),
+        ids: already_ids.clone(),
+    };
+    pull_body(store, from, &already, &share, &source, post, |_| Ok(()))
 }
 
 fn pull_body(
     store: &SeatStore,
     from: &Path,
-    already_hashes: &BTreeSet<String>,
-    already_ids: &BTreeSet<String>,
+    already: &Known,
     share: &Share,
     source: &impl ExportSource,
     mut post: impl FnMut(&Kept) -> Result<()>,
@@ -818,11 +816,13 @@ fn pull_body(
     let _dir = Held::exclusive(from, share)?;
     let _seat = Held::seat(&store.dir, share)?;
     let (mut have, mut row_ids) = read_seed(&store.seed_path(), share)?;
-    row_ids.extend(already_ids.iter().cloned());
-    let mut known_hashes = already_hashes.clone();
+    row_ids.extend(already.ids.iter().cloned());
+    let mut known_hashes = already.hashes.clone();
     known_hashes.extend(have.keys().cloned());
-    let baseline_hashes = known_hashes.clone();
-    let baseline_ids = row_ids.clone();
+    let baseline = Known {
+        hashes: known_hashes.clone(),
+        ids: row_ids.clone(),
+    };
     let mut marks = read_marks(store, share)?;
     let paths = export_paths(from, source, share)?;
     let total = paths.len();
@@ -894,8 +894,7 @@ fn pull_body(
             &mut have,
             &mut row_ids,
             &mut known_hashes,
-            &baseline_hashes,
-            &baseline_ids,
+            &baseline,
             &mut post,
         )?;
         summary.imported += fold.imported;
@@ -1525,16 +1524,11 @@ mod tests {
         halt: impl FnMut(usize) -> Result<()>,
     ) -> Result<Summary> {
         let share = crate::share_io::Share::mesh_pull(&store.seat, from);
-        pull_body(
-            store,
-            from,
-            already,
-            &BTreeSet::new(),
-            &share,
-            files,
-            post,
-            halt,
-        )
+        let known = Known {
+            hashes: already.clone(),
+            ids: BTreeSet::new(),
+        };
+        pull_body(store, from, &known, &share, files, post, halt)
     }
 
     #[test]
