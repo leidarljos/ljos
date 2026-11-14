@@ -137,6 +137,36 @@ enum Stop {
     Indexed,
 }
 
+/// Whether this seat already has a lesson kept beside the pack.
+///
+/// A search that the pack answered with nothing uses this to tell a first
+/// lesson from a query that shares no word with what is stored.
+pub(crate) fn holds_a_copy() -> bool {
+    let mut stack = vec![memory_home()];
+    let mut seen = 0u32;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > 64 {
+                return true;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_file() {
+                return true;
+            }
+            if kind.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    false
+}
+
 /// The memory directory. `VISSUE_ROOT` wins, then the vissue layout when
 /// that root is a tracker, then the state directory. A missing directory
 /// means recall has nothing to add.

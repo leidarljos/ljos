@@ -360,7 +360,36 @@ fn next_limit(matched: usize, capped: bool) -> usize {
 pub fn no_hits_line(query: &str, explain: bool) -> String {
     let query = query.trim();
     let next = next_search(query);
-    let head = if query.is_empty()
+    let head = no_hits_head(query);
+    if explain {
+        format!("{head}, so the pack holds nothing on this query and the next command is `{next}`.")
+    } else {
+        format!("{head}, so run `{next}`.")
+    }
+}
+
+/// A search before anything has been stored. A shorter query would miss too,
+/// so the next command is the one that stores a lesson.
+#[must_use]
+pub fn empty_store_line(query: &str) -> String {
+    format!(
+        "{}, so run `ljos remember \"TEXT\"`.",
+        no_hits_head(query.trim())
+    )
+}
+
+/// [`empty_store_line`] on one page, wrapped to [`COLS`].
+#[must_use]
+pub fn empty_store_page(query: &str) -> String {
+    let mut out = wrap(&empty_store_line(query), COLS);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn no_hits_head(query: &str) -> String {
+    if query.is_empty()
         || query
             .chars()
             .any(|ch| ch.is_control() || matches!(ch, '"' | '`' | '\\'))
@@ -370,11 +399,6 @@ pub fn no_hits_line(query: &str, explain: bool) -> String {
         format!("No hits for \"{query}\"")
     } else {
         format!("No hits for {query}")
-    };
-    if explain {
-        format!("{head}, so the pack holds nothing on this query and the next command is `{next}`.")
-    } else {
-        format!("{head}, so run `{next}`.")
     }
 }
 

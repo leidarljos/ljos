@@ -4243,6 +4243,14 @@ fn run_command() -> Result<()> {
                 eprint!("{}", ljos_cli::ranking_line(&ranking));
                 if hits.is_empty() && unrelated {
                     print!("{}", ljos_cli::NOTHING_RELEVANT);
+                } else if hits.is_empty() && !explain && ljos_cli::nothing_stored() {
+                    print!(
+                        "{}",
+                        ljos_cli::scan::for_reader(
+                            &ljos_cli::scan::empty_store_page(&asked),
+                            human_color()
+                        )
+                    );
                 } else {
                     print!(
                         "{}",

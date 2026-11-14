@@ -15,6 +15,14 @@ fn no_hits_keeps_the_so_run_line() {
 }
 
 #[test]
+fn an_empty_store_names_remember() {
+    assert_eq!(
+        ljos_cli::scan::empty_store_line("lexical default"),
+        "No hits for \"lexical default\", so run `ljos remember \"TEXT\"`."
+    );
+}
+
+#[test]
 fn sources_do_not_use_the_other_next_step_form() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut bad = Vec::new();

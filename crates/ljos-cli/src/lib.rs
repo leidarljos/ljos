@@ -14193,6 +14193,33 @@ fn hit_cosine(hit: &Hit) -> Option<f64> {
 /// prints `No hits.`
 pub const NOTHING_RELEVANT: &str = "Nothing relevant was found.\n";
 
+/// Whether this seat has no lesson in the pack and none kept beside it.
+///
+/// A search that matched nothing asks this once. When it is true, a
+/// shorter query would miss too, and the next command is `ljos remember`.
+/// A failure to ask the pack leaves the ordinary no-hits line in place.
+#[must_use]
+pub fn nothing_stored() -> bool {
+    if memory_port::holds_a_copy() {
+        return false;
+    }
+    let Ok(client) = pack() else {
+        return false;
+    };
+    let workspace = client.workspace();
+    match atoms_listed_of(
+        &client,
+        &workspace,
+        search_asks_with_token(&client),
+        None,
+        Some(1),
+        false,
+    ) {
+        Ok((atoms, _)) => atoms.is_empty(),
+        Err(_) => false,
+    }
+}
+
 /// Drop another seat's hit that does not clear the similarity floor.
 ///
 /// This seat's own hits stay, and so does a person-origin rule. Another

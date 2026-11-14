@@ -267,7 +267,7 @@ fn a_search_with_no_hits_names_the_next_command() {
     assert_eq!(out.status.code(), Some(0), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
-        "No hits for \"which fusion method\", so run `ljos search fusion`."
+        "No hits for \"which fusion method\", so run `ljos remember \"TEXT\"`."
     );
 }
 
