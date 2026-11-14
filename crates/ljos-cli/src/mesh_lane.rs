@@ -10,6 +10,12 @@
 //!
 //! The directory and the seat each take an exclusive lock for the whole
 //! run, so two runs wait and the seed keeps a single copy of each text.
+//! After an export is stored, the seat records its size, its modification
+//! time and a hash of its bytes. The next pull stats each export and does
+//! not read one whose size and time match. A changed time is hashed, and
+//! the same bytes are not imported again. The run says how many exports
+//! were skipped and how many were imported. The seed is written by a
+//! temporary name and a rename, and only when its bytes would change.
 //! A pack that answers 503 is asked again once, after `Retry-After`, with
 //! the same deadline. A second 503 or a 408 stops the pull. Rows already
 //! stored stay in the seed. A handoff or a seed folder that has gone away,
@@ -71,15 +77,24 @@ pub struct Summary {
     pub imported: usize,
     pub unchanged: usize,
     pub skipped: usize,
+    /// Exports whose size and modification time matched, or whose bytes
+    /// hashed the same, so this run did not import them.
+    pub exports_skipped: usize,
+    /// Exports whose bytes were new to the seat's record of that file.
+    pub exports_imported: usize,
 }
 
 impl Summary {
-    /// The line `ljos mesh pull` prints.
+    /// The lines `ljos mesh pull` prints.
     #[must_use]
     pub fn line(&self) -> String {
         format!(
-            "imported {}, unchanged {}, skipped {} duplicates\n",
-            self.imported, self.unchanged, self.skipped
+            "imported {}, unchanged {}, skipped {} duplicates\nexports skipped {}, imported {}\n",
+            self.imported,
+            self.unchanged,
+            self.skipped,
+            self.exports_skipped,
+            self.exports_imported
         )
     }
 }
@@ -93,15 +108,6 @@ struct Kept {
     entities: BTreeSet<String>,
     /// `lane` + tab + the export's row id. Empty when the line names none.
     row_ids: BTreeSet<String>,
-}
-
-struct Incoming {
-    text: String,
-    kind: String,
-    lanes: BTreeSet<String>,
-    entities: BTreeSet<String>,
-    row_ids: BTreeSet<String>,
-    copies: usize,
 }
 
 struct Held {
@@ -332,19 +338,6 @@ fn values_of(bytes: &[u8]) -> Vec<Value> {
     out
 }
 
-fn lane_files(dir: &Path, share: &Share) -> Result<Vec<PathBuf>> {
-    match share.list_files(dir) {
-        Ok(files) => Ok(files),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            bail!(
-                "mesh: {} does not exist. Create it, or pass a directory of <lane>.jsonl files",
-                dir.display()
-            );
-        }
-        Err(err) => Err(share.fail(dir, err)),
-    }
-}
-
 fn read_seed(path: &Path, share: &Share) -> Result<(BTreeMap<String, Kept>, BTreeSet<String>)> {
     let folder = path
         .parent()
@@ -430,6 +423,267 @@ fn write_seed(
     share.write_atomic(&store.seed_path(), &bytes)
 }
 
+fn file_sha256(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// Size and modification time of one export, enough to skip a read.
+struct ExportMeta {
+    size: u64,
+    mtime_secs: i64,
+    mtime_nanos: u32,
+}
+
+impl ExportMeta {
+    fn of(meta: &std::fs::Metadata) -> std::io::Result<Self> {
+        let modified = meta.modified()?;
+        let (mtime_secs, mtime_nanos) = match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(dur) => (
+                i64::try_from(dur.as_secs()).unwrap_or(i64::MAX),
+                dur.subsec_nanos(),
+            ),
+            Err(err) => {
+                let dur = err.duration();
+                let secs = i64::try_from(dur.as_secs()).unwrap_or(i64::MAX);
+                (-secs, dur.subsec_nanos())
+            }
+        };
+        Ok(Self {
+            size: meta.len(),
+            mtime_secs,
+            mtime_nanos,
+        })
+    }
+
+    fn matches(&self, mark: &ExportMark) -> bool {
+        self.size == mark.size
+            && self.mtime_secs == mark.mtime_secs
+            && self.mtime_nanos == mark.mtime_nanos
+    }
+}
+
+/// What the seat recorded for one export after that export was stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExportMark {
+    size: u64,
+    mtime_secs: i64,
+    mtime_nanos: u32,
+    sha256: String,
+    rows: usize,
+}
+
+const EXPORTS_FORMAT: &str = "ljos-mesh-exports-1";
+
+fn marks_path(store: &SeatStore) -> PathBuf {
+    store.dir.join("exports.json")
+}
+
+fn mark_from(item: &Value) -> Option<ExportMark> {
+    let size = item.get("size")?.as_u64()?;
+    let mtime_secs = item.get("mtime_secs")?.as_i64()?;
+    let mtime_nanos = u32::try_from(item.get("mtime_nanos")?.as_u64()?).ok()?;
+    let sha256 = item.get("sha256")?.as_str().unwrap_or("");
+    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let rows = usize::try_from(item.get("rows")?.as_u64()?).ok()?;
+    Some(ExportMark {
+        size,
+        mtime_secs,
+        mtime_nanos,
+        sha256: sha256.to_string(),
+        rows,
+    })
+}
+
+fn load_marks(bytes: &[u8]) -> BTreeMap<String, ExportMark> {
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return BTreeMap::new();
+    };
+    if value.get("format").and_then(Value::as_str) != Some(EXPORTS_FORMAT) {
+        return BTreeMap::new();
+    }
+    let Some(files) = value.get("files").and_then(Value::as_object) else {
+        return BTreeMap::new();
+    };
+    let mut marks = BTreeMap::new();
+    for (name, item) in files {
+        if let Some(mark) = mark_from(item) {
+            marks.insert(name.clone(), mark);
+        }
+    }
+    marks
+}
+
+fn marks_document(marks: &BTreeMap<String, ExportMark>) -> Result<Vec<u8>> {
+    let mut files = serde_json::Map::new();
+    for (name, mark) in marks {
+        files.insert(
+            name.clone(),
+            json!({
+                "mtime_nanos": mark.mtime_nanos,
+                "mtime_secs": mark.mtime_secs,
+                "rows": mark.rows,
+                "sha256": mark.sha256,
+                "size": mark.size,
+            }),
+        );
+    }
+    let mut bytes = serde_json::to_vec(&json!({
+        "files": Value::Object(files),
+        "format": EXPORTS_FORMAT,
+    }))?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn read_marks(store: &SeatStore, share: &Share) -> Result<BTreeMap<String, ExportMark>> {
+    match share.read_if_file(&marks_path(store)) {
+        Ok(Some(bytes)) => Ok(load_marks(&bytes)),
+        Ok(None) => Ok(BTreeMap::new()),
+        Err(err) => Err(share.fail(&store.dir, err)),
+    }
+}
+
+fn write_marks(
+    store: &SeatStore,
+    marks: &BTreeMap<String, ExportMark>,
+    share: &Share,
+) -> Result<()> {
+    share.write_atomic(&marks_path(store), &marks_document(marks)?)
+}
+
+fn remember(marks: &mut BTreeMap<String, ExportMark>, name: &str, mark: ExportMark) -> bool {
+    if marks.get(name) == Some(&mark) {
+        return false;
+    }
+    marks.insert(name.to_string(), mark);
+    true
+}
+
+/// Lane exports the pull reads. Tests substitute a reader that counts bodies.
+trait ExportSource {
+    fn list(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>>;
+    fn meta(&self, path: &Path) -> std::io::Result<Option<ExportMeta>>;
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
+}
+
+struct ShareRead<'a> {
+    share: &'a Share,
+}
+
+impl ExportSource for ShareRead<'_> {
+    fn list(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+        self.share.list_files(dir)
+    }
+
+    fn meta(&self, path: &Path) -> std::io::Result<Option<ExportMeta>> {
+        let meta = self.share.symlink_meta(path)?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Ok(None);
+        }
+        ExportMeta::of(&meta).map(Some)
+    }
+
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        Share::read(self.share, path)
+    }
+}
+
+fn grow(into: &mut BTreeSet<String>, extra: &BTreeSet<String>) -> bool {
+    let before = into.len();
+    into.extend(extra.iter().cloned());
+    into.len() != before
+}
+
+struct Fold {
+    rows: usize,
+    imported: usize,
+    unchanged: usize,
+    skipped: usize,
+    seed_changed: bool,
+}
+
+/// Merge one export into the seat. A post that fails leaves the rows
+/// already accepted in `have`, so the caller can store those and stop.
+fn fold_export(
+    bytes: &[u8],
+    lane: &str,
+    have: &mut BTreeMap<String, Kept>,
+    row_ids: &mut BTreeSet<String>,
+    known_hashes: &mut BTreeSet<String>,
+    baseline_hashes: &BTreeSet<String>,
+    baseline_ids: &BTreeSet<String>,
+    post: &mut impl FnMut(&Kept) -> Result<()>,
+) -> Result<Fold> {
+    let mut fold = Fold {
+        rows: 0,
+        imported: 0,
+        unchanged: 0,
+        skipped: 0,
+        seed_changed: false,
+    };
+    for value in values_of(bytes) {
+        let Some(row) = kept_from_line(&value, lane) else {
+            continue;
+        };
+        fold.rows += 1;
+        let hash_known = known_hashes.contains(&row.content_sha256);
+        let id_known = row.row_ids.iter().any(|id| row_ids.contains(id));
+        if hash_known || id_known {
+            let introduced = !baseline_hashes.contains(&row.content_sha256)
+                && row.row_ids.iter().all(|id| !baseline_ids.contains(id));
+            if hash_known && introduced {
+                fold.skipped += 1;
+            } else {
+                fold.unchanged += 1;
+            }
+            if grow(row_ids, &row.row_ids) {
+                fold.seed_changed = true;
+            }
+            if let Some(existing) = have.get_mut(&row.content_sha256) {
+                let lanes = grow(&mut existing.lanes, &row.lanes);
+                let entities = grow(&mut existing.entities, &row.entities);
+                let ids = grow(&mut existing.row_ids, &row.row_ids);
+                if lanes || entities || ids {
+                    fold.seed_changed = true;
+                }
+            }
+            continue;
+        }
+        post(&row)?;
+        fold.imported += 1;
+        known_hashes.insert(row.content_sha256.clone());
+        if grow(row_ids, &row.row_ids) {
+            fold.seed_changed = true;
+        }
+        have.insert(row.content_sha256.clone(), row);
+        fold.seed_changed = true;
+    }
+    Ok(fold)
+}
+
+fn export_paths(dir: &Path, source: &impl ExportSource, share: &Share) -> Result<Vec<PathBuf>> {
+    let listed = match source.list(dir) {
+        Ok(files) => files,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "mesh: {} does not exist. Create it, or pass a directory of <lane>.jsonl files",
+                dir.display()
+            );
+        }
+        Err(err) => return Err(share.fail(dir, err)),
+    };
+    let mut paths = Vec::new();
+    for path in listed {
+        if lane_of(&path).is_some() && path.file_name().and_then(|item| item.to_str()).is_some() {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
 fn merge_row(rows: &mut BTreeMap<String, Kept>, row: Kept) {
     match rows.get_mut(&row.content_sha256) {
         Some(have) => {
@@ -509,89 +763,154 @@ fn pull_with(
     from: &Path,
     already_hashes: &BTreeSet<String>,
     already_ids: &BTreeSet<String>,
+    post: impl FnMut(&Kept) -> Result<()>,
+) -> Result<Summary> {
+    let share = Share::mesh_pull(&store.seat, from);
+    let source = ShareRead { share: &share };
+    pull_body(
+        store,
+        from,
+        already_hashes,
+        already_ids,
+        &share,
+        &source,
+        post,
+    )
+}
+
+fn pull_body(
+    store: &SeatStore,
+    from: &Path,
+    already_hashes: &BTreeSet<String>,
+    already_ids: &BTreeSet<String>,
+    share: &Share,
+    source: &impl ExportSource,
     mut post: impl FnMut(&Kept) -> Result<()>,
 ) -> Result<Summary> {
     require_name(&store.seat, "seat")?;
-    let share = Share::mesh_pull(&store.seat, from);
-    require_dir(from, &share)?;
-    let _dir = Held::exclusive(from, &share)?;
-    let _seat = Held::seat(&store.dir, &share)?;
-    let (mut have, mut row_ids) = read_seed(&store.seed_path(), &share)?;
+    require_dir(from, share)?;
+    let _dir = Held::exclusive(from, share)?;
+    let _seat = Held::seat(&store.dir, share)?;
+    let (mut have, mut row_ids) = read_seed(&store.seed_path(), share)?;
     row_ids.extend(already_ids.iter().cloned());
     let mut known_hashes = already_hashes.clone();
     known_hashes.extend(have.keys().cloned());
-    let mut incoming: BTreeMap<String, Incoming> = BTreeMap::new();
-    for path in lane_files(from, &share)? {
-        let Some(lane) = lane_of(&path) else {
+    let baseline_hashes = known_hashes.clone();
+    let baseline_ids = row_ids.clone();
+    let mut marks = read_marks(store, share)?;
+    let paths = export_paths(from, source, share)?;
+    let mut seen = BTreeSet::new();
+    let mut summary = Summary {
+        imported: 0,
+        unchanged: 0,
+        skipped: 0,
+        exports_skipped: 0,
+        exports_imported: 0,
+    };
+    for path in &paths {
+        let Some(name) = path.file_name().and_then(|item| item.to_str()) else {
             continue;
         };
-        let bytes = share.read(&path).map_err(|err| share.fail(from, err))?;
-        for value in values_of(&bytes) {
-            let Some(row) = kept_from_line(&value, &lane) else {
+        let Some(lane) = lane_of(path) else {
+            continue;
+        };
+        let name = name.to_string();
+        seen.insert(name.clone());
+        let meta = source.meta(path).map_err(|err| share.fail(from, err))?;
+        let Some(meta) = meta else {
+            continue;
+        };
+        if let Some(mark) = marks.get(&name) {
+            if meta.matches(mark) {
+                summary.unchanged += mark.rows;
+                summary.exports_skipped += 1;
                 continue;
-            };
-            let slot = incoming
-                .entry(row.content_sha256.clone())
-                .or_insert_with(|| Incoming {
-                    text: row.text.clone(),
-                    kind: row.kind.clone(),
-                    lanes: BTreeSet::new(),
-                    entities: BTreeSet::new(),
-                    row_ids: BTreeSet::new(),
-                    copies: 0,
-                });
-            slot.copies += 1;
-            slot.lanes.extend(row.lanes);
-            slot.entities.extend(row.entities);
-            slot.row_ids.extend(row.row_ids);
-        }
-    }
-    let mut imported = 0usize;
-    let mut unchanged = 0usize;
-    let mut skipped = 0usize;
-    for (hash, inc) in incoming {
-        let id_known = inc.row_ids.iter().any(|id| row_ids.contains(id));
-        if known_hashes.contains(&hash) || id_known {
-            unchanged += inc.copies;
-            row_ids.extend(inc.row_ids.iter().cloned());
-            if let Some(existing) = have.get_mut(&hash) {
-                existing.lanes.extend(inc.lanes);
-                existing.entities.extend(inc.entities);
-                existing.row_ids.extend(inc.row_ids);
             }
-            continue;
         }
-        let row = Kept {
-            content_sha256: hash.clone(),
-            text: inc.text,
-            kind: inc.kind,
-            lanes: inc.lanes,
-            entities: inc.entities,
-            row_ids: inc.row_ids,
+        let bytes = source.read(path).map_err(|err| share.fail(from, err))?;
+        let digest = file_sha256(&bytes);
+        if let Some(mark) = marks.get(&name).cloned() {
+            if mark.sha256 == digest {
+                summary.unchanged += mark.rows;
+                summary.exports_skipped += 1;
+                let rows = mark.rows;
+                if remember(
+                    &mut marks,
+                    &name,
+                    ExportMark {
+                        size: meta.size,
+                        mtime_secs: meta.mtime_secs,
+                        mtime_nanos: meta.mtime_nanos,
+                        sha256: digest,
+                        rows,
+                    },
+                ) {
+                    write_marks(store, &marks, share)?;
+                }
+                continue;
+            }
+        }
+        let fold = match fold_export(
+            &bytes,
+            &lane,
+            &mut have,
+            &mut row_ids,
+            &mut known_hashes,
+            &baseline_hashes,
+            &baseline_ids,
+            &mut post,
+        ) {
+            Ok(fold) => fold,
+            Err(err) => {
+                let _ = write_seed(store, &have, &row_ids, share);
+                return Err(err);
+            }
         };
-        if let Err(err) = post(&row) {
-            let _ = write_seed(store, &have, &row_ids, &share);
-            return Err(err);
+        summary.imported += fold.imported;
+        summary.unchanged += fold.unchanged;
+        summary.skipped += fold.skipped;
+        summary.exports_imported += 1;
+        if fold.seed_changed {
+            write_seed(store, &have, &row_ids, share)?;
         }
-        imported += 1;
-        skipped += inc.copies.saturating_sub(1);
-        row_ids.extend(row.row_ids.iter().cloned());
-        known_hashes.insert(hash.clone());
-        have.insert(hash, row);
+        if remember(
+            &mut marks,
+            &name,
+            ExportMark {
+                size: meta.size,
+                mtime_secs: meta.mtime_secs,
+                mtime_nanos: meta.mtime_nanos,
+                sha256: digest,
+                rows: fold.rows,
+            },
+        ) {
+            write_marks(store, &marks, share)?;
+        }
     }
-    write_seed(store, &have, &row_ids, &share)?;
-    Ok(Summary {
-        imported,
-        unchanged,
-        skipped,
-    })
+    let before = marks.len();
+    marks.retain(|name, _| seen.contains(name));
+    if marks.len() != before {
+        write_marks(store, &marks, share)?;
+    }
+    let seed_there = match share.symlink_meta(&store.seed_path()) {
+        Ok(meta) => meta.is_file() && !meta.file_type().is_symlink(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(share.fail(&store.dir, err)),
+    };
+    if !seed_there {
+        write_seed(store, &have, &row_ids, share)?;
+    }
+    Ok(summary)
 }
 
 /// Import every lane file in `from` into `store`.
 ///
 /// The summary counts new texts as imported, a text or a lane row id the
 /// seat already holds as unchanged, and a repeated text in this pull as
-/// skipped. A second pull of the same directory imports nothing.
+/// skipped. A second pull of the same directory imports nothing and does
+/// not read an export whose size and modification time are unchanged.
+/// The second line counts those exports against the ones that were read
+/// because their bytes were new.
 ///
 /// After the seed is written, `pull` integrates every import in the seat.
 /// That is [`crate::memory_port::integrate`] with `--all`: each
@@ -744,7 +1063,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    fn write_lane(dir: &Path, lane: &str, texts: &[&str]) {
+    fn lane_body(lane: &str, texts: &[&str]) -> Vec<u8> {
         let mut lines = vec![json!({
             "format": FORMAT,
             "record": "export",
@@ -764,7 +1083,11 @@ mod tests {
         }
         let mut body = lines.join("\n");
         body.push('\n');
-        std::fs::write(dir.join(format!("{lane}.jsonl")), body).unwrap();
+        body.into_bytes()
+    }
+
+    fn write_lane(dir: &Path, lane: &str, texts: &[&str]) {
+        std::fs::write(dir.join(format!("{lane}.jsonl")), lane_body(lane, texts)).unwrap();
     }
 
     fn handoff(dir: &Path) -> (PathBuf, SeatStore) {
@@ -801,12 +1124,14 @@ mod tests {
             Summary {
                 imported: 3,
                 unchanged: 0,
-                skipped: 1
+                skipped: 1,
+                exports_skipped: 0,
+                exports_imported: 2,
             }
         );
         assert_eq!(
             summary.line(),
-            "imported 3, unchanged 0, skipped 1 duplicates\n"
+            "imported 3, unchanged 0, skipped 1 duplicates\nexports skipped 0, imported 2\n"
         );
         let mut texts = texts_of(dir.path());
         texts.sort();
@@ -851,7 +1176,9 @@ mod tests {
             Summary {
                 imported: 0,
                 unchanged: 4,
-                skipped: 0
+                skipped: 0,
+                exports_skipped: 2,
+                exports_imported: 0,
             }
         );
         assert_eq!(std::fs::read(store.seed_path()).unwrap(), first);
@@ -902,7 +1229,9 @@ mod tests {
             Summary {
                 imported: 0,
                 unchanged: 1,
-                skipped: 0
+                skipped: 0,
+                exports_skipped: 0,
+                exports_imported: 1,
             }
         );
         assert_eq!(posts.load(Ordering::SeqCst), 0);
@@ -1021,5 +1350,230 @@ mod tests {
         assert!(alpha.contains("alpha kiln"), "{alpha}");
         assert!(beta.contains("beta kiln"), "{beta}");
         assert!(!alpha.contains("beta kiln"), "{alpha}");
+    }
+
+    struct MemFile {
+        bytes: Vec<u8>,
+        mtime_secs: i64,
+        mtime_nanos: u32,
+    }
+
+    /// Exports that live in memory. `read` records the file name so a test
+    /// can show a later pull did not open the body.
+    struct MemExports {
+        files: std::sync::Mutex<BTreeMap<String, MemFile>>,
+        reads: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl MemExports {
+        fn new() -> Self {
+            Self {
+                files: std::sync::Mutex::new(BTreeMap::new()),
+                reads: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn insert(&self, name: &str, bytes: Vec<u8>, mtime_secs: i64) {
+            self.files.lock().unwrap().insert(
+                name.to_string(),
+                MemFile {
+                    bytes,
+                    mtime_secs,
+                    mtime_nanos: 0,
+                },
+            );
+        }
+
+        fn set_mtime(&self, name: &str, mtime_secs: i64) {
+            self.files.lock().unwrap().get_mut(name).unwrap().mtime_secs = mtime_secs;
+        }
+
+        fn set_bytes(&self, name: &str, bytes: Vec<u8>, mtime_secs: i64) {
+            let mut files = self.files.lock().unwrap();
+            let file = files.get_mut(name).unwrap();
+            file.bytes = bytes;
+            file.mtime_secs = mtime_secs;
+        }
+
+        fn reads(&self) -> Vec<String> {
+            self.reads.lock().unwrap().clone()
+        }
+
+        fn clear_reads(&self) {
+            self.reads.lock().unwrap().clear();
+        }
+    }
+
+    impl ExportSource for MemExports {
+        fn list(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+            let files = self.files.lock().unwrap();
+            Ok(files.keys().map(|name| dir.join(name)).collect())
+        }
+
+        fn meta(&self, path: &Path) -> std::io::Result<Option<ExportMeta>> {
+            let name = path
+                .file_name()
+                .and_then(|item| item.to_str())
+                .unwrap_or("");
+            let files = self.files.lock().unwrap();
+            let Some(file) = files.get(name) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "missing export",
+                ));
+            };
+            Ok(Some(ExportMeta {
+                size: file.bytes.len() as u64,
+                mtime_secs: file.mtime_secs,
+                mtime_nanos: file.mtime_nanos,
+            }))
+        }
+
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            let name = path
+                .file_name()
+                .and_then(|item| item.to_str())
+                .unwrap_or("")
+                .to_string();
+            self.reads.lock().unwrap().push(name.clone());
+            let files = self.files.lock().unwrap();
+            files
+                .get(&name)
+                .map(|file| file.bytes.clone())
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "missing export"))
+        }
+    }
+
+    fn pull_mem(
+        store: &SeatStore,
+        from: &Path,
+        files: &MemExports,
+        post: impl FnMut(&Kept) -> Result<()>,
+    ) -> Result<Summary> {
+        let share = crate::share_io::Share::mesh_pull(&store.seat, from);
+        pull_body(
+            store,
+            from,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &share,
+            files,
+            post,
+        )
+    }
+
+    #[test]
+    fn a_second_pull_reads_no_unchanged_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, store) = handoff(dir.path());
+        let files = MemExports::new();
+        files.insert(
+            "lane-a.jsonl",
+            lane_body("lane-a", &["alpha kiln", "shared kiln"]),
+            10,
+        );
+        files.insert(
+            "lane-b.jsonl",
+            lane_body("lane-b", &["shared kiln", "beta kiln"]),
+            11,
+        );
+        let first = pull_mem(&store, &from, &files, |_| Ok(())).unwrap();
+        assert_eq!(first.exports_imported, 2, "{first:?}");
+        assert!(!files.reads().is_empty());
+        let seed = std::fs::read(store.seed_path()).unwrap();
+        let written = std::fs::metadata(store.seed_path())
+            .unwrap()
+            .modified()
+            .unwrap();
+        files.clear_reads();
+        let again = pull_mem(&store, &from, &files, |_| Ok(())).unwrap();
+        assert!(
+            files.reads().is_empty(),
+            "unchanged exports were read: {:?}",
+            files.reads()
+        );
+        assert_eq!(
+            again,
+            Summary {
+                imported: 0,
+                unchanged: 4,
+                skipped: 0,
+                exports_skipped: 2,
+                exports_imported: 0,
+            }
+        );
+        assert_eq!(std::fs::read(store.seed_path()).unwrap(), seed);
+        assert_eq!(
+            std::fs::metadata(store.seed_path())
+                .unwrap()
+                .modified()
+                .unwrap(),
+            written
+        );
+    }
+
+    #[test]
+    fn a_changed_export_is_read_and_reimported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, store) = handoff(dir.path());
+        let files = MemExports::new();
+        files.insert("lane-a.jsonl", lane_body("lane-a", &["alpha kiln"]), 10);
+        files.insert("lane-b.jsonl", lane_body("lane-b", &["beta kiln"]), 11);
+        pull_mem(&store, &from, &files, |_| Ok(())).unwrap();
+        files.set_bytes(
+            "lane-b.jsonl",
+            lane_body("lane-b", &["beta kiln", "gamma kiln"]),
+            12,
+        );
+        files.clear_reads();
+        let posts = AtomicU64::new(0);
+        let again = pull_mem(&store, &from, &files, |row| {
+            assert_eq!(row.text, "gamma kiln");
+            posts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(files.reads(), ["lane-b.jsonl"]);
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
+        assert_eq!(again.imported, 1, "{again:?}");
+        assert_eq!(again.exports_imported, 1, "{again:?}");
+        assert_eq!(again.exports_skipped, 1, "{again:?}");
+        let texts = texts_of(dir.path());
+        assert_eq!(texts.iter().filter(|text| *text == "gamma kiln").count(), 1);
+        assert_eq!(texts.iter().filter(|text| *text == "beta kiln").count(), 1);
+    }
+
+    #[test]
+    fn a_touched_export_with_the_same_bytes_does_not_duplicate_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, store) = handoff(dir.path());
+        let files = MemExports::new();
+        files.insert("lane-a.jsonl", lane_body("lane-a", &["alpha kiln"]), 10);
+        files.insert("lane-b.jsonl", lane_body("lane-b", &["beta kiln"]), 11);
+        pull_mem(&store, &from, &files, |_| Ok(())).unwrap();
+        let seed = std::fs::read(store.seed_path()).unwrap();
+        files.set_mtime("lane-a.jsonl", 20);
+        files.clear_reads();
+        let posts = AtomicU64::new(0);
+        let again = pull_mem(&store, &from, &files, |_| {
+            posts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(files.reads(), ["lane-a.jsonl"]);
+        assert_eq!(posts.load(Ordering::SeqCst), 0);
+        assert_eq!(again.imported, 0, "{again:?}");
+        assert_eq!(again.exports_skipped, 2, "{again:?}");
+        assert_eq!(again.exports_imported, 0, "{again:?}");
+        assert_eq!(std::fs::read(store.seed_path()).unwrap(), seed);
+        assert_eq!(texts_of(dir.path()).len(), 2);
+        files.clear_reads();
+        let third = pull_mem(&store, &from, &files, |_| Ok(())).unwrap();
+        assert!(
+            files.reads().is_empty(),
+            "the new time was not recorded: {:?}",
+            files.reads()
+        );
+        assert_eq!(third.exports_skipped, 2, "{third:?}");
     }
 }

@@ -188,6 +188,7 @@ fn pull_dedups_and_a_second_run_skips_every_row() {
     assert!(pull.status.success(), "{}", text(&pull));
     let stdout = String::from_utf8(pull.stdout).unwrap();
     assert_eq!(counts(&stdout), (3, 0, 1), "{stdout}");
+    assert!(stdout.contains("exports skipped 0, imported 2"), "{stdout}");
     let seed = std::fs::read(root.join(".ljos/memory/mesh/box/seed.jsonl")).unwrap();
     let again = run(
         &root,
@@ -203,7 +204,12 @@ fn pull_dedups_and_a_second_run_skips_every_row() {
         ],
     );
     assert!(again.status.success(), "{}", text(&again));
-    assert_eq!(counts(&String::from_utf8(again.stdout).unwrap()), (0, 4, 0));
+    let again_out = String::from_utf8(again.stdout).unwrap();
+    assert_eq!(counts(&again_out), (0, 4, 0));
+    assert!(
+        again_out.contains("exports skipped 2, imported 0"),
+        "{again_out}"
+    );
     assert_eq!(
         std::fs::read(root.join(".ljos/memory/mesh/box/seed.jsonl")).unwrap(),
         seed
