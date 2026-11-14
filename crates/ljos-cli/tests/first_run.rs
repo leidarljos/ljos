@@ -898,6 +898,65 @@ fn a_new_seat_follows_the_readme_and_getting_started() {
     );
 }
 
+/// Two votes typed in one shell are one voice. The settle this prints is
+/// the getting-started sample: the push stays closed, and the advice
+/// names social power and holds.
+#[test]
+fn one_shell_folds_two_votes_and_names_the_settle() {
+    if !tools_ready() {
+        return;
+    }
+    let mut seat = Seat::open();
+    let cwd = seat.work.clone();
+    let limit = budget("ljos onboard");
+    let (code, output, elapsed) = seat.run("ljos onboard", &cwd, limit);
+    assert_step(
+        "one shell: onboard",
+        "ljos onboard",
+        code,
+        &output,
+        elapsed,
+        limit,
+    );
+    for line in [
+        "git config --global user.name \"Your Name\"",
+        "git config --global user.email \"you@example.com\"",
+    ] {
+        let (code, output, _) = seat.run(line, &cwd, Duration::from_secs(20));
+        assert_eq!(code, 0, "{line}\n{output}");
+    }
+    let script = r#"set -e
+id=$(LJOS_SEAT=alice ljos file "Pick a codec" -p fold -t decision --options keep,drop)
+LJOS_SEAT=alice ljos claim "$id" --assignee alice >/dev/null
+LJOS_SEAT=alice ljos vote "$id" --for keep --used none
+LJOS_SEAT=bob ljos vote "$id" --for keep --used none
+LJOS_SEAT=alice ljos consensus "$id" --no-file
+"#;
+    let limit = Duration::from_secs(120);
+    let (code, output, elapsed) = seat.run(script, &cwd, limit);
+    assert!(
+        elapsed <= limit,
+        "one shell took {}s:\n{output}",
+        elapsed.as_secs()
+    );
+    assert_eq!(code, 0, "{output}");
+    assert_plain("one shell", script, &output);
+    for key in [
+        "claimed session bob, folded into alice (same shell)",
+        "folded into one voice (same shell alice)",
+        "does not clear a push",
+        "social power",
+        "holds: keep",
+        "trust default (equal weight)",
+    ] {
+        assert!(output.contains(key), "missing {key:?}\n{output}");
+    }
+    assert!(
+        !output.contains("DeGroot") && !output.contains("influence:"),
+        "the settle sample drifted back:\n{output}"
+    );
+}
+
 #[test]
 fn a_confused_order_stays_plain() {
     if !tools_ready() {

@@ -40,7 +40,7 @@ If install stops, the script names the cause and the command that fixes it.
 - The install directory is not on PATH: the script prints the line for bash (`~/.bashrc`), zsh (`~/.zshrc`) and fish (`~/.config/fish/config.fish`). It does not edit those files. `--modify-path` writes the bash and zsh lines. Run the line it prints, then `ljos doctor`.
 - An older `ljos` is earlier on PATH: the script names both binaries and prints the `export PATH` line that puts the new one first.
 - Running the script again over the same version says it reinstalled that version. An older install says it updated, and names both versions.
-- `--version VER` or `--pin REPO=VER` for a release that does not exist says so, and names the releases page that lists versions.
+- `--version VER` or `--pin REPO=VER` for a release that does not exist says so, names the releases page, and the command `sh install.sh --version VER` or `sh install.sh --pin REPO=VER`. A version the script itself names, when that release is not published and Rust is not installed, installs the latest release of that program and says so. With Rust installed, it builds that version from source.
 - A running `ljos-mcp` keeps the previous binary. Restart the assistant, or `kill` the pid the script prints, then run `ljos doctor`.
 
 `ljos onboard` with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store. The deed store keeps signed records of the work. Install an agent, then run `ljos onboard`. `ljos onboard --example` lists the tools.
@@ -136,6 +136,7 @@ From a checkout of this repository:
 ```
 sh scripts/install.sh --no-embed
 export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME"
 git config --global user.name "Your Name"
 git config --global user.email "you@example.com"
 ljos doctor

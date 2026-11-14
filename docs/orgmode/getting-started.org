@@ -55,7 +55,7 @@ The script names the cause and the command that fixes it.
 - The install directory is not on =PATH=. The script prints the line for bash (=~/.bashrc=), zsh (=~/.zshrc=) and fish (=~/.config/fish/config.fish=). It does not edit those files. =--modify-path= writes the bash and zsh lines. Run the line it prints, then =ljos doctor=.
 - An older =ljos= is earlier on =PATH=. The script names both binaries and prints the =export PATH= line that puts the new one first.
 - Running the script again over the same version says it reinstalled that version. An older install says it updated, and names both versions.
-- =--version VER= or =--pin REPO=VER= for a release that does not exist says so, and names the releases page that lists versions.
+- =--version VER= or =--pin REPO=VER= for a release that does not exist says so, names the releases page, and the command =sh install.sh --version VER= or =sh install.sh --pin REPO=VER=. A version the script itself names, when that release is not published and Rust is not installed, installs the latest release of that program and says so. With Rust installed, it builds that version from source.
 - A running =ljos-mcp= keeps the previous binary. Restart the assistant, or =kill= the pid the script prints, then run =ljos doctor=.
 
 =ljos onboard= with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store. The deed store keeps signed records of the work. Install an agent, then run =ljos onboard=. =ljos onboard --example= lists the tools.
@@ -77,6 +77,7 @@ the ticket tracker, the memory writer and the deed store.
 The tracker commits each change, so git needs an identity:
 
 #+begin_src console
+$ cd "$HOME"
 $ git config --global user.name "Your Name"
 $ git config --global user.email "you@example.com"
 $ ljos doctor
@@ -224,10 +225,10 @@ gen=2
 tracker: demo-2f5j STARTED under alice
 tracker git: committed chore(issues): demo-2f5j claimed by alice; no remote, kept local
 $ LJOS_SEAT=bob ljos claim demo-2f5j --assignee bob
-label claim-conflict: claim: demo-2f5j is held by another (alice, seat alice, still running, ...), not by bob, so run `ljos send alice TEXT`.
+label claim-conflict: claim: demo-2f5j is held by another (alice, seat alice, still running, since TIME), not by bob, so run `ljos send alice TEXT`.
 #+end_src
 
-The line names =ljos send=. The ticket stays with alice.
+The line names =ljos send=. TIME is when alice claimed it. The ticket stays with alice.
 Bob can file another ticket. To help on this one, bob writes a note.
 
 #+begin_src console
@@ -239,6 +240,7 @@ $ ljos timeline demo-2f5j
 
 =ljos timeline= prints the ticket's rows oldest first.
 The note is one row: =note: [unverified HASH]= the text =[end HASH]=. The hash is the fence. The text inside is tracker text from the ticket.
+A row that does not fit wraps. The next line starts with =|= and the rest of the hash.
 =vissue show demo-2f5j= prints the heading and the log, newest first, including the note. =ljos recall= prints the issue as unverified tracker text. The note is on the timeline, not in that text.
 =ljos digest= reads the tracker and says what each seat filed, claimed and voted on.
 
@@ -276,14 +278,20 @@ shared parent alice: alice, bob
 folded into one voice (same shell alice): alice, bob
 counted bob
 advice, which does not decide a push: the weighted settle over every ballot
-settle (DeGroot, 1 voters): keep 1.000
-every voter is on keep: the settle is unanimous
-polarization 0.000, disagreement 0.000
-influence: bob 1.000
+demo-2f5j: 2 ballots over 1 option, trust default (equal weight)
+  count
+    keep                     2 (alice, bob)
+  consensus after 0 round(s)
+    keep                     1.000
+  social power
+    alice                    0.500
+    bob                      0.500
+  holds: keep (1.000 of the group's weight)
 #+end_src
 
 The first line is the verdict: which option the ballots pick, and whether that clears a push onto =develop= or =main=. =push cite= and =protected push= are the same checks in full.
-From one shell the two ballots are one voice, so they fold and the protected-branch check still wants a second seat. The lines under =advice= are the weighted settle. They do not clear that push. =influence= names the weight of that one voice.
+From one shell the two ballots are one voice, so they fold and the protected-branch check still wants a second seat. A vote in its own shell is its own voice, and those two clear the push.
+The lines under =advice= are the weighted settle. They do not clear that push. =social power= names each seat's weight in that one voice. =holds= names the option and its share of the group's weight.
 A signature line and =tracker git:= follow each vote. A ballot is its own voice when the cast has no shell, no agent runner and no earlier row that shares a session, a parent or the root session of one runner.
 The how-to [[file:howto-vote.org][Vote and settle a decision]] is that case, and =ljos learn=.
 The docs of beads, Mem0, Letta, Zep, Basic Memory and git-bug, read on 2026-11-10, describe no vote. The comparison is [[file:compare.org][How ljos compares]].
