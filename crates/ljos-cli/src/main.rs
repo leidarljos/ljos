@@ -2274,63 +2274,236 @@ const USAGE_STATUS: i32 = 2;
 
 /// One sentence for a mistyped command or flag. Other parse errors stay
 /// with clap. Exit [`USAGE_STATUS`].
+///
+/// The command tree is built on a fresh thread. `run_command`'s frame is
+/// already the whole command match, and building the tree again on that
+/// stack is the cost a hook call is kept away from. A typo is not a hook
+/// call. The thread is the 8 MiB a normal process gets.
 fn usage_sentence(err: &clap::Error) -> Option<String> {
     use clap::error::{ContextKind, ErrorKind};
-    let kind = err.kind();
-    if !matches!(
-        kind,
-        ErrorKind::InvalidSubcommand | ErrorKind::UnknownArgument
-    ) {
-        return None;
-    }
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if kind == ErrorKind::InvalidSubcommand {
-        let typed = context_one(err, ContextKind::InvalidSubcommand)?;
-        let options = context_list(err, ContextKind::SuggestedSubcommand);
-        let next = match closest(&typed, &options) {
-            Some(name) => {
-                let rewritten = rewrite_arg(&args, &typed, name);
-                format!(
-                    "ljos: no command {typed}, and the closest is {name}, so run `{rewritten}`."
-                )
+    match err.kind() {
+        ErrorKind::InvalidSubcommand => {
+            let typed = context_one(err, ContextKind::InvalidSubcommand)?;
+            Some(command_sentence(&typed, &args))
+        }
+        ErrorKind::UnknownArgument => {
+            let typed = context_one(err, ContextKind::InvalidArg)?;
+            if typed.starts_with('-') {
+                Some(flag_sentence(&typed, &args))
+            } else {
+                Some(command_sentence(&typed, &args))
             }
-            None => {
-                let help = parent_help(&args, &typed);
-                format!("ljos: no command {typed}, so run `{help}`.")
-            }
-        };
-        return Some(next);
+        }
+        ErrorKind::InvalidValue => value_sentence(err, &args),
+        ErrorKind::MissingRequiredArgument => missing_shell(&args),
+        _ => None,
     }
-    let typed = context_one(err, ContextKind::InvalidArg)?;
-    let options = context_list(err, ContextKind::SuggestedArg);
-    let command = command_before(&args, &typed);
-    let where_ = if command.is_empty() {
+}
+
+/// A word a person types at the root instead of the command.
+///
+/// The command is not run. `find` is the verb beside `ljos search` on the
+/// bare screen. `add`, `save` and `store` are `remember`. `note-add` is
+/// `note`. A real command spelled this way still runs, because this is
+/// only asked after the word missed every command.
+fn root_synonym(typed: &str) -> Option<&'static str> {
+    match typed.to_ascii_lowercase().as_str() {
+        "find" | "query" | "lookup" => Some("search"),
+        "add" | "save" | "store" => Some("remember"),
+        "note-add" | "add-note" => Some("note"),
+        _ => None,
+    }
+}
+
+fn command_sentence(typed: &str, args: &[String]) -> String {
+    let path = command_words(args, typed);
+    let here = words_at(&path);
+    let picked = if here.at.is_empty() {
+        root_synonym(typed).map(str::to_string)
+    } else {
+        None
+    };
+    let picked = picked.or_else(|| closest(typed, &here.commands).map(str::to_string));
+    match picked {
+        Some(name) => {
+            let rewritten = rewrite_arg(args, typed, &name);
+            format!("ljos: no command {typed}, and the closest is {name}, so run `{rewritten}`.")
+        }
+        None => {
+            let help = if here.at.is_empty() {
+                "ljos help".to_string()
+            } else {
+                format!("ljos {} --help", here.at.join(" "))
+            };
+            format!("ljos: no command {typed}, so run `{help}`.")
+        }
+    }
+}
+
+fn flag_sentence(typed: &str, args: &[String]) -> String {
+    let path = command_words(args, typed);
+    let here = words_at(&path);
+    let bare = typed.trim_start_matches('-');
+    let names = flag_names(&here.flags);
+    let where_ = if here.at.is_empty() {
         "ljos".to_string()
     } else {
-        command.clone()
+        here.at.join(" ")
     };
-    let next = match closest(typed.trim_start_matches('-'), &flag_names(&options)) {
+    match closest(bare, &names) {
         Some(name) => {
-            let flag = options
-                .iter()
-                .find(|option| option.trim_start_matches('-') == name)
-                .map(String::as_str)
-                .unwrap_or(name);
-            let rewritten = rewrite_arg(&args, &typed, flag);
+            let flag = flag_text(typed, name, &here.flags);
+            let rewritten = rewrite_arg(args, typed, flag);
             format!(
                 "ljos: {where_} has no flag {typed}, and the closest is {flag}, so run `{rewritten}`."
             )
         }
         None => {
-            let help = if command.is_empty() {
+            let help = if here.at.is_empty() {
                 "ljos --help".to_string()
             } else {
-                format!("ljos {command} --help")
+                format!("ljos {} --help", here.at.join(" "))
             };
             format!("ljos: {where_} has no flag {typed}, so run `{help}`.")
         }
+    }
+}
+
+fn value_sentence(err: &clap::Error, args: &[String]) -> Option<String> {
+    use clap::error::ContextKind;
+    let typed = context_one(err, ContextKind::InvalidValue)?;
+    if typed.starts_with('-') || args.iter().any(|arg| arg == "--candidates") {
+        return None;
+    }
+    let path = command_words(args, &typed);
+    if path != ["completions"] {
+        return None;
+    }
+    let mut options = context_list(err, ContextKind::ValidValue);
+    if options.is_empty() {
+        options = context_list(err, ContextKind::SuggestedValue);
+    }
+    if options.is_empty() {
+        return None;
+    }
+    // `pwsh` is the program PowerShell installs. It is not an alias: the
+    // line names `powershell`, and that is the script the person runs.
+    let picked = (typed.eq_ignore_ascii_case("pwsh"))
+        .then_some("powershell")
+        .filter(|name| options.iter().any(|have| have == *name))
+        .map(str::to_string)
+        .or_else(|| closest(&typed, &options).map(str::to_string));
+    let line = match picked {
+        Some(name) => {
+            let rewritten = rewrite_arg(args, &typed, &name);
+            format!("ljos: no shell {typed}, and the closest is {name}, so run `{rewritten}`.")
+        }
+        None => {
+            let rewritten = rewrite_arg(args, &typed, "bash");
+            format!("ljos: no shell {typed}, so run `{rewritten}`.")
+        }
     };
-    Some(next)
+    Some(line)
+}
+
+fn missing_shell(args: &[String]) -> Option<String> {
+    if command_words_rest(args) != ["completions"] {
+        return None;
+    }
+    let mut line = vec!["ljos".to_string()];
+    line.extend(args.iter().map(|arg| shell_word(arg)));
+    line.push("bash".to_string());
+    Some(format!(
+        "ljos: completions needs a shell, so run `{}`.",
+        line.join(" ")
+    ))
+}
+
+struct UsageWords {
+    at: Vec<String>,
+    commands: Vec<String>,
+    flags: Vec<String>,
+}
+
+fn words_at(path: &[String]) -> UsageWords {
+    let path = path.to_vec();
+    std::thread::Builder::new()
+        .name("ljos-usage".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || words_at_inner(&path))
+        .expect("usage hint thread")
+        .join()
+        .expect("usage hint")
+}
+
+fn words_at_inner(path: &[String]) -> UsageWords {
+    let mut cmd = Cli::command();
+    cmd.build();
+    let mut at = Vec::new();
+    for name in path {
+        let Some(sub) = cmd.find_subcommand(name).cloned() else {
+            break;
+        };
+        at.push(name.clone());
+        cmd = sub;
+    }
+    UsageWords {
+        at,
+        commands: child_names(&cmd),
+        flags: flag_spellings(&cmd),
+    }
+}
+
+fn child_names(cmd: &clap::Command) -> Vec<String> {
+    let mut names = Vec::new();
+    for sub in cmd.get_subcommands() {
+        names.push(sub.get_name().to_string());
+        names.extend(sub.get_all_aliases().map(str::to_string));
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn flag_spellings(cmd: &clap::Command) -> Vec<String> {
+    let mut names = Vec::new();
+    for arg in cmd.get_arguments() {
+        if let Some(long) = arg.get_long() {
+            names.push(format!("--{long}"));
+        }
+        if let Some(aliases) = arg.get_all_aliases() {
+            for alias in aliases {
+                names.push(format!("--{alias}"));
+            }
+        }
+        if let Some(short) = arg.get_short() {
+            names.push(format!("-{short}"));
+        }
+        if let Some(shorts) = arg.get_all_short_aliases() {
+            for short in shorts {
+                names.push(format!("-{short}"));
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn flag_text<'a>(typed: &str, bare: &'a str, flags: &'a [String]) -> &'a str {
+    let long = typed.starts_with("--");
+    if let Some(flag) = flags
+        .iter()
+        .find(|flag| flag.trim_start_matches('-') == bare && flag.starts_with("--") == long)
+    {
+        return flag;
+    }
+    flags
+        .iter()
+        .find(|flag| flag.trim_start_matches('-') == bare)
+        .map(String::as_str)
+        .unwrap_or(bare)
 }
 
 fn context_one(err: &clap::Error, kind: clap::error::ContextKind) -> Option<String> {
@@ -2368,23 +2541,48 @@ fn flag_names(options: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// How many edits still count as one mistype.
+///
+/// One letter is every other short flag, so a one-letter flag is not
+/// guessed. Two or three letters can miss one. A longer word can be off
+/// by two, and a long one by three.
+fn max_edits(typed: &str) -> usize {
+    match typed.chars().count() {
+        0 | 1 => 0,
+        2 | 3 => 1,
+        4..=7 => 2,
+        _ => 3,
+    }
+}
+
 fn closest<'a>(typed: &str, options: &'a [String]) -> Option<&'a str> {
     let typed = typed.trim();
     if typed.is_empty() {
         return None;
     }
+    for option in options {
+        let name = option.trim();
+        if name.eq_ignore_ascii_case(typed) && name != typed {
+            return Some(name);
+        }
+    }
+    let limit = max_edits(typed);
+    if limit == 0 {
+        return None;
+    }
+    let folded = typed.to_ascii_lowercase();
     let mut best: Option<(&str, usize)> = None;
     for option in options {
         let name = option.trim();
-        if name.is_empty() || name == typed {
+        if name.is_empty() || name.eq_ignore_ascii_case(typed) {
             continue;
         }
-        let distance = edits(typed, name);
-        if distance == 0 || distance > 3 {
+        let distance = edits(&folded, &name.to_ascii_lowercase());
+        if distance == 0 || distance > limit {
             continue;
         }
         match best {
-            Some((_, have)) if distance >= have => {}
+            Some((prev, have)) if distance > have || (distance == have && name > prev) => {}
             _ => best = Some((name, distance)),
         }
     }
@@ -2407,22 +2605,38 @@ fn edits(left: &str, right: &str) -> usize {
     prev[b.len()]
 }
 
-fn command_before(args: &[String], flag: &str) -> String {
-    args.iter()
-        .take_while(|arg| arg.as_str() != flag)
-        .filter(|arg| !arg.starts_with('-'))
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ")
+/// Command words before `stop`. `--seat` and the name after it are this
+/// process, not a command. Any other flag is skipped, and its separate
+/// value is left for [`words_at`] to ignore when it is not a command.
+fn command_words(args: &[String], stop: &str) -> Vec<String> {
+    command_words_until(args, Some(stop))
 }
 
-fn parent_help(args: &[String], typed: &str) -> String {
-    let parent = command_before(args, typed);
-    if parent.is_empty() {
-        "ljos help".to_string()
-    } else {
-        format!("ljos {parent} --help")
+fn command_words_rest(args: &[String]) -> Vec<String> {
+    command_words_until(args, None)
+}
+
+fn command_words_until(args: &[String], stop: Option<&str>) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut skip_seat = false;
+    for arg in args {
+        if stop.is_some_and(|stop| arg == stop) {
+            break;
+        }
+        if skip_seat {
+            skip_seat = false;
+            continue;
+        }
+        if arg == "--seat" {
+            skip_seat = true;
+            continue;
+        }
+        if arg.starts_with("--seat=") || arg.starts_with('-') {
+            continue;
+        }
+        words.push(arg.clone());
     }
+    words
 }
 
 fn rewrite_arg(args: &[String], from: &str, to: &str) -> String {
@@ -2743,7 +2957,8 @@ fn root_help_only() -> bool {
 }
 
 /// `ljos help`, and `ljos help --all`. A named command prints that
-/// command's own help, hidden or not.
+/// command's own help, hidden or not. A word that is not a command
+/// names the closest one and exits 2.
 fn show_help(all: bool, topic: &[String]) -> Result<()> {
     let mut cmd = Cli::command();
     cmd.build();
@@ -2753,9 +2968,30 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
     }
     let mut current = &cmd;
     for (i, name) in topic.iter().enumerate() {
-        current = current
-            .find_subcommand(name)
-            .with_context(|| format!("help: no command {}", topic[..=i].join(" ")))?;
+        if let Some(sub) = current.find_subcommand(name) {
+            current = sub;
+            continue;
+        }
+        let names = child_names(current);
+        let picked = if current.get_name() == "ljos" {
+            root_synonym(name).map(str::to_string)
+        } else {
+            None
+        };
+        let picked = picked.or_else(|| closest(name, &names).map(str::to_string));
+        let line = match picked {
+            Some(real) => {
+                let mut fixed: Vec<&str> = topic.iter().map(String::as_str).collect();
+                fixed[i] = &real;
+                format!(
+                    "ljos: no command {name}, and the closest is {real}, so run `ljos help {}`.",
+                    fixed.join(" ")
+                )
+            }
+            None => format!("ljos: no command {name}, so run `ljos help`."),
+        };
+        eprintln!("{line}");
+        std::process::exit(USAGE_STATUS);
     }
     current.clone().print_help()?;
     println!();
@@ -6042,5 +6278,61 @@ mod help_list {
             cmd.get_about().map(|text| text.to_string()).as_deref(),
             Some(ABOUT_LINE)
         );
+    }
+}
+
+#[cfg(test)]
+mod usage_hint {
+    use super::*;
+
+    #[test]
+    fn edits_count_a_missing_letter_and_a_swap() {
+        assert_eq!(edits("serch", "search"), 1);
+        assert_eq!(edits("serach", "search"), 2);
+        assert_eq!(edits("finsh", "finish"), 1);
+        // Two neighbouring letters swapped is two edits, and a four-letter
+        // flag still accepts that.
+        assert_eq!(edits("josn", "json"), 2);
+        assert_eq!(edits("lesons", "lesson"), 2);
+        assert_eq!(edits("limt", "limit"), 1);
+        assert_eq!(edits("find", "file"), 2);
+    }
+
+    #[test]
+    fn a_one_letter_flag_is_not_guessed() {
+        let flags = vec!["json".into(), "limit".into(), "n".into(), "h".into()];
+        assert_eq!(closest("josn", &flags), Some("json"));
+        assert_eq!(closest("limt", &flags), Some("limit"));
+        assert_eq!(closest("x", &flags), None);
+        assert_eq!(closest("n", &flags), None);
+    }
+
+    #[test]
+    fn find_add_and_note_add_name_real_commands() {
+        assert_eq!(root_synonym("find"), Some("search"));
+        assert_eq!(root_synonym("FIND"), Some("search"));
+        assert_eq!(root_synonym("add"), Some("remember"));
+        assert_eq!(root_synonym("save"), Some("remember"));
+        assert_eq!(root_synonym("store"), Some("remember"));
+        assert_eq!(root_synonym("note-add"), Some("note"));
+        assert_eq!(root_synonym("add-note"), Some("note"));
+        assert!(root_synonym("serch").is_none());
+        assert!(root_synonym("finsh").is_none());
+        let here = words_at(&[]);
+        for word in [
+            "find", "query", "lookup", "add", "save", "store", "note-add", "add-note",
+        ] {
+            let real = root_synonym(word).unwrap();
+            assert!(
+                here.commands.iter().any(|name| name == real),
+                "{word} -> {real} is not a command"
+            );
+        }
+        assert_eq!(closest("finsh", &here.commands), Some("finish"));
+        assert_eq!(closest("serch", &here.commands), Some("search"));
+        let search = words_at(&["search".to_string()]);
+        let bare = flag_names(&search.flags);
+        assert_eq!(closest("josn", &bare), Some("json"));
+        assert_eq!(closest("x", &bare), None);
     }
 }
