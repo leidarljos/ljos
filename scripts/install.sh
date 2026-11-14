@@ -102,8 +102,13 @@
 # An attestation that is found and does not verify is a warning, or
 # with --attest the end of the install. One line at the end sums up.
 #
-# A pinned version that has no release for this platform is built from
-# that version's crate, never from a newer one.
+# A version you name that has no release says so and names the command
+# that picks one from the releases page. Cargo is not started for that
+# typo. A version this script names, when that release is not published,
+# is built from that version's crate when Rust is installed, and never
+# from a newer crate. With no Rust it installs the latest release of
+# that program and says so. A release that exists but has no archive
+# for this platform is built from that version's crate.
 set -eu
 
 BIN_DIR=${LJOS_BIN_DIR:-$HOME/.local/bin}
@@ -217,6 +222,29 @@ pinned() {
   done
 }
 
+# True when this run's arguments named REPO. A pin added from
+# .github/sibling-pin, or from the fallback list, is not one of these.
+user_asked() {
+  for pin in $USER_PINS; do
+    case $pin in "$1="*) return 0 ;; esac
+  done
+  return 1
+}
+
+# PINS with REPO's pin removed. A default pin whose release is missing
+# is dropped so the same repository is installed from its latest release.
+drop_pin() {
+  name=$1
+  out=
+  for pin in $PINS; do
+    case $pin in
+      "$name"=*) ;;
+      *) out="$out $pin" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 # vissue, claimdag and deedar follow .github/sibling-pin when this script
 # sits in the repository. A downloaded script carries the same versions.
 # --pin for one of them wins. --latest leaves every unpinned repository
@@ -268,6 +296,8 @@ EOF
     PINS="$PINS $item"
   done
 }
+# Pins from the command line. apply_sibling_pins adds the rest.
+USER_PINS=$PINS
 apply_sibling_pins
 
 for pin in $PINS; do
@@ -331,6 +361,20 @@ latest_url() {
   fi
   wget -q --max-redirect=5 -S --spider "$1" 2>"$TMP/fetch.err" || return 1
   sed -n 's/^ *[Ll]ocation: *//p' "$TMP/fetch.err" | tail -n 1
+}
+# The tag of REPO's latest release, such as v0.24.0. A failure names the
+# command that retries.
+latest_tag() {
+  repo=$1
+  tag=$(latest_url "https://github.com/$OWNER/$repo/releases/latest" || true)
+  tag=${tag##*/}
+  case $tag in
+    v*) printf '%s' "$tag" ;;
+    *)
+      why=$(fetch_detail)
+      die "could not read the latest $repo release${why:+: $why}. Check the network and run \`sh install.sh\` again. To install a version you name: \`sh install.sh --version VER\`. With the archives on disk: \`sh install.sh --asset-dir DIR\`."
+      ;;
+  esac
 }
 fetch_why() {
   head -n 1 "$TMP/fetch.err" 2>/dev/null | tr -d '\r' || true
@@ -419,7 +463,10 @@ if ! mkdir -p "$BIN_DIR" 2>"$TMP/mkdir.err"; then
   why=$(head -n 1 "$TMP/mkdir.err" 2>/dev/null | tr -d '\r' || true)
   die "$BIN_DIR is not writable${why:+: $why}. Run \`sh install.sh --bin-dir DIR\` with a directory you can write."
 fi
-if ! touch "$BIN_DIR/.ljos-install-write" 2>"$TMP/mkdir.err"; then
+# A directory can exist and still refuse a new file. The probe is a
+# builtin inside a subshell, so a minimal PATH needs no touch, and
+# `set -e` does not stop the script before the message below.
+if ! ( : > "$BIN_DIR/.ljos-install-write" ) 2>"$TMP/mkdir.err"; then
   why=$(head -n 1 "$TMP/mkdir.err" 2>/dev/null | tr -d '\r' || true)
   die "$BIN_DIR is not writable${why:+: $why}. Run \`sh install.sh --bin-dir DIR\` with a directory you can write."
 fi
@@ -637,15 +684,7 @@ install_one() {
   if [ -n "$ver" ]; then
     tag=v$ver
   else
-    tag=$(latest_url "https://github.com/$OWNER/$repo/releases/latest" || true)
-    tag=${tag##*/}
-    case $tag in
-      v*) ;;
-      *)
-        why=$(fetch_detail)
-        die "could not read the latest $repo release${why:+: $why}. Check the network and run \`sh install.sh\` again. To install a version you name: \`sh install.sh --version VER\`. With the archives on disk: \`sh install.sh --asset-dir DIR\`."
-        ;;
-    esac
+    tag=$(latest_tag "$repo")
   fi
   case $style in
     v) asset="$repo-$tag-$TARGET.tar.gz" ;;
@@ -666,7 +705,28 @@ install_one() {
         if [ -n "$ver" ]; then
           rel=$(release_state "$repo" "$ver")
           if [ "$rel" = missing ]; then
-            die "$repo $ver has no release. List versions at https://github.com/$OWNER/$repo/releases"
+            if user_asked "$repo"; then
+              if [ "$repo" = ljos ]; then
+                die "$repo $ver has no release. List versions at https://github.com/$OWNER/$repo/releases, then run \`sh install.sh --version VER\`."
+              fi
+              die "$repo $ver has no release. List versions at https://github.com/$OWNER/$repo/releases, then run \`sh install.sh --pin $repo=VER\`."
+            fi
+            # The script named this version, and the release is not
+            # published. Build that crate when Rust is here. Otherwise
+            # the latest release still installs the program.
+            rust_floor
+            have=$(rust_have || true)
+            if [ "$NO_BUILD" != 1 ] && rust_new_enough "$have" && command -v cargo >/dev/null 2>&1; then
+              source_build "$crate" "$ver" "$asset"
+              case ",$progs," in
+                *,packset-embed,*) [ -x "$BIN_DIR/packset-embed" ] || warn_embed "a source build" ;;
+              esac
+              return
+            fi
+            say "  $repo $ver has no release archive. Installing the latest $repo release."
+            PINS=$(drop_pin "$repo")
+            install_one "$repo" "$crate" "$style" "$progs"
+            return
           fi
         fi
         if [ "$NO_BUILD" = 1 ]; then

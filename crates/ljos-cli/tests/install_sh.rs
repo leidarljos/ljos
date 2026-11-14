@@ -1334,10 +1334,187 @@ fn a_pinned_version_with_no_release_says_how_to_list_versions() {
         text.contains("https://github.com/leidarljos/ljos/releases"),
         "{text}"
     );
+    assert!(text.contains("sh install.sh --version VER"), "{text}");
     assert!(
         !cargo_log.exists(),
         "a missing release started cargo:\n{text}"
     );
+}
+
+/// The sibling pin names vissue 0.23.1, and that version has no GitHub
+/// release. A machine without Rust still finishes: the script says so
+/// and installs the latest vissue release. Cargo is not started.
+#[test]
+fn a_default_pin_with_no_release_installs_the_latest() {
+    let dir = tempfile::tempdir().unwrap();
+    let assets = dir.path().join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    let target = "x86_64-unknown-linux-gnu";
+    let packs = [
+        ("ljos-v0.42.1", &["ljos", "ljos-mcp"][..]),
+        (
+            "packset-v0.17.10",
+            &["packset", "packsetd", "packset-mcp"][..],
+        ),
+        ("vissue-v0.24.0", &["vissue", "vissue-mcp"][..]),
+        ("deedar-v0.4.0", &["deedar"][..]),
+        ("claimdag-v0.8.0", &["claimdag"][..]),
+        ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
+        ("consensus-v0.10.1", &["ljos-consensus"][..]),
+    ];
+    for (stem, bins) in packs {
+        let top = assets.join(stem);
+        std::fs::create_dir_all(&top).unwrap();
+        for bin in bins {
+            script(&top, bin, "#!/bin/sh\nprintf '%s\\n' from-latest\nexit 0\n");
+        }
+        let archive = assets.join(format!("{stem}-{target}.tar.gz"));
+        let packed = Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&assets)
+            .arg(stem)
+            .status()
+            .unwrap();
+        assert!(packed.success(), "tar {stem}");
+        let sum = format!("{}.sha256", archive.display());
+        std::fs::write(&sum, sha256_of(&archive)).unwrap();
+    }
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script(
+        &bin,
+        "curl",
+        r#"#!/bin/sh
+out=
+url=
+prev=
+for a in "$@"; do
+  case $prev in
+    -o) out=$a ;;
+  esac
+  case $a in
+    http://*|https://*) url=$a ;;
+  esac
+  prev=$a
+done
+repo=
+case $url in
+  *github.com/leidarljos/*/releases/*)
+    repo=${url#*github.com/leidarljos/}
+    repo=${repo%%/*}
+    ;;
+esac
+case $url in
+  */releases/latest)
+    ver=0.42.1
+    case $repo in
+      packset) ver=0.17.10 ;;
+      vissue) ver=0.24.0 ;;
+      deedar) ver=0.4.0 ;;
+      claimdag) ver=0.8.0 ;;
+      ljos-policyd) ver=0.7.0 ;;
+      consensus) ver=0.10.1 ;;
+    esac
+    printf '%s' "https://github.com/leidarljos/$repo/releases/tag/v$ver"
+    exit 0
+    ;;
+  */releases/tag/v0.23.1|*/releases/tag/v0.23.1/*)
+    printf '%s' 404
+    exit 0
+    ;;
+  */releases/tag/*)
+    printf '%s' 200
+    exit 0
+    ;;
+esac
+case $url in
+  *vissue-v0.23.1-*)
+    printf '%s' 404
+    exit 0
+    ;;
+  *.sha256)
+    base=$(basename "$url" .sha256)
+    cp "$LJOS_FAKE_ASSETS/$base.sha256" "$out"
+    printf '%s' 200
+    exit 0
+    ;;
+esac
+base=$(basename "$url")
+cp "$LJOS_FAKE_ASSETS/$base" "$out"
+printf '%s' 200
+exit 0
+"#,
+    );
+    script(&bin, "gh", "#!/bin/sh\nexit 1\n");
+    script(&bin, "cosign", "#!/bin/sh\nexit 1\n");
+    script(
+        &bin,
+        "cargo",
+        "#!/bin/sh\necho ran >> \"$LJOS_CARGO_LOG\"\nexit 1\n",
+    );
+    let cargo_log = dir.path().join("cargo.log");
+    let home = dir.path().join("home");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .args([
+            "--no-embed",
+            "--no-onboard",
+            "--no-modify-path",
+            "--target",
+            target,
+            "--bin-dir",
+        ])
+        .arg(home.join(".local/bin"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .env("LJOS_FAKE_ASSETS", &assets)
+        .env("LJOS_CARGO_LOG", &cargo_log)
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(
+            "vissue 0.23.1 has no release archive. Installing the latest vissue release."
+        ),
+        "{text}"
+    );
+    assert!(!cargo_log.exists(), "cargo was started:\n{text}");
+    let installed = home.join(".local/bin/vissue");
+    assert!(installed.is_file(), "{text}");
+    let ran = Command::new(&installed).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&ran.stdout).trim(), "from-latest");
+}
+
+fn sha256_of(path: &Path) -> String {
+    let hex = |out: std::process::Output| -> Option<String> {
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .map(|word| format!("{word}\n"))
+    };
+    if let Some(line) = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .ok()
+        .and_then(hex)
+    {
+        return line;
+    }
+    Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(path)
+        .output()
+        .ok()
+        .and_then(hex)
+        .expect("sha256sum or shasum")
 }
 
 #[test]
