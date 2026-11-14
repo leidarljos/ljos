@@ -178,7 +178,7 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
         "the mode line belongs on stderr\nstdout:\n{said}"
     );
     assert!(
-        recall_err.contains("matched by words: the encoder is not installed"),
+        recall_err.contains("matched by words (encoder not installed)"),
         "recall did not name the ranking\nstderr:\n{recall_err}\nstdout:\n{said}"
     );
 
@@ -186,7 +186,7 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
     let search_out = String::from_utf8_lossy(&search.stdout);
     let search_err = String::from_utf8_lossy(&search.stderr);
     assert!(
-        search_err.contains("matched by words: the encoder is not installed"),
+        search_err.contains("matched by words (encoder not installed)"),
         "search did not name the ranking\nstderr:\n{search_err}\nstdout:\n{search_out}"
     );
     assert!(

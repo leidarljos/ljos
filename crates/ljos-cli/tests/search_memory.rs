@@ -222,7 +222,7 @@ fn a_missing_encoder_is_unavailable_not_still_loading() {
     let said = format!("{stdout}{stderr}");
     assert!(out.status.success(), "{said}");
     assert!(
-        stderr.contains("matched by words: the encoder is not installed"),
+        stderr.contains("matched by words (encoder not installed)"),
         "{said}"
     );
     assert!(

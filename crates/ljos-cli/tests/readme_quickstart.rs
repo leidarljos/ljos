@@ -387,7 +387,7 @@ fn promised_in_readme(cmd: &str) -> Vec<&'static str> {
         Some("doctor") => DOCTOR.to_vec(),
         Some("remember") => vec!["unknown-"],
         Some("search") if cmd.contains("lexical default") => {
-            vec!["matched by words: the encoder is not installed"]
+            vec!["matched by words (encoder not installed)"]
         }
         Some("file") => vec![
             "project:",
@@ -445,7 +445,7 @@ fn expect_output(cmd: &str, output: &str) {
             assert!(output.contains(LESSON), "{cmd}\n{output}");
             if !ljos_cli::tool_installed("packset-embed") {
                 assert!(
-                    output.contains("matched by words: the encoder is not installed"),
+                    output.contains("matched by words (encoder not installed)"),
                     "{cmd}\n{output}"
                 );
             }

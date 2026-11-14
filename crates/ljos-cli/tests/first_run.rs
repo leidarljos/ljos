@@ -775,7 +775,7 @@ fn expect_documented(command: &str, output: &str) {
         assert!(output.contains(LESSON), "{command}\n{output}");
         if !ljos_cli::tool_installed("packset-embed") {
             assert!(
-                output.contains("matched by words: the encoder is not installed"),
+                output.contains("matched by words (encoder not installed)"),
                 "{command}\n{output}"
             );
         }

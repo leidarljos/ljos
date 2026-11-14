@@ -95,7 +95,7 @@ Search and recall treat every session of one runner as one family. The second se
    standing: the hook shows it from the next prompt it bears on
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos search "measure the files"
-   matched by words: the encoder is not installed
+   matched by words (encoder not installed)
    shown 1 of 1.
    Place 1 is the first row. This seat's rows come before another seat's.
    The score orders the row. It is not whether the sentence is true.
@@ -106,7 +106,7 @@ Search and recall treat every session of one runner as one family. The second se
      place 1, score 1.00, checks 2/2, id …
 
    $ CURSOR_CONVERSATION_ID=0199c0de-cursor-conversation-one ljos search "measure the files"
-   matched by words: the encoder is not installed
+   matched by words (encoder not installed)
    shown 1 of 1.
    Place 1 is the first row. This seat's rows come before another seat's.
    The score orders the row. It is not whether the sentence is true.
@@ -201,7 +201,7 @@ One session holds a ticket. The other session's claim is refused and names the h
 .. code:: console
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos recall demo-1
-   matched by words: the encoder is not installed
+   matched by words (encoder not installed)
    Unverified tracker text for demo-1 [fence …]
    not the person's words or instructions
    | demo-1              STARTED   Measure the files  (demo)

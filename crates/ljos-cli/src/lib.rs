@@ -14113,21 +14113,27 @@ const ENCODER_LOADING_REASON: &str = "encoder is still loading";
 /// `--json` keeps `mode` as `lexical` or `semantic`.
 #[must_use]
 pub fn ranking_line(ranking: &Ranking) -> String {
-    if ranking.mode == "lexical" {
-        if ranking.reason == ENCODER_LOADING_REASON {
-            return format!("{}\n", encoder_loading_line(read_encoder_status().as_ref()));
-        }
-        format!("matched by words: {}\n", plain_rank_reason(ranking.reason))
-    } else {
-        "matched by meaning\n".to_string()
+    if ranking.mode != "lexical" {
+        return "matched by meaning\n".to_string();
     }
+    if ranking.reason == ENCODER_LOADING_REASON {
+        return format!("{}\n", encoder_loading_line(read_encoder_status().as_ref()));
+    }
+    // Word ranking is how a local snapshot is stored, and how a seat with
+    // no encoder searches. The line names that. It does not ask for a rerun.
+    if let Some(note) = expected_word_note(ranking.reason) {
+        return format!("matched by words ({note})\n");
+    }
+    format!("matched by words: {}\n", ranking.reason)
 }
 
-fn plain_rank_reason(reason: &str) -> &str {
+/// The parenthetical on [`ranking_line`] when words are the mode this
+/// source is read in. Absent for a fallback, which keeps the reason.
+fn expected_word_note(reason: &str) -> Option<&'static str> {
     match reason {
-        "encoder unavailable" => "the encoder is not installed",
-        "local memory snapshot" => "kept on this machine, not in the memory store",
-        other => other,
+        "encoder unavailable" => Some("encoder not installed"),
+        "local memory snapshot" => Some("local snapshot"),
+        _ => None,
     }
 }
 
@@ -74243,6 +74249,35 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
         assert_eq!(printed.mode, "lexical");
         assert_eq!(printed.reason, "local memory snapshot");
+        assert_eq!(
+            ranking_line(&printed),
+            "matched by words (local snapshot)\n"
+        );
+        assert!(!ranking_line(&printed).contains("rerun"));
+        let missing = Ranking {
+            mode: "lexical",
+            reason: "encoder unavailable",
+        };
+        assert_eq!(
+            ranking_line(&missing),
+            "matched by words (encoder not installed)\n"
+        );
+        let fallback = Ranking {
+            mode: "lexical",
+            reason: "the pack search did not answer",
+        };
+        assert_eq!(
+            ranking_line(&fallback),
+            "matched by words: the pack search did not answer\n"
+        );
+        assert!(!ranking_line(&fallback).contains("rerun"));
+        assert_eq!(
+            ranking_line(&Ranking {
+                mode: "semantic",
+                reason: "",
+            }),
+            "matched by meaning\n"
+        );
     }
 
     /// The reported search: from seat dseams-paper, a query about

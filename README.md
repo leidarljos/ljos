@@ -153,7 +153,7 @@ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.
 
 The `install.sh` attached to the 0.41.1 release asked for `vissue-cli-<target>.tar.xz`. The 0.41.2 script fetches `vissue-v<version>-<target>.tar.gz`, the archive the vissue release publishes.
 
-`--no-embed` leaves out the encoder. Search then matches words, and `ljos search` prints `matched by words: the encoder is not installed`.
+`--no-embed` leaves out the encoder. Search then matches words, and `ljos search` prints `matched by words (encoder not installed)`.
 A cold encoder, one the writer has not loaded yet, gets `LJOS_SEARCH_WAIT` seconds (3 when unset). The search is asked again once the model has answered, and the ranking line names the ranker that ordered the printed rows. If the encoder is still loading, the line is `Semantic ranking is still starting; rerun in about N s for better matches`. `N` is the writer's remaining time when it sends one. `--json` puts `semantic` or `lexical` in `ranking`. Starting the memory writer starts that load, so the first search is not what starts it. A row whose score is only the word-rank floor, 0.20, is left out.
 A lesson `ljos remember` queued because the pack was busy is sent again on `ljos search` and `ljos sitting`. When it is still waiting, that command says so.
 The installer checks each download against its published SHA-256 sum. It sets up the ticket tracker, the memory writer and the deed store, then runs `ljos onboard` for each runner it finds. The deed store keeps signed records of the work.
