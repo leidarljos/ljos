@@ -14,7 +14,9 @@
 //! time and a hash of its bytes. The next pull stats each export and does
 //! not read one whose size and time match. A changed time is hashed, and
 //! the same bytes are not imported again. The run says how many exports
-//! were skipped and how many were imported. The seed is written by a
+//! were skipped and how many were imported. On a terminal, each export
+//! prints one line with its count. A pipe prints the summary lines only.
+//! The seed is written by a
 //! temporary name and a rename, and only when its bytes would change.
 //! A pack that answers 503 is asked again once, after `Retry-After`, with
 //! the same deadline. A second 503 or a 408 stops the pull. Each export is
@@ -26,6 +28,7 @@
 //! reported as imported or pushed.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::IsTerminal;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -765,6 +768,20 @@ fn post_row(seat: &str, row: &Kept) -> Result<Option<String>> {
     }
 }
 
+/// A progress line for one export, or nothing when `stderr` is not a terminal.
+fn export_progress(
+    tty: bool,
+    done: usize,
+    total: usize,
+    name: &str,
+    action: &str,
+) -> Option<String> {
+    if !tty {
+        return None;
+    }
+    Some(format!("mesh pull: {name} {action} ({done}/{total})"))
+}
+
 fn pull_with(
     store: &SeatStore,
     from: &Path,
@@ -808,8 +825,17 @@ fn pull_body(
     let baseline_ids = row_ids.clone();
     let mut marks = read_marks(store, share)?;
     let paths = export_paths(from, source, share)?;
+    let total = paths.len();
+    let tty = std::io::stderr().is_terminal();
     let mut seen = BTreeSet::new();
     let mut committed = 0usize;
+    let mut finish = |done: &mut usize, name: &str, action: &str| -> Result<()> {
+        *done += 1;
+        if let Some(line) = export_progress(tty, *done, total, name, action) {
+            eprintln!("{line}");
+        }
+        halt(*done)
+    };
     let mut summary = Summary {
         imported: 0,
         unchanged: 0,
@@ -834,8 +860,7 @@ fn pull_body(
             if meta.matches(mark) {
                 summary.unchanged += mark.rows;
                 summary.exports_skipped += 1;
-                committed += 1;
-                halt(committed)?;
+                finish(&mut committed, &name, "skipped")?;
                 continue;
             }
         }
@@ -859,8 +884,7 @@ fn pull_body(
                 ) {
                     write_marks(store, &marks, share)?;
                 }
-                committed += 1;
-                halt(committed)?;
+                finish(&mut committed, &name, "skipped")?;
                 continue;
             }
         }
@@ -894,8 +918,11 @@ fn pull_body(
         ) {
             write_marks(store, &marks, share)?;
         }
-        committed += 1;
-        halt(committed)?;
+        finish(
+            &mut committed,
+            &name,
+            &format!("imported {}", fold.imported),
+        )?;
     }
     let before = marks.len();
     marks.retain(|name, _| seen.contains(name));
@@ -1673,5 +1700,20 @@ mod tests {
                 "{lesson} in {texts:?}"
             );
         }
+    }
+
+    #[test]
+    fn progress_is_one_line_on_a_terminal_and_quiet_otherwise() {
+        assert_eq!(
+            export_progress(false, 1, 7, "lane-a.jsonl", "skipped"),
+            None
+        );
+        assert_eq!(
+            export_progress(true, 1, 7, "lane-a.jsonl", "imported 2").as_deref(),
+            Some("mesh pull: lane-a.jsonl imported 2 (1/7)")
+        );
+        let skipped = export_progress(true, 2, 7, "lane-b.jsonl", "skipped").unwrap();
+        assert_eq!(skipped, "mesh pull: lane-b.jsonl skipped (2/7)");
+        assert!(!skipped.contains('\r'), "{skipped}");
     }
 }
