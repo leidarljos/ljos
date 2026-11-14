@@ -118,7 +118,7 @@ Search and recall treat every session of one runner as one family. The second se
 
    lesson, from an agent, today, from claude-f2pu9d56g0
      Measure the files before picking a codec.
-     place 1, score 0.81, checks 2/2, id …
+     place 1, score 0.68, checks 2/2, id …
 
 .. END ljos-sample agents-memory
 
