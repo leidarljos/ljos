@@ -23,19 +23,6 @@ fn install_pair(dir: &Path) {
     }
 }
 
-fn stub_claude(path: &Path) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(
-        path,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/claude-argv\"\ncase \"$*\" in *'mcp get'*) exit 1 ;; esac\nexit 0\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
-
 fn stub(path: &Path) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
@@ -164,14 +151,13 @@ fn a_config_written_under_one_home_runs_under_another() {
     let codex_command = toml_command(&codex);
     assert_eq!(codex_command, command, "{codex}");
 
-    // the terminal harness stores the command it is given. A stub records that argv.
-    stub_claude(&bin_a.join("claude"));
     let out = onboard(&ljos, &home_a, &["onboard", "--harness", "claude"]);
     assert!(out.status.success(), "{}", said(&out));
-    let argv = fs::read_to_string(home_a.join("claude-argv")).unwrap();
+    let (claude_command, _) = json_command(&home_a.join(".claude.json"));
+    assert_eq!(claude_command, command);
     assert!(
-        argv.contains("ljos-mcp") && !argv.contains(home_a.to_str().unwrap()),
-        "{argv}"
+        !claude_command.contains(home_a.to_str().unwrap()),
+        "{claude_command}"
     );
 
     let out = onboard(&ljos, &home_a, &["onboard", "--harness", "json"]);

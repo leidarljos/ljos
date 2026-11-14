@@ -14,8 +14,16 @@ export PATH="$HOME/.local/bin:$PATH" && ljos onboard
 ```
 
 The second command, `ljos onboard`, finds Claude Code, Cursor and Codex on this machine, and any other runner it knows, and registers the MCP server and the skill for each.
-It prints each file it writes.
+One runner is one command.
+Each command prints the files it wrote and the next command.
 Run it again and those files stay as they are.
+
+Claude Code: `ljos onboard --harness claude`. It writes `~/.claude.json`, the hooks and the skill. Check with `ljos doctor --all`.
+
+Cursor: `ljos onboard --harness cursor`. It writes `~/.cursor/mcp.json`, the hooks and the skill. Check with `ljos doctor --all`.
+
+Codex: `ljos onboard --harness codex`. It writes `~/.codex/config.toml`, the hooks and the skill in `~/.agents/skills`. Check with `ljos doctor --all`.
+
 `ljos onboard --dry-run` prints the steps and writes nothing.
 `ljos offboard` removes the registration.
 `ljos uninstall` removes the programs.

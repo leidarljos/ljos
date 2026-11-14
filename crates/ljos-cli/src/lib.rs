@@ -932,8 +932,12 @@ resume = ["omp", "--continue"]
 
 [[harness]]
 name = "claude"
-register = ["claude", "mcp", "add", "-s", "user", "ljos", "--", "{server}"]
-registered = ["claude", "mcp", "get", "ljos"]
+# Claude Code reads user MCP servers from ~/.claude.json, under mcpServers.
+# The file is written here, so the claude command is not required.
+# Other keys in that file stay.
+config_json = "~/.claude.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"type": "stdio", "command": "{server}", "args": [], "env": {}}'
 skills = "~/.claude/skills"
 hooks = "~/.claude/settings.json"
 hook_events = ["UserPromptSubmit", "SessionEnd", "Stop", "PostToolUse", "PreToolUse", "SubagentStop", "PreCompact", "SessionStart"]
@@ -950,7 +954,8 @@ marker = "[mcp_servers.ljos]"
 # records' directory, and the session the prompt hook binds the kept
 # prompt to.
 snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv_vars = [\"XDG_RUNTIME_DIR\", \"CODEX_SESSION_ID\", \"CODEX_THREAD_ID\"]\n"
-skills = "~/.codex/skills"
+# Codex reads user skills from ~/.agents/skills. ~/.codex/skills is the old directory.
+skills = "~/.agents/skills"
 hooks = "~/.codex/hooks.json"
 hook_events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"]
 # Codex runs a hook only once it is trusted in /hooks, and a changed hook
@@ -6659,8 +6664,7 @@ fn heal_registered(
             notes.push(note);
         }
     }
-    // `the terminal harness mcp add` stores the command in this file, which the harness
-    // table does not name.
+    // The same file, when a copy was written before the table named it.
     if h.name == "claude" {
         if let Ok(home) = home() {
             if let Some(note) = heal_json_command(
@@ -6959,7 +6963,12 @@ pub fn detect_runners(
         .into_iter()
         .flatten()
         .filter_map(under_home)
-        .any(|p| p.parent().is_some_and(Path::is_dir));
+        .any(|p| {
+            // ~/.claude.json sits in the home directory. That directory
+            // always exists, so it is not a sign the runner is installed.
+            // A nested file's parent, such as ~/.claude or ~/.cursor, is.
+            p.parent().is_some_and(|dir| dir != home && dir.is_dir())
+        });
         if by_command || by_dir {
             found.push(h.name.clone());
         }
@@ -7839,7 +7848,7 @@ fn onboard_in_at_inner(
             ));
         }
         steps.extend(dependencies);
-        return Ok(steps);
+        return Ok(with_try_next(steps, &h.name));
     }
     steps.push(register_step(h, &server, dry));
     if let Some(file) = &h.hooks {
@@ -7885,7 +7894,29 @@ fn onboard_in_at_inner(
         ));
     }
     steps.extend(dependencies);
-    Ok(steps)
+    Ok(with_try_next(steps, &h.name))
+}
+
+/// Claude Code, Cursor and Codex print the command that checks the files
+/// just written. The row name stays the one the step already uses.
+fn with_try_next(mut steps: Vec<Step>, runner: &str) -> Vec<Step> {
+    let Some(next) = (match runner {
+        "claude" | "cursor" | "codex" => Some("ljos doctor --all"),
+        _ => None,
+    }) else {
+        return steps;
+    };
+    if let Some(step) = steps
+        .iter_mut()
+        .rev()
+        .find(|step| step.what.ends_with(" mcp") || step.what == "cursor plugin")
+    {
+        if !step.detail.contains("so run `") {
+            let detail = step.detail.trim_end_matches('.').trim_end().to_string();
+            step.detail = format!("{detail}, so run `{next}`");
+        }
+    }
+    steps
 }
 
 /// Aider has no MCP client and no tool hook. Onboard writes the skill as

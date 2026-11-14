@@ -6,10 +6,77 @@ Connect an agent runner
 =======================
 
 
-Wire the seat into an agent runner
-==================================
+Claude Code
+===========
 
-One entry, for any runner that speaks the Model Context Protocol (MCP)
+One command writes the config Claude Code reads.
+
+.. code:: console
+
+   $ ljos onboard --harness claude
+
+It writes the MCP server into ``~/.claude.json``, the hooks into ``~/.claude/settings.json``, and the skill into ``~/.claude/skills``.
+Other keys in ``~/.claude.json`` stay.
+The command does not need the ``claude`` program.
+It prints each file and the next command.
+Run it again and those files stay as they are.
+
+.. code:: console
+
+   $ ljos doctor --all
+
+The runner mcp row names claude when the server is registered.
+
+Cursor
+======
+
+One command writes the config Cursor reads.
+The IDE and the ``agent`` command read the same files.
+
+.. code:: console
+
+   $ ljos onboard --harness cursor
+
+It writes the MCP server into ``~/.cursor/mcp.json``, the hooks into ``~/.cursor/hooks.json``, and the skill into ``~/.cursor/skills``.
+Other servers in ``mcp.json`` stay.
+It prints each file and the next command.
+Run it again and those files stay as they are.
+
+.. code:: console
+
+   $ ljos doctor --all
+
+The runner mcp row names cursor when the server is registered.
+
+Codex
+=====
+
+One command writes the config Codex reads.
+
+.. code:: console
+
+   $ ljos onboard --harness codex
+
+It writes the MCP server into ``~/.codex/config.toml``, the hooks into ``~/.codex/hooks.json``, and the skill into ``~/.agents/skills``.
+Other tables in ``config.toml`` stay.
+It prints each file and the next command.
+Run it again and those files stay as they are.
+Codex runs a hook only after you trust it.
+Open ``/hooks`` and trust each ljos hook.
+Trust it again after an upgrade rewrites one.
+
+.. code:: console
+
+   $ ljos doctor --all
+
+The runner mcp row names codex when the server is registered.
+Until the hooks are trusted, the hook trust row says to open ``/hooks``.
+
+Another runner
+==============
+
+Claude Code, Cursor and Codex are the three sections above.
+One entry, for any other runner that speaks the Model Context Protocol (MCP)
 over stdio:
 
 .. code:: console
@@ -111,28 +178,6 @@ machine into ``harnesses.toml``, then one verb each:
 A runner with a hooks file (``hooks`` in its table) takes the memory hook
 too; for the others the skill and the ``ljos://protocol`` resource carry
 what the seat knows, and the sitting's island brings the memories in.
-
-Wire the seat into the editor harness
-=====================================
-
-.. code:: console
-
-   $ ljos onboard --harness cursor
-
-The command prints one ok line for the MCP entry, the hooks, the skill and the agent
-definitions, and each line names the file it wrote.
-
-The editor harness's IDE and its ``agent`` command line take the server from the same
-``~/.cursor/mcp.json`` and the hooks from ``~/.cursor/hooks.json``. It
-does not hand a prompt hook's context to the model, so the memories a
-prompt activates arrive with the first tool result instead, as on the build harness.
-A shell command that a rule names is allowed, with the rule's
-warning in the editor harness's ``user_message``. The editor harness runs the terminal harness hooks itself where
-``ljos onboard --harness claude`` already ran. The events the terminal harness's file
-names stay there. ``beforeShellExecution``, ``preToolUse``,
-``beforeMCPExecution``, ``beforeReadFile`` and ``postToolUseFailure`` are
-still written to ``~/.cursor/hooks.json``. If a hook fails, the command runs. The seat answers
-both files in the editor harness's shape.
 
 Seat a shell-only agent
 =======================

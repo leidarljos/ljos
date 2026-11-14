@@ -127,8 +127,9 @@ fn registration(home: &Path) -> Vec<PathBuf> {
         ".cursor/mcp.json",
         ".cursor/skills/ljos/SKILL.md",
         ".cursor/hooks.json",
+        ".claude.json",
         ".codex/config.toml",
-        ".codex/skills/ljos/SKILL.md",
+        ".agents/skills/ljos/SKILL.md",
         ".codex/hooks.json",
     ]
     .into_iter()
@@ -207,34 +208,34 @@ fn onboard_does_not_print_the_signing_key() {
     assert!(!text.contains("32-byte"), "{text}");
 }
 
-/// Claude's directory is present and the `claude` command is not.
-/// Onboard and doctor both name the install, and doctor keeps the seat ready.
+/// Claude Code's directory is present and the `claude` command is not.
+/// The MCP server still lands in `~/.claude.json`, and doctor says so.
 #[test]
-fn a_missing_claude_command_names_the_install() {
+fn a_missing_claude_command_still_writes_the_config() {
     let home = Home::new();
     stubs(&home);
     std::fs::remove_file(home.path().join("bin").join("claude")).unwrap();
     std::fs::create_dir_all(home.path().join(".claude")).unwrap();
     let onboard = home.ljos(&["onboard", "--harness", "claude"]);
     let onboard_text = said(&onboard);
-    assert!(!onboard.status.success(), "{onboard_text}");
+    assert!(onboard.status.success(), "{onboard_text}");
+    assert!(onboard_text.contains(".claude.json"), "{onboard_text}");
     assert!(
-        onboard_text.contains(
-            "no\tclaude mcp\tclaude is not on PATH and must be installed, so run `ljos onboard --harness claude`."
-        ),
+        onboard_text.contains("so run `ljos doctor --all`"),
         "{onboard_text}"
     );
-    let doctor = home.ljos(&["doctor"]);
+    let mcp = text_at(&home.path().join(".claude.json"));
+    assert!(mcp.contains("\"ljos\""), "{mcp}");
+    assert!(mcp.contains("ljos-mcp"), "{mcp}");
+    let doctor = home.ljos(&["doctor", "--all"]);
     let doctor_text = said(&doctor);
     assert!(
-        doctor_text.contains(
-            "warn\trunner mcp\tclaude: not registered, and claude is not on PATH and must be installed, so run `ljos onboard --harness claude`."
-        ),
+        doctor_text.contains("ok\trunner mcp\tclaude: ljos registered"),
         "{doctor_text}"
     );
     assert!(
-        !doctor_text.contains("no\trunner mcp"),
-        "a missing command failed the ready seat: {doctor_text}"
+        !doctor_text.contains("claude is not on PATH"),
+        "{doctor_text}"
     );
 }
 
@@ -265,17 +266,14 @@ fn detects_claude_cursor_and_codex_from_directories() {
     for name in ["claude", "codex", "cursor"] {
         std::fs::remove_file(home.path().join("bin").join(name)).unwrap();
     }
-    // Claude's MCP registration runs `claude`. Without it the step fails,
-    // and the directories are still what detection named.
+    // The directories are what detection named. Claude's config is a file
+    // write, so a missing `claude` command does not fail the dry run.
     let out = home.ljos(&["onboard", "--harness", "all", "--dry-run"]);
     let text = said(&out);
+    assert!(out.status.success(), "{text}");
     assert!(text.contains("found claude, codex, cursor"), "{text}");
-    assert!(
-        text.contains(
-            "claude is not on PATH and must be installed, so run `ljos onboard --harness claude`."
-        ),
-        "{text}"
-    );
+    assert!(text.contains(".claude.json"), "{text}");
+    assert!(!text.contains("not on PATH"), "{text}");
     for path in registration(home.path()) {
         assert!(!path.exists(), "dry-run wrote {}", path.display());
     }
@@ -315,8 +313,12 @@ fn onboard_writes_once_and_offboard_removes() {
         skill
     );
     assert_eq!(
-        text_at(&home.path().join(".codex/skills/ljos/SKILL.md")),
+        text_at(&home.path().join(".agents/skills/ljos/SKILL.md")),
         skill
+    );
+    assert!(
+        !home.path().join(".codex/skills/ljos/SKILL.md").exists(),
+        "the skill was written to the old Codex directory"
     );
 
     let cursor = text_at(&home.path().join(".cursor/mcp.json"));
@@ -327,13 +329,16 @@ fn onboard_writes_once_and_offboard_removes() {
     let claude = text_at(&home.path().join(".claude/settings.json"));
     assert!(claude.contains("UserPromptSubmit"), "{claude}");
     assert!(claude.contains("ljos"), "{claude}");
+    let claude_mcp = text_at(&home.path().join(".claude.json"));
+    assert!(claude_mcp.contains("\"ljos\""), "{claude_mcp}");
+    assert!(claude_mcp.contains("ljos-mcp"), "{claude_mcp}");
     let cursor_hooks = text_at(&home.path().join(".cursor/hooks.json"));
     assert!(cursor_hooks.contains("ljos"), "{cursor_hooks}");
     let codex_hooks = text_at(&home.path().join(".codex/hooks.json"));
     assert!(codex_hooks.contains("ljos"), "{codex_hooks}");
     assert!(
-        home.path().join(".claude/.ljos-mcp-added").is_file(),
-        "claude mcp add did not run"
+        !home.path().join(".claude/.ljos-mcp-added").is_file(),
+        "onboard still shelled out to claude mcp add"
     );
 
     let snap: Vec<Vec<u8>> = registration(home.path()).iter().map(|p| bytes(p)).collect();
