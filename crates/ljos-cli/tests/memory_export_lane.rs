@@ -429,3 +429,75 @@ fn integrate_help_does_not_name_apply() {
     assert!(help.contains("ljos memory imports"), "{help}");
     assert!(!help.contains("--apply"), "{help}");
 }
+
+#[test]
+fn a_dead_share_stops_export_and_import_without_a_count() {
+    let (home, root) = seat_home();
+    let share = root.join("share");
+    std::fs::create_dir(&share).unwrap();
+    let out_path = share.join("lane.jsonl");
+    let exported = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["memory", "export", "--out", out_path.to_str().unwrap()])
+        .current_dir(&root)
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8")
+        .env("TMPDIR", home.path().join("tmp"))
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env("XDG_STATE_HOME", home.path().join(".local/state"))
+        .env("XDG_CACHE_HOME", home.path().join(".cache"))
+        .env("VISSUE_ROOT", &root)
+        .env("LJOS_SEAT", "lane-seat")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("PACKSET_URL", "off")
+        .env("LJOS_OFF", "1")
+        .env("LJOS_SHARE_FAULT", "eio")
+        .output()
+        .expect("ljos");
+    assert_eq!(exported.status.code(), Some(1), "{}", fault(&exported));
+    let said = fault(&exported);
+    assert!(said.contains("Input/output error"), "{said}");
+    assert!(said.contains("Check the mount, then rerun"), "{said}");
+    assert!(
+        said.contains(&format!("ljos memory export --out {}", out_path.display())),
+        "{said}"
+    );
+    assert!(said.contains(&share.display().to_string()), "{said}");
+    assert!(!said.contains("os error"), "{said}");
+    assert!(!said.contains("Caused by"), "{said}");
+    assert!(!said.contains("exported "), "{said}");
+    assert!(!out_path.exists());
+
+    std::fs::write(&out_path, "{}\n").unwrap();
+    let imported = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["memory", "import", out_path.to_str().unwrap()])
+        .current_dir(&root)
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8")
+        .env("TMPDIR", home.path().join("tmp"))
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env("XDG_STATE_HOME", home.path().join(".local/state"))
+        .env("XDG_CACHE_HOME", home.path().join(".cache"))
+        .env("VISSUE_ROOT", &root)
+        .env("LJOS_SEAT", "lane-seat")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("PACKSET_URL", "off")
+        .env("LJOS_OFF", "1")
+        .env("LJOS_SHARE_FAULT", "estale")
+        .output()
+        .expect("ljos");
+    assert_eq!(imported.status.code(), Some(1), "{}", fault(&imported));
+    let said = fault(&imported);
+    assert!(said.contains("Stale file handle"), "{said}");
+    assert!(
+        said.contains(&format!("ljos memory import {}", out_path.display())),
+        "{said}"
+    );
+    assert!(!said.contains("imported "), "{said}");
+    assert!(!said.contains("os error"), "{said}");
+}

@@ -80,3 +80,17 @@ writes the same bytes.
 
 =push= takes the same pair of locks. A pull that is reading the directory
 waits until the file is in place.
+
+* A folder that has gone away
+
+A handoff on a network mount or a FUSE mount can answer
+=Transport endpoint is not connected=, an input/output error, or a stale
+file handle, or a write can sit and never return. =pull= and =push= stop,
+and so does an export or an import that writes that folder. The line names
+the folder, the error in words, and the command to run once the mount
+answers. The exit is 1. The count is printed only when that write finished.
+The bytes land under a temporary name in the same folder and take the real
+name when the write has finished, so a later pull reads a whole seed. One
+operation waits 60 seconds. =LJOS_SHARE_WAIT= sets that wait, in seconds.
+
+=Error: mesh: /srv/handoff: Transport endpoint is not connected. Check the mount, then rerun `ljos mesh pull --seat box --from /srv/handoff`.=

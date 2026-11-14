@@ -396,13 +396,26 @@ fn write_export_body(out: &Path, bytes: &[u8]) -> Result<()> {
         stdout.flush()?;
         return Ok(());
     }
-    if std::fs::symlink_metadata(out).is_ok_and(|meta| meta.is_dir()) {
-        bail!(
-            "memory: {} is a directory. `ljos memory export --out FILE` writes a file",
-            out.display()
-        );
+    let share = crate::share_io::Share::memory_export(out);
+    let folder = out
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    match share.symlink_meta(out) {
+        Ok(meta) if meta.is_dir() => {
+            bail!(
+                "memory: {} is a directory. `ljos memory export --out FILE` writes a file",
+                out.display()
+            );
+        }
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!("memory: {} is a symlink", out.display());
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(share.fail(folder, err)),
     }
-    write_private(out, bytes)
+    share.write_atomic(out, bytes)
 }
 
 /// A store can refuse `rename` across its boundary. These are the
@@ -1826,21 +1839,33 @@ fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
 
 /// Read an export file. A missing path is one line that names `ljos memory export`.
 fn read_import_file(path: &Path) -> Result<Vec<u8>> {
-    if path.is_dir() {
-        bail!(
-            "memory: {} is a directory. Pass the file `ljos memory export --out` wrote",
-            path.display()
-        );
-    }
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(bytes),
+    let share = crate::share_io::Share::memory_import(path);
+    let folder = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    match share.symlink_meta(path) {
+        Ok(meta) if meta.is_dir() => {
+            bail!(
+                "memory: {} is a directory. Pass the file `ljos memory export --out` wrote",
+                path.display()
+            );
+        }
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!(
+                "memory: {} is a symlink. Pass the file `ljos memory export --out` wrote",
+                path.display()
+            );
+        }
+        Ok(_) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => bail!(
             "memory: {} is not a file. `ljos memory export --out {}` writes one on the machine that has the lessons",
             path.display(),
             path.display()
         ),
-        Err(err) => bail!("memory: cannot read {}: {err}", path.display()),
+        Err(err) => return Err(share.fail(folder, err)),
     }
+    share.read(path).map_err(|err| share.fail(folder, err))
 }
 
 /// Import the file at `path`.
@@ -1855,16 +1880,6 @@ pub fn import_path(
     source_seat: Option<&str>,
     as_machine: Option<&str>,
 ) -> Result<ImportDone> {
-    if path
-        .symlink_metadata()
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        bail!(
-            "memory: {} is a symlink. Pass the file `ljos memory export --out` wrote",
-            path.display()
-        );
-    }
     let bytes = read_import_file(path)?;
     let Some(lane) = path
         .file_stem()

@@ -677,6 +677,16 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_SHARE_FAULT",
+        default: "unset",
+        group: "ljos",
+    },
+    Var {
+        name: "LJOS_SHARE_WAIT",
+        default: "60 seconds",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_SHELL_SESSION",
         default: "unset",
         group: "ljos",

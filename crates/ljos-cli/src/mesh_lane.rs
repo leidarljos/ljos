@@ -12,17 +12,18 @@
 //! run, so two runs wait and the seed keeps a single copy of each text.
 //! A pack that answers 503 is asked again once, after `Retry-After`, with
 //! the same deadline. A second 503 or a 408 stops the pull. Rows already
-//! stored stay in the seed.
+//! stored stay in the seed. A handoff or a seed folder that has gone away,
+//! or a write that does not return, stops the command: the line names the
+//! folder and the command to run once the mount answers, and nothing is
+//! reported as imported or pushed.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
+
+use crate::share_io::Share;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -108,39 +109,20 @@ struct Held {
 }
 
 impl Held {
-    fn exclusive(path: &Path) -> Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .open(path)
-            .with_context(|| format!("mesh: cannot open {}", path.display()))?;
-        // SAFETY: flock on a descriptor this struct owns until drop.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            bail!("mesh: cannot lock {}: {err}", path.display());
-        }
-        Ok(Self { file })
+    fn exclusive(path: &Path, share: &Share) -> Result<Self> {
+        share
+            .lock_shared(path)
+            .map(|file| Self { file })
+            .map_err(|err| share.fail(path, err))
     }
 
-    fn seat(dir: &Path) -> Result<Self> {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("mesh: cannot create {}", dir.display()))?;
+    fn seat(dir: &Path, share: &Share) -> Result<Self> {
+        share.create_dir(dir).map_err(|err| share.fail(dir, err))?;
         let path = dir.join("write.lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("mesh: cannot open {}", path.display()))?;
-        // SAFETY: flock on a descriptor this struct owns until drop.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            bail!("mesh: cannot lock {}: {err}", path.display());
-        }
-        Ok(Self { file })
+        share
+            .lock_create(&path)
+            .map(|file| Self { file })
+            .map_err(|err| share.fail(dir, err))
     }
 }
 
@@ -167,8 +149,8 @@ fn require_name(name: &str, what: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
-fn require_dir(path: &Path) -> Result<()> {
-    let meta = match std::fs::symlink_metadata(path) {
+fn require_dir(path: &Path, share: &Share) -> Result<()> {
+    let meta = match share.symlink_meta(path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             bail!(
@@ -176,9 +158,7 @@ fn require_dir(path: &Path) -> Result<()> {
                 path.display()
             );
         }
-        Err(err) => {
-            return Err(err).with_context(|| format!("mesh: cannot read {}", path.display()));
-        }
+        Err(err) => return Err(share.fail(path, err)),
     };
     if meta.file_type().is_symlink() {
         bail!(
@@ -352,48 +332,29 @@ fn values_of(bytes: &[u8]) -> Vec<Value> {
     out
 }
 
-fn lane_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
+fn lane_files(dir: &Path, share: &Share) -> Result<Vec<PathBuf>> {
+    match share.list_files(dir) {
+        Ok(files) => Ok(files),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             bail!(
                 "mesh: {} does not exist. Create it, or pass a directory of <lane>.jsonl files",
                 dir.display()
             );
         }
-        Err(err) => {
-            return Err(err).with_context(|| format!("mesh: cannot read {}", dir.display()));
-        }
-    };
-    for entry in entries {
-        let entry = entry.with_context(|| format!("mesh: cannot read {}", dir.display()))?;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|item| item.to_str()) else {
-            continue;
-        };
-        if name.starts_with('.') || !name.ends_with(".jsonl") || name.ends_with(".seed.jsonl") {
-            continue;
-        }
-        let meta = match std::fs::symlink_metadata(&path) {
-            Ok(meta) => meta,
-            Err(_) => continue,
-        };
-        if meta.file_type().is_symlink() || !meta.is_file() {
-            continue;
-        }
-        files.push(path);
+        Err(err) => Err(share.fail(dir, err)),
     }
-    files.sort();
-    Ok(files)
 }
 
-fn read_seed(path: &Path) -> Result<(BTreeMap<String, Kept>, BTreeSet<String>)> {
-    if !path.is_file() {
-        return Ok((BTreeMap::new(), BTreeSet::new()));
-    }
-    let bytes =
-        std::fs::read(path).with_context(|| format!("mesh: cannot read {}", path.display()))?;
+fn read_seed(path: &Path, share: &Share) -> Result<(BTreeMap<String, Kept>, BTreeSet<String>)> {
+    let folder = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let bytes = match share.read_if_file(path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Ok((BTreeMap::new(), BTreeSet::new())),
+        Err(err) => return Err(share.fail(folder, err)),
+    };
     let mut rows = BTreeMap::new();
     let mut row_ids = BTreeSet::new();
     for value in values_of(&bytes) {
@@ -459,57 +420,14 @@ fn document(
     Ok(body.into_bytes())
 }
 
-fn unique() -> u64 {
-    static N: AtomicU64 = AtomicU64::new(0);
-    N.fetch_add(1, Ordering::Relaxed)
-}
-
-fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("mesh: cannot create {}", parent.display()))?;
-    }
-    if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        bail!(
-            "mesh: {} is a symlink. Remove the link so the lane file can be written",
-            path.display()
-        );
-    }
-    if std::fs::read(path).ok().as_deref() == Some(bytes) {
-        return Ok(());
-    }
-    let mut tmp_name = path
-        .file_name()
-        .context("mesh: path has no file name")?
-        .to_os_string();
-    tmp_name.push(format!(".{}.{}.tmp", std::process::id(), unique()));
-    let tmp = path.with_file_name(tmp_name);
-    {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&tmp)
-            .with_context(|| format!("mesh: cannot write {}", tmp.display()))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    if let Err(err) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err).with_context(|| format!("mesh: cannot place {}", path.display()));
-    }
-    Ok(())
-}
-
 fn write_seed(
     store: &SeatStore,
     rows: &BTreeMap<String, Kept>,
     row_ids: &BTreeSet<String>,
+    share: &Share,
 ) -> Result<()> {
     let bytes = document("seed", &store.seat, &store.seat, rows, row_ids)?;
-    write_bytes(&store.seed_path(), &bytes)
+    share.write_atomic(&store.seed_path(), &bytes)
 }
 
 fn merge_row(rows: &mut BTreeMap<String, Kept>, row: Kept) {
@@ -594,20 +512,20 @@ fn pull_with(
     mut post: impl FnMut(&Kept) -> Result<()>,
 ) -> Result<Summary> {
     require_name(&store.seat, "seat")?;
-    require_dir(from)?;
-    let _dir = Held::exclusive(from)?;
-    let _seat = Held::seat(&store.dir)?;
-    let (mut have, mut row_ids) = read_seed(&store.seed_path())?;
+    let share = Share::mesh_pull(&store.seat, from);
+    require_dir(from, &share)?;
+    let _dir = Held::exclusive(from, &share)?;
+    let _seat = Held::seat(&store.dir, &share)?;
+    let (mut have, mut row_ids) = read_seed(&store.seed_path(), &share)?;
     row_ids.extend(already_ids.iter().cloned());
     let mut known_hashes = already_hashes.clone();
     known_hashes.extend(have.keys().cloned());
     let mut incoming: BTreeMap<String, Incoming> = BTreeMap::new();
-    for path in lane_files(from)? {
+    for path in lane_files(from, &share)? {
         let Some(lane) = lane_of(&path) else {
             continue;
         };
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("mesh: cannot read {}", path.display()))?;
+        let bytes = share.read(&path).map_err(|err| share.fail(from, err))?;
         for value in values_of(&bytes) {
             let Some(row) = kept_from_line(&value, &lane) else {
                 continue;
@@ -652,7 +570,7 @@ fn pull_with(
             row_ids: inc.row_ids,
         };
         if let Err(err) = post(&row) {
-            let _ = write_seed(store, &have, &row_ids);
+            let _ = write_seed(store, &have, &row_ids, &share);
             return Err(err);
         }
         imported += 1;
@@ -661,7 +579,7 @@ fn pull_with(
         known_hashes.insert(hash.clone());
         have.insert(hash, row);
     }
-    write_seed(store, &have, &row_ids)?;
+    write_seed(store, &have, &row_ids, &share)?;
     Ok(Summary {
         imported,
         unchanged,
@@ -683,7 +601,9 @@ fn pull_with(
 ///
 /// # Errors
 ///
-/// The directory is missing, or the pack sheds the write or passes its deadline.
+/// The directory is missing, the handoff or the seed folder did not take a
+/// read or a write, or the pack sheds the write or passes its deadline.
+/// The summary is returned only after the seed is in place.
 pub fn pull(store: &SeatStore, from: &Path) -> Result<Summary> {
     let _deadline = crate::pack_link::CommandDeadline::enter(crate::IMPORT_ADMISSION);
     let place = crate::memory_port::Place::for_seat(&store.seat);
@@ -758,17 +678,23 @@ fn pull_stopped(seat: &str, from: &Path, err: anyhow::Error) -> anyhow::Error {
 fn push_with(store: &SeatStore, to: &Path, lane: &str, extra: &[Value]) -> Result<String> {
     require_name(&store.seat, "seat")?;
     let lane = require_name(lane, "lane")?;
-    if std::fs::symlink_metadata(to).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        bail!(
-            "mesh: {} is a symlink. Pass the directory itself, not a link",
-            to.display()
-        );
+    let share = Share::mesh_push(&store.seat, &lane, to);
+    match share.symlink_meta(to) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!(
+                "mesh: {} is a symlink. Pass the directory itself, not a link",
+                to.display()
+            );
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(share.fail(to, err)),
     }
-    std::fs::create_dir_all(to).with_context(|| format!("mesh: cannot create {}", to.display()))?;
-    require_dir(to)?;
-    let _dir = Held::exclusive(to)?;
-    let _seat = Held::seat(&store.dir)?;
-    let (mut rows, row_ids) = read_seed(&store.seed_path())?;
+    share.create_dir(to).map_err(|err| share.fail(to, err))?;
+    require_dir(to, &share)?;
+    let _dir = Held::exclusive(to, &share)?;
+    let _seat = Held::seat(&store.dir, &share)?;
+    let (mut rows, row_ids) = read_seed(&store.seed_path(), &share)?;
     for value in extra {
         if let Some(row) = kept_from_line(value, &lane) {
             merge_row(&mut rows, row);
@@ -776,7 +702,7 @@ fn push_with(store: &SeatStore, to: &Path, lane: &str, extra: &[Value]) -> Resul
     }
     let dest = to.join(format!("{lane}.jsonl"));
     let bytes = document("export", &store.seat, &lane, &rows, &row_ids)?;
-    write_bytes(&dest, &bytes)?;
+    share.write_atomic(&dest, &bytes)?;
     let queued = crate::note_queue::pending_in(&crate::note_queue::state_dir())
         .iter()
         .filter(|note| note.kind == "lesson")
@@ -804,7 +730,7 @@ fn push_summary(rows: usize, dest: &Path, queued: usize) -> String {
 ///
 /// # Errors
 ///
-/// `lane` is not a file name, or the directory cannot be written.
+/// `lane` is not a file name, or the directory did not take the file.
 pub fn push(store: &SeatStore, to: &Path, lane: &str) -> Result<String> {
     let place = crate::memory_port::Place::for_seat(&store.seat);
     let extra = crate::memory_port::portable_rows(&place);
@@ -814,6 +740,7 @@ pub fn push(store: &SeatStore, to: &Path, lane: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
 

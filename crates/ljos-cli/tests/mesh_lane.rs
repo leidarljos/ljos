@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn run(root: &Path, home: &Path, pack: &str, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ljos"))
@@ -545,4 +545,226 @@ fn a_seat_with_a_slash_names_the_flag() {
     assert!(err.contains("is not a single name"), "{err}");
     assert!(err.contains("Pass --seat NAME with no slash"), "{err}");
     assert!(!err.contains("Caused by"), "{err}");
+}
+
+fn run_share(
+    root: &Path,
+    home: &Path,
+    args: &[&str],
+    extra: &[(&str, &str)],
+) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    cmd.args(args)
+        .current_dir(root)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8")
+        .env("TMPDIR", home.join("tmp"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("VISSUE_ROOT", root)
+        .env("LJOS_SEAT", "box")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("LJOS_OFF", "1")
+        .env("PACKSET_URL", "off")
+        .stdin(Stdio::null());
+    for (key, value) in extra {
+        cmd.env(key, value);
+    }
+    cmd.output().expect("ljos")
+}
+
+fn share_line(out: &std::process::Output) -> (String, String) {
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn assert_share_failure(out: &std::process::Output, folder: &Path, words: &str, again: &str) {
+    assert_eq!(out.status.code(), Some(1), "{}", text(out));
+    let (stdout, err) = share_line(out);
+    assert!(
+        err.contains(&format!("mesh: {}", folder.display())),
+        "{err}"
+    );
+    assert!(err.contains(words), "{err}");
+    assert!(err.contains("Check the mount, then rerun"), "{err}");
+    assert!(err.contains(again), "{err}");
+    assert!(!err.contains("os error"), "{err}");
+    assert!(!err.contains("Caused by"), "{err}");
+    assert_eq!(
+        err.lines().filter(|line| !line.is_empty()).count(),
+        1,
+        "{err}"
+    );
+    assert!(!stdout.contains("imported"), "{stdout}");
+    assert!(!stdout.contains("pushed"), "{stdout}");
+    assert!(!stdout.contains("unchanged"), "{stdout}");
+}
+
+struct OpenMode(PathBuf);
+
+impl Drop for OpenMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[test]
+fn a_read_only_share_does_not_report_a_push() {
+    use std::os::unix::fs::PermissionsExt;
+    let (home, root) = world();
+    let dest = root.join("handoff");
+    std::fs::create_dir(&dest).unwrap();
+    let _open = OpenMode(dest.clone());
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let pushed = run_share(
+        &root,
+        home.path(),
+        &[
+            "mesh",
+            "push",
+            "--seat",
+            "box",
+            "--lane",
+            "box",
+            "--to",
+            dest.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_share_failure(
+        &pushed,
+        &dest,
+        "Permission denied",
+        "ljos mesh push --seat box --lane box --to",
+    );
+    assert!(!dest.join("box.jsonl").exists());
+}
+
+#[test]
+fn a_missing_parent_names_the_folder() {
+    let (home, root) = world();
+    let blocker = root.join("not-a-directory");
+    std::fs::write(&blocker, b"x").unwrap();
+    let dest = blocker.join("handoff");
+    let pushed = run_share(
+        &root,
+        home.path(),
+        &[
+            "mesh",
+            "push",
+            "--seat",
+            "box",
+            "--lane",
+            "box",
+            "--to",
+            dest.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_share_failure(
+        &pushed,
+        &dest,
+        "Not a directory",
+        "ljos mesh push --seat box --lane box --to",
+    );
+}
+
+#[test]
+fn a_dead_share_skips_nothing_and_prints_no_seed_count() {
+    let (home, root) = world();
+    let from = root.join("handoff");
+    std::fs::create_dir(&from).unwrap();
+    write_lane(&from, "lane-a", &["alpha kiln"]);
+    let pulled = run_share(
+        &root,
+        home.path(),
+        &[
+            "mesh",
+            "pull",
+            "--seat",
+            "box",
+            "--from",
+            from.to_str().unwrap(),
+        ],
+        &[("LJOS_SHARE_FAULT", "enotconn")],
+    );
+    assert_share_failure(
+        &pulled,
+        &from,
+        "Transport endpoint is not connected",
+        &format!("ljos mesh pull --seat box --from {}", from.display()),
+    );
+    let seed =
+        std::fs::read_to_string(root.join(".ljos/memory/mesh/box/seed.jsonl")).unwrap_or_default();
+    assert!(!seed.contains("alpha kiln"), "{seed}");
+}
+
+#[test]
+fn a_stat_error_on_a_lane_file_does_not_count_as_imported() {
+    let (home, root) = world();
+    let from = root.join("handoff");
+    std::fs::create_dir(&from).unwrap();
+    write_lane(&from, "lane-a", &["alpha kiln"]);
+    let pulled = run_share(
+        &root,
+        home.path(),
+        &[
+            "mesh",
+            "pull",
+            "--seat",
+            "box",
+            "--from",
+            from.to_str().unwrap(),
+        ],
+        &[("LJOS_SHARE_FAULT", "stat")],
+    );
+    assert_share_failure(
+        &pulled,
+        &from,
+        "Transport endpoint is not connected",
+        "ljos mesh pull --seat box --from",
+    );
+    let seed =
+        std::fs::read_to_string(root.join(".ljos/memory/mesh/box/seed.jsonl")).unwrap_or_default();
+    assert!(!seed.contains("alpha kiln"), "{seed}");
+}
+
+#[test]
+fn a_slow_share_stops_within_the_wait() {
+    let (home, root) = world();
+    let from = root.join("handoff");
+    std::fs::create_dir(&from).unwrap();
+    write_lane(&from, "lane-a", &["alpha kiln"]);
+    let started = Instant::now();
+    let pulled = run_share(
+        &root,
+        home.path(),
+        &[
+            "mesh",
+            "pull",
+            "--seat",
+            "box",
+            "--from",
+            from.to_str().unwrap(),
+        ],
+        &[("LJOS_SHARE_FAULT", "slow"), ("LJOS_SHARE_WAIT", "0.2")],
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the pull sat for {elapsed:?}"
+    );
+    assert_share_failure(
+        &pulled,
+        &from,
+        "did not answer within 0.2 s",
+        "ljos mesh pull --seat box --from",
+    );
 }

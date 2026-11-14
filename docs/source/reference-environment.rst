@@ -165,6 +165,8 @@ LJOS_ variables
 - ``LJOS_SEAT`` default unset
 - ``LJOS_SEAT_KEY`` default unset
 - ``LJOS_SESSION_ID`` default unset
+- ``LJOS_SHARE_FAULT`` default unset
+- ``LJOS_SHARE_WAIT`` default 60 seconds
 - ``LJOS_SHELL_SESSION`` default unset
 - ``LJOS_SITTING_CLAIM_WAIT`` default 10 seconds
 - ``LJOS_SYNC_HOST`` default unset
