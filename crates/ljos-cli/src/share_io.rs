@@ -429,14 +429,24 @@ mod tests {
         Share::mesh_pull("box", dir)
     }
 
+    /// The words this system uses for `code`, without the `os error` number.
+    /// Linux says `Transport endpoint is not connected` for `ENOTCONN`. macOS
+    /// says `Socket is not connected`.
+    fn os_words(code: i32) -> String {
+        words(&IoError::from_raw_os_error(code))
+    }
+
     #[test]
     fn the_line_uses_words_and_names_the_next_pull() {
         let dir = Path::new("/srv/handoff");
+        let said = os_words(libc::ENOTCONN);
         let err = share(dir).fail(dir, IoError::from_raw_os_error(libc::ENOTCONN));
         let line = err.to_string();
         assert_eq!(
             line,
-            "mesh: /srv/handoff: Transport endpoint is not connected. Check the mount, then rerun `ljos mesh pull --seat box --from /srv/handoff`."
+            format!(
+                "mesh: /srv/handoff: {said}. Check the mount, then rerun `ljos mesh pull --seat box --from /srv/handoff`."
+            )
         );
         assert!(!line.contains("os error"), "{line}");
         assert!(!line.contains('\n'), "{line}");
@@ -467,7 +477,7 @@ mod tests {
         let err = place.write_atomic(&path, b"new\n").unwrap_err();
         drop(_fault);
         let line = err.to_string();
-        assert!(line.contains("Input/output error"), "{line}");
+        assert!(line.contains(&os_words(libc::EIO)), "{line}");
         assert!(line.contains("Check the mount, then rerun"), "{line}");
         assert!(!line.contains("os error"), "{line}");
         assert_eq!(std::fs::read(&path).unwrap(), b"old\n");
@@ -487,11 +497,7 @@ mod tests {
         let _fault = FaultArm::code(libc::ENOTCONN);
         let err = share(dir.path()).write_atomic(&path, b"new\n").unwrap_err();
         drop(_fault);
-        assert!(
-            err.to_string()
-                .contains("Transport endpoint is not connected"),
-            "{err}"
-        );
+        assert!(err.to_string().contains(&os_words(libc::ENOTCONN)), "{err}");
         assert_eq!(std::fs::read(&path).unwrap(), b"old\n");
     }
 }

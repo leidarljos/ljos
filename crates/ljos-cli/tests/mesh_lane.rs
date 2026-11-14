@@ -577,6 +577,15 @@ fn run_share(
     cmd.output().expect("ljos")
 }
 
+/// The words this system uses for `code`, without the `os error` number.
+fn os_words(code: i32) -> String {
+    let text = std::io::Error::from_raw_os_error(code).to_string();
+    match text.rfind(" (os error ") {
+        Some(at) if text.ends_with(')') => text[..at].to_string(),
+        _ => text,
+    }
+}
+
 fn share_line(out: &std::process::Output) -> (String, String) {
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -641,7 +650,7 @@ fn a_read_only_share_does_not_report_a_push() {
     assert_share_failure(
         &pushed,
         &dest,
-        "Permission denied",
+        &os_words(libc::EACCES),
         "ljos mesh push --seat box --lane box --to",
     );
     assert!(!dest.join("box.jsonl").exists());
@@ -671,7 +680,7 @@ fn a_missing_parent_names_the_folder() {
     assert_share_failure(
         &pushed,
         &dest,
-        "Not a directory",
+        &os_words(libc::ENOTDIR),
         "ljos mesh push --seat box --lane box --to",
     );
 }
@@ -698,7 +707,7 @@ fn a_dead_share_skips_nothing_and_prints_no_seed_count() {
     assert_share_failure(
         &pulled,
         &from,
-        "Transport endpoint is not connected",
+        &os_words(libc::ENOTCONN),
         &format!("ljos mesh pull --seat box --from {}", from.display()),
     );
     let seed =
@@ -728,7 +737,7 @@ fn a_stat_error_on_a_lane_file_does_not_count_as_imported() {
     assert_share_failure(
         &pulled,
         &from,
-        "Transport endpoint is not connected",
+        &os_words(libc::ENOTCONN),
         "ljos mesh pull --seat box --from",
     );
     let seed =

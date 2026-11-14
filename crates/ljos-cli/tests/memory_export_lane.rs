@@ -281,6 +281,15 @@ fn a_missing_import_names_export() {
     assert!(said.contains("no-such.jsonl"), "{said}");
 }
 
+/// The words this system uses for `code`, without the `os error` number.
+fn os_words(code: i32) -> String {
+    let text = std::io::Error::from_raw_os_error(code).to_string();
+    match text.rfind(" (os error ") {
+        Some(at) if text.ends_with(')') => text[..at].to_string(),
+        _ => text,
+    }
+}
+
 fn fault(out: &std::process::Output) -> String {
     format!(
         "status {}\n{}{}",
@@ -458,7 +467,7 @@ fn a_dead_share_stops_export_and_import_without_a_count() {
         .expect("ljos");
     assert_eq!(exported.status.code(), Some(1), "{}", fault(&exported));
     let said = fault(&exported);
-    assert!(said.contains("Input/output error"), "{said}");
+    assert!(said.contains(&os_words(libc::EIO)), "{said}");
     assert!(said.contains("Check the mount, then rerun"), "{said}");
     assert!(
         said.contains(&format!("ljos memory export --out {}", out_path.display())),
@@ -493,7 +502,7 @@ fn a_dead_share_stops_export_and_import_without_a_count() {
         .expect("ljos");
     assert_eq!(imported.status.code(), Some(1), "{}", fault(&imported));
     let said = fault(&imported);
-    assert!(said.contains("Stale file handle"), "{said}");
+    assert!(said.contains(&os_words(libc::ESTALE)), "{said}");
     assert!(
         said.contains(&format!("ljos memory import {}", out_path.display())),
         "{said}"
