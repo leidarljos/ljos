@@ -18996,6 +18996,10 @@ fn ensure_writer() -> Result<()> {
     #[cfg(not(test))]
     {
         run_captured("packset", &["ensure"]).context("packset ensure")?;
+        // packsetd loads the encoder on the first encode, not when the
+        // process starts. Ask now, in the background, so the person's
+        // first search is not the request that starts that load.
+        start_encoder_warm();
         Ok(())
     }
 }
