@@ -3448,9 +3448,10 @@ fn own_ancestry() -> Vec<(u32, String)> {
 /// Names ljos ships for runners, plus any the runners file adds.
 ///
 /// An absent runners file is not "no runners": the shapes in
-/// [`HARNESSES_EXAMPLE`] are the names a process tree and a cgroup are
-/// matched against. A file that does not parse contributes nothing of
-/// its own; the shipped names still count.
+/// [`HARNESSES_EXAMPLE`] are the names a process tree is matched against,
+/// and on macOS the process that owns this one. A cgroup path is not.
+/// A file that does not parse contributes nothing of its own; the shipped
+/// names still count.
 fn runner_names() -> Vec<String> {
     fn shipped() -> &'static [String] {
         static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
@@ -3476,10 +3477,12 @@ fn runner_names() -> Vec<String> {
     names
 }
 
-/// A cgroup path component names a runner when one of its words is that
-/// runner's name. `the editor command` is the word `the editor harness`. A shell, a
-/// multiplexer or a terminal is not a runner, and a name shorter than
-/// four letters is too small a word to trust inside a path.
+/// A process name spells a runner when one of its words is that runner's
+/// name. `cursor-agent` is the word `cursor`. A shell, a multiplexer or a
+/// terminal is not a runner, and a name shorter than four letters is too
+/// small a word to trust. A cgroup path can spell the same word. That
+/// spelling is not proof a runner is above this process.
+#[cfg(any(test, target_os = "macos"))]
 fn scope_word_counts(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.len() >= 4
@@ -3490,6 +3493,7 @@ fn scope_word_counts(name: &str) -> bool {
         && !TERMINALS.iter().any(|t| t.eq_ignore_ascii_case(name))
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn segment_names_runner(segment: &str, runners: &[String]) -> bool {
     segment
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -3498,9 +3502,10 @@ fn segment_names_runner(segment: &str, runners: &[String]) -> bool {
         })
 }
 
-/// Whether `text` is `/proc/self/cgroup` for a process still inside a
-/// runner's scope. Each line is `id:controllers:path`.
-#[cfg(any(test, target_os = "linux"))]
+/// Whether `text` is `/proc/self/cgroup` whose path spells a runner.
+/// Each line is `id:controllers:path`. Spelling the name is not proof
+/// that this process is under a runner.
+#[cfg(test)]
 fn cgroup_text_names_runner(text: &str, runners: &[String]) -> bool {
     text.lines().any(|line| {
         let path = line.rsplit_once(':').map_or(line, |(_, path)| path);
@@ -3532,29 +3537,26 @@ fn own_cgroup() -> Result<String, ()> {
     std::fs::read_to_string("/proc/self/cgroup").map_err(|_| ())
 }
 
-/// A cgroup read that names a runner or a transient scope, or that failed.
-/// `Err` is an unreadable `/proc/self/cgroup`. A program between this
-/// process and the session does not change the answer: `setsid -f python3`
-/// leaves python in the chain and the runner's cgroup around both.
+/// A cgroup read that is a runner for a reason other than a path that
+/// spells a runner's name. `Err` is an unreadable `/proc/self/cgroup`.
+/// A transient `run-*.scope` is `systemd-run` or a D-Bus scope. A path
+/// such as `cursor-agent` is how a container or a cloud VM names its
+/// workload, and it is not this.
 #[cfg(test)]
-fn cgroup_read_is_runner(read: Result<&str, ()>, runners: &[String]) -> bool {
+fn cgroup_read_is_runner(read: Result<&str, ()>) -> bool {
     match read {
         Err(()) => true,
-        Ok(text) => cgroup_text_names_runner(text, runners) || cgroup_text_is_transient(text),
+        Ok(text) => cgroup_text_is_transient(text),
     }
 }
 
-/// Linux: the cgroup this process was started in. A new session does not
-/// leave it. Writing a different cgroup, which a user service or
-/// `systemd-run --user --scope` does, does leave it. The file is read
-/// whether or not a program sits above this process. Unreadable counts
-/// as a runner.
+/// Linux: an unreadable cgroup hides the scope, which counts as a runner.
+/// A path that spells a runner's name does not. Containers and cloud VMs
+/// are named that way with no runner above the shell. A transient
+/// `run-*.scope` is [`transient_scope`].
 #[cfg(target_os = "linux")]
-fn scope_names_runner(runners: &[String]) -> bool {
-    match own_cgroup() {
-        Ok(text) => cgroup_text_names_runner(&text, runners),
-        Err(()) => true,
-    }
+fn scope_names_runner(_runners: &[String]) -> bool {
+    own_cgroup().is_err()
 }
 
 /// What the responsible process says about a runner. No name is not
@@ -3635,12 +3637,16 @@ fn responsible_comm() -> Option<String> {
         .map(str::to_string)
 }
 
-/// A runner in the process tree, or the scope this process still sits in.
-/// The scope is read whatever the ancestors are. A program a tool call
-/// puts in the chain (`python3`, `node`, `perl`, `nice`) used to hide it.
-/// On Linux the scope is the cgroup, including a transient `run-*.scope`
-/// from `systemd-run` or a D-Bus scope, and an unreadable cgroup. On macOS
-/// it is the responsible process. A cleared environment does not leave either.
+/// A runner in the process tree, or a scope this process still sits in
+/// that is not merely a path spelling a runner's name.
+/// The tree is read first. A program a tool call puts in the chain
+/// (`python3`, `node`, `perl`, `nice`) does not hide a runner named
+/// there. On Linux the scope that still counts is a transient
+/// `run-*.scope` from `systemd-run` or a D-Bus scope, and an unreadable
+/// cgroup. On macOS it is the responsible process. A cgroup path that
+/// spells a runner does not: that is the workload name on a container
+/// or a cloud VM. A cleared environment does not leave the tree or the
+/// scope that does count.
 fn runner_scope_or_tree() -> bool {
     let runners = runner_names();
     if tree_names_runner(&ancestry(), &runners, |pid| seat_record_path(pid).exists()) {
@@ -3681,18 +3687,18 @@ fn transient_scope() -> bool {
 
 /// Whether this process runs under an agent runner.
 ///
-/// A runner in the process tree, or the scope this process still sits in,
-/// is enough on its own. The scope is read whatever the ancestors are: a
-/// `python3`, `node`, `perl` or `nice` a tool call put in the chain does
-/// not hide it. On Linux that scope is the cgroup, including a transient
-/// `run-*.scope` from `systemd-run` or a D-Bus scope, and a cgroup that
-/// cannot be read. On macOS it is the responsible process. A runner
-/// variable ([`runner_mark_set`]) counts only when this is not a person's
-/// terminal: a hook, a pipe, a process with no controlling tty. On a
-/// terminal whose tree and scope show no runner, the variable does not
-/// count. One left over from a runner that started the shell is not a
-/// runner. The same variable with that evidence does count. Consent is
-/// the person's, so the verbs that grant it refuse when this is true.
+/// A runner in the process tree is enough on its own. On Linux a
+/// transient `run-*.scope` from `systemd-run` or a D-Bus scope is too,
+/// and so is a cgroup that cannot be read. On macOS the process the
+/// kernel holds responsible is that scope. A cgroup path that spells a
+/// runner's name is not: containers and cloud VMs are named that way
+/// with no runner above the shell. A runner variable
+/// ([`runner_mark_set`]), including the runner's session variable,
+/// counts only when this is not a person's terminal: a hook, a pipe, a
+/// process with no controlling tty. On a terminal whose tree and scope
+/// show no runner, the variable does not count. One left over from a
+/// runner that started the shell is not a runner. Consent is the
+/// person's, so the verbs that grant it refuse when this is true.
 /// [`runner_cause`] says which of the two it was.
 #[must_use]
 pub fn under_a_runner() -> bool {
@@ -41752,6 +41758,14 @@ pub fn not_assignee_message(
     }
 }
 
+/// The line `ljos finish` prints when the sitting had no lesson. The
+/// command names this issue, so it can be run as written.
+fn missing_lesson_line(issue: &str) -> String {
+    format!(
+        "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, so run `ljos finish {issue} --lesson \"...\"`"
+    )
+}
+
 /// Whether a lesson given to `ljos finish` is the person's own: no agent
 /// runner above the process and [`person_present`]. Any other lesson is
 /// stored at once all the same, labelled `agent-derived`.
@@ -42496,9 +42510,8 @@ pub fn finish(
     }
     out.push_str(&lesson_lines);
     if supplied.is_none() && !ticket_has_lesson(issue) {
-        out.push_str(
-            "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, otherwise pass --lesson in two sentences\n",
-        );
+        out.push_str(&missing_lesson_line(issue));
+        out.push('\n');
     }
     if verbose {
         match packset_island(&title, true) {
@@ -66746,7 +66759,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     #[test]
-    fn a_cgroup_word_names_the_runner_that_started_it() {
+    fn a_cgroup_path_can_spell_a_runner_without_being_one() {
         let runners = vec![
             "cursor".to_string(),
             "claude".to_string(),
@@ -66785,20 +66798,23 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(!super::cgroup_text_is_transient(
             "0::/system.slice/pod/cursor-agent/workload\n"
         ));
-        // A program above the process does not skip this. An unreadable
-        // cgroup is a runner; a login session that was read is not.
-        assert!(super::cgroup_read_is_runner(Err(()), &runners));
-        assert!(super::cgroup_read_is_runner(Ok(transient), &runners));
-        assert!(!super::cgroup_read_is_runner(
-            Ok("0::/user.slice/user-1000.slice/session-3.scope\n"),
-            &runners
-        ));
+        // An unreadable cgroup is a runner, and so is a transient scope.
+        // A login session that was read is not. A path that spells a
+        // runner is not: the words above are only the spelling.
+        assert!(super::cgroup_read_is_runner(Err(())));
+        assert!(super::cgroup_read_is_runner(Ok(transient)));
+        assert!(!super::cgroup_read_is_runner(Ok(
+            "0::/user.slice/user-1000.slice/session-3.scope\n"
+        )));
+        assert!(!super::cgroup_read_is_runner(Ok(
+            "0::/system.slice/pod/cursor-agent/workload\n"
+        )));
     }
 
-    /// The suite's own process is not a runner workload. A host cgroup
-    /// that is a cloud runner's named workload cgroup still names that
-    /// runner for the product. The test harness moves out of it before
-    /// a test models a person.
+    /// The boot moves this process out of a host workload cgroup before
+    /// a test models a person. A path that spells a runner is not a
+    /// runner. A transient scope would be, so the process is not left
+    /// in one.
     #[test]
     fn a_test_process_is_not_left_in_a_runner_cgroup() {
         let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
@@ -66960,7 +66976,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         #[cfg(target_os = "linux")]
         let scope = {
             let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-            super::cgroup_read_is_runner(Ok(&text), &super::runner_names())
+            super::cgroup_read_is_runner(Ok(&text))
         };
         #[cfg(not(target_os = "linux"))]
         let scope = super::runner_scope_or_tree();
@@ -66996,8 +67012,21 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             .map(|(comm, pid)| (pid, (*comm).to_string()))
             .collect();
         let hard = super::tree_names_runner(&chain, &runners, |_| false)
-            || super::cgroup_read_is_runner(cgroup, &runners);
+            || super::cgroup_read_is_runner(cgroup);
         super::cause_of(hard, || at_terminal, || mark)
+    }
+
+    /// Person or runner, from the same rule as [`super::person_present`]
+    /// and [`super::under_a_runner`]: a cause is a runner, and a terminal
+    /// with no cause is the person.
+    fn role(cause: Option<super::RunnerCause>, at_terminal: bool) -> &'static str {
+        if cause.is_some() {
+            "runner"
+        } else if at_terminal {
+            "person"
+        } else {
+            "absent"
+        }
     }
 
     /// A runner in the tree or the scope is a hard runner whatever the
@@ -67030,8 +67059,26 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 "a runner in the tree, terminal {at_terminal}, mark {mark}"
             );
         }
+        // A path that spells a runner is not hard evidence. A transient
+        // scope and an unreadable cgroup still are, on either host.
+        let named = Ok("0::/system.slice/pod-1/cursor-agent/workload\n");
+        assert_eq!(
+            role(fixture_cause(&hook, named, true, false), true),
+            "person"
+        );
+        assert_eq!(
+            role(fixture_cause(&hook, named, true, true), true),
+            "person"
+        );
+        assert_eq!(
+            role(fixture_cause(&hook, named, false, false), false),
+            "absent"
+        );
+        assert_eq!(
+            role(fixture_cause(&hook, named, false, true), false),
+            "runner"
+        );
         for cgroup in [
-            Ok("0::/system.slice/pod-1/cursor-agent/workload\n"),
             Ok("0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1a2b3.scope\n"),
             Err(()),
         ] {
@@ -67043,6 +67090,55 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 );
             }
         }
+    }
+
+    /// A plain terminal whose cgroup path spells a runner is the person.
+    /// A runner process above the shell is a runner, and so is the
+    /// runner's session variable when there is no terminal. The strings
+    /// stand in for the host, so the same decision is what Linux and
+    /// macOS run.
+    #[test]
+    fn a_named_cgroup_at_a_terminal_is_the_person() {
+        let shell = ["bash", "gnome-terminal-"];
+        let named = Ok("0::/system.slice/pod-1/cursor-agent/workload\n");
+        let login = Ok("0::/user.slice/user-1000.slice/session-3.scope\n");
+        assert_eq!(
+            role(fixture_cause(&shell, named, true, false), true),
+            "person"
+        );
+        assert_eq!(
+            role(fixture_cause(&shell, named, true, true), true),
+            "person"
+        );
+        assert_eq!(
+            role(fixture_cause(&shell, login, true, false), true),
+            "person"
+        );
+        let ancestor = ["sh", "claude", "gnome-terminal-"];
+        assert_eq!(
+            role(fixture_cause(&ancestor, login, true, false), true),
+            "runner"
+        );
+        assert_eq!(
+            role(fixture_cause(&ancestor, named, false, false), false),
+            "runner"
+        );
+        assert_eq!(
+            role(fixture_cause(&shell, named, false, true), false),
+            "runner"
+        );
+        assert_eq!(
+            role(fixture_cause(&shell, login, false, true), false),
+            "runner"
+        );
+        assert_eq!(
+            fixture_cause(&ancestor, named, true, false),
+            Some(super::RunnerCause::Hard)
+        );
+        assert_eq!(
+            fixture_cause(&shell, login, false, true),
+            Some(super::RunnerCause::MarkOnly)
+        );
     }
 
     /// The variables are named, sorted, and their values never appear.
@@ -67074,16 +67170,16 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             .any(|m| m.contains("value") || m.contains("0199")));
     }
 
-    /// The cgroup is consulted whatever sits above this process. When it
-    /// names a runner, this process is under one. When it does not, and no
-    /// runner variable is set, it is not.
+    /// A transient scope or an unreadable cgroup puts this process under
+    /// a runner. A path that only spells a runner does not, and with no
+    /// runner variable set the process is not under one.
     #[test]
-    fn this_process_follows_its_cgroup() {
+    fn this_process_follows_a_real_scope() {
         let _g = env_guard();
         #[cfg(target_os = "linux")]
         let named = {
             let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-            super::cgroup_read_is_runner(Ok(&text), &super::runner_names())
+            super::cgroup_read_is_runner(Ok(&text))
         };
         #[cfg(not(target_os = "linux"))]
         let named = super::runner_scope_or_tree();
@@ -77166,10 +77262,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(lesson_claims("   ").is_empty());
     }
 
-    const LESSON_LINE: &str = "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, otherwise pass --lesson in two sentences";
-
-    fn lesson_lines_in(text: &str) -> usize {
-        text.matches(LESSON_LINE).count()
+    fn lesson_lines_in(text: &str, issue: &str) -> usize {
+        text.matches(&super::missing_lesson_line(issue)).count()
     }
 
     fn claimdag_for(log: &std::path::Path, complete_ok: bool) -> String {
@@ -77265,7 +77359,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn a_refused_finish_prints_nothing_about_a_lesson() {
         let err = run_finish_lesson(r#"{"atoms":[]}"#, None, false).unwrap_err();
         assert!(err.contains("the seat does not hold this node"), "{err}");
-        assert_eq!(lesson_lines_in(&err), 0, "{err}");
+        assert_eq!(lesson_lines_in(&err, "probe-lsn1"), 0, "{err}");
         assert!(!err.contains("remembered your lesson"), "{err}");
         assert!(!err.contains("the lesson was not kept"), "{err}");
         assert!(!err.contains(" as agent-derived"), "{err}");
@@ -77273,7 +77367,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let err = run_finish_lesson(r#"{"atoms":[]}"#, Some("The codec is one file."), false)
             .unwrap_err();
         assert!(err.contains("the seat does not hold this node"), "{err}");
-        assert_eq!(lesson_lines_in(&err), 0, "{err}");
+        assert_eq!(lesson_lines_in(&err, "probe-lsn1"), 0, "{err}");
         assert!(!err.contains("remembered your lesson"), "{err}");
         assert!(!err.contains("the lesson was not kept"), "{err}");
         assert!(!err.contains(" as agent-derived"), "{err}");
@@ -77293,7 +77387,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         .unwrap_err()
         .to_string();
         assert!(err.contains("is not one of"), "{err}");
-        assert_eq!(lesson_lines_in(&err), 0, "{err}");
+        assert_eq!(lesson_lines_in(&err, "probe-lsn1"), 0, "{err}");
     }
 
     /// The reminder is one line, and only when the ticket has no live lesson.
@@ -77308,39 +77402,39 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             !said.contains("island") && !said.contains("seed"),
             "the memory links stay behind --verbose: {said}"
         );
-        assert_eq!(lesson_lines_in(&said), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
 
         let said = run_finish_lesson(none, Some("   "), true).unwrap();
-        assert_eq!(lesson_lines_in(&said), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
 
         let other = r#"{"atoms":[{"id":"les-o","kind":"lesson","text":"Another ticket taught this.","issue":"probe-othr","entities":["issue:probe-othr"]}]}"#;
         let said = run_finish_lesson(other, None, true).unwrap();
         assert!(said.contains("finished probe-lsn1 as done"), "{said}");
-        assert_eq!(lesson_lines_in(&said), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
 
         let tomb = r#"{"atoms":[{"id":"les-t","kind":"lesson","text":"Withdrawn.","issue":"probe-lsn1","entities":["issue:probe-lsn1"],"tombstone":true}]}"#;
         let said = run_finish_lesson(tomb, None, true).unwrap();
-        assert_eq!(lesson_lines_in(&said), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
 
         let note = r#"{"atoms":[{"id":"n-1","kind":"note","text":"A note is not a lesson.","issue":"probe-lsn1","entities":["issue:probe-lsn1"]}]}"#;
         let said = run_finish_lesson(note, None, true).unwrap();
-        assert_eq!(lesson_lines_in(&said), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
 
         let pref = r#"{"atoms":[{"id":"p-1","kind":"preference","text":"Use the codec file.","issue":"probe-lsn1","entities":["issue:probe-lsn1"]}]}"#;
         let said = run_finish_lesson(pref, None, true).unwrap();
-        assert_eq!(lesson_lines_in(&said), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
 
         let own = r#"{"atoms":[{"id":"les-1","kind":"lesson","text":"The codec is one file.","issue":"probe-lsn1","entities":["issue:probe-lsn1"]}]}"#;
         let said = run_finish_lesson(own, None, true).unwrap();
         assert!(said.contains("finished probe-lsn1 as done"), "{said}");
-        assert_eq!(lesson_lines_in(&said), 0, "{said}");
+        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 0, "{said}");
 
         let entity = r#"{"atoms":[{"id":"les-e","kind":"lesson","text":"Tagged only.","entities":["issue:probe-lsn1"]}]}"#;
         let said = run_finish_lesson(entity, None, true).unwrap();
-        assert_eq!(lesson_lines_in(&said), 0, "{said}");
+        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 0, "{said}");
 
         let said = run_finish_lesson(none, Some("The codec is one file."), true).unwrap();
-        assert_eq!(lesson_lines_in(&said), 0, "{said}");
+        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 0, "{said}");
         assert!(
             said.contains("remembered your lesson")
                 || said.contains(" as agent-derived")

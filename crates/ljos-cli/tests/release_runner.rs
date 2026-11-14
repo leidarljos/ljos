@@ -1,8 +1,9 @@
 //! The release binary has no way to turn runner detection off.
 //!
-//! A test harness may leave a host runner cgroup. The binary it builds
-//! must not. A copy whose path contains `/deps/` is still the product,
-//! and a runner cgroup around that copy still makes a keep the agent's.
+//! A test run may leave a host cgroup whose path spells a runner. The
+//! binary it builds must not. A copy whose path contains `/deps/` is
+//! still the product. A keep with no terminal is the agent's. The cgroup
+//! path is not what decides that.
 
 ljos_test_boot::harness!();
 

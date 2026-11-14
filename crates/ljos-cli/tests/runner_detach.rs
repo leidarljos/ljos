@@ -1,9 +1,11 @@
-//! A runner that detaches is still a runner.
+//! A runner that detaches is a runner only with a runner still in the
+//! process tree, or with the runner's session variable and no terminal.
 //!
-//! `setsid -f`, a double fork, `script` and `tmux new-session -d` drop the
-//! runner from the process tree and can clear its variables. The cgroup
-//! stays. A keep of a held user rule and a preference from any of those
-//! are the agent's, the same as under a live `the terminal harness` parent.
+//! `setsid -f`, a double fork and `script` drop the runner from the
+//! process tree and can clear its variables. With no terminal, the
+//! command is not the person's. A cgroup path that spells a runner is
+//! not that evidence: a terminal in that cgroup, including one `tmux`
+//! already has open, is the person.
 
 ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
@@ -187,6 +189,20 @@ fn prefer_as_agent(seat: &Seat, out: &std::process::Output, needle: &str, how: &
     let stored = by_text(&stored, needle);
     assert_eq!(basis(stored), Some("agent"), "{how}: {stored}");
     assert_ne!(stored["origin"], "user-declared", "{how}: {stored}");
+}
+
+/// A preference typed at a terminal is the person's, including when the
+/// cgroup path spells a runner and no runner process sits above the shell.
+fn prefer_as_person(seat: &Seat, out: &std::process::Output, needle: &str, how: &str) {
+    assert!(
+        out.status.success(),
+        "{how} prefer failed\n{}",
+        text_of(out)
+    );
+    let stored = atoms(&seat.url);
+    let stored = by_text(&stored, needle);
+    assert_eq!(basis(stored), Some("person"), "{how}: {stored}");
+    assert_eq!(stored["origin"], "user-declared", "{how}: {stored}");
 }
 
 /// Run `body` under `setsid -f`, so the shell's parent is init and the
@@ -411,7 +427,9 @@ fn forged_hook(seat: &Seat) -> std::process::Output {
     )
 }
 
-/// Detaching does not make a keep, a prefer, or a prompt hook the person's.
+/// A detach with no terminal does not make a keep, a prefer, or a prompt
+/// hook the person's. A terminal in a cgroup that only spells a runner
+/// is the person.
 #[test]
 fn detaching_does_not_make_this_process_the_person() {
     if !ljos_cli::tool_installed("packsetd") {
@@ -429,35 +447,45 @@ fn detaching_does_not_make_this_process_the_person() {
         .output()
         .unwrap();
     assert!(direct.status.success(), "{}", text_of(&direct));
-    keep_as_agent(&seat, &direct, "the runner cgroup without a detach");
+    keep_as_agent(&seat, &direct, "no terminal, cgroup name only");
 
-    // python holds the pty. It is not a wrapper, and the cgroup still names
-    // the runner, so the typed command is the runner's.
+    // The terminal is the person's. The cgroup path spells a runner, and
+    // no runner process sits above the shell.
     let shaped = terminal::shape(
         "terminal",
         ljos(),
         &["prefer", "Keep the release notes in one file."],
     );
     let typed = seat.command(terminal::PYTHON, &shaped).output().unwrap();
-    prefer_as_agent(
+    prefer_as_person(
         &seat,
         &typed,
         "release notes",
-        "terminal inside the runner cgroup",
+        "terminal inside a cgroup that spells a runner",
     );
 
     keep_as_agent(&seat, &setsid_keep(&seat), "setsid");
     keep_as_agent(&seat, &env_i_keep(&seat), "setsid env -i");
     keep_as_agent(&seat, &script_keep(&seat), "script");
     keep_as_agent(&seat, &double_fork_keep(&seat), "double fork");
-    keep_as_agent(&seat, &tmux_keep(&seat), "tmux");
+    // tmux is a terminal. A cgroup path that spells a runner does not
+    // hide the person typing in that pane.
+    let tmuxed = tmux_keep(&seat);
+    let path = seat.home.path().join(".config/ljos/user-rules.json");
+    let rules: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        rules["rules"][0]["basis"],
+        "person",
+        "tmux: {rules}\n{}",
+        text_of(&tmuxed)
+    );
 
     let detached = setsid_prefer(&seat, "Name release branches after the month.");
     prefer_as_agent(&seat, &detached, "release branches", "setsid prefer");
 
-    // setsid -f python3: python is the parent, so the chain is not only
-    // wrappers, and the environment is the seat's clean one. The cgroup
-    // still has to count.
+    // setsid -f python3: python is the parent, so this is not a login
+    // terminal, and the environment is the seat's clean one. A cgroup
+    // path that spells a runner is not what makes the preference the agent's.
     let via_python = setsid_python_prefer(&seat, "Write the notes before the tag.");
     prefer_as_agent(&seat, &via_python, "before the tag", "setsid python3");
 
@@ -483,10 +511,10 @@ fn detaching_does_not_make_this_process_the_person() {
 }
 
 /// `tmux send-keys` into a session that already exists types into a real
-/// pane. The pane has a terminal. The server was started in the runner's
-/// cgroup, so the command is still the runner's.
+/// pane. The pane has a terminal. A cgroup path that spells a runner does
+/// not make that typing a runner's.
 #[test]
-fn tmux_send_keys_into_an_existing_session_is_not_the_person() {
+fn tmux_send_keys_into_an_existing_session_is_the_person() {
     if !ljos_cli::tool_installed("packsetd") {
         eprintln!("skipped: packsetd is not installed");
         return;
@@ -551,7 +579,7 @@ fn tmux_send_keys_into_an_existing_session_is_not_the_person() {
     if std::fs::read_to_string(&done).unwrap_or_default().trim() != "0" {
         built.status = std::os::unix::process::ExitStatusExt::from_raw(1 << 8);
     }
-    prefer_as_agent(&seat, &built, "every Makefile", "tmux send-keys");
+    prefer_as_person(&seat, &built, "every Makefile", "tmux send-keys");
 }
 
 /// A terminal shape with `GITHUB_ACTIONS` set is a CI job, not the person,
