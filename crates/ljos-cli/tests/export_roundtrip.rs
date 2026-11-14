@@ -174,12 +174,25 @@ fn export_import_integrate_round_trip_reaches_the_hook() {
     let imported = seat.run(
         "roundtrip-b",
         &into,
-        &["memory", "import", path.to_str().expect("utf-8")],
+        &["memory", "import", "--json", path.to_str().expect("utf-8")],
         None,
     );
     assert!(imported.status.success(), "import: {}", text(&imported));
-    let rows = number_after(&text(&imported), " rows ");
-    assert_eq!(rows, Some(carried), "import: {}", text(&imported));
+    // `--json` names `imported` and `unchanged`. The prose is
+    // `imported N, unchanged M, skipped K`, or
+    // `nothing new: N rows already present` when the file was stored already.
+    let summary: serde_json::Value =
+        serde_json::from_slice(&imported.stdout).unwrap_or_else(|err| {
+            panic!("import was not json ({err}): {}", text(&imported));
+        });
+    let count = |key: &str| summary.get(key).and_then(serde_json::Value::as_u64);
+    assert_eq!(
+        count("imported").map(|n| n as usize),
+        Some(carried),
+        "import: {}",
+        text(&imported)
+    );
+    assert_eq!(count("unchanged"), Some(0), "import: {}", text(&imported));
 
     let integrated = seat.run(
         "roundtrip-b",
