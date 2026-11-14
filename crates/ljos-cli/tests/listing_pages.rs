@@ -39,11 +39,7 @@ impl Home {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
-        std::fs::write(
-            root.join("tracker/vissue.toml"),
-            "prefix = \"Software\"\n",
-        )
-        .unwrap();
+        std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
         std::fs::write(root.join("tracker/Software/demo/issues.org"), ISSUES).unwrap();
         let bin = root.join("home/.local/bin/vissue");
         std::fs::write(&bin, VISSUE_STUB).unwrap();
@@ -406,7 +402,9 @@ fn snap(name: &str, actual: &str) {
 }
 
 fn atoms() -> Value {
-    let today = chrono::Utc::now().format("%Y-%m-%dT12:00:00.000Z").to_string();
+    let today = chrono::Utc::now()
+        .format("%Y-%m-%dT12:00:00.000Z")
+        .to_string();
     let yesterday = (chrono::Utc::now().date_naive() - chrono::Duration::days(1))
         .format("%Y-%m-%dT12:00:00.000Z")
         .to_string();
@@ -576,10 +574,7 @@ fn listing_commands_match_the_saved_pages() {
     for (name, args) in cases {
         let out = home.run(args);
         let text = page(&out, &home.root);
-        assert!(
-            out.status.success(),
-            "{name} failed\n{text}"
-        );
+        assert!(out.status.success(), "{name} failed\n{text}");
         snap(name, &text);
     }
 }

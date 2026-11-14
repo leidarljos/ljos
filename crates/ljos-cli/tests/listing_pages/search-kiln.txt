@@ -4,47 +4,48 @@ matched by meaning
 stdout:
 shown 10 of 16, and the next page lists the rest, so run `ljos search kiln -n
 16`.
-The number is the order in the list. It is not whether the sentence is true.
+Place 1 is the first row. This seat's rows come before another seat's.
+The score orders the row. It is not whether the sentence is true.
 Checks: how many of them named this row.
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-kiln
   The damper sticks when the kiln is cold.
-  order 0.96, checks 2/3, id idkiln01
+  place 1, score 0.96, checks 2/3, id idkiln01a
 
-lesson, from an agent, yesterday
+lesson, from an agent, yesterday, ticket demo-kiln
   The damper sticks.
   Open the flue before the kiln reaches temperature.
   Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
-  order 0.91, checks 3/3, id idkiln02
+  place 2, score 0.91, checks 3/3, id idkiln02b
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-tile
   Glaze batch 1 waits until the kiln is cool enough to open.
-  order 0.79, checks 2/2, id idglaze0
+  place 3, score 0.79, checks 2/2, id idglaze01
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-tile
   Glaze batch 2 waits until the kiln is cool enough to open.
-  order 0.78, checks 2/2, id idglaze0
+  place 4, score 0.78, checks 2/2, id idglaze02
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-tile
   Glaze batch 3 waits until the kiln is cool enough to open.
-  order 0.77, checks 2/2, id idglaze0
+  place 5, score 0.77, checks 2/2, id idglaze03
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-tile
   Glaze batch 4 waits until the kiln is cool enough to open.
-  order 0.76, checks 2/2, id idglaze0
+  place 6, score 0.76, checks 2/2, id idglaze04
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-tile
   Glaze batch 5 waits until the kiln is cool enough to open.
-  order 0.75, checks 2/2, id idglaze0
+  place 7, score 0.75, checks 2/2, id idglaze05
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-tile
   Glaze batch 6 waits until the kiln is cool enough to open.
-  order 0.74, checks 2/2, id idglaze0
+  place 8, score 0.74, checks 2/2, id idglaze06
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-tile
   Glaze batch 7 waits until the kiln is cool enough to open.
-  order 0.73, checks 2/2, id idglaze0
+  place 9, score 0.73, checks 2/2, id idglaze07
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-tile
   Glaze batch 8 waits until the kiln is cool enough to open.
-  order 0.72, checks 2/2, id idglaze0
+  place 10, score 0.72, checks 2/2, id idglaze08

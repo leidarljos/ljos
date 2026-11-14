@@ -170,9 +170,39 @@ fn break_word(text: &str, cols: usize) -> String {
 /// The first eight characters, which `ljos forget` accepts as an id.
 #[must_use]
 pub fn short_id(id: &str) -> &str {
-    match id.trim().char_indices().nth(8) {
+    prefix_of(id, 8)
+}
+
+/// A prefix of `id`, at least eight characters when `id` is that long,
+/// long enough that every id in the list has its own. `ljos forget`
+/// accepts the eight-character prefix, and a longer one when several
+/// memories share those eight.
+#[must_use]
+pub fn unique_prefixes<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let ids: Vec<&str> = ids.into_iter().map(str::trim).collect();
+    let widest = ids.iter().map(|id| id.chars().count()).max().unwrap_or(0);
+    let mut len = 8.min(widest);
+    while len < widest {
+        let mut seen = std::collections::BTreeSet::new();
+        let clash = ids.iter().filter(|id| !id.is_empty()).any(|id| {
+            let short = prefix_of(id, len);
+            !seen.insert(short)
+        });
+        if !clash {
+            break;
+        }
+        len += 1;
+    }
+    ids.iter()
+        .map(|id| prefix_of(id, len).to_string())
+        .collect()
+}
+
+fn prefix_of(id: &str, len: usize) -> &str {
+    let id = id.trim();
+    match id.char_indices().nth(len) {
         Some((index, _)) => &id[..index],
-        None => id.trim(),
+        None => id,
     }
 }
 
@@ -263,8 +293,12 @@ pub struct SearchRow<'a> {
     pub score: f64,
     /// Scorers that named the hit, and how many ran.
     pub ballots: Option<(u32, u32)>,
-    /// Full id. The page prints eight characters.
+    /// Full id. The page prints a prefix that names this row alone.
     pub id: Option<&'a str>,
+    /// Ticket the memory was filed on, when it has one.
+    pub ticket: Option<&'a str>,
+    /// Place on this page. 1 is the first row.
+    pub place: usize,
     /// Kept on this machine, not in the pack.
     pub local: bool,
 }
@@ -305,14 +339,14 @@ pub fn search_page(page: &SearchPage<'_>) -> String {
             out.push('\n');
         }
     } else {
-        out.push_str(
-            "The number is the order in the list. It is not whether the sentence is true.\n",
-        );
+        out.push_str("Place 1 is the first row. This seat's rows come before another seat's.\n");
+        out.push_str("The score orders the row. It is not whether the sentence is true.\n");
         out.push_str("Checks: how many of them named this row.\n");
     }
     out.push('\n');
-    for row in page.rows {
-        out.push_str(&search_row(row));
+    let labels = unique_prefixes(page.rows.iter().map(|row| row.id.unwrap_or("")));
+    for (row, label) in page.rows.iter().zip(labels) {
+        out.push_str(&search_row(row, &label));
         out.push_str("\n\n");
     }
     while out.ends_with("\n\n") {
@@ -440,7 +474,7 @@ fn search_hint(query: &str, limit: usize, asks: bool) -> String {
     format!("{verb}, so run `{cmd}`.")
 }
 
-fn search_row(row: &SearchRow<'_>) -> String {
+fn search_row(row: &SearchRow<'_>, id_label: &str) -> String {
     let mut head = row.label.to_string();
     if !row.age.is_empty() {
         head.push_str(", ");
@@ -450,15 +484,19 @@ fn search_row(row: &SearchRow<'_>) -> String {
         head.push_str(", from ");
         head.push_str(seat);
     }
-    let mut foot = format!("order {:.2}", row.score);
+    if let Some(ticket) = row.ticket.filter(|ticket| !ticket.is_empty()) {
+        head.push_str(", ticket ");
+        head.push_str(ticket);
+    }
+    let mut foot = format!("place {}, score {:.2}", row.place.max(1), row.score);
     if row.local {
         foot.push_str(", local, not in the pack");
     } else if let Some((hit, of)) = row.ballots {
         foot.push_str(&format!(", checks {hit}/{of}"));
     }
-    if let Some(id) = row.id.map(str::trim).filter(|id| !id.is_empty()) {
+    if !id_label.is_empty() {
         foot.push_str(", id ");
-        foot.push_str(short_id(id));
+        foot.push_str(id_label);
     }
     claim_block(&head, row.text, &foot, 0)
 }

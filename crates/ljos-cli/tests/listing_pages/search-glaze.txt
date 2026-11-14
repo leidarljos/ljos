@@ -4,17 +4,18 @@ matched by meaning
 stdout:
 shown 3 of 12, and the next page lists the rest, so run `ljos search glaze -n
 12`.
-The number is the order in the list. It is not whether the sentence is true.
+Place 1 is the first row. This seat's rows come before another seat's.
+The score orders the row. It is not whether the sentence is true.
 Checks: how many of them named this row.
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-tile
   Glaze batch 1 waits until the kiln is cool enough to open.
-  order 0.79, checks 2/2, id idglaze0
+  place 1, score 0.79, checks 2/2, id idglaze01
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-tile
   Glaze batch 2 waits until the kiln is cool enough to open.
-  order 0.78, checks 2/2, id idglaze0
+  place 2, score 0.78, checks 2/2, id idglaze02
 
-lesson, from an agent, today
+lesson, from an agent, today, ticket demo-tile
   Glaze batch 3 waits until the kiln is cool enough to open.
-  order 0.77, checks 2/2, id idglaze0
+  place 3, score 0.77, checks 2/2, id idglaze03

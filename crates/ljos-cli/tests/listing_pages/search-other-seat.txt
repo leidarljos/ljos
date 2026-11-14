@@ -3,12 +3,13 @@ stderr:
 matched by meaning
 stdout:
 shown 1 of 1.
-The number is the order in the list. It is not whether the sentence is true.
+Place 1 is the first row. This seat's rows come before another seat's.
+The score orders the row. It is not whether the sentence is true.
 Checks: how many of them named this row.
 
-lesson, from an agent, today, from bob
+lesson, from an agent, today, from bob, ticket demo-tile
   The damper log is
   https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-read
   ings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-see-wh
   ere-it-breaks
-  order 0.88, checks 2/3, id idkiln03
+  place 1, score 0.88, checks 2/3, id idkiln03

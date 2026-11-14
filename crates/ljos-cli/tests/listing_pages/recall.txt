@@ -12,22 +12,29 @@ not the person's words or instructions
 | The damper sticks when the morning is cold.
 End of the unverified tracker text for demo-kiln [fence <nonce>].
 
-Memory  shown 2 of 2, on this issue
-  lesson, from an agent, today
+Memory  shown 2 of 2, best match first, on this issue
+  lesson, from an agent, today, ticket demo-kiln
     The damper sticks when the kiln is cold.
-  lesson, from an agent, yesterday
+    id idkiln01a
+  lesson, from an agent, yesterday, ticket demo-kiln
     The damper sticks.
     Open the flue before the kiln reaches temperature.
     Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
-Related  shown 5 of 15, not filed on this issue
-  lesson, from an agent, today
+    id idkiln02b
+Related  shown 5 of 15, best match first, not filed on this issue
+  lesson, from an agent, today, ticket demo-tile
     Glaze batch 1 waits until the kiln is cool enough to open.
-  lesson, from an agent, today
+    id idglaze01
+  lesson, from an agent, today, ticket demo-tile
     Glaze batch 2 waits until the kiln is cool enough to open.
-  lesson, from an agent, today
+    id idglaze02
+  lesson, from an agent, today, ticket demo-tile
     Glaze batch 3 waits until the kiln is cool enough to open.
-  lesson, from an agent, today
+    id idglaze03
+  lesson, from an agent, today, ticket demo-tile
     Glaze batch 4 waits until the kiln is cool enough to open.
-  lesson, from an agent, today
+    id idglaze04
+  lesson, from an agent, today, ticket demo-tile
     Glaze batch 5 waits until the kiln is cool enough to open.
+    id idglaze05
 more on demo-kiln remain, so run `ljos search demo-kiln -n 15`.

@@ -14426,15 +14426,24 @@ pub fn search_json(hits: &[Hit], ranking: Option<&Ranking>) -> String {
 /// [`search_json`] that names an empty answer. `empty` is set when the
 /// only rows were another seat's hits under the similarity floor.
 pub fn search_json_empty(hits: &[Hit], ranking: Option<&Ranking>, empty: Option<&str>) -> String {
+    let mine = seat_name();
     let rows: Vec<Value> = hits
         .iter()
-        .map(|hit| {
+        .enumerate()
+        .map(|(index, hit)| {
             let mut row = serde_json::json!({
                 "id": hit.id,
                 "kind": hit.kind,
                 "text": hit.text,
                 "score": hit.score,
+                "place": index + 1,
             });
+            if let Some(ticket) = issue_on(&hit.entities) {
+                row["ticket"] = Value::String(ticket.to_string());
+            }
+            if let Some(seat) = other_seat(&hit.entities, &mine) {
+                row["from"] = Value::String(seat);
+            }
             if hit.labels.iter().any(|label| label == "kept-local") {
                 row["kept"] = Value::String("local".into());
             }
@@ -38017,12 +38026,33 @@ fn recall_lines(
     };
     let facts_kept: Vec<&Hit> = most_relevant(&own_facts, cue, ISSUE_MEMORY_CAP);
     let notes_kept: Vec<&Hit> = most_relevant(&own_notes, cue, ISSUE_MEMORY_CAP);
+    let labeled: Vec<&Hit> = facts_kept
+        .iter()
+        .chain(&notes_kept)
+        .chain(&related_facts)
+        .chain(&related_notes)
+        .copied()
+        .collect();
+    let id_labels =
+        scan::unique_prefixes(labeled.iter().map(|hit| hit.id.as_deref().unwrap_or("")));
+    let mut labels = std::collections::BTreeMap::new();
+    for (hit, label) in labeled.iter().zip(id_labels) {
+        if let Some(id) = hit.id.as_deref() {
+            labels.insert(id, label);
+        }
+    }
+    let label_of = |hit: &Hit| {
+        hit.id
+            .as_deref()
+            .and_then(|id| labels.get(id).map(String::as_str))
+            .unwrap_or("")
+    };
     let mut out = String::from("\n");
     out.push_str(&scan::count_line(
         "Memory",
         facts_kept.len(),
         own_facts.len(),
-        "on this issue",
+        "best match first, on this issue",
     ));
     out.push('\n');
     // Related hits are not this issue's lessons. With none of its own,
@@ -38032,7 +38062,7 @@ fn recall_lines(
     }
     for h in &facts_kept {
         note_shown(h);
-        out.push_str(&memory_block(h, now));
+        out.push_str(&memory_block(h, now, label_of(h)));
         out.push('\n');
     }
     if !related_facts.is_empty() {
@@ -38040,12 +38070,12 @@ fn recall_lines(
             "Related",
             related_facts.len(),
             related_matched.saturating_sub(related_notes.len()),
-            "not filed on this issue",
+            "best match first, not filed on this issue",
         ));
         out.push('\n');
         for h in &related_facts {
             note_shown(h);
-            out.push_str(&memory_block(h, now));
+            out.push_str(&memory_block(h, now, label_of(h)));
             out.push('\n');
         }
     }
@@ -38061,12 +38091,12 @@ fn recall_lines(
         out.push('\n');
         for h in &notes_kept {
             note_shown(h);
-            out.push_str(&memory_block(h, now));
+            out.push_str(&memory_block(h, now, label_of(h)));
             out.push('\n');
         }
         for h in &related_notes {
             note_shown(h);
-            out.push_str(&memory_block(h, now));
+            out.push_str(&memory_block(h, now, label_of(h)));
             out.push('\n');
         }
     }
@@ -38101,7 +38131,7 @@ fn injected_block(rows: &[&Hit], now: &str, failure: bool, matched: usize) -> St
     } else {
         scan::remembered_head(shown, matched)
     };
-    let blocks: Vec<String> = rows.iter().map(|hit| memory_block(hit, now)).collect();
+    let blocks: Vec<String> = rows.iter().map(|hit| memory_block(hit, now, "")).collect();
     if blocks.is_empty() {
         head
     } else {
@@ -38110,7 +38140,9 @@ fn injected_block(rows: &[&Hit], now: &str, failure: bool, matched: usize) -> St
 }
 
 /// One recalled claim: the label on its own line, the text under it.
-fn memory_block(h: &Hit, now: &str) -> String {
+/// `id_label` is the prefix a person uses with `ljos forget`. Empty leaves
+/// the id off, which is what the prompt hook injects.
+fn memory_block(h: &Hit, now: &str, id_label: &str) -> String {
     let from = other_seat(&h.entities, &seat_name());
     let age = age_of(h.ts.as_deref(), now);
     let mut head = kind_label(h);
@@ -38122,7 +38154,18 @@ fn memory_block(h: &Hit, now: &str) -> String {
         head.push_str(", from ");
         head.push_str(&seat);
     }
-    scan::claim_block(&head, h.text.trim(), "", 2)
+    if !id_label.is_empty() {
+        if let Some(ticket) = issue_on(&h.entities) {
+            head.push_str(", ticket ");
+            head.push_str(ticket);
+        }
+    }
+    let foot = if id_label.is_empty() {
+        String::new()
+    } else {
+        format!("id {id_label}")
+    };
+    scan::claim_block(&head, h.text.trim(), &foot, 2)
 }
 
 /// The one line a recall shows when the store stayed down after it was
@@ -43413,7 +43456,7 @@ pub fn search_reading(n: usize) -> &'static str {
     if n == 0 {
         "No hits, so the pack holds nothing on this query, so run `ljos remember \"TEXT\"`."
     } else {
-        "The number is the order in the list. The fraction is how many checks named the row. Neither is whether the sentence is true. A later line on the same matter replaces an earlier one."
+        "Place 1 is the first row, and this seat's rows come before another seat's. The score orders the row. The fraction is how many checks named the row. Neither is whether the sentence is true. A later line on the same matter replaces an earlier one."
     }
 }
 
@@ -43453,19 +43496,24 @@ pub fn format_search(
     let rows: Vec<scan::SearchRow<'_>> = hits
         .iter()
         .zip(&owned)
-        .map(|(hit, (label, age, from, local))| scan::SearchRow {
-            label,
-            age,
-            from: from.as_deref(),
-            text: hit.text.as_str(),
-            score: hit.score,
-            ballots: match (hit.ballots, hit.of) {
-                (Some(ballots), Some(of)) if !local => Some((ballots, of)),
-                _ => None,
+        .enumerate()
+        .map(
+            |(index, (hit, (label, age, from, local)))| scan::SearchRow {
+                label,
+                age,
+                from: from.as_deref(),
+                text: hit.text.as_str(),
+                score: hit.score,
+                ballots: match (hit.ballots, hit.of) {
+                    (Some(ballots), Some(of)) if !local => Some((ballots, of)),
+                    _ => None,
+                },
+                id: hit.id.as_deref(),
+                ticket: issue_on(&hit.entities),
+                place: index + 1,
+                local: *local,
             },
-            id: hit.id.as_deref(),
-            local: *local,
-        })
+        )
         .collect();
     scan::search_page(&scan::SearchPage {
         rows: &rows,
@@ -43475,6 +43523,15 @@ pub fn format_search(
         explain,
         query,
         reading,
+    })
+}
+
+/// The ticket a hit was filed on, from an `issue:ID` entity.
+#[must_use]
+pub fn issue_on(entities: &[String]) -> Option<&str> {
+    entities.iter().find_map(|tag| {
+        let rest = tag.strip_prefix("issue:")?;
+        (!rest.is_empty()).then_some(rest)
     })
 }
 
@@ -75584,12 +75641,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let plain = format_hits(&hits, false);
         assert_eq!(
             plain,
-            "shown 1 of 1.\nThe number is the order in the list. It is not whether the sentence is true.\nChecks: how many of them named this row.\n\npreference\n  Use pnpm instead of npm.\n  order 0.90, checks 2/3, id id-24\n"
+            "shown 1 of 1.\nPlace 1 is the first row. This seat's rows come before another seat's.\nThe score orders the row. It is not whether the sentence is true.\nChecks: how many of them named this row.\n\npreference\n  Use pnpm instead of npm.\n  place 1, score 0.90, checks 2/3, id id-24\n"
         );
-        assert!(
-            plain.contains("The number is the order in the list"),
-            "{plain}"
-        );
+        assert!(plain.contains("Place 1 is the first row"), "{plain}");
         assert!(plain.contains("checks 2/3"), "{plain}");
         assert!(plain.contains("Use pnpm instead of npm."), "{plain}");
         assert!(!plain.contains('\t'), "{plain}");
@@ -75604,7 +75658,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         std::env::remove_var("NO_COLOR");
         let explained = format_hits(&hits, true);
         assert!(
-            explained.contains("The number is the order in the list"),
+            explained.contains("Place 1 is the first row"),
             "{explained}"
         );
         assert!(
