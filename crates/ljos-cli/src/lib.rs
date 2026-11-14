@@ -14105,11 +14105,18 @@ pub fn ranking_now() -> Option<Ranking> {
     })
 }
 
+/// The ranking reason while the encoder is present and has not answered.
+/// The line a person reads is [`encoder_loading_line`], not this token.
+const ENCODER_LOADING_REASON: &str = "encoder is still loading";
+
 /// One line for stderr: a word match, or a meaning match.
 /// `--json` keeps `mode` as `lexical` or `semantic`.
 #[must_use]
 pub fn ranking_line(ranking: &Ranking) -> String {
     if ranking.mode == "lexical" {
+        if ranking.reason == ENCODER_LOADING_REASON {
+            return format!("{}\n", encoder_loading_line(read_encoder_status().as_ref()));
+        }
         format!("matched by words: {}\n", plain_rank_reason(ranking.reason))
     } else {
         "matched by meaning\n".to_string()
@@ -14269,6 +14276,52 @@ fn lexical_ranking(reason: &'static str) -> Ranking {
     }
 }
 
+/// Milliseconds a status object names as still to go on the encoder load.
+/// Absent when the writer does not say.
+fn embedder_remaining_ms(status: &Value) -> Option<u64> {
+    let embedder = &status["embedder"];
+    for key in ["remaining_ms", "eta_ms"] {
+        if let Some(ms) = embedder.get(key).and_then(json_millis) {
+            return Some(ms);
+        }
+    }
+    embedder
+        .get("load")
+        .and_then(|load| load.get("remaining_ms"))
+        .and_then(json_millis)
+}
+
+fn json_millis(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .map(|n| n as u64)
+    })
+}
+
+/// Seconds to tell a person to wait before searching again.
+///
+/// The writer's remaining time when it sends one, otherwise
+/// [`search_wait`], and never zero: a load that has no clock still has
+/// a next step.
+#[must_use]
+pub fn encoder_retry_secs(status: Option<&Value>) -> u64 {
+    if let Some(ms) = status.and_then(embedder_remaining_ms) {
+        return ms.div_ceil(1000).max(1);
+    }
+    search_wait().as_secs().max(1)
+}
+
+/// What a search prints when the encoder is present and still loading.
+#[must_use]
+pub fn encoder_loading_line(status: Option<&Value>) -> String {
+    format!(
+        "Semantic ranking is still starting; rerun in about {} s for better matches",
+        encoder_retry_secs(status)
+    )
+}
+
 fn encoder_has_answered_now() -> bool {
     read_encoder_status()
         .as_ref()
@@ -14288,11 +14341,11 @@ fn search_can_fall_back(err: &anyhow::Error) -> bool {
 
 /// Hits for `ljos search`, and the ranking that produced them.
 ///
-/// A cold encoder is asked once, which starts the model, then again after
-/// it has answered. The second answer is what is printed, and the ranking
-/// line names it. A 503 or a deadline is not turned into an empty success.
-/// When the encoder never answers, the word-ranked rows are what is
-/// printed and the line says so.
+/// A cold encoder is asked once, which starts the model, then the search
+/// waits up to [`search_wait`] for an answer and asks again. The second
+/// answer is what is printed. A 503 or a deadline is not turned into an
+/// empty success. When the encoder is still loading after the wait, the
+/// word-ranked rows are what is printed and the line says to rerun.
 ///
 /// # Errors
 ///
@@ -14314,7 +14367,7 @@ pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
                 } else if encoder_has_answered_now() {
                     ranking_now().unwrap_or_else(semantic_ranking)
                 } else {
-                    lexical_ranking("encoder is still loading")
+                    lexical_ranking(ENCODER_LOADING_REASON)
                 };
             Ok((hits, ranking))
         }
@@ -14324,10 +14377,13 @@ pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
 
 /// The first search starts a stopped encoder and is ranked by words.
 /// Once the encoder has answered, one more search is the semantic one.
+/// The wait is [`search_wait`], and it leaves two seconds of the clock
+/// for that second search.
 fn search_after_warmup(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
     let first = search_direct(query, limit);
-    let left = pack_link::clock_left().unwrap_or(COLD_SEARCH_BUDGET);
-    let wait = left.saturating_sub(std::time::Duration::from_secs(2));
+    let reserve = std::time::Duration::from_secs(2);
+    let left = pack_link::clock_left().unwrap_or(search_wait().saturating_add(reserve));
+    let wait = search_wait().min(left.saturating_sub(reserve));
     let warm = if wait.is_zero() {
         false
     } else {
@@ -14341,7 +14397,7 @@ fn search_after_warmup(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
         }
     }
     match first {
-        Ok(hits) => Ok((hits, lexical_ranking("encoder is still loading"))),
+        Ok(hits) => Ok((hits, lexical_ranking(ENCODER_LOADING_REASON))),
         Err(err) => Err(err),
     }
 }
@@ -14469,7 +14525,12 @@ fn ranking_doc(ranking: Option<&Ranking>, mut doc: Value) -> String {
     let mode = ranking.map(|row| row.mode).unwrap_or("semantic");
     doc["ranking"] = Value::String(mode.to_string());
     if let Some(ranking) = ranking.filter(|row| row.mode == "lexical") {
-        doc["reason"] = Value::String(ranking.reason.to_string());
+        let reason = if ranking.reason == ENCODER_LOADING_REASON {
+            encoder_loading_line(read_encoder_status().as_ref())
+        } else {
+            ranking.reason.to_string()
+        };
+        doc["reason"] = Value::String(reason);
     }
     format!("{}\n", serde_json::to_string(&doc).unwrap_or_default())
 }
@@ -18085,12 +18146,18 @@ const PACK_HEALTH_FAILS_BEFORE_RESTART: u32 = 3;
 /// command's outer timeout.
 pub const SEARCH_PACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// How long a search waits when the encoder has not answered since the
-/// writer last stopped it. packsetd stops the encoder after five minutes
-/// idle and starts it on the next search, without waiting for the load.
-/// A model already on disk answers inside this. The warm budget stays
-/// [`SEARCH_PACK_BUDGET`].
+/// How long a sitting's search may run when the encoder has not answered
+/// since the writer last stopped it. packsetd stops the encoder after five
+/// minutes idle and starts it on the next search, without waiting for the
+/// load. `ljos search` uses [`search_wait`] instead, so a person is not
+/// held for this whole interval.
 pub const COLD_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Seconds `ljos search` waits for a cold encoder when
+/// [`LJOS_SEARCH_WAIT`](search_wait) is unset. Long enough for a model
+/// that is already on disk, and short enough that a download still
+/// prints a line the person can act on.
+pub const DEFAULT_SEARCH_WAIT_SECS: u64 = 3;
 
 /// The score a word-ranked row gets when it does not name the subject.
 /// [`lexical_match_scores`] puts that row on the half-sigmoid under 0.5,
@@ -18098,13 +18165,30 @@ pub const COLD_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_se
 /// these is not an answer.
 pub const NO_SUBJECT_FLOOR: f64 = 0.20;
 
-/// The budget for this search. A cold encoder gets [`COLD_SEARCH_BUDGET`]
-/// so the model can load and the search can be asked again. A warm
+/// How long `ljos search` waits for a cold encoder before it prints the
+/// word ranking.
+///
+/// `LJOS_SEARCH_WAIT` is a whole number of seconds. Unset, and a value
+/// that is not a whole number, use [`DEFAULT_SEARCH_WAIT_SECS`]. `0`
+/// does not wait.
+#[must_use]
+pub fn search_wait() -> std::time::Duration {
+    let secs = std::env::var("LJOS_SEARCH_WAIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SEARCH_WAIT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// The budget for this search. A cold encoder gets [`search_wait`] plus
+/// the warm budget, so the wait and one more search both fit. A warm
 /// encoder keeps [`SEARCH_PACK_BUDGET`].
 #[must_use]
 pub fn search_budget() -> std::time::Duration {
     if read_encoder_status().as_ref().is_some_and(encoder_cold) {
-        COLD_SEARCH_BUDGET
+        search_wait()
+            .saturating_add(SEARCH_PACK_BUDGET)
+            .max(SEARCH_PACK_BUDGET)
     } else {
         SEARCH_PACK_BUDGET
     }
@@ -67367,6 +67451,24 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "available": false, "answering": false
         }));
         assert!(super::encoder_failed(&dead));
+        let loading = status(serde_json::json!({
+            "available": true,
+            "answering": null,
+            "remaining_ms": 4000
+        }));
+        assert_eq!(super::encoder_retry_secs(Some(&loading)), 4);
+        assert_eq!(
+            super::encoder_loading_line(Some(&loading)),
+            "Semantic ranking is still starting; rerun in about 4 s for better matches"
+        );
+        let nested = status(serde_json::json!({
+            "available": true,
+            "answering": null,
+            "load": {"remaining_ms": 1500.0}
+        }));
+        assert_eq!(super::encoder_retry_secs(Some(&nested)), 2);
+        let eta = status(serde_json::json!({"eta_ms": 1}));
+        assert_eq!(super::encoder_retry_secs(Some(&eta)), 1);
         assert!(super::encoder_lexical(&dead));
         let missing = status(serde_json::json!({
             "available": false, "answering": null

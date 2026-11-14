@@ -749,7 +749,11 @@ enum Cmd {
     /// nothing prints `No hits for QUERY` and the next command:
     /// `ljos search WORD` when QUERY has more than one word, otherwise
     /// `ljos remember "TEXT"`. A busy memory store ranks by words
-    /// and still returns a hit that names the subject. A memory store that
+    /// and still returns a hit that names the subject. While the encoder is
+    /// still loading, the search waits `LJOS_SEARCH_WAIT` seconds (3 when
+    /// unset) and then ranks by meaning. If it is still loading, the line
+    /// says to rerun and about how many seconds to wait. `--json` puts
+    /// `semantic` or `lexical` in `ranking`. A memory store that
     /// runs out of time prints `pack busy, try again` and exits 75.
     /// The pack is this seat's memory store.
     /// When nothing is storing memories, the command exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.

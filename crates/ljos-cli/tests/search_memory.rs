@@ -9,9 +9,10 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 fn content_length(head: &str) -> usize {
     head.lines()
@@ -225,9 +226,36 @@ fn a_missing_encoder_is_unavailable_not_still_loading() {
         "{said}"
     );
     assert!(
-        !stderr.contains("still loading"),
+        !stderr.contains("still loading") && !stderr.contains("still starting"),
         "a missing encoder was described as loading: {said}"
     );
+    let as_json = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["search", "--json", "lexical default"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("LJOS_SEAT", "travel")
+        .env("PACKSET_AUTH", "off")
+        .env("PACKSET_URL", &url)
+        .env("PACKSET_WORKSPACE", "seat")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let json_out = String::from_utf8_lossy(&as_json.stdout);
+    let json_err = String::from_utf8_lossy(&as_json.stderr);
+    assert!(as_json.status.success(), "{json_out}{json_err}");
+    assert!(
+        !json_err.contains("matched by words") && !json_err.contains("still starting"),
+        "json search printed the mode line: {json_err}"
+    );
+    let doc: serde_json::Value = serde_json::from_str(json_out.trim())
+        .unwrap_or_else(|err| panic!("search json did not parse ({err}): {json_out}"));
+    assert_eq!(doc["ranking"], "lexical", "{doc}");
+    assert_eq!(doc["reason"], "encoder unavailable", "{doc}");
 }
 
 #[test]
@@ -244,8 +272,13 @@ fn a_search_that_stays_cold_says_the_rows_were_ranked_by_words() {
     let said = format!("{stdout}{stderr}");
     assert!(out.status.success(), "{said}");
     assert!(
-        stderr.contains("matched by words: encoder is still loading"),
+        stderr
+            .contains("Semantic ranking is still starting; rerun in about 3 s for better matches"),
         "{said}"
+    );
+    assert!(
+        !stderr.contains("encoder is still loading"),
+        "the loading note was the old token: {said}"
     );
     assert!(
         !stdout.contains("ferry timetable"),
@@ -256,6 +289,200 @@ fn a_search_that_stays_cold_says_the_rows_were_ranked_by_words() {
         "{said}"
     );
     assert!(stdout.contains("`ljos search Carrollton`"), "{said}");
+}
+
+/// A cold encoder that stays cold, or becomes warm `delay` after the first
+/// search. `remaining_ms` is the load time the cold status reports.
+fn slow_pack(delay: Duration, stay_cold: bool, remaining_ms: Option<u64>) -> Pack {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let searches = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&searches);
+    let first_search = Arc::new(Mutex::new(None::<Instant>));
+    thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            let count = Arc::clone(&count);
+            let first_search = Arc::clone(&first_search);
+            thread::spawn(move || {
+                let mut sock = conn;
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                let path = path.split('?').next().unwrap_or("/");
+                let cl = content_length(&head);
+                while buf.len() < head_end + cl {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let seen = count.load(Ordering::SeqCst);
+                let (status, body) = if path == "/v1/search" {
+                    if seen == 0 {
+                        *first_search.lock().unwrap() = Some(Instant::now());
+                    }
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let body = if seen == 0 {
+                        r#"{"hits":[{"id":"other","kind":"lesson","text":"a ferry timetable for the docks","score":0.2,"entities":["seat:other"]}],"rank":"fused"}"#
+                    } else {
+                        r#"{"hits":[{"id":"oak","kind":"lesson","text":"Oak Tree on Nov 23 is the morning plan.","score":0.91,"entities":["seat:travel"],"dense_rank":1,"cosine":0.84}],"rank":"relevance"}"#
+                    };
+                    (200, body.to_string())
+                } else if path == "/v1/status" {
+                    let age = first_search.lock().unwrap().map(|at| at.elapsed());
+                    let warm = !stay_cold && age.is_some_and(|age| age >= delay);
+                    if warm {
+                        (
+                            200,
+                            r#"{"embedder":{"available":true,"answering":true,"enabled":true},"search":{"ranks":["fused","relevance"]}}"#
+                                .to_string(),
+                        )
+                    } else {
+                        let body = match remaining_ms {
+                            Some(ms) => format!(
+                                r#"{{"embedder":{{"available":true,"answering":null,"enabled":true,"remaining_ms":{ms}}},"search":{{"ranks":["fused","relevance"]}}}}"#
+                            ),
+                            None => {
+                                r#"{"embedder":{"available":true,"answering":null,"enabled":true},"search":{"ranks":["fused","relevance"]}}"#
+                                    .to_string()
+                            }
+                        };
+                        (200, body)
+                    }
+                } else {
+                    (200, "ok".to_string())
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            });
+        }
+    });
+    Pack {
+        url: format!("http://127.0.0.1:{port}"),
+        searches,
+    }
+}
+
+fn search_waited(
+    pack: &Pack,
+    home: &Path,
+    state: &Path,
+    wait: &str,
+    json: bool,
+) -> std::process::Output {
+    let mut args = vec!["search"];
+    if json {
+        args.push("--json");
+    }
+    args.push("Carrollton Nov 23 morning timing");
+    Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(&args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home)
+        .env("XDG_STATE_HOME", state)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("LJOS_SEAT", "travel")
+        .env("PACKSET_AUTH", "off")
+        .env("PACKSET_URL", &pack.url)
+        .env("PACKSET_WORKSPACE", "seat")
+        .env("LJOS_SEARCH_WAIT", wait)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_slow_encoder_is_waited_for_and_the_search_is_semantic() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let pack = slow_pack(Duration::from_millis(400), false, None);
+    let started = Instant::now();
+    let out = search_waited(&pack, &home, &state, "2", false);
+    let elapsed = started.elapsed();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!("{stdout}{stderr}");
+    assert!(out.status.success(), "{said}");
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "the wait was not bounded: {elapsed:?}\n{said}"
+    );
+    assert!(
+        pack.searches.load(Ordering::SeqCst) >= 2,
+        "the search did not ask again after the encoder answered: {said}"
+    );
+    assert!(stderr.contains("matched by meaning"), "{said}");
+    assert!(
+        stdout.contains("Oak Tree on Nov 23 is the morning plan."),
+        "{said}"
+    );
+    assert!(
+        !stdout.contains("ferry timetable"),
+        "the word-ranked row was printed: {said}"
+    );
+}
+
+#[test]
+fn a_search_past_the_wait_says_to_rerun_and_names_the_ranking() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let pack = slow_pack(Duration::from_secs(30), true, Some(4000));
+    let started = Instant::now();
+    let out = search_waited(&pack, &home, &state, "1", false);
+    let elapsed = started.elapsed();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!("{stdout}{stderr}");
+    assert!(out.status.success(), "{said}");
+    assert!(
+        elapsed >= Duration::from_millis(700),
+        "the search did not wait: {elapsed:?}\n{said}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "the wait ran past LJOS_SEARCH_WAIT: {elapsed:?}\n{said}"
+    );
+    assert!(
+        stderr
+            .contains("Semantic ranking is still starting; rerun in about 4 s for better matches"),
+        "{said}"
+    );
+    let as_json = search_waited(&pack, &home, &state, "1", true);
+    let json_out = String::from_utf8_lossy(&as_json.stdout);
+    let json_err = String::from_utf8_lossy(&as_json.stderr);
+    assert!(as_json.status.success(), "{json_out}{json_err}");
+    assert!(
+        !json_err.contains("Semantic ranking"),
+        "json search printed the mode line: {json_err}"
+    );
+    let doc: serde_json::Value = serde_json::from_str(json_out.trim())
+        .unwrap_or_else(|err| panic!("search json did not parse ({err}): {json_out}"));
+    assert_eq!(doc["ranking"], "lexical", "{doc}");
+    assert_eq!(
+        doc["reason"], "Semantic ranking is still starting; rerun in about 4 s for better matches",
+        "{doc}"
+    );
 }
 
 #[test]

@@ -18,6 +18,7 @@
 | =LJOS_HUD_SOCKET= | summon socket; else =$XDG_RUNTIME_DIR/ljos/hud.sock= |
 | =LJOS_TRACKER_GIT= | =commit= commits the ticket's =issues.org=, and the sitting's and finish's sealed sync log, without pushing; =off= skips the commit and push, and the sync in passing; unset, commit and push. =ljos sync= by hand always pushes |
 | =LJOS_TRACKER_PUSH_WAIT= | seconds the tracker push after a claim or finish waits; 5 when unset |
+| =LJOS_SEARCH_WAIT= | seconds =ljos search= waits for an encoder that is still loading; 3 when unset, =0= does not wait. The fallback line names how long to wait before running the search again |
 | =LJOS_INBOX_SYNC_WAIT= | seconds =ljos inbox --sync COMMIT= keeps fetching until the remote has the commit; 30 when unset, =0= fetches once |
 | =LJOS_USER_RULES_SYNC= | =off= stops user rules from being pulled or pushed through any tracker, and =ljos prefer --user --sync= refuses; unset, they sync through a tracker whose =.ljos/sync.toml= names a scope |
 | =LJOS_USER_RULES_TRACKER= | the tracker checkout user rules sync through; unset, =repos= in =~/.config/ljos/sync.toml=, then =ISSUE_ROOT= or =VISSUE_ROOT=, then the seat's vissue config, then the working directory when it is a tracker |
@@ -148,6 +149,7 @@ ljos reads =ljos.toml= from the user config (~/.config/ljos/ljos.toml), then the
 - =LJOS_PROGRAMS= default unset
 - =LJOS_PROJECT= default unset
 - =LJOS_RELEASE_DIR= default unset
+- =LJOS_SEARCH_WAIT= default 3 seconds
 - =LJOS_SEAT= default unset
 - =LJOS_SEAT_KEY= default unset
 - =LJOS_SESSION_ID= default unset
