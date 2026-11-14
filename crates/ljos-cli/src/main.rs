@@ -505,8 +505,8 @@ struct HookArgs {
     text: bool,
     /// Exit 1 only when the answer denies the cloud seat push rule.
     /// Any other rule stays a warning. Without this flag the exit stays 0,
-        /// so a runner that reads the JSON is unchanged. A memory store that does not
-        /// answer still exits 0: a hook must not fail the runner.
+    /// so a runner that reads the JSON is unchanged. A memory store that does not
+    /// answer still exits 0: a hook must not fail the runner.
     #[arg(long)]
     fail_on_deny: bool,
     /// Read the payload and answer in this runner's hook contract: copilot,
@@ -3527,6 +3527,26 @@ fn hook_parsed_alone(args: &[std::ffi::OsString]) -> Option<HookArgs> {
     }
     if !saw_hook {
         return None;
+    }
+    // `ljos hook` with no flags is the call a runner makes. The defaults
+    // are the command's defaults, and building the flag parser faults
+    // code this call does not read.
+    if args.len() == 2 {
+        return Some(HookArgs {
+            limit: 5,
+            event: None,
+            prompt: false,
+            text: false,
+            fail_on_deny: false,
+            runner: None,
+            git_commit: false,
+            git_hook: None,
+            brief_once: false,
+            drain: false,
+            no_wait: false,
+            apply_book: Vec::new(),
+            finish_session: None,
+        });
     }
     match HookFast::try_parse_from(args) {
         Ok(HookFast {
