@@ -2238,16 +2238,18 @@ enum Cmd {
         #[arg(long, default_value = "record")]
         rule: String,
     },
-    /// Print a shell completion script for bash, zsh or fish.
+    /// Print a shell completion script for bash, zsh, fish, powershell or elvish.
     ///
     /// The script completes subcommands and flags. Seat names and open ticket
     /// ids are filled in when the tracker on this machine is small enough to
     /// read while the shell waits. A larger tracker completes commands and
-    /// flags only. The script does not edit a shell startup file.
+    /// flags only. The script does not edit a shell startup file. Bash reads
+    /// ~/.bashrc, zsh reads ~/.zshrc, fish reads config.fish, PowerShell reads
+    /// $PROFILE and Elvish reads rc.elv. The command reference gives the line.
     ///
     /// Example: `ljos completions bash`
     Completions {
-        /// `bash`, `zsh` or `fish`.
+        /// `bash`, `zsh`, `fish`, `powershell` or `elvish`.
         #[arg(required_unless_present = "candidates")]
         shell: Option<shell_complete::ShellName>,
         /// `seats` or `tickets`. The completion scripts ask for these.

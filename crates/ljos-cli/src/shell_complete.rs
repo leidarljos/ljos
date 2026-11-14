@@ -1,11 +1,11 @@
 //! Shell completion scripts, and the seat and ticket names they ask for.
 //!
-//! `ljos completions <bash|zsh|fish>` prints a script. The script completes
-//! commands and flags on its own. Seat names and open ticket ids are read
-//! here, and only when that read stays small: a roster file, a short list of
-//! project directories, and issue files that are not large. A bigger tracker
-//! completes commands and flags and nothing else. Nothing here starts the
-//! pack, the tracker, or git.
+//! `ljos completions <bash|zsh|fish|powershell|elvish>` prints a script. The
+//! script completes commands and flags on its own. Seat names and open ticket
+//! ids are read here, and only when that read stays small: a roster file, a
+//! short list of project directories, and issue files that are not large. A
+//! bigger tracker completes commands and flags and nothing else. Nothing here
+//! starts the pack, the tracker, or git.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -26,6 +26,10 @@ pub enum ShellName {
     Bash,
     Zsh,
     Fish,
+    /// The name is one word. Clap would otherwise print `power-shell`.
+    #[value(name = "powershell")]
+    PowerShell,
+    Elvish,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -43,38 +47,66 @@ pub fn emit(shell: Option<ShellName>, which: Option<Candidates>, cmd: &mut Comma
         return Ok(());
     }
     let Some(shell) = shell else {
-        bail!("completions: pass bash, zsh or fish");
+        bail!("completions: pass bash, zsh, fish, powershell or elvish");
     };
     let mut buf = Vec::new();
     let generated = match shell {
         ShellName::Bash => clap_complete::Shell::Bash,
         ShellName::Zsh => clap_complete::Shell::Zsh,
         ShellName::Fish => clap_complete::Shell::Fish,
+        ShellName::PowerShell => clap_complete::Shell::PowerShell,
+        ShellName::Elvish => clap_complete::Shell::Elvish,
     };
     clap_complete::generate(generated, cmd, "ljos", &mut buf);
     let mut text = String::from_utf8(buf)
         .map_err(|_| anyhow::anyhow!("completions: the script was not text"))?;
-    if shell == ShellName::Bash {
-        text = text.replace("complete -F _ljos ", "complete -F _ljos_full ");
-    }
-    text.push_str(dynamic_tail(shell));
+    text = attach_dynamic(shell, text);
     let mut out = std::io::stdout().lock();
     out.write_all(text.as_bytes())?;
     Ok(())
+}
+
+/// Commands and flags come from the generated script. Seat names and open
+/// ticket ids are asked for in the same places in every shell, and only by
+/// running `ljos completions --candidates`, which does not start a writer.
+fn attach_dynamic(shell: ShellName, mut text: String) -> String {
+    match shell {
+        ShellName::Bash => {
+            text = text.replace("complete -F _ljos ", "complete -F _ljos_full ");
+            text.push_str(BASH_TAIL);
+        }
+        ShellName::Zsh => text.push_str(ZSH_TAIL),
+        ShellName::Fish => text.push_str(FISH_TAIL),
+        ShellName::PowerShell => {
+            text = insert_before(&text, POWERSHELL_MARKER, POWERSHELL_TAIL);
+        }
+        ShellName::Elvish => {
+            text = text.replacen(ELVISH_MARKER, ELVISH_TAIL, 1);
+        }
+    }
+    text
+}
+
+fn insert_before(text: &str, marker: &str, insertion: &str) -> String {
+    match text.find(marker) {
+        Some(at) => {
+            let mut out = String::with_capacity(text.len() + insertion.len());
+            out.push_str(&text[..at]);
+            out.push_str(insertion);
+            out.push_str(&text[at..]);
+            out
+        }
+        // The static script still completes commands and flags. The test
+        // that looks for `completions --candidates` is what notices a
+        // generator whose filter line moved.
+        None => text.to_string(),
+    }
 }
 
 fn candidates(which: Candidates) -> BTreeSet<String> {
     match which {
         Candidates::Seats => seat_names(),
         Candidates::Tickets => open_tickets(),
-    }
-}
-
-fn dynamic_tail(shell: ShellName) -> &'static str {
-    match shell {
-        ShellName::Bash => BASH_TAIL,
-        ShellName::Zsh => ZSH_TAIL,
-        ShellName::Fish => FISH_TAIL,
     }
 }
 
@@ -435,6 +467,113 @@ complete -c ljos -l source-seat -a "(__ljos_candidates seats)"
 complete -c ljos -l via -a "(__ljos_candidates seats)"
 complete -c ljos -l add -a "(__ljos_candidates seats)"
 complete -c ljos -l remove -a "(__ljos_candidates seats)"
+"#;
+
+/// The line clap's PowerShell script filters on. The seat and ticket names
+/// are added to `$completions` just before that filter.
+const POWERSHELL_MARKER: &str =
+    "    $completions.Where{ $_.CompletionText -like \"$wordToComplete*\" } |";
+
+const POWERSHELL_TAIL: &str = r#"
+    # Seat names and open ticket ids, when the tracker is small enough to read.
+    $kind = ''
+    $prev = ''
+    if ($commandElements.Count -ge 2) {
+        $prev = $commandElements[$commandElements.Count - 2].Extent.Text
+    }
+    if ($prev -in @('--seat','--assignee','--source-seat','--via','--add','--remove')) {
+        $kind = 'seats'
+    } else {
+        $sub = ''
+        foreach ($element in $commandElements | Select-Object -Skip 1) {
+            $value = $element.Extent.Text
+            if ($value.StartsWith('-')) { continue }
+            if ($value -eq $wordToComplete) { break }
+            if (-not $sub) {
+                $sub = $value
+            } elseif ($sub -in @('seat','memory','memories','mesh','cloud','record','proposals')) {
+                $sub = "$sub $value"
+                break
+            } else {
+                break
+            }
+        }
+        if ($sub -in @('recall','show','finish','claim','release','complete','vote','reopen','withdraw','timeline','workflow','playbook','consensus','predict','options','block','deed','sitting','panel')) {
+            $kind = 'tickets'
+        } elseif ($sub -in @('send','wake','group','log','seat add','seat grant')) {
+            $kind = 'seats'
+        }
+    }
+    if ($kind -and $wordToComplete -notlike '-*') {
+        $bin = $commandElements[0].Extent.Text
+        if (-not $bin) { $bin = 'ljos' }
+        foreach ($name in (& $bin completions --candidates $kind 2>$null)) {
+            if ($name -and $name -like "$wordToComplete*") {
+                $completions += [CompletionResult]::new($name, $name, [CompletionResultType]::ParameterValue, $name)
+            }
+        }
+    }
+
+"#;
+
+/// The line clap's Elvish script runs for the static candidates.
+const ELVISH_MARKER: &str = "    $completions[$command]\n";
+
+const ELVISH_TAIL: &str = r#"    # Seat names and open ticket ids, when the tracker is small enough to read.
+    var kind = ''
+    var n = (count $words)
+    var prev = ''
+    if (> $n 1) {
+        set prev = $words[-2]
+    }
+    if (has-value ['--seat' '--assignee' '--source-seat' '--via' '--add' '--remove'] $prev) {
+        set kind = seats
+    } else {
+        var sub = ''
+        for word $words[1..-1] {
+            if (str:has-prefix $word '-') {
+                continue
+            }
+            if (eq $sub '') {
+                set sub = $word
+            } else {
+                if (has-value [seat memory memories mesh cloud record proposals] $sub) {
+                    set sub = $sub' '$word
+                }
+                break
+            }
+        }
+        if (has-value [recall show finish claim release complete vote reopen withdraw timeline workflow playbook consensus predict options block deed sitting panel] $sub) {
+            set kind = tickets
+        } elif (has-value [send wake group log 'seat add' 'seat grant'] $sub) {
+            set kind = seats
+        }
+    }
+    var cur = ''
+    if (> $n 0) {
+        set cur = $words[-1]
+    }
+    if (and (not-eq $kind '') (not (str:has-prefix $cur '-'))) {
+        var bin = ljos
+        if (and (> $n 0) (not-eq $words[0] '')) {
+            set bin = $words[0]
+        }
+        var lines = []
+        try {
+            set lines = ($bin completions --candidates $kind 2>/dev/null)
+        } catch e {
+            set lines = []
+        }
+        for line $lines {
+            if (not-eq $line '') {
+                cand $line $line
+            }
+        }
+    }
+    try {
+        $completions[$command]
+    } catch e {
+    }
 "#;
 
 #[cfg(test)]

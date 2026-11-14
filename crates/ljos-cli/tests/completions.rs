@@ -154,7 +154,7 @@ fn each_shell_script_names_every_subcommand() {
     assert!(names.contains("completions"), "{names:?}");
     assert!(names.contains("remember"), "{names:?}");
     assert!(names.len() > 40, "{names:?}");
-    for shell in ["bash", "zsh", "fish"] {
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
         let out = run(dir.path(), &["completions", shell]);
         assert!(out.status.success(), "{shell}: {}", text(&out));
         let body = String::from_utf8_lossy(&out.stdout);
@@ -162,12 +162,60 @@ fn each_shell_script_names_every_subcommand() {
             body.contains("completions --candidates"),
             "{shell} does not ask for seat or ticket names\n{body}"
         );
+        if shell == "powershell" {
+            let names_at = body.find("completions --candidates").unwrap();
+            let filter_at = body
+                .find("$completions.Where")
+                .expect("powershell script has no completion filter");
+            assert!(
+                names_at < filter_at,
+                "powershell asks for seat names outside the completer"
+            );
+        }
         for name in &names {
             assert!(
                 has_name(&body, name),
                 "{shell} completion script has no subcommand {name}"
             );
         }
+    }
+}
+
+/// `bash -n`, `zsh -n` and `fish --no-execute` parse the script. A shell
+/// that is not installed is skipped. PowerShell and Elvish are generated
+/// with the others; those two have no syntax check here.
+#[test]
+fn each_completion_script_parses() {
+    let dir = tempfile::tempdir().unwrap();
+    let shells = [
+        ("bash", &["-n"][..]),
+        ("zsh", &["-n"][..]),
+        ("fish", &["--no-execute"][..]),
+    ];
+    for (shell, flags) in shells {
+        let out = run(dir.path(), &["completions", shell]);
+        assert!(out.status.success(), "{shell}: {}", text(&out));
+        assert!(!out.stdout.is_empty(), "{shell} printed no script");
+        let path = dir.path().join(format!("ljos-{shell}"));
+        std::fs::write(&path, &out.stdout).unwrap();
+        let parsed = Command::new(shell)
+            .args(flags)
+            .arg(&path)
+            .stdin(Stdio::null())
+            .output();
+        let parsed = match parsed {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skip: {shell} is not installed");
+                continue;
+            }
+            Err(err) => panic!("{shell}: {err}"),
+            Ok(parsed) => parsed,
+        };
+        assert!(
+            parsed.status.success(),
+            "{shell} rejected the completion script\n{}",
+            text(&parsed)
+        );
     }
 }
 

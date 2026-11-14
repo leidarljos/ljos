@@ -190,6 +190,10 @@ const TYPO_LINES: &[(&[&str], &str)] = &[
         &["completions", "bsh"],
         "ljos: no shell bsh, and the closest is bash, so run `ljos completions bash`.\n",
     ),
+    (
+        &["completions", "pwsh"],
+        "ljos: no shell pwsh, and the closest is powershell, so run `ljos completions powershell`.\n",
+    ),
 ];
 
 #[test]
