@@ -149,6 +149,8 @@ The id and the review time are the ones that run printed. The name after ``unkno
 That line is printed only when the write uses that seat. A conversation that already has a seat record writes as that seat and does not print the line.
 This run sat under an agent runner, so the search row says ``lesson, from an agent``.
 Typed at a terminal with no runner above it, that row says ``lesson, today``.
+A preference stored at that terminal is ``preference, today``.
+Under a runner the preference row is ``preference, from an agent, not checked``.
 Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
 ``ljos search "which fusion"`` shares no word with either sentence and prints ``No hits for "which fusion", so run `ljos search fusion`.``
 When the encoder ranked the page, this seat's hits come first. A word ranking gives this seat a small boost instead, and a closer row from another seat stays ahead. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.

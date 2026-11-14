@@ -50699,6 +50699,37 @@ mod tests {
         assert_eq!(kind_label(&echo), "note, from a tool, not checked");
     }
 
+    /// A preference the person stored at a terminal is the kind alone.
+    /// One an agent stored names that, and that it is not checked.
+    #[test]
+    fn a_terminal_preference_is_the_kind_and_an_agent_one_is_unchecked() {
+        let agent = serde_json::json!({
+            "id": "prefagent00000000000000000000001",
+            "kind": "preference",
+            "text": "CombMNZ over RRF.",
+            "origin": "agent-derived",
+            "source": {"basis": "agent"},
+            "entities": [],
+        });
+        keep_origin(&agent);
+        let agent_hit = atom_as_hit(&agent).unwrap();
+        assert_eq!(
+            kind_label(&agent_hit),
+            "preference, from an agent, not checked"
+        );
+        let person = serde_json::json!({
+            "id": "prefperson0000000000000000000001",
+            "kind": "preference",
+            "text": "CombMNZ over RRF.",
+            "origin": "user-declared",
+            "source": {"basis": "person"},
+            "entities": [],
+        });
+        keep_origin(&person);
+        let person_hit = atom_as_hit(&person).unwrap();
+        assert_eq!(kind_label(&person_hit), "preference");
+    }
+
     /// This seat's own agent preference is handed to a prompt, labelled with
     /// its origin. Another seat's is not, until accept keeps it.
     #[test]

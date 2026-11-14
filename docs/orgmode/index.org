@@ -106,6 +106,7 @@ $ ljos file "Pick a codec" -p demo
 #+end_src
 
 =ljos search= prints the lesson when the query shares its words.
+The row above sat under a runner, so it says =from an agent=. At a terminal the row is =lesson, today=.
 A word ranking splits an identifier, so =list_scans= matches =list scans=.
 A row that only shares a common word is left out, and the line is then
 =No close matches for "..."=.

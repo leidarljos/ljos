@@ -896,6 +896,34 @@ fn the_getting_started_doctor_sample_names_the_missing_encoder() {
 }
 
 #[test]
+fn the_getting_started_page_names_both_preference_rows() {
+    for rel in [
+        "../../docs/source/getting-started.rst",
+        "../../docs/orgmode/getting-started.org",
+    ] {
+        let text = repo_file(rel);
+        assert!(
+            text.contains("preference, today"),
+            "{rel} does not name the terminal preference row"
+        );
+        assert!(
+            text.contains("preference, from an agent, not checked"),
+            "{rel} does not name the runner preference row"
+        );
+    }
+    for rel in [
+        "../../docs/source/index.rst",
+        "../../docs/orgmode/index.org",
+    ] {
+        let text = repo_file(rel);
+        assert!(
+            text.contains("lesson, today"),
+            "{rel} does not name the terminal lesson row"
+        );
+    }
+}
+
+#[test]
 fn a_new_seat_follows_the_readme_and_getting_started() {
     if !tools_ready() {
         return;
