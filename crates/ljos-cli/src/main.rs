@@ -4603,6 +4603,12 @@ fn run_command() -> Result<()> {
                         reason: "",
                     }),
                 ),
+                // A 401 names `packset` in the command that replaces the
+                // writer. That word is also how a down pack is recognised,
+                // and this refusal is not a down pack: the writer answered.
+                Err(err) if err.to_string().contains(ljos_cli::WRITER_PORT_FIX) => {
+                    return Err(err);
+                }
                 Err(err) if !dated && ljos_cli::pack_unreachable(&err) => {
                     let line =
                         ljos_cli::plain_server_fault(&err).unwrap_or_else(ljos_cli::pack_down_line);
@@ -4684,7 +4690,10 @@ fn run_command() -> Result<()> {
                     ljos_cli::search_json_empty(&hits, Some(&ranking), empty)
                 );
             } else {
-                eprint!("{}", ljos_cli::ranking_line(&ranking));
+                let rank = ljos_cli::search_rank_line(&ranking, &hits);
+                if !rank.is_empty() {
+                    eprint!("{rank}");
+                }
                 if let Some(line) = close_line {
                     let mut page = ljos_cli::scan::wrap(&line, ljos_cli::scan::COLS);
                     if !page.ends_with('\n') {

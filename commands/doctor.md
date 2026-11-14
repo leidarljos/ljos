@@ -15,5 +15,5 @@ A skill edited by hand is left in place, and so is an env file ljos did
 not write; lines the user added to an env file are kept. Git hooks,
 runner hooks, policy, credentials and keys are left in place. A stale
 skill or env ljos wrote is a warning. A row doctor can repair ends with
-`run ljos doctor --fix`. If `ljos` is not installed, follow
+``run `ljos doctor --fix` ``. If `ljos` is not installed, follow
 the ljos-setup skill.

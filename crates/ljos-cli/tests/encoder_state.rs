@@ -61,7 +61,7 @@ fn serve(embedder: &str) -> Seat {
                 let body = if path == "/v1/status" {
                     format!(r#"{{"embedder":{embedder},"live":0,"live_cap":0}}"#)
                 } else if path == "/v1/search" {
-                    r#"{"hits":[],"rank":"fused"}"#.to_string()
+                    r#"{"hits":[{"id":"k1","kind":"lesson","text":"the kiln fires at dusk","score":0.8,"ts":"2026-01-01T00:00:00.000Z","entities":["horizon:standing","seat:travel"],"ballots":2,"of":2}],"rank":"fused"}"#.to_string()
                 } else if path == "/v1/atoms" {
                     r#"{"atoms":[]}"#.to_string()
                 } else {

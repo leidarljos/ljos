@@ -186,7 +186,7 @@ fn a_missing_encoder_is_unavailable_not_still_loading() {
                 let path = head.split_whitespace().nth(1).unwrap_or("/");
                 let path = path.split('?').next().unwrap_or("/");
                 let body = if path == "/v1/search" {
-                    r#"{"hits":[],"rank":"fused"}"#
+                    r#"{"hits":[{"id":"lex","kind":"lesson","text":"The lexical default is BM25+.","score":0.8,"ts":"2026-01-01T00:00:00.000Z","entities":["horizon:standing","seat:travel"],"ballots":2,"of":2}],"rank":"fused"}"#
                 } else if path == "/v1/status" {
                     r#"{"embedder":{"enabled":true,"binary":null,"available":false,"answering":null}}"#
                 } else {

@@ -151,13 +151,13 @@ fn doctor_fix_creates_a_missing_home_and_config() {
     assert!(
         home.starts_with("warn\t")
             && home.contains(&seat.state().display().to_string())
-            && home.ends_with("run ljos doctor --fix"),
+            && home.ends_with("run `ljos doctor --fix`"),
         "{text}"
     );
     assert!(
         config.starts_with("warn\t")
             && config.contains(&seat.config().display().to_string())
-            && config.ends_with("run ljos doctor --fix"),
+            && config.ends_with("run `ljos doctor --fix`"),
         "{text}"
     );
     assert!(text.contains("seat source"), "{text}");
@@ -227,7 +227,7 @@ fn doctor_fix_moves_a_stale_lock_aside_and_leaves_a_live_one() {
     assert_eq!(rows.len(), 2, "{text}");
     assert!(
         rows.iter()
-            .all(|line| line.ends_with("run ljos doctor --fix")),
+            .all(|line| line.ends_with("run `ljos doctor --fix`")),
         "{text}"
     );
     assert!(text.contains("seat source"), "{text}");
@@ -321,7 +321,7 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
     assert!(!log.exists(), "doctor started packset without --fix\n{err}");
     let pack = row(&text, "memory").unwrap_or("");
     assert!(
-        pack.contains("packset ensure") && pack.ends_with("run ljos doctor --fix"),
+        pack.contains("packset ensure") && pack.ends_with("run `ljos doctor --fix`"),
         "{text}"
     );
     assert!(text.contains("seat source"), "{text}");
@@ -359,7 +359,7 @@ fn doctor_fix_records_a_runner_session_seat() {
         row_text.starts_with("warn\t")
             && row_text.contains("CURSOR_CONVERSATION_ID")
             && row_text.contains(&name)
-            && row_text.ends_with("run ljos doctor --fix"),
+            && row_text.ends_with("run `ljos doctor --fix`"),
         "{text}"
     );
     assert!(text.contains("seat source"), "{text}");

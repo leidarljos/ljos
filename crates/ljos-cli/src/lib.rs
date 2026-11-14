@@ -14113,6 +14113,21 @@ const ENCODER_LOADING_REASON: &str = "encoder is still loading";
 /// person reads names the failure and [`ENCODER_RESTART_COMMAND`].
 const ENCODER_FAILED_REASON: &str = "encoder failed";
 
+/// The stderr line for the rows about to be printed.
+///
+/// An empty page does not say the rows were matched by words, and it does
+/// not name the encoder install. Nothing was matched, so that sentence is
+/// not true, and the page's own line is the next command. A page that
+/// shows rows keeps the install line: the encoder is absent and the
+/// install is the way to rank by meaning.
+#[must_use]
+pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
+    if hits.is_empty() && ranking.reason == "encoder unavailable" {
+        return String::new();
+    }
+    ranking_line(ranking)
+}
+
 /// One line for stderr: a word match, or a meaning match.
 /// `--json` keeps `mode` as `lexical` or `semantic`.
 #[must_use]
@@ -14486,8 +14501,13 @@ fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
             .context("search: GET /v1/search failed")?;
     }
     if !(200..300).contains(&answer.status) {
-        if answer.trusted && matches!(answer.status, 401 | 403) {
-            warn_search_refused(client.base(), answer.status);
+        if matches!(answer.status, 401 | 403) {
+            // `packset ensure` leaves a writer that is already listening.
+            // The line names the command that starts this home's writer.
+            bail!(
+                "search: {}",
+                writer_refused_line(client.base(), answer.status)
+            );
         }
         bail!(
             "search: GET /v1/search failed: status code {}",
@@ -15250,7 +15270,7 @@ static SEARCH_AUTH_SAID: std::sync::Mutex<Vec<(String, String)>> =
 /// The line stderr gets when search answered `code`.
 fn search_auth_warning(code: u16) -> String {
     format!(
-        "ljos: the writer answered {code} on /v1/search and recall is using stored memories, so run `ljos doctor`."
+        "ljos: the writer answered {code} on /v1/search and recall is using stored memories, so {WRITER_PORT_FIX}."
     )
 }
 
@@ -15354,10 +15374,38 @@ fn search_auth_habitat(client: &PacksetClient) -> Option<Habitat> {
     Some(Habitat {
         name: "search",
         state: format!(
-            "the writer answered {code} on /v1/search; recall is using stored memories until that read is accepted"
+            "the writer answered {code} on /v1/search; recall is using stored memories, so {WRITER_PORT_FIX}."
         ),
         ok: false,
     })
+}
+
+/// What to run when a writer that is already listening answers 401 or 403
+/// for this home. `packset ensure` leaves that writer in place, which is
+/// the writer another pack home started. Stopping it and starting again
+/// opens this home's writer on the same port. A free `PACKSET_PORT` leaves
+/// the other home's writer running.
+pub const WRITER_PORT_FIX: &str = "\
+run `packset stop && packset ensure` or set PACKSET_PORT to a free port and run `packset ensure`";
+
+fn writer_host(base: &str) -> &str {
+    let host = base
+        .trim_end_matches('/')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    if host.is_empty() {
+        base
+    } else {
+        host
+    }
+}
+
+/// One sentence when the writer at `base` answered `code` for this home.
+pub(crate) fn writer_refused_line(base: &str, code: u16) -> String {
+    format!(
+        "the writer on {} answered {code} for this home, so {WRITER_PORT_FIX}.",
+        writer_host(base)
+    )
 }
 
 /// This seat cannot put its token on a request: there is none, the token
@@ -17245,6 +17293,16 @@ fn probe_lists_ljos_run(argv: &[String]) -> std::result::Result<(), String> {
     }
 }
 
+/// `Some` when the writer answers `/health` and then refuses this home.
+/// The detail is the line `ljos onboard` prints, and the step is not ok.
+fn writer_rejects_this_home(client: &PacksetClient) -> Option<String> {
+    let timeout = std::time::Duration::from_secs(2).min(pack_timeout());
+    let answer = client
+        .roundtrip("GET", "/v1/status", &[], None, true, timeout)
+        .ok()?;
+    matches!(answer.status, 401 | 403).then(|| writer_refused_line(client.base(), answer.status))
+}
+
 /// Have a pack writer up before anything else is wired: a runner onboarded
 /// to a seat with no writer would meet every memory verb failing. `packset
 /// ensure` starts one when none answers and is idempotent when one does.
@@ -17252,6 +17310,15 @@ fn pack_step(dry: bool) -> Step {
     let what = "pack".to_string();
     if let Ok(client) = pack() {
         if client.health().is_ok() {
+            // `/health` does not carry the token. A writer another home
+            // started still answers it and then refuses this home with 401.
+            if let Some(detail) = writer_rejects_this_home(&client) {
+                return Step {
+                    what,
+                    detail,
+                    ok: false,
+                };
+            }
             return Step {
                 what,
                 detail: format!("memory writer is up at {}", client.base()),
@@ -21370,6 +21437,12 @@ pub fn note_unattached_line(text: &str) -> String {
 /// `None` when `err` is some other failure.
 #[must_use]
 pub fn plain_server_fault(err: &anyhow::Error) -> Option<String> {
+    // A refused token names `packset ensure` inside the command that
+    // replaces the writer. That phrase is also how a down writer is
+    // recognised, and this writer did answer.
+    if err.to_string().contains(WRITER_PORT_FIX) {
+        return None;
+    }
     if let Some(line) = pack_down_message(err) {
         return Some(line);
     }
@@ -21539,6 +21612,10 @@ pub fn user_fault_line(err: &anyhow::Error) -> String {
 /// [`user_fault_line`] with the command the line tells the person to run again.
 #[must_use]
 pub fn user_fault_for(err: &anyhow::Error, again: &str) -> String {
+    let top = flatten_line(&err.to_string());
+    if top.contains(WRITER_PORT_FIX) {
+        return top;
+    }
     if busy_queue_line().is_some()
         && (is_pack_busy(err) || is_write_shed(err) || pack_under_load(err))
     {
@@ -21552,7 +21629,6 @@ pub fn user_fault_for(err: &anyhow::Error, again: &str) -> String {
     if let Some(line) = pack_down_message(err) {
         return flatten_line(&line);
     }
-    let top = flatten_line(&err.to_string());
     if pack_turned_off(err) && pack_is_the_point(&top) {
         return off_pack_line(err);
     }
@@ -21601,6 +21677,11 @@ fn with_next_cause(err: &anyhow::Error, top: &str) -> String {
 /// run can reach is 75. Anything else is 1.
 #[must_use]
 pub fn user_fault_exit(err: &anyhow::Error, line: &str) -> i32 {
+    // The writer answered and refused this home. Running the search again
+    // does not start a writer, so this is not the retry status.
+    if line.contains(WRITER_PORT_FIX) {
+        return 1;
+    }
     if line.starts_with("remember: --valid-")
         || line.starts_with("search: --valid-at ")
         || line.starts_with("supervise:")
@@ -56770,7 +56851,11 @@ mod tests {
         let lines = said(&url);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("401"), "{lines:?}");
-        assert!(lines[0].contains("ljos doctor"), "{lines:?}");
+        assert!(
+            lines[0].contains("packset stop && packset ensure")
+                && lines[0].contains("PACKSET_PORT"),
+            "{lines:?}"
+        );
         let _ = search();
         assert_eq!(said(&url).len(), 1, "{:?}", said(&url));
         std::fs::write(search_auth_path(&url), "401 1\n").unwrap();
@@ -56781,6 +56866,13 @@ mod tests {
         let row = search_auth_habitat(&client).expect("doctor reports the refusal");
         assert!(!row.ok);
         assert!(row.state.contains("401"), "{}", row.state);
+        assert!(
+            row.state.contains("recall is using stored memories")
+                && row.state.contains("packset stop && packset ensure")
+                && row.state.contains("PACKSET_PORT"),
+            "{}",
+            row.state
+        );
         assert_eq!(doctor_word(&row), "warn");
         assert!(failing(std::slice::from_ref(&row)).is_empty());
         assert!(healthy(std::slice::from_ref(&row)));
@@ -56790,14 +56882,21 @@ mod tests {
         let _ = search();
         let lines = said(&forbidden);
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("403") && line.contains("ljos doctor")),
+            lines.iter().any(|line| {
+                line.contains("403")
+                    && line.contains("packset stop && packset ensure")
+                    && line.contains("PACKSET_PORT")
+            }),
             "{lines:?}"
         );
         let client = PacksetClient::new(&forbidden).with_workspace("seat");
         let row = search_auth_habitat(&client).expect("403");
         assert!(row.state.contains("403"), "{}", row.state);
+        assert!(
+            row.state.contains("packset stop && packset ensure"),
+            "{}",
+            row.state
+        );
         assert_eq!(doctor_word(&row), "warn");
         assert!(healthy(std::slice::from_ref(&row)));
 
@@ -64740,7 +64839,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             assert!(super::note_can_wait(&busy), "{code}");
         }
         let token = anyhow::anyhow!(
-            "the writer at http://127.0.0.1:8761/v1/atoms refused this seat's token, so run `packset ensure`."
+            "the writer at http://127.0.0.1:8761/v1/atoms refused this seat's token, so run `packset stop && packset ensure` or set PACKSET_PORT to a free port and run `packset ensure`."
         );
         assert!(
             !super::note_can_wait(&token),
@@ -74686,6 +74785,18 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(
             ranking_line(&missing),
             "matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.\n"
+        );
+        assert_eq!(
+            search_rank_line(&missing, &[]),
+            "",
+            "an empty page does not claim the rows were matched by words"
+        );
+        assert_eq!(
+            search_rank_line(
+                &missing,
+                &[hit("oak", "Oak Tree on Nov 23 is the morning plan.", 0.2)]
+            ),
+            ranking_line(&missing)
         );
         let fallback = Ranking {
             mode: "lexical",

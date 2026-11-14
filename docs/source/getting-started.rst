@@ -89,7 +89,7 @@ The tracker commits each change, so git needs an identity:
    warn	seat source	no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
    info	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
    ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
-   warn	ljos config	/home/you/.config/ljos/ljos.toml is missing, so run ljos doctor --fix
+   warn	ljos config	/home/you/.config/ljos/ljos.toml is missing, so run `ljos doctor --fix`
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
 
 On a clean install the ready line names memory, the tracker and the command guard.

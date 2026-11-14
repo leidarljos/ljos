@@ -1840,10 +1840,12 @@ fn refused(url: &str, code: u16, body: &str) -> Error {
         .unwrap_or_else(|| body.to_string());
     let reason = reason.trim();
     if code == 401 {
-        // A token mismatch will not clear on the next send. The line names
-        // the one command that starts this seat's own writer.
+        // A token mismatch will not clear on the next send. `packset ensure`
+        // leaves a writer that is already listening, so the line names the
+        // command that starts this home's writer, or a port of its own.
         return Error::Bad(format!(
-            "the writer at {url} refused this seat's token, so run `packset ensure`."
+            "the writer at {url} refused this seat's token, so {}.",
+            crate::WRITER_PORT_FIX
         ));
     }
     if reason.is_empty() {
@@ -1929,7 +1931,7 @@ mod tests {
     }
 
     #[test]
-    fn a_token_mismatch_names_packset_ensure() {
+    fn a_token_mismatch_names_the_port_command() {
         let err = refused(
             "http://127.0.0.1:8761/v1/atoms",
             401,
@@ -1938,7 +1940,7 @@ mod tests {
         let text = err.to_string();
         assert_eq!(
             text,
-            "bad response: the writer at http://127.0.0.1:8761/v1/atoms refused this seat's token, so run `packset ensure`."
+            "bad response: the writer at http://127.0.0.1:8761/v1/atoms refused this seat's token, so run `packset stop && packset ensure` or set PACKSET_PORT to a free port and run `packset ensure`."
         );
         assert!(!crate::note_can_wait(&anyhow::anyhow!("{text}")));
     }

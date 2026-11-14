@@ -9,7 +9,7 @@
 //! A pack writer that is not answering is started with `packset ensure`.
 //! A runner session id with no session seat on record gets that seat written.
 //!
-//! Without `--fix`, each of these rows ends with `run ljos doctor --fix`.
+//! Without `--fix`, each of these rows ends with `ljos doctor --fix` in backticks.
 //! `--fix` prints one line for each repair and one line for each problem
 //! it could not repair, and that line names the one command to run.
 
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::Habitat;
 
-const HINT: &str = "run ljos doctor --fix";
+const HINT: &str = "run `ljos doctor --fix`";
 const CONFIG_TEXT: &str = "\
 # ljos.toml\n\
 # A key that is not set here keeps its default.\n\
