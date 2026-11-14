@@ -74977,7 +74977,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         )
         .unwrap();
         assert_eq!(n, 2);
-        memory_port::import_cmd(&first, None, None, None).unwrap();
+        memory_port::import_cmd(&first, None, None, None, false).unwrap();
         assert_eq!(
             stored.lock().unwrap().len(),
             2,
@@ -74993,7 +74993,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(again.matches(bench).count(), 1, "{again}");
         drop_listing_cache();
         forget_atom_listings();
-        memory_port::import_cmd(&second, None, None, None).unwrap();
+        memory_port::import_cmd(&second, None, None, None, false).unwrap();
         let held = stored.lock().unwrap().clone();
         assert_eq!(
             posts.lock().unwrap().len(),
@@ -75501,7 +75501,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             body.push('\n');
         }
         std::fs::write(&file, body).unwrap();
-        let imported = memory_port::import_cmd(&file, None, None, None).unwrap();
+        let imported = memory_port::import_cmd(&file, None, None, None, false).unwrap();
         assert!(imported.contains("imported "), "{imported}");
         let index = import_index(&tracker);
         let rows = index_rows(&index);

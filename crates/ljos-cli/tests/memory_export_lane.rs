@@ -155,15 +155,13 @@ fn sync_host_names_the_export_and_as_machine_names_the_import() {
     );
     assert!(imported.status.success(), "{}", text(&imported));
     let said = String::from_utf8(imported.stdout).unwrap();
-    let import_id = said
-        .split_whitespace()
-        .nth(1)
-        .expect("import id")
-        .to_string();
+    assert!(
+        said.starts_with("imported 1, unchanged 0, skipped 0\n"),
+        "{said}"
+    );
     let digest = Command::new("sha256sum").arg(&out).output().unwrap();
     let digest = String::from_utf8(digest.stdout).unwrap();
-    let digest = digest.split_whitespace().next().unwrap();
-    assert_eq!(import_id, digest, "{said}");
+    let import_id = digest.split_whitespace().next().unwrap().to_string();
 
     let slot = root.join(".ljos/memory/imports/lane-seat").join(&import_id);
     assert_eq!(std::fs::read(slot.join("payload.jsonl")).unwrap(), bytes);

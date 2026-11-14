@@ -73,6 +73,9 @@ enum MemoryCmd {
         /// Machine stored for this import, in place of the one the file names. The file bytes are not changed.
         #[arg(long)]
         as_machine: Option<String>,
+        /// Print the counts as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Map rows in one import onto memories already stored.
     ///
@@ -91,6 +94,9 @@ enum MemoryCmd {
         /// Print the mappings and write nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Print one JSON document. The mappings stay, and the counts are added.
+        #[arg(long)]
+        json: bool,
     },
     /// List imports in this seat's slot.
     ///
@@ -210,6 +216,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
             source_machine,
             source_seat,
             as_machine,
+            json,
         } => {
             print!(
                 "{}",
@@ -218,6 +225,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
                     source_machine.as_deref(),
                     source_seat.as_deref(),
                     as_machine.as_deref(),
+                    json,
                 )?
             );
         }
@@ -225,10 +233,11 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
             import_id,
             all,
             dry_run,
+            json,
         } => {
             print!(
                 "{}",
-                ljos_cli::memory_port::integrate_cmd(import_id.as_deref(), all, dry_run)?
+                ljos_cli::memory_port::integrate_cmd(import_id.as_deref(), all, dry_run, json)?
             );
         }
         MemoryCmd::Imports { json } => {

@@ -1005,7 +1005,7 @@ pub fn pull(store: &SeatStore, from: &Path) -> Result<Summary> {
         }
     })
     .map_err(|err| pull_stopped(&store.seat, from, err))?;
-    crate::memory_port::integrate(&place, None, true, false)
+    crate::memory_port::integrate(&place, None, true, false, false)
         .map_err(|err| pull_stopped(&store.seat, from, err))?;
     Ok(summary)
 }

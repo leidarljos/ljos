@@ -10,6 +10,7 @@
 //! byte and labelled `format-unknown`. The version is the first one this
 //! command writes, so a reader can tell a memory file from other JSON.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -542,9 +543,37 @@ fn write_if_absent(path: &Path, bytes: &[u8]) -> Result<bool> {
     Ok(true)
 }
 
+thread_local! {
+    /// Writer locks taken on this thread. A parallel test does not add to it.
+    static WRITER_TAKES: Cell<usize> = const { Cell::new(0) };
+    /// Packset calls made on this thread while importing or integrating.
+    static PACKSET_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
 fn lock_home(home: &Path) -> crate::CommitLock {
+    WRITER_TAKES.with(|taken| taken.set(taken.get().saturating_add(1)));
     let _ = ensure_dir(home);
     crate::CommitLock::acquire_private(&home.join("write.lock"))
+}
+
+fn note_packset() {
+    PACKSET_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+fn writer_takes() -> usize {
+    WRITER_TAKES.with(Cell::get)
+}
+
+#[cfg(test)]
+fn packset_calls() -> usize {
+    PACKSET_CALLS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_work_counts() {
+    WRITER_TAKES.with(|taken| taken.set(0));
+    PACKSET_CALLS.with(|calls| calls.set(0));
 }
 
 fn now_rfc3339() -> String {
@@ -1262,18 +1291,32 @@ fn tag_lane(rows: &mut [Row], lane: &str) {
     }
 }
 
-/// Rows of `lane` this seat does not already hold, and how many it does.
-fn split_known(place: &Place, lane: &str, rows: &[Row]) -> (Vec<Row>, usize) {
+/// Rows of `lane` this seat does not already hold.
+///
+/// The second count is rows already stored for the lane. The third is a
+/// repeated content id inside this file, which is not written again.
+fn split_known(place: &Place, lane: &str, rows: &[Row]) -> (Vec<Row>, usize, usize) {
     let known = known_in_lane(place, lane);
+    let prior_hashes = known.hashes.clone();
+    let prior_ids = known.ids.clone();
     let mut hashes = known.hashes;
     let mut ids = known.ids;
     let mut fresh = Vec::new();
     let mut unchanged = 0usize;
+    let mut skipped = 0usize;
     for row in rows {
         let id_hit = !row.source_id.is_empty() && ids.contains(&row.source_id);
         let hash_hit = row_hashes(row).iter().any(|hash| hashes.contains(hash));
         if id_hit || hash_hit {
-            unchanged += 1;
+            let prior = (!row.source_id.is_empty() && prior_ids.contains(&row.source_id))
+                || row_hashes(row)
+                    .iter()
+                    .any(|hash| prior_hashes.contains(hash));
+            if prior {
+                unchanged += 1;
+            } else {
+                skipped += 1;
+            }
             continue;
         }
         hashes.extend(row_hashes(row));
@@ -1282,7 +1325,27 @@ fn split_known(place: &Place, lane: &str, rows: &[Row]) -> (Vec<Row>, usize) {
         }
         fresh.push(row.clone());
     }
-    (fresh, unchanged)
+    (fresh, unchanged, skipped)
+}
+
+/// A repeated content id inside one file. The first copy is kept.
+fn dedupe_in_file(rows: Vec<Row>) -> (Vec<Row>, usize) {
+    let mut seen = BTreeSet::new();
+    let mut fresh = Vec::new();
+    let mut skipped = 0usize;
+    for row in rows {
+        let key = if row.content_sha256.is_empty() {
+            row.text.clone()
+        } else {
+            row.content_sha256.clone()
+        };
+        if !seen.insert(key) {
+            skipped += 1;
+            continue;
+        }
+        fresh.push(row);
+    }
+    (fresh, skipped)
 }
 
 /// Give `row` this seat's packset tags and the integrated label.
@@ -1518,6 +1581,24 @@ fn import_bytes(
     )
 }
 
+fn already_present(import_id: String, unchanged: usize, skipped: usize) -> ImportDone {
+    ImportDone {
+        import_id,
+        rows: 0,
+        unchanged,
+        skipped,
+        reason: if unchanged > 0 {
+            "already present".into()
+        } else if skipped > 0 {
+            "duplicates".into()
+        } else {
+            String::new()
+        },
+        labels: Vec::new(),
+        searchable: 0,
+    }
+}
+
 fn import_at(
     place: &Place,
     bytes: &[u8],
@@ -1527,27 +1608,50 @@ fn import_at(
     stop: Option<Stop>,
     lane: Option<&str>,
 ) -> Result<ImportDone> {
-    let _held = lock_home(&place.home);
     let import_id = sha256_hex(bytes);
     let mut parsed = parse_payload(bytes, &import_id, source_machine, source_seat, as_machine);
     let mut unchanged = 0usize;
-    if let Some(lane) = lane.map(str::trim).filter(|lane| !lane.is_empty()) {
+    let skipped;
+    let lane_name = lane.map(str::trim).filter(|lane| !lane.is_empty());
+    if let Some(lane) = lane_name {
         tag_lane(&mut parsed.rows, lane);
-        let dir = slot_dir(place, &import_id);
-        if !dir.join("index.jsonl").is_file() {
-            let (fresh, skipped) = split_known(place, lane, &parsed.rows);
-            unchanged = skipped;
-            if fresh.is_empty() && !dir.join("payload.jsonl").is_file() {
-                return Ok(ImportDone {
-                    import_id,
-                    rows: 0,
-                    unchanged,
-                    labels: Vec::new(),
-                    searchable: 0,
-                });
-            }
-            parsed.rows = fresh;
+    }
+    let dir = slot_dir(place, &import_id);
+    let index_path = dir.join("index.jsonl");
+    let payload_path = dir.join("payload.jsonl");
+    // The file is already in the slot. The content ids are on disk, so
+    // this run does not take the writer and does not call packset.
+    if index_path.is_file() {
+        let existing = std::fs::read(&payload_path).unwrap_or_default();
+        if existing.as_slice() != bytes {
+            bail!("memory: slot {import_id} already holds different bytes");
         }
+        return Ok(already_present(import_id, parsed.rows.len(), 0));
+    }
+    if let Some(lane) = lane_name {
+        let (fresh, known, dupes) = split_known(place, lane, &parsed.rows);
+        unchanged = known;
+        skipped = dupes;
+        if fresh.is_empty() && !payload_path.is_file() {
+            return Ok(already_present(import_id, unchanged, skipped));
+        }
+        parsed.rows = fresh;
+    } else {
+        let (fresh, dupes) = dedupe_in_file(std::mem::take(&mut parsed.rows));
+        skipped = dupes;
+        parsed.rows = fresh;
+    }
+    let _held = lock_home(&place.home);
+    if index_path.is_file() {
+        let existing = std::fs::read(&payload_path).unwrap_or_default();
+        if existing.as_slice() != bytes {
+            bail!("memory: slot {import_id} already holds different bytes");
+        }
+        return Ok(already_present(
+            import_id,
+            parsed.rows.len().max(unchanged),
+            skipped,
+        ));
     }
     let dir = slot_dir(place, &import_id);
     ensure_dir(&dir)?;
@@ -1609,23 +1713,15 @@ fn import_at(
     }
     let index_path = dir.join("index.jsonl");
     let stored;
-    let mut rows = parsed.rows;
+    let rows = parsed.rows;
     if index_path.is_file() {
-        unchanged = unchanged.max(rows.len());
-        stored = 0;
-        rows = std::fs::read_to_string(&index_path)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Row>(line).ok())
-            .collect();
-    } else if rows.is_empty() {
-        return Ok(ImportDone {
+        return Ok(already_present(
             import_id,
-            rows: 0,
-            unchanged,
-            labels: Vec::new(),
-            searchable: 0,
-        });
+            unchanged.max(rows.len()),
+            skipped,
+        ));
+    } else if rows.is_empty() {
+        return Ok(already_present(import_id, unchanged, skipped));
     } else {
         stored = rows.len();
         let mut body = String::new();
@@ -1666,6 +1762,12 @@ fn import_at(
         import_id,
         rows: stored,
         unchanged,
+        skipped,
+        reason: if skipped > 0 {
+            "duplicates".into()
+        } else {
+            String::new()
+        },
         labels,
         searchable: rows
             .iter()
@@ -1677,9 +1779,14 @@ fn import_at(
 #[derive(Debug)]
 pub struct ImportDone {
     pub import_id: String,
+    /// Rows written by this run.
     pub rows: usize,
     /// Rows already held, by content hash or by lane and row id.
     pub unchanged: usize,
+    /// Rows in this file that repeat a content id it already listed.
+    pub skipped: usize,
+    /// Why `skipped` is non-zero, or `already present` when nothing was new.
+    pub reason: String,
     pub labels: Vec<String>,
     pub searchable: usize,
 }
@@ -1758,6 +1865,7 @@ fn same_memory(atom: &Value, row: &Row) -> bool {
 /// Texts apply will not post again: the pack's live atoms, plus integrated
 /// or kept rows in this seat's slot that are not part of `posting_ids`.
 fn remembered(dir: &Path, posting_ids: &BTreeSet<String>) -> Vec<Value> {
+    note_packset();
     let mut held = crate::memories::live_atoms().unwrap_or_default();
     let Some(home) = dir
         .parent()
@@ -1809,31 +1917,81 @@ fn already_in_pack(dir: &Path, row: &Row, held: &[Value]) -> bool {
     mark.is_file() || held.iter().any(|atom| same_memory(atom, row))
 }
 
+fn postable(row: &Row) -> bool {
+    !row.text.trim().is_empty()
+        && !row.labels.iter().any(|label| {
+            matches!(
+                label.as_str(),
+                "content-warning" | "invalid-shape" | "format-unknown"
+            )
+        })
+}
+
+fn posted_mark(dir: &Path, row: &Row) -> PathBuf {
+    dir.join("receipts")
+        .join(format!("posted-{}.json", row.content_sha256))
+}
+
+/// Content ids stored under a different import. A row whose id is here is
+/// not posted again, and packset is not asked.
+fn hashes_elsewhere(dir: &Path, import_id: &str) -> BTreeSet<String> {
+    let Some(seat_dir) = dir.parent() else {
+        return BTreeSet::new();
+    };
+    let Some(imports) = seat_dir.parent() else {
+        return BTreeSet::new();
+    };
+    if imports.file_name().is_none_or(|name| name != "imports") {
+        return BTreeSet::new();
+    }
+    let Some(home) = imports.parent() else {
+        return BTreeSet::new();
+    };
+    let seat = seat_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(decode_name)
+        .unwrap_or_default();
+    let place = Place {
+        home: home.to_path_buf(),
+        seat,
+        machine: String::new(),
+    };
+    let mut hashes = BTreeSet::new();
+    for row in load_index(&place) {
+        if row_retired(&row) || row.import_id == import_id {
+            continue;
+        }
+        hashes.extend(row_hashes(&row));
+    }
+    hashes
+}
+
 fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
+    let import_id = dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let known = hashes_elsewhere(dir, import_id);
+    // Content ids already stored, and rows this slot has already posted,
+    // stay out of the batch. Packset is called only for what remains.
+    let pending: Vec<&Row> = rows
+        .iter()
+        .filter(|row| postable(row))
+        .filter(|row| !posted_mark(dir, row).is_file())
+        .filter(|row| !row_hashes(row).iter().any(|hash| known.contains(hash)))
+        .collect();
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
     let _deadline = crate::pack_link::CommandDeadline::enter(crate::IMPORT_ADMISSION);
     let Ok(client) = crate::pack() else {
         return Ok(Vec::new());
     };
     // A lesson already in this pack, or already integrated for this seat,
     // is not posted again. A second import of the same memories stays one copy.
-    let posting_ids: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
+    let posting_ids: BTreeSet<String> = pending.iter().map(|row| row.id.clone()).collect();
     let mut held = remembered(dir, &posting_ids);
     let mut refused = Vec::new();
-    for row in rows {
-        if row.text.trim().is_empty() {
-            continue;
-        }
-        if row.labels.iter().any(|label| {
-            matches!(
-                label.as_str(),
-                "content-warning" | "invalid-shape" | "format-unknown"
-            )
-        }) {
-            continue;
-        }
-        let mark = dir
-            .join("receipts")
-            .join(format!("posted-{}.json", row.content_sha256));
+    for row in pending {
+        let mark = posted_mark(dir, row);
         if mark.is_file() {
             continue;
         }
@@ -1846,6 +2004,7 @@ fn materialise(dir: &Path, rows: &[Row]) -> Result<Vec<String>> {
             continue;
         }
         let atom = atom_for_pack(row, &client.workspace());
+        note_packset();
         match crate::admit::store_labelled(&client, atom) {
             Ok(posted) => {
                 let id = posted["id"].as_str().unwrap_or("").to_string();
@@ -1929,32 +2088,48 @@ pub fn import_path(
     )
 }
 
+fn import_line(done: &ImportDone) -> String {
+    if done.rows == 0 && done.skipped == 0 && done.unchanged > 0 {
+        return format!("nothing new: {} rows already present\n", done.unchanged);
+    }
+    let mut line = format!(
+        "imported {}, unchanged {}, skipped {}",
+        done.rows, done.unchanged, done.skipped
+    );
+    if done.skipped > 0 {
+        line.push_str(" duplicates");
+    }
+    line.push('\n');
+    line
+}
+
+fn import_json(done: &ImportDone) -> Result<String> {
+    let body = json!({
+        "import_id": done.import_id,
+        "imported": done.rows,
+        "rows": done.rows,
+        "unchanged": done.unchanged,
+        "skipped": done.skipped,
+        "reason": done.reason,
+        "labels": done.labels,
+        "searchable": done.searchable,
+    });
+    Ok(format!("{}\n", serde_json::to_string(&body)?))
+}
+
 pub fn import_cmd(
     path: &Path,
     source_machine: Option<&str>,
     source_seat: Option<&str>,
     as_machine: Option<&str>,
+    json_out: bool,
 ) -> Result<String> {
     let place = Place::current();
     let done = import_path(&place, path, source_machine, source_seat, as_machine)?;
-    if done.rows == 0 {
-        return Ok(format!("unchanged {} rows\n", done.unchanged));
+    if json_out {
+        return import_json(&done);
     }
-    if done.unchanged > 0 {
-        return Ok(format!(
-            "imported {} rows {} unchanged {} labels {}\n",
-            done.import_id,
-            done.rows,
-            done.unchanged,
-            done.labels.join(",")
-        ));
-    }
-    Ok(format!(
-        "imported {} rows {} labels {}\n",
-        done.import_id,
-        done.rows,
-        done.labels.join(",")
-    ))
+    Ok(import_line(&done))
 }
 
 fn load_index(place: &Place) -> Vec<Row> {
@@ -2556,11 +2731,76 @@ struct Mapping {
 /// # Errors
 ///
 /// No import was named, or the id matches none or several.
+struct IntegratePiece {
+    import_id: String,
+    plain: String,
+    imported: usize,
+    unchanged: usize,
+    mappings: Vec<Mapping>,
+}
+
+fn watermark_path(slot: &Path) -> PathBuf {
+    slot.join("integrated.json")
+}
+
+fn index_digest(slot: &Path) -> Option<(String, usize)> {
+    let bytes = std::fs::read(slot.join("index.jsonl")).ok()?;
+    let rows = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .count();
+    if rows == 0 {
+        return None;
+    }
+    Some((sha256_hex(&bytes), rows))
+}
+
+/// Rows this import already integrated, when the index still matches the
+/// watermark. `None` when integrate has work left.
+fn integrated_already(slot: &Path) -> Option<usize> {
+    let (digest, rows) = index_digest(slot)?;
+    let bytes = std::fs::read(watermark_path(slot)).ok()?;
+    let mark: Value = serde_json::from_slice(&bytes).ok()?;
+    if mark.get("index_sha256").and_then(Value::as_str)? != digest {
+        return None;
+    }
+    Some(
+        mark.get("rows")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize)
+            .unwrap_or(rows),
+    )
+}
+
+fn write_watermark(slot: &Path) -> Result<()> {
+    let Some((digest, rows)) = index_digest(slot) else {
+        return Ok(());
+    };
+    write_private(
+        &watermark_path(slot),
+        &serde_json::to_vec_pretty(&json!({
+            "index_sha256": digest,
+            "rows": rows,
+        }))?,
+    )
+}
+
+fn unchanged_piece(import_id: &str, rows: usize) -> IntegratePiece {
+    IntegratePiece {
+        import_id: import_id.to_string(),
+        plain: String::new(),
+        imported: 0,
+        unchanged: rows,
+        mappings: Vec::new(),
+    }
+}
+
 pub fn integrate(
     place: &Place,
     import_id: Option<&str>,
     all: bool,
     dry_run: bool,
+    json_out: bool,
 ) -> Result<String> {
     if all && import_id.is_some() {
         bail!("memory: pass an import id or --all, not both. `ljos memory imports` lists the ids");
@@ -2581,9 +2821,33 @@ pub fn integrate(
                 .into(),
         );
     }
-    let mut out = String::new();
+    let mut pieces = Vec::new();
     for id in ids {
-        out.push_str(&integrate_one(place, &id, dry_run)?);
+        pieces.push(integrate_one(place, &id, dry_run)?);
+    }
+    let imported: usize = pieces.iter().map(|piece| piece.imported).sum();
+    let unchanged: usize = pieces.iter().map(|piece| piece.unchanged).sum();
+    if json_out {
+        let body = json!({
+            "imported": imported,
+            "unchanged": unchanged,
+            "skipped": 0,
+            "reason": if imported == 0 && unchanged > 0 { "already integrated" } else { "" },
+            "imports": pieces.iter().filter(|piece| !piece.plain.is_empty()).map(|piece| json!({
+                "import_id": piece.import_id,
+                "mappings": piece.mappings,
+            })).collect::<Vec<_>>(),
+        });
+        return Ok(format!("{}\n", serde_json::to_string(&body)?));
+    }
+    if pieces.iter().all(|piece| piece.plain.is_empty()) {
+        return Ok(format!(
+            "nothing new: {unchanged} rows already integrated\n"
+        ));
+    }
+    let mut out = String::new();
+    for piece in &pieces {
+        out.push_str(&piece.plain);
     }
     Ok(out)
 }
@@ -2623,8 +2887,19 @@ fn resolve_import(place: &Place, prefix: &str) -> Result<String> {
     }
 }
 
-fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<String> {
+fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<IntegratePiece> {
+    let slot = slot_dir(place, import_id);
+    if !dry_run {
+        if let Some(rows) = integrated_already(&slot) {
+            return Ok(unchanged_piece(import_id, rows));
+        }
+    }
     let _held = lock_home(&place.home);
+    if !dry_run {
+        if let Some(rows) = integrated_already(&slot) {
+            return Ok(unchanged_piece(import_id, rows));
+        }
+    }
     let rows = load_rows(place, false);
     let mine: Vec<&Row> = rows
         .iter()
@@ -2635,12 +2910,17 @@ fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<String
     }
     let slot = slot_dir(place, import_id);
     let posting_ids: BTreeSet<String> = mine.iter().map(|row| row.id.clone()).collect();
-    // The same set apply consults before it posts. A pack that is down
-    // posts nothing for a different reason, and the row stays `new`.
-    let held = if crate::pack().is_ok() {
-        remembered(&slot, &posting_ids)
-    } else {
+    // A receipt already names a posted row. Asking the pack again is what
+    // made a second integrate list every atom.
+    let covered = mine
+        .iter()
+        .copied()
+        .filter(|row| postable(row))
+        .all(|row| posted_mark(&slot, row).is_file());
+    let held = if covered || crate::pack().is_err() {
         Vec::new()
+    } else {
+        remembered(&slot, &posting_ids)
     };
     let mut mappings = Vec::new();
     for row in &mine {
@@ -2773,6 +3053,7 @@ fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<String
         for note in materialise(&slot_dir(place, import_id), &posting)? {
             out.push_str(&format!("  not posted: {note}\n"));
         }
+        write_watermark(&slot_dir(place, import_id))?;
     }
     for mapping in &mappings {
         let text = rows
@@ -2795,7 +3076,14 @@ fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<String
             out.push_str(&format!("    {text}\n"));
         }
     }
-    Ok(out)
+    let imported = mine.len();
+    Ok(IntegratePiece {
+        import_id: import_id.to_string(),
+        plain: out,
+        imported,
+        unchanged: 0,
+        mappings,
+    })
 }
 
 fn linked(row: &Row, other: &str, relation: &str) -> Mapping {
@@ -2809,9 +3097,14 @@ fn linked(row: &Row, other: &str, relation: &str) -> Mapping {
     }
 }
 
-pub fn integrate_cmd(import_id: Option<&str>, all: bool, dry_run: bool) -> Result<String> {
+pub fn integrate_cmd(
+    import_id: Option<&str>,
+    all: bool,
+    dry_run: bool,
+    json_out: bool,
+) -> Result<String> {
     let place = Place::current();
-    integrate(&place, import_id, all, dry_run)
+    integrate(&place, import_id, all, dry_run, json_out)
 }
 
 #[derive(Debug, Serialize)]
@@ -3310,7 +3603,7 @@ mod tests {
             "2026-03-01T15:00:00Z",
         );
         let done = import_bytes(&target, &bytes, None, None, None, None).unwrap();
-        let report = integrate(&target, Some(&done.import_id), false, false).unwrap();
+        let report = integrate(&target, Some(&done.import_id), false, false, false).unwrap();
         assert!(report.contains("remember the zircon shelf"), "{report}");
         assert!(
             report.contains("new") || report.contains("exact"),
@@ -3377,7 +3670,7 @@ mod tests {
         };
         let found = selected(&again, "zircon", &SourceFilter::default(), false);
         assert_eq!(found.len(), 1);
-        let report = integrate(&again, Some(&done.import_id), false, false).unwrap();
+        let report = integrate(&again, Some(&done.import_id), false, false, false).unwrap();
         assert!(report.contains("new") || report.contains("exact"));
         let rows = load_rows(&again, false);
         assert!(rows
@@ -3438,7 +3731,7 @@ mod tests {
         import_bytes(&target, &conflict_base, None, None, None, None).unwrap();
         import_bytes(&target, &conflict, None, None, None, None).unwrap();
         import_bytes(&target, &version, None, None, None, None).unwrap();
-        let report = integrate(&target, None, true, false).unwrap();
+        let report = integrate(&target, None, true, false, false).unwrap();
         assert!(report.contains("exact"), "{report}");
         assert!(report.contains("near-duplicate"), "{report}");
         assert!(report.contains("conflict"), "{report}");
@@ -3448,8 +3741,8 @@ mod tests {
         assert!(texts.contains(&"alpha beta gamma delta"));
         assert!(texts.iter().any(|text| text.contains("epsilon")));
         assert!(texts.iter().any(|text| text.contains("no nu")));
-        let again = integrate(&target, Some(&same_id), false, false).unwrap();
-        assert!(again.contains("exact"));
+        let again = integrate(&target, Some(&same_id), false, false, false).unwrap();
+        assert_eq!(again, "nothing new: 1 rows already integrated\n");
         let events = std::fs::read_dir(slot_dir(&target, &same_id).join("integration"))
             .unwrap()
             .count();
@@ -3504,7 +3797,7 @@ mod tests {
         let bytes = header_and_row("host-a", "seat-a", "dry firing", "2026-02-02T00:00:00Z");
         let done = import_bytes(&target, &bytes, None, None, None, None).unwrap();
         let before = snapshot(&target.home);
-        let report = integrate(&target, Some(&done.import_id), false, true).unwrap();
+        let report = integrate(&target, Some(&done.import_id), false, true, false).unwrap();
         assert!(report.contains("dry-run"));
         assert_eq!(before, snapshot(&target.home));
     }
@@ -4044,7 +4337,7 @@ mod tests {
             .labels
             .iter()
             .any(|label| label == "unintegrated"));
-        let report = integrate(&target, None, true, false).unwrap();
+        let report = integrate(&target, None, true, false, false).unwrap();
         assert!(report.contains(text), "{report}");
         let found = selected(&target, "zircon", &SourceFilter::default(), false);
         assert_eq!(found.len(), 1);
@@ -4089,11 +4382,124 @@ mod tests {
         std::fs::create_dir_all(&slot).unwrap();
         std::fs::write(slot.join("manifest.json"), b"{\"rows\":0}\n").unwrap();
         std::fs::write(slot.join("index.jsonl"), b"").unwrap();
-        let err = integrate(&place, Some(id), false, false).unwrap_err();
+        let err = integrate(&place, Some(id), false, false, false).unwrap_err();
         let line = err.to_string();
         assert!(
             line.contains("import only has no rows. `ljos memory imports` lists the slots"),
             "{line}"
         );
+    }
+
+    /// Seven lane files, 281 lessons. The counts are what a second import
+    /// and a second integrate do after the first has stored every row.
+    #[test]
+    fn a_reimport_of_two_hundred_eighty_one_rows_counts_work() {
+        let (dir, target) = place("reimport");
+        let handoff = dir.path().join("handoff");
+        std::fs::create_dir(&handoff).unwrap();
+        let sizes = [38usize, 40, 41, 39, 42, 40, 41];
+        assert_eq!(sizes.iter().sum::<usize>(), 281);
+        let mut files = Vec::new();
+        let mut n = 0usize;
+        for (lane, count) in ["aa", "bb", "cc", "dd", "ee", "ff", "gg"]
+            .into_iter()
+            .zip(sizes)
+        {
+            let mut body = String::new();
+            body.push_str(
+                &json!({
+                    "format": FORMAT,
+                    "record": "export",
+                    "machine": "host-a",
+                    "seat": "ada",
+                    "exported_at": "2026-11-01T00:00:00Z",
+                })
+                .to_string(),
+            );
+            body.push('\n');
+            for k in 0..count {
+                let text = format!("The {lane} kiln keeps lesson {k} on the north bench.");
+                body.push_str(
+                    &json!({
+                        "format": FORMAT,
+                        "kind": "lesson",
+                        "text": text,
+                        "origin": "agent-derived",
+                        "atom_id": format!("{lane}-{k}"),
+                        "exported_at": "2026-11-01T00:00:00Z",
+                        "source": {"machine": "host-a", "seat": "ada"},
+                    })
+                    .to_string(),
+                );
+                body.push('\n');
+                n += 1;
+            }
+            let path = handoff.join(format!("{lane}.jsonl"));
+            std::fs::write(&path, body).unwrap();
+            files.push(path);
+        }
+        assert_eq!(n, 281);
+
+        for file in &files {
+            let done = import_path(&target, file, None, None, None).unwrap();
+            assert_eq!(
+                done.rows,
+                std::fs::read_to_string(file)
+                    .unwrap()
+                    .lines()
+                    .filter(|line| line.contains("\"text\""))
+                    .count(),
+                "{}",
+                file.display()
+            );
+        }
+        reset_work_counts();
+        let before = snapshot(&target.home);
+        let mut unchanged = 0usize;
+        for (file, count) in files.iter().zip(sizes) {
+            let done = import_path(&target, file, None, None, None).unwrap();
+            assert_eq!(done.rows, 0, "{}", file.display());
+            assert_eq!(done.unchanged, count, "{}", file.display());
+            assert_eq!(
+                import_line(&done),
+                format!("nothing new: {count} rows already present\n"),
+                "{}",
+                file.display()
+            );
+            unchanged += done.unchanged;
+        }
+        let after = snapshot(&target.home);
+        assert_eq!(before, after, "a second import changed the store");
+        assert_eq!(unchanged, 281);
+        assert_eq!(
+            (writer_takes(), packset_calls()),
+            (0, 0),
+            "reimport writer {} packset {}",
+            writer_takes(),
+            packset_calls()
+        );
+
+        reset_work_counts();
+        let _report = integrate(&target, None, true, false, false).unwrap();
+        let stored = snapshot(&target.home);
+        reset_work_counts();
+        let again = integrate(&target, None, true, false, false).unwrap();
+        assert_eq!(again, "nothing new: 281 rows already integrated\n");
+        assert_eq!(
+            (writer_takes(), packset_calls()),
+            (0, 0),
+            "second integrate writer {} packset {}",
+            writer_takes(),
+            packset_calls()
+        );
+        assert_eq!(snapshot(&target.home), stored);
+        let body = integrate(&target, None, true, false, true).unwrap();
+        let value: Value = serde_json::from_str(body.trim()).unwrap();
+        assert_eq!(value["imported"], json!(0));
+        assert_eq!(value["unchanged"], json!(281));
+        assert_eq!(value["skipped"], json!(0));
+        assert_eq!(value["reason"], json!("already integrated"));
+        assert!(value.get("imports").is_some(), "{value}");
+        assert_eq!(snapshot(&target.home), stored);
     }
 }
