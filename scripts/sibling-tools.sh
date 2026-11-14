@@ -58,14 +58,16 @@ root=$(CDPATH= cd -- "$(dirname "$script_path")/.." && pwd)
 pin=$root/.github/sibling-pin
 
 # The commit the cargo test job built for packset and packsetd.
+# v0.17.10 is the newest tag with a GitHub release. 0.17.3 published none.
 packset_repo=https://github.com/leidarljos/packset.git
-packset_sha=0fed66408b081a1749befac682304d92e7b29586
+packset_sha=84a2b0f0e7393011d324c00ab3ecc003169212a4
 # workspace.package.version at that commit.
-packset_version=0.17.3
+packset_version=0.17.10
 # Eight hex digits. packset's build.rs stamps `git rev-parse --short=8 HEAD`
-# into `NAME --version` on a clean tree, which for this commit is 0fed6640.
+# into `NAME --version` on a clean tree, which for this commit is 84a2b0f0.
 # PACKSET_COMMIT sets that stamp so a dirty tree does not append `+`.
-packset_stamp=0fed6640
+# The published archive was built from a dirty tree and prints 84a2b0f0+.
+packset_stamp=84a2b0f0
 
 # phronesis keeps no release tags. This is the commit the cargo test job
 # configured with meson and passed as PHRONESIS_DIR. Its VERSION file

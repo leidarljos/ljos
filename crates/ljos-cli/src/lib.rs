@@ -52137,7 +52137,7 @@ mod tests {
     #[test]
     fn doctor_names_the_fix_for_a_tracker_a_seat_and_the_registry() {
         let dir = tempfile::tempdir().unwrap();
-        let id = |root: &str| format!("vissue 0.23.1\nroot={root}\nprefix=Software\n");
+        let id = |root: &str| format!("vissue 0.24.0\nroot={root}\nprefix=Software\n");
         let missing = dir.path().join("gone");
         let (state, ok) = super::tracker_state(&id(&missing.display().to_string()), "cwd");
         assert!(!ok);
@@ -52245,7 +52245,7 @@ mod tests {
             ("VISSUE_ROOT", ""),
             ("ISSUE_ROOT", ""),
         ]);
-        let id = format!("vissue 0.23.1\nroot={}\nprefix=Software\n", root.display());
+        let id = format!("vissue 0.24.0\nroot={}\nprefix=Software\n", root.display());
         let (state, ok) = super::with_config_home(&cfg_dir, || {
             super::tracker_state(&id, "seat config or working directory")
         });

@@ -29,8 +29,8 @@ impl Daemon {
     /// Every live atom whose text is `text`.
     fn atoms(&self, text: &str) -> Vec<Value> {
         let said = get(self.port(), "/v1/atoms?workspace=seat");
-        let body = said.split_once("\r\n\r\n").map_or("", |(_, b)| b);
-        let atoms: Value = serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {said}"));
+        let body = ljos_test_boot::http_body(&said).unwrap_or_else(|err| panic!("{err}: {said}"));
+        let atoms: Value = serde_json::from_str(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
         atoms["atoms"]
             .as_array()
             .map(|all| all.iter().filter(|a| a["text"] == text).cloned().collect())

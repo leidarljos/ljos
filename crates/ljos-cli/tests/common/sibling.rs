@@ -258,18 +258,18 @@ mod tests {
 
     #[test]
     fn a_version_line_is_the_whole_first_line() {
-        assert!(version_matches("vissue 0.23.1\n", "vissue", "0.23.1"));
-        assert!(version_matches("vissue 0.23.1", "vissue", "0.23.1"));
+        assert!(version_matches("vissue 0.24.0\n", "vissue", "0.24.0"));
+        assert!(version_matches("vissue 0.24.0", "vissue", "0.24.0"));
         // The old check was `contains("0.20")`, which accepts a different
         // release and a longer number that merely holds those digits.
-        assert!(!version_matches("vissue 0.20.0\n", "vissue", "0.23.1"));
-        assert!(!version_matches("vissue 0.23.10\n", "vissue", "0.23.1"));
+        assert!(!version_matches("vissue 0.20.0\n", "vissue", "0.24.0"));
+        assert!(!version_matches("vissue 0.24.10\n", "vissue", "0.24.0"));
         assert!(!version_matches(
-            "vissue 0.23.1 extra\n",
+            "vissue 0.24.0 extra\n",
             "vissue",
-            "0.23.1"
+            "0.24.0"
         ));
-        assert!(!version_matches("note vissue 0.23.1\n", "vissue", "0.23.1"));
+        assert!(!version_matches("note vissue 0.24.0\n", "vissue", "0.24.0"));
         assert!(!version_matches("claimdag 0.8.0\n", "claimdag", "0.8"));
         assert!(!version_matches("claimdag 0.8\n", "claimdag", "0.8.0"));
         assert!(!version_matches("claimdag 10.8.0\n", "claimdag", "0.8.0"));

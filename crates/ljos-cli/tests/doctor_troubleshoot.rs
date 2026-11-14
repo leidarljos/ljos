@@ -34,12 +34,12 @@ case \"$name\" in\n\
     if [ \"$1\" = version ]; then echo 'ljos-policyd 0.7.0 (phronesis)'; exit 0; fi\n\
     echo allow; exit 0;;\n\
   vissue)\n\
-    if [ \"$1\" = --version ]; then echo 'vissue 0.23.1'; exit 0; fi\n\
+    if [ \"$1\" = --version ]; then echo 'vissue 0.24.0'; exit 0; fi\n\
     if [ \"$1\" = vote ]; then echo '--used --confidence'; exit 0; fi\n\
     if [ \"$1\" = identity ]; then\n\
       if [ -z \"${VISSUE_ROOT:-}${ISSUE_ROOT:-}\" ]; then echo 'vissue: not inside a tracker' >&2; exit 1; fi\n\
       root=${VISSUE_ROOT:-$ISSUE_ROOT}\n\
-      echo 'vissue 0.23.1'\n\
+      echo 'vissue 0.24.0'\n\
       echo \"root=$root\"\n\
       echo 'prefix=Software'\n\
       exit 0\n\

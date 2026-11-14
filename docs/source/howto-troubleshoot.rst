@@ -106,7 +106,7 @@ The summary names the tracker, and the row is:
 
 .. code:: text
 
-   no  tickets vissue 0.23.1 root=/tmp/seat/no-such-tracker prefix=Software from VISSUE_ROOT=/tmp/seat/no-such-tracker; root is not a directory. `mkdir -p /tmp/seat/no-such-tracker/Software` creates it
+   no  tickets vissue 0.24.0 root=/tmp/seat/no-such-tracker prefix=Software from VISSUE_ROOT=/tmp/seat/no-such-tracker; root is not a directory. `mkdir -p /tmp/seat/no-such-tracker/Software` creates it
 
 ..
    # proseguard:on
@@ -118,7 +118,7 @@ A tracker directory this account cannot write fails the same way:
 
 .. code:: text
 
-   no  tickets vissue 0.23.1 root=/tmp/seat/tracker prefix=Software from VISSUE_ROOT=/tmp/seat/tracker; /tmp/seat/tracker is not writable. `chmod u+w /tmp/seat/tracker` lets this account file tickets
+   no  tickets vissue 0.24.0 root=/tmp/seat/tracker prefix=Software from VISSUE_ROOT=/tmp/seat/tracker; /tmp/seat/tracker is not writable. `chmod u+w /tmp/seat/tracker` lets this account file tickets
 
 ..
    # proseguard:on
@@ -131,7 +131,7 @@ The printed row is:
 
 .. code:: text
 
-   no  tickets vissue 0.23.1 root=/tmp/seat/old-tracker prefix=Software from seat config or working directory; /tmp/seat/.config/vissue/config.toml names /tmp/seat/old-tracker, which is not a directory. `mkdir -p /tmp/seat/old-tracker/Software` creates it
+   no  tickets vissue 0.24.0 root=/tmp/seat/old-tracker prefix=Software from seat config or working directory; /tmp/seat/.config/vissue/config.toml names /tmp/seat/old-tracker, which is not a directory. `mkdir -p /tmp/seat/old-tracker/Software` creates it
 
 ..
    # proseguard:on

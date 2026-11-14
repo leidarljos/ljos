@@ -146,7 +146,7 @@ fn print_assets_uses_the_sibling_pin_unless_latest() {
     );
     assert!(
         text.lines()
-            .all(|line| !line.starts_with("vissue-v0.23.1-")),
+            .all(|line| !line.starts_with("vissue-v0.24.0-")),
         "{text}"
     );
 }
@@ -1341,11 +1341,11 @@ fn a_pinned_version_with_no_release_says_how_to_list_versions() {
     );
 }
 
-/// The sibling pin names vissue 0.23.1, and that version has no GitHub
-/// release. A machine without Rust still finishes: the script says so
-/// and installs the latest vissue release. Cargo is not started.
+/// The sibling pin names vissue 0.24.0, and that version has a GitHub
+/// release. The script installs that archive. It does not build from
+/// source, and it does not fall back to another tag. Cargo is not started.
 #[test]
-fn a_default_pin_with_no_release_installs_the_latest() {
+fn a_default_pin_installs_its_release_archive() {
     let dir = tempfile::tempdir().unwrap();
     let assets = dir.path().join("assets");
     std::fs::create_dir_all(&assets).unwrap();
@@ -1477,12 +1477,9 @@ exit 0
         .unwrap();
     let text = said(&out);
     assert!(out.status.success(), "{text}");
-    assert!(
-        text.contains(
-            "vissue 0.23.1 has no release archive. Installing the latest vissue release."
-        ),
-        "{text}"
-    );
+    assert!(text.contains("vissue v0.24.0"), "{text}");
+    assert!(!text.contains("has no release archive"), "{text}");
+    assert!(!text.contains("from source"), "{text}");
     assert!(!cargo_log.exists(), "cargo was started:\n{text}");
     let installed = home.join(".local/bin/vissue");
     assert!(installed.is_file(), "{text}");

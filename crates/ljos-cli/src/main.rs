@@ -2803,7 +2803,7 @@ fn explicit_note(id: &str, rest: &[String]) -> Result<(String, String, bool)> {
 /// Whether `word` is an id `vissue create` mints by default.
 ///
 /// At the vissue commit `.github/sibling-pin` names
-/// (`bbed0146dc479856b638d76102ae307419caa390`), `generate_id` in
+/// (`42b15346589fee20cdf62e5984452e099fe67b35`), `generate_id` in
 /// `crates/vissue-core/src/store.rs` builds `{project}-` plus `id_length`
 /// characters from `0123456789abcdefghijklmnopqrstuvwxyz`, and
 /// `IssuesSection` in `config.rs` defaults `id_length` to 4. A shorter

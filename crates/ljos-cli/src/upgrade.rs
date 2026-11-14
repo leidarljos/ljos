@@ -882,8 +882,8 @@ mod tests {
         );
         let vissue = COMPONENTS.iter().find(|c| c.name == "vissue").unwrap();
         assert_eq!(
-            asset_of(vissue.asset, "0.23.1", "x86_64-unknown-linux-gnu"),
-            "vissue-v0.23.1-x86_64-unknown-linux-gnu.tar.gz"
+            asset_of(vissue.asset, "0.24.0", "x86_64-unknown-linux-gnu"),
+            "vissue-v0.24.0-x86_64-unknown-linux-gnu.tar.gz"
         );
         let consensus = COMPONENTS
             .iter()

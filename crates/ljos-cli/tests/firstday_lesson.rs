@@ -1,6 +1,6 @@
-//! A first lesson on an empty pack: a long sentence the pack refuses, a
-//! paragraph split into claims, an edit, and recall with no ticket or no
-//! lesson of its own.
+//! A first lesson on an empty pack: a long sentence the pack keeps, with
+//! the word-count line only under `--verbose`, a paragraph split into
+//! claims, an edit, and recall with no ticket or no lesson of its own.
 
 ljos_test_boot::harness!();
 
@@ -124,32 +124,32 @@ fn pack() -> Option<ljos_test_boot::Packsetd> {
     Some(ljos_test_boot::Packsetd::open())
 }
 
+/// packset 0.17.10 stores a sentence past its word limit and names the
+/// reason on `prose.warning`. The lesson is in the pack, so the hook shows
+/// it. The word count is printed only with `--verbose`.
 #[test]
-fn a_long_lesson_the_pack_refuses_is_not_described_as_shown_by_the_hook() {
+fn a_long_lesson_the_pack_keeps_is_shown_by_the_hook() {
     let Some(daemon) = pack() else {
         return;
     };
     let seat = Seat::on(daemon.url());
-    let (code, stdout, stderr) = seat.run(&["remember", LONG]);
+    let (code, stdout, stderr) = seat.run(&["remember", "--verbose", LONG]);
     let said = format!("{stdout}{stderr}");
     assert_eq!(code, 0, "{said}");
-    assert!(stderr.contains("kept locally, not in the pack"), "{stderr}");
-    assert!(stderr.contains("limit 29"), "{stderr}");
     assert!(
-        stderr.contains("the hook does not show a lesson the pack refused"),
+        stderr.contains("stored as written") && stderr.contains("limit 29"),
         "{stderr}"
     );
     assert!(
-        !said.contains("the hook shows it from the next prompt"),
+        said.contains("the hook shows it from the next prompt"),
         "{said}"
     );
+    assert!(!said.contains("kept locally"), "{said}");
     let (code, search, search_err) = seat.run(&["search", "thermocouple"]);
     let found = format!("{search}{search_err}");
     assert_eq!(code, 0, "{found}");
     assert!(found.contains("thermocouple"), "{found}");
-    assert!(found.contains("not in the pack"), "{found}");
-    assert!(found.contains("kept locally"), "{found}");
-    assert!(found.contains("local, not in the pack"), "{found}");
+    assert!(!found.contains("not in the pack"), "{found}");
     let (code, hook, hook_err) = seat.run_in(
         &["hook", "--prompt", "--text"],
         Some("The door thermocouple reads below eighty degrees.\n"),
@@ -157,8 +157,8 @@ fn a_long_lesson_the_pack_refuses_is_not_described_as_shown_by_the_hook() {
     let heard = format!("{hook}{hook_err}");
     assert_eq!(code, 0, "{heard}");
     assert!(
-        !hook.contains("thermocouple"),
-        "the hook showed a lesson the pack refused:\n{heard}"
+        hook.contains("thermocouple"),
+        "the hook left out a lesson the pack kept:\n{heard}"
     );
 }
 

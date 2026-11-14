@@ -249,7 +249,7 @@ drop_pin() {
 # sits in the repository. A downloaded script carries the same versions.
 # --pin for one of them wins. --latest leaves every unpinned repository
 # at its latest release.
-# Three dot-separated numbers, such as 0.23.1. No grep: a PATH that
+# Three dot-separated numbers, such as 0.24.0. No grep: a PATH that
 # cannot fetch a release still has to name curl before anything else.
 version_ok() {
   case $1 in
@@ -290,7 +290,7 @@ EOF
   fi
   # The versions in .github/sibling-pin. release-install-check.sh
   # refuses a copy that has drifted.
-  for item in vissue=0.23.1 claimdag=0.8.0 deedar=0.4.0; do
+  for item in vissue=0.24.0 claimdag=0.8.0 deedar=0.4.0; do
     name=${item%%=*}
     [ -z "$(pinned "$name")" ] || continue
     PINS="$PINS $item"

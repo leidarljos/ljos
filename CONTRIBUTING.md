@@ -24,7 +24,7 @@ The script needs `git`, the Rust toolchain in `rust-toolchain.toml`, and the pac
 `age` and `age-keygen` 1.1.1 come from the `age` package.
 `apt-get install age` installs that package on Ubuntu 24.04, and `brew install age` installs it on macOS.
 The script does not build them.
-`source scripts/sibling-tools.sh` builds the pinned `vissue` 0.23.1 and `packsetd` 0.17.3 and puts them on `PATH`.
+`source scripts/sibling-tools.sh` builds the pinned `vissue` 0.24.0 and `packsetd` 0.17.10 and puts them on `PATH`.
 A test that needs `age-keygen`, `packsetd` or that `vissue` checks for the tool first.
 When it is missing the test prints one line naming the tool, the version and that command, and the test does not fail.
 `LJOS_TEST_REQUIRE_TOOLS=1` fails the test with that same line.

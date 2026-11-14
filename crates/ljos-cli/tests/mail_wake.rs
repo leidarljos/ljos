@@ -445,11 +445,8 @@ fn atoms(port: u16) -> Value {
     let mut buf = Vec::new();
     sock.read_to_end(&mut buf).expect("read");
     let text = String::from_utf8_lossy(&buf);
-    let body = text
-        .split_once("\r\n\r\n")
-        .map(|(_, body)| body)
-        .unwrap_or("");
-    serde_json::from_str(body).unwrap_or_else(|err| panic!("{err}: {body}"))
+    let body = ljos_test_boot::http_body(&text).unwrap_or_else(|err| panic!("{err}: {text}"));
+    serde_json::from_str(&body).unwrap_or_else(|err| panic!("{err}: {body}"))
 }
 
 fn receipt_for<'a>(pack: &'a Value, msg: &str) -> Vec<&'a Value> {

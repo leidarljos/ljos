@@ -35,6 +35,58 @@ pub const ENTER: unsafe extern "C" fn(*const c_char) -> i32 = ljos_test_enter_cg
 #[doc(hidden)]
 pub const SESSION: unsafe extern "C" fn() = ljos_test_session_cgroup;
 
+/// The payload of one HTTP response.
+///
+/// packsetd 0.17.9 and later stream a listing with chunked transfer
+/// encoding. The bytes after the header are then a chunk size, the JSON,
+/// and a closing zero. A reader that parses those bytes as JSON stops on
+/// the size. A response with a content length is the body as written.
+///
+/// # Errors
+///
+/// The text has no header, a chunk size is not hex, or a chunk is short.
+pub fn http_body(raw: &str) -> Result<String, String> {
+    let bytes = raw.as_bytes();
+    let Some(at) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return Err(format!("no http body: {raw}"));
+    };
+    let head = &raw[..at];
+    let mut rest = &bytes[at + 4..];
+    let chunked = head.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.eq_ignore_ascii_case("transfer-encoding")
+            && value.to_ascii_lowercase().contains("chunked")
+    });
+    if !chunked {
+        return String::from_utf8(rest.to_vec()).map_err(|err| err.to_string());
+    }
+    let mut out = Vec::new();
+    loop {
+        let Some(split) = rest.windows(2).position(|w| w == b"\r\n") else {
+            return Err(format!("short chunk: {raw}"));
+        };
+        let size_line = std::str::from_utf8(&rest[..split]).map_err(|err| err.to_string())?;
+        let size_token = size_line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_token, 16)
+            .map_err(|err| format!("chunk size {size_line:?}: {err}"))?;
+        rest = &rest[split + 2..];
+        if size == 0 {
+            break;
+        }
+        if rest.len() < size + 2 {
+            return Err(format!("truncated chunk of {size}"));
+        }
+        out.extend_from_slice(&rest[..size]);
+        if &rest[size..size + 2] != b"\r\n" {
+            return Err("chunk missing CRLF".to_string());
+        }
+        rest = &rest[size + 2..];
+    }
+    String::from_utf8(out).map_err(|err| err.to_string())
+}
+
 /// Move this process into `dir`.
 ///
 /// # Errors

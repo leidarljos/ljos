@@ -56,9 +56,10 @@ fn http_get(base: &str, path: &str) -> Result<(u16, String), String> {
         .read_to_end(&mut raw)
         .map_err(|err| err.to_string())?;
     let text = String::from_utf8_lossy(&raw);
-    let (head, body) = text
+    let head = text
         .split_once("\r\n\r\n")
-        .ok_or_else(|| format!("no http body: {text}"))?;
+        .map_or(text.as_ref(), |(head, _)| head);
+    let body = ljos_test_boot::http_body(&text)?;
     let status = head
         .lines()
         .next()
