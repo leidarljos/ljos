@@ -475,6 +475,7 @@ fn atoms() -> Value {
     json!({"atoms": rows})
 }
 
+#[allow(clippy::too_many_arguments)]
 fn atom(
     id: &str,
     kind: &str,

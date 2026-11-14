@@ -582,15 +582,22 @@ fn every_surface_reads_one_stored_origin() {
             }
         }
     }
-    for line in island.lines() {
+    let island_lines: Vec<&str> = island.lines().collect();
+    for (i, line) in island_lines.iter().enumerate() {
         for row in &rows {
             let text = row["text"].as_str().unwrap_or("");
             if text.is_empty() || !line.contains(text) {
                 continue;
             }
-            assert!(line.contains(want(text)), "{line}");
+            let window = island_lines[i..]
+                .iter()
+                .take(4)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(window.contains(want(text)), "{window}");
             if matches!(want(text), "preference" | "summary") {
-                assert!(!line.contains("not checked"), "{line}");
+                assert!(!window.contains("not checked"), "{window}");
             }
         }
     }
@@ -974,10 +981,21 @@ fn search_and_island_label_an_agents_claims() {
         );
     }
     let island = seat.ljos(&["island", "deploy"]);
-    for line in island.lines().filter(|l| l.contains("aaaaaaaa")) {
+    let island_lines: Vec<&str> = island.lines().collect();
+    for (i, _line) in island_lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("aaaaaaaa"))
+    {
+        let window = island_lines[i..]
+            .iter()
+            .take(4)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            line.contains("from an agent") && line.contains("not checked"),
-            "an island row gave no origin for an agent's claim: {line}"
+            window.contains("from an agent") && window.contains("not checked"),
+            "an island row gave no origin for an agent's claim: {window}"
         );
     }
     let answer = seat.mcp("ljos_search", serde_json::json!({"query": "deploy"}));
@@ -1572,9 +1590,16 @@ fn an_agents_soft_prefer_is_never_the_persons() {
             .unwrap_or(line);
         assert!(label.contains("not checked"), "{label}");
     }
-    for line in island.lines() {
+    let island_lines: Vec<&str> = island.lines().collect();
+    for (i, line) in island_lines.iter().enumerate() {
         if line.contains("release key directly") {
-            assert!(line.contains("not checked"), "{line}");
+            let window = island_lines[i..]
+                .iter()
+                .take(4)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(window.contains("not checked"), "{window}");
         }
     }
 }
@@ -1839,8 +1864,22 @@ fn a_persons_id_on_other_words_is_not_the_persons() {
     }
     let island = seat.ljos(&["island", "command guard"]);
     assert!(island.contains(GUARD_OFF), "{island}");
-    for line in island.lines().filter(|l| l.contains(GUARD_OFF)) {
-        assert!(line.contains("[note, from an agent, not checked"), "{line}");
+    let island_lines: Vec<&str> = island.lines().collect();
+    for (i, _line) in island_lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(GUARD_OFF))
+    {
+        let window = island_lines[i..]
+            .iter()
+            .take(4)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            window.contains("note, from an agent, not checked"),
+            "{window}"
+        );
     }
     let answer = seat.mcp("ljos_island", serde_json::json!({"cue": "command guard"}));
     let rows = answer["result"]["structuredContent"]["rows"]

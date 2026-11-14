@@ -33692,6 +33692,7 @@ fn sitting_memory_text(line: &str) -> Option<String> {
         let text = text.trim();
         if !text.is_empty()
             && !text.starts_with("score ")
+            && !text.starts_with("id ")
             && !text.starts_with("-->")
             && !text.starts_with("<--")
         {
@@ -34763,7 +34764,7 @@ fn format_due_page(shown: &[Value], matched: usize, summary: &str, sweep: &str) 
     out.push('\n');
     if shown.len() < matched {
         out.push_str(&scan::wrap(
-            "the rest stay due, so run `ljos due --all` to read them. That list grades none.",
+            "the rest stay due and that list grades none, so run `ljos due --all`.",
             scan::COLS,
         ));
         out.push('\n');
@@ -49507,13 +49508,13 @@ mod tests {
         // Facts lead; the working notes follow under their own heading.
         assert!(
             text.starts_with(
-                "\nMemory  shown 1 of 1, on this issue\n  lesson, from an agent, today\n    tagged lesson\n"
+                "\nMemory  shown 1 of 1, best match first, on this issue\n  lesson, from an agent, today, ticket probe-0lm4\n    tagged lesson\n    id lesson-0\n"
             ),
             "{text}"
         );
         assert!(
             text.contains(
-                "Related  shown 1 of 1, not filed on this issue\n  lesson, from an agent\n    a related lesson\n"
+                "Related  shown 1 of 1, best match first, not filed on this issue\n  lesson, from an agent\n    a related lesson\n    id near\n"
             ),
             "{text}"
         );
@@ -49522,7 +49523,9 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("  note, from an agent, not checked, today\n    note 21\n"),
+            text.contains(
+                "  note, from an agent, not checked, today, ticket probe-0lm4\n    note 21\n    id own21\n"
+            ),
             "{text}"
         );
         assert!(text.contains("note 12"), "{text}");
@@ -49539,7 +49542,7 @@ mod tests {
         );
         assert_eq!(
             prompt,
-            "\nMemory  shown 1 of 1, on this issue\n  lesson, from an agent\n    tagged lesson\n"
+            "\nMemory  shown 1 of 1, best match first, on this issue\n  lesson, from an agent, ticket probe-0lm4\n    tagged lesson\n    id lesson-0\n"
         );
         assert_eq!(
             super::recall_lines(&[], Vec::new(), "probe-0lm4", "now", true, false),
@@ -49555,7 +49558,7 @@ mod tests {
         );
         assert_eq!(
             alone,
-            "\nMemory  shown 0 of 0, on this issue\n  (none filed on this issue)\nRelated  shown 1 of 1, not filed on this issue\n  lesson, from an agent\n    a related lesson\n"
+            "\nMemory  shown 0 of 0, best match first, on this issue\n  (none filed on this issue)\nRelated  shown 1 of 1, best match first, not filed on this issue\n  lesson, from an agent\n    a related lesson\n    id near\n"
         );
     }
 

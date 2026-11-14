@@ -2,7 +2,7 @@ status 0
 stderr:
 stdout:
 due  shown 8 of 17, soonest first
-the rest stay due, so run `ljos due --all` to read them. That list grades none.
+the rest stay due and that list grades none, so run `ljos due --all`.
 17 due; nothing else scheduled
 
 lesson, not reviewed yet, seat alice, ticket demo-kiln
