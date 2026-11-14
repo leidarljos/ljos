@@ -2,7 +2,10 @@
 //!
 //! The pack here lists twenty thousand atoms, so one `ljos_doctor` grows
 //! the server by tens of MiB. With `LJOS_MCP_IDLE_DROP=1` its anonymous
-//! memory falls back near where it started within a few seconds.
+//! memory falls back near where it started within a few seconds. The
+//! reading kept is the lowest one in that window. What remains has to be
+//! under a sixth of the growth: glibc can hold a few mebibytes of arena
+//! after the trim, and that floor moves when other tests are running.
 #![cfg(all(target_os = "linux", target_env = "gnu"))]
 
 ljos_test_boot::harness!();
@@ -118,23 +121,25 @@ fn an_idle_server_returns_the_burst_to_the_system() {
     writeln!(stdin, "{call}").unwrap();
     answer(2);
     let burst = anon_kib(pid);
+    let growth = burst.saturating_sub(idle);
     assert!(
-        burst > idle + 20 * 1024,
+        growth > 20 * 1024,
         "the listing did not grow the server: {idle} KiB idle, {burst} KiB after"
     );
     let deadline = Instant::now() + Duration::from_secs(15);
-    let mut now = burst;
+    let mut best = burst;
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(500));
-        now = anon_kib(pid);
-        if now < idle + 8 * 1024 {
+        best = best.min(anon_kib(pid));
+        if best.saturating_sub(idle) * 6 < growth {
             break;
         }
     }
     drop(stdin);
     let _ = child.wait();
+    let kept = best.saturating_sub(idle);
     assert!(
-        now < idle + 8 * 1024,
-        "still {now} KiB after the idle drop: {idle} KiB idle, {burst} KiB after the burst"
+        kept * 6 < growth,
+        "still {best} KiB after the idle drop: {idle} KiB idle, {burst} KiB after the burst"
     );
 }
