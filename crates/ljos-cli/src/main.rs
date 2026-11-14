@@ -76,9 +76,9 @@ enum MemoryCmd {
     },
     /// Map rows in one import onto memories already stored.
     ///
-    /// `new` means this import has one copy of that text. A text the pack
-    /// already holds is `held`. It does not post a text the pack already
-    /// holds. `--dry-run` writes nothing. Pass an import id or `--all`.
+    /// `new` means this import has one copy of that text. A text already
+    /// stored is `held`. It does not post a text that is already stored.
+    /// `--dry-run` writes nothing. Pass an import id or `--all`.
     /// `ljos memory imports` lists the ids. A bad id exits 1.
     ///
     /// Example: `ljos memory integrate --all --dry-run`
@@ -110,6 +110,7 @@ enum MemCmd {
     List {
         #[command(flatten)]
         f: MemFilter,
+        /// Print the list as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -119,20 +120,22 @@ enum MemCmd {
     Review {
         #[command(flatten)]
         f: MemFilter,
+        /// Print the memories as JSON and do not review them.
         #[arg(long)]
         json: bool,
         /// Keep this memory as it stands. Repeatable.
         #[arg(long, value_name = "ID")]
         keep: Vec<String>,
-        /// Drop this memory (the pack tombstones it). Repeatable.
+        /// Drop this memory. The text stays, marked removed, and later searches leave it out. Repeatable.
         #[arg(long = "drop", value_name = "ID")]
         drop_ids: Vec<String>,
-        /// Rewrite this memory with --text.
+        /// Replace this memory with the text in `--text`.
         #[arg(long, value_name = "ID")]
         edit: Option<String>,
-        /// Merge these memories into one, with --text or their texts joined. Repeatable, two or more.
+        /// Merge these memories into one, with `--text` or their texts joined. Repeatable, two or more.
         #[arg(long, value_name = "ID")]
         merge: Vec<String>,
+        /// Replacement text for `--edit`, or the text of the merged memory for `--merge`.
         #[arg(long)]
         text: Option<String>,
     },
@@ -147,13 +150,16 @@ enum MemCmd {
     ///
     /// Example: `ljos memories prune`
     Prune {
-        /// Duplicates and memories never recalled in --days.
+        /// Name duplicates, and memories never recalled in `--days`. Required.
         #[arg(long)]
         stale: bool,
+        /// How many days without a recall counts as never recalled. The default is 30.
         #[arg(long, default_value_t = 30)]
         days: i64,
+        /// Remove the memories the report names. Without this, the command only lists them.
         #[arg(long)]
         apply: bool,
+        /// Print the report as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -161,16 +167,16 @@ enum MemCmd {
 
 #[derive(clap::Args, Clone)]
 struct MemFilter {
-    /// Only this seat's.
+    /// Show only memories from this seat.
     #[arg(long)]
     seat: Option<String>,
-    /// Only those written on or after YYYY-MM-DD.
+    /// Show only memories written on or after this day, YYYY-MM-DD.
     #[arg(long)]
     since: Option<String>,
-    /// Reviewed ones too.
+    /// Include memories a person has already reviewed. Without this, only unreviewed ones are shown.
     #[arg(long)]
     all: bool,
-    /// The person's own claims too.
+    /// Include memories the person wrote. Without this, only an agent's memories are shown.
     #[arg(long)]
     user: bool,
 }
@@ -334,7 +340,9 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
 
 #[derive(Subcommand)]
 enum CloudCmd {
-    /// Install the release binaries, write the harness MCP command, and clone `LJOS_TRACKER_REMOTE`.
+    /// Install the release binaries, write the tool command a runner starts, and clone `LJOS_TRACKER_REMOTE`.
+    ///
+    /// That command is the Model Context Protocol (MCP) entry, the tool server the runner starts.
     ///
     /// Example: `ljos cloud up`
     Up {
@@ -349,7 +357,9 @@ enum CloudCmd {
 
 #[derive(Subcommand)]
 enum MeshCmd {
-    /// Join the Headscale mesh. On success, print this node's name, its mesh IPv4 and IPv6, and each peer's name and addresses. Any failure is one line on stderr and a non-zero status.
+    /// Join the private network and print this machine and the others on it.
+    ///
+    /// Headscale is the login server. On success, the line names this machine, its two addresses, and each peer. Any failure is one line on stderr and a non-zero status.
     ///
     /// Example: `ljos mesh up --key-file ~/.config/ljos/mesh.key`
     Up {
@@ -372,16 +382,18 @@ enum MeshCmd {
     ///
     /// Example: `ljos mesh status`
     Status,
-    /// Print the Headscale ACL policy `mesh.toml` implies.
+    /// Print who on the private network may connect to whom.
+    ///
+    /// Headscale is the login server. The rules are the access policy `mesh.toml` implies.
     ///
     /// Example: `ljos mesh acl`
     Acl {
-        /// Other swarm ids, each given rules of its own.
+        /// Extra group names. Each one is given the same pair of connection rules.
         swarms: Vec<String>,
     },
-    /// Import lane JSONL files from a handoff directory into a seat and write that seat's seed.
+    /// Read another machine's memory files into a seat.
     ///
-    /// A missing directory, a path that is not a directory, or a writer that stops the pull exits 1.
+    /// A lane is one machine's memory file, named `<lane>.jsonl`. The command keeps a copy of the rows it brought in. A missing directory, a path that is not a directory, or a memory store that stops the pull exits 1.
     ///
     /// Example: `ljos mesh pull --seat alice --from handoff`
     Pull {
@@ -410,7 +422,7 @@ enum MeshCmd {
 
 #[derive(Subcommand)]
 enum RecordCmd {
-    /// Validate a directory of schema-v1 record entries, or with `--tracker` every ballot on a tracker.
+    /// Check a directory of ballot records, or with `--tracker` every ballot under a tracker.
     ///
     /// Example: `ljos record check records`
     Check {
@@ -425,7 +437,9 @@ enum RecordCmd {
 
 #[derive(Subcommand)]
 enum SeatAction {
-    /// Add NAME to the seat list in the tracker's vissue.toml.
+    /// Add a seat name to the tracker's seat list.
+    ///
+    /// The list is the `seats` table in the tracker's `vissue.toml`. A seat that is not on it cannot write once the list exists.
     ///
     /// Example: `LJOS_SEAT=alice ljos seat add alice`
     Add {
@@ -483,8 +497,9 @@ enum Cmd {
     /// Example: `ljos remember "The lexical default is BM25+."`
     ///
     /// An empty text exits 2. A text past 1000 characters exits 2.
-    /// A writer that is not answering exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
+    /// When nothing is storing memories, the command exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
     Remember {
+        /// The lesson to store.
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
         #[arg(long = "as")]
@@ -495,7 +510,7 @@ enum Cmd {
         /// Store this as a standing rule now. The default.
         #[arg(long)]
         standing: bool,
-        /// Print the pack's warning when a sentence is over 29 words.
+        /// Print a warning when a sentence is over 29 words. The memory is still stored.
         #[arg(long)]
         verbose: bool,
         /// The day (YYYY-MM-DD) the claim starts to hold in the world. `ljos search --valid-at` leaves it out before then.
@@ -515,6 +530,7 @@ enum Cmd {
     ///
     /// Example: `ljos prefer "CombMNZ over RRF for fusing two ballots."`
     Prefer {
+        /// The preference to store.
         text: Vec<String>,
         /// Prefer as this persona.
         #[arg(long = "as")]
@@ -531,7 +547,7 @@ enum Cmd {
         /// Why this user rule stands. Required with `--user`.
         #[arg(long)]
         why: Option<String>,
-        /// Promote this lesson id into a user rule. The lesson stays in the pack. Pass `--user`.
+        /// Copy this lesson into a user rule. The lesson stays stored. Pass `--user`.
         #[arg(long, value_name = "ID")]
         promote: Option<String>,
         /// Deny an outbound post whose body mentions this GitHub login. Repeatable. Used with `--user`.
@@ -591,10 +607,9 @@ enum Cmd {
     },
     /// List lesson proposals waiting on a review.
     ///
-    /// Open rows the pack does not already hold come first, then refused rows,
-    /// then a count of how many open rows are new and how many are already in
-    /// the pack. The pack is this seat's memory store. A refused row quotes
-    /// the sentence and names `ljos proposals amend`.
+    /// Open rows not already stored come first, then refused rows, then a
+    /// count of how many open rows are new and how many are already stored.
+    /// A refused row quotes the sentence and names `ljos proposals amend`.
     ///
     /// Example: `ljos proposals`
     Proposals {
@@ -603,14 +618,16 @@ enum Cmd {
         /// Only proposals filed by this seat. `unknown` is a row that names none.
         #[arg(long)]
         seat: Option<String>,
-        /// Only proposals with this status: open, accepted, refused, already-in-pack. `in-pack` lists rows the pack already holds.
+        /// Keep only this status: open, accepted, refused, or already-in-pack. `in-pack` lists rows already stored.
         #[arg(long)]
         status: Option<String>,
-        /// Record already-in-pack, and the time, on each open row the pack already holds. A second run writes nothing and deletes nothing.
+        /// Mark each open row that is already stored as already-in-pack, and record the time. A second run writes nothing and deletes nothing.
         #[arg(long)]
         settle: bool,
     },
-    /// Accept stored memories or proposals. One id or prefix, or several. One result line each: accepted, already in pack, not found, or refused by the pack. A readability refusal quotes the sentence, after the value and the limit.
+    /// Accept a stored memory or a waiting proposal, so a later search treats it as kept.
+    ///
+    /// One id or prefix, or several. One result line each: accepted, already stored, not found, or refused. A readability refusal quotes the sentence, after the value and the limit.
     ///
     /// Example: `ljos accept a6ae2751`
     Accept {
@@ -635,20 +652,21 @@ enum Cmd {
     /// Retire one memory by id. The text stays, marked retired.
     ///
     /// `ljos search` prints the id. A prefix of 8 or more characters is
-    /// enough. `--why` is a deed id from `deedar create`. Omit it when
-    /// there is no deed.
+    /// enough. `--why` names the stored file that withdrew it, an id from
+    /// `deedar create`. Omit `--why` when there is no such file.
     ///
     /// Example: `ljos forget a6ae2751`
     Forget {
+        /// The memory id `ljos search` prints, or a prefix of 8 or more characters.
         id: String,
-        /// The deed accession that withdrew the claim. Refused if it is not one.
+        /// Id of the stored file that withdrew the memory. Refused when `deedar` does not know it.
         #[arg(long)]
         why: Option<String>,
         /// Print the atom JSON. The default is one line: id, kind, due, text.
         #[arg(long)]
         json: bool,
     },
-    /// What ljos remembers about a topic, best match first.
+    /// Show what ljos remembers about a topic, best match first.
     ///
     /// Example: `ljos search "lexical default"`
     ///
@@ -656,22 +674,24 @@ enum Cmd {
     /// the subject, or when the encoder's cosine reaches 0.66. The cosine is
     /// how close the stored text is to the query, from 0 to 1. A short list
     /// is not padded with a weaker cross-seat hit. When those were the only
-    /// rows, the line is `Nothing relevant was found.` A search the pack
-    /// answered with nothing prints `No hits for QUERY` and the next command:
+    /// rows, the line is `Nothing relevant was found.` A search that found
+    /// nothing prints `No hits for QUERY` and the next command:
     /// `ljos search WORD` when QUERY has more than one word, otherwise
-    /// `ljos remember "TEXT"`. A busy pack ranks by words
-    /// and still returns a hit that names the subject. A pack that runs out
-    /// of time prints `pack busy, try again` and exits 75.
-    /// A writer that is not answering exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
+    /// `ljos remember "TEXT"`. A busy memory store ranks by words
+    /// and still returns a hit that names the subject. A memory store that
+    /// runs out of time prints `pack busy, try again` and exits 75.
+    /// The pack is this seat's memory store.
+    /// When nothing is storing memories, the command exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
     Search {
+        /// Words to look for.
         query: Vec<String>,
         /// Most hits to print.
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: u32,
-        /// Rerank the top hits with the writer's cross-encoder; slower, sharper.
+        /// Score the top hits again, slower and sharper, by reading the text itself.
         #[arg(long)]
         rerank: bool,
-        /// Ask the pack as it stood then (YYYY-MM-DD or RFC 3339): what the seat knew at that time, withdrawn memories included, later ones left out.
+        /// Read the memory store as it stood at this time (YYYY-MM-DD or RFC 3339): what the seat knew then, withdrawn memories included, later ones left out.
         #[arg(long, value_name = "TIME")]
         as_of: Option<String>,
         /// What held in the world on this day (YYYY-MM-DD): claims whose validity window excludes it are left out. Without it, today; `--valid-at any` keeps every window.
@@ -749,8 +769,9 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["key", "adopt", "adopt_legacy"])]
         compact: bool,
     },
-    /// Re-export this machine's atoms over a conflicted tracker log. git calls
-    /// this as the `ljos-atoms` merge driver (`%A` then `%P`).
+    /// Rebuild this machine's memory log when git finds a conflict in it.
+    ///
+    /// git calls this as the `ljos-atoms` merge driver (`%A` then `%P`).
     ///
     /// Example: `ljos merge-atoms current path`
     #[command(hide = true)]
@@ -760,8 +781,9 @@ enum Cmd {
         /// The path in the tracker (`%P`).
         path: String,
     },
-    /// Field-merge one issue org file. git calls this as the `ljos-org`
-    /// merge driver (`%O` `%A` `%B`). The merged text replaces `ours`.
+    /// Merge one issue file when git finds two edits.
+    ///
+    /// git calls this as the `ljos-org` merge driver (`%O` `%A` `%B`). The merged text replaces `ours`.
     ///
     /// Example: `ljos merge-org base ours theirs`
     #[command(hide = true)]
@@ -780,7 +802,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CloudCmd,
     },
-    /// Join or leave the Headscale mesh, print its access policy, or move lane memory through a handoff directory.
+    /// Join or leave the private network, print who may connect, or move memories through a handoff directory.
     ///
     /// Headscale is the login server. A lane is one machine's memory file.
     ///
@@ -792,8 +814,8 @@ enum Cmd {
     /// List the memories most other memories point at.
     ///
     /// The order is a weighted PageRank: a memory ranks higher when the
-    /// memories that point at it are themselves highly linked. The pack is
-    /// this seat's memory store.
+    /// memories that point at it are themselves highly linked. PageRank
+    /// is that count of links.
     ///
     /// Example: `ljos hubs`
     Hubs {
@@ -803,45 +825,51 @@ enum Cmd {
     },
     /// List the memories a task wakes up.
     ///
-    /// Search hits are the seeds. The command then walks the links between memories. The pack is this seat's memory store.
+    /// The words you give are looked up, and the command then walks the links from those memories to others.
     ///
     /// Example: `ljos island codec`
     Island {
+        /// Words that name the task.
         cue: Vec<String>,
-        /// The strongest eight fired together: their links gain weight.
+        /// Strengthen the links among the strongest eight memories.
         #[arg(long)]
         fire: bool,
-        /// Walk it as this persona: its own weights on the way in, and a fire writes its weights, not the seat's.
+        /// Use this persona's link weights. A strengthened link is saved for the persona, not the seat.
         #[arg(long = "as")]
         as_persona: Option<String>,
     },
     /// Check that a stored file is intact, and that the files it came from are too.
     ///
-    /// A deed is that stored file. `at=` is the produced time in ISO 8601
+    /// The id names that stored file. `at=` is the produced time in ISO 8601
     /// with this machine's offset. `record -- COMMAND` runs the repo's test
     /// command and stores a passing record for the current tip, which
     /// `git push` requires.
     ///
     /// Example: `ljos evidence ACCESSION`
     Evidence {
-        /// A deed accession, or `record` followed by the test command.
+        /// The stored file's id, or `record` followed by the test command.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true, num_args = 1..)]
         args: Vec<String>,
     },
-    /// Record entry helpers.
+    /// Check ballot records.
     ///
     /// Example: `ljos record check records`
     Record {
         #[command(subcommand)]
         cmd: RecordCmd,
     },
-    /// Whether a deed is still the tip, or a later take superseded it.
+    /// Say whether a stored file is still the latest copy.
+    ///
+    /// A later copy supersedes it.
     ///
     /// Example: `ljos current ACCESSION`
-    Current { accession: String },
+    Current {
+        /// The stored file's id.
+        accession: String,
+    },
     /// Name a stored file on a ticket, or list the ones named.
     ///
-    /// The bytes stay in the deed store (`deedar`). Citing records the id.
+    /// The bytes stay in `deedar`, the program that keeps those files. Citing records the id.
     ///
     /// Example: `ljos deed proj-1a2b`
     Deed {
@@ -889,7 +917,7 @@ enum Cmd {
         /// Comma-separated tags.
         #[arg(long)]
         tags: Option<String>,
-        /// A, B or C.
+        /// Priority stored on the ticket: A, B or C.
         #[arg(long)]
         priority: Option<String>,
         /// Body prose under the heading. A decision's body names `Options: A, B`.
@@ -952,7 +980,9 @@ enum Cmd {
         #[arg(value_name = "WORDS", required = true, num_args = 1..)]
         words: Vec<String>,
     },
-    /// Tracker commits by one seat. The subject is `chore(issues): ID VERB by SEAT`.
+    /// List one seat's tracker commits.
+    ///
+    /// The subject is `chore(issues): ID VERB by SEAT`.
     ///
     /// Example: `ljos log --seat alice`
     Log {
@@ -960,7 +990,7 @@ enum Cmd {
         #[arg(long)]
         seat: String,
     },
-    /// How many tracker commits each seat made since a day.
+    /// Count the tracker commits each seat made since a day.
     ///
     /// Example: `ljos usage --since 2026-11-01`
     Usage {
@@ -1000,8 +1030,8 @@ enum Cmd {
         /// The vissue issue this message is about. A reply keeps it.
         #[arg(long)]
         issue: Option<String>,
-        /// Write to a seat this pack has not heard from yet. Without it, a
-        /// seat the pack does not know is refused, with the seats it knows.
+        /// Write to a seat that has not stored a memory yet. Without it, an
+        /// unknown seat is refused, and the line names the seats already known.
         #[arg(long)]
         new_seat: bool,
     },
@@ -1010,9 +1040,9 @@ enum Cmd {
     /// Each message shown is marked read, and a receipt is written.
     /// `ljos inbox --all` shows mail already read. `ljos reply` still
     /// answers it. `ljos hook --prompt` writes a receipt for each message
-    /// it shows. A pack that does not answer is an error and the exit is
-    /// non-zero. A pack that runs out of time prints `pack busy, try again`
-    /// and exits 75.
+    /// it shows. A memory store that does not answer is an error and the exit is
+    /// non-zero. A memory store that runs out of time prints `pack busy, try again`
+    /// and exits 75. The pack is this seat's memory store.
     ///
     /// Example: `ljos inbox`
     Inbox {
@@ -1053,10 +1083,13 @@ enum Cmd {
         #[arg(long)]
         interrupt: bool,
     },
-    /// A group of seats. With `--add` or `--remove`, change it; alone, list it.
+    /// List a group of seats, or change who is in it.
+    ///
+    /// With `--add` or `--remove`, change the group. With neither, list it.
     ///
     /// Example: `ljos group review --add alice`
     Group {
+        /// The group's name.
         name: String,
         /// A seat to add. Repeat for several.
         #[arg(long)]
@@ -1082,9 +1115,7 @@ enum Cmd {
         /// reaches it. The guard judges it now and on every run.
         #[arg(long, conflicts_with_all = ["webhook", "clear", "fire"])]
         command: Option<String>,
-        /// POST the message's envelope (never its body) here, such as a build harness
-        /// Bot routine's webhook. https, or http on localhost, an IPv4
-        /// loopback address, or ::1.
+        /// POST the message's envelope (never its body) to this URL, such as a runner's webhook. https, or http on localhost, an IPv4 loopback address, or ::1.
         #[arg(long, conflicts_with_all = ["clear", "fire"])]
         webhook: Option<String>,
         /// A file holding the webhook's bearer key.
@@ -1128,7 +1159,7 @@ enum Cmd {
         #[arg(long, value_name = "ID", conflicts_with = "on")]
         off: Option<String>,
     },
-    /// One ticket, including the tickets it waits on.
+    /// Show one ticket, including the tickets it waits on.
     ///
     /// An unknown id exits 1 and names `ljos ready`. An id that matches more
     /// than one ticket exits 1 and names one `ljos show` command.
@@ -1157,26 +1188,25 @@ enum Cmd {
     /// Show who holds which ticket.
     ///
     /// This is `vissue claims`, with its flags. `--mine` lists this seat's
-    /// claims that have had no note, deed or finish for a day. A deed is a
-    /// file stored for the ticket.
+    /// claims that have had no note, stored file or finish for a day.
     ///
     /// Example: `ljos claims`
     Claims {
         /// Passed to `vissue claims` as given (`--by NAME`, `--json`, `-p PROJECT`).
-        /// `--mine` lists this seat's claims with no note, deed or finish for a day.
+        /// `--mine` lists this seat's claims with no note, stored file or finish for a day.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Show the plan, the cited files and the notes for one ticket.
     ///
-    /// That set is the working set. A deed is a file stored for the ticket.
-    /// A graphify `graph.json` in the repository adds a code context section.
+    /// That set is the working set. A graphify `graph.json` in the repository adds a code context section.
     ///
     /// Example: `ljos recall proj-1a2b`
     ///
-    /// When the pack has no lesson on the issue, the line names `ljos remember`.
-    /// A writer that is not answering exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
+    /// When no lesson is stored on the issue, the line names `ljos remember`.
+    /// When nothing is storing memories, the command exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
     Recall {
+        /// The ticket id.
         issue: String,
         /// Print JSON. The ranking is a field, and the mode line is left off stderr.
         #[arg(long)]
@@ -1202,6 +1232,7 @@ enum Cmd {
     ///
     /// Example: `ljos vote proj-1a2b --for keep --used none`
     Vote {
+        /// The ticket to vote on. With no `--for`, the tally is printed.
         issue: String,
         /// The option to vote for.
         #[arg(long = "for")]
@@ -1211,7 +1242,7 @@ enum Cmd {
         /// or push cite weighs it.
         #[arg(long)]
         confidence: Option<f64>,
-        /// Deed accessions this ballot used, comma-separated, or `none`.
+        /// Ids of stored files this ballot used, comma-separated, or `none`.
         /// Required when `--for` is set.
         #[arg(long)]
         used: Option<String>,
@@ -1244,7 +1275,9 @@ enum Cmd {
         #[arg(long, value_name = "ID", conflicts_with_all = ["choice", "jev"])]
         child: Option<String>,
     },
-    /// The brief a subagent playing a persona starts from: view, domains, what the seat knows there, the work.
+    /// Print the brief a subagent playing a persona starts from.
+    ///
+    /// The brief is that persona's view, its domains, what the seat knows there, and the work.
     ///
     /// Example: `ljos brief editor proj-1a2b`
     Brief {
@@ -1253,7 +1286,9 @@ enum Cmd {
         /// The tracker id of the issue.
         issue: String,
     },
-    /// An issue's timeline: the tracker's logbook, the deeds it cites, and the memories it activates, one dated list oldest first with age and gap.
+    /// List an issue's history, oldest first.
+    ///
+    /// The list joins the tracker's logbook, the stored files the issue cites, and the memories it wakes. Each line has its age and the gap since the one before.
     ///
     /// Example: `ljos timeline proj-1a2b`
     Timeline {
@@ -1263,7 +1298,9 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 60)]
         limit: usize,
     },
-    /// A panel without MCP: one brief per persona, `run` to spawn each designer and persona in its own harness session, or `--cloud` for one prompt file per persona.
+    /// Write one brief per persona for an issue, or start those personas.
+    ///
+    /// `ljos panel ISSUE` writes the briefs. `ljos panel run ISSUE` starts each designer and persona in its own runner session. `--cloud` writes one prompt file per persona and starts nothing. MCP, the tool server a runner starts, is not required.
     ///
     /// Example: `ljos panel proj-1a2b`
     Panel {
@@ -1279,7 +1316,7 @@ enum Cmd {
         /// for get a brief.
         #[arg(long)]
         jev: bool,
-        /// `the editor command` or `the terminal harness`. Overrides `LJOS_PANEL_HARNESS`.
+        /// Which runner starts the panel. Overrides `LJOS_PANEL_HARNESS`.
         #[arg(long)]
         harness: Option<String>,
         /// How many designers `run` spawns. Each files one candidate from the brief alone.
@@ -1299,6 +1336,7 @@ enum Cmd {
     ///
     /// Example: `ljos persona editor --anchor 0.5 --view "reads the diff first"`
     Persona {
+        /// Name of the voter.
         name: String,
         /// How far the persona moves off its ballot in a settle; 1 is a plain voter.
         #[arg(long, default_value_t = 0.5)]
@@ -1341,15 +1379,16 @@ enum Cmd {
         #[arg(long)]
         only: Option<String>,
     },
-    /// Classify one harness exit under the restart policy, and print the
-    /// herdr line that would start the child again. This does not start it.
+    /// Say whether a runner that exited should start again.
+    ///
+    /// The line is `restart`, `stop` or `give-up`. On a restart it also prints the herdr line that would start the child. It prints the line and does not run it.
     ///
     /// Example: `ljos supervise worker --harness codex --exit clean --at 0`
     #[command(hide = true)]
     Supervise {
         /// The child's name. The herdr agent is `persona-NAME`.
         name: String,
-        /// The harness this child runs.
+        /// The runner this child runs.
         #[arg(long)]
         harness: String,
         /// `permanent`, `transient`, or `temporary`.
@@ -1381,28 +1420,31 @@ enum Cmd {
     ///
     /// Example: `ljos ask editor "which codec"`
     Ask {
+        /// The persona to ask.
         name: String,
         /// What to ask, in words.
         text: Vec<String>,
     },
-    /// The personas the pack holds: name, anchor, domains, view, and the seat that defined each, one per line.
+    /// List each persona: name, anchor, domains, view, and who defined it.
     ///
     /// Example: `ljos personas`
     Personas,
-    /// Write every persona as an agent definition in each runner's agents
-    /// directory. A runner starts it as a subagent that casts that
-    /// persona's ballot before it reads the others.
+    /// Write every persona as an agent a runner can start by name.
+    ///
+    /// The file is `ljos-NAME.md` in each runner's agents directory. The runner starts it as a subagent that casts that persona's ballot before it reads the others.
     ///
     /// Example: `ljos agents`
     Agents {
-        /// One runner, from harnesses.toml or the shipped shapes; every runner in harnesses.toml with an agents directory when absent.
+        /// Write one runner's agents only. The name is a runner in harnesses.toml, or one ljos ships. Absent: every runner in harnesses.toml that has an agents directory.
         #[arg(long)]
         harness: Option<String>,
         /// Report what would be written and removed, and change nothing.
         #[arg(long)]
         dry_run: bool,
     },
-    /// One line for a runner's status bar (the build harness's [ui.status_line], the terminal harness's statusLine): the seat, the issue held, what is due. Reads the runner's status JSON on stdin.
+    /// Print one status line for a runner: the seat, the ticket it holds, and what is due.
+    ///
+    /// The runner's status JSON is read on stdin. A build runner reads this from `[ui.status_line]`. A terminal runner reads it from `statusLine`.
     ///
     /// Example: `ljos statusline`
     #[command(hide = true)]
@@ -1416,11 +1458,13 @@ enum Cmd {
         /// The recipe name: sit, arena, land, company-panel, overnight, feature.
         name: String,
     },
-    /// The playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight, feature.
+    /// List the recipes on offer: sit, arena, land, company-panel, overnight, feature.
     ///
     /// Example: `ljos playbooks`
     Playbooks,
-    /// A parent issue's workflow: where it stands and the next step. `--start` puts the parent under a workflow and files its design child; `--round` files the next panel round or a blocking fix. A round count does not close the parent.
+    /// Show where a parent ticket's workflow stands, and the next step.
+    ///
+    /// `--start` puts the parent under a workflow and files its design child. `--round` files the next panel round or a blocking fix. A round count does not close the parent.
     ///
     /// Example: `ljos workflow proj-1a2b`
     Workflow {
@@ -1452,7 +1496,7 @@ enum Cmd {
         /// Desired role affinity when claiming next work ('explore', 'architect', 'implementor', 'verifier', 'orchestrator', 'general').
         #[arg(long)]
         role: Option<String>,
-        /// Critical depth slack for candidate dispersion.
+        /// How far from the best next ticket the claim may reach. A larger number considers more tickets.
         #[arg(long)]
         slack: Option<usize>,
     },
@@ -1475,7 +1519,7 @@ enum Cmd {
         /// done (default), failed, or cancelled.
         #[arg(long)]
         status: Option<String>,
-        /// Generation from the sitting's claim. Absent: the live one. A stale gen is refused.
+        /// Claim generation recorded when the work was taken. Absent: the live one. A stale generation is refused.
         #[arg(long)]
         gen: Option<u64>,
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
@@ -1500,6 +1544,7 @@ enum Cmd {
     ///
     /// Example: `ljos predict proj-1a2b --expect keep`
     Predict {
+        /// The ticket the forecast is about.
         issue: String,
         /// The option you expect to win, or a JSON object of option to share.
         #[arg(long)]
@@ -1531,11 +1576,11 @@ enum Cmd {
         /// Print the atom JSON. The default is one line: id, kind, due, text.
         #[arg(long)]
         json: bool,
-        /// Write the rule into the user config instead of the seat pack.
+        /// Write the rule into the user config, shared by every seat, instead of this seat's memories.
         #[arg(long)]
         user: bool,
     },
-    /// The command guard's rules: verdict, pattern and reason, one a line.
+    /// List the command guard's rules: verdict, pattern and reason, one a line.
     ///
     /// Example: `ljos rules`
     Rules {
@@ -1543,7 +1588,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// What the command guard says about a command. It runs nothing.
+    /// Show what the command guard says about a command. It runs nothing.
     ///
     /// Put `--` before the command when that command has its own flags.
     /// The line after the command is what ljos remembers about it.
@@ -1555,9 +1600,10 @@ enum Cmd {
         /// Any other rule stays a warning, and without this flag the exit stays 0.
         #[arg(long)]
         fail_on_deny: bool,
+        /// The command to judge. Put `--` before it when the command has flags of its own.
         argv: Vec<String>,
     },
-    /// The hook a coding runner calls before it acts.
+    /// Answer the hook a coding runner calls before it acts.
     ///
     /// Hook JSON or plain text goes on stdin. The memories it bears on, and
     /// the guard's verdict, come out. Nothing matched is empty output.
@@ -1583,7 +1629,7 @@ enum Cmd {
         text: bool,
         /// Exit 1 only when the answer denies the cloud seat push rule.
         /// Any other rule stays a warning. Without this flag the exit stays 0,
-        /// so a runner that reads the JSON is unchanged. A pack that does not
+        /// so a runner that reads the JSON is unchanged. A memory store that does not
         /// answer still exits 0: a hook must not fail the runner.
         #[arg(long)]
         fail_on_deny: bool,
@@ -1637,8 +1683,9 @@ enum Cmd {
         /// `install`, `uninstall`, or `status`.
         action: String,
     },
-    /// Set, clear, or show the person's passphrase. `set` and `clear` read
-    /// from the terminal and are the person's, with no runner variable set.
+    /// Set, clear, or show the passphrase that unlocks this person's key.
+    ///
+    /// `set` and `clear` read the terminal. They are refused when a runner variable is set.
     ///
     /// Example: `ljos person-key status`
     PersonKey {
@@ -1662,6 +1709,7 @@ enum Cmd {
     ///
     /// Example: `ljos consensus proj-1a2b`
     Consensus {
+        /// The ticket whose votes to read.
         id: String,
         /// Print one JSON document and nothing else. The push cite stays at
         /// the top level under `push_cite`. The model crate's settle is under
@@ -1695,10 +1743,9 @@ enum Cmd {
         #[arg(long, value_name = "RFC3339", requires = "quorum")]
         deadline: Option<String>,
     },
-    /// Sign a launch slot on the issue a cloud run is launched for: the
-    /// run's seat, the model asked for, the run id and the run's public
-    /// key, under this seat's pinned key. Written before the run's first
-    /// ballot.
+    /// Sign the record that lets a cloud run vote on a ticket.
+    ///
+    /// The record names the run's seat, the model, the run id and the run's public key, under this seat's pinned key. It is written before the run's first ballot.
     ///
     /// Example: `ljos slot proj-1a2b alice --model composer --run run-1 --key aa`
     #[command(hide = true)]
@@ -1719,14 +1766,19 @@ enum Cmd {
         #[arg(long, value_name = "HEX")]
         key: String,
     },
-    /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
+    /// Record how much one voter counts another's view.
+    ///
+    /// FROM weighs TO at WEIGHT, a number from just above 0 up to 1. The row is stored with this seat's memories.
     ///
     /// Example: `ljos trust alice bob 0.5`
     Trust {
+        /// Who is weighing. A seat or a persona name.
         from: String,
+        /// Who is being weighed. A seat or a persona name.
         to: String,
+        /// How much FROM counts TO, from just above 0 up to 1.
         weight: f64,
-        /// Deed accessions this row stands on.
+        /// Ids of stored files this row stands on. Repeat for several.
         #[arg(long)]
         why: Vec<String>,
         /// Domains this row is scoped to; none means it applies everywhere.
@@ -1774,9 +1826,9 @@ enum Cmd {
         #[arg(long)]
         install_desktop: bool,
     },
-    /// Print the short sitting protocol.
+    /// Print how work on one ticket is meant to run.
     ///
-    /// `--full` prints every store and every reason a sitting is refused.
+    /// `--full` prints every store and every reason that work is refused.
     ///
     /// Example: `ljos protocol`
     Protocol {
@@ -1802,7 +1854,9 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<SeatAction>,
     },
-    /// Serve MCP over stdio: run the `ljos-mcp` installed beside this `ljos`, with these arguments. For a client that starts a server by its crate's name.
+    /// Start the tool server a runner connects to.
+    ///
+    /// This runs the `ljos-mcp` installed beside this `ljos` and passes the arguments through. MCP is that tool server. A client that starts a server by its crate's name uses this command.
     ///
     /// Example: `ljos mcp`
     Mcp {
@@ -1874,7 +1928,7 @@ enum Cmd {
     },
     /// Write a signed directory another seat can receive.
     ///
-    /// The directory holds this seat's memories, the deeds they cite, and
+    /// The directory holds this seat's memories, the stored files they cite, and
     /// a signed manifest. The other seat runs `ljos receive` on it.
     ///
     /// Example: `ljos handover --out /tmp/bag --issue proj-1a2b`
@@ -1902,6 +1956,7 @@ enum Cmd {
     ///
     /// Example: `ljos receive /tmp/bag --keep ~/.local/share/ljos/peer.head`
     Receive {
+        /// The handover directory to check.
         dir: PathBuf,
         /// The head file `--keep` wrote at the last receive from the same sender.
         #[arg(long)]
@@ -1909,6 +1964,7 @@ enum Cmd {
         /// Write this bag's log head here, for `--since` next time.
         #[arg(long)]
         keep: Option<PathBuf>,
+        /// Store the directory's memories here. Without this, the directory is only checked.
         #[arg(long)]
         import: bool,
     },
@@ -1931,7 +1987,9 @@ enum Cmd {
     /// Example: `ljos judge-score`
     #[command(hide = true)]
     JudgeScore,
-    /// Put an eb-stack bundle's modules on the tracker: one child issue per module under the parent, blockers along the dependency edges, the same ids on every run. `vissue ready` then lists what a seat can build now.
+    /// File one ticket per module in a bundle, under a parent ticket.
+    ///
+    /// The same ids come back on every run. Each module waits on the modules it depends on. `vissue ready` then lists what can be built now.
     ///
     /// Example: `ljos bump-plan bundle --project demo --parent proj-1a2b`
     #[command(hide = true)]
@@ -1951,24 +2009,28 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// The typed findings of an eb-stack campaign state file, one per line; `--remember` writes one lesson per finding a person or a seat resolved, and `--issue` cites the state file on the issue.
+    /// List the findings in a campaign file, one per line.
+    ///
+    /// `--remember` stores one lesson per finding a person or a seat resolved. `--issue` records the file on that ticket.
     ///
     /// Example: `ljos findings campaign.json`
     #[command(hide = true)]
     Findings {
         /// The campaign state file (`campaign.json`).
         state: PathBuf,
-        /// Write one lesson per resolved finding to the pack.
+        /// Store one lesson per resolved finding with this seat's memories.
         #[arg(long)]
         remember: bool,
         /// With --remember, every finding, the ones a later attempt superseded too.
         #[arg(long)]
         all: bool,
-        /// Cite the state file as a deed on this issue.
+        /// Record the state file as a stored file on this ticket.
         #[arg(long)]
         issue: Option<String>,
     },
-    /// A habit is a number the seat keeps measuring. `ljos habit NAME VALUE` takes a reading and closes the one before; `ljos habit NAME` shows one; `ljos habit` lists them all with the change since the last reading and when the next is due.
+    /// Record a number you measure again later, or list the ones you keep.
+    ///
+    /// A habit is that number. `ljos habit NAME VALUE` stores a reading and closes the one before. `ljos habit NAME` shows one. `ljos habit` lists them, the change since the last reading, and when the next is due.
     ///
     /// Example: `ljos habit`
     Habit {
@@ -2026,10 +2088,10 @@ enum Cmd {
         /// Accepted and ignored. A blocked issue is sat and labelled `blocked-by`.
         #[arg(long)]
         anyway: bool,
-        /// The recipe this sitting copies before recall. Absent, a closed-set token in the title else sit. Held until finish or release.
+        /// The recipe copied in before the ticket is recalled. Absent, a word from the closed set in the title, else sit. Kept until finish or release.
         #[arg(long)]
         playbook: Option<String>,
-        /// Print every section in full: the doctor's rows, recall, timeline, reclaim. Without it the sitting prints what needs action and what the seat remembers.
+        /// Print every section in full: the doctor's rows, recall, timeline, reclaim. Without it the command prints what needs action and what the seat remembers.
         #[arg(long)]
         verbose: bool,
     },
@@ -2042,7 +2104,7 @@ enum Cmd {
         /// done, failed, or cancelled.
         #[arg(long, default_value = "done")]
         status: String,
-        /// The lesson this sitting taught, two sentences at most.
+        /// The lesson this work taught, two sentences at most.
         #[arg(long)]
         lesson: Option<String>,
         /// The lesson given after the issue without `--lesson`, as agents often write it.
@@ -2057,20 +2119,21 @@ enum Cmd {
         /// The factor a refuted voter shrinks by when an outcome is named.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
-        /// Generation from the sitting's claim. Absent: the live one. A stale gen is refused.
+        /// Claim generation recorded when the work was taken. Absent: the live one. A stale generation is refused.
         #[arg(long)]
         gen: Option<u64>,
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
-        /// Close the tracker ticket. A runner is refused. CANCELLED with `--status cancelled`. Only when the work is accepted or dropped, not when the sitting ends.
+        /// Close the tracker ticket. A runner is refused. CANCELLED with `--status cancelled`. Only when the work is accepted or dropped, not when the work session ends.
         #[arg(long)]
         close: bool,
         /// Print whether related memories were linked. Without it, finish says the ticket and the next command.
         #[arg(long)]
         verbose: bool,
     },
-    /// Put a finished or cancelled issue back to the state the close took it from.
+    /// Put a finished or cancelled issue back to the state it had before it was closed.
+    ///
     /// A person has to be present. The close stays on the logbook, with the reopen under it. The caller does not take the claim.
     ///
     /// Example: `ljos reopen proj-1a2b`
@@ -2110,7 +2173,9 @@ enum Cmd {
     ///
     /// Example: `ljos graded a6ae2751`
     Graded {
+        /// The memory id from `ljos due`.
         id: String,
+        /// Count the review as missed. Without this, the memory counts as recalled.
         #[arg(long)]
         lapsed: bool,
     },
@@ -2118,6 +2183,7 @@ enum Cmd {
     ///
     /// Example: `ljos learn proj-1a2b --outcome keep`
     Learn {
+        /// The ticket whose ballots to reweigh.
         id: String,
         /// The option that turned out right.
         #[arg(long)]
@@ -2128,10 +2194,10 @@ enum Cmd {
         /// The factor a refuted voter shrinks by.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
-        /// A fixed share of recovery toward one after the step, so a voter refuted long ago can come back; 0 is plain Hedge.
+        /// How far a voter who was wrong for a long time moves back toward a full vote after this step. 0 leaves the new weight as the step set it.
         #[arg(long, default_value_t = 0.0)]
         share: f64,
-        /// `record` (the default): each voter's hits and misses so far as log-odds weights. `hedge`: refuted voters shrink by --beta, with --share recovery.
+        /// `record` (the default) counts each voter's hits and misses so far. `hedge` shrinks a voter who was wrong by `--beta`, then moves `--share` of the way back.
         #[arg(long, default_value = "record")]
         rule: String,
     },
