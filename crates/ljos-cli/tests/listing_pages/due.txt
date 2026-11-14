@@ -1,0 +1,14 @@
+status 0
+stderr:
+stdout:
+unreviewed	lesson	idkiln01aaaaaaaaaaaaaaaaaaaaaaaa	The damper sticks when the kiln is cold.
+unreviewed	lesson	idkiln02bbbbbbbbbbbbbbbbbbbbbbbb	The damper sticks.
+Open the flue before the kiln reaches temperature.
+Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
+unreviewed	lesson	idkiln03cccccccccccccccccccccccc	The damper log is https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-see-where-it-breaks
+unreviewed	note	idkiln04dddddddddddddddddddddddd	SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumnsAndKeepsGoingFurtherStillUntilTheWordItselfPassesTheMark
+unreviewed	lesson	idglaze01eeeeeeeeeeeeeeeeeeeeeeee	Glaze batch 1 waits until the kiln is cool enough to open.
+unreviewed	lesson	idglaze02eeeeeeeeeeeeeeeeeeeeeeee	Glaze batch 2 waits until the kiln is cool enough to open.
+unreviewed	lesson	idglaze03eeeeeeeeeeeeeeeeeeeeeeee	Glaze batch 3 waits until the kiln is cool enough to open.
+unreviewed	lesson	idglaze04eeeeeeeeeeeeeeeeeeeeeeee	Glaze batch 4 waits until the kiln is cool enough to open.
+17 due; nothing else scheduled

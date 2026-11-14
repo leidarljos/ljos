@@ -1,0 +1,20 @@
+status 0
+stderr:
+matched by meaning
+stdout:
+shown 3 of 12, and the next page lists the rest, so run `ljos search glaze -n
+12`.
+The number is the order in the list. It is not whether the sentence is true.
+Checks: how many of them named this row.
+
+lesson, from an agent, today
+  Glaze batch 1 waits until the kiln is cool enough to open.
+  order 0.79, checks 2/2, id idglaze0
+
+lesson, from an agent, today
+  Glaze batch 2 waits until the kiln is cool enough to open.
+  order 0.78, checks 2/2, id idglaze0
+
+lesson, from an agent, today
+  Glaze batch 3 waits until the kiln is cool enough to open.
+  order 0.77, checks 2/2, id idglaze0

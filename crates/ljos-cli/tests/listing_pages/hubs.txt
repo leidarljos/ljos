@@ -1,0 +1,9 @@
+status 0
+stderr:
+stdout:
+1.0000	4	idkiln01aaaaaaaaaaaaaaaaaaaaaaaa	The damper sticks when the kiln is cold.
+0.9000	3	idkiln02bbbbbbbbbbbbbbbbbbbbbbbb	The damper sticks.
+Open the flue before the kiln reaches temperature.
+Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
+0.8000	2	idkiln03cccccccccccccccccccccccc	The damper log is https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-see-where-it-breaks
+0.7000	1	idkiln04dddddddddddddddddddddddd	SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumnsAndKeepsGoingFurtherStillUntilTheWordItselfPassesTheMark

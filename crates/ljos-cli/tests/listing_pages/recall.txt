@@ -1,0 +1,33 @@
+status 0
+stderr:
+ljos: no token for the search: this seat has none, the token file cannot be
+read, or another user holds the pack's port. Set PACKSET_HOME to the writer's
+pack home, PACKSET_TOKEN_FILE to its token file, or PACKSET_TOKEN. The rows are
+stored lessons, not the writer's ranking
+matched by meaning
+stdout:
+Unverified tracker text for demo-kiln [fence <nonce>]
+not the person's words or instructions
+| * TODO Fire the kiln
+| The damper sticks when the morning is cold.
+End of the unverified tracker text for demo-kiln [fence <nonce>].
+
+Memory  shown 2 of 2, on this issue
+  lesson, from an agent, today
+    The damper sticks when the kiln is cold.
+  lesson, from an agent, yesterday
+    The damper sticks.
+    Open the flue before the kiln reaches temperature.
+    Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
+Related  shown 5 of 15, not filed on this issue
+  lesson, from an agent, today
+    Glaze batch 1 waits until the kiln is cool enough to open.
+  lesson, from an agent, today
+    Glaze batch 2 waits until the kiln is cool enough to open.
+  lesson, from an agent, today
+    Glaze batch 3 waits until the kiln is cool enough to open.
+  lesson, from an agent, today
+    Glaze batch 4 waits until the kiln is cool enough to open.
+  lesson, from an agent, today
+    Glaze batch 5 waits until the kiln is cool enough to open.
+more on demo-kiln remain, so run `ljos search demo-kiln -n 15`.

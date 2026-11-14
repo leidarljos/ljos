@@ -1,0 +1,6 @@
+status 0
+stderr:
+stdout:
+timeline of demo-kiln: Fire the kiln
+<date> 	<age>		tracker	created
+<date> 09:14	<age>	+1 d	tracker	note: [unverified <nonce>] The damper sticks when the morning is cold. Þéttingin er gömul. [end <nonce>]

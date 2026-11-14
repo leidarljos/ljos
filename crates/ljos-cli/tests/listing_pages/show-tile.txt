@@ -1,0 +1,5 @@
+status 0
+stderr:
+stdout:
+demo-tile  STARTED  Glaze the tile after reading https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4/workshop-north/session-that-is-one-long-url
+blockers: none

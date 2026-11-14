@@ -1,0 +1,5 @@
+status 0
+stderr:
+stdout:
+demo-kiln  TODO  Fire the kiln
+blockers: none

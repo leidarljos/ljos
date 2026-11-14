@@ -1,0 +1,39 @@
+status 0
+stderr:
+stdout:
+idglaze0  lesson  Glaze batch 1 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 2x
+idglaze0  lesson  Glaze batch 2 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 2x
+idglaze0  lesson  Glaze batch 3 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 2x
+idglaze0  lesson  Glaze batch 4 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 1x
+idglaze0  lesson  Glaze batch 5 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 1x
+idglaze0  lesson  Glaze batch 6 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 1x
+idglaze0  lesson  Glaze batch 7 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 1x
+idglaze0  lesson  Glaze batch 8 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 1x
+idglaze0  lesson  Glaze batch 9 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 0x
+idglaze1  lesson  Glaze batch 10 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 0x
+idglaze1  lesson  Glaze batch 11 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 0x
+idglaze1  lesson  Glaze batch 12 waits until the kiln is cool enough to open.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 0x
+idkiln01  lesson  The damper sticks when the kiln is cold.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 1x
+idkiln03  lesson  The damper log is https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-see-where-it-breaks
+    seat bob  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 0x
+idkiln04  note  SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumnsAndKeepsGoingFurtherStillUntilTheWordItselfPassesTheMark
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 0x
+idother0  preference  A ferry timetable is not a kiln schedule.
+    seat carol  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 0x
+idkiln02  lesson  The damper sticks.
+Open the flue before the kiln reaches temperature.
+Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
+    seat alice  harness cursor  session sess-listing-pages  at <time>  origin agent-derived  recalled 0x  looked up 2x

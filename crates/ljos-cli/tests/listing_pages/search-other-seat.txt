@@ -1,0 +1,14 @@
+status 0
+stderr:
+matched by meaning
+stdout:
+shown 1 of 1.
+The number is the order in the list. It is not whether the sentence is true.
+Checks: how many of them named this row.
+
+lesson, from an agent, today, from bob
+  The damper log is
+  https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-read
+  ings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-see-wh
+  ere-it-breaks
+  order 0.88, checks 2/3, id idkiln03

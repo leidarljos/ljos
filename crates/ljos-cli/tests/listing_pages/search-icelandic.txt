@@ -1,0 +1,13 @@
+status 0
+stderr:
+matched by meaning
+stdout:
+shown 1 of 1.
+The number is the order in the list. It is not whether the sentence is true.
+Checks: how many of them named this row.
+
+lesson, from an agent, yesterday
+  The damper sticks.
+  Open the flue before the kiln reaches temperature.
+  Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
+  order 0.91, checks 3/3, id idkiln02
