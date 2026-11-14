@@ -3,7 +3,7 @@
 ljos stores a lesson. A later prompt shows it when the prompt bears on that lesson.
 
 [//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
-These notes describe ljos 0.42.0.
+These notes describe ljos 0.42.1.
 [//]: # ([[[end]]])
 
 ljos is installed with two commands. The first fetches install.sh. The second is ljos onboard.

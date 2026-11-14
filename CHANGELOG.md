@@ -5,6 +5,23 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.42.1 (2026-11-14)
+
+### Fixes
+
+- A handoff that has gone away or stopped answering stops `ljos mesh pull`, `ljos mesh push`, and a memory export or import that writes that folder.
+  The line names the folder, the error in words, and the command to run once the mount answers, and the command exits 1.
+  The count is printed only when the write finished.
+  The file is written under a temporary name in that folder and renamed into place.
+  `LJOS_SHARE_WAIT` is how long one operation may sit, 60 seconds when unset.
+- A hook call parses its own flags and does not build every other command, so its peak resident set stays under 30 MB.
+
+### Documentation
+
+- Each command's help says what it does in plain words, what each flag changes, and one example.
+- Old how-to fragments for wiring a seat into a runner or an editor open Another runner and Cursor on the runner how-to.
+
+
 ## 0.42.0 (2026-11-13)
 
 ### Features
