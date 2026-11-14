@@ -17356,7 +17356,7 @@ fn pack_step(dry: bool) -> Step {
     } else {
         return Step {
             what,
-            detail: "PACKSET_URL=off; no pack on purpose".into(),
+            detail: "PACKSET_URL (memory writer address) is off; no pack on purpose".into(),
             ok: true,
         };
     }
@@ -17513,11 +17513,15 @@ fn deed_store_step(dry: bool) -> Step {
         ok,
     };
     if let Some(url) = named_env("DEEDAR_URL") {
-        return step(format!("DEEDAR_URL={url} names the store"), true);
+        return step(
+            format!("DEEDAR_URL (store address)={url} names the store"),
+            true,
+        );
     }
     let Some(dir) = data_base().map(|b| b.join("deedar").join("store")) else {
         return step(
-            "no home directory to keep a deed store in; set HOME, or DEEDAR_URL=file:///DIR".into(),
+            "no home directory to keep a deed store in; set HOME, or DEEDAR_URL (store address)=file:///DIR"
+                .into(),
             false,
         );
     };
@@ -17538,7 +17542,7 @@ fn deed_store_step(dry: bool) -> Step {
     match made {
         Ok(()) => step(
             format!(
-                "created {}, the signed records of finished work. deedar uses it with DEEDAR_URL unset",
+                "created {}, the signed records of finished work. deedar (deed program) uses it while DEEDAR_URL (store address) is unset",
                 dir.display()
             ),
             true,
@@ -17569,7 +17573,11 @@ fn tracker_step(dry: bool) -> Step {
     };
     for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
         if let Some(root) = named_env(key).filter(|root| !tracker_place::pinned(root)) {
-            let detail = format!("{key}={root} names the tracker");
+            let detail = if key == "VISSUE_ROOT" {
+                format!("VISSUE_ROOT (tracker directory)={root} names the tracker")
+            } else {
+                format!("{key}={root} names the tracker")
+            };
             let path = PathBuf::from(&root);
             if let Some(why) = misplaced(&path) {
                 return step(format!("{detail}, and {why}"), false);
@@ -17589,7 +17597,8 @@ fn tracker_step(dry: bool) -> Step {
         tracker_place::default_root(),
     ) else {
         return step(
-            "no home directory to keep a tracker in; set HOME, or VISSUE_ROOT=DIR".into(),
+            "no home directory to keep a tracker in; set HOME, or VISSUE_ROOT (tracker directory)=DIR"
+                .into(),
             false,
         );
     };
@@ -17656,7 +17665,7 @@ fn tracker_step(dry: bool) -> Step {
             }
             step(
                 format!(
-                    "created {}, where tickets are kept. {} names it, so no VISSUE_ROOT is needed",
+                    "created {}, where tickets are kept. {} names it, so VISSUE_ROOT (tracker directory) is not needed",
                     root.display(),
                     cfg.display()
                 ),
@@ -17665,7 +17674,7 @@ fn tracker_step(dry: bool) -> Step {
         }
         Err(e) => step(
             format!(
-                "made {}, but {}: {e}; set VISSUE_ROOT={} instead",
+                "made {}, but {}: {e}; set VISSUE_ROOT (tracker directory)={} instead",
                 root.display(),
                 cfg.display(),
                 root.display()
@@ -61293,8 +61302,10 @@ mod tests {
         }
         assert!(super::tracker_step(true)
             .detail
-            .contains("VISSUE_ROOT=/elsewhere"));
-        assert!(super::deed_store_step(true).detail.contains("DEEDAR_URL="));
+            .contains("VISSUE_ROOT (tracker directory)=/elsewhere"));
+        assert!(super::deed_store_step(true)
+            .detail
+            .contains("DEEDAR_URL (store address)=file:///elsewhere"));
         // SAFETY: as above.
         unsafe {
             for (k, v) in saved {
@@ -64679,6 +64690,36 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             tracker.detail.starts_with("would create"),
             "{}",
             tracker.detail
+        );
+    }
+
+    /// A first onboard names deedar and the store variables in a few words.
+    /// The tutorial has not introduced them yet.
+    #[test]
+    fn a_fresh_onboard_glosses_the_store_names() {
+        let _g = env_guard();
+        let _seat = HermeticSeat::new();
+        let deed = super::deed_store_step(false);
+        let tracker = super::tracker_step(false);
+        let pack = super::pack_step(false);
+        assert!(deed.ok, "{}", deed.detail);
+        assert!(tracker.ok, "{}", tracker.detail);
+        assert!(pack.ok, "{}", pack.detail);
+        assert!(
+            deed.detail.contains("deedar (deed program)")
+                && deed.detail.contains("DEEDAR_URL (store address)"),
+            "{}",
+            deed.detail
+        );
+        assert!(
+            tracker.detail.contains("VISSUE_ROOT (tracker directory)"),
+            "{}",
+            tracker.detail
+        );
+        assert!(
+            pack.detail.contains("PACKSET_URL (memory writer address)"),
+            "{}",
+            pack.detail
         );
     }
 
