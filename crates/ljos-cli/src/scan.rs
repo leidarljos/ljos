@@ -142,29 +142,102 @@ fn push_wrapped(out: &mut String, line: &str, cols: usize) {
     out.push_str(&lines.join("\n"));
 }
 
+/// Break a token that does not fit. A URL breaks after `/`, `?`, `&`, `=`
+/// or `#`. A hyphen, underscore or dot is the next place. Only a run with
+/// none of those ends a line with `\`, so the rest is visibly the same word.
 fn break_word(text: &str, cols: usize) -> String {
     if text.chars().count() <= cols {
         return text.to_string();
     }
-    let mut out = String::new();
-    let mut line = String::new();
-    for ch in text.chars() {
-        if line.chars().count() == cols {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&line);
-            line.clear();
-        }
-        line.push(ch);
+    let indent_len = text.chars().take_while(|ch| *ch == ' ').count();
+    let indent = " ".repeat(indent_len);
+    let room = cols.saturating_sub(indent_len).max(1);
+    let mut lines = Vec::new();
+    let mut current = indent.clone();
+    for piece in soft_pieces(text.trim_start_matches(' ')) {
+        place_piece(&mut lines, &mut current, &indent, room, &piece);
     }
-    if !line.is_empty() {
-        if !out.is_empty() {
-            out.push('\n');
+    if current.chars().count() > indent_len {
+        lines.push(current);
+    }
+    lines.join("\n")
+}
+
+fn soft_pieces(word: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    for ch in word.chars() {
+        cur.push(ch);
+        if matches!(ch, '/' | '?' | '&' | '=' | '#') {
+            parts.push(std::mem::take(&mut cur));
         }
-        out.push_str(&line);
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    let mut out = Vec::new();
+    for part in parts {
+        let mut cur = String::new();
+        for ch in part.chars() {
+            cur.push(ch);
+            if matches!(ch, '-' | '_' | '.') && cur.chars().count() > 1 {
+                out.push(std::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
     }
     out
+}
+
+fn place_piece(
+    lines: &mut Vec<String>,
+    current: &mut String,
+    indent: &str,
+    room: usize,
+    piece: &str,
+) {
+    let indent_len = indent.chars().count();
+    if current.chars().count() > indent_len
+        && current.chars().count() + piece.chars().count() > indent_len + room
+    {
+        lines.push(std::mem::take(current));
+        current.push_str(indent);
+    }
+    if piece.chars().count() <= room {
+        current.push_str(piece);
+        return;
+    }
+    let mut rest = piece;
+    while !rest.is_empty() {
+        if current.chars().count() > indent_len {
+            lines.push(std::mem::take(current));
+            current.push_str(indent);
+        }
+        let take = room.min(rest.chars().count());
+        let more = rest.chars().count() > take;
+        let cut = if more {
+            take.saturating_sub(1).max(1)
+        } else {
+            take
+        };
+        let (head, tail) = split_at_chars(rest, cut);
+        current.push_str(head);
+        if more {
+            current.push('\\');
+            lines.push(std::mem::take(current));
+            current.push_str(indent);
+        }
+        rest = tail;
+    }
+}
+
+fn split_at_chars(text: &str, n: usize) -> (&str, &str) {
+    match text.char_indices().nth(n) {
+        Some((index, _)) => text.split_at(index),
+        None => (text, ""),
+    }
 }
 
 /// The first eight characters, which `ljos forget` accepts as an id.
@@ -651,6 +724,21 @@ mod tests {
         let wrapped = wrap(long, COLS);
         assert!(wrapped.lines().all(|line| line.chars().count() <= COLS));
         assert!(wrapped.lines().count() > 1);
+        let url = "https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4";
+        let broken = wrap(url, COLS);
+        assert!(broken.lines().all(|line| line.chars().count() <= COLS));
+        assert!(
+            broken
+                .lines()
+                .all(|line| !line.contains("read\n") && !line.ends_with("read")),
+            "{broken}"
+        );
+        assert!(broken.contains("readings/"), "{broken}");
+        assert!(!broken.contains("read\nings"), "{broken}");
+        let solid = "SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumnsWithoutABreak";
+        let cut = wrap(solid, 20);
+        assert!(cut.contains('\\'), "{cut}");
+        assert!(cut.lines().all(|line| line.chars().count() <= 20), "{cut}");
     }
 
     #[test]

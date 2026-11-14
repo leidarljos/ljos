@@ -6,7 +6,7 @@ open and not waiting on an open ticket, so run `ljos show ID`.
 
 demo-tile  STARTED  [#A]
   Glaze the tile after reading
-  https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-read
-  ings/line-4/workshop-north/session-that-is-one-long-url
+  https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-
+  readings/line-4/workshop-north/session-that-is-one-long-url
 
 demo-kiln  TODO  [#B]  Fire the kiln

@@ -70,15 +70,15 @@ idkiln01a  lesson, today, ticket demo-kiln
 
 idkiln03c  lesson, today, ticket demo-tile
     The damper log is
-    https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-re
-    adings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-se
-    e-where-it-breaks
+    https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-
+    readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-
+    see-where-it-breaks
     seat bob  origin agent-derived  recalled 0x  looked up 0x
     harness cursor  session sess-listing-pages
 
 idkiln04d  note, today
-    SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumnsA
-    ndKeepsGoingFurtherStillUntilTheWordItselfPassesTheMark
+    SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumns\
+    AndKeepsGoingFurtherStillUntilTheWordItselfPassesTheMark
     seat alice  origin agent-derived  recalled 0x  looked up 0x
     harness cursor  session sess-listing-pages
 

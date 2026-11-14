@@ -39006,42 +39006,99 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
 ///
 /// The tracker cannot be read, or `issue` is not in it.
 pub fn show_issue(issue: &str) -> Result<String> {
-    let card = match tracker_show_json(issue) {
-        Ok(card) => card,
-        Err(err) if tracker_misses(&err, issue) => return Err(unknown_ticket(issue)),
-        Err(err) => return Err(err),
-    };
-    let id = card["id"].as_str().unwrap_or(issue);
+    let card = show_card(issue)?;
+    Ok(format_show(&card))
+}
+
+/// One ticket as JSON: id, project, state, priority, title, and each blocker.
+///
+/// # Errors
+///
+/// The tracker cannot be read, or `issue` is not in it.
+pub fn show_json(issue: &str) -> Result<String> {
+    let card = show_card(issue)?;
+    let blockers = blocker_rows(&card);
+    let doc = serde_json::json!({
+        "id": card["id"].as_str().unwrap_or(issue),
+        "project": card["project"].as_str().unwrap_or(""),
+        "state": card["state"].as_str().unwrap_or(""),
+        "priority": card["priority"].as_str().unwrap_or(""),
+        "title": card["title"].as_str().unwrap_or(""),
+        "blocked_by": blockers,
+    });
+    Ok(format!("{doc}\n"))
+}
+
+fn show_card(issue: &str) -> Result<Value> {
+    match tracker_show_json(issue) {
+        Ok(card) => Ok(card),
+        Err(err) if tracker_misses(&err, issue) => Err(unknown_ticket(issue)),
+        Err(err) => Err(err),
+    }
+}
+
+fn format_show(card: &Value) -> String {
+    let id = card["id"].as_str().unwrap_or("");
     let state = card["state"].as_str().unwrap_or("");
     let title = card["title"].as_str().unwrap_or("");
-    let mut out = format!("{id}  {state}  {title}\n");
-    let blockers: Vec<&str> = card["blocked_by"]
+    let priority = card["priority"].as_str().unwrap_or("");
+    let mut head = format!("{id}  {state}");
+    if !priority.is_empty() {
+        head.push_str(&format!("  [#{priority}]"));
+    }
+    let mut out = if title.is_empty() {
+        scan::wrap(&head, scan::COLS)
+    } else {
+        let one = format!("{head}  {title}");
+        if one.chars().count() <= scan::COLS {
+            one
+        } else {
+            let mut out = head;
+            out.push('\n');
+            out.push_str(&scan::wrap_hang(title, scan::COLS, "  ", "  "));
+            out
+        }
+    };
+    out.push('\n');
+    let blockers = blocker_rows(card);
+    if blockers.is_empty() {
+        out.push_str("blockers: none\n");
+        return out;
+    }
+    out.push_str("blockers:\n");
+    for blocker in blockers {
+        let id = blocker["id"].as_str().unwrap_or("");
+        let state = blocker["state"].as_str().unwrap_or("?");
+        let kind = if blocker["open"].as_bool().unwrap_or(true) {
+            "open"
+        } else {
+            "closed"
+        };
+        let line = format!("{id}  {state}  {kind}");
+        out.push_str(&scan::wrap_hang(&line, scan::COLS, "  ", "  "));
+        out.push('\n');
+    }
+    out
+}
+
+fn blocker_rows(card: &Value) -> Vec<Value> {
+    card["blocked_by"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .collect();
-    if blockers.is_empty() {
-        out.push_str("blockers: none\n");
-        return Ok(out);
-    }
-    out.push_str("blockers:\n");
-    for blocker in blockers {
-        let (state, kind) = match tracker_show_json(blocker) {
-            Ok(shown) => {
-                let state = shown["state"].as_str().unwrap_or("?").to_string();
-                let kind = if matches!(state.as_str(), "DONE" | "CANCELLED") {
-                    "closed"
-                } else {
-                    "open"
-                };
-                (state, kind)
-            }
-            Err(_) => ("missing".to_string(), "open"),
-        };
-        out.push_str(&format!("  {blocker}  {state}  {kind}\n"));
-    }
-    Ok(out)
+        .map(|blocker| {
+            let (state, open) = match tracker_show_json(blocker) {
+                Ok(shown) => {
+                    let state = shown["state"].as_str().unwrap_or("?").to_string();
+                    let open = !matches!(state.as_str(), "DONE" | "CANCELLED");
+                    (state, open)
+                }
+                Err(_) => ("missing".to_string(), true),
+            };
+            serde_json::json!({"id": blocker, "state": state, "open": open})
+        })
+        .collect()
 }
 
 /// Tickets a seat can take: open, and not waiting on an open ticket.

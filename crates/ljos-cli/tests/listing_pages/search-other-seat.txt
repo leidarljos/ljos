@@ -9,7 +9,7 @@ Checks: how many of them named this row.
 
 lesson, from an agent, today, from bob, ticket demo-tile
   The damper log is
-  https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-read
-  ings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-see-wh
-  ere-it-breaks
+  https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-
+  readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-
+  see-where-it-breaks
   place 1, score 0.88, checks 2/3, id idkiln03

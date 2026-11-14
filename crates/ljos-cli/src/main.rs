@@ -1239,6 +1239,9 @@ enum Cmd {
     Show {
         /// The tracker id.
         issue: String,
+        /// Print one JSON object. The human page is left off.
+        #[arg(long)]
+        json: bool,
     },
     /// List tickets that are open and not waiting on another open ticket.
     ///
@@ -4629,9 +4632,19 @@ fn run_command() -> Result<()> {
             };
             print!("{said}");
         }
-        Cmd::Show { issue } => {
+        Cmd::Show { issue, json } => {
             stop_ticket(&issue);
-            print!("{}", ljos_cli::show_issue(&issue).map_err(ticket_error)?);
+            if json {
+                print!("{}", ljos_cli::show_json(&issue).map_err(ticket_error)?);
+            } else {
+                print!(
+                    "{}",
+                    ljos_cli::scan::for_reader(
+                        &ljos_cli::show_issue(&issue).map_err(ticket_error)?,
+                        human_color()
+                    )
+                );
+            }
         }
         Cmd::Ready {
             project,
