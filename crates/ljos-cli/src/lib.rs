@@ -6998,6 +6998,20 @@ pub fn onboard_detected(dry: bool, skills: Option<&Path>) -> Result<Vec<Step>> {
     onboard_detected_with_lookup(dry, skills, &on_path)
 }
 
+/// What `ljos onboard` says when this machine has no coding tool.
+/// The stores are named either way. A dry run has not written them yet.
+fn no_runner_line(dry: bool) -> String {
+    let setup = if dry {
+        "It would set up the tracker, the memory writer and the deed store."
+    } else {
+        "The tracker, the memory writer and the deed store are set up."
+    };
+    format!(
+        "found no coding tool on this machine. {setup} Next: `ljos doctor`. \
+         Install an agent, then run `ljos onboard`. `ljos onboard --example` lists the names."
+    )
+}
+
 fn onboard_detected_with_lookup(
     dry: bool,
     skills: Option<&Path>,
@@ -7017,9 +7031,7 @@ fn onboard_detected_with_lookup(
         // first `ljos doctor` says the tracker works before one exists.
         let mut steps = vec![Step {
             what: "runners".into(),
-            detail: "found no coding tool on this machine. Install an agent, then run \
-                     `ljos onboard`. `ljos onboard --example` lists the names."
-                .into(),
+            detail: no_runner_line(dry),
             ok: true,
         }];
         steps.extend([
@@ -64648,6 +64660,16 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             steps[0].detail.contains("found no coding tool"),
             "{steps:?}"
         );
+        assert!(
+            steps[0]
+                .detail
+                .contains("would set up the tracker, the memory writer and the deed store."),
+            "{steps:?}"
+        );
+        assert!(
+            steps[0].detail.contains("Next: `ljos doctor`."),
+            "{steps:?}"
+        );
         for need in ["deed store", "tracker", "pack", "host key"] {
             assert!(whats.contains(&need), "{whats:?}");
         }
@@ -64658,6 +64680,17 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "{}",
             tracker.detail
         );
+    }
+
+    #[test]
+    fn a_real_onboard_with_no_runner_says_the_stores_are_set_up() {
+        let live = super::no_runner_line(false);
+        assert!(
+            live.contains("The tracker, the memory writer and the deed store are set up."),
+            "{live}"
+        );
+        assert!(live.contains("Next: `ljos doctor`."), "{live}");
+        assert!(!live.contains("so run `ljos onboard`."), "{live}");
     }
 
     /// A seat setup makes the state directory, so the first doctor does

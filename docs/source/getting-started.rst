@@ -62,7 +62,7 @@ The script names the cause and the command that fixes it.
 - ``--version VER`` or ``--pin REPO=VER`` for a release that does not exist says so, names the releases page, and the command ``sh install.sh --version VER`` or ``sh install.sh --pin REPO=VER``. A version the script itself names, when that release is not published and Rust is not installed, installs the latest release of that program and says so. With Rust installed, it builds that version from source.
 - A running ``ljos-mcp`` keeps the previous binary. Restart the assistant, or ``kill`` the pid the script prints, then run ``ljos doctor``.
 
-``ljos onboard`` with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store. The deed store keeps signed records of the work. Install an agent, then run ``ljos onboard``. ``ljos onboard --example`` lists the tools.
+``ljos onboard`` with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store, and the line names those three and ``ljos doctor`` as the next command. The deed store keeps signed records of the work. Install an agent, then run ``ljos onboard``. ``ljos onboard --example`` lists the tools.
 
 ``ljos offboard`` after a hand edit that it cannot undo names the file and leaves the ljos entry. Edit that file, delete the ljos entry, and run ``ljos offboard`` again.
 

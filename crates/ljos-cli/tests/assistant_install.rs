@@ -178,6 +178,12 @@ fn onboard_with_no_assistant_names_the_next_command() {
     assert!(text.contains("\tsigning key\t"), "{text}");
     assert!(text.contains("would write a signing key"), "{text}");
     assert!(
+        text.contains(
+            "would set up the tracker, the memory writer and the deed store. Next: `ljos doctor`."
+        ),
+        "{text}"
+    );
+    assert!(
         text.contains("Install an agent, then run `ljos onboard`."),
         "{text}"
     );
