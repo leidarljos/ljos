@@ -561,17 +561,17 @@ fn note_packset() {
 }
 
 #[cfg(test)]
-fn writer_takes() -> usize {
+pub(crate) fn writer_takes() -> usize {
     WRITER_TAKES.with(Cell::get)
 }
 
 #[cfg(test)]
-fn packset_calls() -> usize {
+pub(crate) fn packset_calls() -> usize {
     PACKSET_CALLS.with(Cell::get)
 }
 
 #[cfg(test)]
-fn reset_work_counts() {
+pub(crate) fn reset_work_counts() {
     WRITER_TAKES.with(|taken| taken.set(0));
     PACKSET_CALLS.with(|calls| calls.set(0));
 }
@@ -950,16 +950,264 @@ pub(crate) fn portable_rows(place: &Place) -> Vec<Value> {
     rows
 }
 
-pub fn export_cmd(out: &Path, machine: Option<&str>) -> Result<String> {
+/// Lessons already written to `path`, ignoring the clock on each row.
+struct HeldExport {
+    machine: String,
+    seat: String,
+    revision: String,
+    lessons: BTreeSet<String>,
+}
+
+/// What a short status read of the pack found.
+enum PackStamp {
+    /// This seat has no pack.
+    Off,
+    /// The pack did not answer inside the short budget.
+    Busy,
+    /// `last_write_ts`, or empty when the status names none.
+    At(String),
+}
+
+fn lesson_key(row: &Value) -> String {
+    let mut copy = row.clone();
+    if let Some(obj) = copy.as_object_mut() {
+        obj.remove("exported_at");
+    }
+    serde_json::to_string(&copy).unwrap_or_default()
+}
+
+/// One stable key per lesson `atoms` would write for `place`.
+fn lessons_of(place: &Place, atoms: &[Value]) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut lessons = BTreeSet::new();
+    for atom in atoms {
+        let Some(row) = export_row(atom, place, "") else {
+            continue;
+        };
+        let id = format!(
+            "{}\n{}",
+            row["kind"].as_str().unwrap_or(""),
+            normalize(row["text"].as_str().unwrap_or(""))
+        );
+        if !seen.insert(id) {
+            continue;
+        }
+        lessons.insert(lesson_key(&row));
+    }
+    lessons
+}
+
+fn read_held(path: &Path) -> Option<HeldExport> {
+    if stdout_path(path) {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header: Value = serde_json::from_str(lines.next()?).ok()?;
+    if header.get("record").and_then(Value::as_str) != Some("export") {
+        return None;
+    }
+    let mut lessons = BTreeSet::new();
+    for line in lines {
+        let row: Value = serde_json::from_str(line).ok()?;
+        if row["text"].as_str().unwrap_or("").trim().is_empty() {
+            continue;
+        }
+        lessons.insert(lesson_key(&row));
+    }
+    Some(HeldExport {
+        machine: header["machine"].as_str().unwrap_or("").to_string(),
+        seat: header["seat"].as_str().unwrap_or("").to_string(),
+        revision: header["exporter_revision"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        lessons,
+    })
+}
+
+fn same_export(place: &Place, held: &HeldExport, lessons: &BTreeSet<String>) -> bool {
+    held.machine == place.machine
+        && held.seat == place.seat
+        && held.revision == env!("CARGO_PKG_VERSION")
+        && &held.lessons == lessons
+}
+
+fn header_matches(place: &Place, held: &HeldExport) -> bool {
+    held.machine == place.machine
+        && held.seat == place.seat
+        && held.revision == env!("CARGO_PKG_VERSION")
+}
+
+fn watch_path(place: &Place) -> PathBuf {
+    place
+        .home
+        .join("exports")
+        .join(path_segment(&place.seat))
+        .join("watch.json")
+}
+
+fn read_watch(place: &Place, out: &Path) -> Option<String> {
+    let bytes = std::fs::read(watch_path(place)).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    if value.get("path").and_then(Value::as_str)? != out.to_string_lossy() {
+        return None;
+    }
+    Some(
+        value
+            .get("last_write_ts")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    )
+}
+
+fn write_watch(place: &Place, out: &Path, ts: &str) {
+    let bytes = serde_json::to_vec(&json!({
+        "path": out.to_string_lossy(),
+        "last_write_ts": ts,
+    }))
+    .unwrap_or_default();
+    let _ = write_private(&watch_path(place), &bytes);
+}
+
+/// Status only, and only for a fifth of a second. A busy writer is
+/// [`PackStamp::Busy`]. The full listing is a separate call.
+fn pack_stamp() -> PackStamp {
+    let Ok(client) = crate::pack() else {
+        return PackStamp::Off;
+    };
+    note_packset();
+    let workspace = client.workspace();
+    let status = crate::with_pack_timeout(200, || client.status(Some(&workspace)));
+    match status {
+        Ok(status) => PackStamp::At(
+            status
+                .get("last_write_ts")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        ),
+        Err(_) => PackStamp::Busy,
+    }
+}
+
+fn listed_atoms() -> Option<Vec<Value>> {
+    note_packset();
+    crate::memories::live_atoms().ok()
+}
+
+/// Rows already in an export, as atoms, so a later write can keep them
+/// when the pack does not answer.
+fn atoms_of_export(path: &Path) -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut atoms = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if index == 0 || line.trim().is_empty() {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        atoms.push(json!({
+            "id": row["atom_id"],
+            "kind": row["kind"],
+            "text": row["text"],
+            "origin": row["origin"],
+            "level": row["level"],
+            "entities": row["entities"],
+            "source": row["source"],
+        }));
+    }
+    atoms
+}
+
+fn export_report(unchanged: bool, count: usize, out: &Path, json_out: bool) -> Result<String> {
+    if json_out {
+        let body = json!({
+            "memories": count,
+            "unchanged": unchanged,
+            "path": out.display().to_string(),
+        });
+        return Ok(format!("{}\n", serde_json::to_string(&body)?));
+    }
+    if unchanged {
+        return Ok(format!("seed unchanged: {count} memories\n"));
+    }
+    Ok(format!("exported {count} memories to {}\n", out.display()))
+}
+
+fn export_place(place: &Place, out: &Path, json_out: bool) -> Result<String> {
+    let local = local_atoms(place);
+    let local_lessons = lessons_of(place, &local);
+    let held = read_held(out);
+    if let Some(held) = &held {
+        if same_export(place, held, &local_lessons) {
+            return export_report(true, held.lessons.len(), out, json_out);
+        }
+    }
+    let mut atoms = Vec::new();
+    let mut wrote_stamp: Option<String> = None;
+    match pack_stamp() {
+        PackStamp::Off => atoms.extend(local),
+        PackStamp::Busy => {
+            if let Some(held) = &held {
+                if header_matches(place, held) && local_lessons.is_subset(&held.lessons) {
+                    return export_report(true, held.lessons.len(), out, json_out);
+                }
+                atoms.extend(atoms_of_export(out));
+            }
+            atoms.extend(local);
+        }
+        PackStamp::At(ts) => {
+            if let Some(held) = &held {
+                if read_watch(place, out).as_deref() == Some(ts.as_str())
+                    && header_matches(place, held)
+                    && local_lessons.is_subset(&held.lessons)
+                {
+                    return export_report(true, held.lessons.len(), out, json_out);
+                }
+            }
+            match listed_atoms() {
+                Some(live) => {
+                    atoms.extend(live);
+                    atoms.extend(local);
+                    wrote_stamp = Some(ts);
+                }
+                None => {
+                    if let Some(held) = &held {
+                        if header_matches(place, held) && local_lessons.is_subset(&held.lessons) {
+                            return export_report(true, held.lessons.len(), out, json_out);
+                        }
+                        atoms.extend(atoms_of_export(out));
+                    }
+                    atoms.extend(local);
+                }
+            }
+        }
+    }
+    let lessons = lessons_of(place, &atoms);
+    if let Some(held) = &held {
+        if same_export(place, held, &lessons) {
+            if let Some(ts) = &wrote_stamp {
+                write_watch(place, out, ts);
+            }
+            return export_report(true, held.lessons.len(), out, json_out);
+        }
+    }
+    let count = export_atoms(place, out, &atoms)?;
+    if let Some(ts) = &wrote_stamp {
+        write_watch(place, out, ts);
+    }
+    export_report(false, count, out, json_out)
+}
+
+pub fn export_cmd(out: &Path, machine: Option<&str>, json_out: bool) -> Result<String> {
     let mut place = Place::current();
     place.machine = export_machine(machine);
-    let mut atoms = Vec::new();
-    if let Ok(live) = crate::memories::live_atoms() {
-        atoms.extend(live);
-    }
-    atoms.extend(local_atoms(&place));
-    let count = export_atoms(&place, out, &atoms)?;
-    Ok(format!("exported {count} memories to {}\n", out.display()))
+    export_place(&place, out, json_out)
 }
 
 fn push_local(rows: &mut Vec<Row>, batch: Vec<Row>, seat: &str, own_dir: bool) {
@@ -4501,5 +4749,161 @@ mod tests {
         assert_eq!(value["reason"], json!("already integrated"));
         assert!(value.get("imports").is_some(), "{value}");
         assert_eq!(snapshot(&target.home), stored);
+    }
+
+    /// Seven lane files, 281 rows, 61 distinct lessons. The second pass is
+    /// the scheduled round trip: import each lane, integrate --all, export
+    /// the seed. Counts are writer locks and packset calls on that pass.
+    #[test]
+    fn an_unchanged_round_trip_skips_the_pack_and_the_file() {
+        let _env = crate::test_env_lock();
+        // SAFETY: the lock above restores the process environment.
+        unsafe {
+            std::env::set_var("PACKSET_URL", "off");
+            std::env::set_var("LJOS_SEARCH_WAIT", "30");
+        }
+        let (dir, target) = place("round");
+        let handoff = dir.path().join("handoff");
+        std::fs::create_dir(&handoff).unwrap();
+        let sizes = [38usize, 40, 41, 39, 42, 40, 41];
+        assert_eq!(sizes.iter().sum::<usize>(), 281);
+        let distinct = 61usize;
+        let mut files = Vec::new();
+        let mut n = 0usize;
+        for (lane, count) in ["aa", "bb", "cc", "dd", "ee", "ff", "gg"]
+            .into_iter()
+            .zip(sizes)
+        {
+            let mut body = String::new();
+            body.push_str(
+                &json!({
+                    "format": FORMAT,
+                    "record": "export",
+                    "machine": "host-a",
+                    "seat": "donor",
+                    "exported_at": "2026-11-01T00:00:00Z",
+                })
+                .to_string(),
+            );
+            body.push('\n');
+            for _ in 0..count {
+                let k = n % distinct;
+                let text = format!("Seed lesson {k:02} stands alone on bench {k:02}.");
+                body.push_str(
+                    &json!({
+                        "format": FORMAT,
+                        "kind": "lesson",
+                        "text": text,
+                        "origin": "agent-derived",
+                        "atom_id": format!("{lane}-{n}"),
+                        "exported_at": "2026-11-01T00:00:00Z",
+                        "source": {"machine": "host-a", "seat": "donor"},
+                    })
+                    .to_string(),
+                );
+                body.push('\n');
+                n += 1;
+            }
+            let path = handoff.join(format!("{lane}.jsonl"));
+            std::fs::write(&path, &body).unwrap();
+            files.push((path, count));
+        }
+        assert_eq!(n, 281);
+        for (file, _) in &files {
+            import_path(&target, file, None, None, None).unwrap();
+        }
+        integrate(&target, None, true, false, false).unwrap();
+        let out = dir.path().join("seed.jsonl");
+        let first = export_place(&target, &out, false).unwrap();
+        assert!(first.starts_with("exported "), "{first}");
+        let bytes = std::fs::read(&out).unwrap();
+        let lessons = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| {
+                !line.is_empty() && std::str::from_utf8(line).unwrap_or("").contains("\"text\"")
+            })
+            .count();
+        assert_eq!(lessons, distinct, "{first}");
+        let written = std::fs::metadata(&out).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        reset_work_counts();
+        let started = std::time::Instant::now();
+        let mut unchanged = 0usize;
+        for (file, count) in &files {
+            let done = import_path(&target, file, None, None, None).unwrap();
+            assert_eq!(done.rows, 0, "{}", file.display());
+            assert_eq!(done.unchanged, *count, "{}", file.display());
+            unchanged += done.unchanged;
+        }
+        assert_eq!(unchanged, 281);
+        let integrated = integrate(&target, None, true, false, false).unwrap();
+        assert!(integrated.starts_with("nothing new:"), "{integrated}");
+        let again = export_place(&target, &out, false).unwrap();
+        let took = started.elapsed();
+        assert_eq!(again, "seed unchanged: 61 memories\n", "{again}");
+        assert_eq!(
+            (writer_takes(), packset_calls()),
+            (0, 0),
+            "round trip writer {} packset {} in {took:?}",
+            writer_takes(),
+            packset_calls()
+        );
+        assert_eq!(std::fs::read(&out).unwrap(), bytes);
+        assert_eq!(
+            std::fs::metadata(&out).unwrap().modified().unwrap(),
+            written,
+            "an unchanged export rewrote the seed"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "unchanged round trip took {took:?}"
+        );
+        let body = export_place(&target, &out, true).unwrap();
+        let value: Value = serde_json::from_str(body.trim()).unwrap();
+        assert_eq!(value["memories"], json!(61));
+        assert_eq!(value["unchanged"], json!(true));
+        assert_eq!(value["path"], json!(out.display().to_string()));
+        assert_eq!(
+            std::fs::metadata(&out).unwrap().modified().unwrap(),
+            written
+        );
+
+        let changed = handoff.join("hh.jsonl");
+        let fresh = "A new kiln stands on the west bench.";
+        std::fs::write(
+            &changed,
+            format!(
+                "{}\n{}\n",
+                json!({
+                    "format": FORMAT,
+                    "record": "export",
+                    "machine": "host-a",
+                    "seat": "donor",
+                    "exported_at": "2026-11-02T00:00:00Z",
+                }),
+                json!({
+                    "format": FORMAT,
+                    "kind": "lesson",
+                    "text": fresh,
+                    "origin": "agent-derived",
+                    "atom_id": "hh-0",
+                    "exported_at": "2026-11-02T00:00:00Z",
+                    "source": {"machine": "host-a", "seat": "donor"},
+                })
+            ),
+        )
+        .unwrap();
+        let done = import_path(&target, &changed, None, None, None).unwrap();
+        assert_eq!(done.rows, 1, "{done:?}");
+        integrate(&target, None, true, false, false).unwrap();
+        reset_work_counts();
+        let wrote = export_place(&target, &out, false).unwrap();
+        assert!(wrote.starts_with("exported "), "{wrote}");
+        assert!(writer_takes() >= 1, "a changed export took no writer lock");
+        let next = std::fs::read(&out).unwrap();
+        assert_ne!(next, bytes);
+        let text = String::from_utf8(next).unwrap();
+        assert!(text.contains(fresh), "{text}");
     }
 }

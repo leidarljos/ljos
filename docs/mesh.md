@@ -108,6 +108,8 @@ The printed lines are `imported N, unchanged U, skipped M duplicates` and `expor
 `S` is exports this run did not import. `I` is exports whose bytes were new to the seat's record of that file.
 After an export is stored, the seat records its size, modification time and a hash of its bytes.
 The next pull stats each file and does not read one whose size and time match.
+A second pull of those files does not call the pack and does not take the writer lock.
+A busy packsetd is not waited out.
 A changed time is hashed, and the same bytes are not imported again.
 Each export is stored before the next is read, so a stop keeps the finished exports and leaves the one in progress out.
 The next pull continues with the rest.

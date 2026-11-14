@@ -75151,7 +75151,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         drop_listing_cache();
         forget_atom_listings();
         let second = tracker.path().join("second.jsonl");
-        memory_port::export_cmd(&second, None).unwrap();
+        memory_port::export_cmd(&second, None, false).unwrap();
         let again = std::fs::read_to_string(&second).unwrap();
         assert_eq!(again.matches(kiln).count(), 1, "{again}");
         assert_eq!(again.matches(bench).count(), 1, "{again}");

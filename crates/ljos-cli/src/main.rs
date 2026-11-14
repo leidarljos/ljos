@@ -46,6 +46,9 @@ enum MemoryCmd {
     /// Write this seat's memories to a local file. The file is not sent.
     ///
     /// A directory exits 1. `ljos memory export --out FILE` writes a file.
+    /// When the lessons already in the file are the same, the file is left
+    /// in place. The seed is the file this command writes.
+    /// The line is `seed unchanged: N memories`.
     ///
     /// Example: `ljos memory export --out memories.json`
     Export {
@@ -55,6 +58,9 @@ enum MemoryCmd {
         /// Machine name in the file. The default is `LJOS_SYNC_HOST` when that is set, then the hostname.
         #[arg(long)]
         machine: Option<String>,
+        /// Print `memories`, `unchanged` and `path` as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Read a portable memory file into this seat's import slot.
     ///
@@ -198,8 +204,8 @@ impl MemFilter {
     }
 }
 
-fn export_memories(out: &std::path::Path, machine: Option<&str>) -> Result<()> {
-    let said = ljos_cli::memory_port::export_cmd(out, machine)?;
+fn export_memories(out: &std::path::Path, machine: Option<&str>, json: bool) -> Result<()> {
+    let said = ljos_cli::memory_port::export_cmd(out, machine, json)?;
     if out == std::path::Path::new("-") {
         eprint!("{said}");
     } else {
@@ -210,7 +216,9 @@ fn export_memories(out: &std::path::Path, machine: Option<&str>) -> Result<()> {
 
 fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
     match cmd {
-        MemoryCmd::Export { out, machine } => export_memories(&out, machine.as_deref())?,
+        MemoryCmd::Export { out, machine, json } => {
+            export_memories(&out, machine.as_deref(), json)?
+        }
         MemoryCmd::Import {
             path,
             source_machine,
@@ -670,6 +678,9 @@ enum Cmd {
         /// Machine name in the file. The default is `LJOS_SYNC_HOST` when that is set, then the hostname.
         #[arg(long)]
         machine: Option<String>,
+        /// Print `memories`, `unchanged` and `path` as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Copy memories to a file, or bring a file from another machine into this seat.
     ///
@@ -3142,6 +3153,19 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
     if let Cmd::Release { stale: true, .. } = cmd {
         return false;
     }
+    // An unchanged import, integrate, export or mesh pull must not wait
+    // on a lesson queued for a busy pack. The queue still drains on the
+    // next search, remember or session start.
+    if matches!(
+        cmd,
+        Cmd::Memory { .. }
+            | Cmd::Export { .. }
+            | Cmd::Mesh {
+                cmd: MeshCmd::Pull { .. },
+            }
+    ) {
+        return false;
+    }
     !matches!(
         cmd,
         Cmd::Remember { .. }
@@ -4378,7 +4402,7 @@ fn run_command() -> Result<()> {
             let yes = ljos_cli::quoted_yes::read(quote.as_deref(), at.as_deref(), via.as_deref())?;
             print!("{}", ljos_cli::admit::accept_ids(&ids, yes.as_ref()));
         }
-        Cmd::Export { out, machine } => export_memories(&out, machine.as_deref())?,
+        Cmd::Export { out, machine, json } => export_memories(&out, machine.as_deref(), json)?,
         Cmd::Memory { cmd } => memory_cmd(cmd)?,
         Cmd::Memories { cmd } => memories_cmd(cmd)?,
         Cmd::RetireNotes => print!("{}", ljos_cli::note_retire::sweep()?),

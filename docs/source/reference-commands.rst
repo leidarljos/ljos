@@ -162,8 +162,8 @@ The line says what went wrong and the command that fixes it.
    Stores: tracker. One child issue per module the bundle's lock builds, under ``I``, blocked by the modules built before it along the edges of its software bill of materials; ids are a hash of module and generation, so a rerun keeps what exists and adds what is missing; ``--dry-run`` prints the rows.
 ``findings STATE [--remember] [--all] [--issue I]``
    Stores: pack, deed store, tracker. The typed findings of an eb-stack campaign state, one per line: id, status, class/disposition, stage, recipe, the fix or the summary; ``--remember`` stores one lesson per finding a person or a seat resolved at once (recipe, step, error line, fix), origin ``tool-echo`` at L0 (``derived``), under the recipe's name, its package and the class; ``ljos accept ID`` raises it to ``explicit``; ``--all`` takes the ones a later attempt superseded too; ``--issue`` cites the state file as a deed on the issue.
-``memory export --out FILE [--machine NAME]``
-   Stores: pack, tracker. Write this seat's lessons to the file. The file is not sent. ``-`` writes it to stdout. The machine is ``--machine``, else ``LJOS_SYNC_HOST`` when that is set and not empty, else the hostname. Another seat's lessons stay out. The line is ``exported N memories to PATH``. A directory prints ``Error: memory: PATH is a directory. `ljos memory export --out FILE` writes a file`` and exits 1.
+``memory export --out FILE [--machine NAME] [--json]``
+   Stores: pack, tracker. Write this seat's lessons to the file. The file is not sent. ``-`` writes it to stdout. The machine is ``--machine``, else ``LJOS_SYNC_HOST`` when that is set and not empty, else the hostname. Another seat's lessons stay out. The line is ``exported N memories to PATH``. When the lessons already in the file are the same, the file is left in place and the line is ``seed unchanged: N memories``. ``--json`` prints ``memories``, ``unchanged`` and ``path``. A busy pack is not waited out. A directory prints ``Error: memory: PATH is a directory. `ljos memory export --out FILE` writes a file`` and exits 1.
 ``memory import FILE [--source-machine NAME] [--source-seat SEAT] [--as-machine NAME] [--json]``
    Stores: tracker. Store the file in this seat's import slot under ``<tracker>/.ljos/memory/imports/<seat>/<sha256>/``. The import id is the SHA-256 of the file. ``--source-machine`` and ``--source-seat`` name the file when it carries neither. ``--as-machine`` records that machine and does not change the bytes. Rows are labelled ``imported,unintegrated``. One line names the counts: ``imported N, unchanged M, skipped K duplicates`` when a row repeats a content id in the file. A second import of the same bytes prints ``nothing new: N rows already present`` and does not call the memory store again. ``--json`` prints those counts and keeps ``import_id``, ``rows``, ``labels`` and ``searchable``. A missing file prints ``Error: memory: PATH is not a file. `ljos memory export --out PATH` writes one on the machine that has the lessons`` and exits 1. When the path is a directory the line is ``Error: memory: PATH is a directory. Pass the file `ljos memory export --out` wrote`` and exits 1.
 ``memory integrate [ID|--all] [--dry-run] [--json]``
@@ -199,7 +199,7 @@ The line says what went wrong and the command that fixes it.
    Stores: tracker. Append ``Options: A, B`` to an issue. Two or more, separated by commas. Fewer than two is refused.
 ``block ISSUE --on ID|--off ID``
    Stores: tracker. Record that one ticket waits on another. ``--on`` adds that edge. ``--off`` drops it.
-``export --out FILE [--machine NAME]``
+``export --out FILE [--machine NAME] [--json]``
    Stores: pack, tracker. The same command as ``memory export``.
 ``proposals [--seat SEAT] [--status STATUS] [--settle]``
    Stores: pack. List lesson proposals waiting on a review. ``--seat`` keeps one seat. ``--status`` is open, accepted, refused, already-in-pack, or in-pack. ``--settle`` records already-in-pack on open rows the pack already holds, and deletes nothing.
@@ -222,7 +222,7 @@ The line says what went wrong and the command that fixes it.
 ``mesh acl [SWARM...]``
    Stores: machine. Print who on the private network may connect to whom. The rules are the access policy ``mesh.toml`` implies. ``up`` and ``down`` do not read that file.
 ``mesh pull --seat SEAT --from DIR``
-   Stores: pack, tracker. Read another machine's memory files into a seat and keep a copy of the rows brought in. An unchanged export is not read again. The second line is ``exports skipped S, imported I``. A lane is one machine's memory file. A missing directory prints ``Error: mesh: PATH does not exist. Create it, or pass a directory of <lane>.jsonl files`` and exits 1. A path that is a file prints ``Error: mesh: PATH is not a directory. Pass a directory of <lane>.jsonl files`` and exits 1. A memory store that stops the pull prints ``Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the seed with rows still missing, so run `ljos mesh pull --seat SEAT --from DIR`.`` and exits 1.
+   Stores: pack, tracker. Read another machine's memory files into a seat and keep a copy of the rows brought in. An unchanged export is not read again. A second pull of unchanged exports does not call the pack or take the writer lock, and a busy pack is not waited out. The second line is ``exports skipped S, imported I``. A lane is one machine's memory file. A missing directory prints ``Error: mesh: PATH does not exist. Create it, or pass a directory of <lane>.jsonl files`` and exits 1. A path that is a file prints ``Error: mesh: PATH is not a directory. Pass a directory of <lane>.jsonl files`` and exits 1. A memory store that stops the pull prints ``Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the seed with rows still missing, so run `ljos mesh pull --seat SEAT --from DIR`.`` and exits 1.
 ``mesh push --seat SEAT --to DIR [--lane NAME]``
    Stores: pack. Write a seat's memories into a handoff directory as one lane file.
 ``mcp [ARGS...]``
@@ -351,7 +351,7 @@ digest --json --mark --since
 doctor --all --fix --verbose
 due --all --json --judge
 evidence
-export --machine --out
+export --json --machine --out
 file --body --deadline --options --parent --porcelain --priority --project --quorum --tags --top --type
 findings --all --issue --remember
 finish --assignee --beta --close --gen --lesson --new-option --outcome --status --verbose
@@ -378,7 +378,7 @@ memories prune --apply --days --json --stale
 memories review --all --drop --edit --json --keep --merge --seat --since --text --user
 memories tui --all --seat --since --user
 memory
-memory export --machine --out
+memory export --json --machine --out
 memory import --as-machine --json --source-machine --source-seat
 memory imports --json
 memory integrate --all --dry-run --json

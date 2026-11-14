@@ -131,6 +131,7 @@ It reads `mesh.toml`. `mesh up` does not.
 A text or a lane row id already in the pack is unchanged. The command then integrates the new rows, the same step as a full `ljos memory integrate`, and relabels them `imported,integrated` so this seat's search ranks them.
 It prints `imported N, unchanged U, skipped M duplicates` and `exports skipped S, imported I`.
 An export whose size and modification time are unchanged is not read again.
+A second pull of those files does not call the pack or take the writer lock, and a busy packsetd is not waited out.
 Each export is stored before the next is read, so a stop keeps the finished exports.
 Run it as `LJOS_SEAT=S ljos mesh pull --seat S --from DIR`.
 `ljos mesh push --seat S --to DIR` writes the seat's memories back as one lane file.

@@ -27,6 +27,7 @@
 //! folder and the command to run once the mount answers, and nothing is
 //! reported as imported or pushed.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 use std::os::unix::io::AsRawFd;
@@ -119,11 +120,32 @@ struct Held {
     file: std::fs::File,
 }
 
+thread_local! {
+    static MESH_LOCKS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn note_mesh_lock() {
+    MESH_LOCKS.with(|taken| taken.set(taken.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+fn mesh_locks() -> usize {
+    MESH_LOCKS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn reset_mesh_locks() {
+    MESH_LOCKS.with(|taken| taken.set(0));
+}
+
 impl Held {
     fn exclusive(path: &Path, share: &Share) -> Result<Self> {
         share
             .lock_shared(path)
-            .map(|file| Self { file })
+            .map(|file| {
+                note_mesh_lock();
+                Self { file }
+            })
             .map_err(|err| share.fail(path, err))
     }
 
@@ -132,7 +154,10 @@ impl Held {
         let path = dir.join("write.lock");
         share
             .lock_create(&path)
-            .map(|file| Self { file })
+            .map(|file| {
+                note_mesh_lock();
+                Self { file }
+            })
             .map_err(|err| share.fail(dir, err))
     }
 }
@@ -959,7 +984,83 @@ fn pull_body(
 /// The directory is missing, the handoff or the seed folder did not take a
 /// read or a write, or the pack sheds the write or passes its deadline.
 /// The summary is returned only after the seed is in place.
+/// A second pull whose exports still match the recorded size and time.
+/// No lock, no pack call, and the seed file is not opened for write.
+fn quiet_pull(store: &SeatStore, from: &Path) -> Result<Option<Summary>> {
+    let share = Share::mesh_pull(&store.seat, from);
+    require_name(&store.seat, "seat")?;
+    require_dir(from, &share)?;
+    let seed_there = match share.symlink_meta(&store.seed_path()) {
+        Ok(meta) => meta.is_file() && !meta.file_type().is_symlink(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(share.fail(&store.dir, err)),
+    };
+    if !seed_there {
+        return Ok(None);
+    }
+    let marks = read_marks(store, &share)?;
+    let source = ShareRead { share: &share };
+    let paths = export_paths(from, &source, &share)?;
+    if paths.is_empty() {
+        if marks.is_empty() {
+            return Ok(Some(Summary {
+                imported: 0,
+                unchanged: 0,
+                skipped: 0,
+                exports_skipped: 0,
+                exports_imported: 0,
+            }));
+        }
+        return Ok(None);
+    }
+    let mut seen = BTreeSet::new();
+    let mut names = Vec::new();
+    let mut summary = Summary {
+        imported: 0,
+        unchanged: 0,
+        skipped: 0,
+        exports_skipped: 0,
+        exports_imported: 0,
+    };
+    for path in &paths {
+        let Some(name) = path.file_name().and_then(|item| item.to_str()) else {
+            return Ok(None);
+        };
+        seen.insert(name.to_string());
+        let meta = source.meta(path).map_err(|err| share.fail(from, err))?;
+        let Some(meta) = meta else {
+            return Ok(None);
+        };
+        let Some(mark) = marks.get(name) else {
+            return Ok(None);
+        };
+        if !meta.matches(mark) {
+            return Ok(None);
+        }
+        summary.unchanged += mark.rows;
+        summary.exports_skipped += 1;
+        names.push(name.to_string());
+    }
+    if seen.len() != marks.len() {
+        return Ok(None);
+    }
+    let total = names.len();
+    let tty = std::io::stderr().is_terminal();
+    for (index, name) in names.iter().enumerate() {
+        if let Some(line) = export_progress(tty, index + 1, total, name, "skipped") {
+            eprintln!("{line}");
+        }
+    }
+    Ok(Some(summary))
+}
+
 pub fn pull(store: &SeatStore, from: &Path) -> Result<Summary> {
+    if let Some(summary) = quiet_pull(store, from)? {
+        let place = crate::memory_port::Place::for_seat(&store.seat);
+        crate::memory_port::integrate(&place, None, true, false, false)
+            .map_err(|err| pull_stopped(&store.seat, from, err))?;
+        return Ok(summary);
+    }
     let _deadline = crate::pack_link::CommandDeadline::enter(crate::IMPORT_ADMISSION);
     let place = crate::memory_port::Place::for_seat(&store.seat);
     let (mut hashes, ids) = crate::memory_port::known_mesh(&place);
@@ -1709,5 +1810,81 @@ mod tests {
         let skipped = export_progress(true, 2, 7, "lane-b.jsonl", "skipped").unwrap();
         assert_eq!(skipped, "mesh pull: lane-b.jsonl skipped (2/7)");
         assert!(!skipped.contains('\r'), "{skipped}");
+    }
+
+    #[test]
+    fn a_second_pull_does_not_call_a_slow_pack_or_lock() {
+        let _env = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("handoff");
+        std::fs::create_dir(&from).unwrap();
+        write_lane(&from, "lane-a", &["alpha kiln", "shared kiln"]);
+        write_lane(&from, "lane-b", &["shared kiln", "beta kiln"]);
+        // SAFETY: test_env_lock restores the process environment.
+        unsafe {
+            std::env::set_var("VISSUE_ROOT", dir.path());
+            std::env::set_var("LJOS_SEAT", "box");
+            std::env::set_var("LJOS_TRACKER_GIT", "off");
+            std::env::set_var("PACKSET_URL", "off");
+            std::env::set_var("LJOS_SEARCH_WAIT", "30");
+        }
+        let store = SeatStore::open("box").unwrap();
+        let first = pull(&store, &from).unwrap();
+        assert!(first.imported > 0, "{first:?}");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let calls_thread = Arc::clone(&calls);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop_thread.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        calls_thread.fetch_add(1, Ordering::Relaxed);
+                        let _ =
+                            stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+                        let mut buf = [0u8; 1024];
+                        let _ = std::io::Read::read(&mut stream, &mut buf);
+                        std::thread::sleep(std::time::Duration::from_secs(30));
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        unsafe {
+            std::env::set_var("PACKSET_URL", format!("http://{addr}"));
+            std::env::set_var("PACKSET_AUTH", "off");
+        }
+        reset_mesh_locks();
+        crate::memory_port::reset_work_counts();
+        let started = std::time::Instant::now();
+        let again = pull(&store, &from).unwrap();
+        let took = started.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(again.exports_skipped, 2, "{again:?}");
+        assert_eq!(again.exports_imported, 0, "{again:?}");
+        assert_eq!(again.imported, 0, "{again:?}");
+        assert_eq!(mesh_locks(), 0, "second pull took a lock");
+        assert_eq!(
+            (
+                crate::memory_port::writer_takes(),
+                crate::memory_port::packset_calls()
+            ),
+            (0, 0),
+            "writer {} packset {}",
+            crate::memory_port::writer_takes(),
+            crate::memory_port::packset_calls()
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "second pull called packset"
+        );
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 }
