@@ -780,10 +780,8 @@ pub fn reinforced_line(body: &Value) -> Option<String> {
     }
     let id = s(&body["id"]);
     Some(format!(
-        "reinforced {} instead of adding a copy, recalled {}x: {}",
-        id.get(..8).unwrap_or(&id),
-        body["review"]["reps"].as_u64().unwrap_or(0),
-        s(&body["text"]).trim()
+        "reinforced {} instead of adding a copy, so run `ljos search`.",
+        id.get(..8).unwrap_or(&id)
     ))
 }
 

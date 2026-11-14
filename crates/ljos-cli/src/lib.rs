@@ -21222,11 +21222,12 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
         Err(err) if is_deadline_miss(&err) => Err(err),
         Err(err) if existing_atom_id(&err).is_some() => {
             let id = existing_atom_id(&err).unwrap_or_default();
-            eprintln!("remember: already stored as {id}");
+            eprintln!("remember: already stored as {id}, so run `ljos search`.");
             Ok(serde_json::json!({
                 "id": id,
                 "kind": "lesson",
                 "text": text,
+                "duplicate": true,
             }))
         }
         Err(err) if pack_under_load(&err) => {

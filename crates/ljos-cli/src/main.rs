@@ -3746,6 +3746,9 @@ fn run_command() -> Result<()> {
                         )
                     }
                 })?;
+                if body["duplicate"].as_bool() == Some(true) {
+                    continue;
+                }
                 println!("{}", write_ack(&body, verbose));
                 eprintln!("{}", ljos_cli::remember_note(&body));
                 if let Some(line) = ljos_cli::memories::reinforced_line(&body) {
