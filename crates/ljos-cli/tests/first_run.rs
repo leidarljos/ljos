@@ -925,6 +925,69 @@ fn the_getting_started_doctor_sample_names_the_missing_encoder() {
     );
 }
 
+fn sample_region(text: &str, key: &str) -> String {
+    let begin = format!("ljos-sample tutorial-{key}");
+    let start = text
+        .find(&begin)
+        .unwrap_or_else(|| panic!("{key} sample is missing"))
+        + begin.len();
+    let rest = &text[start..];
+    let end_at = format!("END ljos-sample tutorial-{key}");
+    let end = rest
+        .find(&end_at)
+        .unwrap_or_else(|| panic!("{key} sample has no end"));
+    rest[..end].to_string()
+}
+
+#[test]
+fn the_getting_started_search_sample_is_a_terminal() {
+    for rel in [
+        "../../docs/source/getting-started.rst",
+        "../../docs/orgmode/getting-started.org",
+        "../../docs/source/index.rst",
+        "../../docs/orgmode/index.org",
+    ] {
+        let text = repo_file(rel);
+        let search = if rel.contains("index") {
+            sample_region(&text, "index")
+        } else {
+            sample_region(&text, "search")
+        };
+        assert!(
+            search.contains("lesson, today"),
+            "{rel} search sample is not the terminal row:\n{search}"
+        );
+        assert!(
+            !search.contains("from an agent"),
+            "{rel} search sample is a runner transcript:\n{search}"
+        );
+    }
+    for rel in [
+        "../../docs/source/getting-started.rst",
+        "../../docs/orgmode/getting-started.org",
+    ] {
+        let text = repo_file(rel);
+        let prefer = sample_region(&text, "prefer");
+        assert!(
+            prefer.contains("preference, today"),
+            "{rel} preference sample is not the terminal row:\n{prefer}"
+        );
+        assert!(
+            !prefer.contains("from an agent"),
+            "{rel} preference sample is a runner transcript:\n{prefer}"
+        );
+        let timeline = sample_region(&text, "timeline");
+        assert!(
+            timeline.contains("[end 0123456789abcdef]"),
+            "{rel} timeline sample split the fence:\n{timeline}"
+        );
+        assert!(
+            timeline.contains("the codec is one file"),
+            "{rel} timeline sample has no note:\n{timeline}"
+        );
+    }
+}
+
 #[test]
 fn the_getting_started_page_names_both_preference_rows() {
     for rel in [

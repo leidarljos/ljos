@@ -86,6 +86,8 @@ part that needs action. Git needs ``user.name`` and ``user.email`` before the fi
 First commands
 ==============
 
+.. BEGIN ljos-sample tutorial-index
+
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
@@ -100,13 +102,15 @@ First commands
    A closer row from another seat stays ahead.
    Checks: how many of them named this row.
 
-   lesson, from an agent, today
+   lesson, today
      The lexical default is BM25+. It beat BM25 by two points on turns.
      place 1, score 0.81, checks 2/2, id a6ae2751
    $ ljos file "Pick a codec" -p demo
 
+.. END ljos-sample tutorial-index
+
 ``ljos search`` prints the lesson when the query shares its words.
-The row above sat under a runner, so it says ``from an agent``. At a terminal the row is ``lesson, today``.
+Typed at a terminal, the row is ``lesson, today``. Under a runner it says ``lesson, from an agent``.
 A word ranking splits an identifier, so ``list_scans`` matches ``list scans``.
 A row that only shares a common word is left out, and the line is then
 ``No close matches for "..."``.

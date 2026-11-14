@@ -879,6 +879,149 @@ def tutorial_timeline(ljos: Path) -> str:
     return text.strip() + "\n"
 
 
+_EPISODE = (
+    "episode: the hook shows it when a prompt bears on it, "
+    "and ljos graded promotes it to standing, so run `ljos due`."
+)
+_STANDING = "standing: the hook shows it from the next prompt it bears on"
+
+
+def as_terminal(text: str) -> str:
+    """The wording a person's terminal prints for these commands.
+
+    The script is not that terminal. A runner may be above it, and stdin
+    is not a login session, so the binary stores the lesson as an agent's.
+    The substitution is fixed, so the sample does not depend on where the
+    script runs. The how-to for two agents keeps the runner wording.
+    """
+    text = text.replace(_EPISODE, _STANDING)
+    text = text.replace("lesson, from an agent, today", "lesson, today")
+    text = text.replace("lesson, the person's words, today", "lesson, today")
+    text = text.replace("preference, from an agent, not checked, today", "preference, today")
+    return text
+
+
+def tutorial_search(ljos: Path) -> dict[str, str]:
+    """Remember, search and prefer as a terminal would print them.
+
+    The encoder stays off PATH, so the ranking line is the lexical one.
+    The writer listens on a free port and is stopped before return.
+    """
+    for name in ("packset", "packsetd"):
+        _need_tool(name)
+    home = Path(tempfile.mkdtemp(prefix="ljos-doc-search-"))
+    pack_home = home / "pack"
+    pack_port = free_loopback_port()
+    pack = {
+        "PACKSET_HOME": str(pack_home),
+        "PACKSET_PORT": str(pack_port),
+        "PACKSET_URL": f"http://127.0.0.1:{pack_port}",
+        "LJOS_SYNC_HOST": "laptop",
+    }
+    try:
+        for rel in (
+            ".config/ljos",
+            ".local/state/ljos",
+            ".cache",
+            ".local/share",
+            "run",
+            "tmp",
+            "work",
+            "bin",
+        ):
+            (home / rel).mkdir(parents=True)
+        pack_home.mkdir()
+        bind = home / "bin"
+        bind.joinpath("ljos").symlink_to(ljos)
+        from shutil import which
+
+        for name in ("packset", "packsetd"):
+            found = which(name)
+            if found is None:
+                raise SystemExit(f"gen_samples: {name} is not on PATH")
+            bind.joinpath(name).symlink_to(found)
+        env = _agent_env(home, ljos, pack)
+        env["PATH"] = f"{bind}:/usr/bin:/bin"
+        cwd = home / "work"
+        code, text = _pty_run(["packset", "ensure"], env, cwd, 120)
+        if code != 0:
+            raise SystemExit(f"packset ensure exited {code}:\n{text}")
+        lesson = "The lexical default is BM25+. It beat BM25 by two points on turns."
+        remembered = _show(
+            ["ljos", "remember", lesson],
+            env,
+            cwd,
+            f'ljos remember "{lesson}"',
+        )
+        found = _show(
+            ["ljos", "search", "lexical default"],
+            env,
+            cwd,
+            'ljos search "lexical default"',
+        )
+        preference = "CombMNZ over RRF for fusing two ballots."
+        preferred = _show(
+            ["ljos", "prefer", preference],
+            env,
+            cwd,
+            f'ljos prefer "{preference}"',
+        )
+        fused = _show(
+            ["ljos", "search", "fusing"],
+            env,
+            cwd,
+            "ljos search fusing",
+        )
+    finally:
+        subprocess.run(
+            ["packset", "stop"],
+            cwd=home / "work",
+            env=_agent_env(home, ljos, pack),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        import shutil
+
+        shutil.rmtree(home, ignore_errors=True)
+
+    def finish(text: str, standin: str) -> str:
+        text = as_terminal(text)
+        text = text.replace(str(home), "/home/you")
+        text = _REVIEW.sub("next review 2026-11-12 21:40 +00:00", text)
+        text = _SHORT_ID.sub(standin, text)
+        return text.strip() + "\n"
+
+    search = finish(remembered + found, "a6ae2751")
+    prefer = finish(preferred + fused, "f8b725a9")
+    index_lines = [
+        line
+        for line in search.splitlines()
+        if not line.startswith("ljos: no seat")
+        and not line.startswith("standing:")
+        and not line.startswith("episode:")
+    ]
+    index_lines.append('$ ljos file "Pick a codec" -p demo')
+    index = "\n".join(index_lines).strip() + "\n"
+    for name, body, needle in (
+        ("search", search, "lesson, today"),
+        ("prefer", prefer, "preference, today"),
+        ("index", index, "lesson, today"),
+    ):
+        if needle not in body or "from an agent" in body:
+            raise SystemExit(f"gen_samples: {name} sample is not the terminal transcript:\n{body}")
+        if "encoder not installed" not in body:
+            raise SystemExit(f"gen_samples: {name} sample did not rank by words:\n{body}")
+        if "/tmp" in body or "ljos-doc-search" in body:
+            raise SystemExit(f"gen_samples: {name} sample names a temporary directory")
+    if "unknown-laptop" not in search:
+        raise SystemExit(f"gen_samples: search sample did not use the sample host:\n{search}")
+    if _STANDING not in search:
+        raise SystemExit(f"gen_samples: search sample did not say the lesson stands:\n{search}")
+    return {"search": search, "prefer": prefer, "index": index}
+
+
 def rewritten(doctor: str, help_text: str, agents: dict[str, str], tutorials: dict[str, str]) -> dict[Path, str]:
     out: dict[Path, str] = {}
     regions = [
@@ -948,7 +1091,9 @@ def main() -> int:
         print("gen_samples: no ljos binary; left the committed samples", file=sys.stderr)
         return 0
     doctor, help_text = samples_from(ljos)
-    files = rewritten(doctor, help_text, agent_samples(ljos), {"timeline": tutorial_timeline(ljos)})
+    tutorials = {"timeline": tutorial_timeline(ljos)}
+    tutorials.update(tutorial_search(ljos))
+    files = rewritten(doctor, help_text, agent_samples(ljos), tutorials)
     changed = [path for path, text in files.items() if text != path.read_text(encoding="utf-8")]
     if args.check:
         if changed:

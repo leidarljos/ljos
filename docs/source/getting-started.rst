@@ -125,6 +125,8 @@ Trust it again after an upgrade rewrites one.
 A lesson and a search
 =====================
 
+.. BEGIN ljos-sample tutorial-search
+
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
@@ -141,14 +143,16 @@ A lesson and a search
    A closer row from another seat stays ahead.
    Checks: how many of them named this row.
 
-   lesson, from an agent, today
+   lesson, today
      The lexical default is BM25+. It beat BM25 by two points on turns.
      place 1, score 0.81, checks 2/2, id a6ae2751
 
+.. END ljos-sample tutorial-search
+
 The id and the review time are the ones that run printed. The name after ``unknown-`` is the host name. The sample uses ``laptop``, which is not a runner name.
 That line is printed only when the write uses that seat. A conversation that already has a seat record writes as that seat and does not print the line.
-This run sat under an agent runner, so the search row says ``lesson, from an agent``.
-Typed at a terminal with no runner above it, that row says ``lesson, today``.
+Typed at a terminal, the search row says ``lesson, today``.
+Under a runner the same row says ``lesson, from an agent``.
 A preference stored at that terminal is ``preference, today``.
 Under a runner the preference row is ``preference, from an agent, not checked``.
 Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
@@ -158,9 +162,12 @@ That floor is the one the prompt hook uses for a hit the encoder lists at the to
 A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is ``Nothing relevant was found.``
 A busy pack ranks by words and still returns a hit that names the subject.
 
+.. BEGIN ljos-sample tutorial-prefer
+
 .. code:: console
 
    $ ljos prefer "CombMNZ over RRF for fusing two ballots."
+   ljos: no seat was named and this write uses unknown-laptop, so run `export LJOS_SEAT=NAME`.
    remembered (preference): CombMNZ over RRF for fusing two ballots.
      id f8b725a9, next review 2026-11-12 21:40 +00:00
    $ ljos search fusing
@@ -172,9 +179,11 @@ A busy pack ranks by words and still returns a hit that names the subject.
    A closer row from another seat stays ahead.
    Checks: how many of them named this row.
 
-   preference, from an agent, not checked, today
+   preference, today
      CombMNZ over RRF for fusing two ballots.
      place 1, score 0.35, checks 2/2, id f8b725a9
+
+.. END ljos-sample tutorial-prefer
 
 ``ljos due`` lists claims when their review time arrives. A claim you stop reviewing sinks in search.
 The how-to :doc:`Keep memory current <howto-memory>` is the review clock, ``ljos graded`` and ``ljos forget``.
