@@ -39,6 +39,9 @@ Shell completion is one line in the shell's startup file. ``install.sh`` prints 
    $ source <(ljos completions bash)
 
 The same line with ``zsh``, or ``ljos completions fish | source`` for fish, is what the script prints for those shells.
+PowerShell is ``ljos completions powershell | Out-String | Invoke-Expression`` in the profile.
+Elvish is ``eval (ljos completions elvish)`` in ``rc.elv``.
+The command reference names the file each shell reads.
 
 The ``install.sh`` attached to the 0.41.1 release asked for ``vissue-cli-<target>.tar.xz``. The 0.41.2 script fetches ``vissue-v<version>-<target>.tar.gz``.
 The vissue release publishes ``vissue-v<version>-<target>.tar.gz``.

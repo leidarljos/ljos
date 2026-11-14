@@ -39,9 +39,11 @@
 #
 # Shell completion is one line in the shell's startup file. The script
 # prints the line and does not write that file:
-#   bash: source <(ljos completions bash)
-#   zsh:  source <(ljos completions zsh)
-#   fish: ljos completions fish | source
+#   bash:       source <(ljos completions bash)
+#   zsh:        source <(ljos completions zsh)
+#   fish:       ljos completions fish | source
+#   powershell: ljos completions powershell | Out-String | Invoke-Expression
+#   elvish:     eval (ljos completions elvish)
 #
 # Options:
 #   --bin-dir DIR   where the programs go (default: $LJOS_BIN_DIR or ~/.local/bin)
@@ -1057,3 +1059,5 @@ say "Shell completion is one line in the shell's startup file. This script does 
 say "  bash: source <(ljos completions bash)"
 say "  zsh: source <(ljos completions zsh)"
 say "  fish: ljos completions fish | source"
+say "  powershell: ljos completions powershell | Out-String | Invoke-Expression"
+say "  elvish: eval (ljos completions elvish)"

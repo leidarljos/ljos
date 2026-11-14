@@ -179,6 +179,11 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     assert!(read(&home.join(".zshrc")).starts_with("# mine\n\n"));
     assert!(first.contains("source <(ljos completions bash)"), "{first}");
     assert!(
+        first.contains("ljos completions powershell | Out-String | Invoke-Expression"),
+        "{first}"
+    );
+    assert!(first.contains("eval (ljos completions elvish)"), "{first}");
+    assert!(
         !read(&home.join(".bashrc")).contains("ljos completions"),
         "install wrote a completion line into ~/.bashrc:\n{}",
         read(&home.join(".bashrc"))
