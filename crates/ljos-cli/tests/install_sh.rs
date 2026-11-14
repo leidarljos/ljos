@@ -20,6 +20,7 @@ const PROGRAMS: [&str; 11] = [
 
 const PATH_LINE: &str = "export PATH=\"$HOME/.local/bin:$PATH\"";
 const MARK: &str = "# Added by the ljos installer: its programs on PATH.";
+const SOURCE_CMD: &str = "cargo install --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus";
 
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -162,13 +163,13 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     let home = dir.path().join("zsh-user");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join(".zshrc"), "# mine\n").unwrap();
-    let first = install(&home, &progs, "/usr/bin:/bin", &[]);
+    let first = install(&home, &progs, "/usr/bin:/bin", &["--modify-path"]);
     assert!(
         first.contains("to PATH in ~/.profile ~/.bashrc ~/.zshrc"),
         "{first}"
     );
     assert!(first.contains(PATH_LINE), "{first}");
-    let again = install(&home, &progs, "/usr/bin:/bin", &[]);
+    let again = install(&home, &progs, "/usr/bin:/bin", &["--modify-path"]);
     assert!(again.contains("already add"), "{again}");
     for rc in [".profile", ".bashrc", ".zshrc"] {
         let text = read(&home.join(rc));
@@ -197,7 +198,7 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     );
 
     let bash_only = dir.path().join("bash-user");
-    install(&bash_only, &progs, "/usr/bin:/bin", &[]);
+    install(&bash_only, &progs, "/usr/bin:/bin", &["--modify-path"]);
     assert!(read(&bash_only.join(".bashrc")).contains(PATH_LINE));
     assert!(
         !bash_only.join(".zshrc").exists(),
@@ -669,24 +670,37 @@ fn an_unsupported_os_names_the_machine_and_wsl() {
     );
     let home = dir.path().join("home");
     let path = format!("{}:/usr/bin:/bin", bin.display());
-    let out = run_install(&home, &path, &["--no-embed", "--no-onboard"]);
+    std::fs::create_dir_all(&home).unwrap();
+    let out = Command::new("dash")
+        .arg(install_sh())
+        .args(["--no-embed", "--no-onboard"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
     let text = said(&out);
     assert!(
         !out.status.success(),
         "status {:?}\n{text}",
         out.status.code()
     );
+    let line = text
+        .lines()
+        .find(|line| line.contains("is not supported"))
+        .unwrap_or("");
+    assert!(line.contains("FreeBSD amd64 is not supported"), "{text}");
     assert!(
-        text.contains("FreeBSD amd64 is not a supported OS or arch"),
+        line.contains("Supported: Linux and macOS on x86_64 and aarch64"),
         "{text}"
     );
-    assert!(
-        text.contains("x86_64-unknown-linux-gnu"),
-        "missing triple\n{text:?}"
+    assert!(line.contains(SOURCE_CMD), "{text}");
+    assert!(line.contains("WSL"), "{text}");
+    assert_eq!(
+        text.lines().filter(|line| !line.is_empty()).count(),
+        1,
+        "unsupported OS printed more than one line:\n{text}"
     );
-    assert!(text.contains("sh install.sh"), "{text}");
-    assert!(text.contains("WSL"), "{text}");
-    assert!(text.contains("rustup.rs"), "{text}");
 }
 
 /// tar is how a release archive is unpacked. A missing tar stops before that.
@@ -736,7 +750,7 @@ fn a_missing_tar_names_the_install_command() {
     );
     let text = said(&out);
     assert!(!out.status.success(), "{text}");
-    assert!(text.contains("need tar to unpack"), "{text}");
+    assert!(text.contains("missing tar"), "{text}");
     assert!(text.contains("sh install.sh"), "{text}");
     assert!(text.contains("--from-dir DIR"), "{text}");
 }
@@ -760,8 +774,9 @@ fn a_missing_curl_names_how_to_install_one() {
     let out = run_install(&home, &sys.display().to_string(), &["--no-embed"]);
     let text = said(&out);
     assert!(!out.status.success(), "{text}");
-    assert!(text.contains("need curl or wget"), "{text}");
-    assert!(text.contains("apt-get install curl"), "{text}");
+    assert!(text.contains("curl"), "{text}");
+    assert!(text.contains("wget"), "{text}");
+    assert!(text.contains("missing curl or wget"), "{text}");
     assert!(text.contains("sh install.sh"), "{text}");
     assert!(text.contains("--from-dir DIR"), "{text}");
 }
@@ -886,8 +901,11 @@ fn a_second_install_says_it_replaced_the_programs() {
     let second = run_install(&home, &path, &args);
     let text = said(&second);
     assert!(second.status.success(), "{text}");
-    assert!(text.contains("Replaced the ljos already at"), "{text}");
-    assert!(text.contains("ljos 0.2.0"), "{text}");
+    assert!(
+        text.contains("ljos 0.2.0 is already installed at"),
+        "{text}"
+    );
+    assert!(text.contains("Reinstalled the same version."), "{text}");
     assert!(text.contains("Next: `ljos doctor`."), "{text}");
 }
 
@@ -950,4 +968,380 @@ fn upgrading_over_a_running_mcp_server_names_the_pid() {
     );
     assert!(text.contains(&format!("kill {pid}")), "{text}");
     assert!(text.contains("previous binary"), "{text}");
+}
+
+fn link_tools(dir: &Path, names: &[&str]) {
+    std::fs::create_dir_all(dir).unwrap();
+    for name in names {
+        for root in ["/usr/bin", "/bin"] {
+            let found = Path::new(root).join(name);
+            if found.is_file() {
+                std::os::unix::fs::symlink(&found, dir.join(name)).unwrap();
+                break;
+            }
+        }
+    }
+}
+
+fn sha256_file(bytes: &[u8]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("body");
+    std::fs::write(&file, bytes).unwrap();
+    let out = Command::new("sha256sum").arg(&file).output().unwrap();
+    assert!(out.status.success(), "{}", said(&out));
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+/// `sha256sum` is how a download is checked. `shasum` is the macOS name.
+#[test]
+fn a_missing_checksum_tool_names_sha256sum_and_shasum() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys = dir.path().join("sys");
+    link_tools(
+        &sys,
+        &[
+            "sh", "mktemp", "date", "cp", "chmod", "mkdir", "rm", "mv", "cat", "grep", "sed",
+            "awk", "find", "uname", "head", "sort", "dirname", "tar",
+        ],
+    );
+    let home = dir.path().join("home");
+    let out = run_install(
+        &home,
+        &sys.display().to_string(),
+        &[
+            "--no-embed",
+            "--no-onboard",
+            "--asset-dir",
+            "/no/such/assets",
+        ],
+    );
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("sha256sum"), "{text}");
+    assert!(text.contains("shasum"), "{text}");
+    assert!(text.contains("sh install.sh"), "{text}");
+}
+
+/// A bin directory the person cannot write names `--bin-dir`.
+#[test]
+fn a_bin_dir_that_is_not_writable_names_bin_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let locked = dir.path().join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&locked, perms).unwrap();
+    let out = run_install(
+        &home,
+        "/usr/bin:/bin",
+        &[
+            "--from-dir",
+            "/no/such/progs",
+            "--no-embed",
+            "--no-onboard",
+            "--bin-dir",
+            locked.to_str().unwrap(),
+        ],
+    );
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("is not writable"), "{text}");
+    assert!(text.contains("--bin-dir"), "{text}");
+    assert!(text.contains(locked.to_str().unwrap()), "{text}");
+}
+
+/// The default install names the bash, zsh and fish lines and writes none of them.
+#[test]
+fn bin_dir_off_path_names_each_shell_and_does_not_edit_profiles() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+    let home = dir.path().join("home");
+    let text = install(&home, &progs, "/usr/bin:/bin", &[]);
+    assert!(text.contains("bash (~/.bashrc):"), "{text}");
+    assert!(text.contains("zsh (~/.zshrc):"), "{text}");
+    assert!(
+        text.contains("fish (~/.config/fish/config.fish):"),
+        "{text}"
+    );
+    assert!(text.contains(PATH_LINE), "{text}");
+    assert!(text.contains("fish_add_path $HOME/.local/bin"), "{text}");
+    assert!(text.contains("does not edit that file"), "{text}");
+    for rc in [".profile", ".bashrc", ".zshrc", ".config/fish/config.fish"] {
+        assert!(!home.join(rc).exists(), "{rc} was written");
+    }
+}
+
+/// A second install of an older ljos names both versions.
+#[test]
+fn an_older_install_names_both_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let bin = home.join(".local/bin");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let old = dir.path().join("old");
+    std::fs::create_dir_all(&old).unwrap();
+    for name in PROGRAMS {
+        script(
+            &old,
+            name,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo ljos 0.1.0; fi\nexit 0\n",
+        );
+    }
+    let newer = dir.path().join("new");
+    std::fs::create_dir_all(&newer).unwrap();
+    for name in PROGRAMS {
+        script(
+            &newer,
+            name,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo ljos 0.2.0; fi\nexit 0\n",
+        );
+    }
+    let first = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&old)
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "{}", said(&first));
+    let second = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&newer)
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let text = said(&second);
+    assert!(second.status.success(), "{text}");
+    assert!(
+        text.contains(&format!(
+            "Updated ljos at {} from 0.1.0 to 0.2.0.",
+            bin.display()
+        )),
+        "{text}"
+    );
+}
+
+const FAKE_CURL: &str = r#"#!/bin/sh
+out=
+url=
+prev=
+for a in "$@"; do
+  case $prev in
+    -o) out=$a ;;
+  esac
+  case $a in
+    http://*|https://*) url=$a ;;
+  esac
+  prev=$a
+done
+case $url in
+  */releases/tag/*|*/releases/tags/*)
+    case "$LJOS_FAKE_TAG" in
+      missing)
+        printf '%s' 404
+        exit 0
+        ;;
+    esac
+    printf '%s' 200
+    exit 0
+    ;;
+esac
+case "$LJOS_FAKE_MODE" in
+  truncate)
+    printf '%s' partial > "$out"
+    echo 'curl: (18) transfer closed with outstanding read data remaining' >&2
+    exit 18
+    ;;
+  missing)
+    printf '%s' 404
+    exit 0
+    ;;
+esac
+case $url in
+  *.sha256)
+    printf '%s\n' "$LJOS_FAKE_SHA" > "$out"
+    printf '%s' 200
+    exit 0
+    ;;
+esac
+printf '%s' "$LJOS_FAKE_BODY" > "$out"
+printf '%s' 200
+exit 0
+"#;
+
+fn logging_rm(dir: &Path) {
+    script(
+        dir,
+        "rm",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$LJOS_RM_LOG\"\nexec /bin/rm \"$@\"\n",
+    );
+}
+
+/// A download whose checksum does not match is deleted, and the line says to rerun.
+#[test]
+fn a_checksum_mismatch_removes_the_partial_file_and_says_to_rerun() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script(&bin, "curl", FAKE_CURL);
+    logging_rm(&bin);
+    let log = dir.path().join("rm.log");
+    let home = dir.path().join("home");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let asset = "ljos-v0.0.1-x86_64-unknown-linux-gnu.tar.gz";
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .args([
+            "--no-embed",
+            "--no-onboard",
+            "--no-modify-path",
+            "--version",
+            "0.0.1",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--bin-dir",
+        ])
+        .arg(home.join(".local/bin"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .env("LJOS_FAKE_MODE", "mismatch")
+        .env("LJOS_FAKE_BODY", "not-the-archive")
+        .env("LJOS_FAKE_SHA", sha256_file(b"the-archive"))
+        .env("LJOS_RM_LOG", &log)
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("checksum mismatch"), "{text}");
+    assert!(text.contains("Removed the partial file"), "{text}");
+    assert!(text.contains("sh install.sh"), "{text}");
+    assert!(!home.join(".local/bin/ljos").exists(), "{text}");
+    let removed = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        removed.contains(asset),
+        "the partial archive was not deleted:\n{removed}\n{text}"
+    );
+}
+
+/// A download that stops early is deleted, and the line says to rerun.
+#[test]
+fn a_truncated_download_removes_the_partial_file_and_says_to_rerun() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script(&bin, "curl", FAKE_CURL);
+    logging_rm(&bin);
+    let log = dir.path().join("rm.log");
+    let home = dir.path().join("home");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let asset = "ljos-v0.0.1-x86_64-unknown-linux-gnu.tar.gz";
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .args([
+            "--no-embed",
+            "--no-onboard",
+            "--no-modify-path",
+            "--version",
+            "0.0.1",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--bin-dir",
+        ])
+        .arg(home.join(".local/bin"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .env("LJOS_FAKE_MODE", "truncate")
+        .env("LJOS_RM_LOG", &log)
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("truncated"), "{text}");
+    assert!(text.contains("Removed the partial file"), "{text}");
+    assert!(text.contains("sh install.sh"), "{text}");
+    assert!(!home.join(".local/bin/ljos").exists(), "{text}");
+    let removed = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        removed.contains(asset),
+        "the partial archive was not deleted:\n{removed}\n{text}"
+    );
+}
+
+/// `--version` for a release GitHub does not have names the releases page.
+#[test]
+fn a_pinned_version_with_no_release_says_how_to_list_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script(&bin, "curl", FAKE_CURL);
+    script(
+        &bin,
+        "cargo",
+        "#!/bin/sh\necho ran >> \"$LJOS_CARGO_LOG\"\nexit 1\n",
+    );
+    let cargo_log = dir.path().join("cargo.log");
+    let home = dir.path().join("home");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .args([
+            "--no-embed",
+            "--no-onboard",
+            "--no-modify-path",
+            "--version",
+            "9.9.9",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--bin-dir",
+        ])
+        .arg(home.join(".local/bin"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .env("LJOS_FAKE_MODE", "missing")
+        .env("LJOS_FAKE_TAG", "missing")
+        .env("LJOS_CARGO_LOG", &cargo_log)
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("ljos 9.9.9 has no release"), "{text}");
+    assert!(
+        text.contains("https://github.com/leidarljos/ljos/releases"),
+        "{text}"
+    );
+    assert!(
+        !cargo_log.exists(),
+        "a missing release started cargo:\n{text}"
+    );
+}
+
+#[test]
+fn install_sh_passes_shellcheck() {
+    let out = Command::new("shellcheck")
+        .args(["-s", "sh"])
+        .arg(install_sh())
+        .output()
+        .expect("shellcheck");
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
 }

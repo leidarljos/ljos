@@ -197,8 +197,26 @@ fake=$(mktemp -d "${TMPDIR:-/tmp}/ljos-release-fake.XXXXXX")
 trap 'rm -rf "$STAGE" "$ASSETS" "$fake"; rm -f "$PINS"' EXIT INT TERM
 printf '%s\n' '#!/bin/sh' 'echo rustc 1.83.0 \(fake\)' > "$fake/rustc"
 printf '%s\n' '#!/bin/sh' 'echo cargo-was-run >> "$CARGO_MARKER"' 'exit 1' > "$fake/cargo"
-# install.sh reads curl's stdout as the HTTP status. 404 is a missing archive.
-printf '%s\n' '#!/bin/sh' 'printf %s 404' > "$fake/curl"
+# install.sh reads curl's stdout as the HTTP status. 404 on the archive
+# is a missing file. 200 on the tag page means the release exists, so
+# the script does not report a version that was never published.
+cat > "$fake/curl" <<'EOF'
+#!/bin/sh
+url=
+for a in "$@"; do
+  case $a in
+    http://*|https://*) url=$a ;;
+  esac
+done
+case $url in
+  */releases/tag/*|*/releases/tags/*)
+    printf '%s' 200
+    exit 0
+    ;;
+esac
+printf '%s' 404
+exit 0
+EOF
 chmod 755 "$fake/rustc" "$fake/cargo" "$fake/curl"
 gone="$ASSETS/vissue-v$VISSUE_VER-x86_64-unknown-linux-gnu.tar.gz"
 rm -f "$gone" "$gone.sha256"

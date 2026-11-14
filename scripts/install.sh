@@ -28,11 +28,14 @@
 # the first release after 0.28.0 on. Before that release the URL is a 404.
 #
 # A failure names the cause and the command to run next. No network, a
-# download that fails, an unsupported OS or arch, or a missing curl or tar
-# stops there. A second run replaces the programs already in the bin dir.
-# An older ljos earlier on PATH is named, with the line that puts this
-# install first. A running ljos-mcp is still the previous binary until
-# that process is restarted.
+# download that fails, a checksum that does not match, a truncated
+# download, an unsupported OS or CPU, or a missing curl, wget, tar,
+# sha256sum or shasum stops there. A second run over the same version
+# says so. An older install names both versions. The script prints the
+# PATH line for bash, zsh and fish, and does not edit a shell profile
+# unless --modify-path is given. An older ljos earlier on PATH is named,
+# with the line that puts this install first. A running ljos-mcp is still
+# the previous binary until that process is restarted.
 #
 # Shell completion is one line in the shell's startup file. The script
 # prints the line and does not write that file:
@@ -59,11 +62,12 @@
 #   --print-assets  print the archive name for each repository and exit.
 #                   Each repository needs --pin or --version
 #   --no-onboard    install only; onboard nothing
+#   --modify-path   when the bin dir is not on PATH, add the export line
+#                   to ~/.profile and ~/.bashrc, and to ~/.zshrc when that
+#                   file exists. Without this flag the script prints the
+#                   line for bash, zsh and fish and edits nothing
 #   --no-modify-path
-#                   leave the shell profiles alone. Without it, when the
-#                   bin dir is not on PATH, ~/.profile and ~/.bashrc (and
-#                   ~/.zshrc if there is one) each get one line that puts
-#                   it there, once
+#                   leave the shell profiles alone. This is the default
 #   --version VER   install ljos VER (such as 0.29.0) instead of the latest
 #   --pin REPO=VER  install REPO at VER (such as packset=0.14.0); repeat
 #                   for each repository to hold. vissue, claimdag and deedar
@@ -106,7 +110,7 @@ FROM_DIR=
 ASSET_DIR=
 TARGET_OVERRIDE=
 ONBOARD=1
-MODIFY_PATH=1
+MODIFY_PATH=0
 OWNER=leidarljos
 PINS=
 ATTEST=0
@@ -139,7 +143,7 @@ place() {
 # crate with a message that names neither the floor nor rustup.
 MIN_RUST=1.89
 rust_floor() {
-  root=$(CDPATH= cd -- "$(dirname "$0")/.." 2>/dev/null && pwd)
+  root=$(CDPATH='' cd -- "$(dirname "$0")/.." 2>/dev/null && pwd)
   if [ -n "$root" ] && [ -f "$root/Cargo.toml" ]; then
     v=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' "$root/Cargo.toml" | head -n1)
     [ -n "$v" ] && MIN_RUST=$v
@@ -189,6 +193,7 @@ while [ $# -gt 0 ]; do
     --no-build) NO_BUILD=1; shift ;;
     --print-assets) PRINT_ASSETS=1; shift ;;
     --no-onboard) ONBOARD=0; shift ;;
+    --modify-path) MODIFY_PATH=1; shift ;;
     --no-modify-path) MODIFY_PATH=0; shift ;;
     --version) [ $# -ge 2 ] || die "--version needs a version"; PINS="$PINS ljos=$2"; shift 2 ;;
     --version=*) PINS="$PINS ljos=${1#--version=}"; shift ;;
@@ -328,17 +333,18 @@ latest_url() {
 fetch_why() {
   head -n 1 "$TMP/fetch.err" 2>/dev/null | tr -d '\r' || true
 }
-if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-  [ -n "$FROM_DIR" ] || [ -n "$ASSET_DIR" ] || [ "$PRINT_ASSETS" = 1 ] ||
-    die "need curl or wget to download the release. Install one and run \`sh install.sh\` again, for example \`apt-get install curl\`. With the archives on disk: \`sh install.sh --asset-dir DIR\`. With the programs unpacked: \`sh install.sh --from-dir DIR\`."
-fi
-
+# The HTTP status, when the server sent one, follows the first error line.
+fetch_detail() {
+  why=$(fetch_why)
+  if [ -n "${FETCH_CODE:-}" ] && [ "$FETCH_CODE" != 000 ]; then
+    why="${why:+$why }(HTTP $FETCH_CODE)"
+  fi
+  printf '%s' "$why"
+}
 if command -v sha256sum >/dev/null 2>&1; then
   sha256() { sha256sum "$1" | cut -d' ' -f1; }
 elif command -v shasum >/dev/null 2>&1; then
   sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
-else
-  [ -n "$FROM_DIR" ] || [ "$PRINT_ASSETS" = 1 ] || die "need sha256sum or shasum to check the downloads. Install coreutils or perl and run \`sh install.sh\` again. With the programs unpacked: \`sh install.sh --from-dir DIR\`."
 fi
 
 case "$(uname -s)-$(uname -m)" in
@@ -352,21 +358,82 @@ if [ -n "$TARGET_OVERRIDE" ]; then
   TARGET=$TARGET_OVERRIDE
 fi
 
+# The seat crates, without the encoder. One command on a machine the
+# release archives do not cover.
+SOURCE_CMD="cargo install --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus"
+supported_line() {
+  printf '%s' "$(uname -s) $(uname -m) is not supported. Supported: Linux and macOS on x86_64 and aarch64. On Windows, run this script inside WSL. Build from source: $SOURCE_CMD"
+}
+supported_target() {
+  case $1 in
+    x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-apple-darwin) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# Name an unsupported machine, and a missing download tool, before mktemp.
+# A person with neither curl nor tar should see that, not a missing mktemp.
+if [ -z "$FROM_DIR" ] && [ "$PRINT_ASSETS" != 1 ] && ! supported_target "$TARGET"; then
+  rust_floor
+  if [ -n "$ASSET_DIR" ]; then
+    die "$(uname -s) $(uname -m) is not a supported OS or arch (target $TARGET). Pass --target with one of x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin, and run \`sh install.sh --asset-dir $ASSET_DIR --target TRIPLE\` again."
+  fi
+  have=$(rust_have || true)
+  if [ "$NO_BUILD" = 1 ] || ! rust_new_enough "$have"; then
+    die "$(supported_line)"
+  fi
+  SOURCE_ONLY=1
+  say "$(supported_line)"
+fi
+if [ -z "$FROM_DIR" ] && [ "$PRINT_ASSETS" != 1 ] && [ "$SOURCE_ONLY" != 1 ]; then
+  miss=
+  add_miss() {
+    if [ -z "$miss" ]; then
+      miss=$1
+    else
+      miss="$miss, $1"
+    fi
+  }
+  if [ -z "$ASSET_DIR" ] && ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    add_miss "curl or wget"
+  fi
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    add_miss "sha256sum or shasum"
+  fi
+  if ! command -v tar >/dev/null 2>&1; then
+    add_miss "tar"
+  fi
+  if [ -n "$miss" ]; then
+    extra=
+    case $miss in
+      *curl*) extra=" With the archives on disk: \`sh install.sh --asset-dir DIR\`." ;;
+    esac
+    die "missing $miss. Install what is named and run \`sh install.sh\` again.$extra With the programs unpacked: \`sh install.sh --from-dir DIR\`."
+  fi
+fi
+
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ljos-install.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT INT TERM
-mkdir -p "$BIN_DIR"
+if ! mkdir -p "$BIN_DIR" 2>"$TMP/mkdir.err"; then
+  why=$(head -n 1 "$TMP/mkdir.err" 2>/dev/null | tr -d '\r' || true)
+  die "$BIN_DIR is not writable${why:+: $why}. Run \`sh install.sh --bin-dir DIR\` with a directory you can write."
+fi
+if ! touch "$BIN_DIR/.ljos-install-write" 2>"$TMP/mkdir.err"; then
+  why=$(head -n 1 "$TMP/mkdir.err" 2>/dev/null | tr -d '\r' || true)
+  die "$BIN_DIR is not writable${why:+: $why}. Run \`sh install.sh --bin-dir DIR\` with a directory you can write."
+fi
+rm -f "$BIN_DIR/.ljos-install-write"
 
 # A release published before `cloud up` exists cannot bootstrap itself.
 # This script, run from the ljos tree, builds that command from the tree
 # and the download below leaves the new binary in place.
 if [ "$CLOUD" = 1 ] && [ "$FORCE" = 0 ] && [ -z "$FROM_DIR" ]; then
   if ! { [ -x "$BIN_DIR/ljos" ] && "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; }; then
-    script_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+    script_root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
     if [ -f "$script_root/crates/ljos-cli/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
       need_rust ljos
       say "Building ljos from this tree so cloud up is available"
       cargo install --locked --force --path "$script_root/crates/ljos-cli" \
-        --root "$(CDPATH= cd -- "$(dirname "$BIN_DIR")" && pwd)"
+        --root "$(CDPATH='' cd -- "$(dirname "$BIN_DIR")" && pwd)"
     fi
   fi
 fi
@@ -389,7 +456,7 @@ source_build() {
   have=$(rust_have || true)
   if ! rust_new_enough "$have"; then
     if [ "$SOURCE_ONLY" = 1 ]; then
-      die "$(uname -s) $(uname -m) is not a supported OS or arch (target $TARGET). Release archives are x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin and aarch64-apple-darwin. On Windows, run \`sh install.sh\` inside WSL. To build from source, install Rust $MIN_RUST or newer from https://rustup.rs and run \`sh install.sh\` again."
+      die "$(supported_line)"
     fi
     if [ -n "$have" ]; then
       die "no $asset for $TARGET; a source build needs rustc $MIN_RUST or newer (found rustc $have). Install Rust from https://rustup.rs and run \`sh install.sh\` again."
@@ -526,6 +593,22 @@ attest() {
   fi
 }
 
+# exists when the tag is published, missing when GitHub says it is not,
+# unknown when the question could not be asked.
+release_state() {
+  repo=$1
+  ver=$2
+  if fetch "https://github.com/$OWNER/$repo/releases/tag/v$ver" "$TMP/tag-$repo-$ver"; then
+    printf '%s' exists
+    return 0
+  fi
+  case $FETCH_KIND in
+    missing) printf '%s' missing ;;
+    *) printf '%s' unknown ;;
+  esac
+  return 0
+}
+
 install_one() {
   repo=$1 crate=$2 style=$3 progs=$4
   if [ -n "$FROM_DIR" ]; then
@@ -557,7 +640,7 @@ install_one() {
     case $tag in
       v*) ;;
       *)
-        why=$(fetch_why)
+        why=$(fetch_detail)
         die "could not read the latest $repo release${why:+: $why}. Check the network and run \`sh install.sh\` again. To install a version you name: \`sh install.sh --version VER\`. With the archives on disk: \`sh install.sh --asset-dir DIR\`."
         ;;
     esac
@@ -577,6 +660,13 @@ install_one() {
   elif ! fetch "$url" "$TMP/$asset"; then
     case $FETCH_KIND in
       missing)
+        rm -f "$TMP/$asset"
+        if [ -n "$ver" ]; then
+          rel=$(release_state "$repo" "$ver")
+          if [ "$rel" = missing ]; then
+            die "$repo $ver has no release. List versions at https://github.com/$OWNER/$repo/releases"
+          fi
+        fi
         if [ "$NO_BUILD" = 1 ]; then
           die "no $asset for $TARGET. The release has no archive for this machine. Supported archives: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin. To build from source, install Rust $MIN_RUST or newer from https://rustup.rs and run \`sh install.sh\` without --no-build."
         fi
@@ -587,7 +677,12 @@ install_one() {
         return
         ;;
       *)
-        why=$(fetch_why)
+        if [ "$FETCH_KIND" = net ] && [ -s "$TMP/$asset" ]; then
+          rm -f "$TMP/$asset"
+          die "$asset: the download was truncated. Removed the partial file. Run \`sh install.sh\` again."
+        fi
+        rm -f "$TMP/$asset"
+        why=$(fetch_detail)
         die "could not download $url${why:+: $why}. Check the network and run \`sh install.sh\` again. With the archives on disk: \`sh install.sh --asset-dir DIR\`. With the programs unpacked: \`sh install.sh --from-dir DIR\`."
         ;;
     esac
@@ -599,7 +694,13 @@ install_one() {
   fi
   want=$(sed 's/[ *].*//' "$TMP/$asset.sha256" | head -n 1)
   got=$(sha256 "$TMP/$asset")
-  [ "$want" = "$got" ] || die "$asset: checksum mismatch (published $want, downloaded $got); nothing from it was installed"
+  if [ "$want" != "$got" ]; then
+    rm -f "$TMP/$asset"
+    if [ -n "$ASSET_DIR" ]; then
+      die "$asset: checksum mismatch. Nothing was installed. Replace the archive and run \`sh install.sh --asset-dir $ASSET_DIR\` again."
+    fi
+    die "$asset: checksum mismatch. Removed the partial file. Run \`sh install.sh\` again."
+  fi
   attested=skipped
   if [ -z "$ASSET_DIR" ]; then
     attested=$(attest "$TMP/$asset" "$repo" "$got")
@@ -649,34 +750,6 @@ if [ "$PRINT_ASSETS" = 1 ]; then
 $COMPONENTS
 EOF
   exit 0
-fi
-
-# Release archives exist for these four triples. Anything else is built
-# from source, or refused when that build cannot start.
-supported_target() {
-  case $1 in
-    x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-apple-darwin) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-if [ -z "$FROM_DIR" ] && [ "$PRINT_ASSETS" != 1 ] && ! supported_target "$TARGET"; then
-  rust_floor
-  if [ -n "$ASSET_DIR" ]; then
-    die "$(uname -s) $(uname -m) is not a supported OS or arch (target $TARGET). Pass --target with one of x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin, and run \`sh install.sh --asset-dir $ASSET_DIR --target TRIPLE\` again."
-  fi
-  have=$(rust_have || true)
-  if [ "$NO_BUILD" = 1 ] || ! rust_new_enough "$have"; then
-    die "$(uname -s) $(uname -m) is not a supported OS or arch (target $TARGET). Release archives are x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin and aarch64-apple-darwin. On Windows, run \`sh install.sh\` inside WSL. To build from source, install Rust $MIN_RUST or newer from https://rustup.rs and run \`sh install.sh\` again."
-  fi
-  SOURCE_ONLY=1
-  say "warning: $(uname -s) $(uname -m) is not a supported OS or arch (target $TARGET)."
-  say "  Release archives are x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin and aarch64-apple-darwin."
-  say "  On Windows, run \`sh install.sh\` inside WSL."
-  say "  Trying a source build. It needs Rust $MIN_RUST or newer (found rustc $have)."
-fi
-if [ -z "$FROM_DIR" ] && [ "$PRINT_ASSETS" != 1 ] && [ "$SOURCE_ONLY" != 1 ]; then
-  command -v tar >/dev/null 2>&1 ||
-    die "need tar to unpack the release archives. Install tar and run \`sh install.sh\` again. With the programs unpacked: \`sh install.sh --from-dir DIR\`."
 fi
 
 say "Installing ljos into $BIN_DIR ($TARGET)"
@@ -787,6 +860,33 @@ same_bin() {
 ver_of() {
   "$1" --version 2>/dev/null | head -n 1 || true
 }
+ver_num() {
+  printf '%s\n' "$1" | awk '
+    match($0, /[0-9]+\.[0-9]+\.[0-9]+/) {
+      print substr($0, RSTART, RLENGTH)
+      exit
+    }
+  '
+}
+version_lt() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    split(a, x, ".")
+    split(b, y, ".")
+    for (i = 1; i <= 3; i++) {
+      av = x[i] + 0
+      bv = y[i] + 0
+      if (av < bv) exit 0
+      if (av > bv) exit 1
+    }
+    exit 1
+  }'
+}
+shell_profiles() {
+  say "$BIN_DIR is not on PATH. Add one line to the shell profile named here. This script does not edit that file."
+  say "  bash (~/.bashrc): $PATH_LINE"
+  say "  zsh (~/.zshrc): $PATH_LINE"
+  say "  fish (~/.config/fish/config.fish): fish_add_path $shown_dir"
+}
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) if [ "$MODIFY_PATH" = 1 ] && [ "$CLOUD" = 0 ]; then
@@ -797,9 +897,13 @@ case ":$PATH:" in
          say "Your shell profiles already add $BIN_DIR to PATH. In this shell, run:"
        fi
      else
-       say "Note: $BIN_DIR is not on PATH, so \`ljos\` is not a command in this shell. Add this line to your shell profile, and run it here:"
+       shell_profiles
+       say "In this shell, run:"
      fi
      say "  $PATH_LINE"
+     if [ "$MODIFY_PATH" = 1 ] && [ "$CLOUD" = 0 ]; then
+       say "  fish (~/.config/fish/config.fish): fish_add_path $shown_dir"
+     fi
      PATH="$BIN_DIR:$PATH"; export PATH ;;
 esac
 if [ -n "$AHEAD" ] && [ -x "$BIN_DIR/ljos" ] && ! same_bin "$AHEAD" "$BIN_DIR/ljos"; then
@@ -921,7 +1025,17 @@ if [ "$CLOUD" = 1 ]; then
 fi
 if [ -n "$PREV_VER" ]; then
   now=$(ver_of "$BIN_DIR/ljos")
-  say "Replaced the ljos already at $BIN_DIR ($PREV_VER) with ${now:-the programs just installed}."
+  old_n=$(ver_num "$PREV_VER")
+  new_n=$(ver_num "$now")
+  if [ -n "$old_n" ] && [ "$old_n" = "$new_n" ]; then
+    say "ljos $new_n is already installed at $BIN_DIR. Reinstalled the same version."
+  elif [ -n "$old_n" ] && [ -n "$new_n" ] && version_lt "$old_n" "$new_n"; then
+    say "Updated ljos at $BIN_DIR from $old_n to $new_n."
+  elif [ -n "$old_n" ] && [ -n "$new_n" ]; then
+    say "Replaced ljos $old_n at $BIN_DIR with $new_n."
+  else
+    say "Replaced the ljos already at $BIN_DIR ($PREV_VER) with ${now:-the programs just installed}."
+  fi
 fi
 live=
 for pid in $MCP_PIDS; do
