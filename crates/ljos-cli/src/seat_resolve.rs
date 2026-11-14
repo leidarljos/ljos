@@ -44,6 +44,13 @@ pub fn prepare(flag: Option<String>, kind: Kind) {
     KIND.with(|cell| cell.set(kind));
 }
 
+/// The rest of this command writes, so a missing seat is `unknown-<host>`
+/// and [`announce_unknown`] can name it. The `--seat` flag already stored
+/// by [`prepare`] stays.
+pub fn mark_write() {
+    KIND.with(|cell| cell.set(Kind::Write));
+}
+
 /// Print the unknown-host line once, when `seat` is that fallback on a write.
 pub(crate) fn announce_unknown(seat: &crate::Seat) {
     if KIND.with(|cell| cell.get()) != Kind::Write {
@@ -52,10 +59,22 @@ pub(crate) fn announce_unknown(seat: &crate::Seat) {
     if !seat.source.contains("unknown seat") {
         return;
     }
+    say_unknown(&seat.seat);
+}
+
+/// The same line when this write's seat is already `unknown-<host>`,
+/// including a seat taken from the most recent write. A named seat stays quiet.
+pub fn announce_named_unknown(seat: &crate::Seat) {
+    if seat.seat.starts_with("unknown-") {
+        say_unknown(&seat.seat);
+    }
+}
+
+fn say_unknown(seat: &str) {
     if NOTICED.with(|cell| cell.replace(true)) {
         return;
     }
-    eprintln!("{}", notice(&seat.seat));
+    eprintln!("{}", notice(seat));
 }
 
 /// The seat and the rule phrase, when one of the six rules matches.

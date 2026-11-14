@@ -334,6 +334,21 @@ fn a_write_with_no_seat_names_the_export() {
         String::from_utf8_lossy(&out.stderr).contains("so run `export LJOS_SEAT=NAME`."),
         "{said}"
     );
+    let preferred = home.run(
+        &["prefer", "CombMNZ over RRF for fusing two ballots."],
+        &[
+            ("PACKSET_URL", &url),
+            ("PACKSET_AUTH", "off"),
+            ("PACKSET_TOKEN", "probe-token"),
+        ],
+    );
+    let said = text(&preferred);
+    let err = String::from_utf8_lossy(&preferred.stderr);
+    assert!(
+        err.contains("ljos: no seat was named and this write uses unknown-"),
+        "{said}"
+    );
+    assert!(err.contains("so run `export LJOS_SEAT=NAME`."), "{said}");
 }
 
 #[test]

@@ -4343,6 +4343,10 @@ fn run_command() -> Result<()> {
                 Vec::new()
             };
             let basis = ljos_cli::Basis::of_rule();
+            // The same unknown-seat line `ljos remember` prints. A review
+            // or a user-rule flag above has already returned.
+            ljos_cli::seat_resolve::mark_write();
+            ljos_cli::seat_resolve::announce_named_unknown(&ljos_cli::whoami());
             let body = ljos_cli::packset_prefer(&text, as_persona.as_deref())?;
             println!("{}", write_ack(&body, false));
             if let Some(line) = ljos_cli::memories::reinforced_line(&body) {
