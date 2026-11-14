@@ -763,7 +763,123 @@ def agent_samples(ljos: Path) -> dict[str, str]:
     return canon
 
 
-def rewritten(doctor: str, help_text: str, agents: dict[str, str]) -> dict[Path, str]:
+def _dangling_hash(line: str) -> bool:
+    trim = line.strip()
+    if trim.startswith("|"):
+        trim = trim[1:].strip()
+    if not trim.endswith("]") or trim.startswith("["):
+        return False
+    body = trim[:-1]
+    return bool(body) and all(ch in "0123456789abcdef" for ch in body)
+
+
+def tutorial_timeline(ljos: Path) -> str:
+    """The getting-started note and timeline, from this binary.
+
+    The ticket is filed and claimed first, which is where the page is
+    when it reaches the note. Dates, clocks and the fence hash are
+    stand-ins, so a later run prints the same block. The pack stays off,
+    and no writer is started.
+    """
+    for name in ("vissue", "claimdag", "deedar", "git"):
+        _need_tool(name)
+    home = Path(tempfile.mkdtemp(prefix="ljos-doc-tutorial-"))
+    try:
+        for rel in (
+            ".config/ljos",
+            ".local/state/ljos",
+            ".cache",
+            ".local/share",
+            "run",
+            "tmp",
+            "work",
+            "bin",
+        ):
+            (home / rel).mkdir(parents=True)
+        bind = home / "bin"
+        bind.joinpath("ljos").symlink_to(ljos)
+        from shutil import which
+
+        for name in ("vissue", "claimdag", "deedar", "git"):
+            found = which(name)
+            if found:
+                bind.joinpath(name).symlink_to(found)
+        subprocess.run(
+            ["git", "config", "--file", str(home / "gitconfig"), "user.name", "Ada Example"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "--file", str(home / "gitconfig"), "user.email", "ada@example.com"],
+            check=True,
+        )
+        env = _agent_env(home, ljos, {"PACKSET_URL": "off", "LJOS_SYNC_HOST": "laptop"})
+        env["PATH"] = f"{bind}:/usr/bin:/bin"
+        cwd = home / "work"
+        code, text = _pty_run(["ljos", "onboard"], env, cwd, 120)
+        if code != 0:
+            raise SystemExit(f"ljos onboard exited {code}:\n{text}")
+        alice = dict(env)
+        alice["LJOS_SEAT"] = "alice"
+        filed = _show(
+            ["ljos", "file", "Pick a codec", "-p", "demo", "-t", "decision", "--options", "keep,drop"],
+            alice,
+            cwd,
+            'LJOS_SEAT=alice ljos file "Pick a codec" -p demo -t decision --options keep,drop',
+        )
+        first = _ISSUE_ID.search(filed)
+        if first is None:
+            raise SystemExit(f"gen_samples: tutorial file printed no id:\n{filed}")
+        one = first.group(0)
+        _show(
+            ["ljos", "claim", one, "--assignee", "alice"],
+            alice,
+            cwd,
+            f"LJOS_SEAT=alice ljos claim {one} --assignee alice",
+        )
+        noted = _show(
+            ["ljos", "note", one, "the codec is one file"],
+            alice,
+            cwd,
+            f'LJOS_SEAT=alice ljos note {one} "the codec is one file"',
+        )
+        timed = _show(
+            ["ljos", "timeline", one],
+            env,
+            cwd,
+            f"ljos timeline {one}",
+        )
+        block = noted + timed
+    finally:
+        import shutil
+
+        shutil.rmtree(home, ignore_errors=True)
+    text = block.replace(str(home), "/home/you")
+    text = text.replace(one, "demo-2f5j")
+    text = _REVIEW.sub("next review 2026-11-12 21:40 +00:00", text)
+    text = re.sub(r"\b[0-9a-f]{16}\b", "0123456789abcdef", text)
+    text = re.sub(r"\d{4}-\d{2}-\d{2}", "2026-11-12", text)
+    text = re.sub(r"\b\d{2}:\d{2}\b", "21:40", text)
+    for line in text.splitlines():
+        if _dangling_hash(line):
+            raise SystemExit(f"gen_samples: timeline split the fence hash:\n{text}")
+    for needle in (
+        'LJOS_SEAT=alice ljos note demo-2f5j "the codec is one file"',
+        "ljos timeline demo-2f5j",
+        "note: [unverified 0123456789abcdef]",
+        "[end 0123456789abcdef]",
+        "the codec is one file",
+        "Pick a codec",
+    ):
+        if needle not in text:
+            raise SystemExit(f"gen_samples: timeline sample missing {needle!r}:\n{text}")
+    if not any(line.strip().startswith("|") and "[end 0123456789abcdef]" in line for line in text.splitlines()):
+        raise SystemExit(f"gen_samples: the fence closer is not on its own wrap line:\n{text}")
+    if "/tmp" in text or "ljos-doc-tutorial" in text:
+        raise SystemExit("gen_samples: timeline sample still names a temporary directory")
+    return text.strip() + "\n"
+
+
+def rewritten(doctor: str, help_text: str, agents: dict[str, str], tutorials: dict[str, str]) -> dict[Path, str]:
     out: dict[Path, str] = {}
     regions = [
         (ROOT / "docs/orgmode/howto-check.org", "# BEGIN ljos-sample doctor", "# END ljos-sample doctor", org_src(doctor)),
@@ -785,6 +901,28 @@ def rewritten(doctor: str, help_text: str, agents: dict[str, str]) -> dict[Path,
                 ROOT / "docs/source/howto-agents.rst",
                 f".. BEGIN ljos-sample agents-{key}",
                 f".. END ljos-sample agents-{key}",
+                rst_src(body, "console"),
+            )
+        )
+    for key, body in tutorials.items():
+        org_path = ROOT / "docs/orgmode/getting-started.org"
+        rst_path = ROOT / "docs/source/getting-started.rst"
+        if key == "index":
+            org_path = ROOT / "docs/orgmode/index.org"
+            rst_path = ROOT / "docs/source/index.rst"
+        regions.append(
+            (
+                org_path,
+                f"# BEGIN ljos-sample tutorial-{key}",
+                f"# END ljos-sample tutorial-{key}",
+                org_src(body, "console"),
+            )
+        )
+        regions.append(
+            (
+                rst_path,
+                f".. BEGIN ljos-sample tutorial-{key}",
+                f".. END ljos-sample tutorial-{key}",
                 rst_src(body, "console"),
             )
         )
@@ -810,7 +948,7 @@ def main() -> int:
         print("gen_samples: no ljos binary; left the committed samples", file=sys.stderr)
         return 0
     doctor, help_text = samples_from(ljos)
-    files = rewritten(doctor, help_text, agent_samples(ljos))
+    files = rewritten(doctor, help_text, agent_samples(ljos), {"timeline": tutorial_timeline(ljos)})
     changed = [path for path, text in files.items() if text != path.read_text(encoding="utf-8")]
     if args.check:
         if changed:

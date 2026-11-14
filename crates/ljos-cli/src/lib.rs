@@ -39643,8 +39643,95 @@ fn format_timeline(
         out.push('\n');
         out.push_str(&scan::wrap(&head, scan::COLS));
         out.push('\n');
-        out.push_str(&scan::wrap_hang(&event.text, scan::COLS, "  ", "  | "));
+        out.push_str(&wrap_timeline_row(&event.text));
         out.push('\n');
+    }
+    out
+}
+
+/// One timeline row. A note's fence markers stay whole, so a wrap is
+/// `| [end HASH]` and not `|` plus the rest of the hash.
+fn wrap_timeline_row(text: &str) -> String {
+    wrap_fenced_note(text).unwrap_or_else(|| scan::wrap_hang(text, scan::COLS, "  ", "  | "))
+}
+
+/// `note: [unverified HASH] text [end HASH]`, wrapped so both markers stay
+/// one token. `None` when `text` is not that row.
+fn wrap_fenced_note(text: &str) -> Option<String> {
+    let rest = text.strip_prefix("note: ")?;
+    if !rest.starts_with("[unverified ") {
+        return None;
+    }
+    let opener_end = rest.find("] ")?;
+    let close = rest.rfind(" [end ")?;
+    if opener_end >= close {
+        return None;
+    }
+    let opener = &rest[..=opener_end];
+    let body = rest[opener_end + 2..close].trim();
+    let closer = &rest[close + 1..];
+    if !closer.starts_with("[end ") || !closer.ends_with(']') {
+        return None;
+    }
+    Some(hang_atomic(
+        &["note:", opener],
+        body,
+        closer,
+        scan::COLS,
+        "  ",
+        "  | ",
+    ))
+}
+
+/// Wrap `head`, the words of `body`, and `tail` under a hanging prefix.
+/// `tail` is one token, so a fence closer is not split.
+fn hang_atomic(
+    head: &[&str],
+    body: &str,
+    tail: &str,
+    cols: usize,
+    first: &str,
+    cont: &str,
+) -> String {
+    let mut words: Vec<&str> = head.to_vec();
+    if !body.is_empty() {
+        words.extend(body.split_whitespace());
+    }
+    words.push(tail);
+    let first_room = cols.saturating_sub(first.chars().count()).max(1);
+    let cont_room = cols.saturating_sub(cont.chars().count()).max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut room = first_room;
+    for word in words {
+        let next = if current.is_empty() {
+            word.chars().count()
+        } else {
+            current.chars().count() + 1 + word.chars().count()
+        };
+        if current.is_empty() || next <= room {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            room = cont_room;
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+            out.push_str(cont);
+        } else {
+            out.push_str(first);
+        }
+        out.push_str(line);
     }
     out
 }
@@ -73274,6 +73361,66 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             text.lines().all(|l| !l.trim_start().starts_with("Rule:")),
             "{text}"
         );
+        assert!(
+            text.contains(&format!("[end {nonce}]")),
+            "the closing fence was split:\n{text}"
+        );
+    }
+
+    /// The getting-started note is one short sentence. It used to wrap so
+    /// the next line was `|` and the rest of the hash.
+    #[test]
+    fn a_short_note_keeps_the_closing_fence_whole() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("Software/sample");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: sample issues\n#+VISSUE: 1\n#+CATEGORY: sample\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#B] Pick a codec\n:PROPERTIES:\n:ID:         sample-f3nc\n:CREATED:    [2026-09-20 Sat]\n:END:\n:LOGBOOK:\n- Note: \"the codec is one file\" [2026-09-21 Sun 10:00]\n:END:\n",
+        )
+        .unwrap();
+        let _bins = super::set_path(super::path_without(&["vissue", "deedar"]));
+        let _roots = HoldEnv::set(&[
+            ("ISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("PACKSET_URL", "http://127.0.0.1:9"),
+        ]);
+        let text = timeline("sample-f3nc", 12).expect("timeline");
+        let open = text
+            .find("[unverified ")
+            .unwrap_or_else(|| panic!("{text}"));
+        let nonce = text[open + "[unverified ".len()..]
+            .split(|ch: char| !ch.is_ascii_hexdigit())
+            .next()
+            .unwrap_or("");
+        assert_eq!(nonce.len(), 16, "{text}");
+        let closer = format!("[end {nonce}]");
+        assert!(
+            text.contains(&closer),
+            "the closing fence was split:\n{text}"
+        );
+        assert!(
+            text.lines().any(|line| {
+                let trim = line.trim();
+                trim.starts_with('|') && trim.contains(&closer)
+            }),
+            "the wrap did not keep the closer whole:\n{text}"
+        );
+        assert!(
+            text.lines().all(|line| !dangling_hash(line)),
+            "a wrap line is the rest of the hash:\n{text}"
+        );
+        assert!(text.contains("the codec is one file"), "{text}");
+    }
+
+    fn dangling_hash(line: &str) -> bool {
+        let trim = line.trim().trim_start_matches('|').trim();
+        let Some(body) = trim.strip_suffix(']') else {
+            return false;
+        };
+        !trim.starts_with('[') && !body.is_empty() && body.chars().all(|ch| ch.is_ascii_hexdigit())
     }
 
     const EVIDENCE: &str = "stdout:\n== building and installing GCCcore/15.2.0...\nstderr:\nERROR: Installation of GCCcore-15.2.0.eb failed: shell command 'make ...' failed with exit code 2 in build step for GCCcore-15.2.0.eb\nsrun: error: task 0 exited";

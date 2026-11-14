@@ -239,16 +239,33 @@ label claim-conflict: claim: demo-2f5j is held by another (alice, seat alice, st
 The line names =ljos send=. TIME is when alice claimed it. The ticket stays with alice.
 Bob can file another ticket. To help on this one, bob writes a note.
 
+# BEGIN ljos-sample tutorial-timeline
 #+begin_src console
 $ LJOS_SEAT=alice ljos note demo-2f5j "the codec is one file"
 demo-2f5j: noted
 tracker git: committed chore(issues): demo-2f5j noted by alice; no remote, kept local
 $ ljos timeline demo-2f5j
+timeline of demo-2f5j: Pick a codec
+events  shown 4 of 4, oldest first
+
+2026-11-12, today, tracker
+  created
+
+2026-11-12 21:40, today, same day, tracker
+  claimed by alice
+
+2026-11-12 21:40, today, same day, tracker
+  TODO -> STARTED
+
+2026-11-12 21:40, today, same day, tracker
+  note: [unverified 0123456789abcdef] the codec is one file
+  | [end 0123456789abcdef]
 #+end_src
+# END ljos-sample tutorial-timeline
 
 =ljos timeline= prints the ticket's rows oldest first.
 The note is one row: =note: [unverified HASH]= the text =[end HASH]=. The hash is the fence. The text inside is tracker text from the ticket.
-A row that does not fit wraps. The next line starts with =|= and the rest of the hash.
+A row that does not fit wraps. The next line starts with =|= and keeps =[end HASH]= whole.
 =vissue show demo-2f5j= prints the heading and the log, newest first, including the note. =ljos recall= prints the issue as unverified tracker text. The note is on the timeline, not in that text.
 =ljos digest= reads the tracker and says what each seat filed, claimed and voted on.
 
