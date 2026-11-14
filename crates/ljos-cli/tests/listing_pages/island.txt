@@ -1,11 +1,30 @@
 status 0
 stderr:
 stdout:
-Seat island. Activation is spread from search seeds along links. It is not a relevance rank.
-Not fired. Pass fire after the island is used, so the links that served gain weight. Firing on the first look wires whatever the spread touched.
-1.000	seed	idkiln01aaaaaaaaaaaaaaaaaaaaaaaa	today	[lesson, from an agent] The damper sticks when the kiln is cold.
-0.850	seed	idkiln02bbbbbbbbbbbbbbbbbbbbbbbb	yesterday	[lesson, from an agent] The damper sticks.
-Open the flue before the kiln reaches temperature.
-Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
-0.700	    	idkiln03cccccccccccccccccccccccc	today	[lesson, from an agent] The damper log is https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-see-where-it-breaks
-0.550	    	idkiln04dddddddddddddddddddddddd	today	[note, from an agent, not checked] SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumnsAndKeepsGoingFurtherStillUntilTheWordItselfPassesTheMark
+Seat island. Activation is spread from search seeds along links. It is not a
+relevance rank.
+Not fired. Pass fire after the island is used, so the links that served gain
+weight. Firing on the first look wires whatever the spread touched.
+island  shown 4 of 4, strongest first
+
+seed, activation 1.00, today
+  The damper sticks when the kiln is cold.
+  lesson, from an agent, seat alice, ticket demo-kiln, id idkiln01
+
+seed, activation 0.85, yesterday
+  The damper sticks.
+  Open the flue before the kiln reaches temperature.
+  Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
+  lesson, from an agent, seat alice, ticket demo-kiln, id idkiln02
+
+activation 0.70, today
+  The damper log is
+  https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-
+  readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-
+  see-where-it-breaks
+  lesson, from an agent, seat bob, ticket demo-tile, id idkiln03
+
+activation 0.55, today
+  SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumnsAn\
+  dKeepsGoingFurtherStillUntilTheWordItselfPassesTheMark
+  note, from an agent, not checked, seat alice, id idkiln04

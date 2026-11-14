@@ -34685,6 +34685,56 @@ fn sitting_review_sweep() -> String {
 /// With `all`, every due atom is listed to read, and none is put up for
 /// grading: a list of a thousand is a census, not a review.
 pub fn due_report(all: bool) -> Result<String> {
+    let (shown, matched, summary, sweep) = due_rows(all)?;
+    Ok(format_due_page(&shown, matched, &summary, &sweep))
+}
+
+/// The due list as JSON. The ids are the full ones `ljos graded` takes.
+///
+/// # Errors
+///
+/// The pack does not answer.
+pub fn due_json(all: bool) -> Result<String> {
+    let (shown, matched, summary, sweep) = due_rows(all)?;
+    let rows: Vec<Value> = shown
+        .iter()
+        .map(|atom| {
+            let mut row = serde_json::json!({
+                "id": atom["id"].as_str().unwrap_or(""),
+                "kind": atom["kind"].as_str().unwrap_or(""),
+                "text": atom["text"].as_str().unwrap_or(""),
+            });
+            if let Some(due_at) = atom["due_at"].as_str().filter(|due| !due.is_empty()) {
+                row["due_at"] = Value::String(due_at.to_string());
+            }
+            if let Some(seat) = atom_seat(atom) {
+                row["seat"] = Value::String(seat.to_string());
+            }
+            if let Some(ticket) = atom["entities"].as_array().and_then(|entities| {
+                entities.iter().find_map(|item| {
+                    item.as_str()
+                        .and_then(|tag| tag.strip_prefix("issue:"))
+                        .filter(|ticket| !ticket.is_empty())
+                })
+            }) {
+                row["ticket"] = Value::String(ticket.to_string());
+            }
+            row
+        })
+        .collect();
+    let mut doc = serde_json::json!({
+        "shown": rows.len(),
+        "matched": matched,
+        "summary": summary,
+        "rows": rows,
+    });
+    if !sweep.trim().is_empty() {
+        doc["sweep"] = Value::String(sweep.trim().to_string());
+    }
+    Ok(format!("{doc}\n"))
+}
+
+fn due_rows(all: bool) -> Result<(Vec<Value>, usize, String, String)> {
     let client = pack()?;
     // The sweep runs first, so a review left due past twice its interval is
     // lapsed or forgotten before the list is read, and the report says so.
@@ -34693,19 +34743,87 @@ pub fn due_report(all: bool) -> Result<String> {
     let now = now_utc();
     let due = due_of(&atoms, &now);
     let shown = if all {
-        &due[..]
+        due.clone()
     } else {
-        &due[..due.len().min(SITTING_DUE)]
+        due[..due.len().min(SITTING_DUE)].to_vec()
     };
     if !all {
-        record_due_shown(shown);
+        record_due_shown(&shown);
     }
-    Ok(format!(
-        "{}{}{}\n",
-        format_due(shown),
+    Ok((
+        shown,
+        due.len(),
         review_summary(&atoms, &now),
-        format_sweep(swept.as_ref())
+        format_sweep(swept.as_ref()),
     ))
+}
+
+fn format_due_page(shown: &[Value], matched: usize, summary: &str, sweep: &str) -> String {
+    let mut out = scan::count_line("due", shown.len(), matched, "soonest first");
+    out.push('\n');
+    if shown.len() < matched {
+        out.push_str(&scan::wrap(
+            "the rest stay due, so run `ljos due --all` to read them. That list grades none.",
+            scan::COLS,
+        ));
+        out.push('\n');
+    }
+    if !summary.is_empty() {
+        out.push_str(&scan::wrap(summary, scan::COLS));
+        out.push('\n');
+    }
+    if !sweep.trim().is_empty() {
+        out.push_str(&scan::wrap(sweep.trim(), scan::COLS));
+        out.push('\n');
+    }
+    let ids: Vec<&str> = shown
+        .iter()
+        .map(|atom| atom["id"].as_str().unwrap_or(""))
+        .collect();
+    let labels = scan::unique_prefixes(ids.iter().copied());
+    let now = now_utc();
+    for (atom, label) in shown.iter().zip(labels) {
+        out.push('\n');
+        out.push_str(&due_block(atom, &label, &now));
+        out.push('\n');
+    }
+    out
+}
+
+fn due_block(atom: &Value, label: &str, now: &str) -> String {
+    let kind = atom["kind"].as_str().unwrap_or("claim");
+    let when = match atom["due_at"].as_str().filter(|due| !due.is_empty()) {
+        None => "not reviewed yet".to_string(),
+        Some(due) => {
+            let age = age_of(Some(due), now);
+            if age.is_empty() {
+                format!("due {due}")
+            } else {
+                format!("due {age}")
+            }
+        }
+    };
+    let mut head = format!("{kind}, {when}");
+    if let Some(seat) = atom_seat(atom) {
+        head.push_str(", seat ");
+        head.push_str(seat);
+    }
+    if let Some(ticket) = atom["entities"].as_array().and_then(|entities| {
+        entities.iter().find_map(|item| {
+            item.as_str()
+                .and_then(|tag| tag.strip_prefix("issue:"))
+                .filter(|ticket| !ticket.is_empty())
+        })
+    }) {
+        head.push_str(", ticket ");
+        head.push_str(ticket);
+    }
+    let foot = if label.is_empty() {
+        String::new()
+    } else {
+        format!("id {label}")
+    };
+    scan::claim_block(&head, atom["text"].as_str().unwrap_or("").trim(), &foot, 0)
 }
 
 /// The newer claims the pack holds on what `claim` says: the review
@@ -35480,24 +35598,79 @@ pub fn format_consolidation(body: &Value) -> String {
     out
 }
 
-/// One line per hub: score, links, id, text.
+/// One block per hub, highest first. The score is how many memories point
+/// here, weighed by how linked those are.
 pub fn format_hubs(body: &Value) -> String {
-    let mut out = String::new();
-    for hub in body["hubs"]
+    let hubs: Vec<&Value> = body["hubs"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(reviewable)
-    {
-        out.push_str(&format!(
-            "{:.4}\t{}\t{}\t{}\n",
-            hub["score"].as_f64().unwrap_or(0.0),
-            hub["links"].as_u64().unwrap_or(0),
-            hub["id"].as_str().unwrap_or("-"),
-            hub["text"].as_str().unwrap_or("")
+        .filter(|hub| reviewable(*hub))
+        .collect();
+    let mut out = scan::count_line("hubs", hubs.len(), hubs.len(), "highest first");
+    out.push('\n');
+    out.push_str("The score is how many memories point here, weighed by how linked those are.\n");
+    if hubs.is_empty() {
+        out.push_str("no memory is pointed at, so run `ljos remember \"TEXT\"`.\n");
+        return out;
+    }
+    let labels = scan::unique_prefixes(hubs.iter().map(|hub| hub["id"].as_str().unwrap_or("")));
+    for (index, (hub, label)) in hubs.iter().zip(labels).enumerate() {
+        let score = hub["score"].as_f64().unwrap_or(0.0);
+        let links = hub["links"].as_u64().unwrap_or(0);
+        let head = format!("place {}, score {:.2}, links {links}", index + 1, score);
+        let mut kind = atom_label(hub);
+        if let Some(seat) = atom_seat(hub) {
+            if !kind.contains(seat) {
+                kind.push_str(", seat ");
+                kind.push_str(seat);
+            }
+        }
+        if let Some(ticket) = hub["entities"].as_array().and_then(|entities| {
+            entities.iter().find_map(|item| {
+                item.as_str()
+                    .and_then(|tag| tag.strip_prefix("issue:"))
+                    .filter(|ticket| !ticket.is_empty())
+            })
+        }) {
+            kind.push_str(", ticket ");
+            kind.push_str(ticket);
+        }
+        let foot = if label.is_empty() {
+            kind
+        } else {
+            format!("{kind}, id {label}")
+        };
+        out.push('\n');
+        out.push_str(&scan::claim_block(
+            &head,
+            hub["text"].as_str().unwrap_or("").trim(),
+            &foot,
+            0,
         ));
+        out.push('\n');
     }
     out
+}
+
+/// The hubs as JSON. Each id is the full one.
+#[must_use]
+pub fn hubs_json(body: &Value) -> String {
+    let hubs: Vec<Value> = body["hubs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|hub| reviewable(*hub))
+        .map(|hub| {
+            serde_json::json!({
+                "id": hub["id"].as_str().unwrap_or(""),
+                "text": hub["text"].as_str().unwrap_or(""),
+                "score": hub["score"].as_f64().unwrap_or(0.0),
+                "links": hub["links"].as_u64().unwrap_or(0),
+            })
+        })
+        .collect();
+    format!("{}\n", serde_json::json!({"hubs": hubs}))
 }
 
 /// What an activation number is, and whether this call rewrote weights.
@@ -35554,39 +35727,125 @@ pub fn island_reading(body: &Value) -> String {
     out
 }
 
-/// One line per activated memory: activation, seed mark, id, text.
+/// One block per activated memory, strongest first.
 pub fn format_island(body: &Value) -> String {
-    let mut out = island_reading(body);
+    let mut out = String::new();
+    for line in island_reading(body).lines() {
+        if line.is_empty() {
+            continue;
+        }
+        out.push_str(&scan::wrap(line, scan::COLS));
+        out.push('\n');
+    }
     let now = now_utc();
     if body["weak"].as_bool().unwrap_or(false) {
-        out.push_str(&format!(
-            "weak island: {} seed{} two scorers agreed on{}; read it as the pack's best-connected cluster, not as what the cue is about; it will not fire\n",
-            body["agreed_seeds"].as_u64().unwrap_or(0),
-            if body["agreed_seeds"].as_u64().unwrap_or(0) == 1 { "" } else { "s" },
-            if body["dense"].as_bool().unwrap_or(true) { "" } else { "; the encoder is down, matched by words only" }
+        let seeds = body["agreed_seeds"].as_u64().unwrap_or(0);
+        let words = if body["dense"].as_bool().unwrap_or(true) {
+            ""
+        } else {
+            " The encoder is down, so this was matched by words only."
+        };
+        out.push_str(&scan::wrap(
+            &format!(
+                "weak island: {seeds} seed{} two scorers agreed on.{words} Read it as the pack's best-connected cluster, not as what the cue is about. It will not fire.",
+                if seeds == 1 { "" } else { "s" }
+            ),
+            scan::COLS,
         ));
+        out.push('\n');
     }
-    for atom in body["island"]
+    let atoms: Vec<&Value> = body["island"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(reviewable)
-    {
-        out.push_str(&format!(
-            "{:.3}\t{}\t{}\t{}\t[{}] {}\n",
-            atom["activation"].as_f64().unwrap_or(0.0),
-            if atom["seed"].as_bool().unwrap_or(false) {
-                "seed"
-            } else {
-                "    "
-            },
-            atom["id"].as_str().unwrap_or("-"),
-            age_of(atom["ts"].as_str(), &now),
-            atom_label(atom),
-            atom["text"].as_str().unwrap_or("")
+        .filter(|atom| reviewable(*atom))
+        .collect();
+    if out.is_empty() && atoms.is_empty() {
+        return String::new();
+    }
+    if !atoms.is_empty() {
+        out.push_str(&scan::count_line(
+            "island",
+            atoms.len(),
+            atoms.len(),
+            "strongest first",
         ));
+        out.push('\n');
+    }
+    let labels = scan::unique_prefixes(atoms.iter().map(|atom| atom["id"].as_str().unwrap_or("")));
+    for (atom, label) in atoms.iter().zip(labels) {
+        let activation = atom["activation"].as_f64().unwrap_or(0.0);
+        let seed = if atom["seed"].as_bool().unwrap_or(false) {
+            "seed, "
+        } else {
+            ""
+        };
+        let age = age_of(atom["ts"].as_str(), &now);
+        let mut head = format!("{seed}activation {activation:.2}");
+        if !age.is_empty() {
+            head.push_str(", ");
+            head.push_str(&age);
+        }
+        let mut foot = atom_label(atom);
+        if let Some(seat) = atom_seat(atom) {
+            if !foot.contains(seat) {
+                foot.push_str(", seat ");
+                foot.push_str(seat);
+            }
+        }
+        if let Some(ticket) = atom["entities"].as_array().and_then(|entities| {
+            entities.iter().find_map(|item| {
+                item.as_str()
+                    .and_then(|tag| tag.strip_prefix("issue:"))
+                    .filter(|ticket| !ticket.is_empty())
+            })
+        }) {
+            foot.push_str(", ticket ");
+            foot.push_str(ticket);
+        }
+        if !label.is_empty() {
+            foot.push_str(", id ");
+            foot.push_str(&label);
+        }
+        out.push('\n');
+        out.push_str(&scan::claim_block(
+            &head,
+            atom["text"].as_str().unwrap_or("").trim(),
+            &foot,
+            0,
+        ));
+        out.push('\n');
     }
     out
+}
+
+/// The island as JSON. Activation is spread along links, not a relevance rank.
+#[must_use]
+pub fn island_json(body: &Value) -> String {
+    let rows: Vec<Value> = body["island"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|atom| reviewable(*atom))
+        .map(|atom| {
+            serde_json::json!({
+                "id": atom["id"].as_str().unwrap_or(""),
+                "text": atom["text"].as_str().unwrap_or(""),
+                "kind": atom["kind"].as_str().unwrap_or(""),
+                "activation": atom["activation"].as_f64().unwrap_or(0.0),
+                "seed": atom["seed"].as_bool().unwrap_or(false),
+            })
+        })
+        .collect();
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "as": body["as"].as_str().unwrap_or(""),
+            "fired": body["fired"].as_u64().unwrap_or(0),
+            "weak": body["weak"].as_bool().unwrap_or(false),
+            "rows": rows,
+        })
+    )
 }
 
 pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
@@ -38350,7 +38609,7 @@ pub fn timeline_events(issue: &str, limit: usize) -> Result<Vec<Event>> {
     Ok(timeline_of(issue, limit)?.1)
 }
 
-fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
+fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>, usize)> {
     let v = tracker_show_json(issue)?;
     let title = v["title"].as_str().unwrap_or(issue).to_string();
     let mut events = tracker_events(&v);
@@ -38372,8 +38631,9 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
         if let Ok(island) = packset_island(&title, false) {
             if !pack().is_ok_and(|client| client.carried()) {
                 events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
-                let skip = events.len().saturating_sub(limit);
-                return Ok((title, events[skip..].to_vec()));
+                let matched = events.len();
+                let skip = matched.saturating_sub(limit);
+                return Ok((title, events[skip..].to_vec(), matched));
             }
             let ticket = sitting_ticket_text(issue, &title);
             let now = now_utc();
@@ -38404,8 +38664,9 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
         }
     }
     events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
-    let skip = events.len().saturating_sub(limit);
-    Ok((title, events[skip..].to_vec()))
+    let matched = events.len();
+    let skip = matched.saturating_sub(limit);
+    Ok((title, events[skip..].to_vec(), matched))
 }
 
 /// The issue's timeline, the three stores read as one dated list, oldest
@@ -38421,17 +38682,120 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
 /// The tracker not answering. A deed store or pack that does not answer
 /// leaves its rows out; the tracker's rows are the spine.
 pub fn timeline(issue: &str, limit: usize) -> Result<String> {
-    let (title, events) = timeline_of(issue, limit)?;
+    let (title, events, matched) = timeline_of(issue, limit)?;
     let nonce = fence_nonce();
     let events: Vec<Event> = events
         .into_iter()
         .map(|e| fence_note_event(e, &nonce))
         .collect();
-    Ok(format!(
-        "timeline of {issue}: {title}
-{}",
-        format_events(&events, &now_local())
+    Ok(format_timeline(
+        &events,
+        issue,
+        &title,
+        matched,
+        &now_local(),
     ))
+}
+
+/// The same rows as JSON. A tracker note stays inside its fence.
+///
+/// # Errors
+///
+/// The tracker not answering.
+pub fn timeline_json(issue: &str, limit: usize) -> Result<String> {
+    let (title, events, matched) = timeline_of(issue, limit)?;
+    let nonce = fence_nonce();
+    let now = now_local();
+    let today = days_of_stamp(Some(&now)).unwrap_or(0);
+    let mut last: Option<i64> = None;
+    let rows: Vec<Value> = events
+        .into_iter()
+        .map(|event| fence_note_event(event, &nonce))
+        .map(|event| {
+            let gap = gap_of(last, event.days);
+            last = Some(event.days);
+            serde_json::json!({
+                "date": civil_of_days(event.days),
+                "clock": event.clock,
+                "age": age_of(Some(&civil_of_days(event.days)), &civil_of_days(today)),
+                "gap": gap,
+                "source": event.source,
+                "text": event.text,
+            })
+        })
+        .collect();
+    Ok(format!(
+        "{}\n",
+        serde_json::json!({
+            "issue": issue,
+            "title": title,
+            "shown": rows.len(),
+            "matched": matched,
+            "events": rows,
+        })
+    ))
+}
+
+fn gap_of(last: Option<i64>, days: i64) -> String {
+    match last {
+        None => String::new(),
+        Some(d) if days == d => "same day".to_string(),
+        Some(d) => format!("+{} d", days - d),
+    }
+}
+
+fn format_timeline(
+    events: &[Event],
+    issue: &str,
+    title: &str,
+    matched: usize,
+    now: &str,
+) -> String {
+    let today = days_of_stamp(Some(now)).unwrap_or(0);
+    let mut out = scan::wrap(&format!("timeline of {issue}: {title}"), scan::COLS);
+    out.push('\n');
+    out.push_str(&scan::count_line(
+        "events",
+        events.len(),
+        matched,
+        "oldest first",
+    ));
+    out.push('\n');
+    if events.len() < matched {
+        out.push_str(&scan::wrap(
+            &format!("older events remain, so run `ljos timeline {issue} -n {matched}`."),
+            scan::COLS,
+        ));
+        out.push('\n');
+    }
+    let mut last: Option<i64> = None;
+    for event in events {
+        let gap = gap_of(last, event.days);
+        last = Some(event.days);
+        let date = civil_of_days(event.days);
+        let age = age_of(Some(&date), &civil_of_days(today));
+        let mut head = if event.clock.is_empty() {
+            date
+        } else {
+            format!("{date} {}", event.clock)
+        };
+        if !age.is_empty() {
+            head.push_str(", ");
+            head.push_str(&age);
+        }
+        if !gap.is_empty() {
+            head.push_str(", ");
+            head.push_str(&gap);
+        }
+        head.push_str(", ");
+        head.push_str(event.source);
+        out.push('\n');
+        out.push_str(&scan::wrap(&head, scan::COLS));
+        out.push('\n');
+        out.push_str(&scan::wrap_hang(&event.text, scan::COLS, "  ", "  | "));
+        out.push('\n');
+    }
+    out
 }
 
 /// A tracker note row with its text fenced inline: anyone who reaches the
@@ -38617,6 +38981,9 @@ fn stamp_key(stamp: Option<&str>) -> Option<(i64, String)> {
 }
 
 /// One line per event: date, age, gap since the line before, store, text.
+// The tab row stays for the tests that pin how the three stores merge.
+// A person reads [`format_timeline`].
+#[cfg_attr(not(test), allow(dead_code))]
 fn format_events(events: &[Event], now: &str) -> String {
     let today = days_of_stamp(Some(now)).unwrap_or(0);
     let mut out = String::new();
@@ -64444,13 +64811,17 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "{printed}"
         );
         assert!(
-            printed.contains("1.000\tseed\ta\ttoday\t[lesson, from an agent] one\n"),
+            printed.contains("seed, activation 1.00")
+                && printed.contains("today")
+                && printed.contains("lesson, from an agent")
+                && printed.contains("one"),
             "{printed}"
         );
         assert!(
-            printed.contains("0.250\t    \tb\t\t[lesson, from an agent] two\n"),
+            printed.contains("activation 0.25") && printed.contains("two"),
             "{printed}"
         );
+        assert!(printed.contains("strongest first"), "{printed}");
         assert!(format_island(&serde_json::json!({})).is_empty());
         let persona = serde_json::json!({
             "as": "reviewer",
@@ -71648,19 +72019,19 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ("PACKSET_URL", "http://127.0.0.1:9"),
         ]);
         let text = timeline("sample-f3nc", 12).expect("timeline");
-        let row = text
-            .lines()
-            .find(|l| l.contains("Rule: paste"))
+        let open = text
+            .find("[unverified ")
             .unwrap_or_else(|| panic!("{text}"));
-        let open = row.find("[unverified ").expect(row);
-        let nonce = &row[open + "[unverified ".len()..]
-            .split(']')
+        let nonce = text[open + "[unverified ".len()..]
+            .split(|ch: char| !ch.is_ascii_hexdigit())
             .next()
-            .unwrap();
-        assert_eq!(nonce.len(), 16, "{row}");
-        let end = row.find(&format!("[end {nonce}]")).expect(row);
-        let rule = row.find("Rule: paste").unwrap();
-        assert!(open < rule && rule < end, "{row}");
+            .unwrap_or("");
+        assert_eq!(nonce.len(), 16, "{text}");
+        let end = text
+            .find(&format!("[end {nonce}]"))
+            .unwrap_or_else(|| panic!("{text}"));
+        let rule = text.find("Rule: paste").unwrap_or_else(|| panic!("{text}"));
+        assert!(open < rule && rule < end, "{text}");
         assert!(
             text.lines().all(|l| !l.trim_start().starts_with("Rule:")),
             "{text}"

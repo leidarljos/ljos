@@ -1,0 +1,8 @@
+status 0
+stderr:
+ljos: no token for the search: this seat has none, the token file cannot be
+read, or another user holds the pack's port. Set PACKSET_HOME to the writer's
+pack home, PACKSET_TOKEN_FILE to its token file, or PACKSET_TOKEN. The rows are
+stored lessons, not the writer's ranking
+stdout:
+{"text":"\nMemory  shown 2 of 2, best match first, on this issue\n  lesson, from an agent, today, ticket demo-kiln\n    The damper sticks when the kiln is cold.\n    id idkiln01a\n  lesson, from an agent, yesterday, ticket demo-kiln\n    The damper sticks.\n    Open the flue before the kiln reaches temperature.\n    Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.\n    id idkiln02b\nRelated  shown 5 of 15, best match first, not filed on this issue\n  lesson, from an agent, today, ticket demo-tile\n    Glaze batch 1 waits until the kiln is cool enough to open.\n    id idglaze01\n  lesson, from an agent, today, ticket demo-tile\n    Glaze batch 2 waits until the kiln is cool enough to open.\n    id idglaze02\n  lesson, from an agent, today, ticket demo-tile\n    Glaze batch 3 waits until the kiln is cool enough to open.\n    id idglaze03\n  lesson, from an agent, today, ticket demo-tile\n    Glaze batch 4 waits until the kiln is cool enough to open.\n    id idglaze04\n  lesson, from an agent, today, ticket demo-tile\n    Glaze batch 5 waits until the kiln is cool enough to open.\n    id idglaze05\nmore on demo-kiln remain, so run `ljos search demo-kiln -n 15`.\n","ranking":"semantic"}

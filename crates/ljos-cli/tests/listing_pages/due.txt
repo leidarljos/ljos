@@ -1,14 +1,44 @@
 status 0
 stderr:
 stdout:
-unreviewed	lesson	idkiln01aaaaaaaaaaaaaaaaaaaaaaaa	The damper sticks when the kiln is cold.
-unreviewed	lesson	idkiln02bbbbbbbbbbbbbbbbbbbbbbbb	The damper sticks.
-Open the flue before the kiln reaches temperature.
-Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
-unreviewed	lesson	idkiln03cccccccccccccccccccccccc	The damper log is https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-see-where-it-breaks
-unreviewed	note	idkiln04dddddddddddddddddddddddd	SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumnsAndKeepsGoingFurtherStillUntilTheWordItselfPassesTheMark
-unreviewed	lesson	idglaze01eeeeeeeeeeeeeeeeeeeeeeee	Glaze batch 1 waits until the kiln is cool enough to open.
-unreviewed	lesson	idglaze02eeeeeeeeeeeeeeeeeeeeeeee	Glaze batch 2 waits until the kiln is cool enough to open.
-unreviewed	lesson	idglaze03eeeeeeeeeeeeeeeeeeeeeeee	Glaze batch 3 waits until the kiln is cool enough to open.
-unreviewed	lesson	idglaze04eeeeeeeeeeeeeeeeeeeeeeee	Glaze batch 4 waits until the kiln is cool enough to open.
+due  shown 8 of 17, soonest first
+the rest stay due, so run `ljos due --all` to read them. That list grades none.
 17 due; nothing else scheduled
+
+lesson, not reviewed yet, seat alice, ticket demo-kiln
+  The damper sticks when the kiln is cold.
+  id idkiln01a
+
+lesson, not reviewed yet, seat alice, ticket demo-kiln
+  The damper sticks.
+  Open the flue before the kiln reaches temperature.
+  Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
+  id idkiln02b
+
+lesson, not reviewed yet, seat bob, ticket demo-tile
+  The damper log is
+  https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-
+  readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-
+  see-where-it-breaks
+  id idkiln03c
+
+note, not reviewed yet, seat alice
+  SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumnsAn\
+  dKeepsGoingFurtherStillUntilTheWordItselfPassesTheMark
+  id idkiln04d
+
+lesson, not reviewed yet, seat alice, ticket demo-tile
+  Glaze batch 1 waits until the kiln is cool enough to open.
+  id idglaze01
+
+lesson, not reviewed yet, seat alice, ticket demo-tile
+  Glaze batch 2 waits until the kiln is cool enough to open.
+  id idglaze02
+
+lesson, not reviewed yet, seat alice, ticket demo-tile
+  Glaze batch 3 waits until the kiln is cool enough to open.
+  id idglaze03
+
+lesson, not reviewed yet, seat alice, ticket demo-tile
+  Glaze batch 4 waits until the kiln is cool enough to open.
+  id idglaze04

@@ -1,0 +1,4 @@
+status 0
+stderr:
+stdout:
+{"hits":[{"id":"idkiln03cccccccccccccccccccccccc","kind":"lesson","text":"The damper log is https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-see-where-it-breaks","score":0.88,"place":1,"ticket":"demo-tile","from":"bob"}],"ranking":"semantic"}

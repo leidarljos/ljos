@@ -1,0 +1,4 @@
+status 0
+stderr:
+stdout:
+{"as":"","fired":0,"weak":false,"rows":[{"id":"idkiln01aaaaaaaaaaaaaaaaaaaaaaaa","text":"The damper sticks when the kiln is cold.","kind":"lesson","activation":1.0,"seed":true},{"id":"idkiln02bbbbbbbbbbbbbbbbbbbbbbbb","text":"The damper sticks.\nOpen the flue before the kiln reaches temperature.\nÞetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.","kind":"lesson","activation":0.85,"seed":true},{"id":"idkiln03cccccccccccccccccccccccc","text":"The damper log is https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-see-where-it-breaks","kind":"lesson","activation":0.7,"seed":false},{"id":"idkiln04dddddddddddddddddddddddd","text":"SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumnsAndKeepsGoingFurtherStillUntilTheWordItselfPassesTheMark","kind":"note","activation":0.55,"seed":false}]}

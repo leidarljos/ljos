@@ -1,0 +1,27 @@
+status 0
+stderr:
+stdout:
+[
+  {
+    "id": "demo-tile",
+    "state": "STARTED",
+    "priority": "A",
+    "title": "Glaze the tile after reading https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4/workshop-north/session-that-is-one-long-url",
+    "project": "demo",
+    "blocked_by": [],
+    "claimed_by": null,
+    "claimed_at": null,
+    "parent": null
+  },
+  {
+    "id": "demo-kiln",
+    "state": "TODO",
+    "priority": "B",
+    "title": "Fire the kiln",
+    "project": "demo",
+    "blocked_by": [],
+    "claimed_by": null,
+    "claimed_at": null,
+    "parent": null
+  }
+]

@@ -1,0 +1,4 @@
+status 0
+stderr:
+stdout:
+{"issue":"demo-kiln","title":"Fire the kiln","shown":2,"matched":2,"events":[{"date":"<date>","clock":"","age":"<age>","gap":"","source":"tracker","text":"created"},{"date":"<date>","clock":"09:14","age":"<age>","gap":"+1 d","source":"tracker","text":"note: [unverified <nonce>] The damper sticks when the morning is cold. Þéttingin er gömul. [end <nonce>]"}]}

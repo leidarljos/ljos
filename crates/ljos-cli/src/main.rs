@@ -893,6 +893,9 @@ enum Cmd {
         /// Most hubs to print.
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: usize,
+        /// Print JSON. The human page is left off.
+        #[arg(long)]
+        json: bool,
     },
     /// List the memories a task wakes up.
     ///
@@ -908,6 +911,9 @@ enum Cmd {
         /// Use this persona's link weights. A strengthened link is saved for the persona, not the seat.
         #[arg(long = "as")]
         as_persona: Option<String>,
+        /// Print JSON. The human page is left off.
+        #[arg(long)]
+        json: bool,
     },
     /// Check that a stored file is intact, and that the files it came from are too.
     ///
@@ -1371,6 +1377,9 @@ enum Cmd {
         /// Most events to print, the latest kept.
         #[arg(short = 'n', long, default_value_t = 60)]
         limit: usize,
+        /// Print JSON. The human page is left off.
+        #[arg(long)]
+        json: bool,
     },
     /// Write one brief per persona for an issue, or start those personas.
     ///
@@ -2002,6 +2011,9 @@ enum Cmd {
         /// named for `ljos graded`. A contradicted one is named. The rest stay due.
         #[arg(long, conflicts_with = "all")]
         judge: bool,
+        /// Print JSON. The human page is left off. The ids are the full ones `ljos graded` takes.
+        #[arg(long, conflicts_with = "judge")]
+        json: bool,
     },
     /// Score the judge log against outcomes: accuracy and calibration per decision.
     ///
@@ -4082,7 +4094,17 @@ fn run_command() -> Result<()> {
                 );
             }
         }
-        Cmd::Hubs { limit } => print!("{}", format_hubs(&packset_hubs(limit)?)),
+        Cmd::Hubs { limit, json } => {
+            let body = packset_hubs(limit)?;
+            if json {
+                print!("{}", ljos_cli::hubs_json(&body));
+            } else {
+                print!(
+                    "{}",
+                    ljos_cli::scan::for_reader(&format_hubs(&body), human_color())
+                );
+            }
+        }
         Cmd::Conflicts { limit } => print!("{}", conflicts(limit)?),
         Cmd::Consolidate { apply } => {
             print!("{}", format_consolidation(&packset_consolidate(apply)?))
@@ -4091,15 +4113,17 @@ fn run_command() -> Result<()> {
             cue,
             fire,
             as_persona,
+            json,
         } => {
-            print!(
-                "{}",
-                format_island(&packset_island_as(
-                    &join(&cue),
-                    fire,
-                    as_persona.as_deref()
-                )?)
-            );
+            let body = packset_island_as(&join(&cue), fire, as_persona.as_deref())?;
+            if json {
+                print!("{}", ljos_cli::island_json(&body));
+            } else {
+                print!(
+                    "{}",
+                    ljos_cli::scan::for_reader(&format_island(&body), human_color())
+                );
+            }
         }
         Cmd::Search {
             query,
@@ -4867,9 +4891,16 @@ fn run_command() -> Result<()> {
             ljos_cli::panel_gate::note_tracker_read(&issue);
             print!("{}", brief(&name, &issue)?);
         }
-        Cmd::Timeline { issue, limit } => {
+        Cmd::Timeline { issue, limit, json } => {
             ljos_cli::panel_gate::note_tracker_read(&issue);
-            print!("{}", timeline(&issue, limit)?);
+            if json {
+                print!("{}", ljos_cli::timeline_json(&issue, limit)?);
+            } else {
+                print!(
+                    "{}",
+                    ljos_cli::scan::for_reader(&timeline(&issue, limit)?, human_color())
+                );
+            }
         }
         Cmd::Panel {
             issue,
@@ -5544,11 +5575,16 @@ fn run_command() -> Result<()> {
                 println!("{line}");
             }
         }
-        Cmd::Due { all, judge } => {
+        Cmd::Due { all, judge, json } => {
             if judge {
                 print!("{}", ljos_cli::judge_due_page()?);
+            } else if json {
+                print!("{}", ljos_cli::due_json(all)?);
             } else {
-                print!("{}", due_report(all)?);
+                print!(
+                    "{}",
+                    ljos_cli::scan::for_reader(&due_report(all)?, human_color())
+                );
             }
         }
         Cmd::JudgeScore => {

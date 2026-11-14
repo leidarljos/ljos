@@ -570,11 +570,35 @@ fn listing_commands_match_the_saved_pages() {
         ("hubs", &["hubs", "-n", "4"][..]),
         ("island", &["island", "kiln"][..]),
         ("recall", &["recall", "demo-kiln"][..]),
+        ("search-json", &["search", "thermocouple", "--json"][..]),
+        ("recall-json", &["recall", "demo-kiln", "--json"][..]),
+        (
+            "memories-json",
+            &["memories", "list", "--all", "--json"][..],
+        ),
+        ("ready-json", &["ready", "--json"][..]),
+        ("show-json", &["show", "demo-kiln", "--json"][..]),
+        ("due-json", &["due", "--json"][..]),
+        ("timeline-json", &["timeline", "demo-kiln", "--json"][..]),
+        ("hubs-json", &["hubs", "-n", "4", "--json"][..]),
+        ("island-json", &["island", "kiln", "--json"][..]),
     ];
     for (name, args) in cases {
         let out = home.run(args);
         let text = page(&out, &home.root);
         assert!(out.status.success(), "{name} failed\n{text}");
+        if !name.ends_with("-json") {
+            let stdout = text
+                .split_once("stdout:\n")
+                .map(|(_, rest)| rest)
+                .unwrap_or(&text);
+            for line in stdout.lines() {
+                assert!(
+                    line.chars().count() <= 80,
+                    "{name} is wider than 80 columns: {line}"
+                );
+            }
+        }
         snap(name, &text);
     }
 }

@@ -1,0 +1,4 @@
+status 0
+stderr:
+stdout:
+{"id":"demo-kiln","project":"demo","state":"TODO","priority":"B","title":"Fire the kiln","blocked_by":[]}
