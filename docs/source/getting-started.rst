@@ -128,7 +128,7 @@ A lesson and a search
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
-   ljos: no seat was named and this write uses unknown-cursor, so run `export LJOS_SEAT=NAME`.
+   ljos: no seat was named and this write uses unknown-laptop, so run `export LJOS_SEAT=NAME`.
    remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    standing: the hook shows it from the next prompt it bears on
@@ -145,7 +145,7 @@ A lesson and a search
      The lexical default is BM25+. It beat BM25 by two points on turns.
      place 1, score 0.81, checks 2/2, id a6ae2751
 
-The id and the review time are the ones that run printed. The name after ``unknown-`` is the host name.
+The id and the review time are the ones that run printed. The name after ``unknown-`` is the host name. The sample uses ``laptop``, which is not a runner name.
 That line is printed only when the write uses that seat. A conversation that already has a seat record writes as that seat and does not print the line.
 This run sat under an agent runner, so the search row says ``lesson, from an agent``.
 Typed at a terminal with no runner above it, that row says ``lesson, today``.

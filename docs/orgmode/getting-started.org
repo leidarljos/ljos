@@ -120,7 +120,7 @@ Trust it again after an upgrade rewrites one.
 
 #+begin_src console
 $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
-ljos: no seat was named and this write uses unknown-cursor, so run `export LJOS_SEAT=NAME`.
+ljos: no seat was named and this write uses unknown-laptop, so run `export LJOS_SEAT=NAME`.
 remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
   id a6ae2751, next review 2026-11-12 21:40 +00:00
 standing: the hook shows it from the next prompt it bears on
@@ -138,7 +138,7 @@ lesson, from an agent, today
   place 1, score 0.81, checks 2/2, id a6ae2751
 #+end_src
 
-The id and the review time are the ones that run printed. The name after =unknown-= is the host name.
+The id and the review time are the ones that run printed. The name after =unknown-= is the host name. The sample uses =laptop=, which is not a runner name.
 This run sat under an agent runner, so the search row says =lesson, from an agent=.
 Typed at a terminal with no runner above it, that row says =lesson, today=.
 A preference stored at that terminal is =preference, today=.

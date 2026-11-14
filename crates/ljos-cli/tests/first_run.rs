@@ -299,6 +299,36 @@ fn tools_ready() -> bool {
     true
 }
 
+#[test]
+fn the_remember_sample_uses_a_neutral_host() {
+    let runners = [
+        "cursor",
+        "claude",
+        "codex",
+        "grok",
+        "gemini",
+        "opencode",
+        "antigravity",
+        "agy",
+    ];
+    for rel in [
+        "../../docs/source/getting-started.rst",
+        "../../docs/orgmode/getting-started.org",
+    ] {
+        let text = repo_file(rel);
+        assert!(
+            text.contains("unknown-laptop"),
+            "{rel} does not use the neutral host"
+        );
+        for name in runners {
+            assert!(
+                !text.contains(&format!("unknown-{name}")),
+                "{rel} uses the runner name {name} as a host"
+            );
+        }
+    }
+}
+
 fn repo_file(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
