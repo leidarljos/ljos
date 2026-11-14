@@ -31382,11 +31382,39 @@ pub struct CrateVersion {
 /// The newest version crates.io lists for `name`, from the day cache when
 /// it holds one. `refresh` skips the cache: a binary on `PATH` ahead of
 /// the cached answer proves the cache stale.
+/// One in-flight lookup per crate. Doctor asks the same crate from the
+/// prefetch and from the row that needs it; without this both would
+/// download it.
+fn crate_fetch_lock(name: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static FLIGHTS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let map = FLIGHTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard
+        .entry(name.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 fn crate_max_version(name: &str, refresh: bool) -> Option<CrateVersion> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<HashMap<String, Option<CrateVersion>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if !refresh {
+        if let Ok(guard) = cache.lock() {
+            if let Some(hit) = guard.get(name) {
+                return hit.clone();
+            }
+        }
+    }
+    let flight = crate_fetch_lock(name);
+    let _flight = flight
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if !refresh {
         if let Ok(guard) = cache.lock() {
             if let Some(hit) = guard.get(name) {
@@ -31458,49 +31486,101 @@ pub fn doctor_apply_fixes() {
     doctor_fix::apply();
 }
 
+type DoctorSink = Box<dyn FnMut(&Habitat)>;
+
+thread_local! {
+    static DOCTOR_SINK: std::cell::RefCell<Option<DoctorSink>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct ClearDoctorSink;
+
+impl Drop for ClearDoctorSink {
+    fn drop(&mut self) {
+        DOCTOR_SINK.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Run [`doctor`] and call `on_row` as each check finishes, in report order.
+/// A later check does not hold an earlier row. The returned vector is the
+/// same one [`doctor`] builds, which is what a JSON caller prints in one go.
+pub fn doctor_stream(on_row: impl FnMut(&Habitat) + 'static) -> Vec<Habitat> {
+    DOCTOR_SINK.with(|slot| *slot.borrow_mut() = Some(Box::new(on_row)));
+    let _clear = ClearDoctorSink;
+    doctor()
+}
+
+fn doctor_emit(row: &Habitat) {
+    DOCTOR_SINK.with(|slot| {
+        if let Some(emit) = slot.borrow_mut().as_mut() {
+            emit(row);
+        }
+    });
+}
+
+fn doctor_push(out: &mut Vec<Habitat>, row: Habitat) {
+    doctor_emit(&row);
+    out.push(row);
+}
+
+fn doctor_extend(out: &mut Vec<Habitat>, rows: impl IntoIterator<Item = Habitat>) {
+    for row in rows {
+        doctor_push(out, row);
+    }
+}
+
 /// Which habitats answer: binaries on `PATH`, the pack over `PACKSET_URL`, the
 /// deed store, the tracker, the claim graph.
 pub fn doctor() -> Vec<Habitat> {
     // The runner rows ask the runners' own command lines, which start slowly;
-    // they run beside the seat's rows rather than after them.
+    // they run beside the seat's rows rather than after them. The seat rows
+    // are emitted from [`doctor_seat`] as each one is ready.
     let (mut out, runners) = std::thread::scope(|s| {
         let runners = s.spawn(harness_rows);
         let seat = doctor_seat();
         (seat, runners.join().unwrap_or_default())
     });
-    out.extend(runners);
-    out.extend(jev::doctor_row());
-    out.push(seat_binary_row());
-    out.extend(version_skew::rows());
-    out.push(git_hooks::doctor_row());
-    out.push(sitting_gate::doctor_row(
-        std::env::current_dir().ok().as_deref(),
-    ));
-    out.push(policy_row());
-    out.extend(policyd_config_row());
-    out.extend(guard_off_row());
-    out.extend(guard_fail_open_row());
-    out.push(bypass_row());
-    out.push(panes_row());
-    out.extend(config_diag::doctor_rows(
-        std::env::current_dir().ok().as_deref(),
-    ));
-    out.push(note_queue_row());
+    doctor_extend(&mut out, runners);
+    doctor_extend(&mut out, jev::doctor_row());
+    doctor_push(&mut out, seat_binary_row());
+    doctor_extend(&mut out, version_skew::rows());
+    doctor_push(&mut out, git_hooks::doctor_row());
+    doctor_push(
+        &mut out,
+        sitting_gate::doctor_row(std::env::current_dir().ok().as_deref()),
+    );
+    doctor_push(&mut out, policy_row());
+    doctor_extend(&mut out, policyd_config_row());
+    doctor_extend(&mut out, guard_off_row());
+    doctor_extend(&mut out, guard_fail_open_row());
+    doctor_push(&mut out, bypass_row());
+    doctor_push(&mut out, panes_row());
+    doctor_extend(
+        &mut out,
+        config_diag::doctor_rows(std::env::current_dir().ok().as_deref()),
+    );
+    doctor_push(&mut out, note_queue_row());
     if let Some(state) = sync::legacy_doctor_state() {
-        out.push(Habitat {
-            name: "sync",
-            state,
-            ok: false,
-        });
+        doctor_push(
+            &mut out,
+            Habitat {
+                name: "sync",
+                state,
+                ok: false,
+            },
+        );
     }
     if let Some(state) = sync::atoms_doctor_state() {
-        out.push(Habitat {
-            name: "atoms",
-            state,
-            ok: true,
-        });
+        doctor_push(
+            &mut out,
+            Habitat {
+                name: "atoms",
+                state,
+                ok: true,
+            },
+        );
     }
-    out.extend(doctor_fix::rows());
+    doctor_extend(&mut out, doctor_fix::rows());
     out
 }
 
@@ -32552,53 +32632,81 @@ fn check_vissue_ballot_protocol(path: &Path) -> Result<()> {
 /// The seat's own rows: binaries, pack, host key, deed store, tracker,
 /// claim graph. What a sitting checks; the runner rows are onboarding.
 pub fn doctor_seat() -> Vec<Habitat> {
-    // Each registry lookup is its own request. Asked together, the rows
-    // wait for the slowest answer rather than the sum of them; the loop
-    // below reads the answers back from the process cache.
-    std::thread::scope(|s| {
+    // Registry lookups and `--version` probes start together. Joining the
+    // probes in report order emits each row when that probe is done, so a
+    // slow later binary does not hold the earlier rows. The lookups share
+    // one request per crate; the loop reads the answer from the cache.
+    let mut out = std::thread::scope(|s| {
         let mut asked = std::collections::BTreeSet::new();
         for (_, crate_name) in SEAT_BINS {
             if asked.insert(*crate_name) {
-                s.spawn(move || crate_max_version(crate_name, false));
+                s.spawn(move || {
+                    let _ = crate_max_version(crate_name, false);
+                });
             }
         }
-    });
-    let mut out = Vec::new();
-    for (bin, crate_name) in SEAT_BINS {
-        let found = which::which(bin).ok();
-        let probed = found.as_ref().map(|_| probe_version(bin));
-        if probed
-            .as_ref()
-            .is_some_and(|p| p.error.as_deref() == Some("timed out"))
-        {
-            let shown = found
+        let probes: Vec<_> = SEAT_BINS
+            .iter()
+            .map(|(bin, _)| {
+                let bin = *bin;
+                s.spawn(move || {
+                    let found = which::which(bin).ok();
+                    let probed = found.as_ref().map(|_| probe_version(bin));
+                    (found, probed)
+                })
+            })
+            .collect();
+        let mut out = Vec::new();
+        for ((bin, crate_name), probe) in SEAT_BINS.iter().zip(probes) {
+            let (found, probed) = probe.join().unwrap_or_else(|_| {
+                (
+                    None,
+                    Some(ProbedVersion {
+                        version: None,
+                        error: Some("timed out".into()),
+                    }),
+                )
+            });
+            if probed
                 .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| (*bin).to_string());
-            out.push(Habitat {
-                name: bin,
-                state: format!("{shown} --version timed out"),
-                ok: false,
-            });
-            continue;
-        }
-        let have = probed.as_ref().and_then(|p| p.version.clone());
-        // The encoder's loader error is not a version. A binary that does
-        // not start is named here, and the seat still ranks by words.
-        if *bin == "packset-embed" && found.is_some() && have.is_none() {
-            out.push(Habitat {
-                name: bin,
-                state: encoder_not_runnable(probed.as_ref().and_then(|p| p.error.as_deref())),
-                ok: false,
-            });
-            continue;
-        }
-        let latest = crate_version_for(crate_name, have.as_deref());
-        let ballot_protocol = found
-            .as_deref()
-            .filter(|_| *bin == "vissue")
-            .map(check_vissue_ballot_protocol);
-        let (mut state, mut ok) = match (found, have.as_deref(), latest.as_ref()) {
+                .is_some_and(|p| p.error.as_deref() == Some("timed out"))
+            {
+                let shown = found
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| (*bin).to_string());
+                doctor_push(
+                    &mut out,
+                    Habitat {
+                        name: bin,
+                        state: format!("{shown} --version timed out"),
+                        ok: false,
+                    },
+                );
+                continue;
+            }
+            let have = probed.as_ref().and_then(|p| p.version.clone());
+            // The encoder's loader error is not a version. A binary that does
+            // not start is named here, and the seat still ranks by words.
+            if *bin == "packset-embed" && found.is_some() && have.is_none() {
+                doctor_push(
+                    &mut out,
+                    Habitat {
+                        name: bin,
+                        state: encoder_not_runnable(
+                            probed.as_ref().and_then(|p| p.error.as_deref()),
+                        ),
+                        ok: false,
+                    },
+                );
+                continue;
+            }
+            let latest = crate_version_for(crate_name, have.as_deref());
+            let ballot_protocol = found
+                .as_deref()
+                .filter(|_| *bin == "vissue")
+                .map(check_vissue_ballot_protocol);
+            let (mut state, mut ok) = match (found, have.as_deref(), latest.as_ref()) {
             (None, _, _) if *bin == "packset-embed" => (
                 "not on PATH and search stays lexical, so run `cargo binstall --locked packset-embed`."
                     .to_string(),
@@ -32628,73 +32736,90 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 (format!("{}  {ver}", path.display()), true)
             }
         };
-        if let Some(protocol) = ballot_protocol {
-            match protocol {
-                Ok(()) => state.push_str("; evidence ballots supported"),
-                Err(error) => {
-                    state.push_str(&format!("; {error:#}"));
-                    ok = false;
+            if let Some(protocol) = ballot_protocol {
+                match protocol {
+                    Ok(()) => state.push_str("; evidence ballots supported"),
+                    Err(error) => {
+                        state.push_str(&format!("; {error:#}"));
+                        ok = false;
+                    }
                 }
             }
+            if let Some(floor) = below_floor(bin, have.as_deref()) {
+                state.push_str(&floor);
+                ok = false;
+            }
+            doctor_push(
+                &mut out,
+                Habitat {
+                    name: bin,
+                    state,
+                    ok,
+                },
+            );
         }
-        if let Some(floor) = below_floor(bin, have.as_deref()) {
-            state.push_str(&floor);
-            ok = false;
-        }
-        out.push(Habitat {
-            name: bin,
-            state,
-            ok,
-        });
-    }
+        out
+    });
     if let Some(row) = registry_skipped_row() {
-        out.push(row);
+        doctor_push(&mut out, row);
     }
     // The host the seat runs on: a kernel that OOM-kills keeps killing the
     // encoder, the runners and the desktop, and every other row stays green.
-    out.push(host_row());
+    doctor_push(&mut out, host_row());
     // Who is sitting: the name this runner votes under, the name this
     // conversation claims under, and where they came from.
-    out.push(Habitat {
-        name: "seat",
-        state: format_seat_row(),
-        ok: true,
-    });
+    doctor_push(
+        &mut out,
+        Habitat {
+            name: "seat",
+            state: format_seat_row(),
+            ok: true,
+        },
+    );
     if host_lacks_person_check() {
-        out.push(person_absent_row());
+        doctor_push(&mut out, person_absent_row());
     }
-    out.push(doctor_seat_source());
-    out.push(cloud::mcp_row());
-    out.push(cloud::guard_row());
+    doctor_push(&mut out, doctor_seat_source());
+    doctor_push(&mut out, cloud::mcp_row());
+    doctor_push(&mut out, cloud::guard_row());
     // What gate calls took and what they waited on, from the log the hook
     // queue and the book drainer write in the runtime directory.
-    out.push(Habitat {
-        name: "hook latency",
-        state: hookd::timings_line(),
-        ok: true,
-    });
+    doctor_push(
+        &mut out,
+        Habitat {
+            name: "hook latency",
+            state: hookd::timings_line(),
+            ok: true,
+        },
+    );
     // Scope cloud is readable here when cloud up wrote its age identity.
     // The key is not in the tracker.
-    out.push(cloud::cloud_age_row());
+    doctor_push(&mut out, cloud::cloud_age_row());
     // A sitting already read the pack once. Doctor does not ask again:
     // status, health and the memory census were a second and a third call,
     // and each one waited out a busy writer on its own.
     if let Some(listing) = sitting_listing() {
-        out.push(Habitat {
-            name: "pack",
-            state: if listing.ok {
-                format!("{} atoms", listing.atoms.len())
-            } else {
-                PACK_READ_BUSY_LINE.to_string()
+        doctor_push(
+            &mut out,
+            Habitat {
+                name: "pack",
+                state: if listing.ok {
+                    format!("{} atoms", listing.atoms.len())
+                } else {
+                    PACK_READ_BUSY_LINE.to_string()
+                },
+                ok: true,
             },
-            ok: true,
-        });
+        );
         if !listing.ok {
-            out.push(Habitat {
-                name: "encoder",
-                state: format!("{ENCODER_DEGRADED}: the pack read did not answer"),
-                ok: false,
-            });
+            doctor_push(
+                &mut out,
+                Habitat {
+                    name: "encoder",
+                    state: format!("{ENCODER_DEGRADED}: the pack read did not answer"),
+                    ok: false,
+                },
+            );
         }
     } else {
         // A fresh install has no writer until its first memory verb starts one;
@@ -32706,13 +32831,14 @@ pub fn doctor_seat() -> Vec<Habitat> {
         wake_writer();
         // How many stored preferences the hook enforces: a preference with no
         // rule is recalled and never holds the agent to it.
-        out.push(preferences_row());
+        doctor_push(&mut out, preferences_row());
         // Old user rules with no basis stay visible until the person keeps
         // them. The count is a warning; the seat still starts.
-        out.push(user_rules_row());
+        doctor_push(&mut out, user_rules_row());
         // The encoder: loaded, still loading, failed, or not installed.
         // Without it the pack ranks by words alone.
-        out.push(
+        doctor_push(
+            &mut out,
             match pack()
                 .map_err(|e| anyhow::anyhow!("{e:#}"))
                 .and_then(|c| c.status(None).map_err(anyhow::Error::from))
@@ -32733,66 +32859,73 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 },
             },
         );
-        out.push(match pack() {
-            Ok(client) => {
-                let started = std::time::Instant::now();
-                let health = client.health().map_err(anyhow::Error::from);
-                let took_ms = started.elapsed().as_millis();
-                let slow = started.elapsed() >= PACK_SLOW_HEALTH;
-                let admission = client.admission_line();
-                let mut where_ = format!(
-                    "{} workspace {}; pack responded in {took_ms}ms{}",
-                    client.base(),
-                    client.workspace(),
-                    psi_suffix()
-                );
-                if let Some(line) = admission {
-                    where_.push_str("; ");
-                    where_.push_str(&line);
+        doctor_push(
+            &mut out,
+            match pack() {
+                Ok(client) => {
+                    let started = std::time::Instant::now();
+                    let health = client.health().map_err(anyhow::Error::from);
+                    let took_ms = started.elapsed().as_millis();
+                    let slow = started.elapsed() >= PACK_SLOW_HEALTH;
+                    let admission = client.admission_line();
+                    let mut where_ = format!(
+                        "{} workspace {}; pack responded in {took_ms}ms{}",
+                        client.base(),
+                        client.workspace(),
+                        psi_suffix()
+                    );
+                    if let Some(line) = admission {
+                        where_.push_str("; ");
+                        where_.push_str(&line);
+                    }
+                    match health {
+                        Ok(_) if slow => Habitat {
+                            name: "pack",
+                            state: format!("{}; {}", pack_busy_sentence(), where_),
+                            ok: true,
+                        },
+                        Ok(_) => Habitat {
+                            name: "pack",
+                            state: where_,
+                            ok: true,
+                        },
+                        Err(e) if is_read_shed(&e) => Habitat {
+                            name: "pack",
+                            state: format!("{}; {where_}", pack_fault_line(&e)),
+                            ok: true,
+                        },
+                        Err(e) if writer_slow(&e) => Habitat {
+                            name: "pack",
+                            state: format!("{}; {}", pack_busy_sentence(), where_),
+                            ok: true,
+                        },
+                        Err(e) => Habitat {
+                            name: "pack",
+                            state: doctor_fix::hint_pack(match pack_down_message(&e) {
+                                Some(line) => format!("{} does not answer. {line}", client.base()),
+                                // Same line as a memory command. A temporary home
+                                // used to add a second sentence that named
+                                // `packset ensure` even when packset was missing.
+                                None if bookkeep::temp_home().is_some() => {
+                                    format!(
+                                        "{} does not answer. {}",
+                                        client.base(),
+                                        pack_down_line()
+                                    )
+                                }
+                                None => format!("{} does not answer: {e}", client.base()),
+                            }),
+                            ok: false,
+                        },
+                    }
                 }
-                match health {
-                    Ok(_) if slow => Habitat {
-                        name: "pack",
-                        state: format!("{}; {}", pack_busy_sentence(), where_),
-                        ok: true,
-                    },
-                    Ok(_) => Habitat {
-                        name: "pack",
-                        state: where_,
-                        ok: true,
-                    },
-                    Err(e) if is_read_shed(&e) => Habitat {
-                        name: "pack",
-                        state: format!("{}; {where_}", pack_fault_line(&e)),
-                        ok: true,
-                    },
-                    Err(e) if writer_slow(&e) => Habitat {
-                        name: "pack",
-                        state: format!("{}; {}", pack_busy_sentence(), where_),
-                        ok: true,
-                    },
-                    Err(e) => Habitat {
-                        name: "pack",
-                        state: doctor_fix::hint_pack(match pack_down_message(&e) {
-                            Some(line) => format!("{} does not answer. {line}", client.base()),
-                            // Same line as a memory command. A temporary home
-                            // used to add a second sentence that named
-                            // `packset ensure` even when packset was missing.
-                            None if bookkeep::temp_home().is_some() => {
-                                format!("{} does not answer. {}", client.base(), pack_down_line())
-                            }
-                            None => format!("{} does not answer: {e}", client.base()),
-                        }),
-                        ok: false,
-                    },
-                }
-            }
-            Err(e) => Habitat {
-                name: "pack",
-                state: doctor_fix::hint_pack(e.to_string()),
-                ok: false,
+                Err(e) => Habitat {
+                    name: "pack",
+                    state: doctor_fix::hint_pack(e.to_string()),
+                    ok: false,
+                },
             },
-        });
+        );
         // The writer's token: packsetd 0.15 answers its owner only, and a seat
         // with no token meets a 401 on every memory, mail and recall call while
         // `/health` still says ok.
@@ -32803,19 +32936,25 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 .err()
                 .is_some_and(|e| pack_unreachable(&anyhow::Error::msg(e.to_string())))
             {
-                out.push(Habitat {
-                    name: "pack token",
-                    state: format!("not checked. {}", pack_down_line()),
-                    ok: true,
-                });
+                doctor_push(
+                    &mut out,
+                    Habitat {
+                        name: "pack token",
+                        state: format!("not checked. {}", pack_down_line()),
+                        ok: true,
+                    },
+                );
             } else {
                 let refused = status.err().map(|e| format!("{e:#}").contains("401"));
-                out.push(pack_token_row(
-                    client.has_token(),
-                    std::env::var_os("PACKSET_TOKEN").is_some_and(|v| !v.is_empty()),
-                    packset_client::token_path(),
-                    refused,
-                ));
+                doctor_push(
+                    &mut out,
+                    pack_token_row(
+                        client.has_token(),
+                        std::env::var_os("PACKSET_TOKEN").is_some_and(|v| !v.is_empty()),
+                        packset_client::token_path(),
+                        refused,
+                    ),
+                );
             }
         }
         // A search that keeps answering 401 or 403 is using stored memories
@@ -32824,7 +32963,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         if out.iter().any(|h| h.name == "pack" && h.ok) {
             if let Ok(client) = pack() {
                 if let Some(row) = search_auth_habitat(&client) {
-                    out.push(row);
+                    doctor_push(&mut out, row);
                 }
             }
         }
@@ -32850,49 +32989,55 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 if !forgotten.is_empty() {
                     state.push_str(&format!("; forgotten {}", forgotten.join(", ")));
                 }
-                out.push(Habitat {
-                    name: "memory",
-                    state,
-                    ok: cap == 0 || live <= cap,
-                });
+                doctor_push(
+                    &mut out,
+                    Habitat {
+                        name: "memory",
+                        state,
+                        ok: cap == 0 || live <= cap,
+                    },
+                );
             }
         }
     }
-    out.push(match host_key_path() {
-        Some(path) => {
-            let seed = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 32;
-            // A key the deed store does not list signs deeds that evidence
-            // refuses. deedar says so; one without the verb is not asked.
-            let unlisted = if seed {
-                run_captured("deedar", &["host"])
-                    .err()
-                    .map(|e| e.to_string())
-                    .filter(|e| e.contains("is not a signer"))
-            } else {
-                None
-            };
-            Habitat {
-                name: "host key",
-                state: match (&unlisted, seed) {
-                    (Some(why), _) => format!(
-                        "{}, the signing key for deeds; {}",
-                        path.display(),
-                        why.lines().next().unwrap_or("").trim()
-                    ),
-                    (None, true) => format!("{}, the signing key for deeds", path.display()),
-                    (None, false) => format!("{} is not a signing key", path.display()),
-                },
-                ok: seed && unlisted.is_none(),
+    doctor_push(
+        &mut out,
+        match host_key_path() {
+            Some(path) => {
+                let seed = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 32;
+                // A key the deed store does not list signs deeds that evidence
+                // refuses. deedar says so; one without the verb is not asked.
+                let unlisted = if seed {
+                    run_captured("deedar", &["host"])
+                        .err()
+                        .map(|e| e.to_string())
+                        .filter(|e| e.contains("is not a signer"))
+                } else {
+                    None
+                };
+                Habitat {
+                    name: "host key",
+                    state: match (&unlisted, seed) {
+                        (Some(why), _) => format!(
+                            "{}, the signing key for deeds; {}",
+                            path.display(),
+                            why.lines().next().unwrap_or("").trim()
+                        ),
+                        (None, true) => format!("{}, the signing key for deeds", path.display()),
+                        (None, false) => format!("{} is not a signing key", path.display()),
+                    },
+                    ok: seed && unlisted.is_none(),
+                }
             }
-        }
-        None => Habitat {
-            name: "host key",
-            state: "none at ~/.config/deedar/host.key and DEEDAR_HOST_SIGNING_KEY unset; \
+            None => Habitat {
+                name: "host key",
+                state: "none at ~/.config/deedar/host.key and DEEDAR_HOST_SIGNING_KEY unset; \
                     handovers go out unsigned"
-                .into(),
-            ok: false,
+                    .into(),
+                ok: false,
+            },
         },
-    });
+    );
     for (name, bin, args) in [
         ("deed store", "deedar", &["log", "head"][..]),
         ("tracker", "vissue", &["identity"][..]),
@@ -32901,7 +33046,8 @@ pub fn doctor_seat() -> Vec<Habitat> {
         // A habitat that accepts the probe and never answers used to hold
         // the sitting for the full capture wait. Two seconds is enough for
         // identity, a log head, or an empty graph, and then the row says so.
-        out.push(
+        doctor_push(
+            &mut out,
             match run_captured_within(bin, args, None, std::time::Duration::from_secs(2)) {
                 Ok(said) if name == "tracker" => {
                     let (state, ok) = tracker_state(&said.stdout, &root_source());
@@ -34202,6 +34348,13 @@ pub fn format_doctor_short(rows: &[Habitat]) -> String {
         .cloned()
         .collect();
     format!("{}{}", doctor_summary(rows), format_doctor(&needs))
+}
+
+/// Whether the short doctor prints `row`. The same rows [`format_doctor_short`]
+/// keeps, decided from this row alone so it can be printed before later checks.
+#[must_use]
+pub fn doctor_shows_in_short(row: &Habitat) -> bool {
+    shown_short(doctor_word(row), row.name) || plain_encoder_row(row)
 }
 
 /// The not-installed encoder, which plain `ljos doctor` prints so a

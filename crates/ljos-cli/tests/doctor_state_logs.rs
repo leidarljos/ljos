@@ -151,6 +151,13 @@ const BYPASS_ROW: &[u8] =
 const QUEUE_ROW: &[u8] =
     b"{\"issue\":\"ljos-old\",\"text\":\"kept\",\"workspace\":\"w\",\"at\":1,\"kind\":\"note\"}\n";
 
+/// The ready line is printed when the checks are done, after the rows.
+fn ready_line(out: &str) -> &str {
+    out.lines()
+        .find(|line| line.starts_with("ljos is ") || line.starts_with("ljos runs"))
+        .unwrap_or_else(|| panic!("no ready line:\n{out}"))
+}
+
 /// A fifo or a symlink at either log is left as doctor found it: the
 /// fifo stays a fifo, the link and the file it names keep their bytes,
 /// nothing lands beside them, and doctor returns and names the log
@@ -188,7 +195,7 @@ fn doctor_leaves_a_fifo_or_a_symlink_at_either_log_as_it_found_it() {
                 line.starts_with(word) && line.contains("damaged"),
                 "{kind}: {line}"
             );
-            let summary = out.lines().next().unwrap();
+            let summary = ready_line(&out);
             assert!(summary.contains(&format!("{log} is damaged")), "{summary}");
         }
     }
@@ -214,7 +221,7 @@ fn doctor_warns_about_an_aged_torn_bypass_log() {
         line.starts_with("warn\tguard bypass\t") && line.contains("an unfinished last row"),
         "{line}"
     );
-    let summary = out.lines().next().unwrap();
+    let summary = ready_line(&out);
     assert!(
         summary.contains("the guard bypass log is damaged"),
         "{summary}"

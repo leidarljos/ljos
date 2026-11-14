@@ -1514,6 +1514,170 @@ fn sha256_of(path: &Path) -> String {
         .expect("sha256sum or shasum")
 }
 
+/// The archive name is on stdout before curl is asked for the body, and
+/// the size from the headers is on that same line. A pipe stays one line
+/// per archive. With no gh and no cosign, the closing line names where
+/// to get each.
+#[test]
+fn the_archive_name_is_printed_before_the_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = "x86_64-unknown-linux-gnu";
+    let assets = dir.path().join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    let packs = [
+        ("ljos-v0.42.1", &["ljos", "ljos-mcp"][..]),
+        (
+            "packset-v0.17.10",
+            &["packset", "packsetd", "packset-mcp"][..],
+        ),
+        ("vissue-v0.24.0", &["vissue", "vissue-mcp"][..]),
+        ("deedar-v0.4.0", &["deedar"][..]),
+        ("claimdag-v0.8.0", &["claimdag"][..]),
+        ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
+        ("consensus-v0.10.1", &["ljos-consensus"][..]),
+    ];
+    for (stem, bins) in packs {
+        let top = assets.join(stem);
+        std::fs::create_dir_all(&top).unwrap();
+        for name in bins {
+            script(&top, name, "#!/bin/sh\nexit 0\n");
+        }
+        let archive = assets.join(format!("{stem}-{target}.tar.gz"));
+        let packed = Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&assets)
+            .arg(stem)
+            .status()
+            .unwrap();
+        assert!(packed.success(), "tar {stem}");
+        std::fs::write(format!("{}.sha256", archive.display()), sha256_of(&archive)).unwrap();
+    }
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let order = dir.path().join("order");
+    let watch = dir.path().join("stdout.txt");
+    script(
+        &bin,
+        "curl",
+        r#"#!/bin/sh
+url=
+head=0
+out=
+prev=
+for a in "$@"; do
+  case $prev in
+    -o) out=$a ;;
+  esac
+  case $a in
+    -*I*) head=1 ;;
+    http://*|https://*) url=$a ;;
+  esac
+  prev=$a
+done
+base=$(basename "$url")
+shown=$(cat "$LJOS_WATCH" 2>/dev/null || true)
+if [ "$head" = 1 ]; then
+  printf '%s\n' "head $base" >> "$LJOS_ORDER"
+  case $shown in
+    *"downloading $base"*) printf '%s\n' "head-saw-name $base" >> "$LJOS_ORDER" ;;
+    *) printf '%s\n' "head-missed-name $base" >> "$LJOS_ORDER" ;;
+  esac
+  printf '%s\r\n%s\r\n\r\n' 'HTTP/1.1 200 OK' 'Content-Length: 4096'
+  exit 0
+fi
+case $url in
+  *.sha256)
+    cp "$LJOS_FAKE_ASSETS/$base" "$out"
+    printf '%s' 200
+    exit 0
+    ;;
+esac
+printf '%s\n' "get $base" >> "$LJOS_ORDER"
+case $shown in
+  *"downloading $base (4.0 KB)"*) printf '%s\n' "get-saw-size $base" >> "$LJOS_ORDER" ;;
+  *) printf '%s\n' "get-missed-size $base" >> "$LJOS_ORDER" ;;
+esac
+cp "$LJOS_FAKE_ASSETS/$base" "$out"
+printf '%s' 200
+exit 0
+"#,
+    );
+    let home = dir.path().join("home");
+    let err = dir.path().join("stderr.txt");
+    let mut cmd = Command::new("sh");
+    cmd.arg(install_sh())
+        .args([
+            "--no-embed",
+            "--no-onboard",
+            "--no-modify-path",
+            "--target",
+            target,
+            "--pin",
+            "ljos=0.42.1",
+            "--pin",
+            "packset=0.17.10",
+            "--pin",
+            "vissue=0.24.0",
+            "--pin",
+            "deedar=0.4.0",
+            "--pin",
+            "claimdag=0.8.0",
+            "--pin",
+            "ljos-policyd=0.7.0",
+            "--pin",
+            "consensus=0.10.1",
+            "--bin-dir",
+        ])
+        .arg(home.join(".local/bin"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("LJOS_FAKE_ASSETS", &assets)
+        .env("LJOS_ORDER", &order)
+        .env("LJOS_WATCH", &watch)
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .stdout(std::fs::File::create(&watch).unwrap())
+        .stderr(std::fs::File::create(&err).unwrap());
+    let status = cmd.status().unwrap();
+    let text = format!(
+        "{}{}",
+        std::fs::read_to_string(&watch).unwrap_or_default(),
+        std::fs::read_to_string(&err).unwrap_or_default()
+    );
+    let log = std::fs::read_to_string(&order).unwrap_or_default();
+    assert!(status.success(), "{text}\n{log}");
+    let asset = format!("ljos-v0.42.1-{target}.tar.gz");
+    assert!(
+        log.contains(&format!("head-saw-name {asset}")),
+        "the name was not printed before the size lookup:\n{log}\n{text}"
+    );
+    assert!(
+        log.contains(&format!("get-saw-size {asset}")),
+        "the sized line was not printed before the body:\n{log}\n{text}"
+    );
+    assert!(
+        !log.contains("head-missed-name") && !log.contains("get-missed-size"),
+        "{log}\n{text}"
+    );
+    let stdout = std::fs::read_to_string(&watch).unwrap();
+    assert!(!stdout.contains('\r'), "a pipe redrew a line:\n{stdout}");
+    let download_at = stdout
+        .find(&format!("downloading {asset}"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    let done_at = stdout
+        .find("  ljos v0.42.1")
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(download_at < done_at, "{stdout}");
+    assert!(stdout.contains("https://cli.github.com"), "{stdout}");
+    assert!(
+        stdout.contains("https://docs.sigstore.dev/cosign/system_config/installation/"),
+        "{stdout}"
+    );
+}
+
 #[test]
 fn install_sh_passes_shellcheck() {
     let out = Command::new("shellcheck")

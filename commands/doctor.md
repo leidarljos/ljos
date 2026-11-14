@@ -4,9 +4,10 @@ description: Check that the ljos programs are installed and answering
 allowed-tools: Bash(ljos:*)
 ---
 
-Run `ljos doctor` and read it back in plain words: its first line says
-whether ljos is ready, and the rows under it are the ones that need action,
-each with its fix. `ljos doctor --all` lists every row. `ljos doctor --fix`
+Run `ljos doctor` and read it back in plain words: each row that needs
+action appears as that check finishes, and the line that says whether
+ljos is ready is printed when the checks are done. `ljos doctor --all`
+lists every row, in that same order, as each check finishes. `ljos doctor --fix`
 refreshes a runner skill and a runner env file ljos wrote, creates a
 missing ljos home and config file, moves a stale lock or pid file aside,
 starts packsetd with `packset ensure`, and records a runner session seat.

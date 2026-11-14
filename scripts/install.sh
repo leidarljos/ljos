@@ -552,7 +552,52 @@ else
   VERIFIER=none
 fi
 [ "$ATTEST" = 0 ] || [ "$VERIFIER" != none ] ||
-  die "--attest needs gh 2.49 or newer (https://cli.github.com), or cosign with jq or python3"
+  die "--attest needs gh 2.49 or newer (https://cli.github.com), or cosign (https://docs.sigstore.dev/cosign/system_config/installation/) with jq or python3"
+
+# Bytes the server names for URL, or nothing. A HEAD that fails, or a
+# length that is not a number, leaves the size off the line. The body
+# is not downloaded here.
+url_size() {
+  hdr=
+  if command -v curl >/dev/null 2>&1; then
+    hdr=$(curl -fsSI -L --max-time 10 "$1" 2>/dev/null) || hdr=
+  elif command -v wget >/dev/null 2>&1; then
+    hdr=$(wget -q -S --spider --max-redirect=5 "$1" 2>&1) || hdr=
+  fi
+  printf '%s\n' "$hdr" | awk '
+    tolower($1) == "content-length:" {
+      n = $2
+      gsub(/\r/, "", n)
+    }
+    END {
+      if (n ~ /^[0-9]+$/ && n+0 > 0) print n
+    }
+  '
+}
+
+human_size() {
+  awk -v n="$1" 'BEGIN {
+    n += 0
+    if (n < 1024) { printf "%d B", n; exit }
+    if (n < 1048576) { printf "%.1f KB", n / 1024; exit }
+    printf "%.1f MB", n / 1048576
+  }'
+}
+
+# The archive name goes out before the download. The size is added when
+# the server sends one. The name is readable while that length is looked
+# up, and the line is finished before the body starts. A pipe stays one
+# line: no progress meter.
+announce_archive() {
+  asset=$1
+  url=$2
+  printf '%s' "  downloading $asset"
+  bytes=$(url_size "$url" || true)
+  case $bytes in
+    ''|*[!0-9]*) printf '\n' ;;
+    *) printf ' (%s)\n' "$(human_size "$bytes")" ;;
+  esac
+}
 
 # GET URL into FILE and print the HTTP status, 000 when nothing answered.
 api_get() {
@@ -674,6 +719,8 @@ install_one() {
   fi
   ver=$(pinned "$repo")
   ver=${ver#v}
+  label=$repo
+  case $crate in *-mcp) label=$crate ;; esac
   if [ "$SOURCE_ONLY" = 1 ]; then
     source_build "$crate" "$ver" "$repo-$TARGET.tar.gz"
     case ",$progs," in
@@ -684,6 +731,7 @@ install_one() {
   if [ -n "$ver" ]; then
     tag=v$ver
   else
+    printf '%s\n' "  downloading $label"
     tag=$(latest_tag "$repo")
   fi
   case $style in
@@ -698,7 +746,10 @@ install_one() {
     cp "$ASSET_DIR/$asset" "$TMP/$asset"
   elif [ -n "$ASSET_DIR" ]; then
     die "no $asset in $ASSET_DIR. That is the archive name for $TARGET. Put the release archive and its .sha256 in that directory and run \`sh install.sh --asset-dir $ASSET_DIR\` again, or unpack the programs and run \`sh install.sh --from-dir DIR\`."
-  elif ! fetch "$url" "$TMP/$asset"; then
+  elif ! {
+    announce_archive "$asset" "$url"
+    fetch "$url" "$TMP/$asset"
+  }; then
     case $FETCH_KIND in
       missing)
         rm -f "$TMP/$asset"
@@ -782,8 +833,6 @@ install_one() {
     [ -n "$found" ] || die "$asset holds no $p"
     place "$found" "$BIN_DIR/$p"
   done
-  label=$repo
-  case $crate in *-mcp) label=$crate ;; esac
   say "  $label $tag"
   [ "$attested" != failed ] || warn "$asset: its build attestation does not verify: $(head -n 1 "$TMP/attest.err" 2>/dev/null)"
 }
@@ -866,7 +915,7 @@ if [ -f "$TMP/attested" ]; then
   if [ "$verified" = "$total" ]; then
     line="$line build attestations verified for all $total."
   elif [ "$unchecked" = "$total" ]; then
-    line="$line attestations not checked: install gh 2.49+ or cosign."
+    line="$line attestations not checked: install gh 2.49+ (https://cli.github.com) or cosign (https://docs.sigstore.dev/cosign/system_config/installation/)."
   else
     line="$line build attestations: $verified verified"
     [ "$missing" = 0 ] || line="$line, $missing not published"

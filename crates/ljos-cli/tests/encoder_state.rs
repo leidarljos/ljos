@@ -214,9 +214,11 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
         let said = format!("{doctor}{doctor_err}");
         assert!(
             code == 0
-                || doctor.starts_with("ljos is ready")
-                || doctor.starts_with("ljos is not ready")
-                || doctor.starts_with("ljos runs"),
+                || doctor.lines().any(|line| {
+                    line.starts_with("ljos is ready")
+                        || line.starts_with("ljos is not ready")
+                        || line.starts_with("ljos runs")
+                }),
             "{name}: doctor exited {code}\n{said}"
         );
         match doctor_row {

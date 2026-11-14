@@ -8,19 +8,19 @@ mod shell_complete;
 use ljos_cli::{
     age_of, begin_sitting_preclaim, brief, bump_plan, calibrate, cards, claim, claim_next,
     cli_assignee, compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook,
-    doctor, due_report, finish, forecasts_from_json, format_bump_rows, format_consolidation,
-    format_doctor, format_doctor_short, format_findings, format_hubs, format_island,
-    format_playbooks, format_readings, format_remembered, format_seat_command, format_steps,
-    format_write_ack, graded, habit, habits, handover_scoped, healthy, hook_note, island_entities,
-    join, learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen, now_utc, on_path,
-    onboard_to, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
-    packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
-    playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout,
-    protocol_brief, protocol_text, read_campaign, receive, release, remember_findings, reopen,
-    rows_about, run, run_as, run_captured, settle_discount, sitting_close, sitting_stream_started,
-    stop_hook_stdout, timeline, topic_words, tracker_show_json, trim_num, trust_from_pack,
-    uncite_deed, with_discount, write_outcome, write_persona_as, write_prediction, write_rule,
-    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
+    due_report, finish, forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
+    format_findings, format_hubs, format_island, format_playbooks, format_readings,
+    format_remembered, format_seat_command, format_steps, format_write_ack, graded, habit, habits,
+    handover_scoped, healthy, hook_note, island_entities, join, learn_anchors, learn_and_write,
+    learn_reading, learn_shared, mark_seen, now_utc, on_path, onboard_to, packset_consolidate,
+    packset_forget, packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel,
+    panel_steps, parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory,
+    post_hook_stdout, predictions_of, prompt_hook_stdout, protocol_brief, protocol_text,
+    read_campaign, receive, release, remember_findings, reopen, rows_about, run, run_as,
+    run_captured, settle_discount, sitting_close, sitting_stream_started, stop_hook_stdout,
+    timeline, topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed,
+    with_discount, write_outcome, write_persona_as, write_prediction, write_rule, write_trust,
+    Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -5910,11 +5910,20 @@ fn run_command() -> Result<()> {
             println!("{}", ljos_cli::atom_out(&v, false)?);
         }
         Cmd::Doctor { all, .. } => {
-            let rows = doctor();
-            if all {
-                print!("{}", format_doctor(&rows));
-            } else {
-                print!("{}", format_doctor_short(&rows));
+            // Rows go out as each check finishes. `--all` prints every row.
+            // The short report prints the rows that need action as they
+            // are known, then the ready line, which needs every row.
+            // `doctor()` with no sink is what a JSON caller collects and
+            // prints in one document.
+            let rows = ljos_cli::doctor_stream(move |row| {
+                if all || ljos_cli::doctor_shows_in_short(row) {
+                    print!("{}", format_doctor(std::slice::from_ref(row)));
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
+            });
+            if !all {
+                print!("{}", ljos_cli::doctor_summary(&rows));
+                let _ = std::io::Write::flush(&mut std::io::stdout());
             }
             if !healthy(&rows) {
                 std::process::exit(1);
