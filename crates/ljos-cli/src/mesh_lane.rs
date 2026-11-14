@@ -17,8 +17,10 @@
 //! were skipped and how many were imported. The seed is written by a
 //! temporary name and a rename, and only when its bytes would change.
 //! A pack that answers 503 is asked again once, after `Retry-After`, with
-//! the same deadline. A second 503 or a 408 stops the pull. Rows already
-//! stored stay in the seed. A handoff or a seed folder that has gone away,
+//! the same deadline. A second 503 or a 408 stops the pull. Each export is
+//! stored before the next one is read, so a stop keeps the finished exports
+//! and leaves the export in progress out. The next pull continues with
+//! what is not stored yet. A handoff or a seed folder that has gone away,
 //! or a write that does not return, stops the command: the line names the
 //! folder and the command to run once the mount answers, and nothing is
 //! reported as imported or pushed.
@@ -604,8 +606,8 @@ struct Fold {
     seed_changed: bool,
 }
 
-/// Merge one export into the seat. A post that fails leaves the rows
-/// already accepted in `have`, so the caller can store those and stop.
+/// Merge one export into the seat. On `Err` the caller drops this export's
+/// rows, so a stop does not leave a half-imported export in the seed.
 fn fold_export(
     bytes: &[u8],
     lane: &str,
@@ -648,6 +650,11 @@ fn fold_export(
                 if lanes || entities || ids {
                     fold.seed_changed = true;
                 }
+            } else if hash_known {
+                // Posted on a pull that stopped before this export was
+                // stored. Record it once, and do not post it again.
+                have.insert(row.content_sha256.clone(), row);
+                fold.seed_changed = true;
             }
             continue;
         }
@@ -775,6 +782,7 @@ fn pull_with(
         &share,
         &source,
         post,
+        |_| Ok(()),
     )
 }
 
@@ -786,6 +794,7 @@ fn pull_body(
     share: &Share,
     source: &impl ExportSource,
     mut post: impl FnMut(&Kept) -> Result<()>,
+    mut halt: impl FnMut(usize) -> Result<()>,
 ) -> Result<Summary> {
     require_name(&store.seat, "seat")?;
     require_dir(from, share)?;
@@ -800,6 +809,7 @@ fn pull_body(
     let mut marks = read_marks(store, share)?;
     let paths = export_paths(from, source, share)?;
     let mut seen = BTreeSet::new();
+    let mut committed = 0usize;
     let mut summary = Summary {
         imported: 0,
         unchanged: 0,
@@ -824,6 +834,8 @@ fn pull_body(
             if meta.matches(mark) {
                 summary.unchanged += mark.rows;
                 summary.exports_skipped += 1;
+                committed += 1;
+                halt(committed)?;
                 continue;
             }
         }
@@ -847,10 +859,12 @@ fn pull_body(
                 ) {
                     write_marks(store, &marks, share)?;
                 }
+                committed += 1;
+                halt(committed)?;
                 continue;
             }
         }
-        let fold = match fold_export(
+        let fold = fold_export(
             &bytes,
             &lane,
             &mut have,
@@ -859,13 +873,7 @@ fn pull_body(
             &baseline_hashes,
             &baseline_ids,
             &mut post,
-        ) {
-            Ok(fold) => fold,
-            Err(err) => {
-                let _ = write_seed(store, &have, &row_ids, share);
-                return Err(err);
-            }
-        };
+        )?;
         summary.imported += fold.imported;
         summary.unchanged += fold.unchanged;
         summary.skipped += fold.skipped;
@@ -886,6 +894,8 @@ fn pull_body(
         ) {
             write_marks(store, &marks, share)?;
         }
+        committed += 1;
+        halt(committed)?;
     }
     let before = marks.len();
     marks.retain(|name, _| seen.contains(name));
@@ -1274,14 +1284,15 @@ mod tests {
     }
 
     #[test]
-    fn a_deadline_keeps_the_rows_already_stored() {
+    fn a_deadline_keeps_finished_exports_and_drops_the_one_in_progress() {
         let dir = tempfile::tempdir().unwrap();
         let (from, store) = handoff(dir.path());
-        write_lane(&from, "lane-a", &["alpha kiln", "beta kiln", "gamma kiln"]);
+        write_lane(&from, "lane-a", &["alpha kiln"]);
+        write_lane(&from, "lane-b", &["beta kiln", "gamma kiln"]);
         let calls = AtomicU64::new(0);
         let err = pull_with(&store, &from, &BTreeSet::new(), &BTreeSet::new(), |_| {
             let n = calls.fetch_add(1, Ordering::SeqCst);
-            if n == 1 {
+            if n >= 1 {
                 Err(anyhow::Error::new(packset_client::Error::Unavailable(
                     crate::PACK_DEADLINE_LINE.to_string(),
                 )))
@@ -1291,8 +1302,33 @@ mod tests {
         })
         .unwrap_err();
         assert!(crate::is_deadline_miss(&err), "{err:#}");
-        assert_eq!(texts_of(dir.path()).len(), 1);
+        let texts = texts_of(dir.path());
+        assert!(texts.contains(&"alpha kiln".to_string()), "{texts:?}");
+        assert!(!texts.iter().any(|text| text.contains("beta")), "{texts:?}");
+        assert!(
+            !texts.iter().any(|text| text.contains("gamma")),
+            "{texts:?}"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let mut known = BTreeSet::new();
+        known.insert(content_hash("beta kiln"));
+        let posts = AtomicU64::new(0);
+        let again = pull_with(&store, &from, &known, &BTreeSet::new(), |row| {
+            assert_ne!(row.text, "beta kiln");
+            posts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(posts.load(Ordering::SeqCst), 1, "beta was posted again");
+        assert_eq!(again.imported, 1, "{again:?}");
+        let texts = texts_of(dir.path());
+        for lesson in ["alpha kiln", "beta kiln", "gamma kiln"] {
+            assert_eq!(
+                texts.iter().filter(|text| text.as_str() == lesson).count(),
+                1,
+                "{lesson} in {texts:?}"
+            );
+        }
     }
 
     #[test]
@@ -1450,15 +1486,27 @@ mod tests {
         files: &MemExports,
         post: impl FnMut(&Kept) -> Result<()>,
     ) -> Result<Summary> {
+        pull_mem_halt(store, from, &BTreeSet::new(), files, post, |_| Ok(()))
+    }
+
+    fn pull_mem_halt(
+        store: &SeatStore,
+        from: &Path,
+        already: &BTreeSet<String>,
+        files: &MemExports,
+        post: impl FnMut(&Kept) -> Result<()>,
+        halt: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Summary> {
         let share = crate::share_io::Share::mesh_pull(&store.seat, from);
         pull_body(
             store,
             from,
-            &BTreeSet::new(),
+            already,
             &BTreeSet::new(),
             &share,
             files,
             post,
+            halt,
         )
     }
 
@@ -1575,5 +1623,55 @@ mod tests {
             files.reads()
         );
         assert_eq!(third.exports_skipped, 2, "{third:?}");
+    }
+
+    #[test]
+    fn a_pull_stopped_midway_resumes_without_a_half_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, store) = handoff(dir.path());
+        let files = MemExports::new();
+        files.insert("lane-a.jsonl", lane_body("lane-a", &["alpha kiln"]), 10);
+        files.insert(
+            "lane-b.jsonl",
+            lane_body("lane-b", &["beta kiln", "gamma kiln"]),
+            11,
+        );
+        let err = pull_mem_halt(
+            &store,
+            &from,
+            &BTreeSet::new(),
+            &files,
+            |_| Ok(()),
+            |done| {
+                if done >= 1 {
+                    bail!("stopped")
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("stopped"), "{err}");
+        let texts = texts_of(dir.path());
+        assert_eq!(texts, ["alpha kiln"]);
+        assert!(
+            !std::fs::read_to_string(marks_path(&store))
+                .unwrap()
+                .contains("lane-b.jsonl"),
+            "the unfinished export was recorded"
+        );
+        files.clear_reads();
+        let again = pull_mem(&store, &from, &files, |_| Ok(())).unwrap();
+        assert_eq!(files.reads(), ["lane-b.jsonl"]);
+        assert_eq!(again.imported, 2, "{again:?}");
+        assert_eq!(again.exports_skipped, 1, "{again:?}");
+        let texts = texts_of(dir.path());
+        for lesson in ["alpha kiln", "beta kiln", "gamma kiln"] {
+            assert_eq!(
+                texts.iter().filter(|text| text.as_str() == lesson).count(),
+                1,
+                "{lesson} in {texts:?}"
+            );
+        }
     }
 }
