@@ -21267,14 +21267,14 @@ fn pack_under_load(err: &anyhow::Error) -> bool {
 /// queued. An empty text is not a lesson. A duplicate the pack already
 /// named is not queued: [`remember_with_retry`] prints that atom id.
 fn queue_busy_lesson(text: &str) {
-    let dir = note_queue::state_dir();
     let queued = queue_lesson_under_load(text);
     match queued {
-        Ok(_) => eprintln!(
-            "remember: the pack is busy; the lesson is queued in {} and the next ljos call sends it",
-            dir.join("note-queue.jsonl").display()
+        Ok(_) => {
+            eprintln!("remember: the pack is busy and the lesson is queued, so run `ljos search`.")
+        }
+        Err(_) => eprintln!(
+            "remember: the pack is busy and the lesson was not queued, so run `ljos doctor`."
         ),
-        Err(err) => eprintln!("remember: the pack is busy; the lesson was not queued: {err:#}"),
     }
 }
 
