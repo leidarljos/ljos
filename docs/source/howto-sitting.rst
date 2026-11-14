@@ -52,7 +52,10 @@ Start a sitting, and end one
    ...
    == timeline
    timeline of proj-1a2b: Ship the fuse change?
-   2026-08-30  13 days ago     tracker created
+   events  shown 12 of 12, oldest first
+
+   2026-08-30, 13 days ago, tracker
+     created
    ...
    == reclaim
    no claim quiet longer than 900s

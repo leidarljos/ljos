@@ -129,12 +129,13 @@ A lesson and a search
    $ ljos search "lexical default"
    matched by words: the encoder is not installed
    shown 1 of 1.
-   The number is the order in the list. It is not whether the sentence is true.
+   Place 1 is the first row. This seat's rows come before another seat's.
+   The score orders the row. It is not whether the sentence is true.
    Checks: how many of them named this row.
 
    lesson, from an agent, today
      The lexical default is BM25+. It beat BM25 by two points on turns.
-     order 1.00, checks 2/2, id a6ae2751
+     place 1, score 1.00, checks 2/2, id a6ae2751
 
 The id and the review time are the ones that run printed. The name after ``unknown-`` is the host name.
 That line is printed only when the write uses that seat. A conversation that already has a seat record writes as that seat and does not print the line.
@@ -155,12 +156,13 @@ A busy pack ranks by words and still returns a hit that names the subject.
    $ ljos search fusing
    matched by words: the encoder is not installed
    shown 1 of 1.
-   The number is the order in the list. It is not whether the sentence is true.
+   Place 1 is the first row. This seat's rows come before another seat's.
+   The score orders the row. It is not whether the sentence is true.
    Checks: how many of them named this row.
 
    preference, from an agent, not checked, today
      CombMNZ over RRF for fusing two ballots.
-     order 1.00, checks 2/2, id f8b725a9
+     place 1, score 1.00, checks 2/2, id f8b725a9
 
 ``ljos due`` lists claims when their review time arrives. A claim you stop reviewing sinks in search.
 The how-to :doc:`Keep memory current <howto-memory>` is the review clock, ``ljos graded`` and ``ljos forget``.

@@ -85,22 +85,24 @@ standing: the hook shows it from the next prompt it bears on
 $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos search "measure the files"
 matched by words: the encoder is not installed
 shown 1 of 1.
-The number is the order in the list. It is not whether the sentence is true.
+Place 1 is the first row. This seat's rows come before another seat's.
+The score orders the row. It is not whether the sentence is true.
 Checks: how many of them named this row.
 
 lesson, from an agent, today
   Measure the files before picking a codec.
-  order 1.00, checks 2/2, id …
+  place 1, score 1.00, checks 2/2, id …
 
 $ CURSOR_CONVERSATION_ID=0199c0de-cursor-conversation-one ljos search "measure the files"
 matched by words: the encoder is not installed
 shown 1 of 1.
-The number is the order in the list. It is not whether the sentence is true.
+Place 1 is the first row. This seat's rows come before another seat's.
+The score orders the row. It is not whether the sentence is true.
 Checks: how many of them named this row.
 
 lesson, from an agent, today, from claude-f2pu9d56g0
   Measure the files before picking a codec.
-  order 1.00, checks 2/2, id …
+  place 1, score 1.00, checks 2/2, id …
 #+end_src
 # END ljos-sample agents-memory
 
@@ -194,11 +196,12 @@ not the person's words or instructions
 |   (no body)
 End of the unverified tracker text for demo-1 [fence …].
 
-Memory  shown 0 of 0, on this issue
+Memory  shown 0 of 0, best match first, on this issue
   (none filed on this issue)
-Related  shown 1 of 1, not filed on this issue
+Related  shown 1 of 1, best match first, not filed on this issue
   lesson, from an agent, today
     Measure the files before picking a codec.
+    id …
 #+end_src
 # END ljos-sample agents-recall
 

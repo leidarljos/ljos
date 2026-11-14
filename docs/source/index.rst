@@ -91,12 +91,13 @@ First commands
    $ ljos search "lexical default"
    matched by words: the encoder is not installed
    shown 1 of 1.
-   The number is the order in the list. It is not whether the sentence is true.
+   Place 1 is the first row. This seat's rows come before another seat's.
+   The score orders the row. It is not whether the sentence is true.
    Checks: how many of them named this row.
 
    lesson, from an agent, today
      The lexical default is BM25+. It beat BM25 by two points on turns.
-     order 1.00, checks 2/2, id a6ae2751
+     place 1, score 1.00, checks 2/2, id a6ae2751
    $ ljos file "Pick a codec" -p demo
 
 ``ljos search`` prints the lesson when the query shares a word with it.

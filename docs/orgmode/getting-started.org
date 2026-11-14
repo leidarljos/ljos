@@ -121,12 +121,13 @@ standing: the hook shows it from the next prompt it bears on
 $ ljos search "lexical default"
 matched by words: the encoder is not installed
 shown 1 of 1.
-The number is the order in the list. It is not whether the sentence is true.
+Place 1 is the first row. This seat's rows come before another seat's.
+The score orders the row. It is not whether the sentence is true.
 Checks: how many of them named this row.
 
 lesson, from an agent, today
   The lexical default is BM25+. It beat BM25 by two points on turns.
-  order 1.00, checks 2/2, id a6ae2751
+  place 1, score 1.00, checks 2/2, id a6ae2751
 #+end_src
 
 The id and the review time are the ones that run printed. The name after =unknown-= is the host name.
@@ -146,12 +147,13 @@ remembered (preference): CombMNZ over RRF for fusing two ballots.
 $ ljos search fusing
 matched by words: the encoder is not installed
 shown 1 of 1.
-The number is the order in the list. It is not whether the sentence is true.
+Place 1 is the first row. This seat's rows come before another seat's.
+The score orders the row. It is not whether the sentence is true.
 Checks: how many of them named this row.
 
 preference, from an agent, not checked, today
   CombMNZ over RRF for fusing two ballots.
-  order 1.00, checks 2/2, id f8b725a9
+  place 1, score 1.00, checks 2/2, id f8b725a9
 #+end_src
 
 =ljos due= lists claims when their review time arrives. A claim you stop reviewing sinks in search.

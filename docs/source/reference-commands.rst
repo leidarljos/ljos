@@ -20,7 +20,7 @@ Commands
 ``remember TEXT [--as PERSONA] [--transient|--standing] [--verbose] [--valid-from DATE] [--valid-to DATE]``
    Stores: pack. One lesson, stored as written, origin ``user-declared``; as a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the hook shows it from the next prompt it bears on; run under an agent runner it is an episode labelled agent-derived (an agent wrote it, and a person has not accepted it), kept and not a refresher until a review promotes it; ``--transient`` or ``--standing`` picks one either way. A sentence of more than 29 words that the person types is stored as written, and ``--verbose`` prints one line to split it into two sentences. The same sentence from anywhere else is kept on this machine only: the command says the pack refused it, ``ljos search`` still finds the copy, and the hook does not show it. ``--valid-from`` and ``--valid-to`` are the days the claim holds in the world. A 503, including memory pressure, queues the lesson and a later command sends it. A duplicate prints the atom id already in the pack. A content refusal names size or policy. An empty text exits 2. A text past 1000 characters exits 2. A pack that runs out of time exits 75. When nothing is storing memories, the command exits 75 when the line names ``packset ensure``, and exits 1 when packset is not on PATH. Example: ``ljos remember "The lexical default is BM25+."``.
 ``memories list|review|tui|prune``
-   Stores: pack. Review the memories agents wrote on their own: ``list`` newest first with provenance, unreviewed agents' memories by default; ``review`` keeps, drops, edits or merges them; ``tui`` browses them; ``prune`` names duplicates and never-recalled memories and writes only with ``--apply``.
+   Stores: pack. Review the memories agents wrote on their own: ``list`` newest first, shown N of N, each claim wrapped with its seat, its ticket and a short id; unreviewed agents' memories by default; ``review`` keeps, drops, edits or merges them; ``tui`` browses them; ``prune`` names duplicates and never-recalled memories and writes only with ``--apply``. ``list --json`` prints the rows.
 ``prefer TEXT [--deny PATTERN] [--ask PATTERN] [--user --why REASON]``
    Stores: pack, user config. One standing preference, origin ``user-declared``; each ``--deny`` or ``--ask`` also writes that rule with the preference as its reason, so the hook warns by it. ``--user`` writes a user rule instead, shared by every seat on this machine, never reviewed, and not also stored as a seat preference; ``--why`` is required with it. ``--as`` stores it as that persona. ``--promote`` copies a lesson into a user rule. ``--forget`` tombstones a user rule. ``--sync`` pulls and pushes user rules through the tracker. ``--review`` lists preferences stored before a basis was kept, and ``--keep`` keeps one. ``--deny-mention``, ``--deny-name``, ``--deny-reply-to`` and ``--deny-reply-name`` refuse an outbound post, with ``--user``. See :doc:`User rules <reference-rules>`
 ``accept ID [--quote WORDS --at TIME --via SEAT]``
@@ -30,19 +30,19 @@ Commands
 ``retire-notes``
    Stores: pack. Tombstone the note memories an older ``ljos note`` wrote; runs once per seat, and the tracker copies stay.
 ``search QUERY [-n N] [--rerank] [--as-of TIME] [--valid-at DATE] [--explain] [--source-machine NAME] [--source-seat SEAT] [--import-id ID] [--json] [--attempts]``
-   Stores: pack. Ranked claims with how many scorers named each and its age. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. The cosine is how close the stored text is to the query, from 0 to 1. A short list is not padded with a weaker cross-seat hit. When those were the only rows, the line is ``Nothing relevant was found.`` A search that found nothing prints ``No hits for "which fusion", so run ljos search fusion``. A busy memory store ranks by words and still returns a hit that names the subject. ``--rerank`` scores the top hits again, slower and sharper, by reading the text itself; ``--as-of`` reads the memory store as it stood then; ``--valid-at`` asks what held in the world that day (``any`` keeps every window); ``--explain`` opens with what the score and the fraction mean. ``--source-machine``, ``--source-seat`` and ``--import-id`` keep only those rows, before the limit. ``--json`` prints the rows. ``--attempts`` includes failed commands. A memory store that runs out of time prints ``pack busy, try again`` and exits 75. The pack is this seat's memory store. When nothing is storing memories, the command exits 75 when the line names ``packset ensure``, and exits 1 when packset is not on PATH. Example: ``ljos search "lexical default"``.
-``timeline ISSUE [-n N]``
-   Stores: tracker, deed store, pack. The logbook, the cited deeds and the activated memories as one dated list, oldest first, each line with its age and the gap since the one before.
+   Stores: pack. Ranked claims with how many scorers named each and its age. This seat's hits come first. The page names the place, the score, the checks, a short id and the ticket. Another seat's hit is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. The cosine is how close the stored text is to the query, from 0 to 1. A short list is not padded with a weaker cross-seat hit. When those were the only rows, the line is ``Nothing relevant was found.`` A search that found nothing prints ``No hits for "which fusion", so run ljos search fusion``. A busy memory store ranks by words and still returns a hit that names the subject. ``--rerank`` scores the top hits again, slower and sharper, by reading the text itself; ``--as-of`` reads the memory store as it stood then; ``--valid-at`` asks what held in the world that day (``any`` keeps every window); ``--explain`` opens with what the score and the fraction mean. ``--source-machine``, ``--source-seat`` and ``--import-id`` keep only those rows, before the limit. ``--json`` prints the rows. ``--attempts`` includes failed commands. A memory store that runs out of time prints ``pack busy, try again`` and exits 75. The pack is this seat's memory store. When nothing is storing memories, the command exits 75 when the line names ``packset ensure``, and exits 1 when packset is not on PATH. Example: ``ljos search "lexical default"``.
+``timeline ISSUE [-n N] [--json]``
+   Stores: tracker, deed store, pack. The logbook, the cited deeds and the activated memories as one dated list, oldest first. The page says shown N of M and names each event's age and the gap since the one before. ``--json`` prints the rows.
 ``consolidate [--apply]``
    Stores: pack. The pairs where a later claim rewrites an earlier one; ``--apply`` closes the earlier ones' windows.
 ``conflicts [-n N]``
    Stores: pack. Candidate contradictions by geometry: the lowest passes between single memories, read by the optional ``landscape`` habitat. The habitat is not part of this repository. When it is not on ``PATH`` the command says so and writes nothing.
-``hubs [-n N]``
-   Stores: pack. The memories most other memories point at, highest first. PageRank ranks a memory by how many others point at it, and by how linked those are.
-``island CUE [--fire] [--as PERSONA]``
-   Stores: pack. The memories a task activates: search hits spread along the links; ``--fire`` wires the strongest eight together. ``--as`` walks the links as that persona.
-``due [--all] [--judge]``
-   Stores: pack. Sweeps the pack first (reviews left due past twice their interval lapse; never-recalled claims missed three times are forgotten), then the claims whose review is due, unreviewed ones first, one line on the clock, and one on what the sweep moved. ``--all`` lists every due memory and grades none. ``--judge`` sends the page to the review judges.
+``hubs [-n N] [--json]``
+   Stores: pack. The memories most other memories point at, highest first. The page names the score and how many memories point at the row. PageRank ranks a memory by how many others point at it, and by how linked those are. ``--json`` prints the rows.
+``island CUE [--fire] [--as PERSONA] [--json]``
+   Stores: pack. The memories a task activates: search hits spread along the links, strongest first. The page names the activation and whether the row is a seed. ``--fire`` wires the strongest eight together. ``--as`` walks the links as that persona. ``--json`` prints the rows.
+``due [--all] [--judge] [--json]``
+   Stores: pack. Sweeps the pack first (reviews left due past twice their interval lapse; never-recalled claims missed three times are forgotten), then the claims whose review is due, soonest first. The page says shown N of M and names the seat and the ticket. ``--all`` lists every due memory and grades none. ``--json`` prints the rows. ``--judge`` sends the page to the review judges.
 ``hud [--foreground] [--toggle|--show|--hide] [--install-desktop]``
    Stores: none. Exec sibling ``ljos-hud``. A missing program exits 127. ``--hide`` when that program is not installed exits 0. The musl CLI never links iced.
 ``habit [NAME [VALUE]] [--unit U] [--every 7d] [--source S]``
@@ -89,8 +89,8 @@ Commands
    Stores: tracker. File work found while sitting: a child of the held issue unless ``--parent`` names another or ``--top`` none, in the parent's project; a projected board takes it into its inbox under the printed id; the tracker file is committed. ``--options`` writes ``Options: A, B`` as the first body line. ``--quorum`` and ``--deadline`` together say how many ballots are due, and when. ``-q`` (``--porcelain``) is accepted and changes nothing: the id is already the only line on stdout. A day's checklist is ``ljos sitting --plan``, which files the parent and its items in one commit. Example: ``LJOS_SEAT=alice ljos file "Pick a codec" -p demo``.
 ``ready [-p PROJECT] [--json] [--mine]``
    Stores: tracker. Tickets that are open and not waiting on an open ticket. ``--mine`` names the next unfinished item of each of this seat's plans. ``-p`` limits that list to one project. ``--json`` prints the rows.
-``show ISSUE``
-   Stores: tracker. One ticket: its id, state and title, then the tickets it waits on. An open blocker is ``open`` and a finished one is ``closed``. None prints ``blockers: none``. An unknown id exits 1 and names ``ljos ready``. An id that matches more than one ticket exits 1 and names one ``ljos show`` command.
+``show ISSUE [--json]``
+   Stores: tracker. One ticket: its id, state, priority and title, then the tickets it waits on. The title wraps to the terminal. An open blocker is ``open`` and a finished one is ``closed``. None prints ``blockers: none``. ``--json`` prints the ticket. An unknown id exits 1 and names ``ljos ready``. An id that matches more than one ticket exits 1 and names one ``ljos show`` command.
 ``note [ID] TEXT...``
    Stores: tracker. A dated progress note on the issue, committed. With no id, the note is written on the issue this seat holds. On an issue another seat holds it says so: the note is an assist, and ``ljos send`` reaches the holder; the note stays on the ticket and is never written into memory. Example: ``ljos note proj-1a2b "the door seats when it is cold"``.
 ``withdraw ID [--note TEXT] [--as NAME]``
@@ -337,7 +337,7 @@ current
 deed --add --porcelain --remove --ticket
 digest --json --mark --since
 doctor --all --fix --verbose
-due --all --judge
+due --all --json --judge
 evidence
 export --machine --out
 file --body --deadline --options --parent --porcelain --priority --project --quorum --tags --top --type
@@ -352,10 +352,10 @@ habit --every --source --unit
 handover --issue --out --project --scope --since-size --to
 help --all
 hook --brief-once --drain --event --fail-on-deny --git-commit --git-hook --limit --prompt --runner --text
-hubs --limit
+hubs --json --limit
 hud --foreground --hide --install-desktop --show --toggle
 inbox --all --sync
-island --as --fire
+island --as --fire --json
 judge-score
 learn --beta --new-option --outcome --rule --share
 log --seat
@@ -415,13 +415,13 @@ seat
 seat add
 seat grant --at --ids-file --quote --via
 send --group --interrupt --issue --new-seat
-show
+show --json
 sitting --anyway --assignee --cards --dir --plan --playbook --project --verbose
 slot --key --model --run
 statusline
 supervise --at --cwd --exit --failures --harness --max-restarts --restart --script --window
 sync --adopt --adopt-legacy --compact --dry-run --export --force --import --key
-timeline --limit
+timeline --json --limit
 trust --about --why
 uninstall --all --bin-dir --dry-run --keep-programs --no-stub --purge
 upgrade --dir --only
