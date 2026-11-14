@@ -12142,7 +12142,13 @@ mod tests {
     /// name, retired what the current log holds and shrank the taken set.
     #[test]
     fn a_primary_log_under_its_plus_alias_retires_nothing() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        // Another test may have replaced PATH for a moment. The env lock
+        // is what puts it back, so the age check has to take that lock.
+        let missing = {
+            let _env = crate::test_env_lock();
+            crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen)
+        };
+        if missing {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -12500,7 +12506,13 @@ mod tests {
     /// the `?` branch treats the gap as a whole history and pins the tip.
     #[test]
     fn a_promisor_clone_does_not_fetch_or_adopt_a_missing_headed_blob() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        // Another test may have replaced PATH for a moment. The env lock
+        // is what puts it back, so the age check has to take that lock.
+        let missing = {
+            let _env = crate::test_env_lock();
+            crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen)
+        };
+        if missing {
             return;
         }
         if !crate::tool_installed("packsetd") {
