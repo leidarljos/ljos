@@ -2194,6 +2194,9 @@ enum Cmd {
     },
     /// Finish work on a ticket: remember the lesson, strengthen the memories it used, hand the claim back.
     ///
+    /// With no lesson, a ticket that is still TODO and that nobody has claimed is left as it is.
+    /// The line names `ljos sitting ISSUE`.
+    ///
     /// Example: `ljos finish proj-1a2b --lesson "Cold metal seats."`
     Finish {
         /// The tracker id of the issue.

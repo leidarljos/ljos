@@ -42077,6 +42077,29 @@ fn open_child_close_refusal(issue: &str) -> Option<String> {
     ))
 }
 
+/// The line for a TODO ticket nobody has claimed.
+///
+/// Finish has no sitting to end, so it must not report the session done.
+/// `None` when the tracker cannot be read, the ticket is not TODO, or
+/// someone holds it: those stay on the ordinary finish path.
+fn unclaimed_open_line(issue: &str) -> Option<String> {
+    let card = tracker_show_json(issue).ok()?;
+    let state = card["state"].as_str().unwrap_or("").trim();
+    if state != "TODO" {
+        return None;
+    }
+    let claimed = card["claimed_by"]
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if claimed.is_some() {
+        return None;
+    }
+    Some(format!(
+        "{issue} is not claimed and stays TODO, so run `ljos sitting {issue}`."
+    ))
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "The public finish signature preserves its independent command options"
@@ -42163,6 +42186,24 @@ pub fn finish(
         Err(err) if tracker_misses(&err, issue) => return Err(unknown_ticket(issue)),
         Err(err) => return Err(err),
     };
+    // A TODO ticket nobody has claimed has no sitting to end. With no
+    // lesson, finish used to report the session done and then commit
+    // nothing. A lesson is still stored: that write is the point of
+    // passing one, and the ticket stays open either way.
+    if !close {
+        if let Some(line) = unclaimed_open_line(issue) {
+            if let Some(text) = lesson.map(str::trim).filter(|text| !text.is_empty()) {
+                let mut out = String::new();
+                for claim in lesson_claims(text) {
+                    out.push_str(&finish_lesson(issue, &claim));
+                }
+                out.push_str(&line);
+                out.push('\n');
+                return Ok(out);
+            }
+            bail!("{line}");
+        }
+    }
     // The lesson is filed before the node completes. A complete that
     // refuses used to return first and the lesson never reached the pack
     // `ljos memories list` reads. The refusal says nothing about the

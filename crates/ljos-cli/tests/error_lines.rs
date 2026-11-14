@@ -53,6 +53,10 @@ impl Home {
         Self { root }
     }
 
+    fn write_issues(&self, body: &str) {
+        std::fs::write(self.root.join("tracker/Software/demo/issues.org"), body).unwrap();
+    }
+
     fn run(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
         let home = self.root.join("home");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
@@ -169,6 +173,23 @@ fn a_missing_tracker_program_names_the_install_and_exits_1() {
 #[test]
 fn a_missing_claim_program_names_the_install_and_exits_1() {
     let home = Home::new();
+    // A TODO ticket that nobody has claimed stops before the claim graph.
+    // A claimed sitting still has to name a missing claimdag.
+    home.write_issues(
+        "\
+#+TITLE: demo
+#+VISSUE: 1
+#+CATEGORY: demo
+#+TODO: TODO STARTED | DONE CANCELLED
+
+* STARTED [#B] Fire the kiln
+:PROPERTIES:
+:ID:         demo-kiln
+:CLAIMED_BY: alice
+:CREATED:    [2026-06-01 Mon]
+:END:
+",
+    );
     let out = home.run(&["finish", "demo-kiln"], &[("LJOS_SEAT", "alice")]);
     let said = text(&out);
     assert_eq!(out.status.code(), Some(1), "{said}");
