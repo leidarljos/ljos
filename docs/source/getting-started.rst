@@ -72,7 +72,7 @@ The programs go to ``~/.local/bin``. They are ``ljos``, ``ljos-mcp``, ``packset`
 ``packsetd``, ``packset-mcp``, ``vissue``, ``vissue-mcp``, ``deedar``, ``claimdag``, ``ljos-policyd`` and ``ljos-consensus``.
 The installer checks each download against its published SHA-256 sum.
 It builds from source with ``cargo`` where a platform has no release.
-``--no-embed`` leaves out the encoder. Search then matches words, and a search prints ``matched by words (encoder not installed)``.
+``--no-embed`` leaves out the encoder. Search then matches words, and a search prints ``matched by words (encoder not installed)`` and names ``cargo binstall --locked packset-embed``.
 
 Read the script before you run it. It is ``scripts/install.sh`` in this repository.
 It runs ``ljos onboard`` for each coding runner it finds. With none found, it still sets up
@@ -131,7 +131,7 @@ A lesson and a search
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    standing: the hook shows it from the next prompt it bears on
    $ ljos search "lexical default"
-   matched by words (encoder not installed)
+   matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
    shown 1 of 1.
    Place 1 is the first row.
    The score orders the row. It is not whether the sentence is true.
@@ -160,7 +160,7 @@ A busy pack ranks by words and still returns a hit that names the subject.
    remembered (preference): CombMNZ over RRF for fusing two ballots.
      id f8b725a9, next review 2026-11-12 21:40 +00:00
    $ ljos search fusing
-   matched by words (encoder not installed)
+   matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
    shown 1 of 1.
    Place 1 is the first row.
    The score orders the row. It is not whether the sentence is true.

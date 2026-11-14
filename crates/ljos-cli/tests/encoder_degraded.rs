@@ -147,9 +147,7 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
         doctor.status
     );
     assert!(
-        text.contains(
-            "matched by words: the encoder is not installed; `ljos doctor --all` for why"
-        ),
+        text.contains("matched by words: the encoder failed"),
         "{text}"
     );
     assert!(text.contains(ljos_cli::ENCODER_RESTART_COMMAND), "{text}");
@@ -178,16 +176,32 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
         "the mode line belongs on stderr\nstdout:\n{said}"
     );
     assert!(
-        recall_err.contains("matched by words (encoder not installed)"),
+        recall_err.contains("The encoder failed (the last encode did not answer)"),
         "recall did not name the ranking\nstderr:\n{recall_err}\nstdout:\n{said}"
+    );
+    assert!(
+        recall_err.contains(ljos_cli::ENCODER_RESTART_COMMAND),
+        "recall did not name the restart\nstderr:\n{recall_err}"
+    );
+    assert!(
+        !recall_err.contains("still loading") && !recall_err.contains("is loading"),
+        "a failed encoder was described as loading\nstderr:\n{recall_err}"
     );
 
     let search = run(home.path(), &path, &port, &["search", "fuse"]);
     let search_out = String::from_utf8_lossy(&search.stdout);
     let search_err = String::from_utf8_lossy(&search.stderr);
     assert!(
-        search_err.contains("matched by words (encoder not installed)"),
+        search_err.contains("The encoder failed (the last encode did not answer)"),
         "search did not name the ranking\nstderr:\n{search_err}\nstdout:\n{search_out}"
+    );
+    assert!(
+        search_err.contains(ljos_cli::ENCODER_RESTART_COMMAND),
+        "search did not name the restart\nstderr:\n{search_err}"
+    );
+    assert!(
+        !search_err.contains("still loading") && !search_err.contains("not installed"),
+        "a failed encoder was described as loading or missing\nstderr:\n{search_err}"
     );
     assert!(
         !search_out.contains("matched by words"),
@@ -204,7 +218,14 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
     let doc: serde_json::Value = serde_json::from_str(json_out.trim())
         .unwrap_or_else(|err| panic!("search json did not parse ({err}): {json_out}"));
     assert_eq!(doc["ranking"], "lexical", "{doc}");
-    assert_eq!(doc["reason"], "encoder unavailable", "{doc}");
+    assert_eq!(
+        doc["reason"],
+        format!(
+            "The encoder failed (the last encode did not answer), so these rows match words; run `{}`.",
+            ljos_cli::ENCODER_RESTART_COMMAND
+        ),
+        "{doc}"
+    );
 
     let recall_json = run(
         home.path(),
@@ -221,7 +242,14 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
     let recalled: serde_json::Value = serde_json::from_str(recall_body.trim())
         .unwrap_or_else(|err| panic!("recall json did not parse ({err}): {recall_body}"));
     assert_eq!(recalled["ranking"], "lexical", "{recalled}");
-    assert_eq!(recalled["reason"], "encoder unavailable", "{recalled}");
+    assert_eq!(
+        recalled["reason"],
+        format!(
+            "The encoder failed (the last encode did not answer), so these rows match words; run `{}`.",
+            ljos_cli::ENCODER_RESTART_COMMAND
+        ),
+        "{recalled}"
+    );
 }
 
 /// `packset-embed` exits with a loader line. Doctor must not read

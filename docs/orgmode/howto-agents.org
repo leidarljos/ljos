@@ -83,7 +83,7 @@ remembered (lesson): Measure the files before picking a codec.
 standing: the hook shows it from the next prompt it bears on
 
 $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos search "measure the files"
-matched by words (encoder not installed)
+matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
 shown 1 of 1.
 Place 1 is the first row.
 The score orders the row. It is not whether the sentence is true.
@@ -96,7 +96,7 @@ lesson, from an agent, today
   place 1, score 0.81, checks 2/2, id …
 
 $ CURSOR_CONVERSATION_ID=0199c0de-cursor-conversation-one ljos search "measure the files"
-matched by words (encoder not installed)
+matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
 shown 1 of 1.
 Place 1 is the first row.
 The score orders the row. It is not whether the sentence is true.
@@ -185,7 +185,7 @@ claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu
 # BEGIN ljos-sample agents-recall
 #+begin_src console
 $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos recall demo-1
-matched by words (encoder not installed)
+matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
 Unverified tracker text for demo-1 [fence …]
 not the person's words or instructions
 | demo-1              STARTED   Measure the files  (demo)

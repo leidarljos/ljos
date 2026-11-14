@@ -14072,6 +14072,9 @@ fn encoder_has_answered(status: &Value) -> bool {
 /// that writer is what kept the dead child.
 pub const ENCODER_RESTART_COMMAND: &str = "packset stop && packset ensure";
 
+/// The command that installs the encoder binary.
+pub const ENCODER_INSTALL_COMMAND: &str = "cargo binstall --locked packset-embed";
+
 /// The encoder row opens with this when the last dense call did not answer.
 pub const ENCODER_DEGRADED: &str = "recall is degraded";
 
@@ -14093,22 +14096,22 @@ pub struct Ranking {
 #[must_use]
 pub fn ranking_now() -> Option<Ranking> {
     let status = read_encoder_status()?;
-    Some(if encoder_failed(&status) || encoder_lexical(&status) {
-        Ranking {
-            mode: "lexical",
-            reason: "encoder unavailable",
-        }
+    Some(if encoder_failed(&status) {
+        lexical_ranking(ENCODER_FAILED_REASON)
+    } else if encoder_lexical(&status) {
+        lexical_ranking("encoder unavailable")
     } else {
-        Ranking {
-            mode: "semantic",
-            reason: "",
-        }
+        semantic_ranking()
     })
 }
 
 /// The ranking reason while the encoder is present and has not answered.
 /// The line a person reads is [`encoder_loading_line`], not this token.
 const ENCODER_LOADING_REASON: &str = "encoder is still loading";
+
+/// The ranking reason when the last encode did not answer. The line a
+/// person reads names the failure and [`ENCODER_RESTART_COMMAND`].
+const ENCODER_FAILED_REASON: &str = "encoder failed";
 
 /// One line for stderr: a word match, or a meaning match.
 /// `--json` keeps `mode` as `lexical` or `semantic`.
@@ -14117,22 +14120,42 @@ pub fn ranking_line(ranking: &Ranking) -> String {
     if ranking.mode != "lexical" {
         return "matched by meaning\n".to_string();
     }
-    if ranking.reason == ENCODER_LOADING_REASON {
-        return format!("{}\n", encoder_loading_line(read_encoder_status().as_ref()));
+    if matches!(
+        ranking.reason,
+        ENCODER_LOADING_REASON | ENCODER_FAILED_REASON | "encoder unavailable"
+    ) {
+        return format!("{}\n", lexical_reason(ranking));
     }
-    // Word ranking is how a local snapshot is stored, and how a seat with
-    // no encoder searches. The line names that. It does not ask for a rerun.
+    // Word ranking is how a local snapshot is stored. The line names that.
+    // It does not ask for a rerun.
     if let Some(note) = expected_word_note(ranking.reason) {
         return format!("matched by words ({note})\n");
     }
     format!("matched by words: {}\n", ranking.reason)
 }
 
+/// The sentence [`ranking_line`] prints, and the `reason` field of `--json`.
+fn lexical_reason(ranking: &Ranking) -> String {
+    if ranking.reason == ENCODER_LOADING_REASON {
+        return encoder_loading_line(read_encoder_status().as_ref(), &current_invocation());
+    }
+    if ranking.reason == ENCODER_FAILED_REASON {
+        let why = read_encoder_status()
+            .as_ref()
+            .map(embedder_failure_reason)
+            .unwrap_or_else(|| "the last encode did not answer".to_string());
+        return encoder_failed_search_line(&why);
+    }
+    if ranking.reason == "encoder unavailable" {
+        return encoder_missing_search_line();
+    }
+    ranking.reason.to_string()
+}
+
 /// The parenthetical on [`ranking_line`] when words are the mode this
 /// source is read in. Absent for a fallback, which keeps the reason.
 fn expected_word_note(reason: &str) -> Option<&'static str> {
     match reason {
-        "encoder unavailable" => Some("encoder not installed"),
         "local memory snapshot" => Some("local snapshot"),
         _ => None,
     }
@@ -14307,26 +14330,40 @@ fn json_millis(value: &Value) -> Option<u64> {
     })
 }
 
-/// Seconds to tell a person to wait before searching again.
+/// Seconds the writer says are left on the encoder load.
 ///
-/// The writer's remaining time when it sends one, otherwise
-/// [`search_wait`], and never zero: a load that has no clock still has
-/// a next step.
+/// `None` when the status does not name a remaining time. The search does
+/// not invent one from [`search_wait`]: that bound is how long this
+/// command waits, not how long the model takes.
 #[must_use]
-pub fn encoder_retry_secs(status: Option<&Value>) -> u64 {
-    if let Some(ms) = status.and_then(embedder_remaining_ms) {
-        return ms.div_ceil(1000).max(1);
-    }
-    search_wait().as_secs().max(1)
+pub fn encoder_retry_secs(status: Option<&Value>) -> Option<u64> {
+    status
+        .and_then(embedder_remaining_ms)
+        .map(|ms| ms.div_ceil(1000).max(1))
 }
 
 /// What a search prints when the encoder is present and still loading.
+///
+/// One sentence. It names `rerun`, the command to run again, and the
+/// writer's remaining time when [`encoder_retry_secs`] has one.
 #[must_use]
-pub fn encoder_loading_line(status: Option<&Value>) -> String {
+pub fn encoder_loading_line(status: Option<&Value>, rerun: &str) -> String {
+    match encoder_retry_secs(status) {
+        Some(secs) => {
+            format!("The encoder is loading and is ready in about {secs} s, so rerun `{rerun}`.")
+        }
+        None => format!("The encoder is loading, so rerun `{rerun}` when it is ready."),
+    }
+}
+
+fn encoder_failed_search_line(reason: &str) -> String {
     format!(
-        "Semantic ranking is still starting; rerun in about {} s for better matches",
-        encoder_retry_secs(status)
+        "The encoder failed ({reason}), so these rows match words; run `{ENCODER_RESTART_COMMAND}`."
     )
+}
+
+fn encoder_missing_search_line() -> String {
+    format!("matched by words (encoder not installed), so run `{ENCODER_INSTALL_COMMAND}`.")
 }
 
 fn encoder_has_answered_now() -> bool {
@@ -14536,12 +14573,7 @@ fn ranking_doc(ranking: Option<&Ranking>, mut doc: Value) -> String {
     let mode = ranking.map(|row| row.mode).unwrap_or("semantic");
     doc["ranking"] = Value::String(mode.to_string());
     if let Some(ranking) = ranking.filter(|row| row.mode == "lexical") {
-        let reason = if ranking.reason == ENCODER_LOADING_REASON {
-            encoder_loading_line(read_encoder_status().as_ref())
-        } else {
-            ranking.reason.to_string()
-        };
-        doc["reason"] = Value::String(reason);
+        doc["reason"] = Value::String(lexical_reason(ranking));
     }
     format!("{}\n", serde_json::to_string(&doc).unwrap_or_default())
 }
@@ -14597,8 +14629,7 @@ fn embedder_failure_reason(status: &Value) -> String {
 }
 
 fn encoder_not_installed_state() -> String {
-    "not installed. Search matches words, so run `cargo binstall --locked packset-embed`."
-        .to_string()
+    format!("not installed. Search matches words, so run `{ENCODER_INSTALL_COMMAND}`.")
 }
 
 /// The doctor row for the writer's encoder: loaded, loading, failed, or
@@ -14612,7 +14643,12 @@ pub(crate) fn encoder_status_row(status: &Value) -> Habitat {
             encoder_failed_state(&reason)
         }
     } else if encoder_cold(status) {
-        format!("loading. {}", encoder_loading_line(Some(status)))
+        match encoder_retry_secs(Some(status)) {
+            Some(secs) => {
+                format!("loading, about {secs} s left. Search matches words until then.")
+            }
+            None => "loading. Search matches words until it is ready.".to_string(),
+        }
     } else if encoder_has_answered(status) {
         "loaded".to_string()
     } else {
@@ -34007,7 +34043,26 @@ pub fn doctor_summary(rows: &[Habitat]) -> String {
         &working_parts(&words),
         off,
         recall_word_matching(rows),
+        word_match_note(rows),
     )
+}
+
+/// The parenthetical on a ready line when recall is matching words.
+/// A failed encoder is not described as missing.
+fn word_match_note(rows: &[Habitat]) -> &'static str {
+    if rows.iter().any(|row| {
+        row.name == "encoder"
+            && (row.state.starts_with("failed:") || row.state.starts_with(ENCODER_DEGRADED))
+    }) {
+        " (matched by words: the encoder failed)"
+    } else if rows
+        .iter()
+        .any(|row| row.name == "packset-embed" && row.state.starts_with("not runnable"))
+    {
+        " (matched by words: the encoder did not start)"
+    } else {
+        " (matched by words: the encoder is not installed; `ljos doctor --all` for why)"
+    }
 }
 
 /// The encoder crashed, or `packset-embed` does not start. Recall still
@@ -34062,8 +34117,9 @@ fn summary_line(
     working: &[&str],
     off: usize,
     degraded: bool,
+    note: &str,
 ) -> String {
-    let mut line = summary_verdict(down, damaged, working, degraded);
+    let mut line = summary_verdict(down, damaged, working, degraded, note);
     if degraded {
         line.push('\n');
         return line;
@@ -34077,7 +34133,13 @@ fn summary_line(
 }
 
 /// [`summary_line`] without the pointer to `ljos doctor --all`.
-fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str], degraded: bool) -> String {
+fn summary_verdict(
+    down: &[&str],
+    damaged: &[&str],
+    working: &[&str],
+    degraded: bool,
+    note: &str,
+) -> String {
     let silent: Vec<&str> = down
         .iter()
         .copied()
@@ -34106,19 +34168,17 @@ fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str], degraded: 
         format!("ljos is not ready: {why}.")
     };
     if degraded {
-        lexical_ready(verdict)
+        lexical_ready(verdict, note)
     } else {
         verdict
     }
 }
 
 /// The ready sentence, with the lexical label in place of the final period.
-fn lexical_ready(ready: String) -> String {
-    const NOTE: &str =
-        " (matched by words: the encoder is not installed; `ljos doctor --all` for why)";
+fn lexical_ready(ready: String, note: &str) -> String {
     match ready.strip_suffix('.') {
-        Some(body) => format!("{body}{NOTE}"),
-        None => format!("{ready}{NOTE}"),
+        Some(body) => format!("{body}{note}"),
+        None => format!("{ready}{note}"),
     }
 }
 
@@ -34132,15 +34192,23 @@ fn plain_part(name: &str) -> &str {
 
 /// The short doctor: the summary line, then only the rows that need
 /// action (`no` and `warn`) and an optional row of a part the line leaves
-/// out, each with the fix its state names.
+/// out, each with the fix its state names. An encoder that is not
+/// installed is one of those rows. A loaded encoder stays off this list.
 #[must_use]
 pub fn format_doctor_short(rows: &[Habitat]) -> String {
     let needs: Vec<Habitat> = rows
         .iter()
-        .filter(|h| shown_short(doctor_word(h), h.name))
+        .filter(|h| shown_short(doctor_word(h), h.name) || plain_encoder_row(h))
         .cloned()
         .collect();
     format!("{}{}", doctor_summary(rows), format_doctor(&needs))
+}
+
+/// The not-installed encoder, which plain `ljos doctor` prints so a
+/// word-only search has a command to run. Loading and failed rows are
+/// already `warn` and pass [`shown_short`].
+fn plain_encoder_row(row: &Habitat) -> bool {
+    row.name == "encoder" && row.state.starts_with("not installed")
 }
 
 /// Whether the short doctor prints a row, from its word and name. An
@@ -34394,7 +34462,13 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
             // The `without:` line carries the one pointer to the full rows.
             // A degraded encoder is one line of its own, not a parenthetical
             // on the ready line and not the doctor's warn row.
-            out.push_str(&summary_verdict(&down, &[], &working_parts(&words), false));
+            out.push_str(&summary_verdict(
+                &down,
+                &[],
+                &working_parts(&words),
+                false,
+                "",
+            ));
             out.push('\n');
             out.push_str(&act);
             if memory {
@@ -62354,7 +62428,7 @@ mod tests {
             };
             assert_eq!(failing(&rows), fails);
         }
-        let line = summary_line(&["note queue"], &[], &[], 0, false);
+        let line = summary_line(&["note queue"], &[], &[], 0, false, "");
         assert!(line.starts_with("ljos is not ready: note queue does not answer."));
     }
 
@@ -63317,16 +63391,16 @@ mod tests {
         let short = format_doctor_short(&rows);
         let lines: Vec<&str> = short.lines().collect();
         // The encoder is optional, so a missing one is an info row, not a
-        // reason the seat is not ready. The short doctor still names the
-        // pack, with its fix.
+        // reason the seat is not ready. Plain doctor still prints it, with
+        // the install command, and it still names the pack.
         assert_eq!(
             lines[0],
             "ljos is not ready: memory does not answer. Optional extras: `ljos doctor --all`."
         );
-        assert_eq!(lines.len(), 2, "{short}");
+        assert_eq!(lines.len(), 3, "{short}");
         assert!(lines[1].starts_with("no\tmemory\tno pack: run packset ensure"));
+        assert!(lines[2].starts_with("info\tencoder\tnot installed"));
         assert!(!short.contains("tracker"), "{short}");
-        assert!(!short.contains("encoder"), "{short}");
         assert!(format_doctor(&rows).contains("info\tencoder\t"));
     }
 
@@ -63343,7 +63417,7 @@ mod tests {
         let short = format_doctor_short(&rows);
         assert!(
             short.starts_with(
-                "ljos is ready: memory, tracker and command guard work (matched by words: the encoder is not installed; `ljos doctor --all` for why)"
+                "ljos is ready: memory, tracker and command guard work (matched by words: the encoder failed)"
             ),
             "{short}"
         );
@@ -63379,7 +63453,16 @@ mod tests {
         assert_eq!(doctor_word(&loading), "warn");
         assert_eq!(
             loading.state,
-            "loading. Semantic ranking is still starting; rerun in about 3 s for better matches"
+            "loading, about 3 s left. Search matches words until then."
+        );
+        let loading_quiet = row(serde_json::json!({
+            "available": true,
+            "answering": null
+        }));
+        assert_eq!(doctor_word(&loading_quiet), "warn");
+        assert_eq!(
+            loading_quiet.state,
+            "loading. Search matches words until it is ready."
         );
         let failed = row(serde_json::json!({
             "available": true,
@@ -65161,7 +65244,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             (&["note queue"], &["the note queue"], 6),
         ];
         for (down, damaged, off) in cases {
-            let line = summary_line(down, damaged, all, off, false);
+            let line = summary_line(down, damaged, all, off, false, "");
             assert!(line.trim_end().chars().count() <= 100, "{line}");
             assert!(!line.contains("pack"), "{line}");
         }
@@ -67939,19 +68022,28 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "answering": null,
             "remaining_ms": 4000
         }));
-        assert_eq!(super::encoder_retry_secs(Some(&loading)), 4);
+        assert_eq!(super::encoder_retry_secs(Some(&loading)), Some(4));
         assert_eq!(
-            super::encoder_loading_line(Some(&loading)),
-            "Semantic ranking is still starting; rerun in about 4 s for better matches"
+            super::encoder_loading_line(Some(&loading), "ljos search kiln"),
+            "The encoder is loading and is ready in about 4 s, so rerun `ljos search kiln`."
+        );
+        let quiet = status(serde_json::json!({
+            "available": true,
+            "answering": null
+        }));
+        assert_eq!(super::encoder_retry_secs(Some(&quiet)), None);
+        assert_eq!(
+            super::encoder_loading_line(Some(&quiet), "ljos search kiln"),
+            "The encoder is loading, so rerun `ljos search kiln` when it is ready."
         );
         let nested = status(serde_json::json!({
             "available": true,
             "answering": null,
             "load": {"remaining_ms": 1500.0}
         }));
-        assert_eq!(super::encoder_retry_secs(Some(&nested)), 2);
+        assert_eq!(super::encoder_retry_secs(Some(&nested)), Some(2));
         let eta = status(serde_json::json!({"eta_ms": 1}));
-        assert_eq!(super::encoder_retry_secs(Some(&eta)), 1);
+        assert_eq!(super::encoder_retry_secs(Some(&eta)), Some(1));
         assert!(super::encoder_lexical(&dead));
         let missing = status(serde_json::json!({
             "available": false, "answering": null
@@ -74381,7 +74473,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         };
         assert_eq!(
             ranking_line(&missing),
-            "matched by words (encoder not installed)\n"
+            "matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.\n"
         );
         let fallback = Ranking {
             mode: "lexical",

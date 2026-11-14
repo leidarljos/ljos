@@ -90,7 +90,7 @@ $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on tur
 remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
   id a6ae2751, next review 2026-11-12 21:40 +00:00
 $ ljos search "lexical default"
-matched by words (encoder not installed)
+matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
 shown 1 of 1.
 Place 1 is the first row.
 The score orders the row. It is not whether the sentence is true.

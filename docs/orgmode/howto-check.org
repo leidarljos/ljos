@@ -15,7 +15,7 @@ The path stands in for the binary.
 The scratch =PATH= holds only this =ljos=, so the sample does not show the other seat binaries.
 A release newer than the crates.io copy says =ahead of crates.io= on that program's row.
 That is the release you installed. Search without the encoder is the =encoder= row:
-=not installed. Search matches words=. A loaded encoder says =loaded=. One that is still starting says =loading= and about how long to wait. One whose last encode failed says =failed= and the reason. The =packset-embed= row names =sh scripts/install.sh=
+=not installed. Search matches words=. A loaded encoder says =loaded=. One that is still starting says =loading=, and about how long is left when the writer reports it. One whose last encode failed says =failed= and the reason. The =packset-embed= row names =sh scripts/install.sh=
 without =--no-embed=, or =cargo binstall=. =ljos statusline= works without =ljos-hud=.
 =ljos doctor= with no =--all= also prints the sitting gate. Under a runner it
 names the seat and what a push onto a protected branch waits for. With no

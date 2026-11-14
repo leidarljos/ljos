@@ -255,7 +255,15 @@ fn a_missing_encoder_is_unavailable_not_still_loading() {
     let doc: serde_json::Value = serde_json::from_str(json_out.trim())
         .unwrap_or_else(|err| panic!("search json did not parse ({err}): {json_out}"));
     assert_eq!(doc["ranking"], "lexical", "{doc}");
-    assert_eq!(doc["reason"], "encoder unavailable", "{doc}");
+    assert_eq!(
+        doc["reason"],
+        "matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.",
+        "{doc}"
+    );
+    assert!(
+        !json_out.contains("still loading") && !json_out.contains("is loading"),
+        "a missing encoder was described as loading: {json_out}"
+    );
 }
 
 #[test]
@@ -272,13 +280,14 @@ fn a_search_that_stays_cold_says_the_rows_were_ranked_by_words() {
     let said = format!("{stdout}{stderr}");
     assert!(out.status.success(), "{said}");
     assert!(
-        stderr
-            .contains("Semantic ranking is still starting; rerun in about 3 s for better matches"),
+        stderr.contains(
+            "The encoder is loading, so rerun `ljos search \"Carrollton Nov 23 morning timing\"` when it is ready."
+        ),
         "{said}"
     );
     assert!(
-        !stderr.contains("encoder is still loading"),
-        "the loading note was the old token: {said}"
+        !stderr.contains("about") && !stderr.contains("encoder is still loading"),
+        "a load with no remaining time invented a clock or used the old token: {said}"
     );
     assert!(
         !stdout.contains("ferry timetable"),
@@ -463,11 +472,10 @@ fn a_search_past_the_wait_says_to_rerun_and_names_the_ranking() {
         elapsed < Duration::from_secs(4),
         "the wait ran past LJOS_SEARCH_WAIT: {elapsed:?}\n{said}"
     );
-    assert!(
-        stderr
-            .contains("Semantic ranking is still starting; rerun in about 4 s for better matches"),
-        "{said}"
-    );
+    let again = "ljos search \"Carrollton Nov 23 morning timing\"";
+    let line = format!("The encoder is loading and is ready in about 4 s, so rerun `{again}`.");
+    assert!(stderr.contains(&line), "{said}");
+    assert_eq!(line.matches('.').count(), 1, "{line}");
     let as_json = search_waited(&pack, &home, &state, "1", true);
     let json_out = String::from_utf8_lossy(&as_json.stdout);
     let json_err = String::from_utf8_lossy(&as_json.stderr);
@@ -480,7 +488,8 @@ fn a_search_past_the_wait_says_to_rerun_and_names_the_ranking() {
         .unwrap_or_else(|err| panic!("search json did not parse ({err}): {json_out}"));
     assert_eq!(doc["ranking"], "lexical", "{doc}");
     assert_eq!(
-        doc["reason"], "Semantic ranking is still starting; rerun in about 4 s for better matches",
+        doc["reason"],
+        "The encoder is loading and is ready in about 4 s, so rerun `ljos search --json \"Carrollton Nov 23 morning timing\"`.",
         "{doc}"
     );
 }
