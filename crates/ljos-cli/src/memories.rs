@@ -71,6 +71,9 @@ pub struct Memory {
     pub verdict: Option<String>,
     /// Later wordings of the same lesson that reinforced it.
     pub aliases: Vec<String>,
+    /// Ticket the memory was filed on, from an `issue:ID` entity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 fn s(v: &Value) -> String {
@@ -131,6 +134,14 @@ impl Memory {
             earlier: 0,
             verdict: None,
             aliases: aliases_of(atom).map(str::to_string).collect(),
+            ticket: atom["entities"].as_array().and_then(|entities| {
+                entities.iter().find_map(|item| {
+                    item.as_str()
+                        .and_then(|tag| tag.strip_prefix("issue:"))
+                        .filter(|ticket| !ticket.is_empty())
+                        .map(str::to_string)
+                })
+            }),
         })
     }
 
@@ -517,28 +528,108 @@ pub fn merge(ids: &[String], text: Option<&str>, all: &[Memory]) -> Result<Strin
     replace(&olds, text, "merged")
 }
 
+/// The memories as a person reads them: a count, newest first, each claim
+/// wrapped to a terminal width. The id prefix names one memory in the list.
+#[must_use]
+pub fn list_page(shown: &[Memory]) -> String {
+    if shown.is_empty() {
+        return "no memories to review\n".to_string();
+    }
+    let labels = crate::scan::unique_prefixes(shown.iter().map(|m| m.id.as_str()));
+    let mut out = crate::scan::count_line("memories", shown.len(), shown.len(), "newest first");
+    out.push('\n');
+    for (memory, label) in shown.iter().zip(labels) {
+        out.push('\n');
+        out.push_str(&render_memory(memory, &label));
+    }
+    out
+}
+
 /// The memory as the review prints it: id, kind, text, then provenance.
 #[must_use]
 pub fn describe(m: &Memory) -> String {
-    let mut out = format!("{}  {}  {}\n", m.short_id(), m.kind, m.text);
-    out.push_str(&format!(
-        "    seat {}  harness {}  session {}  at {}  origin {}  {}{}\n",
-        dash(&m.seat),
-        dash(&m.harness),
-        dash(&m.session),
-        dash(&m.at),
-        m.origin,
-        use_label(m),
-        m.verdict
-            .as_deref()
-            .map(|v| format!("  verdict {v}"))
-            .unwrap_or_default()
+    render_memory(m, m.short_id())
+}
+
+fn render_memory(m: &Memory, label: &str) -> String {
+    let age = crate::age_of(
+        (!m.at.is_empty()).then_some(m.at.as_str()),
+        &crate::now_utc(),
+    );
+    let mut head = format!("{label}  {}", m.kind);
+    if !age.is_empty() {
+        head.push_str(", ");
+        head.push_str(&age);
+    }
+    if let Some(ticket) = m.ticket.as_deref().filter(|ticket| !ticket.is_empty()) {
+        head.push_str(", ticket ");
+        head.push_str(ticket);
+    }
+    let counts = use_label(m);
+    let (counts, earlier) = counts
+        .split_once("  earlier ")
+        .map(|(head, rest)| (head.to_string(), Some(format!("earlier {rest}"))))
+        .unwrap_or((counts, None));
+    let mut foot = format!("seat {}  origin {}  {counts}", dash(&m.seat), m.origin);
+    if let Some(verdict) = m.verdict.as_deref() {
+        foot.push_str("  verdict ");
+        foot.push_str(verdict);
+    }
+    let mut out = crate::scan::wrap(&head, crate::scan::COLS);
+    out.push('\n');
+    let text = m.text.trim();
+    if !text.is_empty() {
+        out.push_str(&crate::scan::wrap_hang(
+            text,
+            crate::scan::COLS,
+            "    ",
+            "    ",
+        ));
+        out.push('\n');
+    }
+    out.push_str(&crate::scan::wrap_hang(
+        &foot,
+        crate::scan::COLS,
+        "    ",
+        "    ",
     ));
+    out.push('\n');
+    if let Some(earlier) = earlier {
+        out.push_str(&crate::scan::wrap_hang(
+            &earlier,
+            crate::scan::COLS,
+            "    ",
+            "    ",
+        ));
+        out.push('\n');
+    }
+    if !m.harness.is_empty() || !m.session.is_empty() {
+        let where_from = format!("harness {}  session {}", dash(&m.harness), dash(&m.session));
+        out.push_str(&crate::scan::wrap_hang(
+            &where_from,
+            crate::scan::COLS,
+            "    ",
+            "    ",
+        ));
+        out.push('\n');
+    }
     if let Some(reason) = &m.reason {
-        out.push_str(&format!("    why: {reason}\n"));
+        out.push_str(&crate::scan::wrap_hang(
+            &format!("why: {reason}"),
+            crate::scan::COLS,
+            "    ",
+            "    ",
+        ));
+        out.push('\n');
     }
     for alias in &m.aliases {
-        out.push_str(&format!("    also written: {alias}\n"));
+        out.push_str(&crate::scan::wrap_hang(
+            &format!("also written: {alias}"),
+            crate::scan::COLS,
+            "    ",
+            "    ",
+        ));
+        out.push('\n');
     }
     out
 }

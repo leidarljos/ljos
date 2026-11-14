@@ -250,12 +250,11 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
             let shown = mem::list(&mem::live_atoms()?, &mem::reviews(), &f.filter());
             if json {
                 println!("{}", serde_json::to_string_pretty(&shown)?);
-            } else if shown.is_empty() {
-                println!("no memories to review");
             } else {
-                for m in &shown {
-                    print!("{}", mem::describe(m));
-                }
+                print!(
+                    "{}",
+                    ljos_cli::scan::for_reader(&mem::list_page(&shown), human_color())
+                );
             }
         }
         MemCmd::Review {
