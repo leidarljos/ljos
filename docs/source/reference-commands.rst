@@ -211,7 +211,7 @@ Commands
 ``mesh acl [SWARM...]``
    Stores: machine. Print who on the private network may connect to whom. The rules are the access policy ``mesh.toml`` implies. ``up`` and ``down`` do not read that file.
 ``mesh pull --seat SEAT --from DIR``
-   Stores: pack, tracker. Read another machine's memory files into a seat and keep a copy of the rows brought in. A lane is one machine's memory file. A missing directory prints ``Error: mesh: PATH does not exist. Create it, or pass a directory of <lane>.jsonl files`` and exits 1. A path that is a file prints ``Error: mesh: PATH is not a directory. Pass a directory of <lane>.jsonl files`` and exits 1. A memory store that stops the pull prints ``Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the seed with rows still missing, so run `ljos mesh pull --seat SEAT --from DIR`.`` and exits 1.
+   Stores: pack, tracker. Read another machine's memory files into a seat and keep a copy of the rows brought in. An unchanged export is not read again. The second line is ``exports skipped S, imported I``. A lane is one machine's memory file. A missing directory prints ``Error: mesh: PATH does not exist. Create it, or pass a directory of <lane>.jsonl files`` and exits 1. A path that is a file prints ``Error: mesh: PATH is not a directory. Pass a directory of <lane>.jsonl files`` and exits 1. A memory store that stops the pull prints ``Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the seed with rows still missing, so run `ljos mesh pull --seat SEAT --from DIR`.`` and exits 1.
 ``mesh push --seat SEAT --to DIR [--lane NAME]``
    Stores: pack. Write a seat's memories into a handoff directory as one lane file.
 ``mcp [ARGS...]``

@@ -16,6 +16,7 @@ Pull lane exports into a seat
 
    $ LJOS_SEAT=box ljos mesh pull --seat box --from /srv/handoff
    imported 12, unchanged 0, skipped 3 duplicates
+   exports skipped 0, imported 4
 
 ``--from`` is the handoff directory. A missing directory prints
 ``Error: mesh: PATH does not exist. Create it, or pass a directory of <lane>.jsonl files``
@@ -23,7 +24,8 @@ and exits 1. Create it, or pass a directory that exists. A path that is a
 file prints
 ``Error: mesh: PATH is not a directory. Pass a directory of <lane>.jsonl files``
 and exits 1. An empty directory prints
-``imported 0, unchanged 0, skipped 0 duplicates``. Each ``*.jsonl`` file is one lane, and the
+``imported 0, unchanged 0, skipped 0 duplicates`` and
+``exports skipped 0, imported 0``. Each ``*.jsonl`` file is one lane, and the
 lane name is the file name with ``.jsonl`` removed. A file whose name ends in
 ``.seed.jsonl`` is a seed already written for a seat, and ``pull`` leaves it
 unread. A line that is a header, or a line that is not a lesson, is left
@@ -33,7 +35,10 @@ The text's SHA-256 is the identity of a lesson. So is the lane plus the row
 id, when the line carries ``atom_id``, ``row_id`` or ``id``. The first copy
 is imported. A copy already in the pack is unchanged, and is not
 imported again. A repeated text in this same pull is a duplicate. The
-command prints one line, ``imported N, unchanged U, skipped M duplicates``.
+command prints ``imported N, unchanged U, skipped M duplicates``, then
+``exports skipped S, imported I``.
+``S`` is exports this run did not import.
+``I`` is exports whose bytes were new to the seat's record of that file.
 
 A new row is stored in the seat's import slot with the labels
 ``imported,unintegrated``. ``pull`` then integrates the seat's imports.
@@ -46,12 +51,36 @@ The atom stored for a lesson carries a packset tag ``lane:<name>`` for each
 lane that held the text, and ``seat:<seat>`` for the seat that received it.
 A lesson with no horizon becomes standing, so search ranks it with this
 seat's own memories. ``LJOS_SEAT`` is that seat, the same name as ``--seat``.
-A second pull of the same directory imports nothing. The seed bytes stay as
-they were.
+
+After an export is stored, the seat records that file's size, its
+modification time and a hash of its bytes.
+The next pull stats each export.
+When the size and the modification time match, the file is not read.
+When either has changed, the pull reads the file and hashes the bytes.
+The same bytes are not imported again, so a copy that only touched the file
+does not add a row.
+A second pull of an unchanged directory imports nothing and reads no export.
+The seed bytes stay as they were.
+
+Each export is stored before the next one is read.
+A pull that is killed, or that stops because the writer missed its deadline,
+leaves the finished exports in the seed.
+The export in progress is left out, so the seed never holds half of it.
+The next pull continues with the exports that are not stored yet.
+A row the writer already took is recorded once and is not posted again.
+
+On a terminal, pull prints one line per export,
+``mesh pull: NAME ACTION (N/TOTAL)``.
+``ACTION`` is ``imported N`` or ``skipped``.
+When standard error is not a terminal, those lines are omitted.
+The two summary lines are the output.
 
 The seed is ``<tracker>/.ljos/memory/mesh/<seat>/seed.jsonl``. Rows are sorted
 by the content hash. The file carries no clock, so the same lessons write
 the same bytes.
+The bytes land under a temporary name in that folder and take the real name
+by rename.
+The file is rewritten only when its bytes would change.
 
 ``pull`` takes an exclusive lock on the handoff directory and on the seat.
 Two pulls of one seat wait, and the seed holds one copy of each text.
@@ -66,8 +95,9 @@ A 408 uses ``the deadline passed before this request ran`` as ``CAUSE``. A secon
 503 uses the writer's line, or ``packsetd busy, retrying later``. A writer that
 is not answering uses the reason this seat prints for a down writer, and
 that reason names ``cargo install --locked packset`` or ``packset ensure``.
-Lessons already stored stay in the seed, and the next pull continues with
-the rows still missing. A row the writer did not take is one of those rows.
+Exports already stored stay in the seed.
+The export in progress is left out, and the next pull reads it again.
+A row the writer did not take is one of the rows in that export.
 
 Push a seat to the handoff
 ==========================

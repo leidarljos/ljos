@@ -103,8 +103,17 @@ No user owns a tag, so a node cannot tag itself into another swarm.
 `ljos mesh pull --seat S --from DIR` reads the lane `.jsonl` files in `DIR` into seat `S` and writes a seed at `<tracker>/.ljos/memory/mesh/<seat>/seed.jsonl`.
 The lane is the file name without `.jsonl`.
 A row already in the pack stays unchanged and is not imported again. The match is the text SHA-256, or that lane plus the row id (`atom_id`, `row_id` or `id`).
-The printed line is `imported N, unchanged U, skipped M duplicates`.
+The printed lines are `imported N, unchanged U, skipped M duplicates` and `exports skipped S, imported I`.
 `N` is new texts. `U` is texts or row ids already held. `M` is a repeated text in this pull.
+`S` is exports this run did not import. `I` is exports whose bytes were new to the seat's record of that file.
+After an export is stored, the seat records its size, modification time and a hash of its bytes.
+The next pull stats each file and does not read one whose size and time match.
+A changed time is hashed, and the same bytes are not imported again.
+Each export is stored before the next is read, so a stop keeps the finished exports and leaves the one in progress out.
+The next pull continues with the rest.
+On a terminal, one line per export names the file and the count.
+A pipe prints the two summary lines only.
+The seed is written by a temporary name and a rename, and only when its bytes would change.
 New rows land in the seat's import slot labelled `imported,unintegrated`.
 `pull` then integrates them. That is the same step as a full `ljos memory integrate`.
 Integrate deduplicates each row against memories already in the pack, posts a new one once, and relabels the row `imported,integrated`.
@@ -130,6 +139,7 @@ Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the see
 A 408 uses `the deadline passed before this request ran` as `CAUSE`.
 A second 503 uses the writer's line, or `packsetd busy, retrying later`.
 A writer that is not answering uses the reason this seat prints for a down writer, and that reason names `cargo install --locked packset` or `packset ensure`.
-Lessons already stored stay in the seed, and the next pull continues with the rows still missing.
-A row the writer did not take is one of those rows.
+Exports already stored stay in the seed.
+The export in progress is left out, and the next pull reads it again.
+A row the writer did not take is one of the rows in that export.
 [Move memory across lanes](source/howto-mesh.rst) has the commands.

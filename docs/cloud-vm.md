@@ -129,7 +129,9 @@ It reads `mesh.toml`. `mesh up` does not.
 
 `ljos mesh pull --seat S --from DIR` reads lane JSONL exports from a shared handoff directory into seat `S` and writes a deduplicated seed for that seat.
 A text or a lane row id already in the pack is unchanged. The command then integrates the new rows, the same step as a full `ljos memory integrate`, and relabels them `imported,integrated` so this seat's search ranks them.
-It prints `imported N, unchanged U, skipped M duplicates`.
+It prints `imported N, unchanged U, skipped M duplicates` and `exports skipped S, imported I`.
+An export whose size and modification time are unchanged is not read again.
+Each export is stored before the next is read, so a stop keeps the finished exports.
 Run it as `LJOS_SEAT=S ljos mesh pull --seat S --from DIR`.
 `ljos mesh push --seat S --to DIR` writes the seat's memories back as one lane file.
 A 503 from the pack is retried once after `Retry-After`, and a second 503, a 408, or a writer that is not answering stops the pull and exits 1.
