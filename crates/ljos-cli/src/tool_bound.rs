@@ -189,6 +189,16 @@ pub async fn blocking<T: Send + 'static>(
     .await
 }
 
+/// Drop a bound a previous test left on this thread.
+///
+/// The guard clears the bound on the thread that drops it. A guard moved
+/// to another thread leaves the bound behind, and the next test on this
+/// thread would treat every child as timed out.
+#[cfg(test)]
+pub(crate) fn disarm() {
+    THREAD.with(|slot| *slot.borrow_mut() = None);
+}
+
 /// Arm a bound on this thread. Tests use this. The guard clears it.
 #[cfg(test)]
 #[must_use]

@@ -13837,6 +13837,16 @@ pub fn arm_hook_wall_budget() -> WallGuard {
     arm_wall_budget_for(left)
 }
 
+/// Drop a wall budget a previous test left on this thread.
+///
+/// [`WallGuard`] restores the budget on the thread that drops it. A guard
+/// moved elsewhere leaves the deadline set, and a later `ps` on this thread
+/// is then a timeout rather than an answer.
+#[cfg(test)]
+fn disarm_wall() {
+    WALL_DEADLINE.with(|cell| cell.set(None));
+}
+
 /// Time left in the armed wall budget. `None` when this call is not armed.
 pub(crate) fn wall_left() -> Option<std::time::Duration> {
     let thread = WALL_DEADLINE.with(|cell| {
@@ -49556,6 +49566,22 @@ pub(crate) fn test_env_lock() -> EnvLock {
     }
 }
 
+/// Whether `tool` is missing, after the process `PATH` is the one the
+/// suite started with.
+///
+/// A test that has not taken [`test_env_lock`] can observe a `PATH` another
+/// test replaced for a moment. The lock is what puts that `PATH` back, so
+/// the check takes it unless this thread already holds it.
+#[cfg(test)]
+pub(crate) fn require_tool(tool: test_tools::Tool) -> bool {
+    if ENV_LOCK_HELD.with(std::cell::Cell::get) {
+        test_tools::halt(tool)
+    } else {
+        let _env = test_env_lock();
+        test_tools::halt(tool)
+    }
+}
+
 #[cfg(test)]
 pub(crate) use tests::{serve_sync_pack, SyncPack};
 
@@ -54773,6 +54799,10 @@ mod tests {
     #[test]
     fn a_failed_ps_on_macos_leaves_a_live_hold_alone_and_an_unreadable_git_cwd_holds_the_lock() {
         use std::os::unix::fs::PermissionsExt as _;
+        // A spent hook budget makes every `ps` an error, and an error is a
+        // live hold. This test is about the `ps` line, so it starts clean.
+        super::disarm_wall();
+        super::tool_bound::disarm();
         let dir = tempfile::tempdir().unwrap();
         let script = |name: &str, body: &str| -> PathBuf {
             let p = dir.path().join(name);
@@ -54807,8 +54837,16 @@ mod tests {
             !hold_alive_on_macos(&hold(u32::MAX, "claude"), &failing_ps),
             "a dead pid is not kept"
         );
+        let named = ps_parent_and_comm(&good_ps, me);
+        assert!(
+            matches!(&named, Ok(Some((_, comm))) if comm == "claude"),
+            "stand-in ps named {named:?}"
+        );
         assert!(hold_alive_on_macos(&hold(me, "claude"), &good_ps));
-        assert!(!hold_alive_on_macos(&hold(me, "other"), &good_ps));
+        assert!(
+            !hold_alive_on_macos(&hold(me, "other"), &good_ps),
+            "a different comm is not that process: {named:?}"
+        );
 
         let top = Path::new("/work/repo");
         assert!(!git_runs_in_ps(top, "100 /bin/bash\n", |_| None));
@@ -77718,7 +77756,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// holding the three atoms of its ticket.
     #[test]
     fn finish_seals_the_atoms_of_its_ticket_alone() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let _g = env_guard();

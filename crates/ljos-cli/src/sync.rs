@@ -7477,7 +7477,7 @@ mod tests {
 
     #[test]
     fn a_sealed_log_opens_for_a_recipient_and_not_for_another() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let _g = crate::test_env_lock();
@@ -7516,7 +7516,7 @@ mod tests {
     /// one could rename the other's half-written file into place.
     #[test]
     fn each_seal_writes_its_own_temp_file() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let _g = crate::test_env_lock();
@@ -8020,7 +8020,7 @@ mod tests {
 
     #[test]
     fn the_cloud_identity_opens_a_log_without_a_machine_key() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let _g = crate::test_env_lock();
@@ -8101,7 +8101,7 @@ mod tests {
 
     #[test]
     fn a_broken_cloud_file_is_not_passed_to_age() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let _g = crate::test_env_lock();
@@ -8208,7 +8208,7 @@ mod tests {
     /// tried with the cloud identity, even one the cloud key could open.
     #[test]
     fn a_box_scope_log_is_never_opened_with_the_cloud_identity() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let _g = crate::test_env_lock();
@@ -8252,7 +8252,7 @@ mod tests {
     /// in this host's cloud log, and keeps the primary log in place.
     #[test]
     fn adopt_reads_a_gone_hosts_cloud_log_with_only_the_cloud_identity() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let _g = crate::test_env_lock();
@@ -8340,7 +8340,7 @@ mod tests {
     /// on another VM wrote, and leaves the box log closed.
     #[test]
     fn a_sitting_on_one_cloud_vm_recalls_what_another_vm_learned() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let _g = crate::test_env_lock();
@@ -8471,7 +8471,7 @@ mod tests {
     /// with the machine key and reseal the plaintext to the cloud recipients.
     #[test]
     fn a_symlinked_cloud_log_is_not_adopted() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -8562,7 +8562,7 @@ mod tests {
 
     #[test]
     fn adopt_reads_a_gone_hosts_primary_log_without_the_cloud_identity() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -8702,7 +8702,7 @@ mod tests {
 
     #[test]
     fn a_machine_only_log_named_as_scope_cloud_is_not_adopted() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         for legacy in [false, true] {
@@ -8727,7 +8727,7 @@ mod tests {
 
     #[test]
     fn a_machine_only_log_named_as_scope_cloud_is_not_imported() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         for legacy in [false, true] {
@@ -8746,7 +8746,7 @@ mod tests {
     /// reads a peer's cloud log that names itself.
     #[test]
     fn a_cloud_log_with_its_header_opens_with_the_machine_key() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -8776,7 +8776,7 @@ mod tests {
     /// nothing in it says which host wrote it.
     #[test]
     fn a_legacy_cloud_log_is_left_unread() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -8849,7 +8849,7 @@ mod tests {
     /// it as the tracker's, and export would write this host's log there.
     #[test]
     fn a_symlinked_tracker_directory_is_not_read_or_written() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         for linked in [".ljos", ".ljos/atoms"] {
@@ -8906,7 +8906,7 @@ mod tests {
     /// read what was taken or to write it.
     #[test]
     fn a_symlinked_state_directory_is_not_read_or_written() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         for linked in ["sync", "sync/{id}", "sync/{id}/cloud", "sync/cloud"] {
@@ -8936,7 +8936,7 @@ mod tests {
     /// symlink at either directory, or at `.ljos`, is not followed.
     #[test]
     fn symlinked_user_rule_directories_are_not_read_or_written() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let rules = |id: &str, text: &str| {
@@ -9189,7 +9189,7 @@ mod tests {
     /// not swallow them, and the log is deleted only after that is visible.
     #[test]
     fn an_adopt_posts_each_issue_then_drops_the_log() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9273,7 +9273,7 @@ mod tests {
     /// so the commit that drops the gone log carries the adopted atoms.
     #[test]
     fn an_adopt_commit_carries_the_log_of_a_host_with_a_space() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9321,7 +9321,7 @@ mod tests {
     /// log, so the adopt commit leaves no file of that host behind.
     #[test]
     fn an_adopt_drops_the_gone_hosts_chunks() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9383,7 +9383,7 @@ mod tests {
     /// reads, so its stdin is fed while its stdout drains.
     #[test]
     fn a_log_past_the_pipe_buffers_opens() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9405,7 +9405,7 @@ mod tests {
     /// stopped a rebase on "Your local changes would be overwritten".
     #[test]
     fn the_atoms_driver_writes_only_the_file_git_hands_it() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9574,7 +9574,7 @@ mod tests {
     /// reads the same atoms the single file would carry.
     #[test]
     fn twenty_syncs_leave_the_base_alone() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9616,7 +9616,7 @@ mod tests {
     /// the next sync carries the atoms of other tickets.
     #[test]
     fn a_ticket_seal_adds_that_tickets_atoms_alone() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9674,7 +9674,7 @@ mod tests {
     /// whole once, and the sync after that writes a chunk over it.
     #[test]
     fn a_single_file_log_moves_to_chunks_on_its_first_write() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9734,7 +9734,7 @@ mod tests {
     /// under its digest and seals that chunk again.
     #[test]
     fn a_cut_chunk_is_left_unread_and_sealed_again() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9786,7 +9786,7 @@ mod tests {
     /// reads every atom.
     #[test]
     fn sixty_five_syncs_fold_chunks_over_one_base() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9828,7 +9828,7 @@ mod tests {
     /// whole seal, and a peer reads every atom.
     #[test]
     fn a_log_at_sixty_four_chunks_folds_instead_of_sealing_whole() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9872,7 +9872,7 @@ mod tests {
     /// instead. The next small change is a chunk over that new base.
     #[test]
     fn chunks_past_half_the_base_seal_the_log_whole() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9928,7 +9928,7 @@ mod tests {
     /// after it, and a gap ends the chunks.
     #[test]
     fn a_log_reads_as_its_base_and_chunks() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -9993,7 +9993,7 @@ mod tests {
 
     #[test]
     fn a_refused_post_keeps_the_log_and_its_sync_copies() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10027,7 +10027,7 @@ mod tests {
 
     #[test]
     fn an_echoed_sync_atom_is_not_treated_as_adopted() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10054,7 +10054,7 @@ mod tests {
 
     #[test]
     fn a_dry_run_prints_the_plan_and_writes_nothing() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10081,7 +10081,7 @@ mod tests {
 
     #[test]
     fn a_young_log_needs_force_and_a_dry_run_still_writes_nothing() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10113,7 +10113,7 @@ mod tests {
     /// again: the deletion already started.
     #[test]
     fn a_missing_log_is_resumed_from_head() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10164,7 +10164,7 @@ mod tests {
 
     #[test]
     fn an_import_retires_an_adopted_host_without_its_log() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10213,7 +10213,7 @@ mod tests {
 
     #[test]
     fn a_readded_log_is_imported_instead_of_retired() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10259,7 +10259,7 @@ mod tests {
 
     #[test]
     fn an_import_with_nothing_to_retire_still_says_there_are_no_logs() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10300,7 +10300,7 @@ mod tests {
     /// dropped is retired.
     #[test]
     fn an_import_keys_each_text_by_its_ticket() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let same: BTreeSet<String> = [crate::work_id("same words")].into();
@@ -10337,7 +10337,7 @@ mod tests {
     /// text the host dropped, and rewrites the file by memory.
     #[test]
     fn an_import_reads_a_taken_file_of_texts() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         import_over_texts(|root| taken_path(root, "cloud", "peer"));
@@ -10348,7 +10348,7 @@ mod tests {
     /// it goes once the tracker's own is written.
     #[test]
     fn an_import_reads_the_taken_file_trackers_shared() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         import_over_texts(|_| shared_taken_path("cloud", "peer"));
@@ -10406,7 +10406,7 @@ mod tests {
     /// tracker, and the next import does not read the shared path again.
     #[test]
     fn an_upgraded_tracker_retires_what_the_peer_dropped() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10450,7 +10450,7 @@ mod tests {
     /// The shared file goes only after the tracker's own is written.
     #[test]
     fn a_failed_taken_write_keeps_the_shared_file() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10473,7 +10473,7 @@ mod tests {
     /// the tracker's directory; host `..` named a sender of `sync:..`.
     #[test]
     fn an_import_skips_a_log_named_outside_host_and_scope_names() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10573,7 +10573,7 @@ mod tests {
 
     #[test]
     fn an_adopt_takes_every_scope_log_of_the_host() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10659,7 +10659,7 @@ mod tests {
 
     #[test]
     fn a_refused_extra_scope_keeps_every_log() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10685,7 +10685,7 @@ mod tests {
     /// The bad file stays; the one that opens is adopted.
     #[test]
     fn a_bad_ciphertext_keeps_that_scope_and_adopts_the_other() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10717,7 +10717,7 @@ mod tests {
     /// named as adopted. An empty cloud log opens and still has no atoms.
     #[test]
     fn adopt_summary_names_only_scopes_that_post() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -10759,7 +10759,7 @@ mod tests {
 
     #[test]
     fn a_young_extra_scope_blocks_the_adopt() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -11175,7 +11175,7 @@ mod tests {
 
     #[test]
     fn an_empty_primary_scope_still_refuses_to_export() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let _g = crate::test_env_lock();
@@ -11319,7 +11319,7 @@ mod tests {
 
     #[test]
     fn an_import_retires_atoms_when_the_extra_scope_is_gone() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -11419,7 +11419,7 @@ mod tests {
     /// `+` is before `.`. Import has to read the primary log first.
     #[test]
     fn import_jobs_reads_the_primary_log_before_an_extra_scope() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         // Another test puts a fake `age` on PATH. Without the lock this
@@ -11475,7 +11475,7 @@ mod tests {
     /// scope afterwards deleted that claim.
     #[test]
     fn a_text_moved_between_scopes_is_kept() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -11591,7 +11591,7 @@ mod tests {
     /// primary sender.
     #[test]
     fn an_extra_scope_log_is_imported_under_its_sender() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -11659,7 +11659,7 @@ mod tests {
     /// is taken. The primary log, sealed to someone else, is not.
     #[test]
     fn a_vm_import_with_only_the_cloud_key_takes_the_cloud_log() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -11983,7 +11983,7 @@ mod tests {
     /// another host's name is refused, and the host it names keeps it.
     #[test]
     fn a_headerless_cloud_log_is_not_taken_under_any_name() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -12045,7 +12045,7 @@ mod tests {
     /// removed scope is not a command.
     #[test]
     fn adopt_legacy_ignores_hostile_names_and_binds_the_host_with_equals() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -12105,7 +12105,7 @@ mod tests {
     /// the cloud identity, and retired what the headed log had added.
     #[test]
     fn a_headed_log_put_back_to_its_headerless_blob_retires_nothing() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -12146,7 +12146,7 @@ mod tests {
         // is what puts it back, so the age check has to take that lock.
         let missing = {
             let _env = crate::test_env_lock();
-            crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen)
+            crate::require_tool(crate::test_tools::Tool::AgeKeygen)
         };
         if missing {
             return;
@@ -12189,7 +12189,7 @@ mod tests {
     /// no file in the work tree.
     #[test]
     fn the_merge_driver_does_not_copy_a_symlinked_log_into_the_merge() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -12256,7 +12256,7 @@ mod tests {
     /// pinned blob once the box has written a headed log are all refused.
     #[test]
     fn a_legacy_log_is_read_only_as_the_blob_the_reader_pinned() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -12333,7 +12333,7 @@ mod tests {
     /// history and must not offer adoption of a headerless replacement.
     #[test]
     fn a_second_clone_does_not_adopt_a_host_whose_committed_log_was_headed() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -12401,7 +12401,7 @@ mod tests {
     /// clone sees that commit, and so does the shallow one once deepened.
     #[test]
     fn a_clone_missing_history_neither_offers_nor_pins_adopt_legacy() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -12510,7 +12510,7 @@ mod tests {
         // is what puts it back, so the age check has to take that lock.
         let missing = {
             let _env = crate::test_env_lock();
-            crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen)
+            crate::require_tool(crate::test_tools::Tool::AgeKeygen)
         };
         if missing {
             return;
@@ -12663,7 +12663,7 @@ mod tests {
     /// to adopt the forged blob.
     #[test]
     fn a_headed_log_behind_an_ours_merge_still_counts() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -12706,7 +12706,7 @@ mod tests {
     /// the headed mark, and a scope dropped from the config was still named.
     #[test]
     fn doctor_does_not_record_a_headed_log_or_name_a_removed_scope() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {
@@ -12763,7 +12763,7 @@ mod tests {
     /// reached through a symlinked parent, and a git worktree.
     #[test]
     fn honest_logs_import_through_linked_homes_parents_and_worktrees() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         if !crate::tool_installed("packsetd") {

@@ -7,8 +7,10 @@
 //!
 //! `vissue` is the row in `.github/sibling-pin`. `packsetd` is the version
 //! and stamp in `scripts/sibling-tools.sh`. `age-keygen` 1.1.1 is the `age`
-//! package the cargo test job installs on Ubuntu 24.04. A newer age-keygen
-//! still runs the test.
+//! package the cargo test job installs on Ubuntu 24.04. That binary's
+//! `--version` line is the number alone, so the check is that `age-keygen`
+//! is a file on `PATH`. A newer age-keygen still runs the test. The number
+//! in the skip line is the package to install.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

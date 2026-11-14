@@ -3021,7 +3021,7 @@ mod tests {
 
     #[test]
     fn user_rules_travel_sealed_to_the_scope() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let homes = Homes::new();
@@ -3059,7 +3059,7 @@ mod tests {
     /// machine's own is removed from the tracker when it seals.
     #[test]
     fn a_plaintext_rules_file_is_still_read_and_this_hosts_is_replaced() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let homes = Homes::new();
@@ -3093,7 +3093,7 @@ mod tests {
 
     #[test]
     fn user_rule_sync_follows_tracker_git() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let homes = Homes::new();
@@ -3143,7 +3143,7 @@ mod tests {
 
     #[test]
     fn two_homes_with_different_rules_converge() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let homes = Homes::new();
@@ -3186,7 +3186,7 @@ mod tests {
 
     #[test]
     fn a_newer_edit_wins_and_a_tombstone_beats_an_older_edit() {
-        if crate::test_tools::halt(crate::test_tools::Tool::AgeKeygen) {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
         let homes = Homes::new();
