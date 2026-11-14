@@ -1392,7 +1392,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3612,7 +3612,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3626,9 +3626,9 @@ dependencies = [
 
 [[package]]
 name = "packset-client"
-version = "0.17.6"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6d02baf92accabb7eaf52d9a5ee18c1820c8b5b6bcac3470714520cf956f813"
+checksum = "59be94b5b3c0dece724e1eac0e8c9f780ae9dfcda03dd3ac0204b6aa5523a390"
 dependencies = [
  "packset-core",
  "serde",
@@ -3639,9 +3639,9 @@ dependencies = [
 
 [[package]]
 name = "packset-core"
-version = "0.17.6"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "571424fd277d4d8d2fc6f65acb2b0ecc9ff2c08b95f20c281a6da53ec3cb4a90"
+checksum = "7a654d98b68812eb623a35526c92b2310b30c4f1e7f30f8c0751151ae2700bec"
 dependencies = [
  "rust-stemmers",
  "serde",
@@ -4462,7 +4462,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5101,10 +5101,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6145,7 +6145,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

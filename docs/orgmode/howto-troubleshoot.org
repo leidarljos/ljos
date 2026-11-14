@@ -19,8 +19,8 @@ Exit 1.
 #+begin_src text
 $ ljos doctor
 ljos is not ready: ljos-policyd, vissue, deedar, claimdag, packset, packsetd and memory do not answer. Optional extras: `ljos doctor --all`.
-no	packset	not on PATH, and crates.io lists 0.17.10, so run `cargo install --locked packset`.
-no	packsetd	not on PATH, and crates.io lists 0.17.10, so run `cargo install --locked packset`.
+no	packset	not on PATH, and crates.io lists 0.18.1, so run `cargo install --locked packset`.
+no	packsetd	not on PATH, and crates.io lists 0.18.1, so run `cargo install --locked packset`.
 no	memory	http://127.0.0.1:8761 does not answer. no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.
 #+end_src
 

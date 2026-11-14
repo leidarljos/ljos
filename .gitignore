@@ -138,3 +138,6 @@ docs/build/
 
 # Benchmark products. bench/hf/run.sh writes these. They are not source.
 bench/hf/out/
+
+# Python bytecode
+__pycache__/

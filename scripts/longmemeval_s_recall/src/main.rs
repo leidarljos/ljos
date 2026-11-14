@@ -69,7 +69,7 @@ const ISLAND_SEEDS: usize = 5;
 const ISLAND_HOPS: usize = 2;
 
 /// packset-core this program links, the same minor the seat's crate pins.
-const PACKSET_CORE: &str = "0.17.6";
+const PACKSET_CORE: &str = "0.18.1";
 
 struct Question {
     id: String,
@@ -778,7 +778,7 @@ mod tests {
         assert!(text.contains("\"recall@5\": 0.750000"));
         assert!(text.contains("\"questions\": 2"));
         assert!(text.contains("\"seconds\": 1.250"));
-        assert!(text.contains("\"packset\": \"0.17.6\""));
+        assert!(text.contains("\"packset\": \"0.18.1\""));
         assert!(text.contains(DATA_REV));
         let _ = std::fs::remove_dir_all(dir);
     }
