@@ -5,6 +5,227 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.42.0 (2026-11-13)
+
+### Features
+
+- A typo, a key in the wrong section, or a value of the wrong type produces a warning.
+  So does a missing or unreadable path, a file that does not parse, an unknown `LJOS_` variable, or a project file that shadows the home file.
+  Invalid config text names the file, the line and the column.
+  An unknown key or `LJOS_` name names the nearest valid one, and a wrong type names the key and the expected type.
+  `ljos doctor` names the file or the environment variable that set each value.
+  A hook and the MCP server print the warning and keep going.
+- `ljos completions` prints a bash, zsh or fish completion script.
+  Seat names and open ticket ids are completed when the local tracker is small enough to read.
+  `ljos` with no arguments prints the first commands and where the command reference is.
+  Each command's help includes one example.
+  `install.sh` prints the line that enables completion. It does not write that line into a shell startup file.
+- `ljos doctor --fix` creates a missing ljos home and config file, moves a stale lock or pid file aside when its process is gone, starts packsetd with `packset ensure`, and records a runner session seat.
+  A row it can repair ends with `run ljos doctor --fix`.
+  The command prints one line for each repair and one line for each problem it left.
+- `ljos offboard --harness` is the same flag as `--runner`, matching `ljos onboard`.
+  `ljos cards --cards` and `ljos sitting --dir` name the same card directory.
+- `ljos recall` adds a Code context section when `graphify-out/graph.json` is in the repository.
+  The section lists matching nodes with file and line, and a few edges tagged EXTRACTED or INFERRED.
+  `--no-graph` and `LJOS_GRAPHIFY=off` leave it out. A graph file whose schema version is not 1 is refused in that section.
+  `ljos_recall` returns the same section.
+- `ljos` with no arguments prints what ljos is, the seat it would use and where that seat came from, then search, remember, file and doctor.
+  The last line names the command reference.
+- `sh bench/hf/run.sh` repeats the LongMemEval_S BM25+ CPU run and writes `out/summary.json` and `out/per_question.csv`.
+  `sh bench/hf/upload.sh` publishes those files, the card and `run.sh` as a public dataset.
+
+### Fixes
+
+- A down writer stops `ljos mesh pull` on one line that names the cause and `ljos mesh pull` again. A lesson the writer did not take stays out of the seed so the next pull imports it.
+  `ljos memory integrate`, and a directory passed to `ljos memory import` or `ljos memory export`, name the command that fixes the failure.
+- A failed `ljos_finish` says the sitting is still open and to call it again.
+  It no longer says the claim is released.
+- A later write in the same second is the recent seat.
+  An older line with no fraction of a second still reads as the start of that second.
+- A lesson the pack refuses for length is kept on this machine only, and `ljos remember` says the hook does not show it and that `ljos search` still finds the copy.
+  `ljos search` marks that row `kept locally`, and the score line says `local, not in the pack`.
+  A text of more than two sentences says it was stored as several claims because a lesson is at most two sentences, and names `ljos search`.
+- A missing `ljos memory import` file is one line, and it names `ljos memory export --out`.
+- A missing program in an ljos-mcp tool result names `ljos doctor` for the install.
+  It no longer adds `cannot find binary path`.
+- A missing handoff directory and a down writer under a temporary home use the same next command as the other writer lines.
+  `ljos search`, `ljos remember` and `ljos recall` exit 75 when that line names `packset ensure`, and exit 1 when packset is not on PATH.
+  `ljos memory export`, `ljos memory import`, `ljos memory integrate` and `ljos mesh pull` name exit 1 in command help, matching the command reference.
+  The doctor page, the install page and the homepage quote those lines, and they no longer state a runner count or the packset LongMemEval figures.
+- A missing pack writer answers an ljos-mcp tool and the doctor with the install line or `packset ensure`.
+  The answer no longer repeats `Connection refused (os error 111)`.
+  The doctor `pack token` row says the token was not checked when that writer is down.
+- A missing runner command names the install and the onboard to run after it.
+  `ljos doctor` prints that row as a warning, and the seat stays ready.
+- A mistyped command or flag names the closest one and the command to run, and exits 2.
+  An unknown ticket id, and an id that matches more than one ticket, names the next command and exits 1.
+  `ljos remember` with an empty text or a text past 1000 characters exits 2 and names the command to run.
+  A search with no hits and a recall of an empty pack name the next command.
+  A write with no seat, a seat the tracker does not list, and a ticket another seat already claimed each name one next command.
+  A half-written user-rules file names the rewrite command, and so does a damaged note queue.
+- A pack writer for another home is left out of the down line when this seat did not ask for its port and did not start it.
+  The line names the port that was asked for, or the writer this seat started.
+  An empty home asks for a port that is already in use. A writer on the default port is not that seat's writer.
+- A recall whose writer stays down after it is started names `packset ensure`, instead of saying only that the pack is busy.
+- A runner session id is read from this process only.
+  An id that exists only on a parent does not name the seat.
+- A search with no pack token names `PACKSET_HOME`, `PACKSET_TOKEN_FILE` or `PACKSET_TOKEN` in the tool result.
+  The same line is what stderr prints.
+- A seat setup makes the state directory, so the first doctor does not warn that it is missing.
+- A seat that adds someone else is told to add itself, and can add itself afterwards.
+  A missing memory id, card, wake, mesh directory, campaign file or encoder names the next command.
+  The installer's force-push sample is not written to the bypass log.
+  Common commands include an example in their help.
+- A session id does not replace a person's recorded seat.
+  It still replaces another runner's session seat left by the last write.
+- A session id in this process names the seat when another runner wrote last on this machine.
+- A write in a session uses that session's seat.
+  The unknown-host line is printed only when the write really uses that seat.
+- A writer that refuses this seat's token names `packset ensure`, and the lesson is not queued for a send that would be refused again.
+- An exported `LJOS_SEAT` stays quiet when the only other name is the runner session.
+  The session id still tags the holder.
+  A seat from a map, a record or the client still warns. `LJOS_SEAT` still writes.
+- An onboarded tracker keeps memory imports and mesh seeds under that tracker, even before `vissue.toml` exists.
+- An unlisted seat that adds another name is refused as `seat-unlisted` and exits 2.
+  The line still says to add this seat first, then the other name, and it names `vissue.toml`.
+- Doctor and onboard name the stores memory, tickets, deeds and the signing key.
+  The signing key row no longer calls the key a 32-byte seed.
+- Error, warning and hint lines are one sentence, then one next command written as `, so run` and the command in backticks, ending with a period.
+  The no-hits line for the search `which fusion` stays as it is, and the README quote of it stays valid.
+  A source check refuses a period followed by `Run`.
+- Search says a row was matched by words or by meaning, and whether an agent wrote it.
+  The order in the list is not a judgement of whether the sentence is true.
+- Tests of the MCP server with an empty home create their own temporary directory.
+- The README quickstart test accepts a ready line that omits the command guard.
+  That happens when the home is temporary and the doctor says the guard stays out of that sandbox.
+  The README still quotes the line from a home where the guard is on.
+- The installer makes the state directory, so the first doctor does not warn that it is missing.
+  When no coding tool is installed, the script names the ticket tracker, the memory writer, and the deed store.
+  The deed store keeps signed records of the work.
+- The installer names the cause and the next command.
+  It does this for a failed download, an unsupported OS, a missing curl or tar, a bin dir that is not first on PATH, a repeated install, a running server, or a hand edit in the way.
+  `ljos upgrade`, `ljos onboard`, `ljos offboard` and `ljos uninstall` print the same kind of line.
+- The installer's force-push sample keeps the pack home, so it does not warn that the search has no token.
+  The bypass log still goes to the sample directory.
+- Two sessions of one runner no longer share a seat when `LJOS_SEAT` is unset.
+  Claude Code, Codex and Cursor each sit as the runner's name plus a short id of that session.
+  Mail names the session it came from, and an unknown recipient lists every seat.
+  Search and recall still read the runner as one family. An exported `LJOS_SEAT` is the seat.
+- `install.sh` installs vissue, claimdag and deedar at the versions in `.github/sibling-pin`.
+  `--latest` leaves an unpinned repository at its latest release.
+- `ljos consensus` opens with which option the ballots pick, and whether that clears a push.
+  The count and the weighted settle stay on the lines under that verdict.
+- `ljos doctor` names a missing seat, a tracker root that is missing or not writable, a missing program, and a registry that did not answer, each with the command that fixes it.
+  That tracker case exits 1.
+  A seat nobody named stays a warning.
+- `ljos doctor` prints the seat source row in every case, including a named seat and a recent write.
+  A read that matched no rule still says it uses every seat.
+  A write that matched no rule names the `unknown-<host>` seat it fell back to.
+- `ljos file` outside a git checkout names the default project and `ljos file TITLE -p NAME`.
+- `ljos file` prints `project: NAME` when the tracker leaves that line out.
+  The id stays on standard output, and the project line is the first line of the rest.
+- `ljos finish` on a ticket claimed by another seat says that seat and `ljos send`.
+- `ljos finish` says the ticket is finished.
+  Whether related memories were linked is printed with `--verbose`.
+- `ljos hook` reads a bare command on stdin as an argv and prints the lessons that bear on it.
+- `ljos memories review --edit` says `ljos memories list` leaves a kept row out, and names `ljos memories list --all` and `ljos forget` for the new id.
+  An id that matches nothing names `ljos memories list --all --user` and `ljos search`.
+  A search with no pack token says the rows are stored lessons, and prints that once.
+- `ljos memory integrate --dry-run` reports a text the pack already holds as held, which is what an apply that posts nothing does.
+- `ljos mesh up` and `ljos mesh status` exit non-zero when they cannot do what was asked.
+  `ljos mesh status` names `ljos mesh up` when tailscale is not on PATH.
+  `ljos mesh down` still exits 0 when the machine is not on the mesh.
+- `ljos onboard --harness claude` writes the MCP server into `~/.claude.json`.
+  The `claude` program is not required, and other keys in that file stay.
+  `ljos onboard --harness codex` writes the skill into `~/.agents/skills`.
+  Claude Code, Cursor and Codex each print the files and `ljos doctor --all` as the next command.
+  Running the command again leaves those files as they are.
+- `ljos onboard` on a machine with no coding tool says to install an agent, then run `ljos onboard`.
+  `ljos onboard --example` lists the names.
+- `ljos onboard` says the deed store lists the signing key, and does not print the key.
+- `ljos ready --mine -p PROJECT` names only that project's plans.
+- `ljos recall` of an id the tracker does not hold names `ljos search`, `ljos ready` and `ljos file`.
+  An issue with no lesson of its own says so and names `ljos search` and `ljos remember`.
+  `related` lists lessons matched by the title or the tags and not filed on the issue.
+- `ljos remember` says a paragraph was stored as several claims because a lesson is at most two sentences, then names `ljos search` once.
+- `ljos remember`, `ljos search`, `ljos recall`, the prompt hook and the pack tools name what is down and the one command that fixes it when no writer answers.
+  A lesson stored while the writer is down is said to be queued, and the next run sends it.
+  `ljos mesh push` names a queued lesson instead of `pushed 0 memories`.
+- `ljos search`, `ljos recall`, `ljos ready` and the prompt hook fit an 80-column terminal.
+  Each human page names its section, says shown N of M, and names the command that lists the rest.
+  A pipe and `NO_COLOR` carry no colour codes.
+  `--json` and the MCP rows are unchanged.
+- `ljos seat` names the variable in this process that gave a session its seat, including after a write.
+  A session with no id says so on that line, and the notice names `export LJOS_SEAT=NAME`.
+- `ljos show`, `ljos finish` and `ljos file --parent` name `ljos ready` when the ticket id is not in the tracker.
+- `longmemeval_s_recall` accepts packset-core 0.17.6, which is the crate the lock names.
+  Its download is revision `98d7416c24c778c2fee6e6f3006e7a073259d48f` of `xiaowu0162/longmemeval-cleaned`, and the sha256 pin is unchanged.
+
+### Documentation
+
+- A how-to for two agents on one repository: the seat each session gets, mail between them, and how they split the tickets.
+  Search and recall stay one family for a runner. A session with no id is fixed by `export LJOS_SEAT=NAME`.
+- A how-to page covers installing graphify, running `/graphify`, and reading the code context from `ljos recall`.
+  The comparison page notes that graphify maps the code, and ljos remembers what agents learned and tracks their work.
+- Command help opens with one plain line. Each of the ten daily commands shows an example.
+  The command reference names their flags and exits, and notes that `ljos inbox` writes a receipt.
+  A test fails when that flag list and command help differ.
+- Getting started names the deed store, the search row typed at a terminal, and the line bob's claim prints.
+  Running doctor in a checkout that has `.ljos/gates.toml` names that file.
+- Getting started shows the missing config row doctor prints, and the search miss with its backticks.
+  The hook sentence uses the word runner.
+- The README and the getting-started page list each install failure and the command that fixes it.
+- The README and the getting-started page quote the lines a current install prints.
+  A clean doctor warns when no seat is named.
+  Votes cast from one shell are counted on that shell, and the consensus sample includes the push lines and the influence line.
+  The runner count, the LongMemEval figures and an unmeasured cosine are no longer stated as results of this tree.
+- The README and the runner how-to give one command for Claude Code, one for Cursor and one for Codex.
+  Each section says to run `ljos doctor --all` and read the runner mcp row.
+- The README links the LongMemEval_S retrieval dataset and the command that repeats the run.
+- The README names the doctor's `sitting-gate` row the way the command prints it.
+  A search that shares no word with the stored text is quoted with the next command that line names.
+- The README opens with the two-command install and a recorded recall.
+  `ljos onboard` finds Claude Code, Cursor and Codex and registers each one.
+  A lesson comes back on the next prompt with no seat, sitting or ticket.
+- The README's recorded recall shows the 80-column hook page.
+- The command reference lists `ljos show` and `ljos memory export`, `import`, `integrate` and `imports`, including the mesh seed path.
+- The doctor how-to says what `ljos doctor --fix` repairs and what it leaves alone.
+- The environment reference lists every `ljos.toml` key and every `LJOS_`, packset and vissue variable with its default.
+- The getting started search sample, the hook sample and the recall how-to quote the 80-column pages.
+- The getting-started doctor sample uses the idle sitting-gate word and the config row a clean install prints.
+  A search with no shared word prints `No hits for "...", so run ...`.
+  The force-push hook sample says when `sitting-gate` is added.
+  The graphify page names `graphify update` and a pip install.
+- The getting-started ticket transcript includes the claim's tracker commit, and the lines a plan sitting prints.
+- The how-to pages for seats, runners, recall, memory, handover, doctor, mesh, sittings, mail, votes, personas, judge and eb-stack follow the commands as they print.
+- The memory how-to and the command reference say when a long sentence stays out of the pack, and what `ljos recall` prints for a missing id, an issue with no lesson, and a related lesson.
+- The mesh and memory pages quote the pull stop line and the import, export and integrate lines.
+- The page quotes the doctor rows.
+  Those rows cover a missing writer, seat, tracker or binary. They also cover an MCP entry, and a registry that did not answer.
+- The seat pages no longer treat the client name as the seat. The protocol and the claim tool match that.
+  `LJOS_SEAT`, a `seat=` line or `seats.toml` names it.
+  A write with none of those uses `unknown-` and the host name.
+- The tools page names ljos_mail_search and ljos_mail_show, and ljos_finish takes issue and lesson.
+- `ljos onboard` at a terminal onboards every runner it finds.
+  A pipe, or onboard in json form, prints the ljos-mcp entry to paste.
+
+### Removals
+
+- The identity check no longer compares a commit's author date with its committer date.
+  A wrong author, a wrong committer, or a message trailer still fails.
+
+### Miscellaneous
+
+- A missing memory import file is labelled `input-warning`, and `ljos search --attempts` shows that label.
+- A test that needs age-keygen, packsetd or pinned vissue checks for the tool first and skips with one line naming the tool, the version and the command that installs it.
+  LJOS_TEST_REQUIRE_TOOLS=1 fails that test on the same line, and the cargo test job sets it.
+- The MCP tool list measures 8,057 tokens for the core set and 18,011 for all fifty-two tools.
+- The README quickstart commands are run, in order, on a fresh seat.
+- The release installer check expects the missing-archive line for an install from archives on disk.
+  A missing download names the rustc a source build needs. Cargo is not started.
+- The seat setup test restores the environment variables it changed.
+
+
 ## 0.41.11 (2026-11-13)
 
 ### Fixes
