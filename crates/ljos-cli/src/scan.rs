@@ -485,13 +485,17 @@ pub fn no_hits_line(query: &str, explain: bool) -> String {
 }
 
 /// A search before anything has been stored. A shorter query would miss too,
-/// so the next command is the one that stores a lesson.
+/// so the next command is the one that stores a lesson. One word is quoted
+/// in that command. Several words stay `TEXT`, because no one word is the lesson.
 #[must_use]
 pub fn empty_store_line(query: &str) -> String {
-    format!(
-        "{}, so run `ljos remember \"TEXT\"`.",
-        no_hits_head(query.trim())
-    )
+    let query = query.trim();
+    let next = if one_word(query) {
+        remember_command(query)
+    } else {
+        "ljos remember \"TEXT\"".to_string()
+    };
+    format!("{}, so run `{next}`.", no_hits_head(query))
 }
 
 /// [`empty_store_line`] on one page, wrapped to [`COLS`].
@@ -532,7 +536,34 @@ fn next_search(query: &str) -> String {
         }
         return format!("ljos search {best}");
     }
+    if one_word(query) {
+        return remember_command(query);
+    }
     "ljos remember \"TEXT\"".to_string()
+}
+
+/// One whitespace-separated query, with nothing to shorten it to.
+fn one_word(query: &str) -> bool {
+    let word = query.trim();
+    !word.is_empty() && !word.chars().any(char::is_whitespace)
+}
+
+/// `ljos remember "WORD"` for one query word. A control character, or a
+/// word that is not one token, keeps the `TEXT` placeholder.
+fn remember_command(query: &str) -> String {
+    let word = query.trim();
+    if !one_word(word) || word.chars().any(char::is_control) {
+        return "ljos remember \"TEXT\"".to_string();
+    }
+    let mut quoted = String::from("\"");
+    for ch in word.chars() {
+        if matches!(ch, '"' | '\\' | '$' | '`') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    format!("ljos remember {quoted}")
 }
 
 fn search_hint(query: &str, limit: usize, asks: bool) -> String {

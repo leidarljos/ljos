@@ -770,7 +770,7 @@ enum Cmd {
     /// rows, the line is `Nothing relevant was found.` A search that found
     /// nothing prints `No hits for QUERY` and the next command:
     /// `ljos search WORD` when QUERY has more than one word, otherwise
-    /// `ljos remember "TEXT"`. A busy memory store ranks by words
+    /// `ljos remember "WORD"` with that one word in quotes. A busy memory store ranks by words
     /// and still returns a hit that names the subject. While the encoder is
     /// still loading, the search waits `LJOS_SEARCH_WAIT` seconds (3 when
     /// unset) and then ranks by meaning. If it is still loading, one line

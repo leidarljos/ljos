@@ -18,6 +18,22 @@ fn an_empty_store_names_remember() {
         ljos_cli::scan::empty_store_line("lexical default"),
         "No hits for \"lexical default\", so run `ljos remember \"TEXT\"`."
     );
+    assert_eq!(
+        ljos_cli::scan::empty_store_line("fusing"),
+        "No hits for fusing, so run `ljos remember \"fusing\"`."
+    );
+    assert_eq!(
+        ljos_cli::scan::no_hits_line("fusing", false),
+        "No hits for fusing, so run `ljos remember \"fusing\"`."
+    );
+    assert_eq!(
+        ljos_cli::scan::no_hits_line("zircon-missing", false),
+        "No hits for zircon-missing, so run `ljos remember \"zircon-missing\"`."
+    );
+    assert_eq!(
+        ljos_cli::scan::no_hits_line("a\"b", false),
+        "No hits, so run `ljos remember \"a\\\"b\"`."
+    );
 }
 
 #[test]

@@ -2,4 +2,4 @@ status 0
 stderr:
 matched by meaning
 stdout:
-No hits for zzzznotaword, so run `ljos remember "TEXT"`.
+No hits for zzzznotaword, so run `ljos remember "zzzznotaword"`.
