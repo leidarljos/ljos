@@ -154,8 +154,8 @@ fn a_missing_encoder_warns_and_recall_restarts_it() {
     );
     assert!(text.contains(ljos_cli::ENCODER_RESTART_COMMAND), "{text}");
     assert!(
-        text.contains("search is a word match"),
-        "the warning does not say the search is a word match: {text}"
+        text.contains("Search matches words"),
+        "the warning does not say the search matches words: {text}"
     );
     let before = std::fs::read_to_string(&marker).unwrap_or_default();
     assert!(

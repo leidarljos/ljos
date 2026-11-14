@@ -14562,11 +14562,57 @@ pub fn encoder_lexical(status: &Value) -> bool {
         && embedder.get("answering").is_none_or(Value::is_null)
 }
 
+/// One line when the last encode did not answer. The reason is the
+/// writer's when it sends one.
+pub(crate) fn encoder_failed_state(reason: &str) -> String {
+    format!("failed: {reason}. Search matches words, so run `{ENCODER_RESTART_COMMAND}`.")
+}
+
 pub(crate) fn encoder_degraded_state() -> String {
-    format!(
-        "{ENCODER_DEGRADED}: packset-embed is not running and search is a word match, \
-         so run `{ENCODER_RESTART_COMMAND}`."
-    )
+    encoder_failed_state("the last encode did not answer")
+}
+
+fn embedder_failure_reason(status: &Value) -> String {
+    let embedder = &status["embedder"];
+    for key in ["error", "reason"] {
+        if let Some(text) = embedder.get(key).and_then(Value::as_str) {
+            let text = text.lines().next().unwrap_or("").trim();
+            if !text.is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+    "the last encode did not answer".to_string()
+}
+
+fn encoder_not_installed_state() -> String {
+    "not installed. Search matches words, so run `cargo binstall --locked packset-embed`."
+        .to_string()
+}
+
+/// The doctor row for the writer's encoder: loaded, loading, failed, or
+/// not installed.
+pub(crate) fn encoder_status_row(status: &Value) -> Habitat {
+    let state = if encoder_failed(status) {
+        let reason = embedder_failure_reason(status);
+        if reason == "the last encode did not answer" {
+            encoder_degraded_state()
+        } else {
+            encoder_failed_state(&reason)
+        }
+    } else if encoder_cold(status) {
+        format!("loading. {}", encoder_loading_line(Some(status)))
+    } else if encoder_has_answered(status) {
+        "loaded".to_string()
+    } else {
+        encoder_not_installed_state()
+    };
+    let ok = state == "loaded";
+    Habitat {
+        name: "encoder",
+        state,
+        ok,
+    }
 }
 
 fn encoder_restart_mark() -> PathBuf {
@@ -32248,38 +32294,18 @@ pub fn doctor_seat() -> Vec<Habitat> {
         // Old user rules with no basis stay visible until the person keeps
         // them. The count is a warning; the seat still starts.
         out.push(user_rules_row());
-        // The dense ballot: without it the pack ranks by words alone, and an
-        // island's seeds are weaker than the agent may assume.
+        // The encoder: loaded, still loading, failed, or not installed.
+        // Without it the pack ranks by words alone.
         out.push(
             match pack()
                 .map_err(|e| anyhow::anyhow!("{e:#}"))
                 .and_then(|c| c.status(None).map_err(anyhow::Error::from))
             {
                 Ok(status) => {
-                    let available = status["embedder"]["available"].as_bool().unwrap_or(false);
-                    let answering = status["embedder"]["answering"].as_bool();
-                    if answering == Some(true) {
+                    if status["embedder"]["answering"].as_bool() == Some(true) {
                         forget_encoder_restart(&status);
                     }
-                    Habitat {
-                        name: "encoder",
-                        state: if available {
-                            "dense ballot on".to_string()
-                        } else if answering == Some(false) {
-                            // The row used to say packsetd would restart the
-                            // child on the next search. That child is packsetd's,
-                            // and a failed call leaves `answering` false until a
-                            // later one succeeds. Name the command that replaces
-                            // the writer so the next search can start the child.
-                            encoder_degraded_state()
-                        } else {
-                            "off; search is lexical. The encoder is optional: packset-embed \
-                         links ONNX Runtime 1.28; `cargo binstall --locked packset-embed` \
-                         takes the release build, beside packsetd"
-                                .to_string()
-                        },
-                        ok: available,
-                    }
+                    encoder_status_row(&status)
                 }
                 Err(e) => Habitat {
                     name: "encoder",
@@ -33482,9 +33508,15 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "search" && !row.ok {
         return "warn";
     }
-    // The encoder child died. Recall still runs, on words alone, and the
-    // seat still starts. The row names the command that replaces the writer.
-    if row.name == "encoder" && !row.ok && row.state.starts_with(ENCODER_DEGRADED) {
+    // The encoder is loading or the last encode failed. Recall still runs,
+    // on words alone, and the seat still starts. A failed row names the
+    // command that replaces the writer. A loading row says when to rerun.
+    if row.name == "encoder"
+        && !row.ok
+        && (row.state.starts_with(ENCODER_DEGRADED)
+            || row.state.starts_with("failed:")
+            || row.state.starts_with("loading"))
+    {
         return "warn";
     }
     // The binary is on PATH and did not start. Same warning: the loader
@@ -33603,7 +33635,9 @@ pub fn doctor_summary(rows: &[Habitat]) -> String {
 /// ready.
 fn recall_word_matching(rows: &[Habitat]) -> bool {
     rows.iter().any(|h| {
-        (h.name == "encoder" && !h.ok && h.state.starts_with(ENCODER_DEGRADED))
+        (h.name == "encoder"
+            && !h.ok
+            && (h.state.starts_with(ENCODER_DEGRADED) || h.state.starts_with("failed:")))
             || (h.name == "packset-embed" && h.state.starts_with("not runnable"))
     })
 }
@@ -33901,7 +33935,12 @@ fn is_memory_noise_line(line: &str) -> bool {
 }
 
 fn memory_row(name: &str, state: &str) -> bool {
-    (name == "encoder" && (state.starts_with(ENCODER_DEGRADED) || state.contains("lexical")))
+    (name == "encoder"
+        && (state.starts_with(ENCODER_DEGRADED)
+            || state.starts_with("failed:")
+            || state.starts_with("loading")
+            || state.starts_with("not installed")
+            || state.contains("lexical")))
         || (name == "packset-embed" && state.starts_with("not runnable"))
         || (name == "pack" && (state.contains("busy") || state.contains(PACK_READ_BUSY_LINE)))
 }
@@ -62911,7 +62950,7 @@ mod tests {
         );
         assert!(short.contains("warn\tencoder\t"), "{short}");
         assert!(short.contains(ENCODER_RESTART_COMMAND), "{short}");
-        assert!(short.contains("search is a word match"), "{short}");
+        assert!(short.contains("Search matches words"), "{short}");
         let full = format!(
             "== doctor\nok\tmemory\tanswers\nwarn\tencoder\t{}\n{LEXICAL_ONLY_LINE}== claim\nclaimed Software-x for seat\n",
             encoder_degraded_state()
@@ -62921,6 +62960,51 @@ mod tests {
         assert!(sat.contains(MEMORY_DEGRADED_LINE.trim_end()), "{sat}");
         assert!(!sat.contains("lexical-only"), "{sat}");
         assert!(!sat.contains(ENCODER_DEGRADED), "{sat}");
+    }
+
+    #[test]
+    fn doctor_names_the_encoder_loaded_loading_or_failed() {
+        let row = |embedder: serde_json::Value| {
+            super::encoder_status_row(&serde_json::json!({ "embedder": embedder }))
+        };
+        let loaded = row(serde_json::json!({"available": true, "answering": true}));
+        assert!(loaded.ok, "{}", loaded.state);
+        assert_eq!(loaded.state, "loaded");
+        assert_eq!(doctor_word(&loaded), "ok");
+        let loading = row(serde_json::json!({
+            "available": true,
+            "answering": null,
+            "remaining_ms": 2500
+        }));
+        assert!(!loading.ok);
+        assert_eq!(doctor_word(&loading), "warn");
+        assert_eq!(
+            loading.state,
+            "loading. Semantic ranking is still starting; rerun in about 3 s for better matches"
+        );
+        let failed = row(serde_json::json!({
+            "available": true,
+            "answering": false,
+            "error": "the runtime is missing\nsecond line"
+        }));
+        assert_eq!(doctor_word(&failed), "warn");
+        assert_eq!(
+            failed.state,
+            format!(
+                "failed: the runtime is missing. Search matches words, so run `{}`.",
+                ENCODER_RESTART_COMMAND
+            )
+        );
+        let missing = row(serde_json::json!({"available": false, "answering": null}));
+        assert!(!missing.ok);
+        assert_eq!(doctor_word(&missing), "info");
+        assert!(
+            missing
+                .state
+                .starts_with("not installed. Search matches words"),
+            "{}",
+            missing.state
+        );
     }
 
     #[test]
