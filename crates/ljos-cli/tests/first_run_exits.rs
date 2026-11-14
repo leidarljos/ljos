@@ -255,7 +255,7 @@ fn a_sitting_on_a_missing_issue_exits_without_claiming() {
     );
     assert_eq!(
         stderr.trim(),
-        format!("issue {MISSING} not found, so run `ljos ready`.")
+        format!("issue {MISSING} not found. `ljos ready` lists the open tickets.")
     );
     assert!(
         !stdout.contains("is yours"),

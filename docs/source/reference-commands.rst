@@ -13,7 +13,9 @@ A command exits 0 when it did what was asked.
 A bad command, a bad flag, or a bad flag value exits 2.
 A runtime failure exits 1.
 That is a missing program, a ticket the tracker does not hold, a store that is missing, read-only or full, a pack that was turned off, or a network error while upgrading.
-A memory writer that is busy or slow exits 75, and the line is ``pack busy, try again``.
+A memory writer that is busy or slow exits 75.
+A search says ``pack busy, try again``.
+A remember that queued the lesson says to retry with ``ljos remember``.
 Every failure is one line on stderr.
 The line says what went wrong and the command that fixes it.
 ``LJOS_DEBUG=1`` or ``--verbose`` prints the cause chain after that line.

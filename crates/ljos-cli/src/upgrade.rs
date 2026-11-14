@@ -309,14 +309,16 @@ fn latest_release(repo: &str) -> Result<Option<String>> {
 pub fn unreachable_release(repo: &str, why: &str) -> String {
     let why = why.split_whitespace().collect::<Vec<_>>().join(" ");
     format!(
-        "upgrade: could not reach the {repo} release ({why}), and the network must be up, so run `ljos upgrade`."
+        "could not reach the {repo} release ({why}). Check the network, then run `ljos upgrade`."
     )
 }
 
 /// The newest published ljos release's version, from the forge.
 fn latest() -> Result<String> {
     latest_release("ljos")?.ok_or_else(|| {
-        anyhow::anyhow!("upgrade: the latest release has no tag, so run `ljos upgrade VERSION`.")
+        anyhow::anyhow!(
+            "The latest release has no tag. Name the version with `ljos upgrade VERSION`."
+        )
     })
 }
 

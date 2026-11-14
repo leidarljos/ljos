@@ -101,7 +101,7 @@ fn a_pressure_503_queues_a_lesson_the_gate_would_refuse() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let queued = LAST_QUEUE.with(|slot| slot.borrow().clone());
     assert!(
-        stderr.contains("the lesson is queued"),
+        stderr.contains("lesson is queued"),
         "stderr:\n{stderr}\nstdout:\n{stdout}"
     );
     assert!(

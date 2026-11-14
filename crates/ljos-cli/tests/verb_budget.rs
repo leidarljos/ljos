@@ -166,7 +166,7 @@ fn a_silent_pack_does_not_hold_a_remember() {
         "remember waited {took:?}\n{said}"
     );
     assert_eq!(out.status.code(), Some(75), "{said}");
-    assert!(said.contains("pack busy, try again"), "{said}");
+    assert!(said.contains("Retry later with `ljos remember`"), "{said}");
 }
 
 #[test]

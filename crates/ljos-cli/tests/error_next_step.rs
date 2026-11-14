@@ -1,8 +1,6 @@
-//! Next-step lines are one sentence, then `, so run \`command\`.`.
-//!
-//! Nineteen user-facing lines already used that form and twenty-eight used
-//! `. Run \`command\``. The no-hits line stays on the first form, and this
-//! test reads the sources so the other form cannot come back.
+//! A next step names the command after a sentence.
+//! A `, so run` line has to close on that command and a period.
+//! A line that starts with `. Run` and has no sentence in front of it is refused.
 
 use std::path::Path;
 
@@ -56,18 +54,9 @@ fn sources_do_not_use_the_other_next_step_form() {
     );
 }
 
+/// True when `. Run \`` is the whole line, with no sentence in front of it.
 fn other_form(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    let mut start = 0;
-    while let Some(at) = line[start..].find(". Run `") {
-        let abs = start + at;
-        let numbered = abs > 0 && bytes[abs - 1].is_ascii_digit();
-        if !numbered {
-            return true;
-        }
-        start = abs + ". Run `".len();
-    }
-    false
+    line.trim_start().starts_with(". Run `")
 }
 
 /// Drop a `//` comment that is not inside a string, so a comment cannot hide

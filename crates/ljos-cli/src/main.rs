@@ -2428,7 +2428,7 @@ fn bad_value(err: &clap::Error, args: &[String]) -> Option<String> {
     let cmd = command_head(args);
     let help = help_of(&cmd);
     Some(format!(
-        "ljos: {cmd} {flag} {value} is not a valid value, so run `{help}`."
+        "{cmd}: {flag} does not accept {value}. The values it takes are in `{help}`."
     ))
 }
 
@@ -2443,7 +2443,14 @@ fn missing_argument(err: &clap::Error, args: &[String]) -> Option<String> {
         .unwrap_or_else(|| "an argument".to_string());
     let cmd = command_head(args);
     let help = help_of(&cmd);
-    Some(format!("ljos: {cmd} needs {missing}, so run `{help}`."))
+    if cmd == "usage" {
+        return Some(
+            "usage needs a start day. Pass it as `ljos usage --since YYYY-MM-DD`.".to_string(),
+        );
+    }
+    Some(format!(
+        "{cmd} needs {missing}. `{help}` lists what to pass."
+    ))
 }
 
 fn command_head(args: &[String]) -> String {
@@ -4463,9 +4470,7 @@ fn run_command() -> Result<()> {
                 Some("any") => None,
                 Some(d) => {
                     chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
-                        anyhow::anyhow!(
-                            "search: --valid-at {d} is not a day (YYYY-MM-DD or any), so run `ljos search --valid-at YYYY-MM-DD QUERY`."
-                        )
+                        anyhow::anyhow!("search: --valid-at takes YYYY-MM-DD or any, not {d}.")
                     })?;
                     Some(d.to_string())
                 }
@@ -5306,9 +5311,7 @@ fn run_command() -> Result<()> {
                 format!("restart {restart}: permanent, transient, or temporary")
             })?;
             let exit = ljos_cli::plugin::ExitKind::parse(&exit).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "supervise: --exit {exit} is not clean or crash, so run `ljos supervise {name} --harness {harness} --exit clean --at {at}`."
-                )
+                anyhow::anyhow!("supervise: --exit takes clean or crash, not {exit}.")
             })?;
             let failures = failures
                 .split(',')

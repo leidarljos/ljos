@@ -20205,9 +20205,7 @@ pub fn set_validity(from: Option<&str>, to: Option<&str>) -> Result<()> {
                 } else {
                     "--valid-to"
                 };
-                anyhow::anyhow!(
-                    "remember: {flag} {d} is not a day (YYYY-MM-DD), so run `ljos remember {flag} YYYY-MM-DD TEXT`."
-                )
+                anyhow::anyhow!("remember: {flag} takes a day written YYYY-MM-DD, not {d}.")
             })?;
             tags.push(format!("{prefix}{d}"));
         }
@@ -21211,8 +21209,7 @@ pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> R
 /// Why a session-end note is not posted when this conversation has no
 /// sitting. Packset keeps a `note` only on a ticket. It has no form for
 /// an unverified note that names none, so the write is not attempted.
-pub const NOTE_WITHOUT_TICKET: &str =
-    "this conversation holds no sitting, and packset keeps a note only on a ticket, so run `ljos sitting`.";
+pub const NOTE_WITHOUT_TICKET: &str = "no open sitting. Start one with `ljos sitting`.";
 
 /// Store `text` as an unattached note and return the one label line.
 /// A note with no ticket is kept. It is not a refusal and it is not filed.
@@ -21251,10 +21248,10 @@ fn missing_tool_line(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     for (bin, cmd) in TOOLS {
         if lower.contains(&format!("{bin} not on path")) {
-            return format!("{bin} not on PATH, so run `{cmd}`.");
+            return format!("{bin} is not on PATH. Install it with `{cmd}`.");
         }
     }
-    "a required program is not on PATH, so run `ljos doctor`.".to_string()
+    "A required program is not on PATH. `ljos doctor` names the install.".to_string()
 }
 
 /// Whether the cause chain is `LJOS_DEBUG=1` or this command passed `--verbose`.
@@ -21335,12 +21332,12 @@ fn storage_line(err: &anyhow::Error, again: &str) -> Option<String> {
     let words = os_words(code);
     if code == libc::ENOSPC || code == libc::EDQUOT || code == libc::EFBIG {
         return Some(format!(
-            "the disk is full ({words}), so free space and run `{again}`."
+            "The disk is full ({words}). Free some space, then run `{again}` again."
         ));
     }
     if code == libc::EROFS || code == libc::EACCES {
         return Some(format!(
-            "the store is not writable ({words}), so run `ljos doctor`."
+            "The store is not writable ({words}). `ljos doctor` names the directory to fix."
         ));
     }
     None
@@ -21352,17 +21349,18 @@ fn pack_turned_off(err: &anyhow::Error) -> bool {
 }
 
 fn off_pack_line(err: &anyhow::Error) -> String {
-    let mut line = pack_down_line();
-    if format!("{err:#}").contains("queued") {
-        let waiting = queued_lesson_count();
-        if waiting == 1 {
-            line.push_str("; 1 lesson is queued for the next send");
-        } else if waiting > 1 {
-            line.push_str(&format!("; {waiting} lessons are queued for the next send"));
-        }
+    let waiting = if format!("{err:#}").contains("queued") {
+        queued_lesson_count()
+    } else {
+        0
+    };
+    match waiting {
+        0 => "this seat has packs turned off (PACKSET_URL=off). Run `unset PACKSET_URL` to turn them on.".to_string(),
+        1 => "this seat has packs turned off (PACKSET_URL=off); 1 lesson is queued. Run `unset PACKSET_URL` to send it.".to_string(),
+        n => format!(
+            "this seat has packs turned off (PACKSET_URL=off); {n} lessons are queued. Run `unset PACKSET_URL` to send them."
+        ),
     }
-    line.push_str(", so run `unset PACKSET_URL`.");
-    line
 }
 
 fn ticket_line(err: &anyhow::Error) -> Option<String> {
@@ -21370,8 +21368,15 @@ fn ticket_line(err: &anyhow::Error) -> Option<String> {
     if is_ticket_fault(err) {
         return Some(top);
     }
-    if top.starts_with("issue ") && top.contains(" not found") && !top.contains("so run `") {
-        return Some(format!("{top}, so run `ljos ready`."));
+    if let Some(id) = top
+        .strip_prefix("issue ")
+        .and_then(|rest| rest.strip_suffix(" not found"))
+    {
+        if !id.is_empty() && !id.contains(' ') {
+            return Some(format!(
+                "issue {id} not found. `ljos ready` lists the open tickets."
+            ));
+        }
     }
     None
 }
@@ -21410,10 +21415,10 @@ pub fn user_fault_for(err: &anyhow::Error, again: &str) -> String {
         return line;
     }
     if top.contains("another writer held") || top.contains("still locked") {
-        if top.contains("so run `") {
+        if top.contains('`') {
             return top;
         }
-        return format!("{top}, so run `ljos doctor`.");
+        return format!("{top} Wait for that writer to finish, then run the command again.");
     }
     with_next_cause(err, &top)
 }
@@ -21682,10 +21687,12 @@ fn queue_busy_lesson(text: &str) {
 #[must_use]
 pub fn shed_queue_line(fault: &str) -> String {
     match busy_queue_line() {
-        Some(line) if line.contains("was not queued") => {
-            format!("{fault}, and the lesson was not queued, so run `ljos doctor`.")
-        }
-        Some(_) => format!("{fault}, and the lesson is queued, so run `ljos search`."),
+        Some(line) if line.contains("was not queued") => format!(
+            "{fault}. The lesson was not queued. Retry later with `ljos remember` once the writer answers."
+        ),
+        Some(_) => format!(
+            "{fault}. The lesson is queued and will be sent on the next call. Retry later with `ljos remember`."
+        ),
         None => fault.to_string(),
     }
 }
@@ -21695,8 +21702,12 @@ pub fn shed_queue_line(fault: &str) -> String {
 #[must_use]
 pub fn busy_queue_line() -> Option<&'static str> {
     match BUSY_QUEUE.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => Some("pack busy, try again, and the lesson is queued, so run `ljos search`."),
-        2 => Some("pack busy, try again, and the lesson was not queued, so run `ljos doctor`."),
+        1 => Some(
+            "pack busy: the lesson is queued and will be sent on the next call. Retry later with `ljos remember`.",
+        ),
+        2 => Some(
+            "pack busy: the lesson was not queued. Retry later with `ljos remember` once the writer answers.",
+        ),
         _ => None,
     }
 }
@@ -38845,7 +38856,7 @@ fn tracker_misses(err: &anyhow::Error, issue: &str) -> bool {
 /// A ticket id the tracker does not hold, with the commands that list
 /// lessons and tickets.
 fn unknown_ticket(issue: &str) -> anyhow::Error {
-    anyhow::anyhow!("issue {issue} not found, so run `ljos ready`.")
+    anyhow::anyhow!("issue {issue} not found. `ljos ready` lists the open tickets.")
 }
 
 /// Whether `err` is a ticket lookup sentence ([`unknown_ticket`] or
@@ -38853,7 +38864,7 @@ fn unknown_ticket(issue: &str) -> anyhow::Error {
 #[must_use]
 pub fn is_ticket_fault(err: &anyhow::Error) -> bool {
     let text = err.to_string();
-    text.starts_with("issue ") && text.contains(", so run `ljos ")
+    text.starts_with("issue ") && (text.contains("`ljos ready`") || text.contains("`ljos show "))
 }
 
 /// The sentence for an id the tracker does not hold as one ticket.
@@ -38864,7 +38875,7 @@ pub fn is_ticket_fault(err: &anyhow::Error) -> bool {
 pub fn ticket_refusal(id: &str) -> Option<String> {
     let id = id.trim();
     if id.is_empty() {
-        return Some("issue id is empty, so run `ljos ready`.".to_string());
+        return Some("The issue id is empty. `ljos ready` lists the open tickets.".to_string());
     }
     let layout = vissue_core::Layout::resolve(None, None).ok()?;
     let layouts = vissue_core::Router::load(layout.clone())
@@ -38915,7 +38926,9 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
     }
     prefixes.sort();
     match prefixes.as_slice() {
-        [] => Some(format!("issue {id} not found, so run `ljos ready`.")),
+        [] => Some(format!(
+            "issue {id} not found. `ljos ready` lists the open tickets."
+        )),
         [one] => Some(format!(
             "issue {id} not found, and the closest is {one}, so run `ljos show {one}`."
         )),
@@ -49946,7 +49959,10 @@ mod tests {
         let err = super::unknown_ticket("kiln");
         let text = err.to_string();
         assert!(text.contains("issue kiln not found"), "{text}");
-        assert!(text.contains("so run `ljos ready`"), "{text}");
+        assert!(
+            text.contains("`ljos ready` lists the open tickets"),
+            "{text}"
+        );
         assert!(!text.contains("`ljos file`"), "{text}");
         let wrapped = anyhow::anyhow!("vissue failed (exit 1): issue kiln not found");
         assert!(super::issue_missing(&wrapped, "kiln"));

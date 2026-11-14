@@ -141,7 +141,10 @@ fn an_unknown_ticket_names_ready_and_exits_1() {
     let said = text(&out);
     assert_eq!(out.status.code(), Some(1), "{said}");
     let line = one_line(&out.stderr);
-    assert_eq!(line, "issue demo-none not found, so run `ljos ready`.");
+    assert_eq!(
+        line,
+        "issue demo-none not found. `ljos ready` lists the open tickets."
+    );
     assert!(out.stdout.is_empty(), "{said}");
 }
 

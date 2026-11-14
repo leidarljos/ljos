@@ -254,12 +254,12 @@ fn session_end_without_a_sitting_does_not_post() {
         "a note was stored with no sitting\n{report}"
     );
     assert!(
-        report.contains("holds no sitting") && report.contains("only on a ticket"),
+        report.contains("no open sitting") && report.contains("`ljos sitting`"),
         "the finish did not say why the write was skipped:\n{report}"
     );
     no_http_refusal(&report);
     assert_eq!(
-        report.matches("holds no sitting").count(),
+        report.matches("no open sitting").count(),
         1,
         "more than one skip line:\n{report}"
     );

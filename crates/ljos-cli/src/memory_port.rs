@@ -2901,6 +2901,7 @@ const RULES: &[(&str, &str, &str)] = &[
     ("R07", "the pack would refuse this copy", "writer-pending"),
     ("R07", "still queued", "writer-pending"),
     ("R08", "keeps a note only on a ticket", "unattached-note"),
+    ("R08", "no open sitting", "unattached-note"),
     ("R09", "review was not shown", "review-not-shown"),
     ("R10", "approval was not verified", "approval-unverified"),
     ("R11", "no memory starts with", "review-input-warning"),

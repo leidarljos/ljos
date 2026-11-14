@@ -280,7 +280,7 @@ fn vissue_shim() {
 const SYSTEM: &[&str] = &[
     "sh", "env", "mktemp", "date", "cp", "chmod", "mkdir", "rm", "mv", "cat", "grep", "sed", "awk",
     "find", "uname", "wc", "tr", "head", "tail", "cut", "sort", "dirname", "basename", "sleep",
-    "timeout", "git", "ps", "id",
+    "timeout", "git", "ps", "id", "touch",
 ];
 
 fn on_path(name: &str) -> Option<PathBuf> {

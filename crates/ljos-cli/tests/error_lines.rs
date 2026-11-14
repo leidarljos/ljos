@@ -121,7 +121,7 @@ fn a_turned_off_pack_names_unset_and_exits_1() {
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "PACKSET_URL=off: this seat has no pack on purpose; 1 lesson is queued for the next send, so run `unset PACKSET_URL`."
+        "this seat has packs turned off (PACKSET_URL=off); 1 lesson is queued. Run `unset PACKSET_URL` to send it."
     );
     assert!(!said.contains("Caused by"), "{said}");
     assert!(out.stdout.is_empty(), "{said}");
@@ -150,7 +150,7 @@ fn a_slow_writer_names_search_and_exits_75() {
     assert_eq!(out.status.code(), Some(75), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "pack busy, try again, and the lesson is queued, so run `ljos search`."
+        "pack busy: the lesson is queued and will be sent on the next call. Retry later with `ljos remember`."
     );
 }
 
@@ -162,7 +162,7 @@ fn a_missing_tracker_program_names_the_install_and_exits_1() {
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "vissue not on PATH, so run `cargo install --locked vissue-cli`."
+        "vissue is not on PATH. Install it with `cargo install --locked vissue-cli`."
     );
 }
 
@@ -174,7 +174,7 @@ fn a_missing_claim_program_names_the_install_and_exits_1() {
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "claimdag not on PATH, so run `cargo install --locked claimdag-cli`."
+        "claimdag is not on PATH. Install it with `cargo install --locked claimdag-cli`."
     );
 }
 
@@ -186,7 +186,7 @@ fn an_unknown_ticket_on_a_sitting_names_ready_and_exits_1() {
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "issue demo-gone not found, so run `ljos ready`."
+        "issue demo-gone not found. `ljos ready` lists the open tickets."
     );
 }
 
@@ -198,7 +198,7 @@ fn an_unknown_ticket_on_a_timeline_names_ready_and_exits_1() {
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "issue demo-gone not found, so run `ljos ready`."
+        "issue demo-gone not found. `ljos ready` lists the open tickets."
     );
 }
 
@@ -210,7 +210,7 @@ fn a_note_with_no_sitting_names_sit() {
     assert_eq!(out.status.code(), Some(0), "{said}");
     assert_eq!(
         one_line(&out.stdout),
-        "label unattached-note: this conversation holds no sitting, and packset keeps a note only on a ticket, so run `ljos sitting`."
+        "label unattached-note: no open sitting. Start one with `ljos sitting`."
     );
     assert!(out.stderr.is_empty(), "{said}");
 }
@@ -226,7 +226,7 @@ fn a_bad_limit_names_help_and_exits_2() {
     assert_eq!(out.status.code(), Some(2), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "ljos: search --limit nope is not a valid value, so run `ljos search --help`."
+        "search: --limit does not accept nope. The values it takes are in `ljos search --help`."
     );
 }
 
@@ -238,7 +238,7 @@ fn a_missing_since_names_help_and_exits_2() {
     assert_eq!(out.status.code(), Some(2), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "ljos: usage needs --since <SINCE>, so run `ljos usage --help`."
+        "usage needs a start day. Pass it as `ljos usage --since YYYY-MM-DD`."
     );
 }
 
@@ -258,7 +258,7 @@ fn a_bad_day_names_the_flag_and_exits_2() {
     assert_eq!(out.status.code(), Some(2), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "remember: --valid-from yesterday is not a day (YYYY-MM-DD), so run `ljos remember --valid-from YYYY-MM-DD TEXT`."
+        "remember: --valid-from takes a day written YYYY-MM-DD, not yesterday."
     );
 }
 
@@ -282,7 +282,7 @@ fn a_bad_exit_kind_names_the_command_and_exits_2() {
     assert_eq!(out.status.code(), Some(2), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "supervise: --exit banana is not clean or crash, so run `ljos supervise demo --harness shell --exit clean --at 1`."
+        "supervise: --exit takes clean or crash, not banana."
     );
 }
 
@@ -292,7 +292,7 @@ fn a_failed_upgrade_download_names_the_retry() {
     assert_eq!(
         ljos_cli::upgrade::unreachable_release("ljos", why),
         format!(
-            "upgrade: could not reach the ljos release ({why}), and the network must be up, so run `ljos upgrade`."
+            "could not reach the ljos release ({why}). Check the network, then run `ljos upgrade`."
         )
     );
 }
@@ -322,7 +322,7 @@ fn a_read_only_store_names_doctor_and_exits_1() {
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        format!("the store is not writable ({words}), so run `ljos doctor`.")
+        format!("The store is not writable ({words}). `ljos doctor` names the directory to fix.")
     );
     assert!(!said.contains("os error"), "{said}");
 }
@@ -335,7 +335,7 @@ fn a_full_disk_names_the_command_again() {
     let words = os_words(libc::ENOSPC);
     assert_eq!(
         line,
-        format!("the disk is full ({words}), so free space and run `{again}`.")
+        format!("The disk is full ({words}). Free some space, then run `{again}` again.")
     );
     assert!(!line.contains("os error"));
     assert!(!line.contains('\n'));
@@ -346,7 +346,7 @@ fn a_full_disk_names_the_command_again() {
     assert_eq!(
         ljos_cli::user_fault_for(&read_only, again),
         format!(
-            "the store is not writable ({}), so run `ljos doctor`.",
+            "The store is not writable ({}). `ljos doctor` names the directory to fix.",
             os_words(libc::EROFS)
         )
     );
@@ -366,7 +366,7 @@ fn debug_prints_the_cause_after_the_line() {
     assert_eq!(lines.len(), 2, "{err}");
     assert_eq!(
         lines[0],
-        "PACKSET_URL=off: this seat has no pack on purpose; 1 lesson is queued for the next send, so run `unset PACKSET_URL`."
+        "this seat has packs turned off (PACKSET_URL=off); 1 lesson is queued. Run `unset PACKSET_URL` to send it."
     );
     assert!(lines[1].contains("packset url missing"), "{err}");
     assert!(!err.contains("Caused by"), "{err}");
