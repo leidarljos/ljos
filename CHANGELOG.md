@@ -5,6 +5,29 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.43.1 (2026-11-14)
+
+### Fixes
+
+- A second `ljos memory import` of a file already stored prints `nothing new: N rows already present` and does not take the writer or call packset.
+  `ljos memory integrate --all` records a watermark, and a second run of an unchanged import does no work.
+  `--json` on `ljos memory import` and `ljos memory integrate` adds `imported`, `unchanged`, `skipped` and `reason`.
+- A word search ranks by BM25 over split identifiers, with a title or a tag counted above the body, a bonus when the query words sit together, and a small boost for this seat.
+  A query whose rows do not cover enough of its words prints `No close matches for "..."`, and names a broader query.
+  `ljos search --json` adds `close_matches` when that happens, and keeps `ranking` and `reading`.
+- `ljos doctor` prints one encoder row when the encoder is loading, has failed, or is not installed, and leaves a ready encoder off that list.
+  A search that falls back while the encoder is loading names the remaining time when packsetd sends `embedder.remaining_ms`, and the command to rerun, in one sentence.
+  A failed or missing encoder names the command that fixes it.
+  The wait stays `LJOS_SEARCH_WAIT`.
+- `ljos proposals` answers an empty queue without reading the pack or taking the writer lock.
+  Open rows are matched from the lesson index or a filtered search, not a scan of every memory.
+  A busy memory service is given one second, then the list is the local snapshot and the line is `memory service busy; listed from the local snapshot`.
+
+### Documentation
+
+- The two-agents how-to quotes the word-ranking score this build prints for the lesson stored in the other session.
+
+
 ## 0.43.0 (2026-11-14)
 
 ### Features

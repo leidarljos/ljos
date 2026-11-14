@@ -2,7 +2,7 @@
 #+options: toc:nil num:nil
 
 # [[[cog import ljos_version as v; v.lines("A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos {version}.")]]]
-A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.43.0.
+A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.43.1.
 # [[[end]]]
 
 Do the sections in order. They install ljos, store a lesson, search it, and open a day's work as a plan.
