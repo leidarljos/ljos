@@ -1,7 +1,7 @@
 //! `ljos`: one seat over the habitats. Each habitat keeps its own crate.
 
 use anyhow::{bail, Context, Result};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 mod help_groups;
 mod shell_complete;
@@ -482,6 +482,78 @@ enum ProposalCmd {
         #[arg(long, value_name = "TEXT")]
         text: String,
     },
+}
+
+/// Flags of `ljos hook`. A separate args type so a hook call can parse
+/// them without building every other command.
+#[derive(Args, Debug)]
+struct HookArgs {
+    /// Most memories to inject per call; each is injected once between compactions.
+    #[arg(long, default_value_t = 5)]
+    limit: usize,
+    /// The event, for a runner whose payload does not name it
+    /// (`PreToolUse`, `PostToolUse`, `PreInvocation`, `Stop`).
+    #[arg(long)]
+    event: Option<String>,
+    /// Read stdin as the person's prompt, including when it is plain text.
+    /// Mail it shows is marked read.
+    #[arg(long, conflicts_with = "event")]
+    prompt: bool,
+    /// With --prompt, print what the agent would be told as plain text
+    /// instead of the runner's JSON.
+    #[arg(long, requires = "prompt")]
+    text: bool,
+    /// Exit 1 only when the answer denies the cloud seat push rule.
+    /// Any other rule stays a warning. Without this flag the exit stays 0,
+        /// so a runner that reads the JSON is unchanged. A memory store that does not
+        /// answer still exits 0: a hook must not fail the runner.
+    #[arg(long)]
+    fail_on_deny: bool,
+    /// Read the payload and answer in this runner's hook contract: copilot,
+    /// gemini, windsurf, factory, kiro, cline, qwen or crush.
+    #[arg(long, conflicts_with_all = ["prompt", "fail_on_deny"])]
+    runner: Option<String>,
+    /// Book the commit git just created. The hook scripts pass this.
+    /// `post-commit` reads no stdin. `post-rewrite` reads the old and new shas.
+    #[arg(long, conflicts_with_all = ["prompt", "runner", "fail_on_deny"])]
+    git_commit: bool,
+    /// Which git hook called `--git-commit`: `post-commit` or `post-rewrite`.
+    #[arg(long, requires = "git_commit")]
+    git_hook: Option<String>,
+    /// Print the SessionStart brief on stderr once for this conversation.
+    #[arg(long, conflicts_with_all = ["prompt", "runner", "git_commit"])]
+    brief_once: bool,
+    /// Apply the bookkeeping that hook calls queued, and wait until none is left.
+    #[arg(long, conflicts_with_all = ["prompt", "runner", "git_commit", "brief_once"])]
+    drain: bool,
+    /// With --drain, leave the work to a drainer that already runs.
+    #[arg(long, requires = "drain", hide = true)]
+    no_wait: bool,
+    /// Apply these queued book jobs, in order. The drainer runs this.
+    #[arg(long, num_args = 1.., hide = true, conflicts_with = "drain")]
+    apply_book: Vec<std::path::PathBuf>,
+    /// Finish a session off the runner's clock. The SessionEnd hook starts this.
+    #[arg(
+        long,
+        hide = true,
+        value_name = "FILE",
+        conflicts_with_all = ["prompt", "runner", "git_commit", "brief_once", "drain"]
+    )]
+    finish_session: Option<std::path::PathBuf>,
+}
+
+/// `ljos hook` on its own, so the process does not build every other command.
+#[derive(Parser)]
+#[command(name = "ljos", disable_help_flag = true, disable_version_flag = true)]
+struct HookFast {
+    #[command(subcommand)]
+    cmd: HookFastCmd,
+}
+
+#[derive(Subcommand)]
+enum HookFastCmd {
+    #[command(disable_help_flag = true)]
+    Hook(HookArgs),
 }
 
 #[derive(Subcommand)]
@@ -1611,60 +1683,7 @@ enum Cmd {
     ///
     /// Example: `echo "cargo test" | ljos hook --prompt --text`
     #[command(hide = true)]
-    Hook {
-        /// Most memories to inject per call; each is injected once between compactions.
-        #[arg(long, default_value_t = 5)]
-        limit: usize,
-        /// The event, for a runner whose payload does not name it
-        /// (`PreToolUse`, `PostToolUse`, `PreInvocation`, `Stop`).
-        #[arg(long)]
-        event: Option<String>,
-        /// Read stdin as the person's prompt, including when it is plain text.
-        /// Mail it shows is marked read.
-        #[arg(long, conflicts_with = "event")]
-        prompt: bool,
-        /// With --prompt, print what the agent would be told as plain text
-        /// instead of the runner's JSON.
-        #[arg(long, requires = "prompt")]
-        text: bool,
-        /// Exit 1 only when the answer denies the cloud seat push rule.
-        /// Any other rule stays a warning. Without this flag the exit stays 0,
-        /// so a runner that reads the JSON is unchanged. A memory store that does not
-        /// answer still exits 0: a hook must not fail the runner.
-        #[arg(long)]
-        fail_on_deny: bool,
-        /// Read the payload and answer in this runner's hook contract: copilot,
-        /// gemini, windsurf, factory, kiro, cline, qwen or crush.
-        #[arg(long, conflicts_with_all = ["prompt", "fail_on_deny"])]
-        runner: Option<String>,
-        /// Book the commit git just created. The hook scripts pass this.
-        /// `post-commit` reads no stdin. `post-rewrite` reads the old and new shas.
-        #[arg(long, conflicts_with_all = ["prompt", "runner", "fail_on_deny"])]
-        git_commit: bool,
-        /// Which git hook called `--git-commit`: `post-commit` or `post-rewrite`.
-        #[arg(long, requires = "git_commit")]
-        git_hook: Option<String>,
-        /// Print the SessionStart brief on stderr once for this conversation.
-        #[arg(long, conflicts_with_all = ["prompt", "runner", "git_commit"])]
-        brief_once: bool,
-        /// Apply the bookkeeping that hook calls queued, and wait until none is left.
-        #[arg(long, conflicts_with_all = ["prompt", "runner", "git_commit", "brief_once"])]
-        drain: bool,
-        /// With --drain, leave the work to a drainer that already runs.
-        #[arg(long, requires = "drain", hide = true)]
-        no_wait: bool,
-        /// Apply these queued book jobs, in order. The drainer runs this.
-        #[arg(long, num_args = 1.., hide = true, conflicts_with = "drain")]
-        apply_book: Vec<std::path::PathBuf>,
-        /// Finish a session off the runner's clock. The SessionEnd hook starts this.
-        #[arg(
-            long,
-            hide = true,
-            value_name = "FILE",
-            conflicts_with_all = ["prompt", "runner", "git_commit", "brief_once", "drain"]
-        )]
-        finish_session: Option<std::path::PathBuf>,
-    },
+    Hook(HookArgs),
     /// Run the ljos part of one git hook. The block `ljos git-hooks install` appends calls this.
     ///
     /// Example: `ljos git-hook post-commit`
@@ -2732,7 +2751,7 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
     !matches!(
         cmd,
         Cmd::Remember { .. }
-            | Cmd::Hook { .. }
+            | Cmd::Hook(_)
             | Cmd::Help { .. }
             | Cmd::Completions { .. }
             | Cmd::Doctor { .. }
@@ -2826,6 +2845,709 @@ fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
     }
 }
 
+fn run_hook(hook: HookArgs) -> Result<()> {
+    let HookArgs {
+        limit,
+        event,
+        prompt,
+        text,
+        fail_on_deny,
+        runner,
+        git_commit,
+        git_hook,
+        brief_once,
+        drain,
+        no_wait,
+        apply_book,
+        finish_session,
+    } = hook;
+    if !brief_once {
+        ljos_cli::config_diag::emit();
+    }
+    if text {
+        return prompt_as_text(limit);
+    }
+    if drain {
+        std::process::exit(ljos_cli::book_queue::drain(!no_wait));
+    }
+    if !apply_book.is_empty() {
+        std::process::exit(ljos_cli::book_queue::apply(&apply_book));
+    }
+    if git_commit {
+        let _wall = ljos_cli::arm_hook_wall_budget();
+        return ljos_cli::git_hooks::run_git_commit(git_hook.as_deref().unwrap_or("post-commit"));
+    }
+    if let Some(path) = finish_session {
+        return ljos_cli::extract::run_finish_job(&path);
+    }
+    if brief_once {
+        ljos_cli::bookkeep::print_brief_once();
+        return Ok(());
+    }
+    use std::io::Read;
+    let bytes = match ljos_cli::hookd::take_stdin() {
+        Some(bytes) => bytes,
+        None => {
+            let mut bytes = Vec::new();
+            std::io::stdin().read_to_end(&mut bytes)?;
+            bytes
+        }
+    };
+    if !prompt {
+        if let Some(code) = ljos_cli::answer_cursor_read_bytes(&bytes) {
+            std::process::exit(code);
+        }
+    }
+    let input = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => {
+            // The queue path judges a side event from a lossy copy.
+            // Do the same here, so invalid UTF-8 still prints an
+            // answer instead of exiting with an empty stdout.
+            let raw = err.into_bytes();
+            let lossy = String::from_utf8_lossy(&raw);
+            if !prompt {
+                if let Some(code) = ljos_cli::emit_cursor_side_answer(&lossy, event.as_deref()) {
+                    std::process::exit(code);
+                }
+            }
+            // The relay reads stdin before the gate's panic hook is
+            // armed. Invalid text used to exit 1 with no output,
+            // which nine runners read as an allow.
+            if let Some(name) = runner.as_deref() {
+                if ljos_cli::runner_hooks::is_runner(name) {
+                    exit_relay_fault(name, event.as_deref().unwrap_or(""), "stdin is not utf-8");
+                }
+            }
+            anyhow::bail!("hook: stdin is not utf-8");
+        }
+    };
+    let _wall = ljos_cli::arm_hook_wall_budget();
+    ljos_cli::log_recall("hook", event.as_deref().unwrap_or("-"));
+    if let Some(runner) = runner.as_deref() {
+        if !ljos_cli::runner_hooks::is_runner(runner) {
+            anyhow::bail!(
+                "hook: no runner {runner:?}; --runner takes {}",
+                ljos_cli::runner_hooks::RUNNERS.join(", ")
+            );
+        }
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ljos_cli::runner_hooks::relay(runner, &input, limit, event.as_deref())
+        }));
+        match caught {
+            Ok(code) => std::process::exit(code),
+            Err(_) => exit_relay_fault(runner, event.as_deref().unwrap_or(""), "panicked"),
+        }
+    }
+    let mut call = if prompt {
+        ljos_cli::prompt_call(&input)
+    } else {
+        ljos_cli::hook_call_as(&input, event.as_deref())
+    };
+    // Arm before bind or the spawn note. Both can take
+    // tmux-sock.lock, and a blocking take runs past the cut-off.
+    if !prompt {
+        ljos_cli::hook_timed("arm_gate", || ljos_cli::arm_gate(&input, event.as_deref()));
+    }
+    ljos_cli::bind_call_conversation(&input, &call);
+    ljos_cli::adopt_blank_conversation(&input, &mut call);
+    ljos_cli::ballot_sig::export_hook_session(call.session.as_deref());
+    if ljos_cli::subagent::note_hook_call(&input, &call.event) {
+        // the editor harness blocks a permission hook that prints nothing.
+        // A seat tool named mcp__SERVER__ljos_NAME is that hook
+        // when SERVER is a key in the seat's MCP config.
+        if call.shape.is_cursor() {
+            print!("{}", ljos_cli::hook_output_ruled(&call, "", None));
+        }
+        return Ok(());
+    }
+    // The queue is off, or this process was already inside a hook.
+    // Answer before the pack search. The deadline is already armed.
+    // The seat env was loaded above. A promoted rule may ask the
+    // pack once from inside that answer. The call is recorded
+    // first, so a bare seat can still bind the conversation.
+    if !prompt {
+        if let Some(code) = ljos_cli::emit_cursor_side_answer(&input, event.as_deref()) {
+            std::process::exit(code);
+        }
+    }
+    // A runner the seat asked for a judgment hears nothing from the
+    // seat, so the judgment cannot open sittings or judge again;
+    // the law on its tool calls still holds.
+    if std::env::var_os("LJOS_JUDGE").is_some() && call.event != "PreToolUse" {
+        print!("{}", ljos_cli::hook_output_ruled(&call, "", None));
+        return Ok(());
+    }
+    // A context event (a prompt, a tool result) says what the seat
+    // knows, and saying nothing is a correct answer; a runner that
+    // cuts the hook off throws the answer away and says it failed.
+    // So those events answer inside a deadline, whatever the pack
+    // does, and a call a second registration of the same hook makes
+    // at the same moment is answered once. A tool gate is exempt
+    // from both: its verdict must not be lost to a clock. Exiting
+    // at the deadline writes no deny, and the runner then allows
+    // the command; a shell hook's deadline, armed above, writes one.
+    // The same holds for an event said once, such as a stop or the
+    // end of a session: its twin is answered with nothing.
+    if ljos_cli::hook_twin(&call, &input) {
+        return Ok(());
+    }
+    if matches!(call.event.as_str(), "UserPromptSubmit" | "PostToolUse") {
+        if ljos_cli::hook_already_running(&call, &input) {
+            if ljos_cli::replays_its_copy(&call) {
+                let wait = std::time::Duration::from_millis(ljos_cli::HOOK_DEADLINE_MS);
+                if let Some(answer) = ljos_cli::replay_hook_answer(&call, &input, wait) {
+                    print!("{answer}");
+                }
+            }
+            return Ok(());
+        }
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(ljos_cli::HOOK_DEADLINE_MS));
+            // Taking the lock waits out an answer being written.
+            let _held = std::io::stdout().lock();
+            std::process::exit(0);
+        });
+    }
+    // A hook answers within the runner's timeout: lookups that walk
+    // the whole tracker are skipped from here on.
+    // SAFETY: single-threaded here, before anything reads the environment.
+    unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+    let _pack_clock = ljos_cli::arm_hook_pack();
+    let _side_bound = ljos_cli::arm_side_bound(&call);
+    let (subagent, stop_active, agent) = ljos_cli::hook_subagent(&input);
+    ljos_cli::hook_trace(&input, &call, subagent.as_deref());
+    // A subagent about to stop is held once while its parent holds
+    // an issue, so its result reaches the issue as a ballot or a
+    // lesson instead of ending in the parent's context.
+    if call.event == "SubagentStop" {
+        let kind = subagent.as_deref().unwrap_or("subagent");
+        let key = format!("subagent-gate:{agent}");
+        let seen = ljos_cli::seen_ids(call.session.as_deref());
+        if !seen.contains(&key) {
+            let issue = ljos_cli::held_issue();
+            let decision = issue.as_deref().is_some_and(|i| {
+                ljos_cli::tracker_show_json(i).is_ok_and(|v| ljos_cli::is_decision(&v))
+            });
+            if let Some(reason) =
+                ljos_cli::subagent_stop_reason(kind, issue.as_deref(), decision, stop_active)
+            {
+                println!("{}", ljos_cli::block_output(call.shape, &reason));
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                ljos_cli::mark_seen(call.session.as_deref(), &[key]);
+                return Ok(());
+            }
+        }
+        if let Some(reason) = ljos_cli::stop_audit(&input, stop_active) {
+            println!("{}", ljos_cli::block_output(call.shape, &reason));
+        }
+        return Ok(());
+    }
+    // An agent about to end its turn is audited once: a done claim
+    // beside a red test run, or asked work put off, holds it for
+    // one more round. An agy stop with `fullyIdle` is the session
+    // end: it finishes even when a mid-loop stop would have held.
+    let agy_idle = call.shape == ljos_cli::HookShape::Steps
+        && call.event == "Stop"
+        && ljos_cli::stop_is_idle(&input);
+    if call.event == "Stop" && call.shape != ljos_cli::HookShape::Context && !agy_idle {
+        // At a usage limit the stores hear what the conversation
+        // knows before the runner cuts it off.
+        if let Some(reason) = ljos_cli::limit_stop(&input, call.session.as_deref()) {
+            println!("{}", ljos_cli::block_output(call.shape, &reason));
+            return Ok(());
+        }
+        if let Some(reason) = ljos_cli::seat_stop_reason(&input, stop_active, subagent.is_some()) {
+            println!("{}", ljos_cli::block_output(call.shape, &reason));
+            return Ok(());
+        }
+        if let Some(reason) = ljos_cli::stop_audit(&input, stop_active) {
+            println!("{}", ljos_cli::block_output(call.shape, &reason));
+            return Ok(());
+        }
+        // Interrupt mail that came in during the turn holds the
+        // stop once, so a running session reads it before it goes
+        // idle. Each letter is receipted once delivered, so the
+        // next stop is not held for it again.
+        if subagent.is_none() {
+            let (mail, ids) = ljos_cli::mail::stop_note();
+            if !mail.is_empty() {
+                println!("{}", ljos_cli::block_output(call.shape, &mail));
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                ljos_cli::mail::ack_delivered(&ids);
+                return Ok(());
+            }
+        }
+    }
+    // At the end of a session the memories it used fire together,
+    // and the transcript is read, in a detached process. This
+    // process does not wait on the pack or the tracker.
+    if call.event == "SessionEnd" {
+        let _ = ljos_cli::bookkeep::observe(&input, &call);
+        ljos_cli::extract::at_session_end(&input, call.session.as_deref());
+        return Ok(());
+    }
+    // On a tool call the pack's rules give a verdict; on a prompt
+    // there is nothing to stop, only something to know. A force
+    // push, a seat deny, and an `rm -rf` are judged in this
+    // process first, so a slow pack or a slow guard is not what
+    // the runner waits on.
+    let on_tool = call.event == "PreToolUse" || call.event == "argv";
+    if on_tool {
+        let _ = ljos_cli::take_guard_note();
+    }
+    // The tool shell does not exist yet. Record the session, cgroup
+    // and this hook's start time while the runner that spawned the
+    // guard is still the parent, so a later detach is still the call.
+    if call.event == "PreToolUse" {
+        match ljos_cli::proc_tree::hook_runner() {
+            Ok((runner, _)) => {
+                let _ = ljos_cli::proc_tree::note_tool_call(&runner);
+            }
+            Err(why) if why.contains("cannot be read") => {
+                ljos_cli::proc_tree::seal_unreadable_tool_call();
+            }
+            Err(_) => {}
+        }
+    }
+    let resolved = ljos_cli::command_directory(input.trim());
+    let cwd = match &resolved {
+        Ok(dir) => Some(dir.clone()),
+        Err(_) => ljos_cli::fallback_directory(input.trim()),
+    };
+    let posted = matches!(call.event.as_str(), "PreToolUse" | "beforeMCPExecution")
+        .then(|| ljos_cli::user_rules::guard_payload(&input))
+        .flatten();
+    // The static guard includes the commit, push, and merge gates,
+    // in the directory the tool would run in.
+    let dir = cwd.as_deref();
+    // LJOS_OFF and a temporary HOME switch the guard off. The push
+    // gate and the pack's rules stay out too, as the shim does.
+    // The sitting gate does not.
+    let suspended = on_tool && ljos_cli::bookkeep::guard_suspended();
+    let fast = if suspended {
+        ljos_cli::sitting_gate::guard_line(&call.cue, dir)
+    } else {
+        on_tool
+            .then(|| ljos_cli::static_guard_in(&call.cue, dir))
+            .flatten()
+            .or(posted)
+    };
+    let (rules, preferences) = if on_tool && fast.is_none() && !suspended {
+        ljos_cli::gate_read()
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
+    // A tool call with no command line (a file read, a search) has
+    // no argv for the law to judge; the TCB sees only shell lines.
+    // A command whose directory does not resolve does not run in
+    // the fallback, so what the guard reads there does not judge it.
+    let unresolved_dir = resolved.is_err()
+        && on_tool
+        && !suspended
+        && !argv.is_empty()
+        && !ljos_cli::subagent::payload_names_mcp_tool(&input);
+    if unresolved_dir {
+        eprintln!(
+            "ljos: the guard could not judge (the directory does not resolve); the call is allowed"
+        );
+    }
+    let tcb_rule = if unresolved_dir {
+        None
+    } else if let Some(rule) = fast {
+        // ljos's own rule warns. A named policyd config may still
+        // block the line, and that block is the verdict.
+        (!suspended && !argv.is_empty())
+            .then(|| ljos_cli::policyd_block(&call.cue, dir))
+            .flatten()
+            .or(Some(rule))
+    } else if suspended {
+        None
+    } else if on_tool && !argv.is_empty() {
+        ljos_cli::tcb_after_static(&call.cue, dir, true)
+    } else if on_tool {
+        ljos_cli::seat_guard(&call.cue)
+    } else {
+        None
+    };
+    // An ordinary branch or tag push is allowed. Force, a
+    // +refspec, a remote-branch delete and a mirror push run with
+    // a warning.
+    let gated = ljos_cli::redirect_seat_verb(
+        ljos_cli::gate_push(
+            ljos_cli::ruled_verdict(&rules, &call.cue).as_ref(),
+            &call.cue,
+            cwd.as_ref().and_then(|p| p.to_str()),
+        ),
+        &call.cue,
+    );
+    // The call runs. One rule is its warning: the guard's, else the
+    // push gate's or a seat rule's. The cloud seat push rule is the
+    // one rule that stops it.
+    let verdict = tcb_rule.as_ref().or(gated.as_ref());
+    // A command the ask pack would have asked about runs because a
+    // setting turned that class off: the bypass log keeps a row.
+    if verdict.is_none() && call.event == "PreToolUse" {
+        if let Some((rule, how)) = ljos_cli::ask_pack::ask_pack_switched_off(&call.cue) {
+            ljos_cli::log_bypass("switch", &how, &call.cue, &rule);
+        }
+    }
+    // Ids are marked after stdout is flushed. A runner that kills
+    // the hook before it reads the answer must see the same note
+    // on the next call.
+    let mut seen_later: Vec<String> = Vec::new();
+    let mut ack_nudge = false;
+    // A lesson queued while the pack was down, or left as a
+    // proposal by an older ljos, is sent before this session reads
+    // memory, so the next prompt can recall it.
+    if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
+        let _ = ljos_cli::flush_note_queue();
+        ljos_cli::admit::import_open(ljos_cli::admit::IMPORT_SLICE_MS);
+    }
+    // Search on the prompt. A camel-case runner discards that
+    // stdout, so each held note goes out on the next tool result.
+    // Stop additionalContext starts another round, so that runner
+    // does not print a held note on Stop. PreToolUse only decides.
+    // A bare command is an argv. The guard above is unchanged, and
+    // the note is the recall a prompt would hand that line.
+    // Printed after the recalled lessons, once. A label, not a refusal.
+    let mut origin_note: Option<String> = None;
+    let mut context = match call.event.as_str() {
+        "PreToolUse" | "argv" => {
+            // A seat verb about to run resets the work count.
+            let _ = ljos_cli::work_nudge(&call, subagent.is_some());
+            // The preferences that name the command about to run
+            // go with it, once a session each, read from the
+            // listing the rules came from.
+            let note = if call.event == "PreToolUse" {
+                let (note, keys) = ljos_cli::command_preference_note(
+                    &preferences,
+                    &call.cue,
+                    call.session.as_deref(),
+                );
+                seen_later.extend(keys);
+                note
+            } else {
+                let (note, keys) = hook_note(&call, limit);
+                seen_later.extend(keys);
+                note
+            };
+            // A timed-out or crashed guard allowed this call. Say so.
+            let note = match ljos_cli::take_guard_note() {
+                Some(guard) if note.is_empty() => guard,
+                Some(guard) => format!("{guard}\n{note}"),
+                None => note,
+            };
+            // A push whose tip has no passing test record runs,
+            // and the agent reads why it was not held.
+            match ljos_cli::gates::take_push_warning() {
+                Some(warning) if note.is_empty() => warning,
+                Some(warning) => format!("{warning}\n{note}"),
+                None => note,
+            }
+        }
+        "PostToolUse" => {
+            let (mut ctx, ids) = post_hook_stdout(call.shape, call.session.as_deref());
+            seen_later.extend(ids);
+            if let Some(nudge) = ljos_cli::work_nudge(&call, subagent.is_some()) {
+                ack_nudge = true;
+                ctx = if ctx.is_empty() {
+                    nudge
+                } else {
+                    format!("{ctx}\n{nudge}")
+                };
+            }
+            if let Some(kind) = subagent.as_deref() {
+                let key = format!("subagent-brief:{agent}");
+                if !ljos_cli::seen_ids(call.session.as_deref()).contains(&key) {
+                    if let Some(issue) = ljos_cli::held_issue() {
+                        let decision = ljos_cli::tracker_show_json(&issue)
+                            .is_ok_and(|v| ljos_cli::is_decision(&v));
+                        seen_later.push(key);
+                        let brief = ljos_cli::subagent_brief(kind, &issue, decision);
+                        ctx = if ctx.is_empty() {
+                            brief
+                        } else {
+                            format!("{brief}\n{ctx}")
+                        };
+                    }
+                }
+            }
+            ctx
+        }
+        // A turn with no tool never fired PostToolUse. Taking the
+        // hold here keeps it off the next turn. A camel-case runner
+        // does not print it: Stop additionalContext starts another
+        // round. The audit block above is the hold that still speaks.
+        "Stop" => {
+            let (ctx, ids) = stop_hook_stdout(call.session.as_deref(), stop_active);
+            let ctx = ljos_cli::stop_context_for_runner(call.shape, ctx);
+            if call.shape != ljos_cli::HookShape::CamelCase {
+                seen_later.extend(ids);
+            }
+            ctx
+        }
+        // The pack is searched on a failed tool's command and its
+        // error; what bears on the failure goes back with the
+        // result.
+        "PostToolUseFailure" => {
+            let error = ljos_cli::tool_error(&input);
+            let (ctx, ids) = ljos_cli::failure_note(&call, &error, 3);
+            seen_later.extend(ids);
+            ctx
+        }
+        // Compaction drops what the seat handed the conversation:
+        // those memories leave the seen list, and up to eight
+        // fire together when two or more were handed over. A held
+        // issue is said again on the next delivery.
+        "PreCompact" => {
+            let _ = ljos_cli::rearm_after_compaction(call.session.as_deref());
+            String::new()
+        }
+        // A session started from a compaction hears what it holds,
+        // and a fresh one hears that ljos is on, where the runner
+        // takes SessionStart context.
+        "SessionStart" => {
+            let compacted = serde_json::from_str::<serde_json::Value>(input.trim())
+                .ok()
+                .and_then(|v| {
+                    v.get("source")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s == "compact")
+                })
+                .unwrap_or(false);
+            let ctx = if compacted && call.shape != ljos_cli::HookShape::CamelCase {
+                if ljos_cli::peek_hook_context(call.session.as_deref()).is_empty() {
+                    let _ = ljos_cli::rearm_after_compaction(call.session.as_deref());
+                }
+                let (ctx, ids) = ljos_cli::take_hook_note(call.session.as_deref());
+                seen_later.extend(ids);
+                ctx
+            } else if !compacted && call.shape != ljos_cli::HookShape::CamelCase {
+                // A fresh session hears that ljos is on, in one
+                // line, so the person and the agent know the seat
+                // is there before the first prompt. The line names
+                // the issue this session already holds.
+                ljos_cli::session_start_for(call.session.as_deref())
+            } else {
+                String::new()
+            };
+            // After the preface is read. The model load is its own
+            // process and does not hold this line, and it does not
+            // occupy the pack until the atoms for the line are in.
+            let _ = ljos_cli::encoder_warming();
+            ctx
+        }
+        // A turn ending is not a session ending, and has nothing
+        // to say either.
+        "TurnEnd" => String::new(),
+        _ => {
+            // Only the person's own prompt is kept as theirs: a
+            // subagent's brief or an unattended run's prompt is an
+            // agent's words in that channel. A tool call can run `ljos hook`
+            // with a payload of its own; only a hook the runner
+            // itself spawned carries the person's prompt. What the
+            // hook saves from any prompt is labelled with whose it is.
+            if call.event == "UserPromptSubmit" {
+                ljos_cli::capture::forget_latest_prompt();
+            }
+            let spawner = if call.event == "UserPromptSubmit" {
+                if let Some(why) = ljos_cli::capture::not_the_person(&input) {
+                    origin_note = Some(ljos_cli::proc_tree::prompt_not_person_label(why));
+                    None
+                } else {
+                    match ljos_cli::proc_tree::hook_runner() {
+                        Ok((runner, _)) => Some(runner),
+                        Err(why) => {
+                            origin_note = Some(ljos_cli::proc_tree::prompt_origin_label(&why));
+                            None
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+            let person = spawner.is_some();
+            ljos_cli::capture::set_persons_prompt(person);
+            if person {
+                let mut sessions: Vec<String> = call.session.iter().cloned().collect();
+                for s in ljos_cli::payload_sessions(&input) {
+                    if !sessions.contains(&s) {
+                        sessions.push(s);
+                    }
+                }
+                ljos_cli::capture::note_latest_prompt_from(
+                    &call.cue,
+                    &sessions,
+                    spawner.as_ref(),
+                    ljos_cli::capture::payload_transcript(&input).as_deref(),
+                );
+            }
+            // A standing choice the prompt states is saved in its
+            // words before the note is read, so the note does not
+            // repeat it and the correction hook does not store it
+            // again.
+            let captured = (call.event == "UserPromptSubmit")
+                .then(|| {
+                    ljos_cli::hook_timed("capture", || ljos_cli::capture::capture_stated(&call))
+                })
+                .flatten();
+            if call.event == "UserPromptSubmit" {
+                ljos_cli::hook_timed("correction", || ljos_cli::store_correction(&call));
+            }
+            let (mut ctx, mut ids) = ljos_cli::hook_timed("hook_note", || hook_note(&call, limit));
+            if let Some((line, keys)) = captured {
+                ctx = if ctx.is_empty() {
+                    line
+                } else {
+                    format!("{line}\n{ctx}")
+                };
+                ids.extend(keys);
+            }
+            if call.shape == ljos_cli::HookShape::CamelCase && call.event == "UserPromptSubmit" {
+                let line = ljos_cli::PACK_LINE;
+                ctx = if ctx.is_empty() {
+                    line.to_string()
+                } else {
+                    format!("{line}\n{ctx}")
+                };
+            }
+            if call.event == "UserPromptSubmit" && ljos_cli::asks_decision(&call.cue) {
+                let line = ljos_cli::start_decision_panel(
+                    &call.cue,
+                    call.session.as_deref(),
+                    cwd.as_ref().and_then(|p| p.to_str()),
+                )
+                .unwrap_or_else(|e| {
+                    format!("{}\npanel did not open: {e:#}", ljos_cli::decision_hold())
+                });
+                ctx = if ctx.is_empty() {
+                    line
+                } else {
+                    format!("{line}\n{ctx}")
+                };
+            }
+            if call.event == "UserPromptSubmit" {
+                let (mail, mail_ids) = ljos_cli::hook_timed("mail", ljos_cli::mail::prompt_note);
+                if !mail.is_empty() {
+                    ctx = if ctx.is_empty() {
+                        mail
+                    } else {
+                        format!("{mail}\n{ctx}")
+                    };
+                    ids.extend(mail_ids);
+                }
+            }
+            if !call.shape.holds_prompt_note() {
+                seen_later.extend(ids.clone());
+            }
+            if call.event == "UserPromptSubmit" {
+                if let Some(line) = ljos_cli::prompt_writer_line() {
+                    ctx = line;
+                }
+            }
+            prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)
+        }
+    };
+    // The book is kept here, after the answer is decided, so a
+    // tracker that does not answer cannot hold the call. A call a
+    // rule warned on runs, so it is booked too; a blocked call does
+    // not run and is not booked.
+    // A Stop the audit held never reaches this line, except an agy
+    // stop that is idle: that one is the session end and finishes.
+    // A mid-loop agy stop, fullyIdle absent, does not finish.
+    // The book is queued, not kept in this call: it waits on a lock
+    // every seat shares, and a claim reads the whole tracker. A
+    // gate's book is queued once its answer is out.
+    let agy_mid_loop = call.shape == ljos_cli::HookShape::Steps
+        && call.event == "Stop"
+        && !ljos_cli::stop_is_idle(&input);
+    let book = !agy_mid_loop && !verdict.is_some_and(ljos_cli::Rule::blocks);
+    let gate = ljos_cli::is_gate_event(&call.event);
+    if book && !gate {
+        let extra = ljos_cli::hook_timed("bookkeep", || {
+            ljos_cli::book_queue::book_later(&input, &call)
+        });
+        if !extra.is_empty() {
+            context = if context.is_empty() {
+                extra
+            } else {
+                format!("{context}\n{extra}")
+            };
+        }
+    }
+    let output = ljos_cli::rewrite::answer(&input, &call, &context, verdict, |line| {
+        ljos_cli::tcb_verdict_in(line, dir).or_else(|| ljos_cli::ruled_verdict(&rules, line))
+    })
+    .unwrap_or_else(|| ljos_cli::hook_output_ruled(&call, &context, verdict));
+    ljos_cli::answer_gate(&output);
+    if let Some(note) = origin_note {
+        eprintln!("{}", ljos_cli::scan::wrap(&note, ljos_cli::scan::COLS));
+    }
+    if let Some(rule) = verdict {
+        let seat = std::env::var("LJOS_SEAT").unwrap_or_default();
+        let kind = if rule.blocks() { "refusal" } else { "warning" };
+        ljos_cli::digest::note_guard(kind, &seat, &rule.reason);
+    }
+    if book && gate {
+        ljos_cli::hook_timed("bookkeep", || {
+            ljos_cli::book_queue::enqueue(&input, &call);
+        });
+    }
+    ljos_cli::keep_hook_answer(&call, &input, &output);
+    if !seen_later.is_empty() {
+        mark_seen(call.session.as_deref(), &seen_later);
+        ljos_cli::mail::ack_delivered(&seen_later);
+    }
+    if ack_nudge {
+        ljos_cli::work_nudge_delivered(call.session.as_deref());
+    }
+    if ljos_cli::shell_exit(fail_on_deny, &output) != 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `ljos hook` parsed without the rest of the command tree.
+/// `None` when this is not a hook call, or when help, version, or a
+/// rejected flag should be printed by the full parser.
+fn hook_parsed_alone(args: &[std::ffi::OsString]) -> Option<HookArgs> {
+    let mut saw_hook = false;
+    for arg in args.iter().skip(1) {
+        if arg == "--help" || arg == "-h" || arg == "--version" || arg == "-V" {
+            return None;
+        }
+        if !saw_hook && !arg.to_string_lossy().starts_with('-') {
+            if arg != "hook" {
+                return None;
+            }
+            saw_hook = true;
+        }
+    }
+    if !saw_hook {
+        return None;
+    }
+    match HookFast::try_parse_from(args) {
+        Ok(HookFast {
+            cmd: HookFastCmd::Hook(hook),
+        }) => Some(hook),
+        Err(_) => None,
+    }
+}
+
+/// The seat setup `run_command` does before it reaches a hook, then the hook.
+fn dispatch_hook(seat_flag: Option<String>, hook: HookArgs) -> Result<()> {
+    ljos_cli::seat_resolve::prepare(seat_flag, ljos_cli::seat_resolve::Kind::Keep);
+    ljos_cli::runner_skills::refresh_on_new_version();
+    ljos_cli::runner_env::refresh_on_new_version();
+    let checked = ljos_cli::hook_timed("write_seat", || {
+        None::<&str>.map(ljos_cli::write_seat).transpose()
+    })?;
+    let _seated = checked.as_ref().map(ljos_cli::Seated::enter);
+    run_hook(hook)
+}
+
 fn run_command() -> Result<()> {
     // `--help` exits before the seat is read. `ljos help` is a command.
     if root_help_only() {
@@ -2847,6 +3569,13 @@ fn run_command() -> Result<()> {
     // SAFETY: resetting a signal disposition before any thread is spawned.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+    // The full command tree builds every other command into one function.
+    // That function's frame is 2592 KB, and walking it faults code and
+    // help text a hook never reads. Help and a flag this parser rejects
+    // fall through, so those messages stay as they are.
+    if let Some(hook) = hook_parsed_alone(&args) {
+        return dispatch_hook(seat_flag, hook);
     }
     // Help, version and a missing argument exit here, before any write.
     // A memory subcommand that clap cannot parse still records the error.
@@ -4410,690 +5139,7 @@ fn run_command() -> Result<()> {
         }
         Cmd::GitHooks { action } => ljos_cli::git_hooks::run(&action)?,
         Cmd::PersonKey { action } => ljos_cli::person_key::run(&action)?,
-        Cmd::Hook {
-            limit,
-            event,
-            prompt,
-            text,
-            fail_on_deny,
-            runner,
-            git_commit,
-            git_hook,
-            brief_once,
-            drain,
-            no_wait,
-            apply_book,
-            finish_session,
-        } => {
-            if !brief_once {
-                ljos_cli::config_diag::emit();
-            }
-            if text {
-                return prompt_as_text(limit);
-            }
-            if drain {
-                std::process::exit(ljos_cli::book_queue::drain(!no_wait));
-            }
-            if !apply_book.is_empty() {
-                std::process::exit(ljos_cli::book_queue::apply(&apply_book));
-            }
-            if git_commit {
-                let _wall = ljos_cli::arm_hook_wall_budget();
-                return ljos_cli::git_hooks::run_git_commit(
-                    git_hook.as_deref().unwrap_or("post-commit"),
-                );
-            }
-            if let Some(path) = finish_session {
-                return ljos_cli::extract::run_finish_job(&path);
-            }
-            if brief_once {
-                ljos_cli::bookkeep::print_brief_once();
-                return Ok(());
-            }
-            use std::io::Read;
-            let bytes = match ljos_cli::hookd::take_stdin() {
-                Some(bytes) => bytes,
-                None => {
-                    let mut bytes = Vec::new();
-                    std::io::stdin().read_to_end(&mut bytes)?;
-                    bytes
-                }
-            };
-            if !prompt {
-                if let Some(code) = ljos_cli::answer_cursor_read_bytes(&bytes) {
-                    std::process::exit(code);
-                }
-            }
-            let input = match String::from_utf8(bytes) {
-                Ok(text) => text,
-                Err(err) => {
-                    // The queue path judges a side event from a lossy copy.
-                    // Do the same here, so invalid UTF-8 still prints an
-                    // answer instead of exiting with an empty stdout.
-                    let raw = err.into_bytes();
-                    let lossy = String::from_utf8_lossy(&raw);
-                    if !prompt {
-                        if let Some(code) =
-                            ljos_cli::emit_cursor_side_answer(&lossy, event.as_deref())
-                        {
-                            std::process::exit(code);
-                        }
-                    }
-                    // The relay reads stdin before the gate's panic hook is
-                    // armed. Invalid text used to exit 1 with no output,
-                    // which nine runners read as an allow.
-                    if let Some(name) = runner.as_deref() {
-                        if ljos_cli::runner_hooks::is_runner(name) {
-                            exit_relay_fault(
-                                name,
-                                event.as_deref().unwrap_or(""),
-                                "stdin is not utf-8",
-                            );
-                        }
-                    }
-                    anyhow::bail!("hook: stdin is not utf-8");
-                }
-            };
-            let _wall = ljos_cli::arm_hook_wall_budget();
-            ljos_cli::log_recall("hook", event.as_deref().unwrap_or("-"));
-            if let Some(runner) = runner.as_deref() {
-                if !ljos_cli::runner_hooks::is_runner(runner) {
-                    anyhow::bail!(
-                        "hook: no runner {runner:?}; --runner takes {}",
-                        ljos_cli::runner_hooks::RUNNERS.join(", ")
-                    );
-                }
-                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    ljos_cli::runner_hooks::relay(runner, &input, limit, event.as_deref())
-                }));
-                match caught {
-                    Ok(code) => std::process::exit(code),
-                    Err(_) => exit_relay_fault(runner, event.as_deref().unwrap_or(""), "panicked"),
-                }
-            }
-            let mut call = if prompt {
-                ljos_cli::prompt_call(&input)
-            } else {
-                ljos_cli::hook_call_as(&input, event.as_deref())
-            };
-            // Arm before bind or the spawn note. Both can take
-            // tmux-sock.lock, and a blocking take runs past the cut-off.
-            if !prompt {
-                ljos_cli::hook_timed("arm_gate", || ljos_cli::arm_gate(&input, event.as_deref()));
-            }
-            ljos_cli::bind_call_conversation(&input, &call);
-            ljos_cli::adopt_blank_conversation(&input, &mut call);
-            ljos_cli::ballot_sig::export_hook_session(call.session.as_deref());
-            if ljos_cli::subagent::note_hook_call(&input, &call.event) {
-                // the editor harness blocks a permission hook that prints nothing.
-                // A seat tool named mcp__SERVER__ljos_NAME is that hook
-                // when SERVER is a key in the seat's MCP config.
-                if call.shape.is_cursor() {
-                    print!("{}", ljos_cli::hook_output_ruled(&call, "", None));
-                }
-                return Ok(());
-            }
-            // The queue is off, or this process was already inside a hook.
-            // Answer before the pack search. The deadline is already armed.
-            // The seat env was loaded above. A promoted rule may ask the
-            // pack once from inside that answer. The call is recorded
-            // first, so a bare seat can still bind the conversation.
-            if !prompt {
-                if let Some(code) = ljos_cli::emit_cursor_side_answer(&input, event.as_deref()) {
-                    std::process::exit(code);
-                }
-            }
-            // A runner the seat asked for a judgment hears nothing from the
-            // seat, so the judgment cannot open sittings or judge again;
-            // the law on its tool calls still holds.
-            if std::env::var_os("LJOS_JUDGE").is_some() && call.event != "PreToolUse" {
-                print!("{}", ljos_cli::hook_output_ruled(&call, "", None));
-                return Ok(());
-            }
-            // A context event (a prompt, a tool result) says what the seat
-            // knows, and saying nothing is a correct answer; a runner that
-            // cuts the hook off throws the answer away and says it failed.
-            // So those events answer inside a deadline, whatever the pack
-            // does, and a call a second registration of the same hook makes
-            // at the same moment is answered once. A tool gate is exempt
-            // from both: its verdict must not be lost to a clock. Exiting
-            // at the deadline writes no deny, and the runner then allows
-            // the command; a shell hook's deadline, armed above, writes one.
-            // The same holds for an event said once, such as a stop or the
-            // end of a session: its twin is answered with nothing.
-            if ljos_cli::hook_twin(&call, &input) {
-                return Ok(());
-            }
-            if matches!(call.event.as_str(), "UserPromptSubmit" | "PostToolUse") {
-                if ljos_cli::hook_already_running(&call, &input) {
-                    if ljos_cli::replays_its_copy(&call) {
-                        let wait = std::time::Duration::from_millis(ljos_cli::HOOK_DEADLINE_MS);
-                        if let Some(answer) = ljos_cli::replay_hook_answer(&call, &input, wait) {
-                            print!("{answer}");
-                        }
-                    }
-                    return Ok(());
-                }
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        ljos_cli::HOOK_DEADLINE_MS,
-                    ));
-                    // Taking the lock waits out an answer being written.
-                    let _held = std::io::stdout().lock();
-                    std::process::exit(0);
-                });
-            }
-            // A hook answers within the runner's timeout: lookups that walk
-            // the whole tracker are skipped from here on.
-            // SAFETY: single-threaded here, before anything reads the environment.
-            unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
-            let _pack_clock = ljos_cli::arm_hook_pack();
-            let _side_bound = ljos_cli::arm_side_bound(&call);
-            let (subagent, stop_active, agent) = ljos_cli::hook_subagent(&input);
-            ljos_cli::hook_trace(&input, &call, subagent.as_deref());
-            // A subagent about to stop is held once while its parent holds
-            // an issue, so its result reaches the issue as a ballot or a
-            // lesson instead of ending in the parent's context.
-            if call.event == "SubagentStop" {
-                let kind = subagent.as_deref().unwrap_or("subagent");
-                let key = format!("subagent-gate:{agent}");
-                let seen = ljos_cli::seen_ids(call.session.as_deref());
-                if !seen.contains(&key) {
-                    let issue = ljos_cli::held_issue();
-                    let decision = issue.as_deref().is_some_and(|i| {
-                        ljos_cli::tracker_show_json(i).is_ok_and(|v| ljos_cli::is_decision(&v))
-                    });
-                    if let Some(reason) = ljos_cli::subagent_stop_reason(
-                        kind,
-                        issue.as_deref(),
-                        decision,
-                        stop_active,
-                    ) {
-                        println!("{}", ljos_cli::block_output(call.shape, &reason));
-                        let _ = std::io::Write::flush(&mut std::io::stdout());
-                        ljos_cli::mark_seen(call.session.as_deref(), &[key]);
-                        return Ok(());
-                    }
-                }
-                if let Some(reason) = ljos_cli::stop_audit(&input, stop_active) {
-                    println!("{}", ljos_cli::block_output(call.shape, &reason));
-                }
-                return Ok(());
-            }
-            // An agent about to end its turn is audited once: a done claim
-            // beside a red test run, or asked work put off, holds it for
-            // one more round. An agy stop with `fullyIdle` is the session
-            // end: it finishes even when a mid-loop stop would have held.
-            let agy_idle = call.shape == ljos_cli::HookShape::Steps
-                && call.event == "Stop"
-                && ljos_cli::stop_is_idle(&input);
-            if call.event == "Stop" && call.shape != ljos_cli::HookShape::Context && !agy_idle {
-                // At a usage limit the stores hear what the conversation
-                // knows before the runner cuts it off.
-                if let Some(reason) = ljos_cli::limit_stop(&input, call.session.as_deref()) {
-                    println!("{}", ljos_cli::block_output(call.shape, &reason));
-                    return Ok(());
-                }
-                if let Some(reason) =
-                    ljos_cli::seat_stop_reason(&input, stop_active, subagent.is_some())
-                {
-                    println!("{}", ljos_cli::block_output(call.shape, &reason));
-                    return Ok(());
-                }
-                if let Some(reason) = ljos_cli::stop_audit(&input, stop_active) {
-                    println!("{}", ljos_cli::block_output(call.shape, &reason));
-                    return Ok(());
-                }
-                // Interrupt mail that came in during the turn holds the
-                // stop once, so a running session reads it before it goes
-                // idle. Each letter is receipted once delivered, so the
-                // next stop is not held for it again.
-                if subagent.is_none() {
-                    let (mail, ids) = ljos_cli::mail::stop_note();
-                    if !mail.is_empty() {
-                        println!("{}", ljos_cli::block_output(call.shape, &mail));
-                        let _ = std::io::Write::flush(&mut std::io::stdout());
-                        ljos_cli::mail::ack_delivered(&ids);
-                        return Ok(());
-                    }
-                }
-            }
-            // At the end of a session the memories it used fire together,
-            // and the transcript is read, in a detached process. This
-            // process does not wait on the pack or the tracker.
-            if call.event == "SessionEnd" {
-                let _ = ljos_cli::bookkeep::observe(&input, &call);
-                ljos_cli::extract::at_session_end(&input, call.session.as_deref());
-                return Ok(());
-            }
-            // On a tool call the pack's rules give a verdict; on a prompt
-            // there is nothing to stop, only something to know. A force
-            // push, a seat deny, and an `rm -rf` are judged in this
-            // process first, so a slow pack or a slow guard is not what
-            // the runner waits on.
-            let on_tool = call.event == "PreToolUse" || call.event == "argv";
-            if on_tool {
-                let _ = ljos_cli::take_guard_note();
-            }
-            // The tool shell does not exist yet. Record the session, cgroup
-            // and this hook's start time while the runner that spawned the
-            // guard is still the parent, so a later detach is still the call.
-            if call.event == "PreToolUse" {
-                match ljos_cli::proc_tree::hook_runner() {
-                    Ok((runner, _)) => {
-                        let _ = ljos_cli::proc_tree::note_tool_call(&runner);
-                    }
-                    Err(why) if why.contains("cannot be read") => {
-                        ljos_cli::proc_tree::seal_unreadable_tool_call();
-                    }
-                    Err(_) => {}
-                }
-            }
-            let resolved = ljos_cli::command_directory(input.trim());
-            let cwd = match &resolved {
-                Ok(dir) => Some(dir.clone()),
-                Err(_) => ljos_cli::fallback_directory(input.trim()),
-            };
-            let posted = matches!(call.event.as_str(), "PreToolUse" | "beforeMCPExecution")
-                .then(|| ljos_cli::user_rules::guard_payload(&input))
-                .flatten();
-            // The static guard includes the commit, push, and merge gates,
-            // in the directory the tool would run in.
-            let dir = cwd.as_deref();
-            // LJOS_OFF and a temporary HOME switch the guard off. The push
-            // gate and the pack's rules stay out too, as the shim does.
-            // The sitting gate does not.
-            let suspended = on_tool && ljos_cli::bookkeep::guard_suspended();
-            let fast = if suspended {
-                ljos_cli::sitting_gate::guard_line(&call.cue, dir)
-            } else {
-                on_tool
-                    .then(|| ljos_cli::static_guard_in(&call.cue, dir))
-                    .flatten()
-                    .or(posted)
-            };
-            let (rules, preferences) = if on_tool && fast.is_none() && !suspended {
-                ljos_cli::gate_read()
-            } else {
-                (Vec::new(), Vec::new())
-            };
-            let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
-            // A tool call with no command line (a file read, a search) has
-            // no argv for the law to judge; the TCB sees only shell lines.
-            // A command whose directory does not resolve does not run in
-            // the fallback, so what the guard reads there does not judge it.
-            let unresolved_dir = resolved.is_err()
-                && on_tool
-                && !suspended
-                && !argv.is_empty()
-                && !ljos_cli::subagent::payload_names_mcp_tool(&input);
-            if unresolved_dir {
-                eprintln!(
-                    "ljos: the guard could not judge (the directory does not resolve); the call is allowed"
-                );
-            }
-            let tcb_rule = if unresolved_dir {
-                None
-            } else if let Some(rule) = fast {
-                // ljos's own rule warns. A named policyd config may still
-                // block the line, and that block is the verdict.
-                (!suspended && !argv.is_empty())
-                    .then(|| ljos_cli::policyd_block(&call.cue, dir))
-                    .flatten()
-                    .or(Some(rule))
-            } else if suspended {
-                None
-            } else if on_tool && !argv.is_empty() {
-                ljos_cli::tcb_after_static(&call.cue, dir, true)
-            } else if on_tool {
-                ljos_cli::seat_guard(&call.cue)
-            } else {
-                None
-            };
-            // An ordinary branch or tag push is allowed. Force, a
-            // +refspec, a remote-branch delete and a mirror push run with
-            // a warning.
-            let gated = ljos_cli::redirect_seat_verb(
-                ljos_cli::gate_push(
-                    ljos_cli::ruled_verdict(&rules, &call.cue).as_ref(),
-                    &call.cue,
-                    cwd.as_ref().and_then(|p| p.to_str()),
-                ),
-                &call.cue,
-            );
-            // The call runs. One rule is its warning: the guard's, else the
-            // push gate's or a seat rule's. The cloud seat push rule is the
-            // one rule that stops it.
-            let verdict = tcb_rule.as_ref().or(gated.as_ref());
-            // A command the ask pack would have asked about runs because a
-            // setting turned that class off: the bypass log keeps a row.
-            if verdict.is_none() && call.event == "PreToolUse" {
-                if let Some((rule, how)) = ljos_cli::ask_pack::ask_pack_switched_off(&call.cue) {
-                    ljos_cli::log_bypass("switch", &how, &call.cue, &rule);
-                }
-            }
-            // Ids are marked after stdout is flushed. A runner that kills
-            // the hook before it reads the answer must see the same note
-            // on the next call.
-            let mut seen_later: Vec<String> = Vec::new();
-            let mut ack_nudge = false;
-            // A lesson queued while the pack was down, or left as a
-            // proposal by an older ljos, is sent before this session reads
-            // memory, so the next prompt can recall it.
-            if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
-                let _ = ljos_cli::flush_note_queue();
-                ljos_cli::admit::import_open(ljos_cli::admit::IMPORT_SLICE_MS);
-            }
-            // Search on the prompt. A camel-case runner discards that
-            // stdout, so each held note goes out on the next tool result.
-            // Stop additionalContext starts another round, so that runner
-            // does not print a held note on Stop. PreToolUse only decides.
-            // A bare command is an argv. The guard above is unchanged, and
-            // the note is the recall a prompt would hand that line.
-            // Printed after the recalled lessons, once. A label, not a refusal.
-            let mut origin_note: Option<String> = None;
-            let mut context = match call.event.as_str() {
-                "PreToolUse" | "argv" => {
-                    // A seat verb about to run resets the work count.
-                    let _ = ljos_cli::work_nudge(&call, subagent.is_some());
-                    // The preferences that name the command about to run
-                    // go with it, once a session each, read from the
-                    // listing the rules came from.
-                    let note = if call.event == "PreToolUse" {
-                        let (note, keys) = ljos_cli::command_preference_note(
-                            &preferences,
-                            &call.cue,
-                            call.session.as_deref(),
-                        );
-                        seen_later.extend(keys);
-                        note
-                    } else {
-                        let (note, keys) = hook_note(&call, limit);
-                        seen_later.extend(keys);
-                        note
-                    };
-                    // A timed-out or crashed guard allowed this call. Say so.
-                    let note = match ljos_cli::take_guard_note() {
-                        Some(guard) if note.is_empty() => guard,
-                        Some(guard) => format!("{guard}\n{note}"),
-                        None => note,
-                    };
-                    // A push whose tip has no passing test record runs,
-                    // and the agent reads why it was not held.
-                    match ljos_cli::gates::take_push_warning() {
-                        Some(warning) if note.is_empty() => warning,
-                        Some(warning) => format!("{warning}\n{note}"),
-                        None => note,
-                    }
-                }
-                "PostToolUse" => {
-                    let (mut ctx, ids) = post_hook_stdout(call.shape, call.session.as_deref());
-                    seen_later.extend(ids);
-                    if let Some(nudge) = ljos_cli::work_nudge(&call, subagent.is_some()) {
-                        ack_nudge = true;
-                        ctx = if ctx.is_empty() {
-                            nudge
-                        } else {
-                            format!("{ctx}\n{nudge}")
-                        };
-                    }
-                    if let Some(kind) = subagent.as_deref() {
-                        let key = format!("subagent-brief:{agent}");
-                        if !ljos_cli::seen_ids(call.session.as_deref()).contains(&key) {
-                            if let Some(issue) = ljos_cli::held_issue() {
-                                let decision = ljos_cli::tracker_show_json(&issue)
-                                    .is_ok_and(|v| ljos_cli::is_decision(&v));
-                                seen_later.push(key);
-                                let brief = ljos_cli::subagent_brief(kind, &issue, decision);
-                                ctx = if ctx.is_empty() {
-                                    brief
-                                } else {
-                                    format!("{brief}\n{ctx}")
-                                };
-                            }
-                        }
-                    }
-                    ctx
-                }
-                // A turn with no tool never fired PostToolUse. Taking the
-                // hold here keeps it off the next turn. A camel-case runner
-                // does not print it: Stop additionalContext starts another
-                // round. The audit block above is the hold that still speaks.
-                "Stop" => {
-                    let (ctx, ids) = stop_hook_stdout(call.session.as_deref(), stop_active);
-                    let ctx = ljos_cli::stop_context_for_runner(call.shape, ctx);
-                    if call.shape != ljos_cli::HookShape::CamelCase {
-                        seen_later.extend(ids);
-                    }
-                    ctx
-                }
-                // The pack is searched on a failed tool's command and its
-                // error; what bears on the failure goes back with the
-                // result.
-                "PostToolUseFailure" => {
-                    let error = ljos_cli::tool_error(&input);
-                    let (ctx, ids) = ljos_cli::failure_note(&call, &error, 3);
-                    seen_later.extend(ids);
-                    ctx
-                }
-                // Compaction drops what the seat handed the conversation:
-                // those memories leave the seen list, and up to eight
-                // fire together when two or more were handed over. A held
-                // issue is said again on the next delivery.
-                "PreCompact" => {
-                    let _ = ljos_cli::rearm_after_compaction(call.session.as_deref());
-                    String::new()
-                }
-                // A session started from a compaction hears what it holds,
-                // and a fresh one hears that ljos is on, where the runner
-                // takes SessionStart context.
-                "SessionStart" => {
-                    let compacted = serde_json::from_str::<serde_json::Value>(input.trim())
-                        .ok()
-                        .and_then(|v| {
-                            v.get("source")
-                                .and_then(|s| s.as_str())
-                                .map(|s| s == "compact")
-                        })
-                        .unwrap_or(false);
-                    let ctx = if compacted && call.shape != ljos_cli::HookShape::CamelCase {
-                        if ljos_cli::peek_hook_context(call.session.as_deref()).is_empty() {
-                            let _ = ljos_cli::rearm_after_compaction(call.session.as_deref());
-                        }
-                        let (ctx, ids) = ljos_cli::take_hook_note(call.session.as_deref());
-                        seen_later.extend(ids);
-                        ctx
-                    } else if !compacted && call.shape != ljos_cli::HookShape::CamelCase {
-                        // A fresh session hears that ljos is on, in one
-                        // line, so the person and the agent know the seat
-                        // is there before the first prompt. The line names
-                        // the issue this session already holds.
-                        ljos_cli::session_start_for(call.session.as_deref())
-                    } else {
-                        String::new()
-                    };
-                    // After the preface is read. The model load is its own
-                    // process and does not hold this line, and it does not
-                    // occupy the pack until the atoms for the line are in.
-                    let _ = ljos_cli::encoder_warming();
-                    ctx
-                }
-                // A turn ending is not a session ending, and has nothing
-                // to say either.
-                "TurnEnd" => String::new(),
-                _ => {
-                    // Only the person's own prompt is kept as theirs: a
-                    // subagent's brief or an unattended run's prompt is an
-                    // agent's words in that channel. A tool call can run `ljos hook`
-                    // with a payload of its own; only a hook the runner
-                    // itself spawned carries the person's prompt. What the
-                    // hook saves from any prompt is labelled with whose it is.
-                    if call.event == "UserPromptSubmit" {
-                        ljos_cli::capture::forget_latest_prompt();
-                    }
-                    let spawner = if call.event == "UserPromptSubmit" {
-                        if let Some(why) = ljos_cli::capture::not_the_person(&input) {
-                            origin_note = Some(ljos_cli::proc_tree::prompt_not_person_label(why));
-                            None
-                        } else {
-                            match ljos_cli::proc_tree::hook_runner() {
-                                Ok((runner, _)) => Some(runner),
-                                Err(why) => {
-                                    origin_note =
-                                        Some(ljos_cli::proc_tree::prompt_origin_label(&why));
-                                    None
-                                }
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    let person = spawner.is_some();
-                    ljos_cli::capture::set_persons_prompt(person);
-                    if person {
-                        let mut sessions: Vec<String> = call.session.iter().cloned().collect();
-                        for s in ljos_cli::payload_sessions(&input) {
-                            if !sessions.contains(&s) {
-                                sessions.push(s);
-                            }
-                        }
-                        ljos_cli::capture::note_latest_prompt_from(
-                            &call.cue,
-                            &sessions,
-                            spawner.as_ref(),
-                            ljos_cli::capture::payload_transcript(&input).as_deref(),
-                        );
-                    }
-                    // A standing choice the prompt states is saved in its
-                    // words before the note is read, so the note does not
-                    // repeat it and the correction hook does not store it
-                    // again.
-                    let captured = (call.event == "UserPromptSubmit")
-                        .then(|| {
-                            ljos_cli::hook_timed("capture", || {
-                                ljos_cli::capture::capture_stated(&call)
-                            })
-                        })
-                        .flatten();
-                    if call.event == "UserPromptSubmit" {
-                        ljos_cli::hook_timed("correction", || ljos_cli::store_correction(&call));
-                    }
-                    let (mut ctx, mut ids) =
-                        ljos_cli::hook_timed("hook_note", || hook_note(&call, limit));
-                    if let Some((line, keys)) = captured {
-                        ctx = if ctx.is_empty() {
-                            line
-                        } else {
-                            format!("{line}\n{ctx}")
-                        };
-                        ids.extend(keys);
-                    }
-                    if call.shape == ljos_cli::HookShape::CamelCase
-                        && call.event == "UserPromptSubmit"
-                    {
-                        let line = ljos_cli::PACK_LINE;
-                        ctx = if ctx.is_empty() {
-                            line.to_string()
-                        } else {
-                            format!("{line}\n{ctx}")
-                        };
-                    }
-                    if call.event == "UserPromptSubmit" && ljos_cli::asks_decision(&call.cue) {
-                        let line = ljos_cli::start_decision_panel(
-                            &call.cue,
-                            call.session.as_deref(),
-                            cwd.as_ref().and_then(|p| p.to_str()),
-                        )
-                        .unwrap_or_else(|e| {
-                            format!("{}\npanel did not open: {e:#}", ljos_cli::decision_hold())
-                        });
-                        ctx = if ctx.is_empty() {
-                            line
-                        } else {
-                            format!("{line}\n{ctx}")
-                        };
-                    }
-                    if call.event == "UserPromptSubmit" {
-                        let (mail, mail_ids) =
-                            ljos_cli::hook_timed("mail", ljos_cli::mail::prompt_note);
-                        if !mail.is_empty() {
-                            ctx = if ctx.is_empty() {
-                                mail
-                            } else {
-                                format!("{mail}\n{ctx}")
-                            };
-                            ids.extend(mail_ids);
-                        }
-                    }
-                    if !call.shape.holds_prompt_note() {
-                        seen_later.extend(ids.clone());
-                    }
-                    if call.event == "UserPromptSubmit" {
-                        if let Some(line) = ljos_cli::prompt_writer_line() {
-                            ctx = line;
-                        }
-                    }
-                    prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)
-                }
-            };
-            // The book is kept here, after the answer is decided, so a
-            // tracker that does not answer cannot hold the call. A call a
-            // rule warned on runs, so it is booked too; a blocked call does
-            // not run and is not booked.
-            // A Stop the audit held never reaches this line, except an agy
-            // stop that is idle: that one is the session end and finishes.
-            // A mid-loop agy stop, fullyIdle absent, does not finish.
-            // The book is queued, not kept in this call: it waits on a lock
-            // every seat shares, and a claim reads the whole tracker. A
-            // gate's book is queued once its answer is out.
-            let agy_mid_loop = call.shape == ljos_cli::HookShape::Steps
-                && call.event == "Stop"
-                && !ljos_cli::stop_is_idle(&input);
-            let book = !agy_mid_loop && !verdict.is_some_and(ljos_cli::Rule::blocks);
-            let gate = ljos_cli::is_gate_event(&call.event);
-            if book && !gate {
-                let extra = ljos_cli::hook_timed("bookkeep", || {
-                    ljos_cli::book_queue::book_later(&input, &call)
-                });
-                if !extra.is_empty() {
-                    context = if context.is_empty() {
-                        extra
-                    } else {
-                        format!("{context}\n{extra}")
-                    };
-                }
-            }
-            let output = ljos_cli::rewrite::answer(&input, &call, &context, verdict, |line| {
-                ljos_cli::tcb_verdict_in(line, dir)
-                    .or_else(|| ljos_cli::ruled_verdict(&rules, line))
-            })
-            .unwrap_or_else(|| ljos_cli::hook_output_ruled(&call, &context, verdict));
-            ljos_cli::answer_gate(&output);
-            if let Some(note) = origin_note {
-                eprintln!("{}", ljos_cli::scan::wrap(&note, ljos_cli::scan::COLS));
-            }
-            if let Some(rule) = verdict {
-                let seat = std::env::var("LJOS_SEAT").unwrap_or_default();
-                let kind = if rule.blocks() { "refusal" } else { "warning" };
-                ljos_cli::digest::note_guard(kind, &seat, &rule.reason);
-            }
-            if book && gate {
-                ljos_cli::hook_timed("bookkeep", || {
-                    ljos_cli::book_queue::enqueue(&input, &call);
-                });
-            }
-            ljos_cli::keep_hook_answer(&call, &input, &output);
-            if !seen_later.is_empty() {
-                mark_seen(call.session.as_deref(), &seen_later);
-                ljos_cli::mail::ack_delivered(&seen_later);
-            }
-            if ack_nudge {
-                ljos_cli::work_nudge_delivered(call.session.as_deref());
-            }
-            if ljos_cli::shell_exit(fail_on_deny, &output) != 0 {
-                std::process::exit(1);
-            }
-        }
+        Cmd::Hook(hook) => return run_hook(hook),
         Cmd::Consensus {
             id,
             json,
