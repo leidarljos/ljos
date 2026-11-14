@@ -430,6 +430,23 @@ if [ -z "$FROM_DIR" ] && [ "$PRINT_ASSETS" != 1 ] && ! supported_target "$TARGET
   SOURCE_ONLY=1
   say "$(supported_line)"
 fi
+# Run from a checkout, this script still fetches the published release.
+# Say so, and name the command that builds the tree on disk. The path is
+# taken from $0, so a PATH with no dirname still prints the line. An
+# unsupported machine has already stopped, on one line.
+if [ -z "$FROM_DIR" ] && [ "$PRINT_ASSETS" != 1 ] && [ "$SOURCE_ONLY" != 1 ]; then
+  case $0 in
+    */*/*)
+      checkout_root=${0%/*}
+      checkout_root=${checkout_root%/*}
+      ;;
+    */*) checkout_root=. ;;
+    *) checkout_root= ;;
+  esac
+  if [ -n "$checkout_root" ] && [ -f "$checkout_root/crates/ljos-cli/Cargo.toml" ]; then
+    say "This script installs the published release, not this checkout. To build this checkout, run \`cargo build --locked --release -p ljos\`."
+  fi
+fi
 if [ -z "$FROM_DIR" ] && [ "$PRINT_ASSETS" != 1 ] && [ "$SOURCE_ONLY" != 1 ]; then
   miss=
   add_miss() {

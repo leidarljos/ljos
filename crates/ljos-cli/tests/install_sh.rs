@@ -784,6 +784,29 @@ fn a_missing_curl_names_how_to_install_one() {
     assert!(text.contains("missing curl or wget"), "{text}");
     assert!(text.contains("sh install.sh"), "{text}");
     assert!(text.contains("--from-dir DIR"), "{text}");
+    assert!(
+        text.contains("not this checkout"),
+        "a checkout install did not say it fetches the release:\n{text}"
+    );
+    assert!(
+        text.contains("cargo build --locked --release -p ljos"),
+        "{text}"
+    );
+}
+
+/// `--from-dir` installs the programs it was given. It does not fetch the
+/// published release, so a checkout does not print that warning.
+#[test]
+fn from_dir_in_a_checkout_does_not_say_it_fetches_the_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+    let home = dir.path().join("home");
+    let text = install(&home, &progs, "/usr/bin:/bin", &[]);
+    assert!(!text.contains("not this checkout"), "{text}");
 }
 
 /// The force-push sample keeps its bypass log out of the seat's data
