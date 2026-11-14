@@ -83,6 +83,7 @@ ljos reads =ljos.toml= from the user config (~/.config/ljos/ljos.toml), then the
 - =LJOS_CITE= default unset
 - =LJOS_CLOUD_AGE_SECRET= default unset
 - =LJOS_CONFIG= default unset
+- =LJOS_DEBUG= default unset
 - =LJOS_EXTRACT= default unset
 - =LJOS_EXTRACT_DEBUG= default unset
 - =LJOS_GIT_HOOK= default unset

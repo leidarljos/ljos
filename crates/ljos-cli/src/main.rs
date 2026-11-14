@@ -2297,8 +2297,12 @@ fn usage_sentence(err: &clap::Error) -> Option<String> {
                 Some(command_sentence(&typed, &args))
             }
         }
-        ErrorKind::InvalidValue => value_sentence(err, &args),
-        ErrorKind::MissingRequiredArgument => missing_shell(&args),
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation => {
+            value_sentence(err, &args).or_else(|| bad_value(err, &args))
+        }
+        ErrorKind::MissingRequiredArgument => {
+            missing_shell(&args).or_else(|| missing_argument(err, &args))
+        }
         _ => None,
     }
 }
@@ -2407,6 +2411,54 @@ fn value_sentence(err: &clap::Error, args: &[String]) -> Option<String> {
         }
     };
     Some(line)
+}
+
+fn bad_value(err: &clap::Error, args: &[String]) -> Option<String> {
+    use clap::error::ContextKind;
+    let value = context_one(err, ContextKind::InvalidValue)?;
+    let flag = context_one(err, ContextKind::InvalidArg).unwrap_or_default();
+    let flag = flag.split_whitespace().next().unwrap_or(flag.as_str());
+    let flag = if flag.is_empty() {
+        "value".to_string()
+    } else if flag.starts_with('-') {
+        flag.to_string()
+    } else {
+        format!("--{flag}")
+    };
+    let cmd = command_head(args);
+    let help = help_of(&cmd);
+    Some(format!(
+        "ljos: {cmd} {flag} {value} is not a valid value, so run `{help}`."
+    ))
+}
+
+fn missing_argument(err: &clap::Error, args: &[String]) -> Option<String> {
+    use clap::error::ContextKind;
+    let missing = context_one(err, ContextKind::InvalidArg)
+        .or_else(|| {
+            context_list(err, ContextKind::InvalidArg)
+                .into_iter()
+                .next()
+        })
+        .unwrap_or_else(|| "an argument".to_string());
+    let cmd = command_head(args);
+    let help = help_of(&cmd);
+    Some(format!("ljos: {cmd} needs {missing}, so run `{help}`."))
+}
+
+fn command_head(args: &[String]) -> String {
+    command_words_rest(args)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "ljos".to_string())
+}
+
+fn help_of(cmd: &str) -> String {
+    if cmd == "ljos" {
+        "ljos --help".to_string()
+    } else {
+        format!("ljos {cmd} --help")
+    }
 }
 
 fn missing_shell(args: &[String]) -> Option<String> {
@@ -2824,7 +2876,7 @@ fn exit_relay_fault(runner: &str, event: &str, what: &str) -> ! {
     std::process::exit(0);
 }
 
-fn main() -> Result<()> {
+fn main() {
     // Both run before the seat's environment, the tracker or the pack is
     // read: the server stays small, and a hook call waits its turn before
     // it costs anything.
@@ -2848,7 +2900,7 @@ fn main() -> Result<()> {
             {
                 std::process::exit(USAGE_STATUS);
             }
-            return Ok(());
+            return;
         }
         if ljos_cli::is_read_shed(e) || ljos_cli::is_deadline_miss(e) {
             // A hook must not fail the runner. A read that was shed, or a
@@ -2858,7 +2910,10 @@ fn main() -> Result<()> {
             if hook_cmd {
                 std::process::exit(0);
             }
-            eprintln!("{}", ljos_cli::pack_fault_line(e));
+            eprintln!(
+                "{}",
+                ljos_cli::shed_queue_line(&ljos_cli::pack_fault_line(e))
+            );
             std::process::exit(1);
         }
         if ljos_cli::is_pack_busy(e) || ljos_cli::is_write_shed(e) {
@@ -2870,11 +2925,14 @@ fn main() -> Result<()> {
             if hook_cmd {
                 std::process::exit(0);
             }
-            if ljos_cli::is_write_shed(e) {
-                eprintln!("{}", ljos_cli::pack_fault_line(e));
+            let line = if ljos_cli::is_write_shed(e) {
+                ljos_cli::shed_queue_line(&ljos_cli::pack_fault_line(e))
+            } else if let Some(line) = ljos_cli::busy_queue_line() {
+                line.to_string()
             } else {
-                eprintln!("{}", ljos_cli::PACK_BUSY_LINE);
-            }
+                ljos_cli::PACK_BUSY_LINE.to_string()
+            };
+            eprintln!("{line}");
             std::process::exit(ljos_cli::PACK_BUSY_EXIT);
         }
         if let Some(line) = ljos_cli::plain_server_fault(e) {
@@ -2888,8 +2946,16 @@ fn main() -> Result<()> {
         // A gate whose hook fails answers allow in the runner's JSON with
         // the note that says why, and exits 0: a broken ljos blocks nothing.
         ljos_cli::answer_failed_gate(&format!("{e:#}"));
+        let line = ljos_cli::user_fault_line(e);
+        eprintln!("{line}");
+        if ljos_cli::fault_detail() {
+            let detail = format!("{e:#}");
+            if ljos_cli::fault_detail_differs(&detail, &line) {
+                eprintln!("{detail}");
+            }
+        }
+        std::process::exit(ljos_cli::user_fault_exit(e, &line));
     }
-    ran
 }
 
 /// What ljos is. The same words as the command's about line.
@@ -4397,7 +4463,9 @@ fn run_command() -> Result<()> {
                 Some("any") => None,
                 Some(d) => {
                     chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
-                        anyhow::anyhow!("--valid-at {d:?} is not YYYY-MM-DD or any")
+                        anyhow::anyhow!(
+                            "search: --valid-at {d} is not a day (YYYY-MM-DD or any), so run `ljos search --valid-at YYYY-MM-DD QUERY`."
+                        )
                     })?;
                     Some(d.to_string())
                 }
@@ -5237,8 +5305,11 @@ fn run_command() -> Result<()> {
             let restart = ljos_cli::plugin::Restart::parse(&restart).with_context(|| {
                 format!("restart {restart}: permanent, transient, or temporary")
             })?;
-            let exit = ljos_cli::plugin::ExitKind::parse(&exit)
-                .with_context(|| format!("exit {exit}: clean or crash"))?;
+            let exit = ljos_cli::plugin::ExitKind::parse(&exit).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "supervise: --exit {exit} is not clean or crash, so run `ljos supervise {name} --harness {harness} --exit clean --at {at}`."
+                )
+            })?;
             let failures = failures
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
@@ -5942,8 +6013,15 @@ fn run_command() -> Result<()> {
             // A refused sitting used to fall through a gate path that
             // exits 0. The refusal is the answer, and it is not success.
             if let Err(e) = printed {
-                eprintln!("{e:#}");
-                std::process::exit(1);
+                let line = ljos_cli::user_fault_line(&e);
+                eprintln!("{line}");
+                if ljos_cli::fault_detail() {
+                    let detail = format!("{e:#}");
+                    if ljos_cli::fault_detail_differs(&detail, &line) {
+                        eprintln!("{detail}");
+                    }
+                }
+                std::process::exit(ljos_cli::user_fault_exit(&e, &line));
             }
             if !verbose {
                 if !memories.is_empty() {

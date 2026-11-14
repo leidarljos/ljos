@@ -9,6 +9,15 @@ Commands
 
    <span id="command-line"></span>
 
+A command exits 0 when it did what was asked.
+A bad command, a bad flag, or a bad flag value exits 2.
+A runtime failure exits 1.
+That is a missing program, a ticket the tracker does not hold, a store that is missing, read-only or full, a pack that was turned off, or a network error while upgrading.
+A memory writer that is busy or slow exits 75, and the line is ``pack busy, try again``.
+Every failure is one line on stderr.
+The line says what went wrong and the command that fixes it.
+``LJOS_DEBUG=1`` or ``--verbose`` prints the cause chain after that line.
+
 ``sitting ISSUE [--assignee NAME] [--cards DIR] [--playbook NAME] [--anyway] [--verbose]``
    Stores: all. Open a sitting: doctor, sync when the repository names a scope, cards, due, island, blockers, playbook, workflow when the issue carries one, panel when the issue is a decision, recall, timeline, reclaim, claim. The short form prints what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``. A pack that answers 503 or does not answer is ``memory skipped: packsetd busy``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold. Quiet claims are a count that points at ``ljos claims --mine``. ``--verbose`` prints every section. Reclaim hands back claims quiet longer than ``LJOS_LEASE_SECS`` (900; 0 is off) whose conversation is gone, and keeps one whose runner still runs. It stops at the first store down. The name defaults to this conversation's holder (``ljos seat``). ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``. The name is a tracker ``playbook:`` note until finish or release. ``--cards`` is the directory of ``USER.md`` and ``MEMORY.md``; ``--dir`` is the same flag.
 ``sitting --plan TITLE [-p PROJECT] -- ITEM...``

@@ -253,7 +253,10 @@ fn a_sitting_on_a_missing_issue_exits_without_claiming() {
         Some(1),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert_eq!(stderr.trim(), format!("issue {MISSING} not found"));
+    assert_eq!(
+        stderr.trim(),
+        format!("issue {MISSING} not found, so run `ljos ready`.")
+    );
     assert!(
         !stdout.contains("is yours"),
         "a missing issue was called held:\n{stdout}"

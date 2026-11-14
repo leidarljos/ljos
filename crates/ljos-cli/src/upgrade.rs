@@ -289,7 +289,10 @@ fn latest_release(repo: &str) -> Result<Option<String>> {
         Ok(resp) => resp,
         Err(ureq::Error::Status(404, _)) => return Ok(None),
         Err(err) => {
-            return Err(err).context(format!("upgrade: asking {repo} for its latest release"));
+            return Err(anyhow::anyhow!(
+                "{}",
+                unreachable_release(repo, &err.to_string())
+            ));
         }
     };
     let body: serde_json::Value = resp
@@ -301,9 +304,20 @@ fn latest_release(repo: &str) -> Result<Option<String>> {
         .filter(|t| !t.is_empty()))
 }
 
+/// One line when the forge cannot be asked for `repo`.
+#[must_use]
+pub fn unreachable_release(repo: &str, why: &str) -> String {
+    let why = why.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!(
+        "upgrade: could not reach the {repo} release ({why}), and the network must be up, so run `ljos upgrade`."
+    )
+}
+
 /// The newest published ljos release's version, from the forge.
 fn latest() -> Result<String> {
-    latest_release("ljos")?.context("upgrade: the latest release has no tag")
+    latest_release("ljos")?.ok_or_else(|| {
+        anyhow::anyhow!("upgrade: the latest release has no tag, so run `ljos upgrade VERSION`.")
+    })
 }
 
 fn run_ok(cmd: &str, args: &[&str]) -> Result<String> {

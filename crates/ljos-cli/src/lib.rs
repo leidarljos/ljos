@@ -20199,8 +20199,16 @@ pub fn set_validity(from: Option<&str>, to: Option<&str>) -> Result<()> {
     let mut tags = Vec::new();
     for (prefix, v) in [(VALID_FROM, from), (VALID_TO, to)] {
         if let Some(d) = v.map(str::trim) {
-            chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
-                .map_err(|_| anyhow::anyhow!("{prefix} {d:?} is not YYYY-MM-DD"))?;
+            chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
+                let flag = if prefix.starts_with("valid_from") {
+                    "--valid-from"
+                } else {
+                    "--valid-to"
+                };
+                anyhow::anyhow!(
+                    "remember: {flag} {d} is not a day (YYYY-MM-DD), so run `ljos remember {flag} YYYY-MM-DD TEXT`."
+                )
+            })?;
             tags.push(format!("{prefix}{d}"));
         }
     }
@@ -21204,7 +21212,7 @@ pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> R
 /// sitting. Packset keeps a `note` only on a ticket. It has no form for
 /// an unverified note that names none, so the write is not attempted.
 pub const NOTE_WITHOUT_TICKET: &str =
-    "this conversation holds no sitting, and packset keeps a note only on a ticket";
+    "this conversation holds no sitting, and packset keeps a note only on a ticket, so run `ljos sitting`.";
 
 /// Store `text` as an unattached note and return the one label line.
 /// A note with no ticket is kept. It is not a refusal and it is not filed.
@@ -21222,14 +21230,238 @@ pub fn plain_server_fault(err: &anyhow::Error) -> Option<String> {
     }
     let full = format!("{err:#}").to_ascii_lowercase();
     if full.contains("not on path") {
-        let line = err.to_string();
-        let line = line
-            .lines()
-            .next()
-            .unwrap_or("a required program is not on PATH");
-        return Some(line.trim().to_string());
+        return Some(missing_tool_line(&full));
     }
     None
+}
+
+/// One line naming the program that is not on `PATH` and the install.
+fn missing_tool_line(text: &str) -> String {
+    const TOOLS: &[(&str, &str)] = &[
+        ("vissue", "cargo install --locked vissue-cli"),
+        ("claimdag", "cargo install --locked claimdag-cli"),
+        ("deedar", "cargo install --locked deedar-cli"),
+        ("packsetd", "cargo install --locked packset"),
+        ("packset", "cargo install --locked packset"),
+        ("ljos-policyd", "cargo install --locked ljos-policyd"),
+        ("ljos-consensus", "cargo install --locked ljos-consensus"),
+        ("ljos-hud", "cargo install --locked ljos-hud"),
+        ("ljos-mcp", "ljos upgrade"),
+    ];
+    let lower = text.to_ascii_lowercase();
+    for (bin, cmd) in TOOLS {
+        if lower.contains(&format!("{bin} not on path")) {
+            return format!("{bin} not on PATH, so run `{cmd}`.");
+        }
+    }
+    "a required program is not on PATH, so run `ljos doctor`.".to_string()
+}
+
+/// Whether the cause chain is `LJOS_DEBUG=1` or this command passed `--verbose`.
+#[must_use]
+pub fn fault_detail() -> bool {
+    let debug = match std::env::var("LJOS_DEBUG") {
+        Ok(value) => matches!(value.trim(), "1" | "true" | "yes"),
+        Err(_) => false,
+    };
+    debug || std::env::args().any(|arg| arg == "--verbose")
+}
+
+/// Whether the cause chain says more than the one line already printed.
+#[must_use]
+pub fn fault_detail_differs(detail: &str, line: &str) -> bool {
+    flatten_line(detail) != line
+}
+
+/// The command line a failure tells the person to run again.
+fn current_invocation() -> String {
+    let mut words = vec!["ljos".to_string()];
+    for arg in std::env::args().skip(1).take(8) {
+        words.push(quote_arg(&arg));
+    }
+    if std::env::args().skip(1).count() > 8 {
+        words.push("...".to_string());
+    }
+    words.join(" ")
+}
+
+fn quote_arg(word: &str) -> String {
+    if word.is_empty()
+        || word
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '\\'))
+    {
+        format!("\"{}\"", word.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        word.to_string()
+    }
+}
+
+fn flatten_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn os_words(code: i32) -> String {
+    let text = std::io::Error::from_raw_os_error(code).to_string();
+    match text.rfind(" (os error ") {
+        Some(at) if text.ends_with(')') => text[..at].to_string(),
+        _ => text,
+    }
+}
+
+fn storage_code(err: &anyhow::Error) -> Option<i32> {
+    const CODES: [i32; 5] = [
+        libc::ENOSPC,
+        libc::EDQUOT,
+        libc::EFBIG,
+        libc::EROFS,
+        libc::EACCES,
+    ];
+    if let Some(code) = err.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+    }) {
+        return CODES.contains(&code).then_some(code);
+    }
+    let text = format!("{err:#}");
+    [libc::ENOSPC, libc::EDQUOT, libc::EFBIG, libc::EROFS]
+        .into_iter()
+        .find(|&code| text.contains(&os_words(code)))
+}
+
+fn storage_line(err: &anyhow::Error, again: &str) -> Option<String> {
+    let code = storage_code(err)?;
+    let words = os_words(code);
+    if code == libc::ENOSPC || code == libc::EDQUOT || code == libc::EFBIG {
+        return Some(format!(
+            "the disk is full ({words}), so free space and run `{again}`."
+        ));
+    }
+    if code == libc::EROFS || code == libc::EACCES {
+        return Some(format!(
+            "the store is not writable ({words}), so run `ljos doctor`."
+        ));
+    }
+    None
+}
+
+fn pack_turned_off(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}").to_ascii_lowercase();
+    text.contains("no pack on purpose") || text.contains("packset url missing")
+}
+
+fn off_pack_line(err: &anyhow::Error) -> String {
+    let mut line = pack_down_line();
+    if format!("{err:#}").contains("queued") {
+        let waiting = queued_lesson_count();
+        if waiting == 1 {
+            line.push_str("; 1 lesson is queued for the next send");
+        } else if waiting > 1 {
+            line.push_str(&format!("; {waiting} lessons are queued for the next send"));
+        }
+    }
+    line.push_str(", so run `unset PACKSET_URL`.");
+    line
+}
+
+fn ticket_line(err: &anyhow::Error) -> Option<String> {
+    let top = flatten_line(&err.to_string());
+    if is_ticket_fault(err) {
+        return Some(top);
+    }
+    if top.starts_with("issue ") && top.contains(" not found") && !top.contains("so run `") {
+        return Some(format!("{top}, so run `ljos ready`."));
+    }
+    None
+}
+
+/// One plain line for a failure that reached the person.
+/// The cause chain stays off this line. [`fault_detail`] prints it.
+#[must_use]
+pub fn user_fault_line(err: &anyhow::Error) -> String {
+    user_fault_for(err, &current_invocation())
+}
+
+/// [`user_fault_line`] with the command the line tells the person to run again.
+#[must_use]
+pub fn user_fault_for(err: &anyhow::Error, again: &str) -> String {
+    if busy_queue_line().is_some()
+        && (is_pack_busy(err) || is_write_shed(err) || pack_under_load(err))
+    {
+        return busy_queue_line()
+            .unwrap_or("pack busy, try again")
+            .to_string();
+    }
+    if let Some(line) = storage_line(err, again) {
+        return line;
+    }
+    if let Some(line) = pack_down_message(err) {
+        return flatten_line(&line);
+    }
+    let top = flatten_line(&err.to_string());
+    if pack_turned_off(err) && pack_is_the_point(&top) {
+        return off_pack_line(err);
+    }
+    if top.to_ascii_lowercase().contains("not on path") {
+        return missing_tool_line(&top);
+    }
+    if let Some(line) = ticket_line(err) {
+        return line;
+    }
+    if top.contains("another writer held") || top.contains("still locked") {
+        if top.contains("so run `") {
+            return top;
+        }
+        return format!("{top}, so run `ljos doctor`.");
+    }
+    with_next_cause(err, &top)
+}
+
+/// The pack being off is the failure itself, not a later cause under a
+/// sentence that already says what happened.
+fn pack_is_the_point(top: &str) -> bool {
+    let lower = top.to_ascii_lowercase();
+    lower.contains("no pack on purpose")
+        || lower.contains("packset url missing")
+        || lower.contains("queued")
+        || lower.contains("post /v1/atoms")
+}
+
+/// A short label keeps the next cause, so `wake seat-a` still shows the
+/// command that failed. A sentence that already stands is left as it is.
+fn with_next_cause(err: &anyhow::Error, top: &str) -> String {
+    let Some(cause) = err.chain().nth(1) else {
+        return top.to_string();
+    };
+    let cause = flatten_line(&cause.to_string());
+    if cause.is_empty() || top.contains(&cause) || top.contains("so run `") {
+        return top.to_string();
+    }
+    if top.len() > 80 {
+        return top.to_string();
+    }
+    format!("{top}: {cause}")
+}
+
+/// The status for [`user_fault_line`]. Usage is 2. A writer that a later
+/// run can reach is 75. Anything else is 1.
+#[must_use]
+pub fn user_fault_exit(err: &anyhow::Error, line: &str) -> i32 {
+    if line.starts_with("remember: --valid-")
+        || line.starts_with("search: --valid-at ")
+        || line.starts_with("supervise:")
+    {
+        return 2;
+    }
+    if is_pack_busy(err)
+        || is_write_shed(err)
+        || busy_queue_line().is_some()
+        || (writer_retries(line) && !pack_turned_off(err))
+    {
+        return PACK_BUSY_EXIT;
+    }
+    1
 }
 
 /// Write an agent-derived working note with provenance tags. Unlike
@@ -21437,15 +21669,35 @@ fn pack_under_load(err: &anyhow::Error) -> bool {
 /// A busy or pressure answer has not judged the words. The copy is
 /// queued. An empty text is not a lesson. A duplicate the pack already
 /// named is not queued: [`remember_with_retry`] prints that atom id.
+/// `1` when a busy writer queued the lesson, `2` when the queue refused it.
+static BUSY_QUEUE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 fn queue_busy_lesson(text: &str) {
     let queued = queue_lesson_under_load(text);
-    match queued {
-        Ok(_) => {
-            eprintln!("remember: the pack is busy and the lesson is queued, so run `ljos search`.")
+    let mark = if queued.is_ok() { 1 } else { 2 };
+    BUSY_QUEUE.store(mark, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The shed line, and that the lesson was queued, on one line.
+#[must_use]
+pub fn shed_queue_line(fault: &str) -> String {
+    match busy_queue_line() {
+        Some(line) if line.contains("was not queued") => {
+            format!("{fault}, and the lesson was not queued, so run `ljos doctor`.")
         }
-        Err(_) => eprintln!(
-            "remember: the pack is busy and the lesson was not queued, so run `ljos doctor`."
-        ),
+        Some(_) => format!("{fault}, and the lesson is queued, so run `ljos search`."),
+        None => fault.to_string(),
+    }
+}
+
+/// The one line for a lesson queued while the writer was busy.
+/// `None` when this process did not queue one.
+#[must_use]
+pub fn busy_queue_line() -> Option<&'static str> {
+    match BUSY_QUEUE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some("pack busy, try again, and the lesson is queued, so run `ljos search`."),
+        2 => Some("pack busy, try again, and the lesson was not queued, so run `ljos doctor`."),
+        _ => None,
     }
 }
 
@@ -40219,7 +40471,7 @@ pub fn sitting_stream_started(
     // into a product checkout that is not the tracker.
     if let Err(err) = issue_title(issue) {
         if tracker_misses(&err, issue) {
-            bail!("issue {issue} not found");
+            return Err(unknown_ticket(issue));
         }
     }
     let mut out = String::new();
@@ -40237,7 +40489,7 @@ pub fn sitting_stream_started(
     }
     let title = match issue_title(issue) {
         Ok(title) => title,
-        Err(err) if tracker_misses(&err, issue) => bail!("issue {issue} not found"),
+        Err(err) if tracker_misses(&err, issue) => return Err(unknown_ticket(issue)),
         Err(_) => issue.to_string(),
     };
     let blockers = open_blockers(issue);

@@ -332,6 +332,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_DEBUG",
+        default: "unset",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_EXTRACT",
         default: "unset",
         group: "ljos",

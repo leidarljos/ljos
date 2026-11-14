@@ -659,7 +659,7 @@ fn keep_unattached_at(place: &Place, text: &str) {
         text,
         "note",
         "unattached-note",
-        "this conversation holds no sitting, and packset keeps a note only on a ticket",
+        crate::NOTE_WITHOUT_TICKET,
         "not-posted",
     );
 }

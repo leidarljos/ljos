@@ -97,6 +97,7 @@ LJOS_ variables
 - ``LJOS_CITE`` default unset
 - ``LJOS_CLOUD_AGE_SECRET`` default unset
 - ``LJOS_CONFIG`` default unset
+- ``LJOS_DEBUG`` default unset
 - ``LJOS_EXTRACT`` default unset
 - ``LJOS_EXTRACT_DEBUG`` default unset
 - ``LJOS_GIT_HOOK`` default unset
