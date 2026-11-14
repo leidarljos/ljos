@@ -2104,7 +2104,16 @@ fn overlap(text: &str, query: &str) -> f64 {
 }
 
 fn to_hit(row: &Row, score: f64) -> Hit {
-    let entities = row.entities.clone();
+    let mut entities = row.entities.clone();
+    for label in &row.labels {
+        if label.is_empty() || label.contains(':') {
+            continue;
+        }
+        let tag = format!("tag:{label}");
+        if !entities.iter().any(|item| item == &tag) {
+            entities.push(tag);
+        }
+    }
     // A failed command is stored, and the line names the failure. It is
     // not a lesson the default search returns.
     let kind = if row.id.starts_with("attempt:") {
@@ -2159,7 +2168,26 @@ fn selected(place: &Place, query: &str, filter: &SourceFilter, attempts: bool) -
             let score = if query.trim().is_empty() {
                 1.0
             } else {
-                overlap(&row.text, query)
+                let overlap = overlap(&row.text, query);
+                if overlap > 0.0 {
+                    overlap
+                } else {
+                    let tags = row
+                        .entities
+                        .iter()
+                        .chain(row.labels.iter())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let blob = format!("{tags} {}", row.text);
+                    if crate::word_rank::shares_term(query, &blob) {
+                        // Above the no-subject floor so the merge keeps the
+                        // row. The word ranker replaces this number.
+                        crate::NO_SUBJECT_FLOOR + 0.01
+                    } else {
+                        0.0
+                    }
+                }
             };
             (row, score)
         })

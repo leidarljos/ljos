@@ -4564,25 +4564,42 @@ fn run_command() -> Result<()> {
                     attempts,
                 );
             }
-            ljos_cli::refine_default_hits(&mut hits, &asked, attempts);
-            ljos_cli::drop_word_floor(&mut hits, &asked, ranking.mode == "lexical");
-            let unrelated =
-                ljos_cli::drop_weak_cross_seat(&mut hits, &asked, ranking.mode == "lexical");
-            ljos_cli::prefer_calling_seat(&mut hits);
+            // A word ranking re-scores the rows it was given. The encoder
+            // path keeps the seat wall and the cosine floor.
+            let (close_miss, unrelated) = if ranking.mode == "lexical" {
+                let missed = ljos_cli::word_rank::order_hits(&mut hits, &asked, attempts)
+                    == ljos_cli::word_rank::WordList::NoClose;
+                (missed, false)
+            } else {
+                ljos_cli::refine_default_hits(&mut hits, &asked, attempts);
+                ljos_cli::drop_word_floor(&mut hits, &asked, false);
+                let unrelated = ljos_cli::drop_weak_cross_seat(&mut hits, &asked, false);
+                ljos_cli::prefer_calling_seat(&mut hits);
+                (false, unrelated)
+            };
             let matched = hits.len();
             let capped = fetch > 0 && matched == usize::try_from(fetch).unwrap_or(usize::MAX);
             hits.truncate(limit as usize);
             ljos_cli::note_lookups(&hits);
             ranking = ljos_cli::ranking_for_printed(ranking, &hits);
+            let close_line = close_miss.then(|| ljos_cli::word_rank::no_close_line(&asked));
             if json {
-                let empty = unrelated.then_some(ljos_cli::NOTHING_RELEVANT);
+                let empty = close_line
+                    .as_deref()
+                    .or(unrelated.then_some(ljos_cli::NOTHING_RELEVANT));
                 print!(
                     "{}",
                     ljos_cli::search_json_empty(&hits, Some(&ranking), empty)
                 );
             } else {
                 eprint!("{}", ljos_cli::ranking_line(&ranking));
-                if hits.is_empty() && unrelated {
+                if let Some(line) = close_line {
+                    let mut page = ljos_cli::scan::wrap(&line, ljos_cli::scan::COLS);
+                    if !page.ends_with('\n') {
+                        page.push('\n');
+                    }
+                    print!("{}", ljos_cli::scan::for_reader(&page, human_color()));
+                } else if hits.is_empty() && unrelated {
                     print!("{}", ljos_cli::NOTHING_RELEVANT);
                 } else if hits.is_empty() && !explain && ljos_cli::nothing_stored() {
                     print!(
@@ -4596,7 +4613,14 @@ fn run_command() -> Result<()> {
                     print!(
                         "{}",
                         ljos_cli::scan::for_reader(
-                            &ljos_cli::format_search(&hits, matched, capped, explain, &asked),
+                            &ljos_cli::format_search(
+                                &hits,
+                                matched,
+                                capped,
+                                explain,
+                                &asked,
+                                ranking.mode != "lexical",
+                            ),
                             human_color()
                         )
                     );

@@ -1602,15 +1602,27 @@ impl LjosServer {
         } else {
             search_ranked(&args.query, 10).map_err(refused)?
         };
-        if args.as_of.as_deref().is_none_or(|at| at.trim().is_empty()) {
-            refine_default_hits(&mut hits, &args.query, false);
-        }
         let lexical = !ljos_cli::carries_cosine(&hits);
-        let unrelated = ljos_cli::drop_weak_cross_seat(&mut hits, &args.query, lexical);
+        let close_miss = if args.as_of.as_deref().is_none_or(|at| at.trim().is_empty()) && lexical {
+            ljos_cli::word_rank::order_hits(&mut hits, &args.query, false)
+                == ljos_cli::word_rank::WordList::NoClose
+        } else {
+            if args.as_of.as_deref().is_none_or(|at| at.trim().is_empty()) {
+                refine_default_hits(&mut hits, &args.query, false);
+            }
+            false
+        };
+        let unrelated = if lexical {
+            false
+        } else {
+            ljos_cli::drop_weak_cross_seat(&mut hits, &args.query, false)
+        };
         note_lookups(&hits);
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
-        let mut reading = if hits.is_empty() && unrelated {
+        let mut reading = if close_miss {
+            ljos_cli::word_rank::no_close_line(&args.query)
+        } else if hits.is_empty() && unrelated {
             ljos_cli::NOTHING_RELEVANT.trim().to_string()
         } else {
             search_reading(hits.len()).to_string()

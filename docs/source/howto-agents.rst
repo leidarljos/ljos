@@ -97,24 +97,28 @@ Search and recall treat every session of one runner as one family. The second se
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos search "measure the files"
    matched by words (encoder not installed)
    shown 1 of 1.
-   Place 1 is the first row. This seat's rows come before another seat's.
+   Place 1 is the first row.
    The score orders the row. It is not whether the sentence is true.
+   This seat's score gets a small boost.
+   A closer row from another seat stays ahead.
    Checks: how many of them named this row.
 
    lesson, from an agent, today
      Measure the files before picking a codec.
-     place 1, score 1.00, checks 2/2, id …
+     place 1, score 0.81, checks 2/2, id …
 
    $ CURSOR_CONVERSATION_ID=0199c0de-cursor-conversation-one ljos search "measure the files"
    matched by words (encoder not installed)
    shown 1 of 1.
-   Place 1 is the first row. This seat's rows come before another seat's.
+   Place 1 is the first row.
    The score orders the row. It is not whether the sentence is true.
+   This seat's score gets a small boost.
+   A closer row from another seat stays ahead.
    Checks: how many of them named this row.
 
    lesson, from an agent, today, from claude-f2pu9d56g0
      Measure the files before picking a codec.
-     place 1, score 1.00, checks 2/2, id …
+     place 1, score 0.81, checks 2/2, id …
 
 .. END ljos-sample agents-memory
 

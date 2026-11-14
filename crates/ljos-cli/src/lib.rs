@@ -98,6 +98,7 @@ pub mod user_rules;
 mod verbatim;
 mod version_skew;
 pub mod wake;
+pub mod word_rank;
 
 #[cfg(test)]
 mod cursor_event_scan;
@@ -14515,6 +14516,10 @@ pub fn search_json_empty(hits: &[Hit], ranking: Option<&Ranking>, empty: Option<
     let mut doc = serde_json::json!({ "hits": rows });
     if hits.is_empty() {
         if let Some(line) = empty.map(str::trim).filter(|line| !line.is_empty()) {
+            // `close_matches` is new. `reading` and `ranking` keep their names.
+            if line.starts_with("No close matches") {
+                doc["close_matches"] = Value::Bool(false);
+            }
             doc["reading"] = Value::String(line.to_string());
         }
     }
@@ -15598,11 +15603,13 @@ fn relevant_atoms(client: &PacksetClient, cue: &str, limit: usize) -> Vec<Value>
 }
 
 /// Hits from the stored snapshot when `/v1/search` does not answer.
-/// The score is the lexical match. Empty when the listing cannot be read.
+/// The score is filled in later by [`word_rank::order_hits`]. Empty when
+/// the listing cannot be read. Rows the old word scan missed, such as
+/// `SHA-1` for `sha1`, are added when they share a content word.
 #[must_use]
 pub fn search_by_words(query: &str, limit: u32) -> Vec<Hit> {
     let mut hits = if let Ok(client) = pack() {
-        word_ranked(&client, query, limit as usize)
+        let mut hits = word_ranked(&client, query, limit as usize)
             .into_iter()
             .filter_map(|(atom, score)| {
                 let mut hit = atom_as_hit(&atom)?;
@@ -15610,14 +15617,68 @@ pub fn search_by_words(query: &str, limit: u32) -> Vec<Hit> {
                 hit.ts = written_at(&atom);
                 Some(hit)
             })
-            .collect()
+            .collect();
+        widen_word_hits(&client, query, &mut hits);
+        hits
     } else {
         Vec::new()
     };
     prefer_calling_seat(&mut hits);
     memory_port::append_recall(&mut hits, query, limit as usize);
-    refine_default_hits(&mut hits, query, false);
     hits
+}
+
+/// Atoms the lexical scan did not keep, when [`word_rank`] can still match
+/// them. A title on the atom is carried as `title:` so the ranker can weight
+/// it, and that prefix is taken off before the row is printed.
+fn widen_word_hits(client: &PacksetClient, query: &str, hits: &mut Vec<Hit>) {
+    let Ok(atoms) = rows_read(client, &client.workspace()) else {
+        return;
+    };
+    let have: std::collections::HashSet<String> = hits
+        .iter()
+        .filter_map(|hit| hit.id.clone())
+        .filter(|id| !id.is_empty())
+        .collect();
+    for atom in atoms.iter() {
+        let id = atom.field("id").and_then(Value::as_str).unwrap_or("");
+        if !id.is_empty() && have.contains(id) {
+            continue;
+        }
+        let text = atom_text(atom);
+        let title = atom
+            .field("source")
+            .and_then(|source| source.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let tags = topical_tag_text(atom.field("entities"));
+        let blob = format!("{title} {tags} {text}");
+        if !word_rank::shares_term(query, &blob) {
+            continue;
+        }
+        let Some(mut hit) = atom_as_hit(atom) else {
+            continue;
+        };
+        if !title.is_empty() {
+            hit.entities.push(format!("title:{title}"));
+        }
+        hit.score = 0.0;
+        hit.ts = written_at(&atom.atom());
+        hits.push(hit);
+    }
+}
+
+fn topical_tag_text(entities: Option<&Value>) -> String {
+    entities
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .filter(|tag| !tag.contains(':'))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
 }
 
 /// Kinds a default search does not return. A note, an attempt and a log
@@ -44289,7 +44350,7 @@ pub fn search_reading(n: usize) -> &'static str {
 /// the next command. The id on each
 /// row is the eight-character prefix. `--json` does not use this.
 pub fn format_hits(hits: &[Hit], explain: bool) -> String {
-    format_search(hits, hits.len(), false, explain, "")
+    format_search(hits, hits.len(), false, explain, "", true)
 }
 
 /// [`format_hits`] with the count before the limit cut. `capped` means the
@@ -44301,10 +44362,15 @@ pub fn format_search(
     capped: bool,
     explain: bool,
     query: &str,
+    seat_ahead: bool,
 ) -> String {
     let now = now_utc();
     let mine = seat_name();
-    let reading = search_reading(hits.len());
+    let reading = if hits.is_empty() || seat_ahead {
+        search_reading(hits.len())
+    } else {
+        "Place 1 is the first row. The score orders the row, and it includes a small boost for this seat. A closer row from another seat stays ahead. The fraction is how many checks named the row. Neither is whether the sentence is true."
+    };
     let mut owned: Vec<(String, String, Option<String>, bool)> = Vec::new();
     for hit in hits {
         let local = hit.labels.iter().any(|label| label == "kept-local");
@@ -44346,6 +44412,7 @@ pub fn format_search(
         explain,
         query,
         reading,
+        seat_ahead,
     })
 }
 

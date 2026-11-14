@@ -391,6 +391,9 @@ pub struct SearchPage<'a> {
     pub query: &'a str,
     /// The paragraph `--explain` prints. Ignored when `explain` is false.
     pub reading: &'a str,
+    /// This seat's rows come first. A word ranking leaves this false: the
+    /// score already includes a small boost, and a closer row stays ahead.
+    pub seat_ahead: bool,
 }
 
 /// The human search page.
@@ -411,9 +414,15 @@ pub fn search_page(page: &SearchPage<'_>) -> String {
             out.push_str(&wrap(reading, COLS));
             out.push('\n');
         }
-    } else {
+    } else if page.seat_ahead {
         out.push_str("Place 1 is the first row. This seat's rows come before another seat's.\n");
         out.push_str("The score orders the row. It is not whether the sentence is true.\n");
+        out.push_str("Checks: how many of them named this row.\n");
+    } else {
+        out.push_str("Place 1 is the first row.\n");
+        out.push_str("The score orders the row. It is not whether the sentence is true.\n");
+        out.push_str("This seat's score gets a small boost.\n");
+        out.push_str("A closer row from another seat stays ahead.\n");
         out.push_str("Checks: how many of them named this row.\n");
     }
     out.push('\n');

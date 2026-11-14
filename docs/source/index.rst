@@ -93,16 +93,21 @@ First commands
    $ ljos search "lexical default"
    matched by words (encoder not installed)
    shown 1 of 1.
-   Place 1 is the first row. This seat's rows come before another seat's.
+   Place 1 is the first row.
    The score orders the row. It is not whether the sentence is true.
+   This seat's score gets a small boost.
+   A closer row from another seat stays ahead.
    Checks: how many of them named this row.
 
    lesson, from an agent, today
      The lexical default is BM25+. It beat BM25 by two points on turns.
-     place 1, score 1.00, checks 2/2, id a6ae2751
+     place 1, score 0.81, checks 2/2, id a6ae2751
    $ ljos file "Pick a codec" -p demo
 
-``ljos search`` prints the lesson when the query shares a word with it.
+``ljos search`` prints the lesson when the query shares its words.
+A word ranking splits an identifier, so ``list_scans`` matches ``list scans``.
+A row that only shares a common word is left out, and the line is then
+``No close matches for "..."``.
 ``ljos file`` prints the new id and commits the Org heading. :doc:`Getting started <getting-started>` has the full transcript, including a second seat.
 
 Where to go next

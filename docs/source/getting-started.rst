@@ -133,13 +133,15 @@ A lesson and a search
    $ ljos search "lexical default"
    matched by words (encoder not installed)
    shown 1 of 1.
-   Place 1 is the first row. This seat's rows come before another seat's.
+   Place 1 is the first row.
    The score orders the row. It is not whether the sentence is true.
+   This seat's score gets a small boost.
+   A closer row from another seat stays ahead.
    Checks: how many of them named this row.
 
    lesson, from an agent, today
      The lexical default is BM25+. It beat BM25 by two points on turns.
-     place 1, score 1.00, checks 2/2, id a6ae2751
+     place 1, score 0.81, checks 2/2, id a6ae2751
 
 The id and the review time are the ones that run printed. The name after ``unknown-`` is the host name.
 That line is printed only when the write uses that seat. A conversation that already has a seat record writes as that seat and does not print the line.
@@ -147,7 +149,7 @@ This run sat under an agent runner, so the search row says ``lesson, from an age
 Typed at a terminal with no runner above it, that row says ``lesson, today``.
 Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
 ``ljos search "which fusion"`` shares no word with either sentence and prints ``No hits for "which fusion", so run `ljos search fusion`.``
-This seat's hits come first. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.
+When the encoder ranked the page, this seat's hits come first. A word ranking gives this seat a small boost instead, and a closer row from another seat stays ahead. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.
 That floor is the one the prompt hook uses for a hit the encoder lists at the top.
 A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is ``Nothing relevant was found.``
 A busy pack ranks by words and still returns a hit that names the subject.
@@ -160,13 +162,15 @@ A busy pack ranks by words and still returns a hit that names the subject.
    $ ljos search fusing
    matched by words (encoder not installed)
    shown 1 of 1.
-   Place 1 is the first row. This seat's rows come before another seat's.
+   Place 1 is the first row.
    The score orders the row. It is not whether the sentence is true.
+   This seat's score gets a small boost.
+   A closer row from another seat stays ahead.
    Checks: how many of them named this row.
 
    preference, from an agent, not checked, today
      CombMNZ over RRF for fusing two ballots.
-     place 1, score 1.00, checks 2/2, id f8b725a9
+     place 1, score 0.35, checks 2/2, id f8b725a9
 
 ``ljos due`` lists claims when their review time arrives. A claim you stop reviewing sinks in search.
 The how-to :doc:`Keep memory current <howto-memory>` is the review clock, ``ljos graded`` and ``ljos forget``.
