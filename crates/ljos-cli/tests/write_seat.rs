@@ -230,6 +230,36 @@ fn a_seats_file_does_not_name_the_write() {
 }
 
 #[test]
+fn file_with_no_seat_names_the_unknown_seat() {
+    let notice =
+        "ljos: no seat was named and this write uses unknown-box, so run `export LJOS_SEAT=NAME`.";
+    let file = &["file", "a new bug", "--top", "-p", "proj"][..];
+    let fresh = Bench::new();
+    let out = fresh.ljos_env(&[("LJOS_SYNC_HOST", "box")], file);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(notice),
+        "a first file did not name the unknown seat:\n{err}"
+    );
+    let again = Bench::new();
+    let log = again.root.join("home/.state/ljos/seat-writes.log");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, "2026-11-13T00:00:00.000Z\tunknown-box\tbox\n").unwrap();
+    let out = again.ljos_env(&[("LJOS_SYNC_HOST", "box")], file);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(notice),
+        "a file after an unknown write did not name that seat:\n{err}"
+    );
+    let named = again.ljos(Some("ada"), file);
+    let err = String::from_utf8_lossy(&named.stderr);
+    assert!(
+        !err.contains("no seat was named"),
+        "a named seat was called unknown:\n{err}"
+    );
+}
+
+#[test]
 fn a_filed_issue_is_created_as_the_seat_the_check_named() {
     let b = Bench::new();
     b.roster("seats = [\"saddle\", \"inky\"]\n");

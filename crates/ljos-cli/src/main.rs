@@ -4862,6 +4862,10 @@ fn run_command() -> Result<()> {
             deadline,
             porcelain: _,
         } => {
+            // The same unknown-seat line `ljos remember` prints. A seat
+            // taken from the most recent write is already `unknown-<host>`,
+            // and the commit line alone does not say to name one.
+            ljos_cli::seat_resolve::announce_named_unknown(&ljos_cli::whoami());
             if let Some(parent) = parent.as_deref() {
                 stop_ticket(parent);
             }
