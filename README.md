@@ -33,11 +33,14 @@ A script that should register runners passes `--harness all`.
 If install stops, the script names the cause and the command that fixes it.
 
 - No network, or the release download fails: check the connection and run `sh install.sh` again. A version you name is `sh install.sh --version VER`. Archives already on disk are `sh install.sh --asset-dir DIR`.
-- The OS or arch is not Linux or macOS on x86_64 or aarch64: on Windows, run the script inside WSL. To build from source, install Rust from https://rustup.rs and run `sh install.sh` again.
-- `curl` or `tar` is missing: install it and run `sh install.sh` again. Programs already unpacked are `sh install.sh --from-dir DIR`.
-- The install directory is not on PATH: the script prints `export PATH="$HOME/.local/bin:$PATH"`. Run that, then `ljos doctor`.
+- The OS or CPU is not Linux or macOS on x86_64 or aarch64: the script prints one line naming those systems and `cargo install --locked` for the seat programs. On Windows, run the script inside WSL.
+- `curl` or `wget`, `tar`, or `sha256sum` is missing. On macOS the checksum tool is `shasum`. The script names the missing tool. Install it and run `sh install.sh` again. Programs already unpacked are `sh install.sh --from-dir DIR`.
+- A checksum does not match, or the download stops early: the script stops, deletes the partial file, and says to run `sh install.sh` again.
+- The install directory is not writable: the script names it and `sh install.sh --bin-dir DIR`.
+- The install directory is not on PATH: the script prints the line for bash (`~/.bashrc`), zsh (`~/.zshrc`) and fish (`~/.config/fish/config.fish`). It does not edit those files. `--modify-path` writes the bash and zsh lines. Run the line it prints, then `ljos doctor`.
 - An older `ljos` is earlier on PATH: the script names both binaries and prints the `export PATH` line that puts the new one first.
-- Running the script again replaces the programs in place and says what was there.
+- Running the script again over the same version says it reinstalled that version. An older install says it updated, and names both versions.
+- `--version VER` or `--pin REPO=VER` for a release that does not exist says so, and names the releases page that lists versions.
 - A running `ljos-mcp` keeps the previous binary. Restart the assistant, or `kill` the pid the script prints, then run `ljos doctor`.
 
 `ljos onboard` with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store. The deed store keeps signed records of the work. Install an agent, then run `ljos onboard`. `ljos onboard --example` lists the tools.
