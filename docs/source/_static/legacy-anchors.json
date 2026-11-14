@@ -1,7 +1,7 @@
 {
   "howto": {
     "how-to": "",
-    "wire-the-seat-into-an-agent-runner": "howto-runner.html#wire-the-seat-into-an-agent-runner",
+    "wire-the-seat-into-an-agent-runner": "howto-runner.html#another-runner",
     "seat-a-shell-only-agent": "howto-runner.html#seat-a-shell-only-agent",
     "add-a-seat-and-let-it-close-tickets": "howto-seats.html#add-a-seat-and-let-it-close-tickets",
     "write-to-another-seat": "howto-mail.html#write-to-another-seat",
@@ -13,7 +13,7 @@
     "choose-which-branches-the-push-check-covers": "howto-command-check.html#choose-which-branches-the-push-check-covers",
     "let-jev-judge-the-prompt": "howto-judge.html#let-jev-judge-the-prompt",
     "open-persona-panes-in-another-tool": "howto-personas.html#open-persona-panes-in-another-tool",
-    "wire-the-seat-into-the-editor-harness": "howto-runner.html#wire-the-seat-into-the-editor-harness",
+    "wire-the-seat-into-the-editor-harness": "howto-runner.html#cursor",
     "spawn-a-persona-as-a-subagent": "howto-personas.html#spawn-a-persona-as-a-subagent",
     "show-the-seat-in-the-status-bar": "howto-runner.html#show-the-seat-in-the-status-bar",
     "put-the-judgments-to-a-local-model-or-a-runner": "howto-judge.html#put-the-judgments-to-a-local-model-or-a-runner",
