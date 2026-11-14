@@ -1,7 +1,7 @@
 //! `ljos` with no arguments, and a mistyped command or flag.
 //!
 //! The bare screen names what ljos is, the seat a read would use and
-//! where that came from, then search, remember, file and doctor, and
+//! where that came from, then install, doctor, remember and search, and
 //! the command reference. A mistyped word names the closest real command
 //! or flag and the command to run, and exits 2.
 
@@ -43,10 +43,10 @@ Memory, a work tracker and a command guard for coding runners.
 
 {seat}
 
-  ljos search QUERY   find what is stored
-  ljos remember TEXT  store one lesson
-  ljos file TITLE     open a ticket
-  ljos doctor         check that ljos is ready
+  sh install.sh --no-embed  install ljos
+  ljos doctor               check that ljos is ready
+  ljos remember TEXT        store one lesson
+  ljos search QUERY         find what is stored
 
 The docs are at https://leidarljos.github.io/ljos/reference-commands.html.
 "
@@ -71,7 +71,9 @@ fn bare_ljos_names_the_seat_and_the_first_commands() {
     assert!(out.stderr.is_empty(), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        screen("no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.")
+        screen(
+            "This read uses every seat, because no seat was named, so run `export LJOS_SEAT=NAME`."
+        )
     );
 }
 

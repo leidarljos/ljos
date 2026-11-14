@@ -128,11 +128,11 @@ fn bare_ljos_prints_the_first_commands() {
     assert!(out.status.success(), "{}", text(&out));
     for line in [
         "Memory, a work tracker and a command guard for coding runners.",
-        "no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.",
-        "ljos search QUERY",
-        "ljos remember TEXT",
-        "ljos file TITLE",
+        "This read uses every seat, because no seat was named, so run `export LJOS_SEAT=NAME`.",
+        "sh install.sh --no-embed",
         "ljos doctor",
+        "ljos remember TEXT",
+        "ljos search QUERY",
         "The docs are at https://leidarljos.github.io/ljos/reference-commands.html.",
     ] {
         assert!(body.contains(line), "missing {line}\n{body}");

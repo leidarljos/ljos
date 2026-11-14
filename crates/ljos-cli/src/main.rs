@@ -3036,12 +3036,12 @@ const ABOUT_LINE: &str = "Memory, a work tracker and a command guard for coding 
 /// The command reference a bare `ljos` names.
 const DOCS_URL: &str = "https://leidarljos.github.io/ljos/reference-commands.html";
 
-/// The first commands, in the order the bare screen prints them.
+/// The first commands, in the order the getting-started page runs them.
 const FIRST_COMMANDS: &[(&str, &str)] = &[
-    ("ljos search QUERY", "find what is stored"),
-    ("ljos remember TEXT", "store one lesson"),
-    ("ljos file TITLE", "open a ticket"),
+    ("sh install.sh --no-embed", "install ljos"),
     ("ljos doctor", "check that ljos is ready"),
+    ("ljos remember TEXT", "store one lesson"),
+    ("ljos search QUERY", "find what is stored"),
 ];
 
 /// What `ljos` with no arguments prints.
@@ -3049,7 +3049,8 @@ const FIRST_COMMANDS: &[(&str, &str)] = &[
 /// One line for what ljos is, the seat a read would use and where that
 /// came from, the first commands, and where the docs are. Load the env
 /// file and prepare a read before calling this, so the seat line is the
-/// one [`ljos_cli::doctor_seat_source`] prints.
+/// one [`ljos_cli::doctor_seat_source`] prints. A read that matched no
+/// seat says that in plain words, not the doctor's rule phrase.
 fn opening_screen() -> String {
     let seat = seat_screen_line(&ljos_cli::doctor_seat_source().state);
     let width = FIRST_COMMANDS
@@ -3071,9 +3072,13 @@ fn opening_screen() -> String {
 
 /// The seat line on the bare screen.
 ///
-/// A named seat keeps the doctor's `named by` phrase. A miss is already
-/// one sentence and names the next command, so it is printed as it stands.
+/// A named seat keeps the doctor's `named by` phrase. A read that matched
+/// no seat says which seat it uses and why, and names the next command.
 fn seat_screen_line(state: &str) -> String {
+    if state.starts_with("no seat rule matched; reading every seat") {
+        return "This read uses every seat, because no seat was named, so run `export LJOS_SEAT=NAME`."
+            .to_string();
+    }
     if let Some((name, source)) = state.split_once(" named by ") {
         if !name.is_empty() && !name.contains(' ') && !source.is_empty() {
             return format!("This seat is {name}, named by {source}.");
