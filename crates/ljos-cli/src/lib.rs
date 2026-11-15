@@ -13546,6 +13546,23 @@ pub fn file_placement(
     fn project_of(id: &str) -> Option<&str> {
         id.rsplit_once('-').map(|(proj, _)| proj)
     }
+    // The held issue is a plan in some other project. A child has to live
+    // in its parent's project, so this ticket is filed with no parent.
+    // The line says that, and the command that files under the plan.
+    // `why` is how the checkout named the project. An explicit `-p` has none.
+    fn top_of_other(project: &str, held: &str, why: Option<&str>) -> String {
+        let place = match project_of(held) {
+            Some(proj) => format!("{held} is in project {proj}"),
+            None => format!("{held} is not in {project}"),
+        };
+        let checkout = match why {
+            Some(why) => format!(" This checkout is project {project} ({why})."),
+            None => String::new(),
+        };
+        format!(
+            "filed at the top of {project}, not under {held}.{checkout} {place}, and a child lives in its parent's project. `ljos file --parent {held} TITLE` files under the held issue.\n"
+        )
+    }
     // A parent the seat did not type is the hold. The line names it, so a
     // sitting on one project does not file a child there without saying so.
     let from_hold = !top && parent.is_none();
@@ -13572,10 +13589,7 @@ pub fn file_placement(
         match (held, asked.as_deref()) {
             (Some(held), Some(asked)) if project_of(&held) != Some(asked) => {
                 if project.is_some() {
-                    passed_over = Some(format!(
-                        "filed at the top of {asked}: the held issue {held} is in another project; \
-                         --parent {held} files under it\n"
-                    ));
+                    passed_over = Some(top_of_other(asked, &held, None));
                 }
                 None
             }
@@ -13588,9 +13602,7 @@ pub fn file_placement(
             .is_some_and(|id| project_of(id) != Some(name.as_str()))
         {
             let held_id = held_note.as_deref().unwrap_or("none");
-            passed_over = Some(format!(
-                "project {name}: {why}; held issue {held_id} is another project, so this files at the top of {name}\n"
-            ));
+            passed_over = Some(top_of_other(name, held_id, Some(why)));
         }
     }
     let parent = if from_cwd
@@ -53546,7 +53558,12 @@ mod tests {
         assert_eq!(project, s("Tools"));
         let said = said.expect("a line");
         assert!(said.contains("filed at the top of Tools"), "{said}");
-        assert!(said.contains("--parent garden-06v8"), "{said}");
+        assert!(said.contains("not under garden-06v8"), "{said}");
+        assert!(said.contains("garden-06v8 is in project garden"), "{said}");
+        assert!(
+            said.contains("`ljos file --parent garden-06v8 TITLE`"),
+            "{said}"
+        );
         // --parent and --top still win, and a --parent brings its project.
         let (parent, project, _) = file_placement(false, s("Tools-example"), s("Tools"), held());
         assert_eq!(parent, s("Tools-example"));
@@ -53595,7 +53612,15 @@ mod tests {
         assert_eq!(project.as_deref(), Some("leidarljos"));
         let said = said.expect("why");
         assert!(said.contains("project leidarljos"), "{said}");
-        assert!(said.contains("wt-pareback7"), "{said}");
+        assert!(said.contains("not under wt-pareback7-ab12"), "{said}");
+        assert!(
+            said.contains("wt-pareback7-ab12 is in project wt-pareback7"),
+            "{said}"
+        );
+        assert!(
+            said.contains("`ljos file --parent wt-pareback7-ab12 TITLE`"),
+            "{said}"
+        );
         let (parent, project, said) = file_placement(
             false,
             None,
@@ -53606,6 +53631,11 @@ mod tests {
         assert_eq!(project.as_deref(), Some("tools"));
         let said = said.expect("why");
         assert!(said.contains("filed at the top of tools"), "{said}");
+        assert!(said.contains("not under wt-pareback7-ab12"), "{said}");
+        assert!(
+            said.contains("`ljos file --parent wt-pareback7-ab12 TITLE`"),
+            "{said}"
+        );
     }
 
     #[test]
