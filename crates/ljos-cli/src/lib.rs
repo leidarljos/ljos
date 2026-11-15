@@ -35565,6 +35565,13 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     quiet += n;
                     continue;
                 }
+                if l.trim().starts_with("tracker git:") || l.trim().starts_with("sync:") {
+                    if let Some(shown) = present_write_line(l) {
+                        out.push_str(&shown);
+                        out.push('\n');
+                    }
+                    continue;
+                }
                 if is_memory_noise_line(l) || routine_git_line(l) || l.starts_with("gen=") {
                     if is_memory_noise_line(l) {
                         note_degraded(out);
@@ -35580,11 +35587,10 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
         }
         "sync" => {
             for l in lines {
-                if routine_git_line(l) || l.trim().is_empty() {
-                    continue;
+                if let Some(shown) = present_write_line(l) {
+                    out.push_str(&shown);
+                    out.push('\n');
                 }
-                out.push_str(l);
-                out.push('\n');
             }
         }
         // A sync line printed ahead of the first section. The compact
@@ -35691,6 +35697,15 @@ pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String 
         let mut out = String::new();
         note_degraded(&mut out);
         out
+    } else if first.starts_with("tracker git:") || first.starts_with("sync:") {
+        let mut out = String::new();
+        for line in std::iter::once(first).chain(lines) {
+            if let Some(shown) = present_write_line(line) {
+                out.push_str(&shown);
+                out.push('\n');
+            }
+        }
+        out
     } else if routine_git_line(first) {
         String::new()
     } else if first.starts_with("tracker:")
@@ -35793,7 +35808,9 @@ fn count_noun(n: usize, one: &str, many: &str) -> String {
 
 /// A tracker or sync line that reports a commit that landed, or a sync the
 /// mode skipped. A refusal, a failed push and a remote that was not reached
-/// stay on the short output.
+/// stay on the short output. Quiet-claim release uses this to decide
+/// whether the commit is an error. The words a person sees are
+/// [`without_routine_git`].
 #[must_use]
 pub fn routine_git_line(line: &str) -> bool {
     let line = line.trim();
@@ -35822,7 +35839,282 @@ pub fn routine_git_line(line: &str) -> bool {
     !TROUBLE.iter().any(|mark| line.contains(mark))
 }
 
-/// `text` with [`routine_git_line`] lines removed. Other lines stay, in order.
+/// Words that mean a tracker or sync step did not finish.
+const WRITE_TROUBLE: &[&str] = &[
+    "refused",
+    "failed",
+    "could not",
+    "ignored",
+    "not a git",
+    "another writer",
+    "deferred",
+    "not started",
+    "push queued",
+    "still running",
+    "not reached",
+    "warning:",
+    "push destination is not origin's default",
+    "was not removed",
+];
+
+/// A commit or a push that landed, or a sync the configured mode completed.
+/// A missing remote is local on purpose. Commit mode saying it did not push
+/// is the mode the operator set.
+fn write_line_quiet(line: &str) -> bool {
+    let line = line.trim();
+    if WRITE_TROUBLE.iter().any(|mark| line.contains(mark)) {
+        return false;
+    }
+    if line.starts_with("tracker git:") {
+        return line.contains("not pushed (LJOS_TRACKER_GIT=commit)")
+            || line.contains("committed and pushed")
+            || line.contains("no remote, kept local")
+            || line.contains("nothing to commit")
+            || line.starts_with("tracker git: off (")
+            || line.starts_with("tracker git: held for the batch")
+            || (line.starts_with("tracker git: pushed ") && !line.contains("queued"));
+    }
+    if line.starts_with("sync:") {
+        return line.starts_with("sync: not fetched")
+            || line.starts_with("sync: off (")
+            || line.contains("names no scope")
+            || line.starts_with("sync: sealed ")
+            || line.starts_with("sync: exported ")
+            || line.starts_with("sync: migrated ")
+            || line.contains("unchanged")
+            || line.contains("already holds")
+            || line.starts_with("sync: pushed pending")
+            || line.starts_with("sync: not pushed (LJOS_TRACKER_GIT=")
+            || line.contains("not pushed (LJOS_TRACKER_GIT=commit)")
+            || line.contains("no remote is configured")
+            || line.contains("; pushed")
+            || line.starts_with("sync: the log was kept")
+            || line.contains("sealed and committed; not pushed");
+    }
+    false
+}
+
+/// One tracker or sync line as the default write prints it.
+///
+/// `None` when the commit or the push landed, or commit mode did what it
+/// was set to do. A refusal, a failed push, or a push that was expected
+/// and skipped is one sentence naming the command to run. The sentence
+/// does not name a host directory or a segment file. `--verbose` prints
+/// `line` itself.
+fn present_write_line(line: &str) -> Option<String> {
+    let trim = line.trim();
+    if trim.is_empty() {
+        return None;
+    }
+    if !trim.starts_with("tracker git:") && !trim.starts_with("sync:") {
+        return Some(line.to_string());
+    }
+    if write_line_quiet(trim) {
+        return None;
+    }
+    Some(plain_write_line(trim))
+}
+
+fn plain_write_line(line: &str) -> String {
+    let sync = line.starts_with("sync:");
+    let body = line
+        .trim()
+        .trim_start_matches("tracker git:")
+        .trim_start_matches("sync:")
+        .trim();
+    let say = |sentence: String| redact_places(&sentence);
+    if let Some(why) = body
+        .split_once("commit refused:")
+        .map(|(_, why)| why.trim())
+    {
+        let why = clip_why(why);
+        if why.contains("user.name") {
+            return say(format!("The tracker commit was refused: {why}."));
+        }
+        let what = if sync {
+            "sync commit"
+        } else {
+            "tracker commit"
+        };
+        return say(format!(
+            "The {what} was refused: {why}, so run the command again."
+        ));
+    }
+    if body.contains("not a git") {
+        return say("The tracker is not a git checkout, so run `ljos doctor`.".into());
+    }
+    if body.contains("ignored") {
+        return say(
+            "The tracker file is ignored and the write stays in this worktree, so run `ljos doctor`."
+                .into(),
+        );
+    }
+    if body.contains("another writer") {
+        return say(
+            "Another writer held the tracker, so this write is on disk and not committed, so run `ljos sync`."
+                .into(),
+        );
+    }
+    if body.contains("deferred") {
+        return say("The tracker commit was deferred, so run `ljos sync`.".into());
+    }
+    if body.contains("push destination is not origin's default") {
+        return say(
+            "The tracker commit landed and the push was skipped, because the destination is not origin's default branch, so run `ljos sync`."
+                .into(),
+        );
+    }
+    if body.contains("not started") {
+        return say(
+            "The tracker commit landed and the push not started, so run `ljos sync`.".into(),
+        );
+    }
+    if body.contains("push queued") {
+        let why = body
+            .split_once("push queued:")
+            .map(|(_, why)| clip_why(why))
+            .filter(|why| !why.is_empty());
+        return say(match why {
+            Some(why) => {
+                format!("The tracker commit landed and the push queued: {why}, so run `ljos sync`.")
+            }
+            None => "The tracker commit landed and the push queued, so run `ljos sync`.".into(),
+        });
+    }
+    if body.contains("still running") {
+        return say(
+            "The tracker commit landed and the push is still running, so run `ljos sync`.".into(),
+        );
+    }
+    if body.contains("not reached") || body.contains("the remote was not reached") {
+        let why = reached_why(body);
+        let lead = if sync {
+            "The sync commit landed and the remote was not reached"
+        } else {
+            "The tracker commit landed and the remote was not reached"
+        };
+        return say(match why {
+            Some(why) => format!("{lead} ({why}), so run `ljos sync`."),
+            None => format!("{lead}, so run `ljos sync`."),
+        });
+    }
+    if body.contains("could not") && !body.contains("not reached") {
+        return say(format!(
+            "The tracker write could not be committed ({}), so run `ljos doctor`.",
+            clip_why(body)
+        ));
+    }
+    if body.contains("push refused") || body.contains("push failed") {
+        let why = body
+            .split_once("push refused:")
+            .or_else(|| body.split_once("push failed:"))
+            .map(|(_, why)| clip_why(why))
+            .filter(|why| !why.is_empty())
+            .unwrap_or_else(|| clip_why(body));
+        let lead = if sync {
+            "The sync commit landed and the push failed"
+        } else {
+            "The tracker commit landed and the push failed"
+        };
+        return say(format!("{lead}: {why}, so run `ljos sync`."));
+    }
+    if sync && (body.contains("fetch failed") || body.contains("merge")) {
+        return say(format!(
+            "Sync could not update the tracker ({}), so run `ljos sync`.",
+            clip_why(body)
+        ));
+    }
+    if sync && body.contains("warning") {
+        return say(
+            "The sealed log could not take this ticket's atoms, so run `ljos sync`.".into(),
+        );
+    }
+    let what = if sync {
+        "sync step"
+    } else {
+        "tracker git step"
+    };
+    say(format!(
+        "The {what} did not finish ({}), so run `ljos sync`.",
+        clip_why(body)
+    ))
+}
+
+fn reached_why(body: &str) -> Option<String> {
+    let at = body.find("not reached")?;
+    let rest = &body[at..];
+    let open = rest.find('(')?;
+    let close = rest[open + 1..].find(')')?;
+    let why = clip_why(&rest[open + 1..open + 1 + close]);
+    (!why.is_empty()).then_some(why)
+}
+
+fn clip_why(why: &str) -> String {
+    let why = redact_places(why.trim().trim_end_matches('.').trim());
+    let mut out = String::new();
+    for word in why.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if out.len() > 180 {
+        out.truncate(177);
+        out.push_str("...");
+    }
+    out
+}
+
+/// Drop a host directory under `.ljos/atoms` and a segment file name.
+fn redact_places(text: &str) -> String {
+    let mut out = String::new();
+    for token in text.split_inclusive(char::is_whitespace) {
+        let lead = token.len() - token.trim_start().len();
+        let trail = token.len() - token.trim_end().len();
+        let bare = token.trim();
+        let stem = bare.trim_end_matches([',', ';', ')', '.', ':']);
+        let hidden = stem.contains(".ljos/atoms")
+            || (stem.contains("seg-") && (stem.contains("jsonl") || stem.contains(".age")));
+        if hidden {
+            out.push_str(&token[..lead]);
+            out.push_str("the sealed log");
+            out.push_str(&token[token.len() - trail..]);
+        } else {
+            out.push_str(token);
+        }
+    }
+    if let Some(start) = out.find("chore(sync):") {
+        if let Some(end_rel) = out[start..].find("atoms") {
+            let end = start + end_rel + "atoms".len();
+            out.replace_range(start..end, "the sealed log");
+        }
+    }
+    let host = sync::host();
+    if !host.is_empty() {
+        let slash = format!("/{host}/");
+        while let Some(at) = out.find(&slash) {
+            out.replace_range(at..at + slash.len(), "/");
+        }
+        let tail = format!("/{host}");
+        if let Some(at) = out.rfind(&tail) {
+            let after = at + tail.len();
+            if after == out.len()
+                || out[after..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !c.is_ascii_alphanumeric())
+            {
+                out.replace_range(at..after, "");
+            }
+        }
+    }
+    out
+}
+
+/// `text` with a landed tracker commit and a landed sync left out.
+///
+/// A refusal, a failed push, or a push that was expected and skipped stays,
+/// as one sentence. Other lines stay, in order.
 #[must_use]
 pub fn without_routine_git(text: &str) -> String {
     if text.is_empty() {
@@ -35830,7 +36122,12 @@ pub fn without_routine_git(text: &str) -> String {
     }
     let mut out = String::new();
     for line in text.lines() {
-        if routine_git_line(line) {
+        let trim = line.trim();
+        if trim.starts_with("tracker git:") || trim.starts_with("sync:") {
+            if let Some(shown) = present_write_line(line) {
+                out.push_str(&shown);
+                out.push('\n');
+            }
             continue;
         }
         out.push_str(line);
@@ -35840,6 +36137,136 @@ pub fn without_routine_git(text: &str) -> String {
         out.pop();
     }
     out
+}
+
+/// JSON for a write: the lines a person sees, plus every tracker git line
+/// and every sync line. Scripts keep the detail the default output leaves off.
+#[must_use]
+pub fn format_write_json(full: &str, verbose: bool) -> String {
+    let text = if verbose {
+        full.to_string()
+    } else {
+        without_routine_git(full)
+    };
+    format_rendered_json(&text, full, None)
+}
+
+/// [`format_write_json`] when `text` is already the lines to show, as a
+/// compact sitting is. `full` is where `tracker_git` and `sync` are read.
+#[must_use]
+pub fn format_rendered_json(text: &str, full: &str, id: Option<&str>) -> String {
+    let mut tracker_git = Vec::new();
+    let mut sync_lines = Vec::new();
+    for line in full.lines() {
+        let trim = line.trim();
+        if trim.starts_with("tracker git:") {
+            tracker_git.push(serde_json::Value::String(trim.to_string()));
+        } else if trim.starts_with("sync:") {
+            sync_lines.push(serde_json::Value::String(trim.to_string()));
+        }
+    }
+    let mut map = serde_json::Map::new();
+    if let Some(id) = id {
+        map.insert("id".into(), serde_json::Value::String(id.to_string()));
+    }
+    map.insert(
+        "text".into(),
+        serde_json::Value::String(text.trim_end().to_string()),
+    );
+    map.insert("tracker_git".into(), serde_json::Value::Array(tracker_git));
+    map.insert("sync".into(), serde_json::Value::Array(sync_lines));
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&serde_json::Value::Object(map))
+            .unwrap_or_else(|_| "{}".to_string())
+    )
+}
+
+#[cfg(test)]
+mod quiet_write_lines {
+    use super::{format_write_json, without_routine_git};
+
+    const LANDED: &str = "\
+noted on probe-a1b2
+tracker git: committed chore(issues): probe-a1b2 noted by ada; not pushed (LJOS_TRACKER_GIT=commit)
+sync: sealed 1 grokbot atoms of probe-a1b2 to .ljos/atoms/runner/seg-439-63efac8f.jsonl.age, sealed to 1 recipient
+sync: committed chore(sync): runner grokbot atoms; not pushed (LJOS_TRACKER_GIT=commit)
+";
+
+    #[test]
+    fn a_commit_that_landed_prints_no_tracker_or_sync_line() {
+        let short = without_routine_git(LANDED);
+        assert_eq!(short, "noted on probe-a1b2\n");
+        assert!(!short.contains("tracker git:"), "{short}");
+        assert!(!short.contains("sync:"), "{short}");
+        assert!(!short.contains(".ljos/atoms"), "{short}");
+        assert!(!short.contains("seg-"), "{short}");
+        assert!(!short.contains("runner"), "{short}");
+        let pushed = without_routine_git(
+            "tracker git: committed and pushed chore(issues): probe-a1b2 noted by ada\n",
+        );
+        assert_eq!(pushed, "");
+    }
+
+    #[test]
+    fn a_refused_commit_is_one_sentence() {
+        let full = "tracker git: commit refused: Author identity unknown. Set git user.name and user.email, then run the command again\n";
+        let short = without_routine_git(full);
+        assert!(!short.contains("tracker git:"), "{short}");
+        assert!(short.contains("user.name"), "{short}");
+        assert!(short.contains("user.email"), "{short}");
+        assert!(short.contains("run the command again"), "{short}");
+        let skipped = without_routine_git(
+            "tracker git: committed chore(issues): probe-a1b2 noted by ada; push destination is not origin's default, kept local\n",
+        );
+        assert!(skipped.contains("push was skipped"), "{skipped}");
+        assert!(skipped.contains("`ljos sync`"), "{skipped}");
+        assert!(!skipped.contains("tracker git:"), "{skipped}");
+    }
+
+    #[test]
+    fn verbose_keeps_the_detail_and_json_keeps_the_fields() {
+        let json = format_write_json(LANDED, true);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let text = value["text"].as_str().unwrap();
+        assert!(text.contains("tracker git: committed"), "{json}");
+        assert!(
+            text.contains(".ljos/atoms/runner/seg-439-63efac8f.jsonl.age"),
+            "{json}"
+        );
+        assert!(
+            value["tracker_git"][0]
+                .as_str()
+                .unwrap()
+                .contains("not pushed (LJOS_TRACKER_GIT=commit)"),
+            "{json}"
+        );
+        assert!(
+            value["sync"][0]
+                .as_str()
+                .unwrap()
+                .contains("seg-439-63efac8f"),
+            "{json}"
+        );
+        assert!(
+            value["sync"][1]
+                .as_str()
+                .unwrap()
+                .contains("not pushed (LJOS_TRACKER_GIT=commit)"),
+            "{json}"
+        );
+        let quiet = format_write_json(LANDED, false);
+        let value: serde_json::Value = serde_json::from_str(&quiet).unwrap();
+        let text = value["text"].as_str().unwrap();
+        assert!(!text.contains("tracker git:"), "{quiet}");
+        assert!(!text.contains("sync:"), "{quiet}");
+        assert!(!text.contains("seg-"), "{quiet}");
+        assert!(
+            value["tracker_git"].as_array().unwrap().len() == 1,
+            "{quiet}"
+        );
+        assert!(value["sync"].as_array().unwrap().len() == 2, "{quiet}");
+    }
 }
 
 /// A tracker drift line as a compact sitting prints it: the counts alone.
@@ -65797,9 +66224,10 @@ sync: the remote was not reached
             "{short}"
         );
         assert!(
-            short.contains("sync: the remote was not reached"),
+            short.contains("the remote was not reached") && short.contains("`ljos sync`"),
             "{short}"
         );
+        assert!(!short.contains("sync:"), "{short}");
         assert!(!short.contains("gen="), "{short}");
         assert!(!short.contains("tracker git:"), "{short}");
         assert!(!short.contains("within a day"), "{short}");
@@ -65808,11 +66236,13 @@ sync: the remote was not reached
         assert!(!short.contains("Software-eiw4"), "{short}");
         assert!(short.contains("ljos-u5he is yours"), "{short}");
         let refused = "tracker git: commit refused: Author identity unknown\n";
-        assert_eq!(
-            without_routine_git(refused),
-            refused,
-            "a refusal stays on the short output"
+        let plain = without_routine_git(refused);
+        assert!(
+            !plain.contains("tracker git:"),
+            "a refusal is one sentence:\n{plain}"
         );
+        assert!(plain.contains("Author identity unknown"), "{plain}");
+        assert!(plain.contains("run the command again"), "{plain}");
         assert_eq!(
             without_routine_git(
                 "tracker git: committed chore(issues): x claimed by ada; not pushed (LJOS_TRACKER_GIT=commit)\n"

@@ -1010,7 +1010,10 @@ enum Cmd {
     /// A child of the issue this conversation holds, unless `--parent`
     /// names another or `--top` none, in the parent's project. `-p` naming
     /// another project files at its top level. The heading and the path go
-    /// to stderr. A commit that landed is printed with `--verbose`. A refusal is still printed.
+    /// to stderr. A commit that landed is not printed, and neither is a push
+    /// that landed. A refused commit, a refused push, or a push that was
+    /// skipped is one sentence naming the command to run. `--verbose` prints
+    /// the tracker and sync lines. `--json` keeps those lines in fields.
     ///
     /// Example: `LJOS_SEAT=alice ljos file "Pick a codec" -p demo`
     File {
@@ -1053,9 +1056,14 @@ enum Cmd {
         /// that pass it.
         #[arg(short = 'q', long = "porcelain", alias = "quiet", alias = "id-only")]
         porcelain: bool,
-        /// Print the tracker commit line. Without it, a commit that landed is quiet. A refusal is still printed.
+        /// Print the tracker and sync lines. Without it, a commit that landed
+        /// is quiet, and so is a push that landed. A refusal is still printed.
         #[arg(long)]
         verbose: bool,
+        /// Print `id`, `text`, `tracker_git` and `sync` as JSON. `text` is
+        /// what a person sees. The other fields keep the commit and sync lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Append `Options: A, B` to an issue. Two or more, separated by commas.
     ///
@@ -1102,9 +1110,14 @@ enum Cmd {
         /// The note, or an issue id and then the note.
         #[arg(value_name = "WORDS", required = true, num_args = 1..)]
         words: Vec<String>,
-        /// Print the tracker commit line. Without it, a commit that landed is quiet. A refusal is still printed.
+        /// Print the tracker and sync lines. Without it, a commit that landed
+        /// is quiet, and so is a push that landed. A refusal is still printed.
         #[arg(long)]
         verbose: bool,
+        /// Print `text`, `tracker_git` and `sync` as JSON. `text` is what a
+        /// person sees. The other fields keep the commit and sync lines.
+        #[arg(long)]
+        json: bool,
         /// Leave off the line that names another issue.
         #[arg(long)]
         quiet: bool,
@@ -2230,9 +2243,16 @@ enum Cmd {
         /// The recipe copied in before the ticket is recalled. Absent, a word from the closed set in the title, else sit. Kept until finish or release.
         #[arg(long)]
         playbook: Option<String>,
-        /// Print every section in full: the doctor's rows, recall, timeline, reclaim, each hand-back and the commit line. Without it the command prints the claim, one line for claims still held, what the seat remembers, and the close.
+        /// Print every section in full, including the tracker and sync lines.
+        /// Without it the command prints the claim, one line for claims still
+        /// held, what the seat remembers, and the close. A commit that landed
+        /// is quiet, and so is a push that landed. A refusal is one sentence.
         #[arg(long)]
         verbose: bool,
+        /// Print `text`, `tracker_git` and `sync` as JSON. `text` is what a
+        /// person sees. The other fields keep the commit and sync lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Finish work on a ticket: remember the lesson, strengthen the memories it used, hand the claim back.
     ///
@@ -2275,9 +2295,16 @@ enum Cmd {
         /// Close the tracker ticket. A runner is refused. CANCELLED with `--status cancelled`. Only when the work is accepted or dropped, not when the work session ends.
         #[arg(long)]
         close: bool,
-        /// Print whether related memories were linked. Without it, finish says the ticket and the next command.
+        /// Print whether related memories were linked, and the tracker and
+        /// sync lines. Without it, finish says the ticket and the next
+        /// command. A commit that landed is quiet, and so is a push that
+        /// landed or a sealed log. A refusal is one sentence.
         #[arg(long)]
         verbose: bool,
+        /// Print `text`, `tracker_git` and `sync` as JSON. `text` is what a
+        /// person sees. The other fields keep the commit and sync lines.
+        #[arg(long)]
+        json: bool,
         /// Leave off the line that names another issue.
         #[arg(long)]
         quiet: bool,
@@ -2993,6 +3020,28 @@ fn named_node(raw: &str) -> Result<String, String> {
 /// Color on a terminal, unless `NO_COLOR` is set. A pipe stays plain.
 fn human_color() -> bool {
     ljos_cli::scan::color_allowed(std::io::stdout().is_terminal())
+}
+
+/// `--verbose`, or `LJOS_DEBUG`, prints the tracker and sync lines.
+fn git_detail(verbose: bool) -> bool {
+    verbose || ljos_cli::fault_detail()
+}
+
+/// The lines a write shows. `--json` is one object whose `text` is that
+/// view and whose `tracker_git` and `sync` fields keep every original line.
+fn render_write(full: &str, detail: bool, json: bool, id: Option<&str>) -> String {
+    if json {
+        let text = if detail {
+            full.to_string()
+        } else {
+            ljos_cli::without_routine_git(full)
+        };
+        ljos_cli::format_rendered_json(&text, full, id)
+    } else if detail {
+        full.to_string()
+    } else {
+        ljos_cli::without_routine_git(full)
+    }
 }
 
 fn write_ack(body: &serde_json::Value, verbose: bool) -> String {
@@ -4184,11 +4233,13 @@ fn run_command() -> Result<()> {
             issue,
             plan,
             verbose,
+            json,
             ..
         } => {
             // The line is how a held lock shows life before the claim.
-            // The short form waits for the claim itself.
-            if *verbose && plan.is_none() {
+            // The short form waits for the claim itself. JSON is one
+            // object at the end, so this line would break it.
+            if *verbose && !*json && plan.is_none() {
                 println!(
                     "sitting {}: checking blockers",
                     issue.as_deref().unwrap_or("plan")
@@ -5017,6 +5068,7 @@ fn run_command() -> Result<()> {
             deadline,
             porcelain: _,
             verbose,
+            json,
         } => {
             // The same unknown-seat line `ljos remember` prints. A seat
             // taken from the most recent write is already `unknown-<host>`,
@@ -5109,21 +5161,45 @@ fn run_command() -> Result<()> {
                 Ok(said) => rest.push_str(&said),
                 Err(e) => eprintln!("ljos file: {e:#}"),
             }
-            if !verbose {
-                rest = ljos_cli::without_routine_git(&rest);
-            }
+            let detail = git_detail(verbose);
             // The id is the only line on stdout, so `ID=$(ljos file ...)`
             // captures the id the docs name. The heading and the path go
             // to stderr. A commit that landed is printed with `--verbose`.
-            // A refusal is still printed. `--porcelain` is the same.
+            // A refusal is still one sentence. `--json` keeps the commit
+            // and sync lines in fields. `--porcelain` is the same as the
+            // plain id.
             if !id.is_empty() {
-                if defaulted {
-                    eprintln!("filed in Software, the default project");
-                }
                 ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
-                println!("{id}");
             }
-            eprint!("{rest}");
+            if json {
+                if !id.is_empty() && defaulted {
+                    rest.insert_str(0, "filed in Software, the default project\n");
+                }
+                let text = if detail {
+                    rest.clone()
+                } else {
+                    ljos_cli::without_routine_git(&rest)
+                };
+                print!(
+                    "{}",
+                    ljos_cli::format_rendered_json(
+                        &text,
+                        &rest,
+                        (!id.is_empty()).then_some(id.as_str())
+                    )
+                );
+            } else {
+                if !detail {
+                    rest = ljos_cli::without_routine_git(&rest);
+                }
+                if !id.is_empty() {
+                    if defaulted {
+                        eprintln!("filed in Software, the default project");
+                    }
+                    println!("{id}");
+                }
+                eprint!("{rest}");
+            }
         }
         Cmd::Options { issue, options } => {
             print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
@@ -5131,6 +5207,7 @@ fn run_command() -> Result<()> {
         Cmd::Note {
             words,
             verbose,
+            json,
             quiet,
         } => {
             let (issue, text, inferred) = note_target(&words)?;
@@ -5143,36 +5220,19 @@ fn run_command() -> Result<()> {
                 ljos_cli::tracker_verb_wait(),
             )?;
             warn_other_sitting(&issue, quiet, inferred);
-            let pending = ljos_cli::retry_pending_claim(&issue);
-            if !pending.is_empty() {
-                print!(
-                    "{}",
-                    if verbose {
-                        pending
-                    } else {
-                        ljos_cli::without_routine_git(&pending)
-                    }
-                );
-            }
+            let mut said = ljos_cli::retry_pending_claim(&issue);
             if inferred {
-                println!("noted on {issue}");
+                said.push_str(&format!("noted on {issue}\n"));
             }
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
-                print!("{line}");
+                said.push_str(&line);
             }
             match ljos_cli::ballot_sig::sign_own_ballot(&issue) {
-                Ok(line) => print!("{line}"),
+                Ok(line) => said.push_str(&line),
                 Err(e) => eprintln!("ljos note: {e:#}"),
             }
-            let persisted = ljos_cli::persist_tracker(&issue, "noted");
-            print!(
-                "{}",
-                if verbose {
-                    persisted
-                } else {
-                    ljos_cli::without_routine_git(&persisted)
-                }
-            );
+            said.push_str(&ljos_cli::persist_tracker(&issue, "noted"));
+            print!("{}", render_write(&said, git_detail(verbose), json, None));
         }
         Cmd::Slot {
             issue,
@@ -6410,25 +6470,32 @@ fn run_command() -> Result<()> {
             anyway,
             playbook,
             verbose,
+            json,
         } => {
+            let mut memories = Vec::new();
+            let mut full = String::new();
+            let mut shown = String::new();
+            let detail = git_detail(verbose);
             let issue = if let Some(title) = plan {
                 let opened = ljos_cli::plan::open_plan(project.as_deref(), &title, &items)?;
-                let plan_text = if verbose {
-                    opened.text
+                let quiet_plan = ljos_cli::without_routine_git(&opened.text);
+                if json {
+                    full.push_str(&opened.text);
+                    if !detail {
+                        shown.push_str(&quiet_plan);
+                    }
                 } else {
-                    ljos_cli::without_routine_git(&opened.text)
-                };
-                print!("{plan_text}");
-                let _ = std::io::Write::flush(&mut std::io::stdout());
-                if verbose {
-                    println!("sitting {}: checking blockers", opened.parent);
+                    print!("{}", if detail { &opened.text } else { &quiet_plan });
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    if detail {
+                        println!("sitting {}: checking blockers", opened.parent);
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    }
                 }
-                let _ = std::io::Write::flush(&mut std::io::stdout());
                 opened.parent
             } else {
                 issue.context("sitting: pass an issue, or --plan TITLE -- ITEM...")?
             };
-            let mut memories = Vec::new();
             ljos_cli::begin_quiet_sitting();
             let printed = sitting_stream_started(
                 &issue,
@@ -6440,7 +6507,12 @@ fn run_command() -> Result<()> {
                     .take()
                     .expect("a sitting starts its claim budget before setup"),
                 |piece| {
-                    if verbose {
+                    if json {
+                        full.push_str(piece);
+                        if !detail {
+                            shown.push_str(&compact_sitting_block(piece, &mut memories));
+                        }
+                    } else if detail {
                         print!("{piece}");
                     } else {
                         print!("{}", compact_sitting_block(piece, &mut memories));
@@ -6461,15 +6533,25 @@ fn run_command() -> Result<()> {
                 }
                 std::process::exit(ljos_cli::user_fault_exit(&e, &line));
             }
-            if !verbose {
+            if !detail {
+                let mut tail = String::new();
                 if !memories.is_empty() {
-                    println!("What the seat remembers for this task:");
+                    tail.push_str("What the seat remembers for this task:\n");
                     for memory in &memories {
-                        println!("- {memory}");
+                        tail.push_str(&format!("- {memory}\n"));
                     }
                 }
-                print!("{}", sitting_close(&issue));
-                let _ = std::io::Write::flush(&mut std::io::stdout());
+                tail.push_str(&sitting_close(&issue));
+                if json {
+                    shown.push_str(&tail);
+                } else {
+                    print!("{tail}");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
+            }
+            if json {
+                let text = if detail { &full } else { &shown };
+                print!("{}", ljos_cli::format_rendered_json(text, &full, None));
             }
         }
         Cmd::Finish {
@@ -6484,6 +6566,7 @@ fn run_command() -> Result<()> {
             assignee,
             close,
             verbose,
+            json,
             quiet,
         } => {
             let (issue, inferred) = match issue {
@@ -6521,14 +6604,7 @@ fn run_command() -> Result<()> {
             )
             .map_err(ticket_error)?;
             warn_other_sitting(&issue, quiet, inferred);
-            print!(
-                "{}",
-                if verbose {
-                    said
-                } else {
-                    ljos_cli::without_routine_git(&said)
-                }
-            );
+            print!("{}", render_write(&said, git_detail(verbose), json, None));
         }
         Cmd::Reopen { issue } => {
             print!("{}", reopen(&issue)?);

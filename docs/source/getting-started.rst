@@ -203,7 +203,7 @@ The id is the only line on standard output, so ``id=$(LJOS_SEAT=alice ljos file 
 The heading and the path are on standard error. A commit that landed is not printed. ``ljos file --verbose`` prints it. A refusal is still printed. The id in the heading is the same one.
 The ``file:`` line is the absolute path. ``/home/you`` above names the home directory.
 Under a runner that already recorded a seat, ljos names both and writes as ``LJOS_SEAT``.
-With no git identity the heading is still written, and the last line is ``tracker git: commit refused: Author identity unknown. Set git user.name and user.email, then run the command again``.
+With no git identity the heading is still written, and the last line is ``The tracker commit was refused: Author identity unknown. Set git user.name and user.email, then run the command again.``
 ``ljos doctor`` then warns that the issue file is uncommitted.
 
 The file is Org. ``vissue show demo-2f5j`` prints the heading, and the tracker repository is the one ``ljos doctor --all`` names under ``tracker``.

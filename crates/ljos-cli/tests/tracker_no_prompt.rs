@@ -26,7 +26,6 @@ const REQUEST_WAIT: Duration = Duration::from_secs(ljos_cli::DEFAULT_PUSH_WAIT_S
 const REQUEST_BYTES: usize = 4096;
 
 const NOT_REACHED: &str = "the remote was not reached (";
-const NEXT_SYNC: &str = "), so the next sync pushes it";
 
 fn on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -279,7 +278,9 @@ fn saved_locally(board: &Board, mode: Option<&str>, args: &[&str]) -> String {
         args.join(" ")
     );
     assert!(
-        lines[0].starts_with("tracker git: committed ") && lines[0].ends_with(NEXT_SYNC),
+        lines[0].contains("the remote was not reached (")
+            && lines[0].contains("`ljos sync`")
+            && !lines[0].contains("tracker git:"),
         "{said}"
     );
     said

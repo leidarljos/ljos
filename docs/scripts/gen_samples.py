@@ -878,7 +878,32 @@ def tutorial_timeline(ljos: Path) -> str:
         raise SystemExit(f"gen_samples: the fence closer is not on its own wrap line:\n{text}")
     if "/tmp" in text or "ljos-doc-tutorial" in text:
         raise SystemExit("gen_samples: timeline sample still names a temporary directory")
+    _quiet_write(text, "timeline sample")
     return text.strip() + "\n"
+
+
+def _quiet_write(block: str, where: str) -> None:
+    """A landed commit, a landed push and a sealed log stay off the sample.
+
+    A refusal may still name tracker git. A host directory and a segment
+    file never appear.
+    """
+    if (
+        "tracker git:" in block
+        and "refused" not in block
+        and "failed" not in block
+        and "skipped" not in block
+    ):
+        raise SystemExit(f"gen_samples: {where} printed a commit that landed:\n{block}")
+    for needle in (
+        "not pushed (LJOS_TRACKER_GIT=commit)",
+        "sync: sealed",
+        "sync: committed",
+        ".ljos/atoms/",
+        "seg-",
+    ):
+        if needle in block:
+            raise SystemExit(f"gen_samples: {where} printed {needle!r}:\n{block}")
 
 
 _EPISODE = (
@@ -1240,8 +1265,7 @@ def sitting_plan_sample(ljos: Path) -> str:
     ):
         if needle not in block:
             raise SystemExit(f"gen_samples: sitting sample missing {needle!r}:\n{block}")
-    if "tracker git:" in block and "refused" not in block and "failed" not in block:
-        raise SystemExit(f"gen_samples: sitting sample printed a commit that landed:\n{block}")
+    _quiet_write(block, "sitting sample")
     if "/tmp" in block or "ljos-doc-sitting" in block:
         raise SystemExit(f"gen_samples: sitting sample names a temporary directory:\n{block}")
     return block
