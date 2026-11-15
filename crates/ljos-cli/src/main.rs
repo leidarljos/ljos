@@ -589,6 +589,9 @@ enum Cmd {
     ///
     /// An empty text exits 2. A text past 1000 characters exits 2.
     /// When the pack is busy or not answering, the lesson is queued and the command exits 0.
+    /// Starting is waited out on `LJOS_SEARCH_WARMUP_WAIT` (5 seconds when unset, `0` does not wait), and not past `LJOS_CALL_TIMEOUT`.
+    /// When that budget runs out the line is `Memory is starting, so try again in a few seconds.` and the command exits non-zero.
+    /// An open store that is only busy still queues the lesson and the command exits 0.
     /// The pack is this seat's memory store.
     /// Turned off on purpose, the command exits 1.
     Remember {
@@ -798,7 +801,12 @@ enum Cmd {
     /// and still returns a hit that names the subject. While the encoder is
     /// still loading, a remaining time that fits in `LJOS_SEARCH_WARMUP_WAIT`
     /// seconds (5 when unset, `0` does not wait) is waited out, inside
-    /// `LJOS_CALL_TIMEOUT`, and the search then ranks by meaning. A remaining
+    /// `LJOS_CALL_TIMEOUT`, and the search then ranks by meaning. When
+    /// `/health` says not-ready, or a search says the pack is busy while
+    /// loading, that same budget is waited out before an empty page is
+    /// printed. An empty page is printed only after the pack has answered.
+    /// When the budget runs out the line is `Memory is starting, so try
+    /// again in a few seconds.` and the command exits non-zero. A remaining
     /// time that is absent or longer than that budget keeps `LJOS_SEARCH_WAIT`
     /// (3 when unset). If it is still loading and rows
     /// are shown, the line is `These are word matches, and meaning search
@@ -3099,6 +3107,10 @@ fn main() {
     ljos_cli::hookd::admit();
     let ran = run_command();
     if let Err(e) = &ran {
+        if e.to_string().contains(ljos_cli::MEMORY_STARTING_LINE) {
+            eprintln!("{}", ljos_cli::MEMORY_STARTING_LINE);
+            std::process::exit(1);
+        }
         let args: Vec<String> = std::env::args().skip(1).collect();
         ljos_cli::memory_port::record_memory_error(&args, &format!("{e:#}"));
         if let Some(label) = ljos_cli::policy_label::as_policy(e) {

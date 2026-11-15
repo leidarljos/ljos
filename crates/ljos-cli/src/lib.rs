@@ -12425,6 +12425,11 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
 /// [`DENSE_ALONE_AT`], is marked so a later sort keeps it ahead of a row
 /// that only shares a word. The caller ranks and cuts.
 pub fn search_ranked(query: &str, limit: u32) -> Result<Vec<Hit>> {
+    wait_until_health_open()?;
+    answer_after_start(|| search_ranked_now(query, limit))
+}
+
+fn search_ranked_now(query: &str, limit: u32) -> Result<Vec<Hit>> {
     let q = query.trim();
     if q.is_empty() {
         bail!("search: empty query");
@@ -14679,6 +14684,106 @@ fn search_can_fall_back(err: &anyhow::Error) -> bool {
             || pack_memory_down(err))
 }
 
+/// What a search, a remember, or a finish lesson prints when the pack has
+/// not finished starting inside [`search_warmup_wait`].
+pub const MEMORY_STARTING_LINE: &str = "Memory is starting, so try again in a few seconds.";
+
+/// The pack answered that it is still starting: `/health` said not-ready,
+/// or a search said the pack is busy while loading. A pack that is already
+/// open and only busy does not match.
+fn pack_still_starting(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("not-ready")
+        || text.contains("not ready")
+        || (text.contains("busy") && text.contains("loading"))
+}
+
+fn memory_starting_err() -> anyhow::Error {
+    anyhow::anyhow!(MEMORY_STARTING_LINE)
+}
+
+/// `Some(true)` when `/health` says the pack has not opened.
+/// `Some(false)` when it has. `None` when the writer is not there.
+fn health_still_starting() -> Option<bool> {
+    let client = pack().ok()?;
+    match client.health() {
+        Ok(body) => Some(pack_still_starting(&body)),
+        Err(err) => {
+            let err = anyhow::Error::from(err);
+            if pack_unreachable(&err) {
+                None
+            } else {
+                Some(pack_still_starting(&format!("{err:#}")))
+            }
+        }
+    }
+}
+
+fn start_budget_left(started: std::time::Instant) -> std::time::Duration {
+    let budget = search_warmup_wait();
+    if budget.is_zero() {
+        return std::time::Duration::ZERO;
+    }
+    let room = search_call_left().saturating_sub(WARMUP_SEARCH_RESERVE);
+    warmup_left(started, budget).min(room)
+}
+
+fn sleep_start(started: std::time::Instant, pause: &mut std::time::Duration) -> bool {
+    let left = start_budget_left(started);
+    if left < std::time::Duration::from_millis(1) {
+        return false;
+    }
+    let sleep = (*pause).min(left);
+    std::thread::sleep(sleep);
+    *pause = pause
+        .saturating_mul(2)
+        .min(std::time::Duration::from_millis(400));
+    true
+}
+
+/// Wait until `/health` no longer says the pack is starting.
+/// A pack that is down, or already open, returns at once.
+/// The wait is [`search_warmup_wait`], and the call deadline still wins.
+fn wait_until_health_open() -> Result<()> {
+    if health_still_starting() != Some(true) {
+        return Ok(());
+    }
+    if search_warmup_wait().is_zero() {
+        return Err(memory_starting_err());
+    }
+    let started = std::time::Instant::now();
+    let mut pause = std::time::Duration::from_millis(50);
+    loop {
+        match health_still_starting() {
+            Some(true) => {
+                if !sleep_start(started, &mut pause) {
+                    return Err(memory_starting_err());
+                }
+            }
+            _ => return Ok(()),
+        }
+    }
+}
+
+/// Retry `op` while it says the pack is busy loading.
+/// The wait shares [`search_warmup_wait`] with [`wait_until_health_open`].
+fn answer_after_start<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
+    let _ = search_call_left();
+    let started = std::time::Instant::now();
+    let mut pause = std::time::Duration::from_millis(50);
+    loop {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(err) if pack_still_starting(&format!("{err:#}")) => {
+                if search_warmup_wait().is_zero() || !sleep_start(started, &mut pause) {
+                    return Err(memory_starting_err());
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// Hits for `ljos search`, and the ranking that produced them.
 ///
 /// A cold encoder whose status names a remaining time inside
@@ -14696,6 +14801,11 @@ fn search_can_fall_back(err: &anyhow::Error) -> bool {
 /// The pack refused the connection, or the search failed for a reason
 /// that is not a busy writer or a deadline.
 pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
+    wait_until_health_open()?;
+    answer_after_start(|| search_hits_settled(query, limit))
+}
+
+fn search_hits_settled(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
     SEARCH_WAITED_MS.with(|cell| cell.set(0));
     let _ = search_call_left();
     if read_encoder_status().as_ref().is_some_and(encoder_cold) {
@@ -14912,6 +15022,15 @@ fn search_after_bounded_wait(
 /// One `/v1/search`, bounded by `limit` and the clock. This does not list
 /// the pack: a listing grows with the pack and spends the budget the
 /// cold encoder needs.
+fn opening_search_err(err: packset_client::Error) -> anyhow::Error {
+    let err = anyhow::Error::from(err);
+    if pack_still_starting(&format!("{err:#}")) {
+        anyhow::anyhow!("the pack is busy while loading")
+    } else {
+        err
+    }
+}
+
 fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
     let client = pack()?;
     if seat_has_no_token(&client) {
@@ -14939,14 +15058,17 @@ fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
     }
     let mut answer = client
         .roundtrip("GET", "/v1/search", &pairs, None, true, timeout)
-        .map_err(anyhow::Error::from)
+        .map_err(opening_search_err)
         .context("search: GET /v1/search failed")?;
     if ranked && answer.status == 400 && names_the_rank(&answer.body) {
         pairs.pop();
         answer = client
             .roundtrip("GET", "/v1/search", &pairs, None, true, timeout)
-            .map_err(anyhow::Error::from)
+            .map_err(opening_search_err)
             .context("search: GET /v1/search failed")?;
+    }
+    if pack_still_starting(&answer.body) {
+        bail!("the pack is busy while loading");
     }
     if !(200..300).contains(&answer.status) {
         if matches!(answer.status, 401 | 403) {
@@ -18922,7 +19044,7 @@ pub fn search_warmup_wait() -> std::time::Duration {
 pub fn search_budget() -> std::time::Duration {
     let _ = search_call_left();
     let status = read_encoder_status();
-    if status.as_ref().is_some_and(encoder_cold) {
+    let budget = if status.as_ref().is_some_and(encoder_cold) {
         let cold = search_wait()
             .saturating_add(SEARCH_PACK_BUDGET)
             .max(SEARCH_PACK_BUDGET);
@@ -18937,7 +19059,16 @@ pub fn search_budget() -> std::time::Duration {
         }
     } else {
         SEARCH_PACK_BUDGET
+    };
+    if health_still_starting() == Some(true) {
+        let span = search_warmup_wait().saturating_add(SEARCH_PACK_BUDGET);
+        let left = search_call_left();
+        return budget
+            .max(span)
+            .min(left)
+            .max(std::time::Duration::from_millis(1));
     }
+    budget
 }
 
 /// `some` or `full` avg10 at or above this, in percent, is memory
@@ -22577,33 +22708,39 @@ fn remember_should_queue(err: &anyhow::Error) -> bool {
 ///
 /// The pack refused the text, or packs are turned off.
 pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) -> Result<Value> {
-    let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
-    let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
-    let _quiet = pack_link::QuietPack::enter();
-    // Do not start a writer from this call. Twenty-six of those at once
-    // is what pushed the box into memory pressure.
-    let _skip = SkipWriterEnsure::enter();
-    match post() {
-        Ok(body) => Ok(body),
-        Err(err) if existing_atom_id(&err).is_some() => {
-            let id = existing_atom_id(&err).unwrap_or_default();
-            eprintln!("remember: already stored as {id}, so run `ljos search`.");
-            Ok(serde_json::json!({
-                "id": id,
-                "kind": "lesson",
-                "text": text,
-                "duplicate": true,
-            }))
+    // A pack that has not opened yet is waited out on the search warm-up
+    // budget. The short post budget starts only after that, so a pack that
+    // is already open and busy still queues inside it.
+    answer_after_start(|| {
+        let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
+        let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
+        let _quiet = pack_link::QuietPack::enter();
+        // Do not start a writer from this call. Twenty-six of those at once
+        // is what pushed the box into memory pressure.
+        let _skip = SkipWriterEnsure::enter();
+        match post() {
+            Ok(body) => Ok(body),
+            Err(err) if existing_atom_id(&err).is_some() => {
+                let id = existing_atom_id(&err).unwrap_or_default();
+                eprintln!("remember: already stored as {id}, so run `ljos search`.");
+                Ok(serde_json::json!({
+                    "id": id,
+                    "kind": "lesson",
+                    "text": text,
+                    "duplicate": true,
+                }))
+            }
+            Err(err) if pack_still_starting(&format!("{err:#}")) => Err(err),
+            Err(err) if pack_turned_off(&err) => Err(err),
+            Err(err) if remember_should_queue(&err) => {
+                // Load has not judged the words. Keep the sentence as given,
+                // even when a local prose check would turn it away.
+                queue_busy_lesson(text);
+                Ok(remember_queued_body(text))
+            }
+            Err(err) => Err(err),
         }
-        Err(err) if pack_turned_off(&err) => Err(err),
-        Err(err) if remember_should_queue(&err) => {
-            // Load has not judged the words. Keep the sentence as given,
-            // even when a local prose check would turn it away.
-            queue_busy_lesson(text);
-            Ok(remember_queued_body(text))
-        }
-        Err(err) => Err(err),
-    }
+    })
 }
 
 /// A 503, a shed, or a pressure line. A passed deadline is not load:
@@ -43375,6 +43512,32 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 }
 
 fn finish_lesson(issue: &str, text: &str) -> String {
+    let filed = answer_after_start(|| finish_lesson_post(issue, text));
+    match filed {
+        Ok(line) => line,
+        Err(e) if e.to_string().contains(MEMORY_STARTING_LINE) => {
+            format!("{MEMORY_STARTING_LINE}\n")
+        }
+        Err(e) if !pack_turned_off(&e) && remember_should_queue(&e) => {
+            // A busy writer has not judged the words. Queue the sentence
+            // as given. A second finish of the same lesson is the row
+            // already waiting, and the line still says it will be saved.
+            match queue_unjudged_lesson(issue, text) {
+                Ok(_) => format!("{}\n", memory_busy_line(1)),
+                Err(err) => format!(
+                    "the lesson was not kept: {err:#}. Reword the lesson and keep it with: ljos remember {}\n",
+                    tools::sh_quote(text)
+                ),
+            }
+        }
+        Err(e) => format!(
+            "the lesson was not kept: {e:#}. Reword the lesson and keep it with: ljos remember {}\n",
+            tools::sh_quote(text)
+        ),
+    }
+}
+
+fn finish_lesson_post(issue: &str, text: &str) -> Result<String> {
     let filed = (|| -> Result<String> {
         // The tracker write has already landed, or is about to. The pack
         // gets one short try. A slow writer queues the lesson.
@@ -43430,25 +43593,7 @@ fn finish_lesson(issue: &str, text: &str) -> String {
             "remembered the lesson as agent-derived, unreviewed (id {id}); search finds it now\n{warned}"
         ))
     })();
-    match filed {
-        Ok(line) => line,
-        Err(e) if !pack_turned_off(&e) && remember_should_queue(&e) => {
-            // A busy writer has not judged the words. Queue the sentence
-            // as given. A second finish of the same lesson is the row
-            // already waiting, and the line still says it will be saved.
-            match queue_unjudged_lesson(issue, text) {
-                Ok(_) => format!("{}\n", memory_busy_line(1)),
-                Err(err) => format!(
-                    "the lesson was not kept: {err:#}. Reword the lesson and keep it with: ljos remember {}\n",
-                    tools::sh_quote(text)
-                ),
-            }
-        }
-        Err(e) => format!(
-            "the lesson was not kept: {e:#}. Reword the lesson and keep it with: ljos remember {}\n",
-            tools::sh_quote(text)
-        ),
-    }
+    filed
 }
 
 /// The verb [`persist_tracker`] wrote when a round count used to close a ticket.
