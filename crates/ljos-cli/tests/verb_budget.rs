@@ -162,11 +162,14 @@ fn a_silent_pack_does_not_hold_a_remember() {
     let (out, took) = ljos(dir.path(), &pack, &["remember", "tabs not spaces"]);
     let said = text_of(&out);
     assert!(
-        took < Duration::from_secs(22),
+        took < Duration::from_secs(8),
         "remember waited {took:?}\n{said}"
     );
-    assert_eq!(out.status.code(), Some(75), "{said}");
-    assert!(said.contains("Retry later with `ljos remember`"), "{said}");
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("queued; the pack is busy and this lesson will be sent on the next call"),
+        "{said}"
+    );
 }
 
 #[test]

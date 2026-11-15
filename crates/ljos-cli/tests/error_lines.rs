@@ -151,11 +151,12 @@ fn a_slow_writer_names_search_and_exits_75() {
         ],
     );
     let said = text(&out);
-    assert_eq!(out.status.code(), Some(75), "{said}");
+    assert!(out.status.success(), "{said}");
     assert_eq!(
-        one_line(&out.stderr),
-        "pack busy: the lesson is queued and will be sent on the next call. Retry later with `ljos remember`."
+        one_line(&out.stdout),
+        "queued; the pack is busy and this lesson will be sent on the next call"
     );
+    assert!(out.stderr.is_empty(), "{said}");
 }
 
 #[test]

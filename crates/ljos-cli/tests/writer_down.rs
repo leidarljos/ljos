@@ -415,7 +415,17 @@ fn walk_commands(seat: &Seat, case: &Case, dead: u16) {
     let search = ljos(seat, &case.path, &state, dead, &["search", "kiln fire"])
         .output()
         .unwrap();
-    assert_fault(case, "search", &search);
+    let search_said = text_of(&search);
+    assert!(
+        search.status.success(),
+        "search {} should fall back\n{search_said}",
+        case.name
+    );
+    assert!(
+        search_said.contains("ranked by words; the pack search did not answer in time"),
+        "search {} did not say it fell back\n{search_said}",
+        case.name
+    );
 
     let recall = ljos(seat, &case.path, &state, dead, &["recall", "probe-1a2b"])
         .output()
@@ -478,11 +488,22 @@ fn walk_commands(seat: &Seat, case: &Case, dead: u16) {
     let remember = ljos(seat, &case.path, &state, dead, &["remember", LESSON])
         .output()
         .unwrap();
-    assert_fault(case, "remember", &remember);
-    let line = stderr_lines(&remember).remove(0);
+    let remembered = text_of(&remember);
     assert!(
-        line.contains("1 lesson is queued for the next send"),
-        "remember did not say the lesson is queued:\n{line}"
+        remember.status.success(),
+        "remember {} should queue and exit 0\n{remembered}",
+        case.name
+    );
+    let remembered_stdout = String::from_utf8_lossy(&remember.stdout);
+    let remembered_lines: Vec<&str> = remembered_stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(
+        remembered_lines,
+        ["queued; the pack is busy and this lesson will be sent on the next call"],
+        "remember {} was not one line:\n{remembered}",
+        case.name
     );
     let queued = std::fs::read_to_string(state.join("ljos/note-queue.jsonl")).unwrap_or_default();
     assert!(
@@ -854,16 +875,15 @@ fn a_queued_lesson_reaches_the_pack_on_the_next_run() {
     )
     .output()
     .unwrap();
-    assert_fault(
-        &Case {
-            name: "queue",
-            path: seat.path_with_packset(),
-            phrase: format!("no pack writer is answering on 127.0.0.1:{dead}"),
-            command: "packset ensure",
-            retries: true,
-        },
-        "remember",
-        &remember,
+    let said = text_of(&remember);
+    assert!(
+        remember.status.success(),
+        "remember should queue and exit 0\n{said}"
+    );
+    assert!(
+        String::from_utf8_lossy(&remember.stdout)
+            .contains("queued; the pack is busy and this lesson will be sent on the next call"),
+        "{said}"
     );
     let queue = state.join("ljos/note-queue.jsonl");
     let queued = std::fs::read_to_string(&queue).unwrap_or_default();

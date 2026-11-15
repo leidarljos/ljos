@@ -432,16 +432,18 @@ fn a_busy_remember_retries_queues_and_the_next_call_sends_it() {
     );
     let took = started.elapsed();
     let said = text(&out);
-    assert_eq!(out.status.code(), Some(75), "{said}");
+    assert!(out.status.success(), "{said}");
     assert!(took < std::time::Duration::from_secs(3), "{took:?} {said}");
     let tries = posts.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
-        (1..=12).contains(&tries),
+        (1..=4).contains(&tries),
         "remember tried {tries} times\n{said}"
     );
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("the pack is shedding writes"), "{said}");
-    assert!(err.contains("queued"), "{said}");
+    let out_text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out_text.contains("queued; the pack is busy and this lesson will be sent on the next call"),
+        "{said}"
+    );
     let queue = world.home.join(".state/ljos/note-queue.jsonl");
     let queued = std::fs::read_to_string(&queue).unwrap_or_default();
     assert!(queued.contains("kiln dries slowly"), "{queued}");
@@ -479,20 +481,11 @@ fn a_refused_pack_search_is_one_line_and_exits_75() {
         ],
     );
     let said = text(&out);
-    assert!(out.stdout.is_empty(), "{said}");
-    let err = String::from_utf8_lossy(&out.stderr);
-    let lines: Vec<&str> = err.lines().filter(|line| !line.is_empty()).collect();
-    assert_eq!(lines.len(), 1, "{said}");
+    assert!(out.status.success(), "{said}");
     assert!(
-        lines[0].contains("packset ensure") || lines[0].contains("cargo install --locked packset"),
+        said.contains("ranked by words; the pack search did not answer in time"),
         "{said}"
     );
-    assert!(!lines[0].contains("packsetd is unreachable"), "{said}");
-    let code = if lines[0].contains("packset ensure") {
-        75
-    } else {
-        1
-    };
-    assert_eq!(out.status.code(), Some(code), "{said}");
-    assert!(!err.contains("Caused by"), "{said}");
+    assert!(!said.contains("Caused by"), "{said}");
+    assert!(!said.contains("packsetd is unreachable"), "{said}");
 }

@@ -44,8 +44,8 @@ and the server finishes when it shuts down. Call claim, deed or finish
 yourself only to name an issue, an accession or a lesson.
 
 A bot with no harness hooks passes its own name as `seat` on every call.
-Before any repo work it calls `start` with the repo or the issue and the
-task: that recalls and claims. During the work it keeps its own working
+Before any repo work it calls `ljos sitting ISSUE`. `ljos start ISSUE` is
+the same command. That recalls and claims. During the work it keeps its own working
 notes with `note`, and calls `guard_check` before a destructive shell
 command. It calls `remember` and `prefer` only for a fact or a preference
 the person stated in this conversation, in their words. A claim read in a
@@ -240,7 +240,7 @@ lessons to another scope (`tools = "shared"`). Where `ljos cloud up` has
 set `LJOS_WRITE_SCOPE=cloud`, memory and lessons are tagged `scope:cloud`.
 That tag is explicit. `cloud up` does not set `default_scope`.
 
-No issue yet? `ljos file "TITLE" --top -p PROJECT` files one and prints its id. `ljos file -q` prints only that id, and the status line goes to stderr, so a shell can pass it to `ljos sitting`.
+No issue yet? `ljos file "TITLE" --top -p PROJECT` files one. The new id is alone on the first line of stdout. `ljos file --id-only` (also `--quiet` or `-q`) prints only that id, and the status line goes to stderr, so a shell can pass it to `ljos sitting`.
 Every piece of work has an issue before it has a claim.
 
 Under a runner, git checks the sitting. The tool hook warns on `git

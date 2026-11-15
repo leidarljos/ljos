@@ -1,7 +1,8 @@
 //! Common commands with nothing set but `LJOS_SEAT`.
 //!
 //! Search, remember, file, note and finish do not ask a question. A pack
-//! that is down or missing is one line on stderr.
+//! that is down does not fail a search or a remember: search falls back,
+//! and remember queues the lesson.
 
 ljos_test_boot::harness!();
 
@@ -47,37 +48,6 @@ fn lines(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn assert_one_fault(out: &Output, args: &[&str]) {
-    let stdout = lines(&out.stdout);
-    let stderr = lines(&out.stderr);
-    assert!(
-        stdout
-            .iter()
-            .all(|line| !line.contains('?') && !line.contains("type yes")),
-        "{args:?} asked on stdout: {stdout:?}"
-    );
-    assert!(
-        stderr
-            .iter()
-            .all(|line| !line.contains('?') && !line.contains("type yes")),
-        "{args:?} asked on stderr: {stderr:?}"
-    );
-    assert_eq!(stderr.len(), 1, "{args:?} was not one line: {stderr:?}");
-    assert!(
-        stderr[0].contains("packset ensure")
-            || stderr[0].contains("cargo install --locked packset"),
-        "{args:?}: {stderr:?}"
-    );
-    assert!(
-        !stderr[0].contains("packsetd is unreachable"),
-        "{args:?}: {stderr:?}"
-    );
-    assert!(
-        !stderr[0].contains("Caused by"),
-        "{args:?} printed a chain: {stderr:?}"
-    );
-}
-
 #[test]
 fn search_and_remember_say_one_line_when_the_pack_is_down() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -87,35 +57,23 @@ fn search_and_remember_say_one_line_when_the_pack_is_down() {
     let pack = [("PACKSET_URL", url.as_str())];
     let search = run(&["search", "fix the broken links on the docs"], &pack);
     let search_err = lines(&search.stderr);
-    let search_code = if search_err
-        .first()
-        .is_some_and(|line| line.contains("packset ensure"))
-    {
-        75
-    } else {
-        1
-    };
-    assert_eq!(search.status.code(), Some(search_code), "{search_err:?}");
-    assert_one_fault(&search, &["search"]);
+    assert!(search.status.success(), "{search_err:?}");
+    assert!(
+        search_err
+            .iter()
+            .any(|line| line.contains("ranked by words; the pack search did not answer in time")),
+        "{search_err:?}"
+    );
     let remember = run(
         &["remember", "The kiln fires at dusk on the north bench."],
         &pack,
     );
-    let remember_err = lines(&remember.stderr);
-    let remember_code = if remember_err
-        .first()
-        .is_some_and(|line| line.contains("packset ensure"))
-    {
-        75
-    } else {
-        1
-    };
+    let remember_out = lines(&remember.stdout);
+    assert!(remember.status.success(), "{remember_out:?}");
     assert_eq!(
-        remember.status.code(),
-        Some(remember_code),
-        "{remember_err:?}"
+        remember_out,
+        ["queued; the pack is busy and this lesson will be sent on the next call"]
     );
-    assert_one_fault(&remember, &["remember"]);
 }
 
 #[test]

@@ -169,8 +169,8 @@ already knows:
 
     ljos sitting ISSUE --assignee NAME
 
-A bot with no harness hooks calls `ljos start` with the repo or the issue
-and the task. That recalls and claims.
+A bot with no harness hooks calls `ljos sitting ISSUE`. That recalls and
+claims. `ljos start ISSUE` is the same command.
 
 ## Note
 
@@ -13738,7 +13738,13 @@ pub fn held_issue() -> Option<String> {
         return None;
     }
     holders.iter().find_map(|holder| {
-        let out = run_captured("vissue", &["claims", "--by", holder, "--json"]).ok()?;
+        let out = run_captured_within(
+            "vissue",
+            &["claims", "--by", holder, "--json"],
+            None,
+            tracker_verb_wait(),
+        )
+        .ok()?;
         let rows: Value = serde_json::from_str(&out.stdout).ok()?;
         rows.as_array()?
             .iter()
@@ -18378,7 +18384,7 @@ fn writer_busy(err: &anyhow::Error) -> bool {
 /// The whole remember post, including one shed wait. Twenty seconds is as
 /// long as a script should wait; the old thirty-second socket timeout,
 /// asked again, was the forty-six second exit.
-const REMEMBER_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+const REMEMBER_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// One line when a pack call runs out of time. Exit [`PACK_BUSY_EXIT`].
 pub const PACK_BUSY_LINE: &str = "pack busy, try again";
@@ -18704,6 +18710,13 @@ fn timeout_cause(cause: &(dyn std::error::Error + 'static)) -> bool {
 /// Whether `err` is a pack call that ran out of time, or [`PackBusy`].
 #[must_use]
 pub fn is_pack_busy(err: &anyhow::Error) -> bool {
+    if err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("another memory call is in flight")
+    }) {
+        return true;
+    }
     err.chain().any(timeout_cause)
 }
 
@@ -19223,6 +19236,33 @@ fn ensure_writer() -> Result<()> {
     }
 }
 
+thread_local! {
+    static SKIP_WRITER_ENSURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Skip `packset ensure` for the writes inside this guard.
+///
+/// A herd that cannot reach the writer used to start one `packset ensure`
+/// each. The lesson is queued instead, and a later call sends it.
+struct SkipWriterEnsure;
+
+impl SkipWriterEnsure {
+    fn enter() -> Self {
+        SKIP_WRITER_ENSURE.with(|cell| cell.set(true));
+        Self
+    }
+}
+
+impl Drop for SkipWriterEnsure {
+    fn drop(&mut self) {
+        SKIP_WRITER_ENSURE.with(|cell| cell.set(false));
+    }
+}
+
+fn skip_writer_ensure() -> bool {
+    SKIP_WRITER_ENSURE.with(|cell| cell.get())
+}
+
 fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
     admit::note_list_lock();
     // A shed or a passed deadline already had its one retry. Asking again
@@ -19232,7 +19272,7 @@ fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
         Err(err) if pack_link::clock_armed() && (is_pack_busy(&err) || writer_busy(&err)) => {
             Err(pack_busy_err())
         }
-        Err(err) if writer_unreachable(&err) => match ensure_writer() {
+        Err(err) if writer_unreachable(&err) && !skip_writer_ensure() => match ensure_writer() {
             Ok(()) => match op() {
                 // The start did not bring a writer up. A timeout on the
                 // retry is that same down writer, not a pack that is busy.
@@ -21934,22 +21974,59 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
 
 /// How long one remember post may wait. The tries still to come, and a
 /// pause before each of them, have to fit in `left`.
+/// The one line `ljos remember` prints when the lesson is queued because
+/// the pack is busy or not answering. The command exits 0.
+pub const REMEMBER_QUEUED_LINE: &str =
+    "queued; the pack is busy and this lesson will be sent on the next call";
+
+fn remember_queued_body(text: &str) -> Value {
+    serde_json::json!({
+        "queued": true,
+        "kind": "lesson",
+        "text": text,
+    })
+}
+
+/// Whether the pack being down or slow is why `err` happened, and the
+/// lesson can wait. A content refusal and packs turned off are not this.
+fn remember_should_queue(err: &anyhow::Error) -> bool {
+    if pack_turned_off(err) || !note_can_wait(err) {
+        return false;
+    }
+    if pack_under_load(err)
+        || is_pack_busy(err)
+        || is_deadline_miss(err)
+        || writer_unreachable(err)
+        || writer_port_down(err)
+        || writer_slow(err)
+    {
+        return true;
+    }
+    let text = format!("{err:#}").to_ascii_lowercase();
+    text.contains("queued")
+        || text.contains("no pack writer")
+        || text.contains("connection refused")
+        || text.contains("closed the socket")
+        || text.contains("another memory call is in flight")
+}
+
 /// Post one lesson. The client waits out one `Retry-After` on a 503.
-/// A pack that is still shed, or that does not answer, queues the lesson.
-/// A passed deadline is returned as that line and is not queued.
+/// A pack that is busy, shed, or not answering queues the lesson and the
+/// command still succeeds. Packs turned off, and a refusal of the text,
+/// stay errors.
 ///
 /// # Errors
 ///
-/// The pack refused the text, or it was still degraded after the one
-/// retry. A shed or a silent pack has the lesson queued when the queue
-/// could take it.
+/// The pack refused the text, or packs are turned off.
 pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) -> Result<Value> {
     let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
     let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
     let _quiet = pack_link::QuietPack::enter();
+    // Do not start a writer from this call. Twenty-six of those at once
+    // is what pushed the box into memory pressure.
+    let _skip = SkipWriterEnsure::enter();
     match post() {
         Ok(body) => Ok(body),
-        Err(err) if is_deadline_miss(&err) => Err(err),
         Err(err) if existing_atom_id(&err).is_some() => {
             let id = existing_atom_id(&err).unwrap_or_default();
             eprintln!("remember: already stored as {id}, so run `ljos search`.");
@@ -21960,13 +22037,12 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
                 "duplicate": true,
             }))
         }
-        Err(err) if pack_under_load(&err) => {
-            // Load is not a content refusal. The lesson is queued even
-            // when a local prose check would turn the same words away.
-            // The pack applies policy, size and duplicate rules on the
-            // send, after the pressure has fallen.
+        Err(err) if pack_turned_off(&err) => Err(err),
+        Err(err) if remember_should_queue(&err) => {
+            // Load has not judged the words. Keep the sentence as given,
+            // even when a local prose check would turn it away.
             queue_busy_lesson(text);
-            Err(err)
+            Ok(remember_queued_body(text))
         }
         Err(err) => Err(err),
     }
@@ -33218,6 +33294,20 @@ pub fn doctor_seat() -> Vec<Habitat> {
         ("tracker", "vissue", &["identity"][..]),
         ("claim graph", "claimdag", &["list"][..]),
     ] {
+        // The sitting already waited out this probe. Asking again holds
+        // the doctor for another two seconds while the graph stays quiet.
+        if name == "claim graph" && claim_graph_marked_down() {
+            doctor_push(
+                &mut out,
+                Habitat {
+                    name,
+                    state: "did not answer; the claim is in the tracker and reconciles later"
+                        .into(),
+                    ok: true,
+                },
+            );
+            continue;
+        }
         // A habitat that accepts the probe and never answers used to hold
         // the sitting for the full capture wait. Two seconds is enough for
         // identity, a log head, or an empty graph, and then the row says so.
@@ -36989,7 +37079,7 @@ pub fn file_issue(
     if quiet {
         argv.push("-q".into());
     }
-    let said = match run_captured_as("vissue", &argv, Some(agent)) {
+    let said = match run_captured_within("vissue", &argv, Some(agent), tracker_verb_wait()) {
         Ok(said) => said,
         Err(err)
             if parent.is_some() && err.to_string().contains("does not refer to any known id") =>
@@ -40831,6 +40921,27 @@ const SITTING_LIST_CAP: usize = 512 * 1024;
 
 pub const SITTING_WORDS_LINE: &str = "ranked by words; the pack search did not answer in time\n";
 
+/// The one line a sitting or a finish prints when the claim graph does not
+/// answer. The tracker already holds the claim or the release.
+pub const LOCAL_CLAIM_LINE: &str =
+    "claim graph did not answer; the claim is in the tracker and reconciles later\n";
+
+thread_local! {
+    static CLAIM_GRAPH_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct ClaimGraphMark;
+
+impl Drop for ClaimGraphMark {
+    fn drop(&mut self) {
+        CLAIM_GRAPH_DOWN.with(|cell| cell.set(false));
+    }
+}
+
+fn claim_graph_marked_down() -> bool {
+    CLAIM_GRAPH_DOWN.with(|cell| cell.get())
+}
+
 /// The one line a sitting prints when the related-memory search did not
 /// answer, then the rest of the sitting continues.
 pub const MEMORY_SKIPPED_LINE: &str = "memory skipped: packsetd busy\n";
@@ -41102,7 +41213,8 @@ pub fn sitting_stream_started(
         }
     }
     let mut out = String::new();
-    let down = sitting_hard_down();
+    let _claim_mark = ClaimGraphMark;
+    let (down, claim_missed) = sitting_hard_down();
     let mut deferred =
         match sitting_budget_left("the deed, tracker and claim-graph checks", budget.total) {
             Ok(()) => None,
@@ -41165,17 +41277,26 @@ pub fn sitting_stream_started(
 
     let mut piece = String::new();
     sections.heading(&mut piece, "claim");
-    let claimed = if let Some(why) = deferred.clone() {
+    let lock_blocked = deferred
+        .as_ref()
+        .is_some_and(|why| why.contains("vissue lock") || why.contains("tracker git lock"));
+    let claimed = if claim_missed && !lock_blocked {
+        local_tracker_claim(issue, assignee)
+    } else if let Some(why) = deferred.clone() {
         note_claim_pending(issue, assignee, &why);
         format!("claim-pending: {why}\n")
     } else {
-        match claim(issue, assignee) {
+        let bound = arm_wall_budget_for(std::time::Duration::from_secs(2));
+        let claimed = claim(issue, assignee);
+        let timed_out = claimed
+            .as_ref()
+            .err()
+            .is_some_and(|err| claim_waits(err) || graph_timed_out(err))
+            || wall_left().is_some_and(|left| left.is_zero());
+        drop(bound);
+        match claimed {
             Ok(claimed) => claimed,
-            Err(err) if claim_waits(&err) || wall_left().is_some_and(|left| left.is_zero()) => {
-                let why = format!("{err:#}");
-                note_claim_pending(issue, assignee, &why);
-                format!("claim-pending: {why}\n")
-            }
+            Err(_err) if timed_out => local_tracker_claim(issue, assignee),
             Err(err) => return Err(err),
         }
     };
@@ -41408,6 +41529,7 @@ pub fn pack_memory_down(err: &anyhow::Error) -> bool {
     }
     let text = format!("{err:#}");
     text.contains("connection refused")
+        || text.contains("closed the socket")
         || text.contains("packset")
         || text.contains(&format!(":{PACK_DEFAULT_PORT}"))
         || text.contains("encoder")
@@ -41456,7 +41578,10 @@ pub fn retry_pending_claim(issue: &str) -> String {
     if assignee.is_empty() {
         return String::new();
     }
-    match claim(issue, assignee) {
+    let bound = arm_wall_budget_for(std::time::Duration::from_secs(2));
+    let claimed = claim(issue, assignee);
+    drop(bound);
+    match claimed {
         Ok(said) => {
             clear_claim_pending(issue);
             let persisted = persist_tracker(issue, "claimed");
@@ -41481,7 +41606,7 @@ fn sitting_budget_left(step: &str, total: std::time::Duration) -> Result<()> {
 }
 
 fn wait_for_sitting_lock(path: &Path, what: &str, total: std::time::Duration) -> Result<()> {
-    let left = wall_left().unwrap_or(total);
+    let left = wall_left().unwrap_or(total).min(tracker_lock_wait());
     let Some(held) = CommitLock::acquire_by(path, std::time::Instant::now() + left) else {
         bail!(
             "sitting: another tracker writer held the {what} at {} past the {}s claim budget; nothing was claimed",
@@ -41519,10 +41644,48 @@ fn wait_for_sitting_locks(issue: &str, total: std::time::Duration) -> Result<()>
     sitting_budget_left("the tracker lock checks", total)
 }
 
-/// Tracker, claim graph and deed store. A sitting cannot open without
-/// them, and none of the three is a pack read. A `warn` tracker row
-/// answered: unpushed commits do not refuse the claim.
-fn sitting_hard_down() -> Vec<String> {
+/// Whether `err` is a claim graph that did not answer in time. A missing
+/// binary is not this: that stays a real failure.
+fn graph_timed_out(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}");
+    if text.contains("not on PATH") || text.contains("not on path") {
+        return false;
+    }
+    text.contains("did not answer in time")
+        || text.contains("timed out")
+        || text.contains("claim budget")
+}
+
+/// Stamp the tracker and leave the claim graph for a later call.
+fn local_tracker_claim(issue: &str, assignee: &str) -> String {
+    note_claim_pending(issue, assignee, "the claim graph did not answer");
+    let _ = stamp_tracker_quick(issue, assignee);
+    LOCAL_CLAIM_LINE.to_string()
+}
+
+fn stamp_tracker_quick(node: &str, assignee: &str) -> Result<()> {
+    // The sitting's claim budget may already be spent on a quiet graph.
+    // The tracker stamp is the write that still has to happen, on its own
+    // short bound.
+    let previous = WALL_DEADLINE.with(|cell| cell.replace(None));
+    let wait = std::time::Duration::from_secs(2);
+    let stamped = match run_captured_within("vissue", &["claim", node], Some(assignee), wait) {
+        Ok(_) => Ok(()),
+        Err(err) if tracker_claim_needs_force(&err.to_string()) => {
+            run_captured_within("vissue", &["claim", node, "--force"], Some(assignee), wait)
+                .map(|_| ())
+        }
+        Err(err) => Err(err),
+    };
+    WALL_DEADLINE.with(|cell| cell.set(previous));
+    stamped
+}
+
+/// Tracker and deed store. A sitting cannot open without them. The claim
+/// graph is asked for about two seconds; if it does not answer, the
+/// sitting still stamps the tracker. None of the three is a pack read.
+/// A `warn` tracker row answered: unpushed commits do not refuse the claim.
+fn sitting_hard_down() -> (Vec<String>, bool) {
     let mut rows = Vec::new();
     for (name, bin, args) in [
         ("deed store", "deedar", &["log", "head"][..]),
@@ -41561,10 +41724,16 @@ fn sitting_hard_down() -> Vec<String> {
             },
         );
     }
-    failing_for_sitting(&rows)
+    let claim_missed = rows.iter().any(|row| row.name == "claim graph" && !row.ok);
+    if claim_missed {
+        CLAIM_GRAPH_DOWN.with(|cell| cell.set(true));
+    }
+    let down = failing_for_sitting(&rows)
         .into_iter()
+        .filter(|name| *name != "claim graph")
         .map(str::to_string)
-        .collect()
+        .collect();
+    (down, claim_missed)
 }
 
 /// Which recipe a sitting binds before it claims. The pack is not asked:
@@ -42020,6 +42189,12 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 
 fn finish_lesson(issue: &str, text: &str) -> String {
     let filed = (|| -> Result<String> {
+        // The tracker write has already landed, or is about to. The pack
+        // gets one short try. A slow writer queues the lesson.
+        let _deadline = pack_link::CommandDeadline::enter(std::time::Duration::from_secs(2));
+        let _clock = pack_link::PackClock::enter(std::time::Duration::from_secs(2));
+        let _quiet = pack_link::QuietPack::enter();
+        let _skip = SkipWriterEnsure::enter();
         let scope = sync::scope_for_lesson(sync::scope_for_issue(issue));
         let persons = lesson_is_the_persons(under_a_runner(), person_present());
         let prefix = "finish: POST /v1/atoms failed for the lesson";
@@ -42070,6 +42245,10 @@ fn finish_lesson(issue: &str, text: &str) -> String {
     })();
     match filed {
         Ok(line) => line,
+        Err(e) if !pack_turned_off(&e) && remember_should_queue(&e) => {
+            let _ = queue_memory(issue, text, "", "lesson", &[]);
+            format!("{REMEMBER_QUEUED_LINE}\n")
+        }
         Err(e) => format!(
             "the lesson was not kept: {e:#}. Reword the lesson and keep it with: ljos remember {}\n",
             tools::sh_quote(text)
@@ -42662,8 +42841,20 @@ pub fn finish(
         _ => None,
     };
     let reopen = closed_as.is_none();
-    let completed = match complete_as(issue, Some(status), assignee, gen, reopen) {
-        Ok(done) => done,
+    let completed = {
+        // The claim graph gets about two seconds. Past that the tracker
+        // already holds the release, and a later call reconciles the graph.
+        let bound = arm_wall_budget_for(std::time::Duration::from_secs(3));
+        let completed = complete_as(issue, Some(status), assignee, gen, reopen);
+        drop(bound);
+        completed
+    };
+    let (completed, graph_quiet) = match completed {
+        Ok(done) => (done, false),
+        Err(e) if graph_timed_out(&e) => {
+            let _ = unstamp_tracker(issue, assignee, reopen);
+            (String::new(), true)
+        }
         Err(e) => {
             let text = e.to_string();
             if text.contains("so run `ljos send ") {
@@ -42673,6 +42864,9 @@ pub fn finish(
         }
     };
     let mut out = format!("{pending}finished {issue} as {status}\n");
+    if graph_quiet {
+        out.push_str(LOCAL_CLAIM_LINE);
+    }
     // "back to TODO" is the tracker returning the heading to the state it
     // had before the claim. The work was not undone: the sitting ended and
     // the ticket stays open for a person to review.
@@ -42786,6 +42980,57 @@ pub fn finish(
     // rest of the pack waits for `ljos sync`.
     out.push_str(&sync::seal_ticket_in_passing(issue).unwrap_or_else(|e| format!("sync: {e:#}\n")));
     Ok(out)
+}
+
+/// Pause between lock tries, plus a little jitter so a herd does not wake
+/// on the same instant. Never longer than `left`.
+fn flock_pause(pause: std::time::Duration, left: std::time::Duration) -> std::time::Duration {
+    let jitter_ms = (std::process::id() as u64).wrapping_mul(13) % 40;
+    pause
+        .saturating_add(std::time::Duration::from_millis(jitter_ms))
+        .min(left)
+}
+
+/// One non-blocking hold on the seat's memory call. `None` when another
+/// call on this seat already has it: the caller queues or falls back and
+/// does not open a socket.
+/// A memory write is in flight for this seat. Readers are not gated:
+/// a seat still searches while a lesson is being stored.
+pub(crate) struct MemoryFlight;
+
+pub(crate) fn try_memory_flight(_kind: MemoryFlight) -> Option<CommitLock> {
+    // Unit tests share one process and count list locks. The seat lock
+    // is for separate processes of one seat.
+    #[cfg(test)]
+    {
+        Some(CommitLock(None))
+    }
+    #[cfg(not(test))]
+    {
+        use std::os::unix::io::AsRawFd;
+        // The seat's state directory, not the shared runtime fallback.
+        // Two seats on one host do not block each other.
+        let dir = note_queue::state_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("memory-write.lock");
+        let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        else {
+            return Some(CommitLock(None));
+        };
+        // SAFETY: flock on a descriptor this function owns until the
+        // returned guard drops. A non-blocking try does not wait.
+        let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        if ok {
+            return Some(CommitLock(Some(file)));
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EWOULDBLOCK | libc::EINTR) => None,
+            _ => Some(CommitLock(None)),
+        }
+    }
 }
 
 /// An exclusive advisory lock on a file, held until dropped. Taking it
@@ -42902,7 +43147,7 @@ impl CommitLock {
                 return None;
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            std::thread::sleep(pause.min(left));
+            std::thread::sleep(flock_pause(pause, left));
             pause = pause.saturating_mul(2).min(MAX_PAUSE);
         }
     }
@@ -42940,7 +43185,7 @@ impl CommitLock {
                 return None;
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            std::thread::sleep(pause.min(left));
+            std::thread::sleep(flock_pause(pause, left));
             pause = pause.saturating_mul(2).min(MAX_PAUSE);
         }
     }
@@ -43128,11 +43373,15 @@ pub fn tracker_commit_lock(dir: &Path) -> CommitLock {
 }
 
 /// How long a background push waits for `.ljos-commit.lock`, in whole
-/// seconds. This is the same wait [`tracker_lock_wait`] uses when
-/// `LJOS_TRACKER_LOCK_WAIT` is unset: long enough for a hook to finish a
-/// normal push, and short enough that a stuck lock does not hold the next
-/// seat. When the wait ends, the push runs without the lock.
+/// seconds. Long enough for a hook to finish a normal push. When the wait
+/// ends, the push runs without the lock. An interactive writer does not
+/// use this: it waits [`TRACKER_WRITER_WAIT_SECS`] and defers.
 pub const TRACKER_FLOCK_WAIT_SECS: u64 = 20;
+
+/// How long a tracker writer waits for another writer's commit lock
+/// before it defers the commit. Short on purpose: a herd must not sit
+/// for [`TRACKER_FLOCK_WAIT_SECS`] each.
+pub const TRACKER_WRITER_WAIT_SECS: u64 = 2;
 
 /// Pause between non-blocking `flock(2)` tries while a background push
 /// waits for [`TRACKER_LOCK`].
@@ -43140,14 +43389,22 @@ const FLOCK_POLL_MS: u64 = 200;
 
 /// How long a tracker write waits for another writer's commit lock before
 /// it says so and leaves the write uncommitted: `LJOS_TRACKER_LOCK_WAIT`
-/// seconds, else [`TRACKER_FLOCK_WAIT_SECS`].
+/// seconds, else [`TRACKER_WRITER_WAIT_SECS`].
 #[must_use]
 pub fn tracker_lock_wait() -> std::time::Duration {
     let secs = std::env::var("LJOS_TRACKER_LOCK_WAIT")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(TRACKER_FLOCK_WAIT_SECS);
+        .unwrap_or(TRACKER_WRITER_WAIT_SECS);
     std::time::Duration::from_secs(secs)
+}
+
+/// How long a tracker verb waits on `vissue` itself. The lock wait, and
+/// never more than four seconds: a quiet `vissue` must not hold the seat
+/// for the old three-minute capture.
+#[must_use]
+pub fn tracker_verb_wait() -> std::time::Duration {
+    tracker_lock_wait().min(std::time::Duration::from_secs(4))
 }
 
 /// The line a tracker write prints when another writer kept the commit
@@ -43807,7 +44064,9 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
             return PathCommit::Refused(orphan);
         }
     }
-    for step in 1..=INDEX_LOCK_RETRY_STEPS {
+    // Two short tries, then defer. Five used to hold the advisory lock for
+    // about six seconds while every other writer waited.
+    for step in 1..=2 {
         if result.is_ok() {
             break;
         }
@@ -44225,26 +44484,36 @@ pub fn ensure_project_line(text: &str, project: &str) -> String {
 /// heading. A quiet create prints the id alone. A `file:` or `inbox:`
 /// line is a path, and a token that ends in `:` is a label.
 pub(crate) fn created_issue_id(text: &str) -> String {
+    let mut heading = String::new();
     let mut bare = String::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let Some(word) = line.split_whitespace().next() else {
+        let mut words = line.split_whitespace();
+        let Some(word) = words.next() else {
             continue;
         };
         if word.ends_with(':') || line.starts_with("file:") || line.starts_with("inbox:") {
             continue;
         }
-        if word.contains('-') {
-            return word.to_string();
+        let state = words.next().unwrap_or("");
+        // The new heading is the last one. A parent printed above it is
+        // not the id this command just filed.
+        if word.contains('-') && matches!(state, "TODO" | "STARTED" | "DONE" | "CANCELLED") {
+            heading = word.to_string();
+            continue;
         }
         if bare.is_empty() {
             bare = word.to_string();
         }
     }
-    bare
+    if !heading.is_empty() {
+        heading
+    } else {
+        bare
+    }
 }
 
 /// Attach the fix when git stopped because it has no author.
@@ -44273,6 +44542,16 @@ file: /tmp/tracker/Software/demo/issues.org
     #[test]
     fn a_quiet_create_is_the_id_alone() {
         assert_eq!(created_issue_id("demo-zcre\n"), "demo-zcre");
+    }
+
+    #[test]
+    fn the_new_heading_is_the_last_one() {
+        let text = "\
+project: demo
+demo-parent  TODO  [#C]  The parent
+demo-child  TODO  [#C]  The new ticket
+";
+        assert_eq!(created_issue_id(text), "demo-child");
     }
 
     #[test]
@@ -65279,13 +65558,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             !pack_copy::pack_copy_ok(text),
             "the local gate accepted a sentence past the word limit"
         );
-        let err = super::remember_with_retry(text, || {
+        let body = super::remember_with_retry(text, || {
             Err(anyhow::Error::new(packset_client::Error::Unavailable(
                 "packsetd is busy: memory pressure; try again".into(),
             )))
         })
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("memory pressure"), "{err:#}");
+        .unwrap();
+        assert_eq!(body["queued"].as_bool(), Some(true), "{body}");
         let queued =
             std::fs::read_to_string(tmp.path().join("ljos/note-queue.jsonl")).unwrap_or_default();
         assert!(

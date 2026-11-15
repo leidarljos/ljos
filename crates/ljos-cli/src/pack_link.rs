@@ -439,6 +439,17 @@ fn listen_uids(table: &str, port: u16) -> Vec<u32> {
         .collect()
 }
 
+/// A memory write. Searches stay out of this lock: a seat still reads
+/// while a lesson is being stored, and several readers run together.
+/// Writes are the calls that start an embed, and a seat does one at a time.
+fn memory_flight(method: &str, path: &str) -> Option<crate::MemoryFlight> {
+    let path = path.split('?').next().unwrap_or(path);
+    if method != "GET" && (path.starts_with("/v1/atoms") || path.starts_with("/v1/embed")) {
+        return Some(crate::MemoryFlight);
+    }
+    None
+}
+
 fn target(path: &str, query: &[(&str, &str)]) -> String {
     if query.is_empty() {
         return path.to_string();
@@ -1287,6 +1298,20 @@ impl PacksetClient {
             body,
             token: token.as_deref(),
         };
+        // One memory call per seat. Another caller queues or falls back
+        // instead of opening a second socket.
+        let _flight = if let Some(kind) = memory_flight(method, path) {
+            match crate::try_memory_flight(kind) {
+                Some(guard) => Some(guard),
+                None => {
+                    return Err(Error::Unavailable(
+                        "pack busy, another memory call is in flight".into(),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
         let answer = self.exchange(addr, &call, allow, budget)?;
         let answer = match answer.status {
             408 => return Err(degrade(&answer.body, method, true)),
@@ -1295,7 +1320,8 @@ impl PacksetClient {
                 .filter(|wait| !deadline_passed() && retry_room(*wait))
             {
                 Some(wait) => {
-                    std::thread::sleep(wait);
+                    let jitter_ms = (std::process::id() as u64).wrapping_mul(17) % 80;
+                    std::thread::sleep(wait.saturating_add(Duration::from_millis(jitter_ms)));
                     if deadline_passed() {
                         return Err(degrade(&answer.body, method, true));
                     }

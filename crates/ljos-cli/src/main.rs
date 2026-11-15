@@ -585,7 +585,9 @@ enum Cmd {
     /// Example: `ljos remember "The lexical default is BM25+."`
     ///
     /// An empty text exits 2. A text past 1000 characters exits 2.
-    /// When nothing is storing memories, the command exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
+    /// When the pack is busy or not answering, the lesson is queued and the command exits 0.
+    /// The pack is this seat's memory store.
+    /// Turned off on purpose, the command exits 1.
     Remember {
         /// The lesson to store.
         text: Vec<String>,
@@ -777,10 +779,10 @@ enum Cmd {
     /// names the command to rerun and, when a remaining time is reported,
     /// about how many seconds are left. A failed or missing encoder
     /// names the command that fixes it. `--json` puts
-    /// `semantic` or `lexical` in `ranking`. A memory store that
-    /// runs out of time prints `pack busy, try again` and exits 75.
+    /// `semantic` or `lexical` in `ranking`. A pack that is down, busy, or
+    /// still loading its encoder ranks by words from what is stored locally,
+    /// prints one line that the search fell back, and exits 0.
     /// The pack is this seat's memory store.
-    /// When nothing is storing memories, the command exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
     Search {
         /// Words to look for.
         query: Vec<String>,
@@ -1040,7 +1042,7 @@ enum Cmd {
         deadline: Option<String>,
         /// The id is already the only line on stdout. Kept for scripts
         /// that pass it.
-        #[arg(short = 'q', long = "porcelain")]
+        #[arg(short = 'q', long = "porcelain", alias = "quiet", alias = "id-only")]
         porcelain: bool,
     },
     /// Append `Options: A, B` to an issue. Two or more, separated by commas.
@@ -2156,6 +2158,7 @@ enum Cmd {
     /// seats, this seat has to be one of them.
     ///
     /// Example: `LJOS_SEAT=alice ljos sitting --plan "Ship the codec" -p day -- "measure the files"`
+    #[command(alias = "start")]
     Sitting {
         /// The tracker id of the issue. Absent when `--plan` files a new one.
         #[arg(
@@ -3179,6 +3182,10 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
     !matches!(
         cmd,
         Cmd::Remember { .. }
+            | Cmd::Note { .. }
+            | Cmd::File { .. }
+            | Cmd::Sitting { .. }
+            | Cmd::Finish { .. }
             | Cmd::Hook(_)
             | Cmd::Help { .. }
             | Cmd::Completions { .. }
@@ -4150,8 +4157,7 @@ fn run_command() -> Result<()> {
                 // A person at the terminal, and words from their latest
                 // prompt, are their lesson. Any other text is a standing
                 // lesson too, sitting or not, labelled agent-derived.
-                // A busy pack is asked once more after Retry-After. It
-                // still exits 75, and the lesson waits in the state dir.
+                // A busy pack queues the lesson and this command exits 0.
                 let body = ljos_cli::remember_with_retry(&text, || {
                     if ljos_cli::person_present() {
                         let horizon = ljos_cli::remember_horizon(transient, standing, false);
@@ -4175,6 +4181,10 @@ fn run_command() -> Result<()> {
                     }
                 })?;
                 if body["duplicate"].as_bool() == Some(true) {
+                    continue;
+                }
+                if body["queued"].as_bool() == Some(true) {
+                    println!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
                     continue;
                 }
                 println!("{}", write_ack(&body, verbose));
@@ -4620,25 +4630,24 @@ fn run_command() -> Result<()> {
                 Err(err) if err.to_string().contains(ljos_cli::WRITER_PORT_FIX) => {
                     return Err(err);
                 }
-                Err(err) if !dated && ljos_cli::pack_unreachable(&err) => {
-                    let line =
-                        ljos_cli::plain_server_fault(&err).unwrap_or_else(ljos_cli::pack_down_line);
-                    ljos_cli::say_fault(&line);
-                    std::process::exit(if ljos_cli::writer_retries(&line) {
-                        ljos_cli::PACK_BUSY_EXIT
-                    } else {
-                        1
-                    });
-                }
                 Err(err)
                     if !dated
-                        && (ljos_cli::is_deadline_miss(&err)
+                        && (ljos_cli::pack_unreachable(&err)
+                            || ljos_cli::is_deadline_miss(&err)
                             || ljos_cli::is_read_shed(&err)
-                            || ljos_cli::pack_memory_down(&err)) =>
+                            || ljos_cli::is_pack_busy(&err)
+                            || ljos_cli::pack_memory_down(&err)
+                            || format!("{err:#}")
+                                .to_ascii_lowercase()
+                                .contains("closed the socket")) =>
                 {
+                    let closed = format!("{err:#}")
+                        .to_ascii_lowercase()
+                        .contains("closed the socket");
+                    let down = ljos_cli::pack_unreachable(&err) || closed;
                     if ljos_cli::is_read_shed(&err) {
                         eprintln!("{}", ljos_cli::pack_fault_line(&err));
-                    } else if !ljos_cli::is_deadline_miss(&err) {
+                    } else if !ljos_cli::is_deadline_miss(&err) && !down {
                         eprintln!("{}", ljos_cli::pack_busy_sentence());
                     }
                     eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
@@ -4978,18 +4987,18 @@ fn run_command() -> Result<()> {
                 }
                 Err(err) => return Err(err),
             };
+            // The note is the tracker write. Reconciling a claim the
+            // graph did not take waits until that write has landed, and
+            // only for a short bound.
+            ljos_cli::run_within(
+                "vissue",
+                &["note", &issue, &text],
+                ljos_cli::tracker_verb_wait(),
+            )?;
             let pending = ljos_cli::retry_pending_claim(&issue);
             if !pending.is_empty() {
                 print!("{pending}");
             }
-            // The tracker's own lock has no deadline. Wait as long as a
-            // tracker commit waits, then say so. A second note once the
-            // lock is free is the retry that used to be instant.
-            ljos_cli::run_within(
-                "vissue",
-                &["note", &issue, &text],
-                ljos_cli::tracker_lock_wait(),
-            )?;
             if inferred {
                 println!("noted on {issue}");
             }
@@ -6263,9 +6272,16 @@ fn run_command() -> Result<()> {
             verbose,
         } => {
             stop_ticket(&issue);
-            match ljos_cli::flush_note_queue() {
-                Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
-                Err(e) => eprintln!("ljos finish: note queue: {e:#}"),
+            {
+                let _deadline =
+                    ljos_cli::pack_link::CommandDeadline::enter(std::time::Duration::from_secs(2));
+                let _clock =
+                    ljos_cli::pack_link::PackClock::enter(std::time::Duration::from_secs(2));
+                let _quiet = ljos_cli::pack_link::QuietPack::enter();
+                match ljos_cli::flush_note_queue() {
+                    Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
+                    Err(e) => eprintln!("ljos finish: note queue: {e:#}"),
+                }
             }
             print!(
                 "{}",
