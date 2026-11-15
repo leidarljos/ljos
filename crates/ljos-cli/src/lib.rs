@@ -89,6 +89,7 @@ pub mod tools;
 mod tracker_attach;
 pub mod tracker_place;
 mod tracker_push;
+mod tracker_repair;
 pub mod tracker_sync;
 pub mod tree_cleanup;
 pub mod turn_record;
@@ -33660,7 +33661,8 @@ fn root_source() -> String {
 /// or holds no prefix directory fails the row: tickets filed there are
 /// invisible to every other seat. When the root is a git checkout with an
 /// upstream, the row also names how many commits origin lacks, and in any
-/// checkout the issue files that hold uncommitted edits.
+/// checkout the issue files that hold uncommitted edits. A checkout whose
+/// objects do not read names the repair. The repair is not run.
 pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
     let version = identity.lines().next().unwrap_or("").trim();
     let field = |key: &str| {
@@ -33690,15 +33692,20 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
         tracker_not_writable(path, prefix)
     };
     let base = format!("{version} root={root} prefix={prefix} from {source}");
-    let (state, ok) = match problem {
+    let (mut state, ok) = match problem {
         Some(why) => return (format!("{base}; {why}"), false),
         None => match tracker_git_drift(path) {
             Some((extra, git_ok)) => (format!("{base}; {extra}"), git_ok),
             None => (base, true),
         },
     };
-    match tracker_uncommitted(path) {
-        Some(edits) => (format!("{state}; {edits}"), ok),
+    if let Some(edits) = tracker_uncommitted(path) {
+        state = format!("{state}; {edits}");
+    }
+    // A broken object store is not drift. The row names the repair and
+    // does not run it. The file write already happened.
+    match tracker_repair::doctor_note(path) {
+        Some(repair) => (format!("{state}; {repair}"), false),
         None => (state, ok),
     }
 }
@@ -34566,7 +34573,9 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         return "info";
     }
     if row.name == "tracker"
-        && (names_unpushed(&row.state) || row.state.contains(UNCOMMITTED_EDITS))
+        && (names_unpushed(&row.state)
+            || row.state.contains(UNCOMMITTED_EDITS)
+            || row.state.contains(tracker_repair::MARK))
     {
         return "warn";
     }
@@ -44443,7 +44452,7 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
             Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
         };
         if !added.status.success() {
-            return refused_or_busy(&added);
+            return refused_or_busy(dir, &added);
         }
         if git(&["diff", "--cached", "--quiet"]).is_ok_and(|o| o.status.success()) {
             return Ok(PathCommit::AlreadyIn);
@@ -44463,7 +44472,7 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         {
             return Ok(PathCommit::AlreadyIn);
         }
-        refused_or_busy(&made)
+        refused_or_busy(dir, &made)
     };
     let mut result = attempt();
     if result.is_err() {
@@ -44840,12 +44849,24 @@ fn index_busy(out: &std::process::Output) -> bool {
     git_text_index_busy(&String::from_utf8_lossy(&out.stderr))
 }
 
-fn refused_or_busy(out: &std::process::Output) -> Result<PathCommit, String> {
+fn refused_or_busy(dir: &Path, out: &std::process::Output) -> Result<PathCommit, String> {
     if index_busy(out) {
         Err(git_refusal(out))
     } else {
-        Ok(PathCommit::Refused(git_refusal(out)))
+        Ok(PathCommit::Refused(tracker_git_said(dir, out)))
     }
+}
+
+/// The first line git printed, unless the failure is a bad object, a
+/// missing object, or a pack with no index. That case names the
+/// repository and `ljos doctor` instead of git's raw line.
+fn tracker_git_said(dir: &Path, out: &std::process::Output) -> String {
+    let full = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    tracker_repair::plain_failure(dir, &full).unwrap_or_else(|| git_refusal(out))
 }
 
 /// What git said when it refused: the first line of stderr, else of
@@ -45251,7 +45272,7 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
             }
         }
         Ok(o) if o.status.success() => {}
-        Ok(o) => return format!("tracker git: {}\n", first_line(&o.stderr)),
+        Ok(o) => return format!("tracker git: {}\n", tracker_git_said(dir, &o)),
         Err(e) => return format!("tracker git: {e}\n"),
     }
     let seat = tracker_seat();
@@ -45385,9 +45406,10 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
                         },
                     );
                 }
+                let why = tracker_repair::plain_failure(dir, &said)
+                    .unwrap_or_else(|| first_line(said.as_bytes()));
                 return say(format!(
-                    "tracker git: committed {message}; push refused: {}\n",
-                    first_line(said.as_bytes())
+                    "tracker git: committed {message}; push refused: {why}\n"
                 ));
             }
             Ok(None) if started.elapsed() < wait => {
@@ -53094,6 +53116,137 @@ mod tests {
         for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
             std::env::remove_var(var);
         }
+    }
+
+    fn drop_pack_index(root: &Path) {
+        let run = |args: &[&str]| {
+            let out = git_at(root).args(args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["repack", "-Ad"]);
+        let pack = root.join(".git/objects/pack");
+        for ent in std::fs::read_dir(&pack).unwrap() {
+            let path = ent.unwrap().path();
+            if matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("idx") | Some("rev")
+            ) {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+    }
+
+    fn point_head_at_missing(root: &Path) {
+        let out = git_at(root)
+            .args(["symbolic-ref", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rel = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let path = root.join(".git").join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n").unwrap();
+    }
+
+    fn assert_repair_line(said: &str, root: &Path) {
+        assert!(
+            said.starts_with("tracker git: the git repository at "),
+            "{said}"
+        );
+        assert!(said.contains(&root.display().to_string()), "{said}");
+        assert!(said.contains("`ljos doctor`"), "{said}");
+        assert!(said.contains("cannot read its objects"), "{said}");
+        assert!(!said.contains("fatal:"), "{said}");
+        assert!(!said.to_ascii_lowercase().contains("bad object"), "{said}");
+    }
+
+    fn assert_tracker_reads(root: &Path) {
+        let id = format!(
+            "vissue 0.16.2\nprotocol: 1\nroot={}\nprefix=Software\n",
+            root.display()
+        );
+        let (clean, ok) = super::tracker_state(&id, "VISSUE_ROOT=x");
+        assert!(ok, "{clean}");
+        assert!(!clean.contains("cannot read its objects"), "{clean}");
+    }
+
+    /// A pack with no index, or HEAD naming a missing commit, replaces git's
+    /// raw object error with the repository path and `ljos doctor`. The
+    /// file that was written stays. Doctor prints the repair and does not
+    /// run it. A healthy checkout gains no new text.
+    #[test]
+    fn a_broken_tracker_names_the_repair_and_keeps_the_file() {
+        let _env = env_guard();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let body = "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+
+        let packed = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(packed.path());
+        assert_tracker_reads(packed.path());
+        drop_pack_index(packed.path());
+        let index = std::fs::read(packed.path().join(".git/index")).ok();
+        std::fs::write(&issues, body).unwrap();
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert_repair_line(&said, packed.path());
+        assert_eq!(std::fs::read_to_string(&issues).unwrap(), body);
+        assert_eq!(std::fs::read(packed.path().join(".git/index")).ok(), index);
+        let id = format!(
+            "vissue 0.16.2\nprotocol: 1\nroot={}\nprefix=Software\n",
+            packed.path().display()
+        );
+        let (state, ok) = super::tracker_state(&id, "VISSUE_ROOT=x");
+        assert!(!ok, "{state}");
+        let row = super::Habitat {
+            name: "tracker",
+            state,
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&row), "warn");
+        let printed = super::format_doctor(std::slice::from_ref(&row));
+        assert!(printed.starts_with("warn\ttickets\t"), "{printed}");
+        assert!(printed.contains("index-pack"), "{printed}");
+        assert!(printed.contains("fetch --refetch origin"), "{printed}");
+        assert!(printed.contains("read-tree HEAD"), "{printed}");
+        assert!(
+            printed.contains("Never reset it: it may hold unpushed tracker changes"),
+            "{printed}"
+        );
+        assert!(
+            std::fs::read_dir(packed.path().join(".git/objects/pack"))
+                .unwrap()
+                .flatten()
+                .all(|ent| ent.path().extension().and_then(|ext| ext.to_str()) != Some("idx")),
+            "the repair was run"
+        );
+
+        let missing = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(missing.path());
+        point_head_at_missing(missing.path());
+        std::fs::write(&issues, body).unwrap();
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert_repair_line(&said, missing.path());
+        assert_eq!(std::fs::read_to_string(&issues).unwrap(), body);
+        let id = format!(
+            "vissue 0.16.2\nprotocol: 1\nroot={}\nprefix=Software\n",
+            missing.path().display()
+        );
+        let (state, _) = super::tracker_state(&id, "VISSUE_ROOT=x");
+        assert!(
+            state.contains("Point the branch at a valid commit"),
+            "{state}"
+        );
+        assert!(state.contains("Set the branch to origin"), "{state}");
     }
 
     /// A live `index.lock` is not deleted and does not drop the write.

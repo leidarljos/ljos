@@ -565,6 +565,12 @@ under equal weights is a count; under calibrated rows it is not.
 - `uncommitted issue edits in FILE` on the `doctor` tracker row: a raw
   `vissue` write or a failed tracker commit left issue edits in the
   checkout, and no other host sees them. Commit them in the tracker.
+- `the git repository at PATH cannot read its objects` on a tracker git
+  line, and the same words on the `doctor` tracker row: a pack has no
+  index, or HEAD names a commit that is not there. The line names the
+  repository and `ljos doctor`. Doctor prints the repair steps and does
+  not run them. The write stays in the worktree. Do not reset that
+  worktree: it may hold unpushed tracker changes.
 - `deedar: warning: this deed is signed by ed25519:...`: the host key is
   not a signer the store's `layout` lists, and `evidence` will refuse the
   deed. Add the printed `signer =` line to that file.
