@@ -2813,16 +2813,7 @@ fn stop_ticket(id: &str) {
 /// Whether the working directory is a git checkout. A tracker prefix is
 /// not that checkout's project when this is false.
 fn cwd_is_checkout() -> bool {
-    let Ok(out) = std::process::Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env("GIT_CONFIG_COUNT", "0")
-        .output()
-    else {
-        return false;
-    };
-    out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
+    ljos_cli::in_work_tree()
 }
 
 fn ticket_error(err: anyhow::Error) -> anyhow::Error {

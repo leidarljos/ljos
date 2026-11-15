@@ -78,6 +78,7 @@ ljos reads =ljos.toml= from the user config (~/.config/ljos/ljos.toml), then the
 - =LJOS_ATOM_NOW_MS= default unset
 - =LJOS_BIN= default unset
 - =LJOS_BIN_DIR= default unset
+- =LJOS_CALL_TIMEOUT= default 60 seconds
 - =LJOS_CAPTURE= default on
 - =LJOS_CARDS_DIR= default unset
 - =LJOS_CITE= default unset

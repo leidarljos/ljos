@@ -20,6 +20,7 @@ pub mod ask_pack;
 pub mod ballot_sig;
 pub mod book_queue;
 pub mod bookkeep;
+pub mod call_deadline;
 pub mod capture;
 pub mod cloud;
 mod cloud_guard;
@@ -13846,16 +13847,29 @@ fn cwd_project() -> Option<(String, String)> {
     ))
 }
 
+/// Whether the working directory is a git checkout.
+#[must_use]
+pub fn in_work_tree() -> bool {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rev-parse", "--is-inside-work-tree"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env("GIT_CONFIG_COUNT", "0");
+    let Ok(out) = bounded_output(&mut cmd) else {
+        return false;
+    };
+    out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
+}
+
 fn checkout_root(dir: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(["rev-parse", "--show-toplevel"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
-        .env("GIT_CONFIG_COUNT", "0")
-        .output()
-        .ok()?;
+        .env("GIT_CONFIG_COUNT", "0");
+    let out = bounded_output(&mut cmd).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -28628,13 +28642,11 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
             d.choice, d.counted
         ));
     }
-    let current = std::process::Command::new("deedar")
+    let mut current_cmd = std::process::Command::new("deedar");
+    current_cmd
         .args(["current", cite])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+        .stdin(std::process::Stdio::null());
+    let current = bounded_output(&mut current_cmd).is_ok_and(|out| out.status.success());
     if current {
         return Err(deed_alone(cite));
     }
@@ -35497,7 +35509,7 @@ fn seat_handover_key() -> Option<PathBuf> {
 }
 
 fn vouch_sign(manifest: &Path, key: Option<&Path>) -> Result<Said> {
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     let bin = which::which("deedar").context("deedar not on PATH")?;
     let mut cmd = Command::new(bin);
     if let Some(key) = key {
@@ -35505,12 +35517,7 @@ fn vouch_sign(manifest: &Path, key: Option<&Path>) -> Result<Said> {
     }
     cmd.args(["vouch", "sign", &manifest.display().to_string()]);
     git_hooks::hook_child_env(&mut cmd);
-    let out = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("deedar: could not start")?;
+    let out = bounded_output(&mut cmd).context("deedar: could not start")?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() {
@@ -36515,24 +36522,15 @@ pub fn utc_at(secs: u64) -> String {
 
 /// Run a habitat's verb with `input` on stdin.
 pub fn run_fed(bin: &str, args: &[impl AsRef<str>], input: &str) -> Result<Said> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     let mut cmd = Command::new(path);
     for a in args {
         cmd.arg(a.as_ref());
     }
     git_hooks::hook_child_env(&mut cmd);
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let out = output_within(cmd, Some(input.as_bytes()), call_deadline::timeout())
         .with_context(|| format!("{bin}: could not start"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input.as_bytes())?;
-    }
-    let out = child.wait_with_output()?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() {
@@ -37849,7 +37847,7 @@ fn taken_first(text: &str) -> bool {
 /// call that did not answer, or the claim lock given up at that deadline.
 fn claim_budget_spent(err: &anyhow::Error) -> bool {
     let text = format!("{err:#}");
-    text.contains("did not answer in time") || text.contains("past the claim budget")
+    call_deadline::stalled(&text) || text.contains("past the claim budget")
 }
 
 /// One line when the claim budget runs out. `which` names the call that
@@ -41640,7 +41638,7 @@ pub fn sitting_stream_started(
             &format!("tracker text for {issue}"),
             &said.stdout,
         )),
-        Err(e) if e.to_string().contains("did not answer in time") => {
+        Err(e) if call_deadline::stalled(&e.to_string()) => {
             piece.push_str(words_line(&mut fell_back));
         }
         Err(e) => piece.push_str(&format!("recall: {e:#}\n")),
@@ -41687,7 +41685,7 @@ fn words_line(said: &mut bool) -> &'static str {
 fn claim_waits(err: &anyhow::Error) -> bool {
     let text = format!("{err:#}");
     text.contains("refused to stamp")
-        || text.contains("did not answer in time")
+        || call_deadline::stalled(&text)
         || text.contains("claim budget")
         || text.contains("nothing was claimed")
 }
@@ -41823,9 +41821,7 @@ fn graph_timed_out(err: &anyhow::Error) -> bool {
     if text.contains("not on PATH") || text.contains("not on path") {
         return false;
     }
-    text.contains("did not answer in time")
-        || text.contains("timed out")
-        || text.contains("claim budget")
+    call_deadline::stalled(&text) || text.contains("timed out") || text.contains("claim budget")
 }
 
 /// Stamp the tracker and leave the claim graph for a later call.
@@ -48771,11 +48767,48 @@ pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Re
         cmd.arg(a.as_ref());
     }
     git_hooks::hook_child_env(&mut cmd);
-    let st = cmd
+    let words: Vec<String> = args.iter().map(|a| a.as_ref().to_string()).collect();
+    let cap = call_deadline::timeout();
+    let shared = wall_left().map(|left| left >= cap).unwrap_or(true);
+    let deadline = wall_left()
+        .unwrap_or(cap)
+        .min(cap)
+        .max(std::time::Duration::from_millis(1));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .status()?;
+        .spawn()
+        .with_context(|| format!("{bin}: could not start"))?;
+    let started = std::time::Instant::now();
+    let mut noted = false;
+    let waited = call_deadline::waiting_label(bin);
+    let st = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= deadline => {
+                stop_captured(&mut child, true);
+                let line = call_deadline::stall_line(bin, &words, deadline);
+                if shared {
+                    call_deadline::stop(&line);
+                }
+                bail!(line);
+            }
+            Ok(None) => {
+                call_deadline::note_waiting(&waited, started, &mut noted);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(err) => {
+                stop_captured(&mut child, true);
+                bail!("{bin}: {err}");
+            }
+        }
+    };
     // A child that died of a closed pipe was cut off by our own reader
     // going away (`ljos consensus ID | head`); that is not the habitat
     // refusing.
@@ -48855,7 +48888,7 @@ pub fn run_captured_as(
 
 fn capture_timed_out(err: &anyhow::Error) -> bool {
     let text = err.to_string();
-    text.contains("did not answer in time") || text.contains(" timed out")
+    call_deadline::stalled(&text) || text.contains(" timed out")
 }
 
 /// Run `cmd` and stop it if it is still going after `deadline`.
@@ -48869,10 +48902,19 @@ fn capture_timed_out(err: &anyhow::Error) -> bool {
 fn output_within(
     mut cmd: std::process::Command,
     stdin: Option<&[u8]>,
-    deadline: std::time::Duration,
+    mut deadline: std::time::Duration,
 ) -> std::io::Result<std::process::Output> {
-    use std::io::{Read, Write};
+    use std::io::Read;
     use std::process::Stdio;
+    let (program, argv) = command_argv(&cmd);
+    let cap = call_deadline::timeout();
+    let shared = deadline >= cap
+        && wall_left().map(|left| left >= cap).unwrap_or(true)
+        && !tool_bound::armed();
+    if let Some(left) = wall_left() {
+        deadline = deadline.min(left);
+    }
+    deadline = deadline.min(cap).max(std::time::Duration::from_millis(1));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -48886,14 +48928,6 @@ fn output_within(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
-    if let Some(bytes) = stdin {
-        let mut input = child
-            .stdin
-            .take()
-            .ok_or_else(|| std::io::Error::other("the child has no stdin"))?;
-        input.write_all(bytes)?;
-        drop(input);
-    }
     let mut out_pipe = child
         .stdout
         .take()
@@ -48912,7 +48946,32 @@ fn output_within(
         let _ = err_pipe.read_to_end(&mut buf);
         buf
     });
+    // Readers run while stdin is written, so a child that answers as it
+    // reads cannot fill a pipe and stall both sides.
+    let stdin_task = stdin.map(|bytes| {
+        let bytes = bytes.to_vec();
+        let mut input = child.stdin.take();
+        std::thread::spawn(move || {
+            // `main` restores SIGPIPE. A child that exits before it reads
+            // would otherwise end this process. Blocked, the write returns
+            // EPIPE and the child's status is what the caller sees.
+            // SAFETY: the set is initialized before it is read, and the
+            // mask changes only this thread.
+            unsafe {
+                let mut set = std::mem::zeroed::<libc::sigset_t>();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGPIPE);
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            }
+            if let Some(input) = input.as_mut() {
+                use std::io::Write;
+                let _ = input.write_all(&bytes);
+            }
+        })
+    });
     let started = std::time::Instant::now();
+    let mut noted = false;
+    let waited = call_deadline::waiting_label(&program);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -48920,20 +48979,35 @@ fn output_within(
                 stop_output_group(&mut child);
                 let _ = join_soon(out_task);
                 let _ = join_soon(err_task);
+                if let Some(task) = stdin_task {
+                    let _ = join_soon(task);
+                }
+                if shared {
+                    call_deadline::stop(&call_deadline::stall_line(&program, &argv, deadline));
+                }
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    "the command was still running",
+                    call_deadline::stall_line(&program, &argv, deadline),
                 ));
             }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Ok(None) => {
+                call_deadline::note_waiting(&waited, started, &mut noted);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             Err(err) => {
                 stop_output_group(&mut child);
                 let _ = join_soon(out_task);
                 let _ = join_soon(err_task);
+                if let Some(task) = stdin_task {
+                    let _ = join_soon(task);
+                }
                 return Err(err);
             }
         }
     };
+    if let Some(task) = stdin_task {
+        let _ = join_soon(task);
+    }
     let stdout = take_output(out_task, &mut child);
     let stderr = take_output(err_task, &mut child);
     Ok(std::process::Output {
@@ -49021,9 +49095,12 @@ fn run_captured_within(
             bail!(line);
         }
     }
+    let cap = call_deadline::timeout();
+    let caller = deadline;
     if let Some(left) = wall_left() {
         deadline = deadline.min(left).max(std::time::Duration::from_millis(1));
     }
+    deadline = deadline.min(cap).max(std::time::Duration::from_millis(1));
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     let mut cmd = Command::new(&path);
     if let Some(who) = identity
@@ -49080,6 +49157,9 @@ fn run_captured_within(
         buf
     });
     let started = std::time::Instant::now();
+    let mut noted = false;
+    let waited = call_deadline::waiting_label(bin);
+    let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -49092,9 +49172,17 @@ fn run_captured_within(
                     tool_bound::mark_failed(line.clone());
                     bail!(line);
                 }
-                bail!("{bin} did not answer in time");
+                let line = call_deadline::stall_line(bin, &words, deadline);
+                let capped = caller >= cap && wall_left().map(|left| left >= cap).unwrap_or(true);
+                if capped {
+                    call_deadline::stop(&line);
+                }
+                bail!(line);
             }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Ok(None) => {
+                call_deadline::note_waiting(&waited, started, &mut noted);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             Err(e) => {
                 stop_captured(&mut child, true);
                 let _ = join_soon(out_task);
@@ -50002,25 +50090,26 @@ pub(crate) fn no_git_prompt(cmd: &mut std::process::Command) {
 /// command when it is set.
 const BATCH_SSH: &str = r#"c=$(git config --get core.sshCommand) && [ -n "$c" ] && eval "exec $c \"\$@\""; exec ssh -o BatchMode=yes"#;
 
-/// [`std::process::Command::output`], stopped when a wall budget is armed
-/// and spent. The child is killed. The caller treats that as no answer.
+/// [`std::process::Command::output`], stopped at the call deadline.
+/// A wall or a tool budget, when one is armed, is the shorter of the two.
+/// The child and its process group are killed. With no shorter budget the
+/// stall line is printed and the process exits.
 pub(crate) fn bounded_output(
     cmd: &mut std::process::Command,
 ) -> std::io::Result<std::process::Output> {
     use std::io::Read as _;
     use std::process::Stdio;
 
-    let program = std::path::Path::new(cmd.get_program())
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "command".to_string());
+    let (program, argv) = command_argv(cmd);
     let timed_out = || {
         let msg = if tool_bound::armed() {
             let line = format!("{program} timed out");
             tool_bound::mark_failed(line.clone());
             line
-        } else {
+        } else if wall_left().is_some() {
             "hook budget spent".to_string()
+        } else {
+            call_deadline::stall_line(&program, &argv, call_deadline::timeout())
         };
         std::io::Error::new(std::io::ErrorKind::TimedOut, msg)
     };
@@ -50030,10 +50119,13 @@ pub(crate) fn bounded_output(
             return Err(std::io::Error::other(line));
         }
     }
-    let Some(left) = wall_left() else {
-        return cmd.output();
-    };
-    if left.is_zero() {
+    let cap = call_deadline::timeout();
+    let shared = wall_left().is_none() && !tool_bound::armed();
+    let left = wall_left()
+        .unwrap_or(cap)
+        .min(cap)
+        .max(std::time::Duration::from_millis(1));
+    if wall_left().is_some_and(|left| left.is_zero()) {
         return Err(timed_out());
     }
     // A process group ensures a descendant cannot keep either pipe open
@@ -50066,6 +50158,8 @@ pub(crate) fn bounded_output(
         buf
     });
     let start = std::time::Instant::now();
+    let mut noted = false;
+    let waited = call_deadline::waiting_label(&program);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -50078,12 +50172,16 @@ pub(crate) fn bounded_output(
                 });
             }
             Ok(None) if start.elapsed() < left => {
+                call_deadline::note_waiting(&waited, start, &mut noted);
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             Ok(None) => {
                 stop_output_group(&mut child);
                 let _ = join_soon(out_task);
                 let _ = join_soon(err_task);
+                if shared {
+                    call_deadline::stop(&call_deadline::stall_line(&program, &argv, left));
+                }
                 return Err(timed_out());
             }
             Err(err) => {
@@ -50094,6 +50192,19 @@ pub(crate) fn bounded_output(
             }
         }
     }
+}
+
+/// The program name and arguments of `cmd`, for a stall line.
+fn command_argv(cmd: &std::process::Command) -> (String, Vec<String>) {
+    let program = std::path::Path::new(cmd.get_program())
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "command".to_string());
+    let argv = cmd
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    (program, argv)
 }
 
 /// Copy a test's git environment onto `cmd`, and drop the guard
@@ -65521,6 +65632,31 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             started.elapsed()
         );
         assert!(err.to_string().contains("did not answer in time"), "{err}");
+    }
+
+    /// A grandchild left asleep in the child's group dies with the child.
+    #[test]
+    fn a_timed_out_child_takes_its_group_with_it() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pidfile.display());
+        let err = run_captured_within(
+            "sh",
+            &["-c", &script],
+            None,
+            std::time::Duration::from_millis(800),
+        )
+        .unwrap_err();
+        assert!(call_deadline::stalled(&err.to_string()), "{err}");
+        let pid = std::fs::read_to_string(&pidfile).expect("grandchild pid");
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill");
+        assert!(!alive.success(), "grandchild {} still running", pid.trim());
     }
 
     #[test]

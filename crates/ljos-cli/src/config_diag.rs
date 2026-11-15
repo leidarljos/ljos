@@ -307,6 +307,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_CALL_TIMEOUT",
+        default: "60 seconds",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_CAPTURE",
         default: "on",
         group: "ljos",

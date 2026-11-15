@@ -144,11 +144,30 @@ fn lock_path(wake_path: &Path) -> PathBuf {
 
 #[cfg(unix)]
 fn lock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+    let deadline = std::time::Instant::now() + crate::call_deadline::timeout();
+    let started = std::time::Instant::now();
+    let mut noted = false;
+    loop {
+        // SAFETY: flock on a descriptor the caller owns.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EWOULDBLOCK | libc::EINTR) => {}
+            _ => return Err(err),
+        }
+        if std::time::Instant::now() >= deadline {
+            crate::call_deadline::stop(&crate::call_deadline::stall_line(
+                "lock",
+                &[] as &[&str],
+                crate::call_deadline::timeout(),
+            ));
+        }
+        crate::call_deadline::note_waiting("lock", started, &mut noted);
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        std::thread::sleep(std::time::Duration::from_millis(20).min(left));
     }
 }
 

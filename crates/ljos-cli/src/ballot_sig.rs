@@ -601,7 +601,9 @@ pub(crate) fn git_history(root: &Path) -> std::process::Command {
 /// What `git ARGS` prints in `root`, trimmed, when it succeeds.
 /// Replacements and grafts are off ([`git_history`]).
 pub(crate) fn git_in(root: &Path, args: &[&str]) -> Option<String> {
-    let out = git_history(root).args(args).output().ok()?;
+    let mut cmd = git_history(root);
+    cmd.args(args);
+    let out = crate::bounded_output(&mut cmd).ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())

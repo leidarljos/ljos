@@ -111,17 +111,15 @@ fn serves_named_remote(dir: &Path) -> bool {
 /// What git prints for `args` run in `dir` alone, when it succeeds. A hook
 /// exports the repository it runs for, and that would answer instead.
 fn git_in(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = crate::git_cmd()
-        .arg("-C")
+    let mut cmd = crate::git_cmd();
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .stdin(std::process::Stdio::null());
+    let out = crate::bounded_output(&mut cmd).ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())

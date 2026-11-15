@@ -2685,13 +2685,12 @@ fn ensure_identity(dir: &Path, seat: &str) -> Result<()> {
 }
 
 fn git_local(dir: &Path, key: &str) -> Option<String> {
-    let out = crate::git_cmd()
-        .arg("-C")
+    let mut cmd = crate::git_cmd();
+    cmd.arg("-C")
         .arg(dir)
         .args(["config", "--local", "--get", key])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .stdin(std::process::Stdio::null());
+    let out = crate::bounded_output(&mut cmd).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -2700,13 +2699,12 @@ fn git_local(dir: &Path, key: &str) -> Option<String> {
 }
 
 fn git_set(dir: &Path, key: &str, value: &str) -> Result<()> {
-    let out = crate::git_cmd()
-        .arg("-C")
+    let mut cmd = crate::git_cmd();
+    cmd.arg("-C")
         .arg(dir)
         .args(["config", "--local", key, value])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .with_context(|| format!("git config {key}"))?;
+        .stdin(std::process::Stdio::null());
+    let out = crate::bounded_output(&mut cmd).with_context(|| format!("git config {key}"))?;
     if out.status.success() {
         Ok(())
     } else {

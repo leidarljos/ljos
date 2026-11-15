@@ -278,5 +278,8 @@ fn a_note_returns_when_the_tracker_does_not_answer() {
         "note waited {took:?}\n{said}"
     );
     assert!(!out.status.success(), "{said}");
-    assert!(said.contains("did not answer in time"), "{said}");
+    assert!(
+        said.contains("tracker did not answer in 1s; the note was not written, so run it again"),
+        "{said}"
+    );
 }

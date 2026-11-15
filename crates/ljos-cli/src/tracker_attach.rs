@@ -425,13 +425,9 @@ pub(crate) fn configure(dir: &Path, helper: Option<&str>, url: &str) -> Result<(
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
-    crate::git_cmd()
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .with_context(|| format!("git {}", args.join(" ")))
+    let mut cmd = crate::git_cmd();
+    cmd.arg("-C").arg(dir).args(args).stdin(Stdio::null());
+    crate::bounded_output(&mut cmd).with_context(|| format!("git {}", args.join(" ")))
 }
 
 #[cfg(test)]

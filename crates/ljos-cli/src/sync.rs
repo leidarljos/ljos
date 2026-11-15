@@ -909,32 +909,16 @@ fn seal_bytes(plain: &str, recipients: &[String]) -> Result<Vec<u8>> {
     for r in recipients {
         cmd.arg("-r").arg(r);
     }
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    // age writes while it reads. `output_within` drains stdout on another
+    // thread, so a log past the pipe buffer does not stall both sides.
+    let done = crate::output_within(cmd, Some(plain.as_bytes()), crate::call_deadline::timeout())
         .context("age not on PATH; install age")?;
-    let mut stdin = child.stdin.take().context("age: no stdin")?;
-    let plain = plain.as_bytes().to_vec();
-    // age writes while it reads; a log past the pipe buffer would block
-    // both sides if stdin were written before stdout is drained.
-    let writer = std::thread::spawn(move || {
-        use std::io::Write;
-        block_sigpipe_here();
-        stdin.write_all(&plain)
-    });
-    let done = child.wait_with_output()?;
-    let wrote = writer
-        .join()
-        .map_err(|_| anyhow::anyhow!("age: stdin writer"))?;
     if !done.status.success() {
         return Err(crate::policy_label::failed(
             "effect-unavailable",
             anyhow::anyhow!("age: {}", String::from_utf8_lossy(&done.stderr).trim()),
         ));
     }
-    wrote?;
     Ok(done.stdout)
 }
 
@@ -3431,28 +3415,14 @@ fn head_blob(root: &Path, rel: &str) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-/// Block SIGPIPE on the calling thread. `main` restores the default
-/// action, so a write to an `age` that already exited would end the
-/// process. Blocked, the write returns EPIPE and age's status is read.
-fn block_sigpipe_here() {
-    // SAFETY: sigemptyset initializes the set before it is read, and
-    // pthread_sigmask changes only this thread's mask.
-    unsafe {
-        let mut set = std::mem::zeroed::<libc::sigset_t>();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGPIPE);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-    }
-}
-
 /// Decrypt `bytes` with `identities`. The ciphertext is written to `age`
 /// on stdin. A path under the system temp directory would be predictable
 /// and, when the log was a symlink, would hold the followed file.
 ///
-/// age writes plaintext while it reads, so the ciphertext goes in from a
-/// thread while stdout drains: a log past the pipe buffers stalled both
-/// sides. age stops reading after the header when no identity matches,
-/// and that thread blocks SIGPIPE so the miss is reported.
+/// age writes plaintext while it reads. The call drains stdout while the
+/// ciphertext goes in, so a log past the pipe buffers does not stall both
+/// sides. age stops reading after the header when no identity matches, and
+/// the write blocks SIGPIPE so the miss is reported.
 fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<String>> {
     if identities.is_empty() {
         return Ok(None);
@@ -3533,26 +3503,8 @@ fn open_sealed_bytes_with_age(bytes: &[u8], identities: &[PathBuf]) -> Result<Op
     for identity in identities {
         cmd.arg("-i").arg(identity);
     }
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("age not on PATH; install age")?;
-    let mut stdin = child.stdin.take().context("age: no stdin")?;
-    let sealed = bytes.to_vec();
-    let writer = std::thread::spawn(move || {
-        use std::io::Write;
-        block_sigpipe_here();
-        stdin.write_all(&sealed)
-    });
-    let out = child.wait_with_output().context("age -d")?;
-    let wrote = writer
-        .join()
-        .map_err(|_| anyhow::anyhow!("age: stdin writer"))?;
-    if wrote.is_err() && out.status.success() {
-        wrote?;
-    }
+    let out = crate::output_within(cmd, Some(bytes), crate::call_deadline::timeout())
+        .context("age -d")?;
     age_opened(&out, "sealed log")
 }
 
@@ -3849,28 +3801,18 @@ fn history_of_log_is_headed(
 /// Whether every object in `oids` is in this repository, asked in one
 /// `git cat-file --batch-check`. An empty list is present.
 fn objects_present(root: &Path, oids: &[&str]) -> bool {
-    use std::io::Write;
     if oids.is_empty() {
         return true;
     }
     let mut cmd = crate::git_at(root);
-    let Ok(mut child) = cmd
-        .args(["cat-file", "--batch-check"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+    cmd.args(["cat-file", "--batch-check"]);
+    let body = oids.iter().fold(String::new(), |mut body, oid| {
+        body.push_str(oid);
+        body.push('\n');
+        body
+    });
+    let Ok(out) = crate::output_within(cmd, Some(body.as_bytes()), crate::call_deadline::timeout())
     else {
-        return false;
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        for oid in oids {
-            if writeln!(stdin, "{oid}").is_err() {
-                return false;
-            }
-        }
-    }
-    let Ok(out) = child.wait_with_output() else {
         return false;
     };
     out.status.success() && !String::from_utf8_lossy(&out.stdout).contains(" missing")
@@ -4715,7 +4657,8 @@ fn tracker_root() -> Result<PathBuf> {
 
 fn git(root: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
     let mut cmd = crate::git_at(root);
-    cmd.args(args).stdin(Stdio::null()).output()
+    cmd.args(args);
+    crate::bounded_output(&mut cmd)
 }
 
 /// Commit the log after an export. A skipped seal with no file yet has
