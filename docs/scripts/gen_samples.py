@@ -1232,7 +1232,7 @@ def sitting_plan_sample(ljos: Path) -> str:
         "day-cd34  measure the files",
         "day-ef56  pick a default",
         "next: day-cd34  measure the files",
-        "memory skipped: packsetd busy",
+        "These are word matches; the pack did not answer.",
         "memory degraded: ranked by words",
         'day-ab12 is yours. `ljos finish day-ab12 --lesson "..."`',
         "ticked day-cd34",

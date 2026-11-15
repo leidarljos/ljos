@@ -167,7 +167,7 @@ fn a_silent_pack_does_not_hold_a_remember() {
     );
     assert!(out.status.success(), "{said}");
     assert!(
-        said.contains("queued; the pack is busy and this lesson will be sent on the next call"),
+        said.contains("Memory busy: queued 1 write, it will be saved on a later call."),
         "{said}"
     );
 }

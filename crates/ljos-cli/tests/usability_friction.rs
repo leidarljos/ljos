@@ -72,7 +72,7 @@ fn search_and_remember_say_one_line_when_the_pack_is_down() {
     assert!(remember.status.success(), "{remember_out:?}");
     assert_eq!(
         remember_out,
-        ["queued; the pack is busy and this lesson will be sent on the next call"]
+        ["Memory busy: queued 1 write, it will be saved on a later call."]
     );
 }
 

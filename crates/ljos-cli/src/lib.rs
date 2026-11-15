@@ -21842,6 +21842,13 @@ fn stamp_queued_seat(atom: &mut Value, seat: &str) {
 }
 
 fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Result<Value> {
+    if let Some(id) = queued_already_stored(client, note) {
+        return Ok(serde_json::json!({
+            "id": id,
+            "kind": "lesson",
+            "duplicate": true,
+        }));
+    }
     let text = note.text.trim();
     let mut atom = atom_body("lesson", text, &client.workspace());
     stamp_queued_seat(&mut atom, &note.seat);
@@ -21852,6 +21859,56 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
             Value::Array(note.supersedes.iter().cloned().map(Value::String).collect());
     }
     with_writer(|| admit::write_agent_one(client, atom.clone()))
+}
+
+/// The id of a lesson the pack already holds for this queued row.
+///
+/// A replay that lost the first answer, or a second drain of the same
+/// text, must not store another copy. A listing that does not answer is
+/// not a miss: the post that follows is what reports that.
+fn queued_already_stored(client: &PacksetClient, note: &note_queue::Queued) -> Option<String> {
+    if pack_link::clock_left().is_some_and(|left| left < std::time::Duration::from_millis(50)) {
+        return None;
+    }
+    let atoms = atoms_lean(client, &client.workspace()).ok()?;
+    let text = note.text.trim();
+    let (peeled, _) = peel_citations(text);
+    let want_raw = memories::lesson_key(&note.kind, text);
+    let want_peeled = memories::lesson_key(&note.kind, &peeled);
+    let issue = note.issue.trim();
+    atoms.into_iter().find_map(|atom| {
+        let kind = atom["kind"].as_str().unwrap_or("");
+        let held = memories::lesson_key(kind, atom["text"].as_str().unwrap_or(""));
+        if held != want_raw && held != want_peeled {
+            return None;
+        }
+        if atom["issue"].as_str().unwrap_or("").trim() != issue {
+            return None;
+        }
+        atom["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// Send lessons that are already queued, without arming a new clock.
+///
+/// The caller has found the pack answering and still has time on its own
+/// deadline. An empty queue does not open a socket. A send that does not
+/// land stays queued for the next call.
+fn replay_ready_lessons() -> String {
+    let dir = note_queue::state_dir();
+    if !note_queue::queue_exists(&dir) || note_queue::pending_in(&dir).is_empty() {
+        return String::new();
+    }
+    if pack_link::clock_left().is_some_and(|left| left <= std::time::Duration::from_millis(50)) {
+        return String::new();
+    }
+    match flush_note_queue() {
+        Ok(done) if !done.kept.is_empty() => note_queue::drained_lines(&done),
+        _ => String::new(),
+    }
 }
 
 /// How the note queue row opens while another process holds the queue
@@ -22449,7 +22506,17 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
 /// The one line `ljos remember` prints when the lesson is queued because
 /// the pack is busy or not answering. The command exits 0.
 pub const REMEMBER_QUEUED_LINE: &str =
-    "queued; the pack is busy and this lesson will be sent on the next call";
+    "Memory busy: queued 1 write, it will be saved on a later call.";
+
+/// The sentence a command prints when `n` memory writes are waiting.
+/// One write uses [`REMEMBER_QUEUED_LINE`].
+#[must_use]
+pub fn memory_busy_line(n: usize) -> String {
+    if n <= 1 {
+        return REMEMBER_QUEUED_LINE.to_string();
+    }
+    format!("Memory busy: queued {n} writes, they will be saved on a later call.")
+}
 
 fn remember_queued_body(text: &str) -> Value {
     serde_json::json!({
@@ -22555,15 +22622,13 @@ fn queue_busy_lesson(text: &str) {
 }
 
 /// The shed line, and that the lesson was queued, on one line.
+/// A lesson that was queued is the one plain sentence. The fault is the
+/// line when nothing was queued.
 #[must_use]
 pub fn shed_queue_line(fault: &str) -> String {
     match busy_queue_line() {
-        Some(line) if line.contains("was not queued") => format!(
-            "{fault}. The lesson was not queued. Retry later with `ljos remember` once the writer answers."
-        ),
-        Some(_) => format!(
-            "{fault}. The lesson is queued and will be sent on the next call. Retry later with `ljos remember`."
-        ),
+        Some(line) if !line.contains("was not queued") => line.to_string(),
+        Some(line) => format!("{fault}. {line}"),
         None => fault.to_string(),
     }
 }
@@ -22573,9 +22638,7 @@ pub fn shed_queue_line(fault: &str) -> String {
 #[must_use]
 pub fn busy_queue_line() -> Option<&'static str> {
     match BUSY_QUEUE.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => Some(
-            "pack busy: the lesson is queued and will be sent on the next call. Retry later with `ljos remember`.",
-        ),
+        1 => Some(REMEMBER_QUEUED_LINE),
         2 => Some(
             "pack busy: the lesson was not queued. Retry later with `ljos remember` once the writer answers.",
         ),
@@ -22586,6 +22649,13 @@ pub fn busy_queue_line() -> Option<&'static str> {
 /// Queue `text` because the pack is under load. The local atom gate is
 /// not applied: that gate is a guess, and a 503 has not refused the copy.
 fn queue_lesson_under_load(text: &str) -> Result<bool> {
+    queue_unjudged_lesson("", text)
+}
+
+/// Queue one lesson the pack did not take. `issue` is empty for a
+/// remember that names no ticket. The same issue, text, workspace, kind
+/// and seat already waiting is not a second row.
+fn queue_unjudged_lesson(issue: &str, text: &str) -> Result<bool> {
     let text = text.trim();
     if text.is_empty() {
         memory_port::keep_empty("lesson");
@@ -22600,7 +22670,7 @@ fn queue_lesson_under_load(text: &str) -> Result<bool> {
     note_queue::push_in(
         &note_queue::state_dir(),
         note_queue::Queued {
-            issue: String::new(),
+            issue: issue.trim().to_string(),
             text: text.to_string(),
             workspace: memory_workspace(""),
             at,
@@ -35304,8 +35374,8 @@ fn note_degraded(out: &mut String) {
 /// A pack or encoder line. The quiet sitting keeps one degraded line.
 fn is_memory_noise_line(line: &str) -> bool {
     let line = line.trim();
-    // The skip line is the one a person acts on. The quiet sitting keeps it.
-    if line.starts_with("memory skipped:") {
+    // The word-match line is the one a person acts on. The quiet sitting keeps it.
+    if line.starts_with("These are word matches;") {
         return false;
     }
     line.starts_with("memory-unavailable")
@@ -35614,7 +35684,7 @@ pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String 
         out
     } else if first.starts_with("next:")
         || first.starts_with("plan complete")
-        || first.starts_with("memory skipped:")
+        || first.starts_with("These are word matches;")
     {
         format!("{first}\n")
     } else if is_memory_noise_line(first) {
@@ -39717,7 +39787,24 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     let issue = issue.trim();
     if let Some(listing) = sitting_listing() {
         if !listing.ok {
-            bail!(PACK_READ_BUSY_LINE);
+            // The pack read already failed inside this clock. Word matches
+            // from this seat's memory slot do not open another socket.
+            let cues = recall_cues(issue);
+            let mut hits = Vec::new();
+            for cue in &cues {
+                memory_port::append_recall(&mut hits, cue, RELATED_MEMORY_CAP);
+            }
+            if hits.is_empty() {
+                bail!(PACK_READ_BUSY_LINE);
+            }
+            return Ok(recall_lines(
+                &hits,
+                Vec::new(),
+                &cues.join(" "),
+                &now_utc(),
+                include_notes,
+                false,
+            ));
         }
         let own = tagged_with_issue(listing.atoms.as_ref(), issue);
         let cues = recall_cues(issue);
@@ -41588,8 +41675,8 @@ fn claim_graph_marked_down() -> bool {
 }
 
 /// The one line a sitting prints when the related-memory search did not
-/// answer, then the rest of the sitting continues.
-pub const MEMORY_SKIPPED_LINE: &str = "memory skipped: packsetd busy\n";
+/// answer. Recall stays on word matches, and the rest of the sitting continues.
+pub const MEMORY_WORD_LINE: &str = "These are word matches; the pack did not answer.\n";
 
 /// The one line a quiet sitting prints when the pack or the encoder did
 /// not answer. `--verbose` keeps the section that failed.
@@ -41983,10 +42070,17 @@ pub fn sitting_stream_started(
     let mut fell_back = false;
     // The search is over, whether it answered or the deadline passed.
     // Say so before doctor, which probes other programs and must not be
-    // what a person waits on to hear that memory was skipped.
+    // what a person waits on to hear that recall is on word matches.
+    // A search that answered found a healthy pack: send lessons that were
+    // waiting, inside the clock this read already armed.
     if sitting_listing().is_some_and(|listing| !listing.ok) {
         fell_back = true;
-        emit_piece(&mut out, &mut emit, MEMORY_SKIPPED_LINE);
+        emit_piece(&mut out, &mut emit, MEMORY_WORD_LINE);
+    } else {
+        let sent = replay_ready_lessons();
+        if !sent.is_empty() {
+            emit_piece(&mut out, &mut emit, &sent);
+        }
     }
 
     let mut piece = String::new();
@@ -42889,8 +42983,16 @@ fn finish_lesson(issue: &str, text: &str) -> String {
     match filed {
         Ok(line) => line,
         Err(e) if !pack_turned_off(&e) && remember_should_queue(&e) => {
-            let _ = queue_memory(issue, text, "", "lesson", &[]);
-            format!("{REMEMBER_QUEUED_LINE}\n")
+            // A busy writer has not judged the words. Queue the sentence
+            // as given. A second finish of the same lesson is the row
+            // already waiting, and the line still says it will be saved.
+            match queue_unjudged_lesson(issue, text) {
+                Ok(_) => format!("{}\n", memory_busy_line(1)),
+                Err(err) => format!(
+                    "the lesson was not kept: {err:#}. Reword the lesson and keep it with: ljos remember {}\n",
+                    tools::sh_quote(text)
+                ),
+            }
         }
         Err(e) => format!(
             "the lesson was not kept: {e:#}. Reword the lesson and keep it with: ljos remember {}\n",

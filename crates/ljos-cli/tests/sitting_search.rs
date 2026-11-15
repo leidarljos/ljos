@@ -200,7 +200,7 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
         "a stalled search is the one read, and the sitting says so:\n{stdout}"
     );
     assert!(
-        stdout.contains("memory skipped: packsetd busy"),
+        stdout.contains("These are word matches; the pack did not answer."),
         "a search that never answers is one line and the sitting goes on:\n{stdout}"
     );
     assert!(
@@ -475,7 +475,10 @@ fn a_sitting_skips_memory_when_packsetd_answers_503() {
         "a 503 with Retry-After 60 held the sitting for {took:?}:\n{said}"
     );
     assert!(ok, "{said}");
-    assert!(said.contains("memory skipped: packsetd busy"), "{said}");
+    assert!(
+        said.contains("These are word matches; the pack did not answer."),
+        "{said}"
+    );
     assert!(
         said.contains("== claim") || said.contains("claimed"),
         "{said}"
@@ -494,5 +497,8 @@ fn a_sitting_skips_memory_when_packsetd_never_answers() {
         "a closed pack port held the sitting for {took:?}:\n{said}"
     );
     assert!(ok, "{said}");
-    assert!(said.contains("memory skipped: packsetd busy"), "{said}");
+    assert!(
+        said.contains("These are word matches; the pack did not answer."),
+        "{said}"
+    );
 }

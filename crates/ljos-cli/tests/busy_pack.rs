@@ -192,7 +192,7 @@ fn check(pack: &str) {
     let done_said = text_of(&done);
     assert!(done_said.contains("finished demo-busy"), "{done_said}");
     assert!(
-        done_said.contains("queued; the pack is busy")
+        done_said.contains("Memory busy: queued 1 write, it will be saved on a later call.")
             || done_said.contains("claim graph did not answer"),
         "{done_said}"
     );

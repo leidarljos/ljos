@@ -129,7 +129,7 @@ fn a_busy_pack_costs_one_read_and_the_sitting_stays_quiet() {
     );
     assert!(out.status.success(), "{said}");
     assert!(
-        said.contains("memory skipped: packsetd busy"),
+        said.contains("These are word matches; the pack did not answer."),
         "a 503 is one skipped line, and the sitting goes on:\n{said}"
     );
     assert!(!said.contains("GET /v1/atoms failed"), "{said}");

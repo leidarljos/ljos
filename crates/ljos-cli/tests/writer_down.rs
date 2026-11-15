@@ -501,7 +501,7 @@ fn walk_commands(seat: &Seat, case: &Case, dead: u16) {
         .collect();
     assert_eq!(
         remembered_lines,
-        ["queued; the pack is busy and this lesson will be sent on the next call"],
+        ["Memory busy: queued 1 write, it will be saved on a later call."],
         "remember {} was not one line:\n{remembered}",
         case.name
     );
@@ -882,7 +882,7 @@ fn a_queued_lesson_reaches_the_pack_on_the_next_run() {
     );
     assert!(
         String::from_utf8_lossy(&remember.stdout)
-            .contains("queued; the pack is busy and this lesson will be sent on the next call"),
+            .contains("Memory busy: queued 1 write, it will be saved on a later call."),
         "{said}"
     );
     let queue = state.join("ljos/note-queue.jsonl");

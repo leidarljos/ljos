@@ -441,7 +441,7 @@ fn a_busy_remember_retries_queues_and_the_next_call_sends_it() {
     );
     let out_text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        out_text.contains("queued; the pack is busy and this lesson will be sent on the next call"),
+        out_text.contains("Memory busy: queued 1 write, it will be saved on a later call."),
         "{said}"
     );
     let queue = world.home.join(".state/ljos/note-queue.jsonl");

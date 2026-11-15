@@ -154,7 +154,7 @@ fn a_slow_writer_names_search_and_exits_75() {
     assert!(out.status.success(), "{said}");
     assert_eq!(
         one_line(&out.stdout),
-        "queued; the pack is busy and this lesson will be sent on the next call"
+        "Memory busy: queued 1 write, it will be saved on a later call."
     );
     assert!(out.stderr.is_empty(), "{said}");
 }
