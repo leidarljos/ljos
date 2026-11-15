@@ -37054,10 +37054,20 @@ fn is_sole_or_ancestor_parent_hold(parent: &str, seat: &str, hold_pid: u32) -> b
 
 /// Refusal when another conversation holds the node: names that holder
 /// and still says `held by another`, so a concurrent sitting can match it.
+///
+/// `alive` is whether the process that wrote the hold is still running.
+/// A dead process does not mean the ticket is free: the claim stays, and
+/// the line names `ljos release` and `ljos sitting`.
 #[must_use]
-pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, running: &str) -> String {
+pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, alive: bool) -> String {
+    if alive {
+        return format!(
+            "claim: {node} is held by another ({}, seat {}, still running, since {}), not by {assignee}, so run `ljos send {} TEXT`.",
+            hold.assignee, hold.seat, hold.since, hold.seat
+        );
+    }
     format!(
-        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee}, so run `ljos send {} TEXT`.",
+        "claim: {node} is still held by another ({}, seat {}, since {}), not by {assignee}. The recorded process has exited, and the ticket stays held. `ljos release {node} --assignee {}` releases it. `ljos sitting {node}` reclaims a claim quiet longer than the lease.",
         hold.assignee, hold.seat, hold.since, hold.seat
     )
 }
@@ -37368,16 +37378,7 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                         Some(h) => {
                             return Err(policy_label::labelled(
                                 "claim-conflict",
-                                held_by_another_message(
-                                    node,
-                                    assignee,
-                                    &h,
-                                    if hold_alive(&h) {
-                                        "still running"
-                                    } else {
-                                        "its runner is gone"
-                                    },
-                                ),
+                                held_by_another_message(node, assignee, &h, hold_alive(&h)),
                             ));
                         }
                         None => {
@@ -53322,11 +53323,22 @@ mod tests {
             comm: "ljos".into(),
             since: "2026-01-01T00:00:00.000Z".into(),
         };
-        let said = super::held_by_another_message("demo-aaaa", "brio", &hold, "still running");
+        let said = super::held_by_another_message("demo-aaaa", "brio", &hold, true);
         assert_eq!(
             said,
             "claim: demo-aaaa is held by another (acme, seat acme, still running, since 2026-01-01T00:00:00.000Z), not by brio, so run `ljos send acme TEXT`."
         );
+        let gone = super::held_by_another_message("demo-aaaa", "brio", &hold, false);
+        assert!(gone.contains("held by another"), "{gone}");
+        assert!(gone.contains("the ticket stays held"), "{gone}");
+        assert!(
+            gone.contains("`ljos release demo-aaaa --assignee acme`"),
+            "{gone}"
+        );
+        assert!(gone.contains("`ljos sitting demo-aaaa`"), "{gone}");
+        assert!(!gone.contains("its runner is gone"), "{gone}");
+        assert!(!gone.contains("ljos send"), "{gone}");
+        assert!(!gone.contains('\n'), "{gone}");
     }
 
     /// Another seat sits on the issue: a note is an assist and says so,
@@ -53346,7 +53358,7 @@ mod tests {
         assert!(line.contains("an assist, not a sitting"), "{line}");
         assert!(line.contains("`ljos send eessi TEXT`"), "{line}");
         assert!(super::assist_line("proj-jz8x", &hold, "eessi").is_none());
-        let refused = super::held_by_another_message("proj-jz8x", "inky-2", &hold, "still running");
+        let refused = super::held_by_another_message("proj-jz8x", "inky-2", &hold, true);
         assert!(refused.contains("`ljos send eessi TEXT`"), "{refused}");
         assert!(!refused.contains("`ljos note"), "{refused}");
     }

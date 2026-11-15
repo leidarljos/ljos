@@ -385,12 +385,23 @@ fn two_seats_on_one_ticket_name_send() {
         comm: "ljos".into(),
         since: "2026-01-01T00:00:00.000Z".into(),
     };
-    let said = ljos_cli::held_by_another_message("demo-aaaa", "brio", &hold, "still running");
+    let said = ljos_cli::held_by_another_message("demo-aaaa", "brio", &hold, true);
     assert_eq!(
         said,
         "claim: demo-aaaa is held by another (acme, seat acme, still running, since 2026-01-01T00:00:00.000Z), not by brio, so run `ljos send acme TEXT`."
     );
     assert!(!said.contains('\n'));
+    let gone = ljos_cli::held_by_another_message("demo-aaaa", "brio", &hold, false);
+    assert!(gone.contains("the ticket stays held"), "{gone}");
+    assert!(
+        gone.contains("`ljos release demo-aaaa --assignee acme` releases it"),
+        "{gone}"
+    );
+    assert!(
+        gone.contains("`ljos sitting demo-aaaa` reclaims a claim quiet longer than the lease"),
+        "{gone}"
+    );
+    assert!(!gone.contains('\n'));
 }
 
 #[test]
