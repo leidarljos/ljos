@@ -177,7 +177,7 @@ fn hides_ticket(out: &Output) {
     assert!(!stdout.contains(TICKET), "{said}");
     assert!(!stdout.contains("GPRidge"), "{said}");
     assert!(
-        stdout.contains("No hits") || stdout.contains("Nothing relevant"),
+        stdout.contains("Nothing matched") || stdout.contains("Nothing relevant"),
         "{said}"
     );
 }

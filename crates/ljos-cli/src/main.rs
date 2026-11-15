@@ -775,14 +775,22 @@ enum Cmd {
     /// the subject, or when the encoder's cosine reaches 0.66. The cosine is
     /// how close the stored text is to the query, from 0 to 1. A short list
     /// is not padded with a weaker cross-seat hit. When those were the only
-    /// rows, the line is `Nothing relevant was found.` A tracker ticket whose
+    /// rows, the line is `Nothing relevant was found.` No match-mode line is
+    /// printed on that empty page. A tracker ticket whose
     /// title matches is included, and then one whose notes match. An exact or
     /// near-exact title is the first row, while the encoder is loading and
     /// after. The row names the ticket id and the title, so `ljos recall ID`
     /// opens it. A search that found
-    /// nothing prints `No hits for QUERY` and the next command:
-    /// `ljos search WORD` when QUERY has more than one word, otherwise
-    /// `ljos remember "WORD"` with that one word in quotes. A busy memory store ranks by words
+    /// nothing prints no match-mode line. The line is `Nothing matched "QUERY"`.
+    /// When a content word is shorter than QUERY, it adds
+    /// `Try a shorter query, such as: ljos search WORD`. Stop words are
+    /// skipped. The longest content word is the one named, and the earlier
+    /// word wins a tie. The command is plain text, on its own line when the
+    /// sentence would split it. A query that is already that word does not
+    /// add the command. When nothing is stored, a shorter search would miss
+    /// too, and the line names `ljos remember`. `--json` adds `suggestion`
+    /// with the command the line names, and leaves the other fields as they
+    /// are. A busy memory store ranks by words
     /// and still returns a hit that names the subject. While the encoder is
     /// still loading, a remaining time that fits in `LJOS_SEARCH_WARMUP_WAIT`
     /// seconds (5 when unset, `0` does not wait) is waited out, inside
@@ -813,7 +821,7 @@ enum Cmd {
         /// What held in the world on this day (YYYY-MM-DD): claims whose validity window excludes it are left out. Without it, today; `--valid-at any` keeps every window.
         #[arg(long, value_name = "DATE")]
         valid_at: Option<String>,
-        /// Open with what the score and the fraction mean, and what an empty answer means.
+        /// Open with what the score and the fraction mean.
         #[arg(long)]
         explain: bool,
         /// Only memories exported by this machine. Applied before the limit.
@@ -825,7 +833,7 @@ enum Cmd {
         /// Only this import. The id is the input digest. Applied before the limit.
         #[arg(long)]
         import_id: Option<String>,
-        /// Print JSON. The ranking is a field, and the mode line is left off stderr.
+        /// Print JSON. The ranking is a field, and the mode line is left off stderr. An empty page may add `suggestion`.
         #[arg(long)]
         json: bool,
         /// Include failed commands. They are stored as attempts and left out of the default list.
@@ -4914,13 +4922,30 @@ fn run_command() -> Result<()> {
             ljos_cli::note_lookups(&hits);
             ranking = ljos_cli::ranking_for_printed(ranking, &hits);
             let close_line = close_miss.then(|| ljos_cli::word_rank::no_close_line(&asked));
+            // A shorter search would miss too when the store is empty, so
+            // that page names remember. A store that already holds a lesson
+            // names a shorter query instead.
+            let empty_store =
+                hits.is_empty() && close_line.is_none() && !unrelated && ljos_cli::nothing_stored();
             if json {
                 let empty = close_line
                     .as_deref()
                     .or(unrelated.then_some(ljos_cli::NOTHING_RELEVANT));
+                let suggestion = if empty_store {
+                    Some(ljos_cli::scan::store_lesson_command(&asked))
+                } else if hits.is_empty() {
+                    ljos_cli::word_rank::shorter_search(&asked)
+                } else {
+                    None
+                };
                 print!(
                     "{}",
-                    ljos_cli::search_json_empty(&hits, Some(&ranking), empty)
+                    ljos_cli::search_json_empty(
+                        &hits,
+                        Some(&ranking),
+                        empty,
+                        suggestion.as_deref()
+                    )
                 );
             } else {
                 let rank = ljos_cli::search_rank_line(&ranking, &hits);
@@ -4933,9 +4958,7 @@ fn run_command() -> Result<()> {
                         page.push('\n');
                     }
                     print!("{}", ljos_cli::scan::for_reader(&page, human_color()));
-                } else if hits.is_empty() && unrelated {
-                    print!("{}", ljos_cli::NOTHING_RELEVANT);
-                } else if hits.is_empty() && !explain && ljos_cli::nothing_stored() {
+                } else if empty_store {
                     print!(
                         "{}",
                         ljos_cli::scan::for_reader(
@@ -4943,6 +4966,8 @@ fn run_command() -> Result<()> {
                             human_color()
                         )
                     );
+                } else if hits.is_empty() && unrelated {
+                    print!("{}", ljos_cli::NOTHING_RELEVANT);
                 } else {
                     print!(
                         "{}",

@@ -306,9 +306,9 @@ client can set a floor on it. 0.66 is the line already used when the
 encoder lists a hit at the top and the hit shares no word with the query: on
 that measured set, an unrelated prompt's best cosine stayed at 0.653.
 A cross-seat row under the line does not fill a short list. When those
-were the only rows, the command prints ``Nothing relevant was found.``
+were the only rows, the command prints ``Nothing relevant was found.`` No match-mode line is printed on that empty page.
 ``ljos search`` also reads the tracker. A ticket whose title matches is included, and then one whose notes match. An exact or near-exact title is the first row, while the encoder is loading and after it has answered. The row names the ticket id and the title, so ``ljos recall ID`` opens it.
-A search the pack answered with nothing prints ``No hits for "which fusion", so run ljos search fusion``. When the
+A search the pack answered with nothing prints no match-mode line. The line is ``Nothing matched "which fusion". Try a shorter query, such as: ljos search fusion``. When the
 pack is busy, search ranks by words. Cosine is not required then, and a
 hit that names the subject still answers.
 

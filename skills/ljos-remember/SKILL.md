@@ -24,8 +24,9 @@ ljos rule '*--force*' --verdict deny --why "Never force push."
 
 - Keep each memory to one or two short sentences. Write the fix, not the
   story: what to do, and why.
-- Before answering from memory, search: `ljos search TOPIC`. `No hits.`
-  means the store has nothing on it. `Nothing relevant was found.` means
+- Before answering from memory, search: `ljos search TOPIC`. A miss prints
+  `Nothing matched "TOPIC".` and, when one content word is shorter, names
+  `ljos search WORD` in plain text. `Nothing relevant was found.` means
   the only rows were another seat's lessons under the similarity floor:
   a hit that names the subject, or an encoder cosine of at least 0.66.
   A failure means the store is down; run `ljos doctor`. A busy pack still

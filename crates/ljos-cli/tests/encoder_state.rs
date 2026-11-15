@@ -342,7 +342,7 @@ fn a_loading_search_with_no_rows_says_to_rerun() {
         let (code, stdout, stderr, _) = run(&seat, &["search", "kiln"]);
         assert!(code == 0, "{name}: {stdout}{stderr}");
         assert!(
-            stdout.contains("No hits") && !stdout.contains("the kiln fires at dusk"),
+            stdout.contains("Nothing matched") && !stdout.contains("the kiln fires at dusk"),
             "{name}: {stdout}"
         );
         assert_search_line(&stderr, plain, name);

@@ -59,7 +59,8 @@ const NOISE: &[&str] = &[
 
 const LESSON: &str = "The lexical default is BM25+. It beat BM25 by two points on turns.";
 
-const NO_HITS: &str = "No hits for \"which fusion\", so run `ljos search fusion`.";
+const NO_HITS: &str =
+    "Nothing matched \"which fusion\". Try a shorter query, such as: ljos search fusion";
 
 struct DocStep {
     place: String,

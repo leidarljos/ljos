@@ -5,35 +5,47 @@
 use std::path::Path;
 
 #[test]
-fn no_hits_keeps_the_so_run_line() {
+fn a_miss_names_a_shorter_query_in_plain_text() {
     assert_eq!(
-        ljos_cli::scan::no_hits_line("which fusion", false),
-        "No hits for \"which fusion\", so run `ljos search fusion`."
+        ljos_cli::scan::nothing_matched_line("which fusion"),
+        "Nothing matched \"which fusion\". Try a shorter query, such as: ljos search fusion"
     );
-}
-
-#[test]
-fn an_empty_store_names_remember() {
+    assert_eq!(
+        ljos_cli::scan::nothing_matched_line("lexical default"),
+        "Nothing matched \"lexical default\". Try a shorter query, such as: ljos search lexical"
+    );
+    assert_eq!(
+        ljos_cli::scan::nothing_matched_line("fusing"),
+        "Nothing matched fusing."
+    );
+    assert_eq!(
+        ljos_cli::scan::nothing_matched_line("zircon-missing"),
+        "Nothing matched zircon-missing."
+    );
+    assert_eq!(
+        ljos_cli::scan::nothing_matched_line("a\"b"),
+        "Nothing matched this query."
+    );
+    let page = ljos_cli::scan::nothing_matched_page("usability friction confusing error");
+    assert!(
+        page.lines().any(|line| line == "ljos search usability"),
+        "{page}"
+    );
+    assert!(!page.contains('`'), "{page}");
     assert_eq!(
         ljos_cli::scan::empty_store_line("lexical default"),
-        "No hits for \"lexical default\", so run `ljos remember \"TEXT\"`."
+        "Nothing matched \"lexical default\". A shorter search would miss too. Try storing a lesson, such as: ljos remember \"TEXT\""
     );
     assert_eq!(
         ljos_cli::scan::empty_store_line("fusing"),
-        "No hits for fusing, so run `ljos remember \"fusing\"`."
+        "Nothing matched fusing. A shorter search would miss too. Try storing a lesson, such as: ljos remember \"fusing\""
     );
-    assert_eq!(
-        ljos_cli::scan::no_hits_line("fusing", false),
-        "No hits for fusing, so run `ljos remember \"fusing\"`."
+    let stored = ljos_cli::scan::empty_store_page("which fusion method");
+    assert!(
+        stored.lines().any(|line| line == "ljos remember \"TEXT\""),
+        "{stored}"
     );
-    assert_eq!(
-        ljos_cli::scan::no_hits_line("zircon-missing", false),
-        "No hits for zircon-missing, so run `ljos remember \"zircon-missing\"`."
-    );
-    assert_eq!(
-        ljos_cli::scan::no_hits_line("a\"b", false),
-        "No hits, so run `ljos remember \"a\\\"b\"`."
-    );
+    assert!(!stored.contains('`'), "{stored}");
 }
 
 #[test]

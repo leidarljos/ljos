@@ -26,7 +26,8 @@ const LESSON: &str = "The lexical default is BM25+. It beat BM25 by two points o
 
 /// What `ljos search "which fusion"` prints when the stored lesson shares
 /// no word with that query. The README quotes this line.
-const NO_HITS: &str = "No hits for \"which fusion\", so run `ljos search fusion`.";
+const NO_HITS: &str =
+    "Nothing matched \"which fusion\". Try a shorter query, such as: ljos search fusion";
 
 const DOCTOR: &[&str] = &[
     "ljos is ready: memory, tracker and command guard work",

@@ -269,7 +269,7 @@ fn tag_text(hit: &Hit) -> String {
         .join(" ")
 }
 
-fn quote_query(query: &str) -> String {
+pub(crate) fn quote_query(query: &str) -> String {
     if query.is_empty()
         || query
             .chars()
@@ -281,6 +281,38 @@ fn quote_query(query: &str) -> String {
     } else {
         query.to_string()
     }
+}
+
+/// A shorter search, when one content word is not the whole query.
+///
+/// Stop words are skipped. The longest content word is the one named,
+/// which is the rarest-looking word in the query. The same length keeps
+/// the earlier word. Absent when that word is the query, or when it is
+/// not one shell token.
+#[must_use]
+pub fn shorter_search(query: &str) -> Option<String> {
+    let mut best: Option<&str> = None;
+    for raw in query.split(char::is_whitespace) {
+        let word = raw.trim_matches(|c: char| !c.is_alphanumeric() && !is_sep(c));
+        if word.is_empty() || !keep_concept(word) {
+            continue;
+        }
+        let longer = best.is_none_or(|have| word.chars().count() > have.chars().count());
+        if longer {
+            best = Some(word);
+        }
+    }
+    let best = best?;
+    if query.trim().eq_ignore_ascii_case(best) {
+        return None;
+    }
+    let safe = best
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
+    if !safe {
+        return None;
+    }
+    Some(format!("ljos search {best}"))
 }
 
 /// The longest written word, when the query has more than one. That is the
@@ -759,6 +791,33 @@ mod tests {
         assert!(!line.contains('/'), "{line}");
         let one = no_close_line("xylophone");
         assert_eq!(one, "No close matches for xylophone. Try a broader query.");
+    }
+
+    #[test]
+    fn a_shorter_search_keeps_the_longest_content_word() {
+        assert_eq!(
+            shorter_search("usability friction confusing error").as_deref(),
+            Some("ljos search usability")
+        );
+        assert_eq!(
+            shorter_search("which fusion").as_deref(),
+            Some("ljos search fusion")
+        );
+        assert_eq!(
+            shorter_search("the usability").as_deref(),
+            Some("ljos search usability")
+        );
+        assert_eq!(
+            shorter_search("fusion method").as_deref(),
+            Some("ljos search fusion")
+        );
+        assert_eq!(
+            shorter_search("Carrollton Nov 23 morning timing").as_deref(),
+            Some("ljos search Carrollton")
+        );
+        assert_eq!(shorter_search("usability"), None);
+        assert_eq!(shorter_search("the"), None);
+        assert_eq!(shorter_search("  Fusion  "), None);
     }
 
     /// A corpus written for this test. The numbers it prints are this

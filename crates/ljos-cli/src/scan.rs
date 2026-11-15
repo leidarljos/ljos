@@ -400,11 +400,7 @@ pub struct SearchPage<'a> {
 #[must_use]
 pub fn search_page(page: &SearchPage<'_>) -> String {
     if page.rows.is_empty() {
-        let mut out = wrap(&no_hits_line(page.query, page.explain), COLS);
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        return out;
+        return nothing_matched_page(page.query);
     }
     let mut out = shown_line(page);
     out.push('\n');
@@ -478,85 +474,105 @@ fn next_limit(matched: usize, capped: bool) -> usize {
     }
 }
 
-/// One sentence when a search matched nothing, and the command to run next.
+/// One sentence when a search matched nothing and the store already holds
+/// something. A shorter query is named when [`crate::word_rank::shorter_search`]
+/// has one. The command is plain text, not a code span.
 #[must_use]
-pub fn no_hits_line(query: &str, explain: bool) -> String {
+pub fn nothing_matched_line(query: &str) -> String {
     let query = query.trim();
-    let next = next_search(query);
-    let head = no_hits_head(query);
-    if explain {
-        format!("{head}, so the pack holds nothing on this query and the next command is `{next}`.")
-    } else {
-        format!("{head}, so run `{next}`.")
+    let shown = crate::word_rank::quote_query(query);
+    match crate::word_rank::shorter_search(query) {
+        Some(cmd) => format!("Nothing matched {shown}. Try a shorter query, such as: {cmd}"),
+        None => format!("Nothing matched {shown}."),
     }
 }
 
-/// A search before anything has been stored. A shorter query would miss too,
-/// so the next command is the one that stores a lesson. One word is quoted
-/// in that command. Several words stay `TEXT`, because no one word is the lesson.
+/// [`nothing_matched_line`] for a terminal. The suggested command is not
+/// wrapped. When the sentence fits, the command stays on that line. When
+/// it does not, the command is the next line.
+#[must_use]
+pub fn nothing_matched_page(query: &str) -> String {
+    let query = query.trim();
+    let shown = crate::word_rank::quote_query(query);
+    let head = format!("Nothing matched {shown}.");
+    match crate::word_rank::shorter_search(query) {
+        Some(cmd) => {
+            let prose = format!("{head} Try a shorter query, such as:");
+            plain_command_page(&prose, Some(&cmd))
+        }
+        None => plain_command_page(&head, None),
+    }
+}
+
+/// A search before anything has been stored. A shorter query would miss
+/// too, so the sentence names the command that stores a lesson. One word
+/// is quoted in that command. Several words stay `TEXT`, because no one
+/// word is the lesson. The command is plain text.
 #[must_use]
 pub fn empty_store_line(query: &str) -> String {
     let query = query.trim();
-    let next = if one_word(query) {
+    let shown = crate::word_rank::quote_query(query);
+    let cmd = store_lesson_command(query);
+    format!("Nothing matched {shown}. A shorter search would miss too. Try storing a lesson, such as: {cmd}")
+}
+
+/// [`empty_store_line`] for a terminal. The command is not wrapped.
+#[must_use]
+pub fn empty_store_page(query: &str) -> String {
+    let query = query.trim();
+    let shown = crate::word_rank::quote_query(query);
+    let cmd = store_lesson_command(query);
+    let prose = format!(
+        "Nothing matched {shown}. A shorter search would miss too. Try storing a lesson, such as:"
+    );
+    plain_command_page(&prose, Some(&cmd))
+}
+
+/// `ljos remember "WORD"` when the query is one word, otherwise
+/// `ljos remember "TEXT"`.
+#[must_use]
+pub fn store_lesson_command(query: &str) -> String {
+    let query = query.trim();
+    if one_word(query) {
         remember_command(query)
     } else {
         "ljos remember \"TEXT\"".to_string()
-    };
-    format!("{}, so run `{next}`.", no_hits_head(query))
+    }
 }
 
-/// [`empty_store_line`] on one page, wrapped to [`COLS`].
-#[must_use]
-pub fn empty_store_page(query: &str) -> String {
-    let mut out = wrap(&empty_store_line(query), COLS);
+/// Prose stays within [`COLS`]. `cmd`, when set, is not wrapped. It stays
+/// on the prose line when the whole sentence fits, and is the next line
+/// when it does not.
+fn plain_command_page(prose: &str, cmd: Option<&str>) -> String {
+    let Some(cmd) = cmd else {
+        return ended(&wrap(prose, COLS));
+    };
+    let one = format!("{prose} {cmd}");
+    if one.chars().count() <= COLS && !one.contains('\n') {
+        return ended(&one);
+    }
+    let mut out = wrap(prose, COLS);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(cmd);
+    out.push('\n');
+    out
+}
+
+fn ended(text: &str) -> String {
+    let mut out = text.to_string();
     if !out.ends_with('\n') {
         out.push('\n');
     }
     out
 }
 
-fn no_hits_head(query: &str) -> String {
-    if query.is_empty()
-        || query
-            .chars()
-            .any(|ch| ch.is_control() || matches!(ch, '"' | '`' | '\\'))
-    {
-        "No hits".to_string()
-    } else if query.contains(char::is_whitespace) {
-        format!("No hits for \"{query}\"")
-    } else {
-        format!("No hits for {query}")
-    }
-}
-
-fn next_search(query: &str) -> String {
-    let words: Vec<&str> = query
-        .split_whitespace()
-        .filter(|word| word.len() >= 3 && word.chars().all(|ch| ch.is_ascii_alphanumeric()))
-        .collect();
-    if words.len() > 1 {
-        let mut best = words[0];
-        for word in &words[1..] {
-            if word.len() > best.len() {
-                best = word;
-            }
-        }
-        return format!("ljos search {best}");
-    }
-    if one_word(query) {
-        return remember_command(query);
-    }
-    "ljos remember \"TEXT\"".to_string()
-}
-
-/// One whitespace-separated query, with nothing to shorten it to.
 fn one_word(query: &str) -> bool {
     let word = query.trim();
     !word.is_empty() && !word.chars().any(char::is_whitespace)
 }
 
-/// `ljos remember "WORD"` for one query word. A control character, or a
-/// word that is not one token, keeps the `TEXT` placeholder.
 fn remember_command(query: &str) -> String {
     let word = query.trim();
     if !one_word(word) || word.chars().any(char::is_control) {
@@ -796,6 +812,46 @@ mod tests {
         let cut = wrap(solid, 20);
         assert!(cut.contains('\\'), "{cut}");
         assert!(cut.lines().all(|line| line.chars().count() <= 20), "{cut}");
+    }
+
+    #[test]
+    fn a_miss_names_a_shorter_query_without_splitting_the_command() {
+        let short = nothing_matched_page("which fusion");
+        assert_eq!(
+            short,
+            "Nothing matched \"which fusion\". Try a shorter query, such as: ljos search fusion\n"
+        );
+        assert!(
+            short.lines().all(|line| line.chars().count() <= COLS),
+            "{short}"
+        );
+        assert!(!short.contains('`'), "{short}");
+
+        let long = nothing_matched_page("usability friction confusing error");
+        assert!(
+            long.lines().any(|line| line == "ljos search usability"),
+            "{long}"
+        );
+        assert!(!long.contains('`'), "{long}");
+        assert!(
+            long.lines()
+                .filter(|line| *line != "ljos search usability")
+                .all(|line| line.chars().count() <= COLS),
+            "{long}"
+        );
+        let wide = "x".repeat(90);
+        let query = format!("note {wide}");
+        let page = nothing_matched_page(&query);
+        let cmd = format!("ljos search {wide}");
+        assert!(page.lines().any(|line| line == cmd), "{page}");
+        assert!(!page.contains('`'), "{page}");
+
+        assert_eq!(
+            nothing_matched_line("usability"),
+            "Nothing matched usability."
+        );
+        assert_eq!(nothing_matched_line("the"), "Nothing matched the.");
+        assert_eq!(nothing_matched_line("a\"b"), "Nothing matched this query.");
     }
 
     #[test]

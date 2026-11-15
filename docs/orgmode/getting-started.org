@@ -146,10 +146,10 @@ Under a runner the same row says =lesson, from an agent=.
 A preference stored at that terminal is =preference, today=.
 Under a runner the preference row is =preference, from an agent, not checked=.
 Search matches words when the encoder is absent. =ljos search fusing= finds a preference that contains that word.
-=ljos search "which fusion"= shares no word with either sentence and prints =No hits for "which fusion", so run `ljos search fusion`.=
+=ljos search "which fusion"= shares no word with either sentence and prints =Nothing matched "which fusion". Try a shorter query, such as: ljos search fusion=. No match-mode line is printed.
 When the encoder ranked the page, this seat's hits come first. A word ranking gives this seat a small boost instead, and a closer row from another seat stays ahead. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.
 That floor is the one the prompt hook uses for a hit the encoder lists at the top.
-A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is =Nothing relevant was found.=
+A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is =Nothing relevant was found.= No match-mode line is printed on that empty page.
 A busy pack ranks by words and still returns a hit that names the subject.
 
 # BEGIN ljos-sample tutorial-prefer

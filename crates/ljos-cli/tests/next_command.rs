@@ -212,8 +212,13 @@ fn a_search_with_no_shared_word_prints_only_the_no_hits_line() {
     let said = format!("{stdout}{stderr}");
     assert_eq!(code, 0, "{said}");
     assert_eq!(
-        stdout, "No hits for \"which fusion\", so run `ljos search fusion`.\n",
+        stdout,
+        "Nothing matched \"which fusion\". Try a shorter query, such as: ljos search fusion\n",
         "{said}"
+    );
+    assert!(
+        !stderr.contains("matched by meaning") && !stderr.contains("matched by words"),
+        "an empty page prints no match-mode line:\n{said}"
     );
     assert!(
         !stderr.contains("encoder not installed") && !stderr.contains("cargo binstall"),

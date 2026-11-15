@@ -14363,19 +14363,26 @@ const ENCODER_FAILED_REASON: &str = "encoder failed";
 
 /// The stderr line for the rows about to be printed.
 ///
-/// An empty page does not say the rows were matched by words, and it does
-/// not name the encoder install. Nothing was matched, so that sentence is
-/// not true, and the page's own line is the next command. A page that
-/// shows rows keeps the install line: the encoder is absent and the
-/// install is the way to rank by meaning. Rows shown while the encoder is
-/// loading say they are word matches, and do not name a command to run
-/// again. That command stays on an empty page.
+/// An empty page prints no match-mode line. Nothing was matched, so
+/// "matched by meaning" or "matched by words" is not true. A page that
+/// shows rows keeps the install line when the encoder is absent. Rows
+/// shown while the encoder is loading say they are word matches. An empty
+/// page while the encoder is loading or has failed still names that,
+/// because the line is about the encoder and not about a match.
 #[must_use]
 pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
-    if hits.is_empty() && ranking.reason == "encoder unavailable" {
+    if hits.is_empty() {
+        if ranking.mode == "lexical"
+            && matches!(
+                ranking.reason,
+                ENCODER_LOADING_REASON | ENCODER_FAILED_REASON
+            )
+        {
+            return ranking_sentence(ranking, false);
+        }
         return String::new();
     }
-    ranking_sentence(ranking, !hits.is_empty())
+    ranking_sentence(ranking, true)
 }
 
 /// One line for stderr: a word match, or a meaning match.
@@ -14504,8 +14511,8 @@ fn hit_cosine(hit: &Hit) -> Option<f64> {
 }
 
 /// The line printed when the only rows were another seat's hits under
-/// the similarity floor. A search the pack answered with nothing still
-/// prints `No hits.`
+/// the similarity floor. No match-mode line is printed with it. A search
+/// the pack answered with nothing prints [`scan::nothing_matched_line`].
 pub const NOTHING_RELEVANT: &str = "Nothing relevant was found.\n";
 
 /// Whether this seat has no lesson in the pack and none kept beside it.
@@ -14979,12 +14986,18 @@ fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
 /// Search hits as JSON, with the ranking the pack used.
 #[must_use]
 pub fn search_json(hits: &[Hit], ranking: Option<&Ranking>) -> String {
-    search_json_empty(hits, ranking, None)
+    search_json_empty(hits, ranking, None, None)
 }
 
 /// [`search_json`] that names an empty answer. `empty` is set when the
 /// only rows were another seat's hits under the similarity floor.
-pub fn search_json_empty(hits: &[Hit], ranking: Option<&Ranking>, empty: Option<&str>) -> String {
+/// `suggestion` is the shorter command, present only when `hits` is empty.
+pub fn search_json_empty(
+    hits: &[Hit],
+    ranking: Option<&Ranking>,
+    empty: Option<&str>,
+    suggestion: Option<&str>,
+) -> String {
     let mine = seat_name();
     let rows: Vec<Value> = hits
         .iter()
@@ -15020,6 +15033,9 @@ pub fn search_json_empty(hits: &[Hit], ranking: Option<&Ranking>, empty: Option<
                 doc["close_matches"] = Value::Bool(false);
             }
             doc["reading"] = Value::String(line.to_string());
+        }
+        if let Some(cmd) = suggestion.map(str::trim).filter(|cmd| !cmd.is_empty()) {
+            doc["suggestion"] = Value::String(cmd.to_string());
         }
     }
     ranking_doc(ranking, doc)
@@ -46412,7 +46428,7 @@ pub fn calibrate(project: &str, rounds: usize) -> Result<Vec<Trust>> {
 #[must_use]
 pub fn search_reading(n: usize) -> &'static str {
     if n == 0 {
-        "No hits, so the pack holds nothing on this query, so run `ljos remember \"TEXT\"`."
+        "Nothing matched."
     } else {
         "Place 1 is the first row, and this seat's rows come before another seat's. The score orders the row. The fraction is how many checks named the row. Neither is whether the sentence is true. A later line on the same matter replaces an earlier one."
     }
@@ -46420,8 +46436,7 @@ pub fn search_reading(n: usize) -> &'static str {
 
 /// The human search page. `explain` (`ljos search --explain`) opens with
 /// [`search_reading`]; without it the page names score and scorers in two
-/// lines. An empty answer is one sentence that starts `No hits` and names
-/// the next command. The id on each
+/// lines. An empty answer is [`scan::nothing_matched_line`]. The id on each
 /// row is the eight-character prefix. `--json` does not use this.
 pub fn format_hits(hits: &[Hit], explain: bool) -> String {
     format_search(hits, hits.len(), false, explain, "", true)
@@ -77201,6 +77216,20 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             }),
             "matched by meaning\n"
         );
+        let semantic = Ranking {
+            mode: "semantic",
+            reason: "",
+        };
+        assert_eq!(
+            search_rank_line(&semantic, &[]),
+            "",
+            "an empty page does not say the rows were matched by meaning"
+        );
+        assert_eq!(
+            search_rank_line(&fallback, &[]),
+            "",
+            "an empty page does not say the rows were matched by words"
+        );
     }
 
     /// Rows on the page while the encoder loads are word matches. An empty
@@ -79552,11 +79581,46 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             !explained.contains("Checks: how many of them named this row"),
             "{explained}"
         );
-        assert_eq!(
-            format_hits(&[], false),
-            "No hits, so run `ljos remember \"TEXT\"`.\n"
+        assert_eq!(format_hits(&[], false), "Nothing matched this query.\n");
+        assert_eq!(format_hits(&[], true), "Nothing matched this query.\n");
+        let empty_json = search_json_empty(
+            &[],
+            Some(&Ranking {
+                mode: "semantic",
+                reason: "",
+            }),
+            None,
+            Some("ljos search usability"),
         );
-        assert!(format_hits(&[], true).contains("the pack holds nothing"));
+        let parsed: serde_json::Value = serde_json::from_str(empty_json.trim()).unwrap();
+        assert_eq!(parsed["suggestion"], "ljos search usability");
+        assert_eq!(parsed["ranking"], "semantic");
+        assert!(parsed.get("reading").is_none(), "{parsed}");
+        let bare = search_json_empty(
+            &[],
+            Some(&Ranking {
+                mode: "semantic",
+                reason: "",
+            }),
+            None,
+            None,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(bare.trim()).unwrap();
+        assert!(parsed.get("suggestion").is_none(), "{parsed}");
+        let with_rows = search_json_empty(
+            &hits,
+            Some(&Ranking {
+                mode: "semantic",
+                reason: "",
+            }),
+            None,
+            Some("ljos search usability"),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(with_rows.trim()).unwrap();
+        assert!(
+            parsed.get("suggestion").is_none(),
+            "a page with rows has no suggestion: {parsed}"
+        );
         let mut local = signal_hit("lesson", "The door thermocouple reads low.", 1.0, 0);
         local.labels.push("kept-local".into());
         let line = format_hits(&[local], false);

@@ -1650,6 +1650,10 @@ impl LjosServer {
             ljos_cli::word_rank::no_close_line(&args.query)
         } else if hits.is_empty() && unrelated {
             ljos_cli::NOTHING_RELEVANT.trim().to_string()
+        } else if hits.is_empty() && ljos_cli::nothing_stored() {
+            ljos_cli::scan::empty_store_line(&args.query)
+        } else if hits.is_empty() {
+            ljos_cli::scan::nothing_matched_line(&args.query)
         } else {
             search_reading(hits.len()).to_string()
         };

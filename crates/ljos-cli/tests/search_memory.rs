@@ -295,10 +295,15 @@ fn a_search_that_stays_cold_says_the_rows_were_ranked_by_words() {
         "a floor score was printed as a hit: {said}"
     );
     assert!(
-        stdout.contains("No hits for \"Carrollton Nov 23 morning timing\""),
+        stdout.contains("Nothing matched \"Carrollton Nov 23 morning timing\""),
         "{said}"
     );
-    assert!(stdout.contains("`ljos search Carrollton`"), "{said}");
+    assert!(
+        stdout.lines().any(|line| line == "ljos search Carrollton"),
+        "{said}"
+    );
+    assert!(!stdout.contains('`'), "{stdout}");
+    assert!(!stderr.contains("matched by meaning"), "{said}");
 }
 
 /// A cold encoder that stays cold, or becomes warm `delay` after the first
@@ -481,7 +486,7 @@ fn a_search_past_the_wait_says_to_rerun_and_names_the_ranking() {
     assert!(stderr.contains(&line), "{said}");
     assert_eq!(line.matches('.').count(), 1, "{line}");
     assert!(
-        stdout.contains("No hits"),
+        stdout.contains("Nothing matched"),
         "the rerun line is for an empty page: {said}"
     );
     assert!(!stderr.contains("word-match"), "{said}");
