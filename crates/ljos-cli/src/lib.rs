@@ -66,6 +66,7 @@ pub mod policy_label;
 pub mod proc_tree;
 pub mod quiet_claims;
 pub mod quoted_yes;
+pub mod readability;
 pub mod reap;
 pub mod recall_floor;
 pub mod record;
@@ -31936,14 +31937,20 @@ fn sentence_word_limit(warning: &str) -> Option<(Option<usize>, usize, usize)> {
 /// The line a write prints when it was stored over a prose warning: as
 /// written, or as the shorter copies an agent's claim was cut into
 /// (`copies`). A sentence past the pack's word limit names the count and
-/// the limit and says to split that sentence into two. Any other warning
-/// keeps the pack's reason, and that shorter sentences are recalled
-/// better. `None` when the pack gave no warning.
+/// the limit and says to split that sentence into two. A readability grade
+/// says the lesson was saved, then names the sentence that raised it, and
+/// stays quiet on a short lesson or one whose score came from identifiers,
+/// paths, code, SHAs or versions ([`readability`]). Any other warning keeps
+/// the pack's reason, and that shorter sentences are recalled better.
+/// `None` when the pack gave no warning, or the grade hint does not apply.
 #[must_use]
 pub fn prose_warning_line(body: &Value) -> Option<String> {
     let warning = body["prose"]["warning"].as_str()?.trim();
     if warning.is_empty() {
         return None;
+    }
+    if warning.contains("readability grade") {
+        return readability::reading_line(body);
     }
     let how = if body["kept"].as_str() == Some("local") {
         "kept locally, not in the pack".to_string()
@@ -80235,20 +80242,22 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     #[test]
     fn a_prose_warning_is_one_line_and_its_absence_is_none() {
-        let warned = serde_json::json!({"id": "a", "prose": {"grade": 14.78,
+        let text = "The configuration management subsystem unfortunately necessitates extraordinarily complicated initialization procedures whenever administrators reconfigure distributed deployment environments across multiple availability zones.";
+        let warned = serde_json::json!({"id": "abcdef1234567890", "text": text, "prose": {"grade": 14.78,
             "warning": "readability grade 14.78 exceeds 14; use shorter sentences and shorter words"}});
         let line = prose_warning_line(&warned).unwrap();
-        assert!(line.starts_with("stored as written"), "{line}");
-        assert!(
-            line.contains("readability grade 14.78 exceeds 14"),
-            "{line}"
-        );
-        assert!(!line.contains('\n'));
+        assert!(line.starts_with("abcdef12 was saved."), "{line}");
+        assert!(line.contains("Use shorter words in:"), "{line}");
+        assert!(line.contains("configuration management"), "{line}");
+        assert!(!line.contains('\n'), "{line}");
         assert_eq!(
             prose_warning_line(&serde_json::json!({"prose": {"grade": 8.0}})),
             None
         );
         assert_eq!(prose_warning_line(&serde_json::json!({"id": "b"})), None);
+        let short = serde_json::json!({"id": "abcd1234", "text": "The payments service retries webhooks three times with exponential backoff starting at 2 seconds.",
+            "prose": {"warning": "readability grade 14.78 exceeds 14; use shorter sentences and shorter words"}});
+        assert_eq!(prose_warning_line(&short), None);
     }
 
     /// The pack names the count and the limit. The line says to split the
@@ -80274,9 +80283,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             prose_warning_shown(&warned, true).as_deref(),
             Some(prose_warning_line(&warned).unwrap().as_str())
         );
-        let grade = serde_json::json!({"prose": {"warning":
+        let hard = "The configuration management subsystem unfortunately necessitates extraordinarily complicated initialization procedures whenever administrators reconfigure distributed deployment environments across multiple availability zones.";
+        let grade = serde_json::json!({"id": "abcdef12", "text": hard, "prose": {"warning":
             "readability grade 14.78 exceeds 14; use shorter sentences and shorter words"}});
         assert!(prose_warning_shown(&grade, false).is_some());
+        let short = serde_json::json!({"id": "abcd1234", "text": "Keep the default.", "prose": {"warning":
+            "readability grade 14.78 exceeds 14; use shorter sentences and shorter words"}});
+        assert!(prose_warning_shown(&short, false).is_none());
     }
 
     #[test]

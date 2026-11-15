@@ -584,6 +584,9 @@ enum Cmd {
     ///
     /// Example: `ljos remember "The lexical default is BM25+."`
     ///
+    /// A long lesson may print a hint after it is saved. The hint names the
+    /// sentence to change and the reading score. A short lesson prints no hint.
+    ///
     /// An empty text exits 2. A text past 1000 characters exits 2.
     /// When the pack is busy or not answering, the lesson is queued and the command exits 0.
     /// The pack is this seat's memory store.
@@ -603,6 +606,9 @@ enum Cmd {
         /// Print a warning when a sentence is over 29 words. The memory is still stored.
         #[arg(long)]
         verbose: bool,
+        /// Print the stored lesson as JSON. The grade, the aim and the sentence that raised the grade are fields on it.
+        #[arg(long)]
+        json: bool,
         /// The day (YYYY-MM-DD) the claim starts to hold in the world. `ljos search --valid-at` leaves it out before then.
         #[arg(long, value_name = "DATE")]
         valid_from: Option<String>,
@@ -4311,6 +4317,7 @@ fn run_command() -> Result<()> {
             verbose,
             valid_from,
             valid_to,
+            json,
         } => {
             ljos_cli::config_diag::emit();
             if transient && standing {
@@ -4370,7 +4377,16 @@ fn run_command() -> Result<()> {
                     println!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
                     continue;
                 }
-                println!("{}", write_ack(&body, verbose));
+                if json {
+                    if let Some(note) = ljos_cli::prose_warning_shown(&body, verbose) {
+                        eprintln!("{note}");
+                    }
+                    let mut printed = body.clone();
+                    ljos_cli::readability::attach(&mut printed);
+                    println!("{}", serde_json::to_string_pretty(&printed)?);
+                } else {
+                    println!("{}", write_ack(&body, verbose));
+                }
                 eprintln!("{}", ljos_cli::remember_note(&body));
                 if let Some(line) = ljos_cli::memories::reinforced_line(&body) {
                     eprintln!("{line}");
