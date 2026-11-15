@@ -778,8 +778,11 @@ enum Cmd {
     /// `ljos search WORD` when QUERY has more than one word, otherwise
     /// `ljos remember "WORD"` with that one word in quotes. A busy memory store ranks by words
     /// and still returns a hit that names the subject. While the encoder is
-    /// still loading, the search waits `LJOS_SEARCH_WAIT` seconds (3 when
-    /// unset) and then ranks by meaning. If it is still loading and rows
+    /// still loading, a remaining time that fits in `LJOS_SEARCH_WARMUP_WAIT`
+    /// seconds (5 when unset, `0` does not wait) is waited out, inside
+    /// `LJOS_CALL_TIMEOUT`, and the search then ranks by meaning. A remaining
+    /// time that is absent or longer than that budget keeps `LJOS_SEARCH_WAIT`
+    /// (3 when unset). If it is still loading and rows
     /// are shown, the line is `These are word-match results while the
     /// encoder loads.` When nothing is shown, one line names the command
     /// to rerun and, when a remaining time is reported, about how many
@@ -4780,6 +4783,7 @@ fn run_command() -> Result<()> {
             // A dated search is the pack as it stood. A source filter asked
             // for slot rows only. Tickets are the live tracker, so neither
             // of those pages grows one. The merge runs after both rankers,
+            // and after a short load waited out inside the call deadline,
             // so a title match is present while the encoder loads and after.
             // `capped` is the pack's page, counted before tickets are added.
             // A full pack page can still have more memories past `fetch`.

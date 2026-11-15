@@ -14671,18 +14671,23 @@ fn search_can_fall_back(err: &anyhow::Error) -> bool {
 
 /// Hits for `ljos search`, and the ranking that produced them.
 ///
-/// A cold encoder is asked once, which starts the model, then the search
-/// waits up to [`search_wait`] for an answer and asks again. The second
-/// answer is what is printed. A 503 or a deadline is not turned into an
-/// empty success. When the encoder is still loading after the wait, the
-/// word-ranked rows are what is printed. A page that shows them says they
-/// match words. A page with none says to rerun.
+/// A cold encoder whose status names a remaining time inside
+/// [`search_warmup_wait`] is polled until it answers, or that budget and
+/// the call deadline run out, and the search then ranks by meaning. Any
+/// other cold encoder is asked once, which starts the model, then the
+/// search waits up to [`search_wait`] for an answer and asks again. The
+/// second answer is what is printed. A 503 or a deadline is not turned
+/// into an empty success. When the encoder is still loading after the
+/// wait, the word-ranked rows are what is printed. A page that shows them
+/// says they match words. A page with none says to rerun.
 ///
 /// # Errors
 ///
 /// The pack refused the connection, or the search failed for a reason
 /// that is not a busy writer or a deadline.
 pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
+    SEARCH_WAITED_MS.with(|cell| cell.set(0));
+    let _ = search_call_left();
     if read_encoder_status().as_ref().is_some_and(encoder_cold) {
         return search_after_warmup(query, limit);
     }
@@ -14710,7 +14715,14 @@ pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
 /// Once the encoder has answered, one more search is the semantic one.
 /// The wait is [`search_wait`], and it leaves two seconds of the clock
 /// for that second search.
+///
+/// A status that names a remaining time inside [`search_warmup_wait`]
+/// takes [`search_after_bounded_wait`] and does not add this wait on top.
 fn search_after_warmup(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
+    let status = read_encoder_status();
+    if let Some(bound) = warmup_bound(status.as_ref()) {
+        return search_after_bounded_wait(query, limit, bound);
+    }
     let first = search_direct(query, limit);
     let reserve = std::time::Duration::from_secs(2);
     let left = pack_link::clock_left().unwrap_or(search_wait().saturating_add(reserve));
@@ -14728,6 +14740,160 @@ fn search_after_warmup(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
         }
     }
     match first {
+        Ok(hits) => Ok((hits, lexical_ranking(ENCODER_LOADING_REASON))),
+        Err(err) => Err(err),
+    }
+}
+
+/// Room left for the search that follows a warm-up poll.
+/// The poll stops this early so that search still fits in the call.
+const WARMUP_SEARCH_RESERVE: std::time::Duration = std::time::Duration::from_millis(400);
+
+thread_local! {
+    /// When this search's call deadline runs out. Armed on the first
+    /// search of the process, which is one command.
+    static SEARCH_CALL_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+    /// Milliseconds the warm-up poll spent. `0` when that poll did not run.
+    static SEARCH_WAITED_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Time left on this search's call deadline.
+/// The first call arms it from [`call_deadline::timeout`].
+fn search_call_left() -> std::time::Duration {
+    let deadline = SEARCH_CALL_DEADLINE.with(|cell| {
+        if let Some(deadline) = cell.get() {
+            deadline
+        } else {
+            let deadline = std::time::Instant::now() + call_deadline::timeout();
+            cell.set(Some(deadline));
+            deadline
+        }
+    });
+    deadline.saturating_duration_since(std::time::Instant::now())
+}
+
+fn note_search_waited(waited: std::time::Duration) {
+    let ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
+    SEARCH_WAITED_MS.with(|cell| cell.set(ms));
+}
+
+fn search_waited_ms() -> u64 {
+    SEARCH_WAITED_MS.with(|cell| cell.get())
+}
+
+/// How long to poll when `status` names a remaining load inside
+/// [`search_warmup_wait`].
+///
+/// `None` when the wait is off, the writer did not say, or the remaining
+/// time is longer than the budget. The bound is also the time the call
+/// deadline still has after [`WARMUP_SEARCH_RESERVE`].
+fn warmup_bound(status: Option<&Value>) -> Option<std::time::Duration> {
+    let budget = search_warmup_wait();
+    if budget.is_zero() {
+        return None;
+    }
+    let remaining = std::time::Duration::from_millis(status.and_then(embedder_remaining_ms)?);
+    if remaining.is_zero() || remaining > budget {
+        return None;
+    }
+    let room = search_call_left().saturating_sub(WARMUP_SEARCH_RESERVE);
+    let bound = remaining.min(budget).min(room);
+    if bound.is_zero() {
+        None
+    } else {
+        Some(bound)
+    }
+}
+
+/// Time the warm-up poll may still sleep.
+fn warmup_left(started: std::time::Instant, bound: std::time::Duration) -> std::time::Duration {
+    let mut left = bound.saturating_sub(started.elapsed());
+    let call = search_call_left().saturating_sub(WARMUP_SEARCH_RESERVE);
+    left = left.min(call);
+    if let Some(clock) = pack_link::clock_left() {
+        left = left.min(clock.saturating_sub(WARMUP_SEARCH_RESERVE));
+    }
+    left
+}
+
+enum EncoderPoll {
+    Ready,
+    Loading,
+    Stop,
+}
+
+/// One status read. A missing answer is still loading: the next pause
+/// tries again. A failed encoder, or one that is not loading, stops.
+fn encoder_poll_once(left: std::time::Duration) -> EncoderPoll {
+    let ms = u64::try_from(left.as_millis()).unwrap_or(200).clamp(1, 200);
+    let status = with_pack_timeout(ms, || {
+        pack().ok().and_then(|client| client.status(None).ok())
+    });
+    let Some(status) = status else {
+        return EncoderPoll::Loading;
+    };
+    if status["embedder"]["answering"].as_bool() == Some(true) {
+        return EncoderPoll::Ready;
+    }
+    if encoder_failed(&status) || !encoder_cold(&status) {
+        return EncoderPoll::Stop;
+    }
+    EncoderPoll::Loading
+}
+
+/// Poll until the encoder has answered or `bound` runs out.
+/// The pause starts at 50ms and doubles up to 400ms. It never spins.
+fn poll_encoder(bound: std::time::Duration) -> bool {
+    let started = std::time::Instant::now();
+    let mut pause = std::time::Duration::from_millis(50);
+    loop {
+        let left = warmup_left(started, bound);
+        let slice = if left.is_zero() {
+            std::time::Duration::from_millis(1)
+        } else {
+            left
+        };
+        match encoder_poll_once(slice) {
+            EncoderPoll::Ready => return true,
+            EncoderPoll::Stop => return false,
+            EncoderPoll::Loading => {}
+        }
+        let left = warmup_left(started, bound);
+        // A shorter pause than this would not block, and the loop would spin.
+        if left < std::time::Duration::from_millis(1) {
+            return false;
+        }
+        let sleep = pause.min(left);
+        if sleep.is_zero() {
+            return false;
+        }
+        std::thread::sleep(sleep);
+        pause = pause
+            .saturating_mul(2)
+            .min(std::time::Duration::from_millis(400));
+    }
+}
+
+/// Wait out a short reported load, then search by meaning.
+/// Still loading, or a meaning search that can fall back, is the word
+/// ranking. This does not also wait [`search_wait`].
+fn search_after_bounded_wait(
+    query: &str,
+    limit: u32,
+    bound: std::time::Duration,
+) -> Result<(Vec<Hit>, Ranking)> {
+    let started = std::time::Instant::now();
+    let warm = poll_encoder(bound);
+    note_search_waited(started.elapsed());
+    if warm {
+        match search_direct(query, limit) {
+            Ok(hits) => return Ok((hits, semantic_ranking())),
+            Err(err) if !search_can_fall_back(&err) => return Err(err),
+            Err(_) => {}
+        }
+    }
+    match search_direct(query, limit) {
         Ok(hits) => Ok((hits, lexical_ranking(ENCODER_LOADING_REASON))),
         Err(err) => Err(err),
     }
@@ -14873,6 +15039,10 @@ fn ranking_doc(ranking: Option<&Ranking>, mut doc: Value) -> String {
             .and_then(Value::as_array)
             .is_some_and(|rows| !rows.is_empty());
         doc["reason"] = Value::String(lexical_reason(ranking, shown));
+    }
+    let waited = search_waited_ms();
+    if waited > 0 {
+        doc["waited_ms"] = Value::from(waited);
     }
     format!("{}\n", serde_json::to_string(&doc).unwrap_or_default())
 }
@@ -18684,15 +18854,50 @@ pub fn search_wait() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Seconds `ljos search` will wait for an encoder whose status names a
+/// remaining time inside this budget, when
+/// [`LJOS_SEARCH_WARMUP_WAIT`](search_warmup_wait) is unset.
+pub const DEFAULT_SEARCH_WARMUP_WAIT_SECS: u64 = 5;
+
+/// How long `ljos search` waits for a loading encoder that reports a
+/// remaining time inside this budget.
+///
+/// `LJOS_SEARCH_WARMUP_WAIT` is a whole number of seconds. Unset, and a
+/// value that is not a whole number, use
+/// [`DEFAULT_SEARCH_WARMUP_WAIT_SECS`]. `0` does not wait. The wait also
+/// stops at [`call_deadline::timeout`]. A remaining time that is missing
+/// or longer than this budget keeps [`search_wait`].
+#[must_use]
+pub fn search_warmup_wait() -> std::time::Duration {
+    let secs = std::env::var("LJOS_SEARCH_WARMUP_WAIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SEARCH_WARMUP_WAIT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 /// The budget for this search. A cold encoder gets [`search_wait`] plus
-/// the warm budget, so the wait and one more search both fit. A warm
-/// encoder keeps [`SEARCH_PACK_BUDGET`].
+/// the warm budget, so the wait and one more search both fit. A reported
+/// remaining time inside [`search_warmup_wait`] widens that to the poll
+/// and one more search, and the call deadline still wins. A warm encoder
+/// keeps [`SEARCH_PACK_BUDGET`].
 #[must_use]
 pub fn search_budget() -> std::time::Duration {
-    if read_encoder_status().as_ref().is_some_and(encoder_cold) {
-        search_wait()
+    let _ = search_call_left();
+    let status = read_encoder_status();
+    if status.as_ref().is_some_and(encoder_cold) {
+        let cold = search_wait()
             .saturating_add(SEARCH_PACK_BUDGET)
-            .max(SEARCH_PACK_BUDGET)
+            .max(SEARCH_PACK_BUDGET);
+        match warmup_bound(status.as_ref()) {
+            Some(bound) => {
+                let span = bound.saturating_add(SEARCH_PACK_BUDGET);
+                let budget = cold.max(span);
+                let left = search_call_left();
+                budget.min(left).max(std::time::Duration::from_millis(1))
+            }
+            None => cold,
+        }
     } else {
         SEARCH_PACK_BUDGET
     }

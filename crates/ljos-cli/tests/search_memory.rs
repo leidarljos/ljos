@@ -409,6 +409,9 @@ fn search_waited(
         .env("PACKSET_URL", &pack.url)
         .env("PACKSET_WORKSPACE", "seat")
         .env("LJOS_SEARCH_WAIT", wait)
+        // A remaining time inside the warm-up budget would take that path.
+        // These tests pin the older wait.
+        .env("LJOS_SEARCH_WARMUP_WAIT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
