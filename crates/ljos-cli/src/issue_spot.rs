@@ -156,8 +156,22 @@ impl Spot {
 }
 
 /// [`Spot`] for `id` in `layout` alone.
+///
+/// A ticket filed with a project path such as `Software/hle-mm` sits at
+/// `<root>/<prefix>/Software/hle-mm/issues.org` with `:ID:`
+/// `Software/hle-mm-yled`. The full id is the heading. The bare id
+/// `hle-mm-yled` is that heading with the leading segment removed, and
+/// only when the file is in that nested directory.
 #[must_use]
 pub fn in_layout(layout: &Layout, id: &str) -> Option<Spot> {
+    let id = id.trim();
+    if let Some(spot) = direct_spot(layout, id) {
+        return Some(spot);
+    }
+    nested_spot(layout, id)
+}
+
+fn direct_spot(layout: &Layout, id: &str) -> Option<Spot> {
     let project = project_of(id)?;
     let dir = project_dir(layout, project)?;
     let recs = project_recs(layout, &dir)?;
@@ -166,6 +180,84 @@ pub fn in_layout(layout: &Layout, id: &str) -> Option<Spot> {
         recs,
         id: id.to_string(),
     })
+}
+
+/// `(project, last segment)` for `<prefix>/A/B/issues.org`. One level,
+/// the same depth the tracker lists. A file that does not parse is
+/// skipped, so one broken nested board does not hide another.
+fn nested_dirs(layout: &Layout) -> Vec<(String, String)> {
+    let dir = layout.projects_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut parents: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    parents.sort();
+    let mut out = Vec::new();
+    for path in parents {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !path.is_dir() || name.starts_with('.') {
+            continue;
+        }
+        let Ok(inner) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        let mut subs: Vec<PathBuf> = inner.flatten().map(|entry| entry.path()).collect();
+        subs.sort();
+        for sub in subs {
+            let Some(sub_name) = sub.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !sub.is_dir() || sub_name.starts_with('.') || !sub.join("issues.org").is_file() {
+                continue;
+            }
+            out.push((format!("{name}/{sub_name}"), sub_name.to_string()));
+        }
+    }
+    out
+}
+
+/// The heading is the asked id, or the asked id is the heading with one
+/// leading segment removed and the directory's last segment is the
+/// project that bare id names.
+fn legacy_hit(heading: &str, asked: &str, dir_name: &str) -> bool {
+    if heading == asked {
+        return true;
+    }
+    let Some((_, rest)) = heading.split_once('/') else {
+        return false;
+    };
+    rest == asked && project_of(asked) == Some(dir_name)
+}
+
+fn nested_spot(layout: &Layout, asked: &str) -> Option<Spot> {
+    let mut found: Option<Spot> = None;
+    for (project, dir_name) in nested_dirs(layout) {
+        let Some(recs) = project_recs(layout, &project) else {
+            continue;
+        };
+        let hits: Vec<String> = recs
+            .iter()
+            .filter(|rec| legacy_hit(&rec.heading.id, asked, &dir_name))
+            .map(|rec| rec.heading.id.clone())
+            .collect();
+        match hits.as_slice() {
+            [] => continue,
+            [one] => {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(Spot {
+                    layout: layout.clone(),
+                    recs,
+                    id: one.clone(),
+                });
+            }
+            _ => return None,
+        }
+    }
+    found
 }
 
 /// [`Spot`] for `id`: the default layout, then the layout a route names
@@ -480,8 +572,9 @@ pub fn answer(args: &[&str]) -> Option<String> {
         }
         "children" => {
             let spot = find(id)?;
+            let real = spot.rec().heading.id.clone();
             let recs = tracker_recs(&spot)?;
-            let rows = vissue_core::catalog::children_from(&recs, id.trim()).ok()?;
+            let rows = vissue_core::catalog::children_from(&recs, &real).ok()?;
             let mut out = serde_json::to_string_pretty(&rows).ok()?;
             out.push('\n');
             Some(out)
@@ -532,6 +625,39 @@ Body.\n\n\
         );
         assert_eq!(project_of("nodash"), None);
         assert_eq!(project_of("trailing-"), None);
+    }
+
+    /// A ticket filed as project `Software/hle-mm` landed one directory
+    /// too deep, with a slash in the id. Both that id and the id with the
+    /// leading segment removed name the same heading.
+    #[test]
+    fn a_nested_project_path_is_found_by_both_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board = tmp.path().join("Software/Software/hle-mm");
+        std::fs::create_dir_all(&board).unwrap();
+        std::fs::write(
+            board.join("issues.org"),
+            "\
+#+TITLE: hle-mm
+#+VISSUE: 1
+#+CATEGORY: hle-mm
+#+TODO: TODO STARTED | DONE CANCELLED
+
+* TODO [#A] Nested mill
+:PROPERTIES:
+:ID:         Software/hle-mm-yled
+:END:
+",
+        )
+        .unwrap();
+        let layout = Layout::new(tmp.path(), "Software");
+        for asked in ["Software/hle-mm-yled", "hle-mm-yled"] {
+            let spot = in_layout(&layout, asked).unwrap_or_else(|| panic!("found {asked}"));
+            assert_eq!(spot.rec().heading.id, "Software/hle-mm-yled");
+            assert_eq!(spot.card().unwrap()["title"], "Nested mill");
+        }
+        assert!(in_layout(&layout, "Software-yled").is_none());
+        assert!(in_layout(&layout, "hle-mm-zzzz").is_none());
     }
 
     #[test]

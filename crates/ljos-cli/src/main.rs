@@ -1035,7 +1035,9 @@ enum Cmd {
     ///
     /// A child of the issue this conversation holds, unless `--parent`
     /// names another or `--top` none, in the parent's project. `-p` naming
-    /// another project files at its top level. The heading and the path go
+    /// another project files at its top level. A held issue the tracker
+    /// does not have is dropped, and the ticket is filed at the top of the
+    /// project. The heading and the path go
     /// to stderr. A commit that landed is not printed, and neither is a push
     /// that landed. A refused commit, a refused push, or a push that was
     /// skipped is one sentence naming the command to run. `--verbose` prints
@@ -1051,7 +1053,9 @@ enum Cmd {
         /// No parent, even while an issue is held.
         #[arg(long, conflicts_with = "parent")]
         top: bool,
-        /// The project; the parent's when omitted. A `--parent` files in
+        /// The project; the parent's when omitted. One name. A leading
+        /// segment that repeats the tracker directory or its org prefix is
+        /// dropped. Any other slash is refused. A `--parent` files in
         /// its own project whatever this names. Another project than the
         /// held issue's files at its top level.
         #[arg(short, long)]
@@ -2247,6 +2251,7 @@ enum Cmd {
         #[arg(long, value_name = "TITLE")]
         plan: Option<String>,
         /// The project the plan is filed in. Absent: this checkout's prefix, else Software.
+        /// One name. A leading segment that repeats the tracker directory or its org prefix is dropped. Any other slash is refused.
         #[arg(short = 'p', long, requires = "plan")]
         project: Option<String>,
         /// Checklist items, after `--`.
@@ -5144,20 +5149,43 @@ fn run_command() -> Result<()> {
             let named_project = project.is_some();
             // `--top` and `--parent` are a parent the seat chose. Only the
             // plain command asks what this conversation holds.
-            let held = if top || named_parent {
+            let mut held = if top || named_parent {
                 None
             } else {
                 ljos_cli::held_issue()
             };
+            // Resolve before any line that says the ticket was filed. A
+            // hold the tracker does not have is cleared and the ticket
+            // goes to the top of the project. An alias becomes the id
+            // on disk, so the parent vissue is asked for exists.
+            let mut dropped = None;
+            if let Some(id) = held.clone() {
+                match ljos_cli::resolve_held_parent(&id) {
+                    Ok(Some(canonical)) => held = Some(canonical),
+                    Ok(None) => {
+                        ljos_cli::clear_hold_for(&id);
+                        held = None;
+                        dropped = Some(id);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
             let no_hold = held.is_none();
             let (parent, mut project, passed_over) =
                 ljos_cli::file_placement(top, parent, project, held);
-            if let Some(line) = passed_over {
-                eprint!("{line}");
+            if project.is_none()
+                && parent.is_none()
+                && passed_over
+                    .as_deref()
+                    .is_some_and(|line| line.starts_with("project: "))
+            {
+                anyhow::bail!("{}", passed_over.unwrap_or_default().trim_end());
             }
             // No hold, no `--parent` and no `-p`: the `prefix=` line
             // `vissue identity` prints for this checkout. `--top` still
             // needs a named project. No prefix files in Software.
+            // The line waits until the ticket exists.
+            let mut prefix_line = None;
             if project.is_none() && no_hold && !top && !named_parent && !named_project {
                 let prefix = run_captured("vissue", &["identity"]).ok().and_then(|said| {
                     said.stdout.lines().find_map(|line| {
@@ -5166,13 +5194,13 @@ fn run_command() -> Result<()> {
                     })
                 });
                 if let Some(prefix) = prefix {
-                    if cwd_is_checkout() {
-                        eprintln!("filed in {prefix}, this checkout's project");
+                    prefix_line = Some(if cwd_is_checkout() {
+                        format!("filed in {prefix}, this checkout's project")
                     } else {
-                        eprintln!(
+                        format!(
                             "filed in {prefix}. This directory is not a git checkout, so run `ljos file TITLE -p NAME`."
-                        );
-                    }
+                        )
+                    });
                     project = Some(prefix);
                 }
             }
@@ -5206,6 +5234,19 @@ fn run_command() -> Result<()> {
                 qd,
             )
             .map_err(ticket_error)?;
+            // A failure above printed nothing that says the ticket was filed.
+            if !id.is_empty() {
+                if let Some(gone) = &dropped {
+                    eprintln!("held issue {gone} is gone; filed at the top of {project}");
+                } else {
+                    if let Some(line) = &passed_over {
+                        eprint!("{line}");
+                    }
+                    if let Some(line) = &prefix_line {
+                        eprintln!("{line}");
+                    }
+                }
+            }
             let mut rest = ljos_cli::ensure_project_line(&text, &project);
             if let (Some((n, d)), false) = (qd, id.is_empty()) {
                 let note = format!("{}{n} by {}", ljos_cli::reap::QUORUM_NOTE, d.trim());
@@ -5230,7 +5271,7 @@ fn run_command() -> Result<()> {
                 ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
             }
             if json {
-                if !id.is_empty() && defaulted {
+                if !id.is_empty() && defaulted && dropped.is_none() {
                     rest.insert_str(0, "filed in Software, the default project\n");
                 }
                 let text = if detail {
@@ -5251,7 +5292,7 @@ fn run_command() -> Result<()> {
                     rest = ljos_cli::without_routine_git(&rest);
                 }
                 if !id.is_empty() {
-                    if defaulted {
+                    if defaulted && dropped.is_none() {
                         eprintln!("filed in Software, the default project");
                     }
                     println!("{id}");
@@ -5872,6 +5913,7 @@ fn run_command() -> Result<()> {
             let assignee = assignee_for("claim", assignee.as_deref(), false)?;
             match node.filter(|_| !next) {
                 Some(node) => {
+                    let node = ljos_cli::on_disk(&node);
                     print!("{}", claim(&node, &assignee)?);
                     print!("{}", ljos_cli::persist_tracker(&node, "claimed"));
                 }
@@ -6552,7 +6594,8 @@ fn run_command() -> Result<()> {
                 }
                 opened.parent
             } else {
-                issue.context("sitting: pass an issue, or --plan TITLE -- ITEM...")?
+                let issue = issue.context("sitting: pass an issue, or --plan TITLE -- ITEM...")?;
+                ljos_cli::on_disk(&issue)
             };
             ljos_cli::begin_quiet_sitting();
             let printed = sitting_stream_started(

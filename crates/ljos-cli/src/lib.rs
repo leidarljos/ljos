@@ -13135,6 +13135,7 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
     let Some(project) = project else {
         bail!("no held issue and LJOS_PROJECT is unset, so no decision was filed");
     };
+    let project = project_name(&project).map_err(anyhow::Error::msg)?;
     let title: String = prompt
         .split_whitespace()
         .take(12)
@@ -13709,6 +13710,123 @@ fn runner_record_holders(chain: &[(u32, String)]) -> Vec<String> {
     out
 }
 
+/// A project name a write may use.
+///
+/// One path segment. A leading segment that repeats the tracker root's
+/// directory or the org prefix (`Software`, or the prefix the layout
+/// names) is removed, so `-p Software/hle-mm` files in `hle-mm` and the
+/// id does not contain `/`. Any other slash is refused. The error is one
+/// line and names the form to pass.
+///
+/// # Errors
+///
+/// The name is empty, or a slash is left after the repeated segment is
+/// removed.
+pub fn project_name(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("project: the name is empty".to_string());
+    }
+    if !raw.contains('/') && !raw.contains('\\') {
+        return Ok(raw.to_string());
+    }
+    let mut rest = raw;
+    loop {
+        let (head, tail) = if let Some(pair) = rest.split_once('/') {
+            pair
+        } else if let Some(pair) = rest.split_once('\\') {
+            pair
+        } else {
+            break;
+        };
+        if tail.is_empty() || !layout_segment(head) {
+            break;
+        }
+        rest = tail;
+    }
+    rest = rest.trim_matches(['/', '\\']);
+    if rest.is_empty() || rest.contains('/') || rest.contains('\\') || rest == "." || rest == ".." {
+        let right = raw
+            .rsplit(['/', '\\'])
+            .find(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
+            .unwrap_or("NAME");
+        return Err(format!("project: pass -p {right}, not -p {raw}"));
+    }
+    Ok(rest.to_string())
+}
+
+/// Whether `head` is the tracker root's directory or the org prefix.
+fn layout_segment(head: &str) -> bool {
+    if head.is_empty() {
+        return false;
+    }
+    if let Ok(layout) = vissue_core::Layout::resolve(None, None) {
+        if head.eq_ignore_ascii_case(layout.prefix()) {
+            return true;
+        }
+        return layout
+            .root()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| !name.is_empty() && head.eq_ignore_ascii_case(name));
+    }
+    head.eq_ignore_ascii_case(vissue_core::DEFAULT_PREFIX)
+}
+
+/// The id on disk when `id` is a legacy alias, otherwise `id`.
+#[must_use]
+pub fn on_disk(id: &str) -> String {
+    issue_spot::find(id.trim())
+        .map(|spot| spot.rec().heading.id.clone())
+        .unwrap_or_else(|| id.to_string())
+}
+
+/// The parent a held id may file under.
+///
+/// `Ok(Some)` is the heading id, which is the held id when it is already
+/// that heading. `Ok(None)` means the tracker can be read and does not
+/// have the id. `Err` is a refusal that is already one line, such as an
+/// id that lives in more than one tracker.
+///
+/// # Errors
+///
+/// The id is not one ticket. The message is the line to print.
+pub fn resolve_held_parent(id: &str) -> Result<Option<String>> {
+    let id = id.trim();
+    if let Some(spot) = issue_spot::find(id) {
+        return Ok(Some(spot.rec().heading.id.clone()));
+    }
+    match ticket_refusal(id) {
+        Some(msg) if msg.contains("not found") => Ok(None),
+        Some(msg) => bail!("{msg}"),
+        None => Ok(Some(id.to_string())),
+    }
+}
+
+/// Drop hold records whose issue line is `issue`.
+pub fn clear_hold_for(issue: &str) {
+    let issue = issue.trim();
+    if issue.is_empty() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(runtime_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("hold-") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        if text.lines().nth(5).is_some_and(|line| line.trim() == issue) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Where `ljos file` puts a new issue: its parent, its project, and a line
 /// for the agent. `--top` files with no parent and `--parent` names one.
 /// Otherwise the held issue is the parent, and the line names that issue
@@ -13717,6 +13835,11 @@ fn runner_record_holders(chain: &[(u32, String)]) -> Vec<String> {
 /// to the top of that project, not under the work being sat on. For the
 /// same reason a `--parent` files in that parent's project whatever `-p`
 /// names, and the line says so.
+///
+/// A `-p` value or a project taken from an id is passed through
+/// [`project_name`]. When that refuses, the third string is the refusal
+/// and the parent and project are absent, so the caller prints nothing
+/// that says the ticket was filed.
 #[must_use]
 pub fn file_placement(
     top: bool,
@@ -13724,8 +13847,22 @@ pub fn file_placement(
     project: Option<String>,
     held: Option<String>,
 ) -> (Option<String>, Option<String>, Option<String>) {
-    fn project_of(id: &str) -> Option<&str> {
-        id.rsplit_once('-').map(|(proj, _)| proj)
+    let project = match project {
+        Some(name) => match project_name(&name) {
+            Ok(name) => Some(name),
+            Err(err) => return (None, None, Some(format!("{err}\n"))),
+        },
+        None => None,
+    };
+    fn project_of(id: &str) -> Option<String> {
+        let (project, suffix) = id.rsplit_once('-')?;
+        if project.is_empty() || suffix.is_empty() {
+            return None;
+        }
+        if !project.contains('/') && !project.contains('\\') {
+            return Some(project.to_string());
+        }
+        project_name(project).ok()
     }
     // The held issue is a plan in some other project. A child has to live
     // in its parent's project, so this ticket is filed with no parent.
@@ -13768,7 +13905,7 @@ pub fn file_placement(
         parent
     } else {
         match (held, asked.as_deref()) {
-            (Some(held), Some(asked)) if project_of(&held) != Some(asked) => {
+            (Some(held), Some(asked)) if project_of(&held).as_deref() != Some(asked) => {
                 if project.is_some() {
                     passed_over = Some(top_of_other(asked, &held, None));
                 }
@@ -13780,16 +13917,15 @@ pub fn file_placement(
     if let Some((name, why)) = &from_cwd {
         if held_note
             .as_deref()
-            .is_some_and(|id| project_of(id) != Some(name.as_str()))
+            .is_some_and(|id| project_of(id).as_deref() != Some(name.as_str()))
         {
             let held_id = held_note.as_deref().unwrap_or("none");
             passed_over = Some(top_of_other(name, held_id, Some(why)));
         }
     }
-    let parent = if from_cwd
-        .as_ref()
-        .is_some_and(|(name, _)| parent.as_deref().and_then(project_of) != Some(name.as_str()))
-    {
+    let parent = if from_cwd.as_ref().is_some_and(|(name, _)| {
+        parent.as_deref().and_then(project_of).as_deref() != Some(name.as_str())
+    }) {
         None
     } else {
         parent
@@ -13802,7 +13938,7 @@ pub fn file_placement(
                  parent's project; --top -p {asked} files at the top of {asked}\n",
                 parent.as_deref().unwrap_or_default()
             ));
-            Some(home.to_string())
+            Some(home)
         }
         (_, None, Some((name, why))) => {
             if passed_over.is_none() {
@@ -13810,7 +13946,14 @@ pub fn file_placement(
             }
             Some(name)
         }
-        (home, asked, _) => asked.or_else(|| home.map(str::to_string)),
+        (home, asked, _) => asked.or(home),
+    };
+    let project = match project {
+        Some(name) => match project_name(&name) {
+            Ok(name) => Some(name),
+            Err(err) => return (None, None, Some(format!("{err}\n"))),
+        },
+        None => None,
     };
     if let (Some(id), Some(proj)) = (parent.as_deref(), project.as_deref()) {
         if from_hold && passed_over.is_none() {
@@ -24779,9 +24922,10 @@ pub(crate) fn workflow_child(
     stage: Stage,
     title: &str,
 ) -> Result<String> {
+    let project = project_name(project).map_err(anyhow::Error::msg)?;
     let said = run_captured(
         "vissue",
-        &["q", "-p", project, "--parent", parent, "-t", kind, title],
+        &["q", "-p", &project, "--parent", parent, "-t", kind, title],
     )?;
     let id = said.stdout.trim().to_string();
     if id.is_empty() {
@@ -38365,7 +38509,8 @@ pub fn file_issue(
     quiet: bool,
     quorum_deadline: Option<(usize, &str)>,
 ) -> Result<(String, String, String, Result<String>)> {
-    let mut argv: Vec<String> = vec!["create".into(), "-p".into(), project.into()];
+    let project = project_name(project).map_err(anyhow::Error::msg)?;
+    let mut argv: Vec<String> = vec!["create".into(), "-p".into(), project];
     for (flag, value) in [
         ("--parent", parent),
         ("-t", kind),
@@ -40857,6 +41002,12 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
         }
     }
     if !saw_file {
+        return None;
+    }
+    // A nested board's heading can be `Software/hle-mm-yled` while the
+    // caller asked for `hle-mm-yled`. That is one ticket. The walk above
+    // still counts an id that is written the same way in two trackers.
+    if issue_spot::find(id).is_some() {
         return None;
     }
     prefixes.sort();
@@ -50998,6 +51149,8 @@ pub fn bump_plan(
     generation: Option<&str>,
     dry: bool,
 ) -> Result<(String, Vec<BumpRow>)> {
+    let project = project_name(project).map_err(anyhow::Error::msg)?;
+    let project = project.as_str();
     let (generation, mut rows) = bump_rows(bundle, project, generation)?;
     if dry {
         return Ok((generation, rows));
@@ -55587,6 +55740,76 @@ mod tests {
             said.contains("`ljos file --parent wt-pareback7-ab12 TITLE`"),
             "{said}"
         );
+    }
+
+    /// `-p Software/hle-mm` is the org prefix twice. The write uses `hle-mm`.
+    /// A slash that is not that prefix is refused, and the line names the form.
+    #[test]
+    fn a_project_path_loses_a_repeated_root_or_is_refused() {
+        let _cwd = super::test_env_lock();
+        let away = tempfile::tempdir().unwrap();
+        let tracker = away.path().join("tracker");
+        std::fs::create_dir_all(tracker.join("Software")).unwrap();
+        let back = std::env::current_dir().unwrap();
+        std::env::set_current_dir(away.path()).unwrap();
+        struct Back(std::path::PathBuf);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _back = Back(back);
+        let before = (
+            std::env::var_os("VISSUE_ROOT"),
+            std::env::var_os("ISSUE_ROOT"),
+            std::env::var_os("VISSUE_PREFIX"),
+        );
+        unsafe {
+            std::env::set_var("VISSUE_ROOT", &tracker);
+            std::env::remove_var("ISSUE_ROOT");
+            std::env::remove_var("VISSUE_PREFIX");
+        }
+        assert_eq!(project_name("hle-mm").unwrap(), "hle-mm");
+        assert_eq!(project_name("Software/hle-mm").unwrap(), "hle-mm");
+        assert_eq!(project_name("tracker/Software/hle-mm").unwrap(), "hle-mm");
+        let err = project_name("foo/bar").unwrap_err();
+        assert!(err.contains("pass -p bar"), "{err}");
+        assert!(err.contains("not -p foo/bar"), "{err}");
+        assert!(!err.contains('\n'), "{err}");
+        let (parent, project, said) =
+            file_placement(true, None, Some("Software/hle-mm".into()), None);
+        assert_eq!(parent, None);
+        assert_eq!(project.as_deref(), Some("hle-mm"));
+        assert!(said.is_none(), "{said:?}");
+        let (parent, project, said) = file_placement(false, None, Some("acme/cli".into()), None);
+        assert!(parent.is_none());
+        assert!(project.is_none());
+        let said = said.expect("a refusal");
+        assert!(said.contains("pass -p cli"), "{said}");
+        assert!(said.starts_with("project: "), "{said}");
+        let (parent, project, said) =
+            file_placement(false, None, None, Some("Software/hle-mm-yled".into()));
+        assert_eq!(parent.as_deref(), Some("Software/hle-mm-yled"));
+        assert_eq!(project.as_deref(), Some("hle-mm"));
+        let said = said.expect("the hold line");
+        assert!(
+            said.contains("filed under Software/hle-mm-yled in hle-mm"),
+            "{said}"
+        );
+        unsafe {
+            match before.0 {
+                Some(v) => std::env::set_var("VISSUE_ROOT", v),
+                None => std::env::remove_var("VISSUE_ROOT"),
+            }
+            match before.1 {
+                Some(v) => std::env::set_var("ISSUE_ROOT", v),
+                None => std::env::remove_var("ISSUE_ROOT"),
+            }
+            match before.2 {
+                Some(v) => std::env::set_var("VISSUE_PREFIX", v),
+                None => std::env::remove_var("VISSUE_PREFIX"),
+            }
+        }
     }
 
     #[test]

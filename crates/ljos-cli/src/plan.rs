@@ -29,7 +29,7 @@ pub fn open_plan(project: Option<&str>, title: &str, items: &[String]) -> Result
         bail!("plan: the title is empty");
     }
     let items = clean_items(items)?;
-    let project = named_project(project);
+    let project = crate::project_name(&named_project(project)).map_err(anyhow::Error::msg)?;
     let _held = Batch::enter();
     let layout = vissue_core::Layout::resolve(None, None)?;
     let parent = create(&layout, &project, title, None, "plan")?;

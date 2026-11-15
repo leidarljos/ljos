@@ -251,6 +251,7 @@ fn file_task(task: &str, repo: Option<&str>) -> Result<String, String> {
         .filter(|name| !name.is_empty() && *name != "." && *name != "..")
         .unwrap_or("work")
         .to_string();
+    let project = super::project_name(&project)?;
     let dir = layout.projects_dir().join(&project);
     std::fs::create_dir_all(&dir).map_err(|err| format!("ljos_start: {err}"))?;
     let made = vissue_core::ops::create(

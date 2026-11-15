@@ -1145,10 +1145,15 @@ fn child_titles(issue: &str) -> Vec<String> {
 }
 
 fn file_child(parent: &str, project: &str, title: &str, depth: usize) -> Result<String> {
+    let project = if project.is_empty() {
+        String::new()
+    } else {
+        crate::project_name(project).map_err(anyhow::Error::msg)?
+    };
     let mut args = vec!["q".to_string()];
     if !project.is_empty() {
         args.push("-p".into());
-        args.push(project.to_string());
+        args.push(project);
     }
     args.extend([
         "--parent".into(),
