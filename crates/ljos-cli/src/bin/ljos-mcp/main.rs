@@ -63,12 +63,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn serve() -> anyhow::Result<()> {
-    ljos_cli::normalize_tracker_env();
-    ljos_cli::load_seat_env();
+    // `initialize` and `tools/list` run before the tracker, the pack, a
+    // login shell or a seat file. A missing tracker is a tool error. A
+    // configured MCP command is checked by `ljos doctor`, not here: that
+    // check can start a login shell.
     ljos_cli::config_diag::emit();
-    if let Some(line) = ljos_cli::cloud::missing_mcp_line() {
-        eprintln!("{line}");
-    }
     // One process is one connection. A later seat argument cannot mint a
     // second session for a ballot.
     ljos_cli::ballot_sig::pin_connection_session(None);

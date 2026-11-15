@@ -1299,6 +1299,32 @@ fn refused(e: anyhow::Error) -> McpError {
     McpError::internal_error(text, None)
 }
 
+/// One sentence when `name` needs a tracker and this process has none.
+/// An empty id keeps the refusal that names the empty field.
+fn tracker_refusal(
+    name: &str,
+    args: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<&'static str> {
+    let text = |key: &str| {
+        args.and_then(|map| map.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let needs = match name {
+        "ljos_file" | "ljos_options" | "ljos_start" | "ljos_deed" => true,
+        "ljos_note" | "ljos_finish" => text("issue").is_some(),
+        "ljos_claim" | "ljos_release" | "ljos_complete" => text("node").is_some(),
+        // A sitting on an unknown id names that id. The tracker sentence
+        // would hide it.
+        _ => false,
+    };
+    if !needs {
+        return None;
+    }
+    ljos_cli::tracker_place::missing_tracker_line()
+}
+
 /// Run a habitat's verb and hand back what it said.
 fn habitat(bin: &str, args: &[&str]) -> Result<Json<Said>, McpError> {
     run_captured(bin, args).map(said).map_err(refused)
@@ -3823,6 +3849,12 @@ impl ServerHandler for LjosServer {
                 ))])
                 .into(),
             ));
+        }
+        // The seat file can name the tracker. Read it before deciding the
+        // tracker is missing. A fifo is not opened.
+        ljos_cli::load_seat_env();
+        if let Some(line) = tracker_refusal(&request.name, request.arguments.as_ref()) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(line)]).into());
         }
         let name = request.name.to_string();
         let _activity = ljos_cli::idle_drop::call_started();

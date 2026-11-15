@@ -38,7 +38,7 @@ pub fn drop_after() -> Option<Duration> {
 
 /// The `[mcp] idle_drop` of one file, or `None` when the file sets none.
 fn configured(path: &Path) -> Option<Option<Duration>> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = crate::read_plain_file(path).ok()?;
     let value = toml::from_str::<toml::Value>(&text).ok()?;
     match value.get("mcp")?.get("idle_drop")? {
         toml::Value::Integer(secs) => Some(u64::try_from(*secs).ok().and_then(window)),
@@ -92,7 +92,7 @@ pub fn orphan_after() -> Option<Duration> {
 }
 
 fn configured_orphan(path: &Path) -> Option<Option<Duration>> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = crate::read_plain_file(path).ok()?;
     let value = toml::from_str::<toml::Value>(&text).ok()?;
     match value.get("mcp")?.get("orphan_idle")? {
         toml::Value::Integer(secs) => Some(u64::try_from(*secs).ok().and_then(window)),

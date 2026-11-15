@@ -216,7 +216,7 @@ pub fn root_line(text: &str) -> Option<&str> {
 /// expanded. `None` when there is no configuration or it names none.
 #[must_use]
 pub fn configured() -> Option<PathBuf> {
-    let text = std::fs::read_to_string(config_path()?).ok()?;
+    let text = crate::read_plain_file(&config_path()?).ok()?;
     let value: toml::Value = toml::from_str(root_line(&text)?).ok()?;
     let named = value.get("root")?.as_str()?.trim();
     (!named.is_empty()).then(|| crate::expand(named))
@@ -574,6 +574,29 @@ pub fn pinned(value: &str) -> bool {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_deref()
         .is_some_and(|root| root == Path::new(value))
+}
+
+/// One sentence when this process has no tracker to write.
+///
+/// A root named in the environment or in the seat's vissue configuration
+/// is that tracker, and so is a `vissue.toml` in the working directory.
+/// A bare `Software/` directory is not.
+pub const MISSING_TRACKER: &str = "No tracker found: set VISSUE_ROOT to the tracker checkout.";
+
+/// [`MISSING_TRACKER`] when nothing names a tracker. `None` when a later
+/// call can use the one that is named.
+#[must_use]
+pub fn missing_tracker_line() -> Option<&'static str> {
+    if named_in_env() || configured().is_some() {
+        return None;
+    }
+    let standing = std::env::current_dir()
+        .ok()
+        .is_some_and(|here| here.join("vissue.toml").is_file());
+    if standing {
+        return None;
+    }
+    Some(MISSING_TRACKER)
 }
 
 /// The tracker `ljos onboard` makes when nothing names one:
@@ -946,6 +969,38 @@ mod tests {
         assert_eq!(from_ledger, None);
         assert_eq!(from_link, None);
         assert_eq!(board_only.as_deref(), Some(boards.as_path()));
+    }
+
+    #[test]
+    fn a_missing_tracker_is_one_sentence() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let saved = (
+            std::env::var_os("HOME"),
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("VISSUE_ROOT"),
+            std::env::var_os("ISSUE_ROOT"),
+            std::env::var_os("VISSUE_CONFIG"),
+        );
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("XDG_CONFIG_HOME", dir.path().join(".config"));
+        std::env::remove_var("VISSUE_ROOT");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::remove_var("VISSUE_CONFIG");
+        let missing = missing_tracker_line();
+        std::env::set_var("VISSUE_ROOT", dir.path());
+        let named = missing_tracker_line();
+        let restore = |key: &str, value: Option<std::ffi::OsString>| match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        };
+        restore("HOME", saved.0);
+        restore("XDG_CONFIG_HOME", saved.1);
+        restore("VISSUE_ROOT", saved.2);
+        restore("ISSUE_ROOT", saved.3);
+        restore("VISSUE_CONFIG", saved.4);
+        assert_eq!(missing, Some(MISSING_TRACKER));
+        assert_eq!(named, None);
     }
 
     #[test]

@@ -3259,6 +3259,7 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
             | Cmd::Finish { .. }
             | Cmd::Hook(_)
             | Cmd::Help { .. }
+            | Cmd::Mcp { .. }
             | Cmd::Completions { .. }
             | Cmd::Doctor { .. }
             | Cmd::Record { .. }
@@ -3273,6 +3274,44 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
                 cmd: MemoryCmd::Integrate { dry_run: true, .. },
             }
     )
+}
+
+/// Arguments for `ljos-mcp` when this process is `ljos mcp` and should
+/// serve. `None` for every other command, and for `ljos mcp --help`, which
+/// keeps the command page.
+fn mcp_serve_args() -> Option<Vec<std::ffi::OsString>> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut index = 0;
+    while index < args.len() {
+        let word = args[index].to_string_lossy();
+        if word == "--" {
+            return None;
+        }
+        if word == "--seat" {
+            index += 2;
+            continue;
+        }
+        if let Some(value) = word.strip_prefix("--seat=") {
+            if value.is_empty() {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        if word.starts_with('-') {
+            return None;
+        }
+        break;
+    }
+    match args.get(index) {
+        Some(arg) if arg == "mcp" => {}
+        _ => return None,
+    }
+    let rest = &args[index + 1..];
+    if rest.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return None;
+    }
+    Some(rest.to_vec())
 }
 
 /// Pull `--seat NAME` off the command line. It names this process, and
@@ -4075,6 +4114,14 @@ fn dispatch_hook(seat_flag: Option<String>, hook: HookArgs) -> Result<()> {
 }
 
 fn run_command() -> Result<()> {
+    // The tool server answers before the seat, the tracker or the pack is
+    // read. Those can exit, block or write, and `initialize` needs none of
+    // them. `--help` stays here so the command page is this binary's.
+    if let Some(args) = mcp_serve_args() {
+        let err = ljos_cli::exec_server(&args);
+        eprintln!("ljos: {err:#}");
+        std::process::exit(1);
+    }
     // `--help` exits before the seat is read. `ljos help` is a command.
     if root_help_only() {
         print!("{}", help_groups::render(&Cli::command(), false));
@@ -4168,7 +4215,8 @@ fn run_command() -> Result<()> {
         | Cmd::Offboard { .. }
         | Cmd::Uninstall { .. }
         | Cmd::Help { .. }
-        | Cmd::Completions { .. } => {}
+        | Cmd::Completions { .. }
+        | Cmd::Mcp { .. } => {}
         _ => {
             ljos_cli::runner_skills::refresh_on_new_version();
             ljos_cli::runner_env::refresh_on_new_version();

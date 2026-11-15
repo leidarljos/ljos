@@ -320,7 +320,7 @@ fn write_stamp() {
 pub fn refresh_on_new_version() {
     let want = refresh_identity();
     if stamp_path()
-        .is_some_and(|path| std::fs::read_to_string(path).is_ok_and(|text| text.trim() == want))
+        .is_some_and(|path| crate::read_plain_file(&path).is_ok_and(|text| text.trim() == want))
     {
         return;
     }

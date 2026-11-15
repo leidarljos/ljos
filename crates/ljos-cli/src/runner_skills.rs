@@ -209,7 +209,7 @@ fn stamp_path() -> Option<PathBuf> {
 fn stamp_is_current() -> bool {
     let want = refresh_identity();
     stamp_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|path| crate::read_plain_file(&path).ok())
         .is_some_and(|text| text.trim() == want)
 }
 

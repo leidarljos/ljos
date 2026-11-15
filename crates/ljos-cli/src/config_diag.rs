@@ -1248,7 +1248,7 @@ fn parse_file(layer: &Layer, warnings: &mut Vec<String>, found: &mut Vec<Found>)
         ));
         return;
     }
-    let text = match std::fs::read_to_string(&layer.path) {
+    let text = match crate::read_plain_file(&layer.path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
         Err(err) => {

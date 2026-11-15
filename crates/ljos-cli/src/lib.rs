@@ -1288,7 +1288,7 @@ pub fn harnesses_path() -> PathBuf {
 ///
 /// A file that is present and not this shape.
 pub fn harnesses_from(path: &Path) -> Result<Harnesses> {
-    match std::fs::read_to_string(path) {
+    match read_plain_file(path) {
         Ok(text) => toml::from_str(&text).with_context(|| format!("{}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Harnesses::default()),
         Err(e) => Err(e).with_context(|| format!("{}", path.display())),
@@ -4481,7 +4481,7 @@ fn conversation_derived_seat() -> Option<String> {
 /// map. A name that is only the placeholder `seat` is not an entry.
 pub(crate) fn mapped_box_seat() -> Option<String> {
     let path = config_base()?.join("ljos").join("seats.toml");
-    let text = std::fs::read_to_string(&path).ok()?;
+    let text = read_plain_file(&path).ok()?;
     let value = toml::from_str::<toml::Value>(&text).ok()?;
     let table = value.as_table()?;
     let ids: Vec<String> = stamped_sessions().into_iter().map(|(_, id)| id).collect();
@@ -18575,13 +18575,31 @@ pub const SEAT_WORKSPACE: &str = "seat";
 /// Load `~/.config/ljos/env` (KEY=VALUE) when the process has not set
 /// those keys. The shell, the hooks, and the MCP seat then share one pack
 /// and one `LJOS_SEAT`.
+/// The text of a regular file. A fifo, a socket or a device is not opened:
+/// reading one waits for a writer, and the tool server has to answer
+/// `initialize` without waiting on the working directory.
+pub(crate) fn read_plain_file(path: &Path) -> std::io::Result<String> {
+    use std::os::unix::fs::FileTypeExt as _;
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() {
+        let kind = meta.file_type();
+        if kind.is_fifo() || kind.is_socket() || kind.is_block_device() || kind.is_char_device() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+    }
+    std::fs::read_to_string(path)
+}
+
 pub fn load_seat_env() {
     with_env_mutation(|| {
         let Ok(home) = home() else {
             return;
         };
         let path = home.join(".config/ljos/env");
-        let Ok(text) = std::fs::read_to_string(path) else {
+        let Ok(text) = read_plain_file(&path) else {
             return;
         };
         for line in text.lines() {
