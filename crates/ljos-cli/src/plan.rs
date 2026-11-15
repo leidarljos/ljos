@@ -119,7 +119,7 @@ pub fn ready_mine(project: Option<&str>) -> Result<String> {
             continue;
         }
         match next_open(&recs, &rec.heading.id) {
-            Some((id, title)) => out.push_str(&format!("next: {id}  {title}\n")),
+            Some((id, title)) => out.push_str(&titled(&format!("next: {id}  "), &title)),
             None => out.push_str(&format!("{}  plan complete\n", rec.heading.id)),
         }
     }
@@ -140,7 +140,7 @@ pub fn next_item_line(issue: &str) -> String {
         return String::new();
     };
     match next_open(&recs, &parent) {
-        Some((id, title)) => format!("next: {id}  {title}\n"),
+        Some((id, title)) => titled(&format!("next: {id}  "), &title),
         None => "plan complete\n".to_string(),
     }
 }
@@ -257,18 +257,25 @@ fn mark_ordered(id: &str) -> Result<()> {
 }
 
 fn render(parent: &str, title: &str, children: &[(String, String)], committed: &str) -> String {
-    let mut out = format!("{parent}  {title}\n");
+    let mut out = titled(&format!("{parent}  "), title);
     for (id, item) in children {
-        out.push_str(&format!("  {id}  {item}\n"));
+        out.push_str(&titled(&format!("  {id}  "), item));
     }
     if let Some((id, item)) = children.first() {
-        out.push_str(&format!("next: {id}  {item}\n"));
+        out.push_str(&titled(&format!("next: {id}  "), item));
     }
     out.push_str(committed);
     if !out.ends_with('\n') {
         out.push('\n');
     }
     out
+}
+
+fn titled(lead: &str, title: &str) -> String {
+    format!(
+        "{}\n",
+        crate::scan::line_with_title(lead, title, crate::scan::COLS)
+    )
 }
 
 fn load_recs() -> Result<Vec<vissue_core::views::IssueRec>> {
@@ -514,5 +521,27 @@ mod tests {
         let ticked = tick_checklist(&opened.children[2].0).unwrap().unwrap();
         assert!(ticked.contains("plan complete"), "{ticked}");
         assert!(tick_checklist("day-nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_long_plan_title_stays_on_the_line() {
+        let title = "guard: tmux by full path, renamed binary, -L or -S bypasses send-keys checks";
+        let text = render(
+            "day-1",
+            title,
+            &[("day-2".into(), title.into())],
+            "tracker: committed\n",
+        );
+        for line in text.lines().filter(|line| !line.starts_with("tracker:")) {
+            assert!(line.chars().count() <= crate::scan::COLS, "{line}");
+            assert!(line.contains("guard:") && line.ends_with("..."), "{line}");
+        }
+        assert!(text.lines().any(|line| line.starts_with("day-1  guard:")));
+        assert!(text.lines().any(|line| line.starts_with("next: day-2  ")));
+        let blank = titled("day-0  ", "  ");
+        assert!(
+            blank.ends_with(&format!("{}\n", crate::scan::NO_TITLE)),
+            "{blank}"
+        );
     }
 }

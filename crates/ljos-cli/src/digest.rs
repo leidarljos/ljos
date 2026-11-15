@@ -7,7 +7,7 @@
 
 use anyhow::{bail, Result};
 use chrono::TimeZone;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::TrackerAct;
@@ -180,7 +180,17 @@ fn show(since: Option<&str>, json: bool, mark: bool, guard_commands: bool) -> Re
             &rows,
         ))
     } else {
-        Ok(render_human(banner.as_deref(), &prelude, &cutoff, &rows))
+        let mut titles = BTreeMap::new();
+        for (_project, heading) in &headings {
+            titles.insert(heading.id.clone(), heading.title.clone());
+        }
+        Ok(render_human(
+            banner.as_deref(),
+            &prelude,
+            &cutoff,
+            &rows,
+            &titles,
+        ))
     }
 }
 
@@ -980,7 +990,28 @@ fn dedup(rows: &mut Vec<Row>) {
     *rows = kept;
 }
 
-fn render_human(banner: Option<&str>, prelude: &str, cutoff: &str, rows: &[Row]) -> String {
+/// One digest row. A ticket's title stays on that line. JSON is built
+/// separately and keeps the event text unchanged.
+fn digest_line(event: &Row, titles: &BTreeMap<String, String>) -> String {
+    let clock = wall(event.at);
+    if event.kind == "ticket" {
+        let title = titles.get(&event.issue).map(String::as_str).unwrap_or("");
+        return crate::scan::line_with_title(
+            &format!("  {clock}  {}  ", event.text),
+            title,
+            crate::scan::COLS,
+        );
+    }
+    format!("  {clock}  {}", event.text)
+}
+
+fn render_human(
+    banner: Option<&str>,
+    prelude: &str,
+    cutoff: &str,
+    rows: &[Row],
+    titles: &BTreeMap<String, String>,
+) -> String {
     let mut out = String::new();
     if let Some(banner) = banner {
         out.push_str(banner);
@@ -1011,7 +1042,8 @@ fn render_human(banner: Option<&str>, prelude: &str, cutoff: &str, rows: &[Row])
         out.push_str(&seat);
         out.push('\n');
         for event in events {
-            out.push_str(&format!("  {}  {}\n", wall(event.at), event.text));
+            out.push_str(&digest_line(event, titles));
+            out.push('\n');
         }
     }
     out
@@ -1474,6 +1506,40 @@ pub(crate) fn note_policyd_line(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_digest_ticket_line_keeps_the_title() {
+        let title = "guard: tmux by full path, renamed binary, -L or -S bypasses send-keys checks";
+        let row = Row::new(
+            1_700_000_000,
+            "ada".into(),
+            "ticket",
+            "filed ljos-633g".into(),
+            "ljos-633g",
+            false,
+        );
+        let mut titles = BTreeMap::new();
+        titles.insert("ljos-633g".into(), title.into());
+        let line = digest_line(&row, &titles);
+        assert!(line.chars().count() <= crate::scan::COLS, "{line}");
+        assert!(line.contains("filed ljos-633g"), "{line}");
+        assert!(line.contains("guard:"), "{line}");
+        assert!(line.ends_with("..."), "{line}");
+        let blank = digest_line(
+            &Row::new(
+                1_700_000_000,
+                "ada".into(),
+                "ticket",
+                "filed ljos-blank".into(),
+                "ljos-blank",
+                false,
+            ),
+            &BTreeMap::new(),
+        );
+        assert!(blank.ends_with(crate::scan::NO_TITLE), "{blank}");
+        assert!(blank.chars().count() <= crate::scan::COLS, "{blank}");
+    }
+
     use std::os::unix::fs::PermissionsExt;
 
     fn git(dir: &std::path::Path, args: &[&str], date: &str) {

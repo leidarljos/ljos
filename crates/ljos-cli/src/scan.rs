@@ -8,6 +8,49 @@
 /// Columns a human page fits, including a pipe read in an 80-column terminal.
 pub const COLS: usize = 80;
 
+/// What a text page prints when a ticket has no title.
+/// JSON keeps the empty string.
+pub const NO_TITLE: &str = "(no title)";
+
+const TITLE_CUT: &str = "...";
+
+/// A title that stays on one ticket line.
+///
+/// A blank title is [`NO_TITLE`]. A title longer than `room` columns is cut
+/// with `...`. The cut counts characters, so a letter such as `Þ` is one
+/// column. `room` of zero yields an empty string.
+#[must_use]
+pub fn fit_title(title: &str, room: usize) -> String {
+    let flat = title.replace(['\n', '\r', '\t'], " ");
+    let flat = flat.trim();
+    if flat.is_empty() {
+        if NO_TITLE.chars().count() <= room {
+            return NO_TITLE.to_string();
+        }
+        return NO_TITLE.chars().take(room).collect();
+    }
+    if flat.chars().count() <= room {
+        return flat.to_string();
+    }
+    let dots = TITLE_CUT.chars().count();
+    if room <= dots {
+        return flat.chars().take(room).collect();
+    }
+    let mut cut: String = flat.chars().take(room - dots).collect();
+    cut.push_str(TITLE_CUT);
+    cut
+}
+
+/// `lead` and the title on one line of at most `cols` columns.
+///
+/// `lead` includes the spaces before the title. The title is not wrapped
+/// onto the next line. A blank title is [`NO_TITLE`].
+#[must_use]
+pub fn line_with_title(lead: &str, title: &str, cols: usize) -> String {
+    let room = cols.saturating_sub(lead.chars().count());
+    format!("{lead}{}", fit_title(title, room))
+}
+
 /// Whether a human page may keep ANSI. `NO_COLOR` set to a non-empty
 /// value turns color off, and so does a stdout that is not a terminal.
 #[must_use]
@@ -694,7 +737,16 @@ struct ReadyRow {
 
 fn parse_ready(line: &str) -> Option<ReadyRow> {
     let line = line.trim_end();
-    if line.len() < 39 || !line.is_ascii() {
+    // The id, state and priority are ASCII columns. The title may hold
+    // any letter, so the rest of the line is not required to be ASCII.
+    // A line that ends on the priority has a blank title. Trailing spaces
+    // were already removed, so that line is 37 columns.
+    if line.len() < 37
+        || !line
+            .as_bytes()
+            .get(..37)
+            .is_some_and(|prefix| prefix.is_ascii())
+    {
         return None;
     }
     let id = line.get(..22)?.trim();
@@ -710,7 +762,11 @@ fn parse_ready(line: &str) -> Option<ReadyRow> {
         return None;
     }
     let priority = mark[2..3].to_string();
-    let rest = line.get(37..)?.strip_prefix("  ")?;
+    let rest = line
+        .get(37..)
+        .unwrap_or("")
+        .strip_prefix("  ")
+        .unwrap_or("");
     let (title, claim) = split_claim(rest);
     Some(ReadyRow {
         id: id.to_string(),
@@ -732,19 +788,7 @@ fn split_claim(rest: &str) -> (&str, &str) {
 
 fn ready_row(row: &ReadyRow) -> String {
     let head = format!("{}  {}  [#{}]", row.id, row.state, row.priority);
-    let with_title = if row.title.is_empty() {
-        head.clone()
-    } else {
-        format!("{head}  {}", row.title)
-    };
-    let mut out = if with_title.chars().count() <= COLS {
-        with_title
-    } else {
-        let mut out = head;
-        out.push('\n');
-        out.push_str(&wrap_hang(&row.title, COLS, "  ", "  "));
-        out
-    };
+    let mut out = line_with_title(&format!("{head}  "), &row.title, COLS);
     if !row.claim.is_empty() {
         out.push('\n');
         out.push_str(&wrap_hang(&row.claim, COLS, "  ", "  "));
@@ -788,6 +832,64 @@ mod tests {
         let plain = ready_text(colored);
         assert!(!plain.contains('\u{1b}'), "{plain}");
         assert!(plain.contains("Kiln damper schedule"), "{plain}");
+    }
+
+    /// Headings taken from tickets whose titles used to leave the line.
+    /// The first is an org heading whose title is everything after the
+    /// priority and before the tag. A blank title is named. A letter
+    /// outside ASCII stays one column.
+    #[test]
+    fn a_long_title_stays_on_the_ready_line() {
+        let shapes = [
+            (
+                "ljos-633g",
+                "TODO",
+                "A",
+                "guard: tmux by full path, renamed binary, -L or -S bypasses send-keys checks",
+            ),
+            (
+                "ljos-tile",
+                "STARTED",
+                "A",
+                "Glaze the tile after reading https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4/workshop-north/session-that-is-one-long-url",
+            ),
+            ("ljos-blank", "TODO", "C", ""),
+            (
+                "ljos-ice",
+                "TODO",
+                "B",
+                "Þéttingin í ofninum í Reykjavík er gömul og þarf nýja þéttingu áður en morguneldurinn kviknar í verkstæðinu",
+            ),
+        ];
+        let mut raw = String::new();
+        for (id, state, priority, title) in shapes {
+            raw.push_str(&format!("{id:<22} {state:<9} [#{priority}]  {title}\n"));
+        }
+        let text = ready_text(&raw);
+        assert!(text.contains("ready  shown 4 of 4"), "{text}");
+        for (id, state, priority, title) in shapes {
+            let lead = format!("{id}  {state}  [#{priority}]  ");
+            let want = line_with_title(&lead, title, COLS);
+            let line = text
+                .lines()
+                .find(|line| line.starts_with(id))
+                .unwrap_or_else(|| panic!("no ticket line for {id}\n{text}"));
+            assert_eq!(line, want, "{text}");
+            assert!(line.chars().count() <= COLS, "{line}");
+            assert!(
+                line.contains(priority) && !line.ends_with(&format!("[#{priority}]")),
+                "the ticket line ends at the priority: {line}"
+            );
+        }
+        assert!(
+            !text.lines().any(|line| line.starts_with("  guard:")),
+            "{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("ljos-blank") && line.ends_with(NO_TITLE)),
+            "{text}"
+        );
     }
 
     #[test]

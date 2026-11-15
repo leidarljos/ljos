@@ -24478,7 +24478,13 @@ pub fn workflow_status_of(
         .max(rounds.len());
     let open: Vec<WorkflowChild> = children.iter().filter(|c| c.open()).cloned().collect();
     let first_open = |stage: Stage| open.iter().find(|c| c.stage == stage);
-    let sit = |c: &WorkflowChild| format!("`ljos sitting {}` ({})", c.id, c.title);
+    let sit = |c: &WorkflowChild| {
+        let lead = format!("`ljos sitting {}` (", c.id);
+        // `next: ` is printed in front of this citation. The title stays
+        // inside the parentheses on that line.
+        let room = scan::COLS.saturating_sub(6 + lead.chars().count() + 1);
+        format!("{lead}{})", scan::fit_title(&c.title, room))
+    };
     let mut passed = false;
     let (stage, next) = if !children.iter().any(|c| c.stage == Stage::Design) {
         (
@@ -24551,13 +24557,9 @@ pub fn format_workflow_status(s: &WorkflowStatus) -> String {
         s.name, s.parent, s.round, s.stage, s.next
     );
     for c in &s.open {
-        out.push_str(&format!(
-            "  open {} ({}, {}) {}\n",
-            c.id,
-            c.stage.word(),
-            c.state,
-            c.title
-        ));
+        let lead = format!("  open {} ({}, {}) ", c.id, c.stage.word(), c.state);
+        out.push_str(&scan::line_with_title(&lead, &c.title, scan::COLS));
+        out.push('\n');
     }
     out
 }
@@ -40941,7 +40943,7 @@ fn format_timeline(
     now: &str,
 ) -> String {
     let today = days_of_stamp(Some(now)).unwrap_or(0);
-    let mut out = scan::wrap(&format!("timeline of {issue}: {title}"), scan::COLS);
+    let mut out = scan::line_with_title(&format!("timeline of {issue}: "), title, scan::COLS);
     out.push('\n');
     out.push_str(&scan::count_line(
         "events",
@@ -41503,7 +41505,7 @@ impl SectionCursor {
 
     fn heading_titled(&mut self, out: &mut String, name: &str, title: &str) {
         self.advance(name);
-        out.push_str(&format!("== {name}: {title}\n"));
+        out.push_str(&sitting_heading(name, title));
     }
 
     /// The block already carries its `== name` line. An empty block leaves
@@ -41528,6 +41530,14 @@ impl SectionCursor {
             );
         }
     }
+}
+
+/// `== name: title` on one line. A long title is cut. A blank title is named.
+fn sitting_heading(name: &str, title: &str) -> String {
+    format!(
+        "{}\n",
+        scan::line_with_title(&format!("== {name}: "), title, scan::COLS)
+    )
 }
 
 /// Open a sitting on an issue, in [`SITTING_SECTIONS`] order, and stop at the
@@ -41694,19 +41704,7 @@ fn format_show(card: &Value) -> String {
     if !priority.is_empty() {
         head.push_str(&format!("  [#{priority}]"));
     }
-    let mut out = if title.is_empty() {
-        scan::wrap(&head, scan::COLS)
-    } else {
-        let one = format!("{head}  {title}");
-        if one.chars().count() <= scan::COLS {
-            one
-        } else {
-            let mut out = head;
-            out.push('\n');
-            out.push_str(&scan::wrap_hang(title, scan::COLS, "  ", "  "));
-            out
-        }
-    };
+    let mut out = scan::line_with_title(&format!("{head}  "), title, scan::COLS);
     out.push('\n');
     let blockers = blocker_rows(card);
     if blockers.is_empty() {
@@ -43871,13 +43869,7 @@ fn open_child_close_refusal(issue: &str) -> Option<String> {
     }
     let listed = open
         .iter()
-        .map(|(id, title)| {
-            if title.is_empty() {
-                id.clone()
-            } else {
-                format!("{id} {title}")
-            }
-        })
+        .map(|(id, title)| scan::line_with_title(&format!("{id} "), title, scan::COLS))
         .collect::<Vec<_>>()
         .join("; ");
     let tickets = if open.len() == 1 { "ticket" } else { "tickets" };
@@ -82419,5 +82411,96 @@ mod claim_chunks_tests {
         assert!(chunks.len() >= 2, "{chunks:?}");
         assert!(chunks.iter().all(|c| c.chars().count() <= 480));
         assert_eq!(chunks.join(" "), text);
+    }
+
+    /// The same headings `ljos ready` keeps on one line, on show, the
+    /// timeline, a sitting heading and a workflow line.
+    #[test]
+    fn a_long_ticket_title_stays_on_the_show_line() {
+        let title = "guard: tmux by full path, renamed binary, -L or -S bypasses send-keys checks";
+        let card = serde_json::json!({
+            "id": "ljos-633g",
+            "state": "TODO",
+            "priority": "A",
+            "title": title,
+            "blocked_by": [],
+        });
+        let shown = super::format_show(&card);
+        let line = shown.lines().next().unwrap();
+        assert!(line.chars().count() <= super::scan::COLS, "{line}");
+        assert!(line.starts_with("ljos-633g  TODO  [#A]  guard:"), "{line}");
+        assert!(line.ends_with("..."), "{line}");
+        assert!(!shown.contains(&format!("\n  {title}")), "{shown}");
+        let blank = super::format_show(&serde_json::json!({
+            "id": "ljos-blank",
+            "state": "TODO",
+            "priority": "C",
+            "title": "  ",
+            "blocked_by": [],
+        }));
+        assert!(
+            blank
+                .lines()
+                .next()
+                .unwrap()
+                .ends_with(super::scan::NO_TITLE),
+            "{blank}"
+        );
+        let json = serde_json::json!({"title": title});
+        assert_eq!(json["title"], title);
+
+        let timeline = super::format_timeline(&[], "ljos-633g", title, 0, "2026-11-15");
+        let head = timeline.lines().next().unwrap();
+        assert!(head.chars().count() <= super::scan::COLS, "{head}");
+        assert!(head.starts_with("timeline of ljos-633g: guard:"), "{head}");
+        assert!(head.ends_with("..."), "{head}");
+
+        let sitting = super::sitting_heading("island", title);
+        let head = sitting.lines().next().unwrap();
+        assert!(head.chars().count() <= super::scan::COLS, "{head}");
+        assert!(head.starts_with("== island: guard:"), "{head}");
+        assert!(head.ends_with("..."), "{head}");
+        assert_eq!(
+            super::sitting_heading("island", "Fix the guard"),
+            "== island: Fix the guard\n"
+        );
+
+        let design = super::WorkflowChild {
+            id: "ljos-design".into(),
+            title: "design: notes".into(),
+            state: "DONE".into(),
+            stage: super::Stage::Design,
+        };
+        let open = super::WorkflowChild {
+            id: "ljos-633g".into(),
+            title: title.into(),
+            state: "TODO".into(),
+            stage: super::Stage::Implement,
+        };
+        let status = super::workflow_status_of(
+            "ljos-parent",
+            "feature",
+            &[design, open],
+            &[],
+            &super::workflow_config(),
+        );
+        let text = super::format_workflow_status(&status);
+        let open_line = text
+            .lines()
+            .find(|line| line.starts_with("  open "))
+            .unwrap();
+        assert!(
+            open_line.chars().count() <= super::scan::COLS,
+            "{open_line}"
+        );
+        assert!(open_line.contains("guard:"), "{open_line}");
+        assert!(open_line.ends_with("..."), "{open_line}");
+        let next = text.lines().find(|line| line.starts_with("next:")).unwrap();
+        assert!(next.chars().count() <= super::scan::COLS, "{next}");
+        assert!(
+            next.contains("ljos-633g") && next.contains("guard:"),
+            "{next}"
+        );
+        assert!(next.ends_with("...)"), "{next}");
     }
 }

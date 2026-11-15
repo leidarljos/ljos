@@ -45,8 +45,6 @@ const DEFAULT_STALE_DAYS: i64 = 7;
 /// the last three of those characters are `...` when the title is longer.
 const TITLE_SHOWN: usize = 48;
 
-const ELLIPSIS: &str = "...";
-
 /// The lines `ljos sitting` prints, from the project parse that opened `issue`.
 ///
 /// [`crate::issue_spot::find`] already parsed that project to name the
@@ -448,14 +446,7 @@ fn age_words(day: Option<NaiveDate>, today: NaiveDate) -> String {
 }
 
 fn short_title(title: &str) -> String {
-    let flat = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= TITLE_SHOWN {
-        return flat;
-    }
-    let keep = TITLE_SHOWN.saturating_sub(ELLIPSIS.chars().count());
-    let mut cut: String = flat.chars().take(keep).collect();
-    cut.push_str(ELLIPSIS);
-    cut
+    crate::scan::fit_title(title, TITLE_SHOWN)
 }
 
 /// `900`, `15m`, `6h`, `2d`. A bare number is seconds, the unit `LJOS_LEASE_SECS` uses.
