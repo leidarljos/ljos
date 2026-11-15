@@ -29,13 +29,22 @@ fn content_length(head: &str) -> usize {
 }
 
 fn serve(embedder: &str) -> Seat {
+    serve_hits(
+        embedder,
+        r#"{"hits":[{"id":"k1","kind":"lesson","text":"the kiln fires at dusk","score":0.8,"ts":"2026-01-01T00:00:00.000Z","entities":["horizon:standing","seat:travel"],"ballots":2,"of":2}],"rank":"fused"}"#,
+    )
+}
+
+fn serve_hits(embedder: &str, search_body: &str) -> Seat {
     let home = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let embedder = embedder.to_string();
+    let search_body = search_body.to_string();
     std::thread::spawn(move || {
         for conn in listener.incoming().flatten() {
             let embedder = embedder.clone();
+            let search_body = search_body.clone();
             std::thread::spawn(move || {
                 let mut sock = conn;
                 let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
@@ -61,7 +70,7 @@ fn serve(embedder: &str) -> Seat {
                 let body = if path == "/v1/status" {
                     format!(r#"{{"embedder":{embedder},"live":0,"live_cap":0}}"#)
                 } else if path == "/v1/search" {
-                    r#"{"hits":[{"id":"k1","kind":"lesson","text":"the kiln fires at dusk","score":0.8,"ts":"2026-01-01T00:00:00.000Z","entities":["horizon:standing","seat:travel"],"ballots":2,"of":2}],"rank":"fused"}"#.to_string()
+                    search_body
                 } else if path == "/v1/atoms" {
                     r#"{"atoms":[]}"#.to_string()
                 } else {
@@ -145,7 +154,6 @@ fn assert_search_line(stderr: &str, want: &str, state: &str) {
 
 #[test]
 fn each_encoder_state_names_itself_on_doctor_and_on_search() {
-    let rerun = "ljos search kiln";
     let install = ljos_cli::ENCODER_INSTALL_COMMAND;
     let restart = ljos_cli::ENCODER_RESTART_COMMAND;
     let cases: &[(&str, &str)] = &[
@@ -195,11 +203,8 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
         };
         let search_line = match *name {
             "ready" => "matched by meaning".to_string(),
-            "loading with remaining_ms" => format!(
-                "The encoder is loading and is ready in about 120 s, so rerun `{rerun}`."
-            ),
-            "loading without remaining_ms" => {
-                format!("The encoder is loading, so rerun `{rerun}` when it is ready.")
+            "loading with remaining_ms" | "loading without remaining_ms" => {
+                "These are word-match results while the encoder loads.".to_string()
             }
             "failed" => format!(
                 "The encoder failed (the runtime is missing), so these rows match words; run `{restart}`."
@@ -250,11 +255,111 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
             "{name}: search took {elapsed:?}, past LJOS_SEARCH_WAIT\n{search_err}"
         );
         assert_search_line(&search_err, &search_line, name);
-        if !name.starts_with("loading") {
+        if name.starts_with("loading") {
+            assert!(
+                search_out.contains("the kiln fires at dusk"),
+                "{name}: the word-ranked row was not printed\n{search_out}"
+            );
+            assert!(
+                !search_err.contains("rerun"),
+                "{name}: a page with rows said to rerun\n{search_err}"
+            );
+        } else {
             assert!(
                 !search_err.contains("is loading"),
                 "{name}: search said the encoder was loading\n{search_err}"
             );
         }
+    }
+}
+
+/// Rows printed while the encoder is loading are word matches, on the
+/// plain page and in `--json`. A remaining time does not add a rerun.
+#[test]
+fn a_loading_search_with_rows_says_they_are_word_matches() {
+    let line = "These are word-match results while the encoder loads.";
+    let cases = [
+        (
+            "with remaining_ms",
+            r#"{"available":true,"answering":null,"enabled":true,"remaining_ms":120000}"#,
+        ),
+        (
+            "without remaining_ms",
+            r#"{"available":true,"answering":null,"enabled":true}"#,
+        ),
+    ];
+    for (name, embedder) in cases {
+        let seat = serve(embedder);
+        let (code, stdout, stderr, _) = run(&seat, &["search", "kiln"]);
+        assert!(code == 0, "{name}: {stdout}{stderr}");
+        assert!(
+            stdout.contains("the kiln fires at dusk"),
+            "{name}: {stdout}"
+        );
+        assert_search_line(&stderr, line, name);
+        assert!(
+            !stderr.contains("rerun") && !stderr.contains("about"),
+            "{stderr}"
+        );
+        let (json_code, json_out, json_err, _) = run(&seat, &["search", "--json", "kiln"]);
+        assert!(json_code == 0, "{name}: {json_out}{json_err}");
+        assert!(
+            !json_err.contains("rerun") && !json_err.contains("word-match"),
+            "{name}: json printed the plain line: {json_err}"
+        );
+        let doc: serde_json::Value = serde_json::from_str(json_out.trim())
+            .unwrap_or_else(|err| panic!("{name}: {err}: {json_out}"));
+        assert_eq!(doc["ranking"], "lexical", "{name}: {doc}");
+        assert_eq!(doc["reason"], line, "{name}: {doc}");
+        assert!(
+            doc["hits"].as_array().is_some_and(|rows| !rows.is_empty()),
+            "{name}: {doc}"
+        );
+    }
+}
+
+/// An empty page while the encoder is loading still names the command to
+/// run again, with the remaining time when the writer sends one.
+#[test]
+fn a_loading_search_with_no_rows_says_to_rerun() {
+    let empty = r#"{"hits":[],"rank":"fused"}"#;
+    let cases = [
+        (
+            "with remaining_ms",
+            r#"{"available":true,"answering":null,"enabled":true,"remaining_ms":120000}"#,
+            "The encoder is loading and is ready in about 120 s, so rerun `ljos search kiln`.",
+            "The encoder is loading and is ready in about 120 s, so rerun `ljos search --json kiln`.",
+        ),
+        (
+            "without remaining_ms",
+            r#"{"available":true,"answering":null,"enabled":true}"#,
+            "The encoder is loading, so rerun `ljos search kiln` when it is ready.",
+            "The encoder is loading, so rerun `ljos search --json kiln` when it is ready.",
+        ),
+    ];
+    for (name, embedder, plain, json_reason) in cases {
+        let seat = serve_hits(embedder, empty);
+        let (code, stdout, stderr, _) = run(&seat, &["search", "kiln"]);
+        assert!(code == 0, "{name}: {stdout}{stderr}");
+        assert!(
+            stdout.contains("No hits") && !stdout.contains("the kiln fires at dusk"),
+            "{name}: {stdout}"
+        );
+        assert_search_line(&stderr, plain, name);
+        assert!(!stderr.contains("word-match"), "{name}: {stderr}");
+        let (json_code, json_out, json_err, _) = run(&seat, &["search", "--json", "kiln"]);
+        assert!(json_code == 0, "{name}: {json_out}{json_err}");
+        assert!(
+            !json_err.contains("rerun") && !json_err.contains("word-match"),
+            "{name}: json printed the plain line: {json_err}"
+        );
+        let doc: serde_json::Value = serde_json::from_str(json_out.trim())
+            .unwrap_or_else(|err| panic!("{name}: {err}: {json_out}"));
+        assert_eq!(doc["ranking"], "lexical", "{name}: {doc}");
+        assert_eq!(doc["reason"], json_reason, "{name}: {doc}");
+        assert!(
+            doc["hits"].as_array().is_some_and(|rows| rows.is_empty()),
+            "{name}: {doc}"
+        );
     }
 }

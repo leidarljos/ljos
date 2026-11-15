@@ -775,9 +775,11 @@ enum Cmd {
     /// `ljos remember "WORD"` with that one word in quotes. A busy memory store ranks by words
     /// and still returns a hit that names the subject. While the encoder is
     /// still loading, the search waits `LJOS_SEARCH_WAIT` seconds (3 when
-    /// unset) and then ranks by meaning. If it is still loading, one line
-    /// names the command to rerun and, when a remaining time is reported,
-    /// about how many seconds are left. A failed or missing encoder
+    /// unset) and then ranks by meaning. If it is still loading and rows
+    /// are shown, the line is `These are word-match results while the
+    /// encoder loads.` When nothing is shown, one line names the command
+    /// to rerun and, when a remaining time is reported, about how many
+    /// seconds are left. A failed or missing encoder
     /// names the command that fixes it. `--json` puts
     /// `semantic` or `lexical` in `ranking`. A pack that is down, busy, or
     /// still loading its encoder ranks by words from what is stored locally,
@@ -4644,7 +4646,8 @@ fn run_command() -> Result<()> {
             ljos_cli::log_recall("search", &query.join(" "));
             // A cold encoder gets long enough to load and be asked again.
             // A warm pack keeps the short budget. Past it the word ranking
-            // prints, and the line names that ranking.
+            // prints. Rows say they match words. An empty page names the
+            // command to run again.
             let dated_ahead = as_of.is_some();
             let budget = if !dated_ahead && !rerank {
                 ljos_cli::search_budget()

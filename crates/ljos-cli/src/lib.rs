@@ -14350,7 +14350,8 @@ pub fn ranking_now() -> Option<Ranking> {
 }
 
 /// The ranking reason while the encoder is present and has not answered.
-/// The line a person reads is [`encoder_loading_line`], not this token.
+/// An empty page reads [`encoder_loading_line`]. A page that shows rows
+/// reads [`WORD_MATCH_WHILE_LOADING`].
 const ENCODER_LOADING_REASON: &str = "encoder is still loading";
 
 /// The ranking reason when the last encode did not answer. The line a
@@ -14363,19 +14364,28 @@ const ENCODER_FAILED_REASON: &str = "encoder failed";
 /// not name the encoder install. Nothing was matched, so that sentence is
 /// not true, and the page's own line is the next command. A page that
 /// shows rows keeps the install line: the encoder is absent and the
-/// install is the way to rank by meaning.
+/// install is the way to rank by meaning. Rows shown while the encoder is
+/// loading say they are word matches, and do not name a command to run
+/// again. That command stays on an empty page.
 #[must_use]
 pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
     if hits.is_empty() && ranking.reason == "encoder unavailable" {
         return String::new();
     }
-    ranking_line(ranking)
+    ranking_sentence(ranking, !hits.is_empty())
 }
 
 /// One line for stderr: a word match, or a meaning match.
 /// `--json` keeps `mode` as `lexical` or `semantic`.
+///
+/// A load is read as an empty page here. Search uses [`search_rank_line`],
+/// which knows whether rows were printed.
 #[must_use]
 pub fn ranking_line(ranking: &Ranking) -> String {
+    ranking_sentence(ranking, false)
+}
+
+fn ranking_sentence(ranking: &Ranking, shown: bool) -> String {
     if ranking.mode != "lexical" {
         return "matched by meaning\n".to_string();
     }
@@ -14383,7 +14393,7 @@ pub fn ranking_line(ranking: &Ranking) -> String {
         ranking.reason,
         ENCODER_LOADING_REASON | ENCODER_FAILED_REASON | "encoder unavailable"
     ) {
-        return format!("{}\n", lexical_reason(ranking));
+        return format!("{}\n", lexical_reason(ranking, shown));
     }
     // Word ranking is how a local snapshot is stored. The line names that.
     // It does not ask for a rerun.
@@ -14394,8 +14404,14 @@ pub fn ranking_line(ranking: &Ranking) -> String {
 }
 
 /// The sentence [`ranking_line`] prints, and the `reason` field of `--json`.
-fn lexical_reason(ranking: &Ranking) -> String {
+///
+/// `shown` is whether the page has rows. It changes only a load: rows are
+/// word matches, and an empty page names the command to run again.
+fn lexical_reason(ranking: &Ranking, shown: bool) -> String {
     if ranking.reason == ENCODER_LOADING_REASON {
+        if shown {
+            return WORD_MATCH_WHILE_LOADING.to_string();
+        }
         return encoder_loading_line(read_encoder_status().as_ref(), &current_invocation());
     }
     if ranking.reason == ENCODER_FAILED_REASON {
@@ -14601,10 +14617,19 @@ pub fn encoder_retry_secs(status: Option<&Value>) -> Option<u64> {
         .map(|ms| ms.div_ceil(1000).max(1))
 }
 
-/// What a search prints when the encoder is present and still loading.
+/// What a search prints when it shows rows while the encoder is loading.
+///
+/// One sentence. It does not name a command to run again. An empty page
+/// uses [`encoder_loading_line`].
+pub const WORD_MATCH_WHILE_LOADING: &str = "These are word-match results while the encoder loads.";
+
+/// What a search prints when the encoder is present and still loading
+/// and the page has no rows.
 ///
 /// One sentence. It names `rerun`, the command to run again, and the
-/// writer's remaining time when [`encoder_retry_secs`] has one.
+/// writer's remaining time when [`encoder_retry_secs`] has one. A page
+/// that shows rows uses [`WORD_MATCH_WHILE_LOADING`] and does not name
+/// that command.
 #[must_use]
 pub fn encoder_loading_line(status: Option<&Value>, rerun: &str) -> String {
     match encoder_retry_secs(status) {
@@ -14648,7 +14673,8 @@ fn search_can_fall_back(err: &anyhow::Error) -> bool {
 /// waits up to [`search_wait`] for an answer and asks again. The second
 /// answer is what is printed. A 503 or a deadline is not turned into an
 /// empty success. When the encoder is still loading after the wait, the
-/// word-ranked rows are what is printed and the line says to rerun.
+/// word-ranked rows are what is printed. A page that shows them says they
+/// match words. A page with none says to rerun.
 ///
 /// # Errors
 ///
@@ -14837,7 +14863,11 @@ fn ranking_doc(ranking: Option<&Ranking>, mut doc: Value) -> String {
     let mode = ranking.map(|row| row.mode).unwrap_or("semantic");
     doc["ranking"] = Value::String(mode.to_string());
     if let Some(ranking) = ranking.filter(|row| row.mode == "lexical") {
-        doc["reason"] = Value::String(lexical_reason(ranking));
+        let shown = doc
+            .get("hits")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| !rows.is_empty());
+        doc["reason"] = Value::String(lexical_reason(ranking, shown));
     }
     format!("{}\n", serde_json::to_string(&doc).unwrap_or_default())
 }
@@ -76247,6 +76277,42 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             }),
             "matched by meaning\n"
         );
+    }
+
+    /// Rows on the page while the encoder loads are word matches. An empty
+    /// page keeps the command to run again, and does not call the rows
+    /// word matches.
+    #[test]
+    fn a_loading_page_names_word_matches_only_when_it_shows_rows() {
+        let loading = Ranking {
+            mode: "lexical",
+            reason: ENCODER_LOADING_REASON,
+        };
+        let row = Hit {
+            id: Some("k1".into()),
+            text: "the kiln fires at dusk".into(),
+            score: 0.8,
+            kind: "lesson".into(),
+            ts: None,
+            entities: Vec::new(),
+            ballots: None,
+            of: None,
+            rerank_score: None,
+            labels: Vec::new(),
+        };
+        let shown = search_rank_line(&loading, &[row]);
+        assert_eq!(shown, format!("{WORD_MATCH_WHILE_LOADING}\n"));
+        assert!(!shown.contains("rerun"), "{shown}");
+        let _guard = env_guard();
+        let _off = HoldEnv::set(&[("PACKSET_URL", "off")]);
+        let empty = search_rank_line(&loading, &[]);
+        assert!(
+            empty.starts_with("The encoder is loading, so rerun `")
+                && empty.ends_with("when it is ready.\n"),
+            "{empty}"
+        );
+        assert!(empty.contains("rerun"), "{empty}");
+        assert!(!empty.contains("word-match"), "{empty}");
     }
 
     /// The reported search: from seat dseams-paper, a query about

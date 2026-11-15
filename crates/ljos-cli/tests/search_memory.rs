@@ -285,6 +285,7 @@ fn a_search_that_stays_cold_says_the_rows_were_ranked_by_words() {
         ),
         "{said}"
     );
+    assert!(!stderr.contains("word-match"), "{said}");
     assert!(
         !stderr.contains("about") && !stderr.contains("encoder is still loading"),
         "a load with no remaining time invented a clock or used the old token: {said}"
@@ -476,20 +477,31 @@ fn a_search_past_the_wait_says_to_rerun_and_names_the_ranking() {
     let line = format!("The encoder is loading and is ready in about 4 s, so rerun `{again}`.");
     assert!(stderr.contains(&line), "{said}");
     assert_eq!(line.matches('.').count(), 1, "{line}");
+    assert!(
+        stdout.contains("No hits"),
+        "the rerun line is for an empty page: {said}"
+    );
+    assert!(!stderr.contains("word-match"), "{said}");
+    // The pack's later search returns the oak row, so this page has a hit.
     let as_json = search_waited(&pack, &home, &state, "1", true);
     let json_out = String::from_utf8_lossy(&as_json.stdout);
     let json_err = String::from_utf8_lossy(&as_json.stderr);
     assert!(as_json.status.success(), "{json_out}{json_err}");
     assert!(
-        !json_err.contains("Semantic ranking"),
+        !json_err.contains("Semantic ranking") && !json_err.contains("rerun"),
         "json search printed the mode line: {json_err}"
     );
     let doc: serde_json::Value = serde_json::from_str(json_out.trim())
         .unwrap_or_else(|err| panic!("search json did not parse ({err}): {json_out}"));
     assert_eq!(doc["ranking"], "lexical", "{doc}");
     assert_eq!(
-        doc["reason"],
-        "The encoder is loading and is ready in about 4 s, so rerun `ljos search --json \"Carrollton Nov 23 morning timing\"`.",
+        doc["reason"], "These are word-match results while the encoder loads.",
+        "{doc}"
+    );
+    let hits = doc["hits"].as_array().unwrap_or_else(|| panic!("{doc}"));
+    assert!(
+        hits.iter()
+            .any(|hit| hit["text"].as_str().unwrap_or("").contains("Oak Tree")),
         "{doc}"
     );
 }
