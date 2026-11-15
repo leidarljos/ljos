@@ -14629,9 +14629,11 @@ pub fn encoder_retry_secs(status: Option<&Value>) -> Option<u64> {
 
 /// What a search prints when it shows rows while the encoder is loading.
 ///
-/// One sentence. It does not name a command to run again. An empty page
-/// uses [`encoder_loading_line`].
-pub const WORD_MATCH_WHILE_LOADING: &str = "These are word-match results while the encoder loads.";
+/// One sentence. The rows are word matches, and meaning search will be
+/// ready shortly. It does not name a command to run again.
+/// An empty page uses [`encoder_loading_line`].
+pub const WORD_MATCH_WHILE_LOADING: &str =
+    "These are word matches, and meaning search will be ready shortly.";
 
 /// What a search prints when the encoder is present and still loading
 /// and the page has no rows.
@@ -46423,21 +46425,28 @@ pub fn calibrate(project: &str, rounds: usize) -> Result<Vec<Trust>> {
     Ok(rows)
 }
 
-/// What a search score is. Empty and nonempty are different facts from a
-/// writer that did not answer.
+/// What `ljos search --explain` prints above the rows.
+///
+/// `seat_ahead` is a meaning search: this seat's rows come first, so a
+/// meaning score does not order the page. A word search leaves it false.
+/// The human page does not print either number. Empty and nonempty are
+/// different facts.
 #[must_use]
-pub fn search_reading(n: usize) -> &'static str {
+pub fn search_reading(n: usize, seat_ahead: bool) -> &'static str {
     if n == 0 {
         "Nothing matched."
+    } else if seat_ahead {
+        "Place 1 is the first row, and this seat's rows come before another seat's. A meaning score runs from 0 to 1 and does not by itself order the rows. A word score is a different scale and can be much larger. The fraction is how many checks named the row. Neither is whether the sentence is true. A later line on the same matter replaces an earlier one."
     } else {
-        "Place 1 is the first row, and this seat's rows come before another seat's. The score orders the row. The fraction is how many checks named the row. Neither is whether the sentence is true. A later line on the same matter replaces an earlier one."
+        "Place 1 is the first row. A word score orders the row and includes a small boost for this seat. A closer row from another seat stays ahead. A meaning score is a different scale, from 0 to 1. The fraction is how many checks named the row. Neither is whether the sentence is true."
     }
 }
 
 /// The human search page. `explain` (`ljos search --explain`) opens with
-/// [`search_reading`]; without it the page names score and scorers in two
-/// lines. An empty answer is [`scan::nothing_matched_line`]. The id on each
-/// row is the eight-character prefix. `--json` does not use this.
+/// [`search_reading`]. Without it the page is one line on place. An empty
+/// answer is [`scan::nothing_matched_line`]. The id on each row is the
+/// eight-character prefix. The ranker score is not printed. `--json` does
+/// not use this.
 pub fn format_hits(hits: &[Hit], explain: bool) -> String {
     format_search(hits, hits.len(), false, explain, "", true)
 }
@@ -46455,11 +46464,7 @@ pub fn format_search(
 ) -> String {
     let now = now_utc();
     let mine = seat_name();
-    let reading = if hits.is_empty() || seat_ahead {
-        search_reading(hits.len())
-    } else {
-        "Place 1 is the first row. The score orders the row, and it includes a small boost for this seat. A closer row from another seat stays ahead. The fraction is how many checks named the row. Neither is whether the sentence is true."
-    };
+    let reading = search_reading(hits.len(), seat_ahead);
     let mut owned: Vec<(String, String, Option<String>, bool)> = Vec::new();
     for hit in hits {
         let local = hit.labels.iter().any(|label| label == "kept-local");
@@ -79553,9 +79558,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let plain = format_hits(&hits, false);
         assert_eq!(
             plain,
-            "shown 1 of 1.\nPlace 1 is the first row. This seat's rows come before another seat's.\nThe score orders the row. It is not whether the sentence is true.\nChecks: how many of them named this row.\n\npreference\n  Use pnpm instead of npm.\n  place 1, score 0.90, checks 2/3, id id-24\n"
+            "shown 1 of 1.\nPlace 1 is the first row. This seat's rows come before another seat's.\n\npreference\n  Use pnpm instead of npm.\n  place 1, checks 2/3, id id-24\n"
         );
         assert!(plain.contains("Place 1 is the first row"), "{plain}");
+        assert!(!plain.contains("score"), "{plain}");
         assert!(plain.contains("checks 2/3"), "{plain}");
         assert!(plain.contains("Use pnpm instead of npm."), "{plain}");
         assert!(!plain.contains('\t'), "{plain}");
@@ -79570,9 +79576,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         std::env::remove_var("NO_COLOR");
         let explained = format_hits(&hits, true);
         assert!(
-            explained.contains("Place 1 is the first row"),
+            explained.contains("does not by itself order the rows"),
             "{explained}"
         );
+        assert!(!explained.contains("0.90"), "{explained}");
         assert!(
             explained.contains("Use pnpm instead of npm."),
             "{explained}"

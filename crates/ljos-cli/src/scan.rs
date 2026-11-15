@@ -1,8 +1,9 @@
 //! Human pages for search, recall, ready, and the hook.
 //!
-//! Each line fits [`COLS`]. The pages name the score, say shown N of M,
-//! and name the command that lists the rest. `--json` and the MCP rows
-//! do not use this module. A pipe, and `NO_COLOR`, carry no ANSI.
+//! Each line fits [`COLS`]. The pages name the place, say shown N of M,
+//! and name the command that lists the rest. The ranker score stays off
+//! the page. `--json` and the MCP rows do not use this module. A pipe,
+//! and `NO_COLOR`, carry no ANSI.
 
 /// Columns a human page fits, including a pipe read in an 80-column terminal.
 pub const COLS: usize = 80;
@@ -362,7 +363,9 @@ pub struct SearchRow<'a> {
     pub from: Option<&'a str>,
     /// The stored sentence.
     pub text: &'a str,
-    /// Scorer rank. Not whether the claim is true.
+    /// Ranker number. The page does not print it. A meaning score and a
+    /// word score use different scales, and a meaning score does not order
+    /// the rows. `--json` keeps the number.
     pub score: f64,
     /// Scorers that named the hit, and how many ran.
     pub ballots: Option<(u32, u32)>,
@@ -385,14 +388,14 @@ pub struct SearchPage<'a> {
     pub matched: usize,
     /// The pack returned a full page, so more may exist past `matched`.
     pub capped: bool,
-    /// `--explain`: the score paragraph, instead of the two legend lines.
+    /// `--explain`: the order paragraph, instead of the one legend line.
     pub explain: bool,
     /// The query, for the command that lists the rest.
     pub query: &'a str,
     /// The paragraph `--explain` prints. Ignored when `explain` is false.
     pub reading: &'a str,
     /// This seat's rows come first. A word ranking leaves this false: the
-    /// score already includes a small boost, and a closer row stays ahead.
+    /// word score already includes a small boost, and a closer row stays ahead.
     pub seat_ahead: bool,
 }
 
@@ -412,14 +415,8 @@ pub fn search_page(page: &SearchPage<'_>) -> String {
         }
     } else if page.seat_ahead {
         out.push_str("Place 1 is the first row. This seat's rows come before another seat's.\n");
-        out.push_str("The score orders the row. It is not whether the sentence is true.\n");
-        out.push_str("Checks: how many of them named this row.\n");
     } else {
         out.push_str("Place 1 is the first row.\n");
-        out.push_str("The score orders the row. It is not whether the sentence is true.\n");
-        out.push_str("This seat's score gets a small boost.\n");
-        out.push_str("A closer row from another seat stays ahead.\n");
-        out.push_str("Checks: how many of them named this row.\n");
     }
     out.push('\n');
     let labels = unique_prefixes(page.rows.iter().map(|row| row.id.unwrap_or("")));
@@ -634,7 +631,9 @@ fn search_row(row: &SearchRow<'_>, id_label: &str) -> String {
             head.push_str(id);
         }
     }
-    let mut foot = format!("place {}, score {:.2}", row.place.max(1), row.score);
+    // Place is the order a person sees. The ranker number is not that
+    // order on a meaning page, and a word score is a different scale.
+    let mut foot = format!("place {}", row.place.max(1));
     if row.local {
         foot.push_str(", local, not in the pack");
     } else if let Some((hit, of)) = row.ballots {
@@ -812,6 +811,63 @@ mod tests {
         let cut = wrap(solid, 20);
         assert!(cut.contains('\\'), "{cut}");
         assert!(cut.lines().all(|line| line.chars().count() <= 20), "{cut}");
+    }
+
+    #[test]
+    fn a_search_page_is_one_legend_line_and_does_not_print_the_score() {
+        let row = |place: usize, score: f64, id: &'static str| SearchRow {
+            label: "lesson",
+            age: "today",
+            from: None,
+            text: "The damper sticks.",
+            score,
+            ballots: Some((2, 3)),
+            id: Some(id),
+            ticket: None,
+            place,
+            local: false,
+        };
+        let rows = [row(1, 68.0, "idkiln01"), row(2, 101.0, "idkiln02")];
+        let reading = "Place 1 is the first row, and this seat's rows come before another seat's. A meaning score runs from 0 to 1 and does not by itself order the rows. A word score is a different scale.";
+        let page = |explain: bool, seat_ahead: bool| SearchPage {
+            rows: &rows,
+            shown: 2,
+            matched: 2,
+            capped: false,
+            explain,
+            query: "kiln",
+            reading,
+            seat_ahead,
+        };
+        let meaning = search_page(&page(false, true));
+        assert_eq!(
+            meaning.lines().nth(1),
+            Some("Place 1 is the first row. This seat's rows come before another seat's.")
+        );
+        assert!(
+            !meaning.contains("68.00") && !meaning.contains("101.00"),
+            "{meaning}"
+        );
+        assert!(meaning.contains("place 1, checks 2/3"), "{meaning}");
+        assert!(meaning.contains("place 2, checks 2/3"), "{meaning}");
+        let words = search_page(&page(false, false));
+        assert_eq!(words.lines().nth(1), Some("Place 1 is the first row."));
+        assert!(
+            !words.contains("68.00") && !words.contains("101.00"),
+            "{words}"
+        );
+        let explained = search_page(&page(true, true));
+        assert!(
+            explained.contains("does not by itself order the rows"),
+            "{explained}"
+        );
+        assert!(!explained.contains("68.00"), "{explained}");
+        for page in [&meaning, &words, &explained] {
+            assert!(
+                page.lines().all(|line| line.chars().count() <= COLS),
+                "{page}"
+            );
+        }
     }
 
     #[test]

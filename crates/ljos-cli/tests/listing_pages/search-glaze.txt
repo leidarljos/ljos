@@ -5,17 +5,15 @@ stdout:
 shown 3 of 13, and the next page lists the rest, so run `ljos search glaze -n
 13`.
 Place 1 is the first row. This seat's rows come before another seat's.
-The score orders the row. It is not whether the sentence is true.
-Checks: how many of them named this row.
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 1 waits until the kiln is cool enough to open.
-  place 1, score 0.79, checks 2/2, id idglaze01
+  place 1, checks 2/2, id idglaze01
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 2 waits until the kiln is cool enough to open.
-  place 2, score 0.78, checks 2/2, id idglaze02
+  place 2, checks 2/2, id idglaze02
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 3 waits until the kiln is cool enough to open.
-  place 3, score 0.77, checks 2/2, id idglaze03
+  place 3, checks 2/2, id idglaze03

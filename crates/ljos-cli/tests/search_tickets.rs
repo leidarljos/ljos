@@ -209,7 +209,8 @@ fn the_same_title_is_found_while_the_encoder_loads() {
     let said = text(&out);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("word-match"),
+        stderr.contains("These are word matches, and meaning search will be ready shortly.")
+            && !stderr.contains("rerun"),
         "the warm-up line was missing:\n{said}"
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -225,7 +226,8 @@ fn a_subset_is_found_while_the_encoder_loads() {
     shows_ticket(&out);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("word-match"),
+        stderr.contains("These are word matches, and meaning search will be ready shortly.")
+            && !stderr.contains("rerun"),
         "the warm-up line was missing:\n{}",
         text(&out)
     );

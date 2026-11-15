@@ -1655,7 +1655,7 @@ impl LjosServer {
         } else if hits.is_empty() {
             ljos_cli::scan::nothing_matched_line(&args.query)
         } else {
-            search_reading(hits.len()).to_string()
+            search_reading(hits.len(), !lexical).to_string()
         };
         if let Some(note) = ljos_cli::search_token_note() {
             reading.push('\n');

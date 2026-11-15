@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 const MEANING: &str = "the kiln schedule is the morning plan";
 const WORD: &str = "the kiln log is a word match";
-const WORD_LINE: &str = "These are word-match results while the encoder loads.";
+const WORD_LINE: &str = "These are word matches, and meaning search will be ready shortly.";
 const TICKET_TITLE: &str = "GPRidge narrated video set";
 const TICKET_ID: &str = "Software-6mrw";
 

@@ -138,14 +138,10 @@ A lesson and a search
    matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
    shown 1 of 1.
    Place 1 is the first row.
-   The score orders the row. It is not whether the sentence is true.
-   This seat's score gets a small boost.
-   A closer row from another seat stays ahead.
-   Checks: how many of them named this row.
 
    lesson, today
      The lexical default is BM25+. It beat BM25 by two points on turns.
-     place 1, score 0.81, checks 2/2, id a6ae2751
+     place 1, checks 2/2, id a6ae2751
 
 .. END ljos-sample tutorial-search
 
@@ -174,14 +170,10 @@ A busy pack ranks by words and still returns a hit that names the subject.
    matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
    shown 1 of 1.
    Place 1 is the first row.
-   The score orders the row. It is not whether the sentence is true.
-   This seat's score gets a small boost.
-   A closer row from another seat stays ahead.
-   Checks: how many of them named this row.
 
    preference, today
      CombMNZ over RRF for fusing two ballots.
-     place 1, score 0.35, checks 2/2, id f8b725a9
+     place 1, checks 2/2, id f8b725a9
 
 .. END ljos-sample tutorial-prefer
 

@@ -5,47 +5,45 @@ stdout:
 shown 10 of 19, and the next page lists the rest, so run `ljos search kiln -n
 19`.
 Place 1 is the first row. This seat's rows come before another seat's.
-The score orders the row. It is not whether the sentence is true.
-Checks: how many of them named this row.
 
 lesson, from an agent, today, ticket demo-kiln
   The damper sticks when the kiln is cold.
-  place 1, score 0.96, checks 2/3, id idkiln01a
+  place 1, checks 2/3, id idkiln01a
 
 lesson, from an agent, yesterday, ticket demo-kiln
   The damper sticks.
   Open the flue before the kiln reaches temperature.
   Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
-  place 2, score 0.91, checks 3/3, id idkiln02b
+  place 2, checks 3/3, id idkiln02b
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 1 waits until the kiln is cool enough to open.
-  place 3, score 0.79, checks 2/2, id idglaze01
+  place 3, checks 2/2, id idglaze01
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 2 waits until the kiln is cool enough to open.
-  place 4, score 0.78, checks 2/2, id idglaze02
+  place 4, checks 2/2, id idglaze02
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 3 waits until the kiln is cool enough to open.
-  place 5, score 0.77, checks 2/2, id idglaze03
+  place 5, checks 2/2, id idglaze03
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 4 waits until the kiln is cool enough to open.
-  place 6, score 0.76, checks 2/2, id idglaze04
+  place 6, checks 2/2, id idglaze04
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 5 waits until the kiln is cool enough to open.
-  place 7, score 0.75, checks 2/2, id idglaze05
+  place 7, checks 2/2, id idglaze05
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 6 waits until the kiln is cool enough to open.
-  place 8, score 0.74, checks 2/2, id idglaze06
+  place 8, checks 2/2, id idglaze06
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 7 waits until the kiln is cool enough to open.
-  place 9, score 0.73, checks 2/2, id idglaze07
+  place 9, checks 2/2, id idglaze07
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 8 waits until the kiln is cool enough to open.
-  place 10, score 0.72, checks 2/2, id idglaze08
+  place 10, checks 2/2, id idglaze08

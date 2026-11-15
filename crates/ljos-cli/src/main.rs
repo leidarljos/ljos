@@ -780,7 +780,11 @@ enum Cmd {
     /// title matches is included, and then one whose notes match. An exact or
     /// near-exact title is the first row, while the encoder is loading and
     /// after. The row names the ticket id and the title, so `ljos recall ID`
-    /// opens it. A search that found
+    /// opens it. The page names the place and the checks. It does not print
+    /// the ranker score, because a meaning score and a word score are
+    /// different scales and a meaning score does not order the rows.
+    /// `--explain` says how the rows are ordered. `--json` keeps the score.
+    /// A search that found
     /// nothing prints no match-mode line. The line is `Nothing matched "QUERY"`.
     /// When a content word is shorter than QUERY, it adds
     /// `Try a shorter query, such as: ljos search WORD`. Stop words are
@@ -797,8 +801,8 @@ enum Cmd {
     /// `LJOS_CALL_TIMEOUT`, and the search then ranks by meaning. A remaining
     /// time that is absent or longer than that budget keeps `LJOS_SEARCH_WAIT`
     /// (3 when unset). If it is still loading and rows
-    /// are shown, the line is `These are word-match results while the
-    /// encoder loads.` When nothing is shown, one line names the command
+    /// are shown, the line is `These are word matches, and meaning search
+    /// will be ready shortly.` When nothing is shown, one line names the command
     /// to rerun and, when a remaining time is reported, about how many
     /// seconds are left. A failed or missing encoder
     /// names the command that fixes it. `--json` puts
@@ -821,7 +825,7 @@ enum Cmd {
         /// What held in the world on this day (YYYY-MM-DD): claims whose validity window excludes it are left out. Without it, today; `--valid-at any` keeps every window.
         #[arg(long, value_name = "DATE")]
         valid_at: Option<String>,
-        /// Open with what the score and the fraction mean.
+        /// Open with how the rows are ordered and what the checks mean.
         #[arg(long)]
         explain: bool,
         /// Only memories exported by this machine. Applied before the limit.
@@ -4776,8 +4780,9 @@ fn run_command() -> Result<()> {
             ljos_cli::log_recall("search", &query.join(" "));
             // A cold encoder gets long enough to load and be asked again.
             // A warm pack keeps the short budget. Past it the word ranking
-            // prints. Rows say they match words. An empty page names the
-            // command to run again.
+            // prints. Rows say they are word matches and that meaning search
+            // will be ready shortly. An empty page names the command to run
+            // again.
             let dated_ahead = as_of.is_some();
             let budget = if !dated_ahead && !rerank {
                 ljos_cli::search_budget()

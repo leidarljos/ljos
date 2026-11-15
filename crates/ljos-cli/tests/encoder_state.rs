@@ -204,7 +204,7 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
         let search_line = match *name {
             "ready" => "matched by meaning".to_string(),
             "loading with remaining_ms" | "loading without remaining_ms" => {
-                "These are word-match results while the encoder loads.".to_string()
+                "These are word matches, and meaning search will be ready shortly.".to_string()
             }
             "failed" => format!(
                 "The encoder failed (the runtime is missing), so these rows match words; run `{restart}`."
@@ -277,7 +277,7 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
 /// plain page and in `--json`. A remaining time does not add a rerun.
 #[test]
 fn a_loading_search_with_rows_says_they_are_word_matches() {
-    let line = "These are word-match results while the encoder loads.";
+    let line = "These are word matches, and meaning search will be ready shortly.";
     let cases = [
         (
             "with remaining_ms",
