@@ -48,3 +48,9 @@ It marks that id done and names the next item. ``node`` is not a field.
 ``ljos_search`` keeps this seat's hits first. Another seat's hit is kept
 when it names the subject, or when the encoder's cosine is at least 0.66.
 When nothing matched, the reading is ``Nothing matched "QUERY"``. It names a shorter query, in plain text, when one content word is shorter than the query. When nothing is stored, it names ``ljos remember`` instead, because a shorter search would miss too. When the only rows were weaker, the reading is ``Nothing relevant was found.``
+
+``ljos_search`` and ``ljos_recall`` append one line to ``recall.log`` in the ljos state directory, the same line ``ljos search`` and ``ljos recall`` append.
+The line is the time, the seat, ``search`` or ``recall``, and the query or the issue.
+The seat is the one the call passed, else the one the session or the environment names.
+The verb on the line is ``search`` or ``recall``.
+

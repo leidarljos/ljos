@@ -5574,8 +5574,15 @@ pub fn registered_seat(seat: &str) -> Result<()> {
 }
 
 /// Append one line, `ts seat verb what`, to the state dir's recall.log, so
-/// an audit can tell when a seat last asked its memory. Best effort: a
-/// log that cannot be written never fails the call.
+/// an audit can tell when a seat last asked its memory.
+///
+/// `ljos search`, `ljos recall` and `ljos hook` append that line, and so
+/// do the MCP tools `ljos_search` and `ljos_recall`. The seat is
+/// [`seat_name`]. On an MCP call that is the seat the server already
+/// resolved: the call's `seat` argument, then the session or the
+/// environment. The verb stays `search`, `recall` or `hook`, which is
+/// what a reader matches, so a command and a tool call count the same
+/// way. Best effort: a log that cannot be written never fails the call.
 pub fn log_recall(verb: &str, what: &str) {
     let dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)

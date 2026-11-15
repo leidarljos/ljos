@@ -1619,6 +1619,9 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<Json<SearchPage>, McpError> {
+        // The same line `ljos search` appends, under the seat this call
+        // already resolved.
+        ljos_cli::log_recall("search", &args.query);
         let mut hits = if args
             .as_of
             .as_deref()
