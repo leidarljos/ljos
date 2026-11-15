@@ -35,3 +35,6 @@ this command runs as:
 The row lives in ``vissue.toml``. It holds the quote, the time, the recorder named by ``--via`` and
 the tracker commit. A grant edited into the file by hand is ignored. A seat cannot grant itself.
 Every close that uses the grant cites the record.
+
+A seat that holds a ticket notes it with ``ljos note "TEXT"`` and ends it with ``ljos finish --lesson "..."``.
+Pass an id to name a different ticket. With no ticket open, both exit 1 and name ``ljos sitting ISSUE``.

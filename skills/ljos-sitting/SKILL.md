@@ -25,8 +25,9 @@ agent, in the editor harness or any other tool, can see who has it and what it t
 
 ## During
 
-- Record progress on the ticket: `ljos note ISSUE "what is done, what is left"`.
-- Save a lesson of your own as soon as you learn it: `ljos note ISSUE "..."`.
+- Record progress on the open ticket: `ljos note "what is done, what is left"`.
+  `ljos note ISSUE "..."` notes ISSUE.
+- Save a lesson of your own as soon as you learn it: `ljos note "..."`.
   The prompt does not treat that note as a fact. The person's own words
   are `ljos remember "..."`.
 - File new work you find instead of doing it on the side (ljos-file skill).
@@ -35,8 +36,10 @@ agent, in the editor harness or any other tool, can see who has it and what it t
 ## Finish
 
 ```
-ljos finish ISSUE --lesson "One or two sentences the next agent can act on."
+ljos finish --lesson "One or two sentences the next agent can act on."
 ```
+
+With no id this finishes the open ticket. `ljos finish ISSUE --lesson "..."` finishes ISSUE.
 
 An agent's lesson is stored at once at L0 (`derived`) with origin `agent-derived`, and search finds it right away. `ljos accept` raises it to `explicit`.
 A lesson the person types at `ljos finish` in their own terminal is written at once as `user-declared`.

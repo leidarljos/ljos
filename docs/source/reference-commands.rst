@@ -24,8 +24,8 @@ The line says what went wrong and the command that fixes it.
    Stores: all. Open a sitting: doctor, sync when the repository names a scope, cards, due, island, blockers, playbook, workflow when the issue carries one, panel when the issue is a decision, recall, timeline, reclaim, claim. The short form prints what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``. A pack that answers 503 or does not answer is ``memory skipped: packsetd busy``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold. Quiet claims are a count that points at ``ljos claims --mine``. Claims untouched for longer than ``LJOS_STALE_DAYS`` (7) are one line, ``N claims untouched for 7+ days: ljos claims --stale``. ``--verbose`` prints every section. Reclaim hands back claims quiet longer than ``LJOS_LEASE_SECS`` (900; 0 is off) whose conversation is gone, and keeps one whose runner still runs. It stops at the first store down. The name defaults to this conversation's holder (``ljos seat``). ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``. The name is a tracker ``playbook:`` note until finish or release. ``--cards`` is the directory of ``USER.md`` and ``MEMORY.md``; ``--dir`` is the same flag.
 ``sitting --plan TITLE [-p PROJECT] -- ITEM...``
    Stores: tracker, claim graph. File ``TITLE`` and the items after ``--`` in one tracker commit, claim the parent, and print the checklist with ids. The parent is tagged ``plan`` and ``ORDERED``. Each item is a ``checklist`` child, in the order given. The sitting names the next unfinished item. ``ljos ready --mine`` names it again. ``ljos finish ITEM`` marks that item done and names the next one.
-``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--new-option] [--beta B] [--gen G] [--assignee NAME] [--close]``
-   Stores: all. Close a sitting: mark the ticket finished, store ``--lesson``, then learn. A lesson written after the issue, with no ``--lesson``, is taken the same way. ``--verbose`` says whether related memories were linked. A checklist item is marked done instead, and the line names the next unfinished item of its plan. The lesson goes in at once at L0 (``derived``, a memory a person has not accepted) with origin ``agent-derived``. It is the person's when no runner marks the environment and a terminal is on its input; ``ljos accept ID`` raises it to ``explicit``; ``--new-option`` says the outcome was none of the ballot's options; ``--gen`` names the claim's generation (absent, the live one; a stale one is refused); ``--assignee`` names the holder (absent, this conversation's holder); a runner is refused. A person closes the ticket when the work is accepted, else the ticket stays open with no holder. With no ``--lesson``, a ticket that is still TODO and that nobody has claimed is left as it is, and the line names ``ljos sitting ISSUE``. Nothing is written. A lesson passed to that finish is still stored. Example: ``ljos finish proj-1a2b --lesson "Cold metal seats."``.
+``finish [ISSUE] [--status S] [--lesson TEXT] [--outcome OPTION] [--new-option] [--beta B] [--gen G] [--assignee NAME] [--close] [--quiet]``
+   Stores: all. Close a sitting: mark the ticket finished, store ``--lesson``, then learn. A lesson written after the issue, with no ``--lesson``, is taken the same way. ``--verbose`` says whether related memories were linked. A checklist item is marked done instead, and the line names the next unfinished item of its plan. The lesson goes in at once at L0 (``derived``, a memory a person has not accepted) with origin ``agent-derived``. It is the person's when no runner marks the environment and a terminal is on its input; ``ljos accept ID`` raises it to ``explicit``; ``--new-option`` says the outcome was none of the ballot's options; ``--gen`` names the claim's generation (absent, the live one; a stale one is refused); ``--assignee`` names the holder (absent, this conversation's holder); a runner is refused. A person closes the ticket when the work is accepted, else the ticket stays open with no holder. With no ``--lesson``, a ticket that is still TODO and that nobody has claimed is left as it is, and the line names ``ljos sitting ISSUE``. Nothing is written. A lesson passed to that finish is still stored. With no id, ``ljos finish --lesson "..."`` finishes the issue this conversation holds. With none open, it exits 1 and names ``ljos sitting ISSUE``. An empty id exits 1 and writes nothing. A named id that is not that issue is still finished, and stderr names both; ``--quiet`` leaves that line off. Example: ``ljos finish --lesson "Cold metal seats."``.
 ``calibrate -p PROJECT [--rounds N]``
    Stores: consensus, pack. Estimate how often each voter has been right, from the project's past votes. The estimate is Dawid-Skene: it uses the ballots and no separate answer key. ``--rounds`` is how many expectation-maximisation passes to run.
 ``remember TEXT [--as PERSONA] [--transient|--standing] [--verbose] [--valid-from DATE] [--valid-to DATE]``
@@ -102,8 +102,8 @@ The line says what went wrong and the command that fixes it.
    Stores: tracker. Tickets that are open and not waiting on an open ticket. ``--mine`` names the next unfinished item of each of this seat's plans. ``-p`` limits that list to one project. ``--json`` prints the rows.
 ``show ISSUE [--json]``
    Stores: tracker. One ticket: its id, state, priority and title, then the tickets it waits on. The title wraps to the terminal. An open blocker is ``open`` and a finished one is ``closed``. None prints ``blockers: none``. ``--json`` prints the ticket. An unknown id exits 1 and names ``ljos ready``. An id that matches more than one ticket exits 1 and names one ``ljos show`` command.
-``note [ID] TEXT...``
-   Stores: tracker. A dated progress note on the issue, committed. With no id, the note is written on the issue this seat holds. On an issue another seat holds it says so: the note is an assist, and ``ljos send`` reaches the holder; the note stays on the ticket and is never written into memory. Example: ``ljos note proj-1a2b "the door seats when it is cold"``.
+``note [ID] TEXT... [--quiet]``
+   Stores: tracker. A dated progress note on the issue, committed. With no id, ``ljos note "TEXT"`` writes on the issue this conversation holds. With none open, it exits 1 and names ``ljos sitting ISSUE``. An empty id exits 1 and writes nothing. ``ljos note ID TEXT`` notes on ID. When ID is not that issue, the note is still written and stderr names both; ``--quiet`` leaves that line off. On an issue another seat holds it says so: the note is an assist, and ``ljos send`` reaches the holder; the note stays on the ticket and is never written into memory. Example: ``ljos note "the door seats when it is cold"``.
 ``withdraw ID [--note TEXT] [--as NAME]``
    Stores: tracker. Take back this seat's own ballot, or with ``--note`` a note it wrote; nothing is deleted, and the withdrawal is a dated note beside it; ``--as`` names the persona a ballot was cast under.
 ``reopen ID``
@@ -354,7 +354,7 @@ evidence
 export --json --machine --out
 file --body --deadline --options --parent --porcelain --priority --project --quorum --tags --top --type --verbose
 findings --all --issue --remember
-finish --assignee --beta --close --gen --lesson --new-option --outcome --status --verbose
+finish --assignee --beta --close --gen --lesson --new-option --outcome --quiet --status --verbose
 forget --json --why
 git-hook
 git-hooks
@@ -391,7 +391,7 @@ mesh pull --from --seat
 mesh push --lane --seat --to
 mesh status
 mesh up --hostname --key-file --login-server
-note --verbose
+note --quiet --verbose
 offboard --dry-run --harness --runner
 onboard --dry-run --example --harness --skills
 open-panel --cwd --log --prompt-file --session

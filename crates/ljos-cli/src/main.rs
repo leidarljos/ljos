@@ -1080,11 +1080,15 @@ enum Cmd {
     /// The note stays on the logbook. It is not written into memory, so
     /// recall on a later task does not hand it back as something the seat knows.
     ///
-    /// `ljos note TEXT...` notes on the issue this seat holds. `ljos note
-    /// ID TEXT...` notes on ID when the first word is an id `vissue create`
-    /// mints; any other first word is part of the note.
+    /// `ljos note TEXT...` notes on the issue this conversation holds.
+    /// With none open, it exits 1 and names `ljos sitting ISSUE`.
+    /// An empty id exits 1 and writes nothing.
+    /// `ljos note ID TEXT...` notes on ID. When ID is not that issue, the
+    /// note is still written and stderr names both. `--quiet` leaves that
+    /// line off. A first word that is an id `vissue create` mints is the
+    /// id; any other first word is part of the note.
     ///
-    /// Example: `ljos note proj-1a2b "the door seats when it is cold"`
+    /// Example: `ljos note "the door seats when it is cold"`
     Note {
         /// The note, or an issue id and then the note.
         #[arg(value_name = "WORDS", required = true, num_args = 1..)]
@@ -1092,6 +1096,9 @@ enum Cmd {
         /// Print the tracker commit line. Without it, a commit that landed is quiet. A refusal is still printed.
         #[arg(long)]
         verbose: bool,
+        /// Leave off the line that names another issue.
+        #[arg(long)]
+        quiet: bool,
     },
     /// List one seat's tracker commits.
     ///
@@ -2205,13 +2212,18 @@ enum Cmd {
     },
     /// Finish work on a ticket: remember the lesson, strengthen the memories it used, hand the claim back.
     ///
+    /// With no id, this finishes the issue this conversation holds.
+    /// With none open, it exits 1 and names `ljos sitting ISSUE`.
+    /// An empty id exits 1 and writes nothing.
+    /// A named id that is not that issue is still finished, and stderr
+    /// names both. `--quiet` leaves that line off.
     /// With no lesson, a ticket that is still TODO and that nobody has claimed is left as it is.
     /// The line names `ljos sitting ISSUE`.
     ///
-    /// Example: `ljos finish proj-1a2b --lesson "Cold metal seats."`
+    /// Example: `ljos finish --lesson "Cold metal seats."`
     Finish {
-        /// The tracker id of the issue.
-        issue: String,
+        /// The tracker id of the issue. Absent: the issue this conversation holds.
+        issue: Option<String>,
         /// done, failed, or cancelled.
         #[arg(long, default_value = "done")]
         status: String,
@@ -2242,6 +2254,9 @@ enum Cmd {
         /// Print whether related memories were linked. Without it, finish says the ticket and the next command.
         #[arg(long)]
         verbose: bool,
+        /// Leave off the line that names another issue.
+        #[arg(long)]
+        quiet: bool,
     },
     /// Put a finished or cancelled issue back to the state it had before it was closed.
     ///
@@ -2837,11 +2852,15 @@ fn ticket_error(err: anyhow::Error) -> anyhow::Error {
 /// tracker without asking vissue who holds what. While a hold record is
 /// present, a word that is not a default mint is text: `ljos-hud` is not
 /// taken for an id. A first word that is not an id at all is text on the
-/// issue [`ljos_cli::held_issue`] names.
+/// issue [`ljos_cli::held_issue`] names. An empty or whitespace first word
+/// is a blank id, not a missing one.
 fn note_target(words: &[String]) -> Result<(String, String, bool)> {
     let Some((first, rest)) = words.split_first() else {
-        bail!("{NO_HELD_ISSUE}");
+        bail!("{}", ljos_cli::NO_OPEN_SITTING);
     };
+    if first.trim().is_empty() {
+        bail!("{}", ljos_cli::EMPTY_TICKET_ID);
+    }
     if minted_issue_id(first) {
         return explicit_note(first, rest);
     }
@@ -2854,13 +2873,39 @@ fn note_target(words: &[String]) -> Result<(String, String, bool)> {
         return explicit_note(first, rest);
     }
     let Some(issue) = ljos_cli::held_issue() else {
-        bail!("{NO_HELD_ISSUE}");
+        bail!("{}", ljos_cli::NO_OPEN_SITTING);
     };
     Ok((issue, words.join(" "), true))
 }
 
-const NO_HELD_ISSUE: &str = "ljos note: no issue is held. `ljos note ID TEXT...` names one; \
-     `ljos note TEXT...` notes on the issue this seat holds";
+/// One stderr line when `wrote` is not the open sitting. An inferred id
+/// is that sitting. `--quiet` leaves the line off, and does not ask.
+fn warn_other_sitting(wrote: &str, quiet: bool, inferred: bool) {
+    if quiet || inferred {
+        return;
+    }
+    let Some(open) = ljos_cli::recorded_sitting() else {
+        return;
+    };
+    if open != wrote {
+        eprintln!("{}", ljos_cli::other_sitting_line(wrote, &open));
+    }
+}
+
+/// An empty or whitespace id on `note` or `finish`.
+///
+/// This is the id a script captured from `ljos file` when filing timed
+/// out. It is not "no id", which means the open sitting.
+fn blank_ticket_line(cmd: &Cmd) -> Option<&'static str> {
+    let blank = match cmd {
+        Cmd::Note { words, .. } => words.first().is_some_and(|word| word.trim().is_empty()),
+        Cmd::Finish {
+            issue: Some(issue), ..
+        } => issue.trim().is_empty(),
+        _ => false,
+    };
+    blank.then_some(ljos_cli::EMPTY_TICKET_ID)
+}
 
 fn explicit_note(id: &str, rest: &[String]) -> Result<(String, String, bool)> {
     let text = rest.join(" ");
@@ -4048,6 +4093,12 @@ fn run_command() -> Result<()> {
             err.exit();
         }
     };
+    // A blank id is a failed `ljos file` capture. Refuse before the seat
+    // check, the note queue and the tracker.
+    if let Some(line) = blank_ticket_line(&cmd) {
+        eprintln!("{line}");
+        std::process::exit(1);
+    }
     ljos_cli::seat_resolve::prepare(seat_flag, seat_kind(&cmd));
     // A lesson left while the pack was busy goes out on the next call
     // that writes. A read, a dry run, onboard, offboard, uninstall and
@@ -4991,16 +5042,12 @@ fn run_command() -> Result<()> {
         Cmd::Options { issue, options } => {
             print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
         }
-        Cmd::Note { words, verbose } => {
-            let (issue, text, inferred) = match note_target(&words) {
-                Ok(found) => found,
-                Err(err) if err.to_string().contains("no issue is held") => {
-                    let text = words.join(" ");
-                    print!("{}", ljos_cli::note_unattached_line(&text));
-                    return Ok(());
-                }
-                Err(err) => return Err(err),
-            };
+        Cmd::Note {
+            words,
+            verbose,
+            quiet,
+        } => {
+            let (issue, text, inferred) = note_target(&words)?;
             // The note is the tracker write. Reconciling a claim the
             // graph did not take waits until that write has landed, and
             // only for a short bound.
@@ -5009,6 +5056,7 @@ fn run_command() -> Result<()> {
                 &["note", &issue, &text],
                 ljos_cli::tracker_verb_wait(),
             )?;
+            warn_other_sitting(&issue, quiet, inferred);
             let pending = ljos_cli::retry_pending_claim(&issue);
             if !pending.is_empty() {
                 print!(
@@ -6312,7 +6360,17 @@ fn run_command() -> Result<()> {
             assignee,
             close,
             verbose,
+            quiet,
         } => {
+            let (issue, inferred) = match issue {
+                Some(raw) => (raw, false),
+                None => {
+                    let Some(open) = ljos_cli::held_issue() else {
+                        bail!("{}", ljos_cli::NO_OPEN_SITTING);
+                    };
+                    (open, true)
+                }
+            };
             stop_ticket(&issue);
             {
                 let _deadline =
@@ -6338,6 +6396,7 @@ fn run_command() -> Result<()> {
                 verbose,
             )
             .map_err(ticket_error)?;
+            warn_other_sitting(&issue, quiet, inferred);
             print!(
                 "{}",
                 if verbose {

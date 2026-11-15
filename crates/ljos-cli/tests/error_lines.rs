@@ -229,12 +229,9 @@ fn a_note_with_no_sitting_names_sit() {
     let home = Home::new();
     let out = home.run(&["note", "the glaze crawled"], &[("LJOS_SEAT", "alice")]);
     let said = text(&out);
-    assert_eq!(out.status.code(), Some(0), "{said}");
-    assert_eq!(
-        one_line(&out.stdout),
-        "label unattached-note: no open sitting. Start one with `ljos sitting`."
-    );
-    assert!(out.stderr.is_empty(), "{said}");
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert_eq!(one_line(&out.stderr), ljos_cli::NO_OPEN_SITTING);
 }
 
 #[test]

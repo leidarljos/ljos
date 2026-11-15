@@ -483,10 +483,10 @@ cloud seat git runs only the hooks the repository and the login name.
   from elsewhere takes the issue into its inbox under the printed id,
   so a child can name it at once.
 - At a usage limit the hook keeps the turn open once. Spend it on the record and
-  nothing else: `ljos note` the held issue with what is done and left,
+  nothing else: `ljos note` the open ticket with what is done and left,
   `ljos file` each item left, `ljos note` each lesson, then stop.
-- Progress goes on the issue, dated: `ljos note ISSUE "..."`, a longer
-  report too. Tags go on when the issue is filed: `ljos file --tags`.
+- Progress goes on the open ticket, dated: `ljos note "..."`, a longer
+  report too. `ljos note ISSUE "..."` notes ISSUE. Tags go on when the issue is filed: `ljos file --tags`.
 - An issue another seat sits on refuses your sitting. To help, `ljos
   note ISSUE "..."` adds an assist to its logbook, and the note names
   the seat that has it; `ljos send SEAT "..."` reaches that seat now.
@@ -556,8 +556,10 @@ lock exists before proceeding": the next seat cannot act on that.
 One verb closes the sitting:
 
 ```
-ljos finish ISSUE --status done --lesson "..." [--outcome OPTION]
+ljos finish --lesson "..." [--outcome OPTION]
 ```
+
+With no id this finishes the open ticket. `ljos finish ISSUE --status done --lesson "..."` finishes ISSUE.
 
 An agent's lesson is stored at once at L0 (`derived`) with origin
 `agent-derived` and its provenance (`seat`, `harness`, `session`, `at`,

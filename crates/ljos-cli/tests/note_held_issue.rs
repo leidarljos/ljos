@@ -1,9 +1,9 @@
 //! `ljos note` with no id notes on the issue this seat holds.
 //!
 //! An id `vissue create` mints still names the issue. A shorter hyphenated
-//! word does not. With nothing held and no id, the note is stored with
-//! `unattached-note` and the tracker is not asked. `ljos_note` with a blank
-//! issue does the same.
+//! word does not. With nothing held and no id, the command exits 1 and
+//! names `ljos sitting ISSUE`. The tracker is not asked to note.
+//! `ljos_note` with a blank issue and no hold is still stored unattached.
 
 ljos_test_boot::harness!();
 use std::io::Write;
@@ -161,17 +161,17 @@ fn a_hyphenated_word_shorter_than_a_minted_id_stays_text() {
     );
 }
 
-/// No hold and no id. The note is stored with `unattached-note` and the
-/// tracker is not asked, the same as `ljos_note` with no issue.
+/// No hold and no id. The command exits 1, names `ljos sitting ISSUE`,
+/// and does not ask the tracker to note.
 #[test]
-fn a_note_with_no_hold_and_no_id_is_stored_unattached() {
+fn a_note_with_no_hold_and_no_id_names_sitting() {
     let hab = Hab::new();
     let started = Instant::now();
     let out = hab.note(&["note", "some", "text"]);
     let took = started.elapsed();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "ljos note failed: {stdout}{stderr}");
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
     assert!(
         took < Duration::from_secs(2),
         "a missing issue took {took:?}: {stderr}"
@@ -182,8 +182,12 @@ fn a_note_with_no_hold_and_no_id_is_stored_unattached() {
         hab.calls()
     );
     assert!(
-        stdout.contains("unattached-note"),
-        "the note was not stored unattached:\n{stdout}"
+        stderr.contains(ljos_cli::NO_OPEN_SITTING),
+        "the refusal did not name a sitting:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("unattached-note"),
+        "a missing sitting was stored:\n{stdout}"
     );
 }
 

@@ -77,18 +77,13 @@ fn search_and_remember_say_one_line_when_the_pack_is_down() {
 }
 
 #[test]
-fn note_without_a_ticket_is_a_label() {
+fn note_without_a_ticket_names_sitting() {
     let out = run(&["note", "the glaze crawled on the north tile"], &[]);
     let stdout = lines(&out.stdout);
     let stderr = lines(&out.stderr);
-    assert!(out.status.success(), "stdout {stdout:?} stderr {stderr:?}");
-    assert!(stderr.is_empty(), "{stderr:?}");
-    assert_eq!(stdout.len(), 1, "{stdout:?}");
-    assert!(
-        stdout[0].starts_with("label unattached-note:"),
-        "{stdout:?}"
-    );
-    assert!(!stdout[0].contains('?'), "{stdout:?}");
+    assert!(!out.status.success(), "stdout {stdout:?} stderr {stderr:?}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert_eq!(stderr, [ljos_cli::NO_OPEN_SITTING]);
 }
 
 #[test]
@@ -332,8 +327,10 @@ fn a_question_is_not_read_from_stdin() {
     stdin.write_all(b"yes\n").unwrap();
     drop(stdin);
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "{:?}", lines(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("unattached-note"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stdout}{stderr}");
+    assert!(stderr.contains(ljos_cli::NO_OPEN_SITTING), "{stderr}");
     assert!(!stdout.contains("yes"), "{stdout}");
+    assert!(!stdout.contains("unattached-note"), "{stdout}");
 }

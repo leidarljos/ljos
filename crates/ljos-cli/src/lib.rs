@@ -13901,11 +13901,10 @@ fn ljos_toml_project(path: &Path) -> Option<String> {
     None
 }
 
-/// The issue this conversation's holder claimed last and still works: a
-/// subagent's hook runs under its parent's holder, so this is the work
-/// the subagent is a slice of.
+/// The issue a hold record names for this conversation. File reads only,
+/// so a note can say which sitting is open without asking the tracker.
 #[must_use]
-pub fn held_issue() -> Option<String> {
+pub fn recorded_sitting() -> Option<String> {
     // The record the runner's own server left names the holder its claims
     // were made under. A hook's environment can carry session variables
     // the server's did not, which hash to another holder that holds
@@ -13915,13 +13914,26 @@ pub fn held_issue() -> Option<String> {
     if !holders.contains(&own) {
         holders.push(own);
     }
+    held_from_records(&holders)
+}
+
+/// The issue this conversation's holder claimed last and still works: a
+/// subagent's hook runs under its parent's holder, so this is the work
+/// the subagent is a slice of.
+#[must_use]
+pub fn held_issue() -> Option<String> {
     // The hold records answer in milliseconds; the tracker walk below takes
     // seconds on a large tracker, past what a runner lets a hook run.
-    if let Some(node) = held_from_records(&holders) {
+    if let Some(node) = recorded_sitting() {
         return Some(node);
     }
     if std::env::var_os("LJOS_IN_HOOK").is_some() {
         return None;
+    }
+    let mut holders: Vec<String> = runner_record_holders(&own_ancestry());
+    let own = holder_name();
+    if !holders.contains(&own) {
+        holders.push(own);
     }
     holders.iter().find_map(|holder| {
         let out = run_captured_within(
@@ -21700,6 +21712,22 @@ pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> R
 /// sitting. Packset keeps a `note` only on a ticket. It has no form for
 /// an unverified note that names none, so the write is not attempted.
 pub const NOTE_WITHOUT_TICKET: &str = "no open sitting. Start one with `ljos sitting`.";
+
+/// `ljos note` or `ljos finish` was given an id that is empty or only whitespace.
+///
+/// A script that reads the id from `ljos file` gets this when filing timed out.
+/// The tracker is not asked.
+pub const EMPTY_TICKET_ID: &str =
+    "no ticket id given; ljos file may have failed, so check its output";
+
+/// No id was given and this conversation holds no ticket.
+pub const NO_OPEN_SITTING: &str = "no open sitting, so run `ljos sitting ISSUE`.";
+
+/// `note` or `finish` wrote `wrote` while this conversation holds `open`.
+#[must_use]
+pub fn other_sitting_line(wrote: &str, open: &str) -> String {
+    format!("note written to {wrote}; your open sitting is {open}")
+}
 
 /// Store `text` as an unattached note and return the one label line.
 /// A note with no ticket is kept. It is not a refusal and it is not filed.
