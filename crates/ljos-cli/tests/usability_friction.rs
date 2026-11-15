@@ -205,6 +205,22 @@ fn cards_name_the_directory_when_both_files_are_missing() {
 }
 
 #[test]
+fn the_vote_howto_names_used_on_a_persona_ballot() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+    for rel in ["source/howto-vote.rst", "orgmode/howto-vote.org"] {
+        let text = std::fs::read_to_string(root.join(rel)).unwrap();
+        assert!(
+            text.contains("ljos vote $id --for hold --used none --as reviewer"),
+            "{rel}\n{text}"
+        );
+        assert!(
+            text.contains("ljos vote $id --for ship --used none --as reader"),
+            "{rel}"
+        );
+    }
+}
+
+#[test]
 fn mesh_pull_names_a_missing_directory() {
     let out = run(
         &[
