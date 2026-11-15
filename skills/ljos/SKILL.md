@@ -113,7 +113,8 @@ sitting that gets that far.
    remain. Claims untouched for longer than `LJOS_STALE_DAYS` (7 when
    unset) are one line, `N claims untouched for D+ days: ljos claims --stale`,
    and those three are the newer ones. Nothing is released. The short
-   form folds hand-backs and quiet claims into one line. `--verbose` prints each one.
+   form folds hand-backs and quiet claims into one line, and a quiet
+   remainder names `ljos release --stale`. `--verbose` prints each one.
 4. `== doctor`. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
    A `warn` on `host` means the kernel killed a process within a day. The

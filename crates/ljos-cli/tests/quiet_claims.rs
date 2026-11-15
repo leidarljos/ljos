@@ -366,7 +366,7 @@ fn a_seat_sees_its_two_stale_claims_and_not_another_seats() {
 
     let sat = world.ok("ada", &["sitting", sitting]);
     assert!(
-        sat.contains("2 quiet claims are still yours (ljos claims --mine)"),
+        sat.contains("2 quiet claims are still yours (ljos release --stale)"),
         "{sat}"
     );
     assert!(quiet_lines(&sat).is_empty(), "{sat}");
@@ -437,7 +437,7 @@ fn claims_past_the_handful_end_on_one_more_line() {
 
     let sat = world.ok("ada", &["sitting", &ids[4]]);
     assert!(
-        sat.contains("4 quiet claims are still yours (ljos claims --mine)"),
+        sat.contains("4 quiet claims are still yours (ljos release --stale)"),
         "{sat}"
     );
     assert!(quiet_lines(&sat).is_empty(), "{sat}");
@@ -505,7 +505,7 @@ fn the_banner_keeps_fresh_claims_and_folds_stale_ones() {
 
     let short = world.ok("ada", &["sitting", sitting]);
     assert!(
-        short.contains("1 quiet claim is still yours (ljos claims --mine)"),
+        short.contains("1 quiet claim is still yours (ljos release --stale)"),
         "{short}"
     );
     assert!(
@@ -591,11 +591,13 @@ fn claims_stale_lists_the_oldest_first_and_json_matches() {
 fn release_stale_prints_the_list_until_yes_and_then_returns_the_ticket_to_todo() {
     let (world, ids) = World::new(&[claim("old work", "ada", 11, None, None, None, "STARTED")]);
     let before = std::fs::read(&world.org).unwrap();
-    let dry = world.ok("ada", &["release", "--stale"]);
+    let dry = world.ok("ada", &["release", "--stale", "--days", "7"]);
     assert!(dry.contains(&ids[0]), "{dry}");
     assert!(dry.contains(&format!("ljos release {}", ids[0])), "{dry}");
     assert!(
-        dry.contains("1 claim would go back to TODO. ljos release --stale --yes releases them."),
+        dry.contains(
+            "1 claim would go back to TODO. ljos release --stale --days 7 --yes releases them."
+        ),
         "{dry}"
     );
     assert_eq!(std::fs::read(&world.org).unwrap(), before);
@@ -639,7 +641,7 @@ fn release_stale_with_nothing_to_hand_back_writes_nothing_and_skips_the_pack() {
     );
     let bin = PathBuf::from(world.path.split(':').next().unwrap());
     script(&bin, "claimdag", "#!/bin/sh\necho called >&2\nexit 1\n");
-    let again = world.ok("ada", &["release", "--stale"]);
+    let again = world.ok("ada", &["release", "--stale", "--days", "7"]);
     assert!(again.contains("no claims untouched"), "{again}");
     assert_eq!(std::fs::read(&world.org).unwrap(), before);
     assert!(!again.contains(&ids[0]), "{again}");

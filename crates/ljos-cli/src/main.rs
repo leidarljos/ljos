@@ -1650,27 +1650,42 @@ enum Cmd {
     },
     /// Give a ticket back. It is open again, and the claim generation moves.
     ///
-    /// `--stale` lists this seat's claims untouched for longer than `--days`
-    /// (`LJOS_STALE_DAYS`, 7 when unset) and writes nothing. `--yes` hands
-    /// each one back. The ticket stays open.
+    /// `--stale` releases every claim this seat holds that has been quiet
+    /// longer than `--older-than`. The default window is `LJOS_LEASE_SECS`,
+    /// 900 seconds when unset, the same window used to hand a quiet claim
+    /// back. A claim whose conversation is still running on this host stays.
+    /// Another seat's claim stays. The ticket stays open.
+    /// `--dry-run` prints the count and changes nothing. `--verbose` prints
+    /// one line per released ticket. `--days` lists claims untouched for
+    /// that many days and writes nothing. `--yes` hands those back.
+    /// An id together with `--stale` is refused.
     ///
     /// Example: `ljos release proj-1a2b`
     Release {
-        /// A tracker id, or a 32-hex claim-graph id. Omit it with `--stale`.
-        #[arg(required_unless_present = "stale", conflicts_with = "stale")]
+        /// A tracker id, or a 32-hex claim-graph id. Leave it off with `--stale`.
+        #[arg(required_unless_present = "stale")]
         node: Option<String>,
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
-        /// This seat's claims untouched for `--days` or longer.
+        /// Release this seat's quiet claims, or with `--days` list the older ones.
         #[arg(long)]
         stale: bool,
         /// Days untouched before a claim is stale. The default is `LJOS_STALE_DAYS`, or 7.
         #[arg(long, value_name = "N", requires = "stale")]
         days: Option<i64>,
-        /// Hand the listed claims back. Without this, the command only prints them.
+        /// Hand the day-counted claims back. Without this, `--days` only prints them.
         #[arg(long, requires = "stale")]
         yes: bool,
+        /// Quiet longer than this before a claim is released: `900`, `15m`, `6h` or `2d`. The default is `LJOS_LEASE_SECS`, 900 seconds.
+        #[arg(long, value_name = "DURATION", requires = "stale")]
+        older_than: Option<String>,
+        /// Print what would be released and change nothing.
+        #[arg(long, requires = "stale")]
+        dry_run: bool,
+        /// Print one line per released ticket.
+        #[arg(long, requires = "stale")]
+        verbose: bool,
     },
     /// Mark the claim finished. The ticket stays open.
     ///
@@ -5687,17 +5702,55 @@ fn run_command() -> Result<()> {
             stale,
             days,
             yes,
+            older_than,
+            dry_run,
+            verbose,
         } => {
             // `release HEX --assignee NAME` hands back a claim another
-            // name still holds. `--stale` hands back the untouched pile,
-            // and only after `--yes`.
-            let assignee = assignee_for("release", assignee.as_deref(), true)?;
-            if stale {
+            // name still holds. `--stale` with an id is refused here, in
+            // one line, rather than as a flag conflict.
+            if stale && node.is_some() {
+                bail!("release: pass an id or --stale, not both");
+            }
+            if stale && (older_than.is_some() || dry_run || verbose) && (days.is_some() || yes) {
+                bail!("release: pass --days and --yes, or --older-than and --dry-run, not both");
+            }
+            let quiet = (stale && older_than.is_some())
+                || dry_run
+                || verbose
+                || (stale && days.is_none() && !yes);
+            if quiet {
+                if let Some(name) = assignee.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    let seat = ljos_cli::seat_name();
+                    if ljos_cli::seat_slug(name) != ljos_cli::seat_slug(&seat)
+                        && !ljos_cli::same_holder(name, &seat)
+                    {
+                        bail!(
+                            "release: --stale releases this seat's claims, and {name} is another seat"
+                        );
+                    }
+                }
+                let window = match older_than.as_deref() {
+                    Some(raw) => Some(ljos_cli::quiet_claims::parse_older_than(raw)?),
+                    None => None,
+                };
+                print!(
+                    "{}",
+                    ljos_cli::quiet_claims::release_quiet(
+                        &ljos_cli::seat_name(),
+                        window,
+                        dry_run,
+                        verbose,
+                    )?
+                );
+            } else if stale {
+                let assignee = assignee_for("release", assignee.as_deref(), true)?;
                 print!(
                     "{}",
                     ljos_cli::quiet_claims::release_stale(&assignee, days, yes)?
                 );
             } else if let Some(node) = node {
+                let assignee = assignee_for("release", assignee.as_deref(), true)?;
                 print!("{}", release(&node, &assignee)?);
                 print!("{}", ljos_cli::persist_tracker(&node, "released"));
             } else {

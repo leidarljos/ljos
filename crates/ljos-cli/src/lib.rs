@@ -35440,7 +35440,7 @@ fn claims_fold_line() -> String {
     if quiet > 0 {
         let verb = if quiet == 1 { "is" } else { "are" };
         parts.push(format!(
-            "{} {verb} still yours (ljos claims --mine)",
+            "{} {verb} still yours (ljos release --stale)",
             count_noun(quiet, "quiet claim", "quiet claims")
         ));
     }
@@ -40545,7 +40545,8 @@ the oldest three, then `+N more (ljos claims --mine)` when more\n   \
 remain. Claims untouched for longer than `LJOS_STALE_DAYS` (7 when\n   \
 unset) are one line, `N claims untouched for D+ days: ljos claims --stale`,\n   \
 and those three are the newer ones. Nothing is released. The short\n   \
-form folds hand-backs and quiet claims into one line. `--verbose` prints each one.",
+form folds hand-backs and quiet claims into one line, and a quiet\n   \
+remainder names `ljos release --stale`. `--verbose` prints each one.",
     },
     SittingSection {
         name: "doctor",
@@ -65041,7 +65042,7 @@ next: day-2  measure the files
             "{short}"
         );
         assert!(
-            short.contains("32 quiet claims are still yours (ljos claims --mine)"),
+            short.contains("32 quiet claims are still yours (ljos release --stale)"),
             "{short}"
         );
         assert!(short.contains("next: day-2  measure the files"), "{short}");
@@ -65055,7 +65056,7 @@ day-new  fresh title  2 days  ljos finish day-new / ljos note day-new \"...\"
 ";
         let folded = compact_sitting(stale, "day-1");
         assert!(
-            folded.contains("1 quiet claim is still yours (ljos claims --mine)"),
+            folded.contains("1 quiet claim is still yours (ljos release --stale)"),
             "{folded}"
         );
         assert!(
@@ -65270,7 +65271,7 @@ sync: the remote was not reached
         );
         assert!(
             short.contains(
-                "handed back 2 quiet claims; kept 1 still running; 35 quiet claims are still yours (ljos claims --mine)"
+                "handed back 2 quiet claims; kept 1 still running; 35 quiet claims are still yours (ljos release --stale)"
             ),
             "{short}"
         );

@@ -3,8 +3,10 @@
 //! `ljos sitting` and `ljos inbox` name a few. `ljos claims --mine` lists
 //! every one. Claims untouched for longer than [`stale_days_from_env`] are
 //! one line on that banner. `ljos claims --stale` lists them. `ljos release
-//! --stale` hands them back, and only when `--yes` is set. A release drops
-//! the claim. It does not close the ticket.
+//! --stale --yes` hands that older pile back. `ljos release --stale` releases
+//! the claims a sitting would hand back: quiet past the lease, held by this
+//! seat, and not kept by a conversation that is still running. A release
+//! drops the claim. It does not close the ticket.
 
 use chrono::{DateTime, Local, NaiveDate};
 use vissue_core::views::IssueRec;
@@ -454,4 +456,407 @@ fn short_title(title: &str) -> String {
     let mut cut: String = flat.chars().take(keep).collect();
     cut.push_str(ELLIPSIS);
     cut
+}
+
+/// `900`, `15m`, `6h`, `2d`. A bare number is seconds, the unit `LJOS_LEASE_SECS` uses.
+///
+/// # Errors
+///
+/// The text is not a duration, or it is zero.
+pub fn parse_older_than(raw: &str) -> Result<u64> {
+    let raw = raw.trim();
+    let split = raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len());
+    let (n, unit) = raw.split_at(split);
+    if n.is_empty() {
+        bail!("release: --older-than wants a duration such as 900, 15m, 6h or 2d");
+    }
+    let n: u64 = n.parse().map_err(|_| {
+        anyhow::anyhow!("release: --older-than wants a duration such as 900, 15m, 6h or 2d")
+    })?;
+    let secs = match unit {
+        "" | "s" => n,
+        "m" => n.saturating_mul(60),
+        "h" => n.saturating_mul(3600),
+        "d" => n.saturating_mul(86_400),
+        _ => bail!("release: --older-than wants a duration such as 900, 15m, 6h or 2d"),
+    };
+    if secs == 0 {
+        bail!("release: --older-than wants a duration longer than 0");
+    }
+    Ok(secs)
+}
+
+/// One claim [`release_quiet`] may hand back.
+struct QuietHeld {
+    /// Tracker id when the claim names one, else the claim-graph id.
+    label: String,
+    ticket: String,
+    /// Claim-graph node. Empty when the tracker holds the claim and the graph does not.
+    graph_id: String,
+    /// Actor the graph recorded. Empty when there is no graph node.
+    actor: String,
+    /// Name [`crate::unstamp_tracker`] matches against `CLAIMED_BY`.
+    holder: String,
+    quiet: u64,
+}
+
+/// Release every claim this seat holds that has been quiet for at least
+/// `older_than` seconds and whose conversation is not running on this host.
+///
+/// `older_than` of `None` is [`crate::lease_secs`], the window a sitting
+/// uses before it hands a claim back. Zero from that variable releases
+/// nothing: a sitting with `LJOS_LEASE_SECS=0` hands nothing back either.
+/// A hold whose process is still the program that wrote it stays, the
+/// same check as `kept <id>: ... is still running`. Another seat's claim
+/// stays. The ticket goes back to the state it had before the claim, or
+/// stays as it is when that state was not STARTED. It is not closed.
+///
+/// `--dry-run` prints the same count and writes nothing. `--verbose`
+/// prints one line per released ticket, and one line for each claim a
+/// running conversation still holds.
+///
+/// # Errors
+///
+/// The tracker cannot be read, or the claim graph does not answer. Nothing
+/// is released in either case.
+pub fn release_quiet(
+    seat: &str,
+    older_than: Option<u64>,
+    dry_run: bool,
+    verbose: bool,
+) -> Result<String> {
+    let threshold = older_than.unwrap_or_else(crate::lease_secs);
+    if older_than.is_none() && threshold == 0 {
+        return Ok(summary_line(0, 0, dry_run));
+    }
+    let recs = load_tracker().context("release --stale: the tracker could not be read")?;
+    let listed = match crate::run_captured("claimdag", &["list", "--json"]) {
+        Ok(said) => said.stdout,
+        Err(err) => {
+            let text = format!("{err:#}");
+            if crate::call_deadline::stalled(&text) {
+                bail!(
+                    "{}",
+                    crate::call_deadline::stall_line(
+                        "claimdag",
+                        &["list", "--json"],
+                        crate::call_deadline::timeout(),
+                    )
+                );
+            }
+            bail!("release: the claim graph did not answer");
+        }
+    };
+    let rows: Vec<serde_json::Value> = serde_json::from_str(listed.trim())
+        .map_err(|_| anyhow::anyhow!("release: the claim graph did not answer"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let (mut release, mut kept) = classify(&recs, &rows, seat, now, threshold);
+    release.sort_by(|a, b| b.quiet.cmp(&a.quiet).then(a.label.cmp(&b.label)));
+    kept.sort_by(|a, b| b.quiet.cmp(&a.quiet).then(a.label.cmp(&b.label)));
+    if dry_run {
+        return Ok(render_quiet(&release, &kept, verbose));
+    }
+    let mut failed = String::new();
+    let mut done = Vec::new();
+    for item in &release {
+        match hand_back(item) {
+            Ok(()) => done.push(item.label.clone()),
+            Err(err) => {
+                failed.push_str(&format!(
+                    "release: {} stayed claimed ({err:#})\n",
+                    item.label
+                ));
+            }
+        }
+    }
+    let mut out = failed;
+    out.push_str(&render_quiet_done(&done, &kept, verbose));
+    Ok(out)
+}
+
+fn render_quiet(release: &[QuietHeld], kept: &[QuietHeld], verbose: bool) -> String {
+    let released: Vec<String> = release.iter().map(|item| item.label.clone()).collect();
+    render_quiet_done(&released, kept, verbose).replace("released ", "would release ")
+}
+
+fn render_quiet_done(released: &[String], kept: &[QuietHeld], verbose: bool) -> String {
+    if verbose {
+        let mut out = String::new();
+        for id in released {
+            out.push_str(&format!("released {id}\n"));
+        }
+        for item in kept {
+            out.push_str(&format!(
+                "kept {}: held by a running conversation\n",
+                item.label
+            ));
+        }
+        if out.is_empty() {
+            out.push_str("released 0 quiet claims\n");
+        }
+        return out;
+    }
+    summary_line(released.len(), kept.len(), false)
+}
+
+fn summary_line(released: usize, kept: usize, dry_run: bool) -> String {
+    let verb = if dry_run { "would release" } else { "released" };
+    let rel = format!(
+        "{verb} {}",
+        count_claims(released, "quiet claim", "quiet claims")
+    );
+    if kept == 0 {
+        return format!("{rel}\n");
+    }
+    let held = if kept == 1 {
+        "kept 1 held by a running conversation".to_string()
+    } else {
+        format!("kept {kept} held by running conversations")
+    };
+    format!("{rel}; {held}\n")
+}
+
+fn count_claims(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+fn classify(
+    recs: &[IssueRec],
+    rows: &[serde_json::Value],
+    seat: &str,
+    now: u64,
+    threshold: u64,
+) -> (Vec<QuietHeld>, Vec<QuietHeld>) {
+    let mut release = Vec::new();
+    let mut kept = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for row in rows {
+        let Some(node) = graph_node(row) else {
+            continue;
+        };
+        if !node.ticket.is_empty() {
+            seen.insert(node.ticket.clone());
+        }
+        let claimed = claimed_on(recs, &node.ticket);
+        let hold = crate::read_hold(&node.actor);
+        if !ours(seat, claimed, hold.as_ref()) {
+            continue;
+        }
+        let Some(quiet) = node.updated.map(|t| now.saturating_sub(t)) else {
+            continue;
+        };
+        if quiet < threshold {
+            continue;
+        }
+        let item = QuietHeld {
+            label: if node.ticket.is_empty() {
+                node.id.clone()
+            } else {
+                node.ticket.clone()
+            },
+            ticket: node.ticket,
+            graph_id: node.id,
+            actor: node.actor,
+            holder: claimed.unwrap_or(seat).to_string(),
+            quiet,
+        };
+        if hold.as_ref().is_some_and(crate::hold_alive) {
+            kept.push(item);
+        } else {
+            release.push(item);
+        }
+    }
+    let want = crate::canonical_seat_name(seat);
+    for rec in recs {
+        if !held_live(&rec.heading, &want) || seen.contains(&rec.heading.id) {
+            continue;
+        }
+        let quiet = claimed_quiet(rec, now);
+        if quiet < threshold {
+            continue;
+        }
+        let named = hold_on_ticket(&rec.heading.id);
+        if let Some((_, hold)) = &named {
+            if !ours(seat, rec.heading.claimed_by(), Some(hold)) {
+                continue;
+            }
+        }
+        let item = QuietHeld {
+            label: rec.heading.id.clone(),
+            ticket: rec.heading.id.clone(),
+            graph_id: String::new(),
+            actor: named
+                .as_ref()
+                .map(|(actor, _)| actor.clone())
+                .unwrap_or_default(),
+            holder: rec.heading.claimed_by().unwrap_or(seat).to_string(),
+            quiet,
+        };
+        if named
+            .as_ref()
+            .is_some_and(|(_, hold)| crate::hold_alive(hold))
+        {
+            kept.push(item);
+        } else {
+            release.push(item);
+        }
+    }
+    (release, kept)
+}
+
+struct GraphNode {
+    id: String,
+    actor: String,
+    ticket: String,
+    updated: Option<u64>,
+}
+
+fn graph_node(row: &serde_json::Value) -> Option<GraphNode> {
+    if !matches!(row["status"].as_str(), Some("claimed" | "running")) {
+        return None;
+    }
+    let id = row["id"].as_str()?.to_string();
+    let actor = row["assignee"].as_str()?.to_string();
+    if actor.len() != 32 || actor.bytes().all(|b| b == b'0') {
+        return None;
+    }
+    Some(GraphNode {
+        id,
+        actor,
+        ticket: row["summary"].as_str().unwrap_or("").trim().to_string(),
+        updated: row["updated_unix"].as_u64(),
+    })
+}
+
+fn claimed_on<'a>(recs: &'a [IssueRec], id: &str) -> Option<&'a str> {
+    if id.is_empty() {
+        return None;
+    }
+    recs.iter()
+        .find(|rec| rec.heading.id == id)
+        .and_then(|rec| rec.heading.claimed_by())
+}
+
+/// This seat's claim. A ticket another seat holds is theirs even when a
+/// hold record here names a different conversation. A hold for another
+/// seat is theirs. No hold and no tracker row is not this seat's.
+fn ours(seat: &str, claimed_by: Option<&str>, hold: Option<&crate::Hold>) -> bool {
+    let want = crate::canonical_seat_name(seat);
+    if want.is_empty() {
+        return false;
+    }
+    if let Some(who) = claimed_by.map(crate::canonical_seat_name) {
+        if !who.is_empty() && who != want {
+            return false;
+        }
+    }
+    if let Some(hold) = hold {
+        let hold_seat = crate::canonical_seat_name(&hold.seat);
+        let hold_who = crate::canonical_seat_name(&hold.assignee);
+        if hold_seat == want || hold_who == want {
+            return true;
+        }
+        if !hold_seat.is_empty() || !hold_who.is_empty() {
+            return false;
+        }
+    }
+    claimed_by
+        .map(crate::canonical_seat_name)
+        .is_some_and(|who| who == want)
+}
+
+fn claimed_quiet(rec: &IssueRec, now: u64) -> u64 {
+    match rec.heading.claimed_at().and_then(crate::reap::org_ts) {
+        Some(t) if t > 0 => now.saturating_sub(t as u64),
+        _ => u64::MAX,
+    }
+}
+
+/// The hold record whose sixth line names `ticket`. An alive one wins, so
+/// one live conversation keeps the claim.
+fn hold_on_ticket(ticket: &str) -> Option<(String, crate::Hold)> {
+    let entries = std::fs::read_dir(crate::runtime_dir()).ok()?;
+    let mut dead = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(actor) = name.strip_prefix("hold-") else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let named = text.lines().nth(5).map(str::trim);
+        if named != Some(ticket) {
+            continue;
+        }
+        let Some(hold) = crate::read_hold(actor) else {
+            continue;
+        };
+        if crate::hold_alive(&hold) {
+            return Some((actor.to_string(), hold));
+        }
+        dead = Some((actor.to_string(), hold));
+    }
+    dead
+}
+
+fn hand_back(item: &QuietHeld) -> Result<()> {
+    if !item.graph_id.is_empty() {
+        crate::run_captured(
+            "claimdag",
+            &["release", &item.graph_id, "--actor", &item.actor],
+        )?;
+        if !item.actor.is_empty() {
+            crate::drop_hold(&item.actor);
+        }
+    } else if !item.actor.is_empty() {
+        crate::drop_hold(&item.actor);
+    }
+    if !item.ticket.is_empty() {
+        crate::unstamp_tracker(&item.ticket, &item.holder, true)?;
+        crate::drop_playbook(&item.ticket);
+        let git = crate::persist_tracker(&item.ticket, "released");
+        if !git.trim().is_empty() && !crate::routine_git_line(git.trim()) {
+            bail!("{}", git.trim());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+
+    #[test]
+    fn older_than_reads_seconds_and_units() {
+        assert_eq!(parse_older_than("900").unwrap(), 900);
+        assert_eq!(parse_older_than("15m").unwrap(), 900);
+        assert_eq!(parse_older_than("6h").unwrap(), 21_600);
+        assert_eq!(parse_older_than("2d").unwrap(), 172_800);
+        assert_eq!(parse_older_than("45s").unwrap(), 45);
+        assert!(parse_older_than("0").is_err());
+        assert!(parse_older_than("6x").is_err());
+        assert!(parse_older_than("h").is_err());
+    }
+
+    #[test]
+    fn the_summary_counts_released_and_kept() {
+        assert_eq!(
+            summary_line(12, 3, false),
+            "released 12 quiet claims; kept 3 held by running conversations\n"
+        );
+        assert_eq!(
+            summary_line(1, 1, true),
+            "would release 1 quiet claim; kept 1 held by a running conversation\n"
+        );
+        assert_eq!(summary_line(0, 0, false), "released 0 quiet claims\n");
+        assert_eq!(summary_line(2, 0, true), "would release 2 quiet claims\n");
+    }
 }

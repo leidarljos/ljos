@@ -232,7 +232,7 @@ A plan files one parent and its checklist in a single tracker commit, claims the
    $ LJOS_SEAT=alice ljos ready --mine
    next: day-ef56  pick a default
 
-The ids are the ones that run printed. The parent is claimed. Each item stays open until ``ljos finish`` ticks it. A sitting with no ``--verbose`` prints the claim, one line for claims still held, what the seat remembers, and the close. With ``--no-embed`` the pack has no encoder, so the sitting prints ``memory degraded: ranked by words``. Quiet claims are ``N quiet claims are still yours (ljos claims --mine)``. Claims untouched for longer than ``LJOS_STALE_DAYS`` (7) are one line, ``ljos claims --stale``. ``ljos sitting ISSUE --verbose`` prints every section.
+The ids are the ones that run printed. The parent is claimed. Each item stays open until ``ljos finish`` ticks it. A sitting with no ``--verbose`` prints the claim, one line for claims still held, what the seat remembers, and the close. With ``--no-embed`` the pack has no encoder, so the sitting prints ``memory degraded: ranked by words``. Quiet claims are ``N quiet claims are still yours (ljos release --stale)``. Claims untouched for longer than ``LJOS_STALE_DAYS`` (7) are one line, ``ljos claims --stale``. ``ljos sitting ISSUE --verbose`` prints every section.
 Under a runner the holder on the ``STARTED`` line can be ``alice`` plus ``@`` and a session tag. The claim command below prints the seat name.
 
 A second seat
