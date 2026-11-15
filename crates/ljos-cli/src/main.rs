@@ -769,7 +769,11 @@ enum Cmd {
     /// the subject, or when the encoder's cosine reaches 0.66. The cosine is
     /// how close the stored text is to the query, from 0 to 1. A short list
     /// is not padded with a weaker cross-seat hit. When those were the only
-    /// rows, the line is `Nothing relevant was found.` A search that found
+    /// rows, the line is `Nothing relevant was found.` A tracker ticket whose
+    /// title matches is included, and then one whose notes match. An exact or
+    /// near-exact title is the first row, while the encoder is loading and
+    /// after. The row names the ticket id and the title, so `ljos recall ID`
+    /// opens it. A search that found
     /// nothing prints `No hits for QUERY` and the next command:
     /// `ljos search WORD` when QUERY has more than one word, otherwise
     /// `ljos remember "WORD"` with that one word in quotes. A busy memory store ranks by words
@@ -4762,7 +4766,7 @@ fn run_command() -> Result<()> {
             }
             // A word ranking re-scores the rows it was given. The encoder
             // path keeps the seat wall and the cosine floor.
-            let (close_miss, unrelated) = if ranking.mode == "lexical" {
+            let (mut close_miss, unrelated) = if ranking.mode == "lexical" {
                 let missed = ljos_cli::word_rank::order_hits(&mut hits, &asked, attempts)
                     == ljos_cli::word_rank::WordList::NoClose;
                 (missed, false)
@@ -4773,8 +4777,20 @@ fn run_command() -> Result<()> {
                 ljos_cli::prefer_calling_seat(&mut hits);
                 (false, unrelated)
             };
+            // A dated search is the pack as it stood. A source filter asked
+            // for slot rows only. Tickets are the live tracker, so neither
+            // of those pages grows one. The merge runs after both rankers,
+            // so a title match is present while the encoder loads and after.
+            // `capped` is the pack's page, counted before tickets are added.
+            // A full pack page can still have more memories past `fetch`.
+            let capped = fetch > 0 && hits.len() == usize::try_from(fetch).unwrap_or(usize::MAX);
+            if !dated && !filter.active() {
+                ljos_cli::ticket_search::merge(&mut hits, &asked);
+            }
+            if !hits.is_empty() {
+                close_miss = false;
+            }
             let matched = hits.len();
-            let capped = fetch > 0 && matched == usize::try_from(fetch).unwrap_or(usize::MAX);
             hits.truncate(limit as usize);
             ljos_cli::note_lookups(&hits);
             ranking = ljos_cli::ranking_for_printed(ranking, &hits);

@@ -84,6 +84,7 @@ pub mod slot;
 pub mod subagent;
 pub mod swap_log;
 pub mod sync;
+pub mod ticket_search;
 pub mod tool_bound;
 pub mod tools;
 mod tracker_attach;
@@ -14831,6 +14832,9 @@ pub fn search_json_empty(hits: &[Hit], ranking: Option<&Ranking>, empty: Option<
             });
             if let Some(ticket) = issue_on(&hit.entities) {
                 row["ticket"] = Value::String(ticket.to_string());
+            }
+            if hit.kind == "ticket" {
+                row["title"] = Value::String(hit.text.clone());
             }
             if let Some(seat) = other_seat(&hit.entities, &mine) {
                 row["from"] = Value::String(seat);
@@ -46491,6 +46495,11 @@ fn unverified_label(h: &Hit, kind: &str) -> String {
 /// and MCP name it the same.
 #[must_use]
 pub fn kind_label(h: &Hit) -> String {
+    // A tracker ticket is not a stored memory. The note rule below would
+    // call every non-lesson unverified, and the row would hide the ticket.
+    if h.kind == "ticket" {
+        return "ticket".to_string();
+    }
     // A failed command is stored as an attempt. The line names that, and
     // the failure label, ahead of the note rules that would call it a lesson.
     if h.id.as_deref().is_some_and(|id| id.starts_with("attempt:")) || h.kind.starts_with("attempt")

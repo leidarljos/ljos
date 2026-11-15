@@ -2,8 +2,8 @@ status 0
 stderr:
 matched by meaning
 stdout:
-shown 3 of 12, and the next page lists the rest, so run `ljos search glaze -n
-12`.
+shown 3 of 13, and the next page lists the rest, so run `ljos search glaze -n
+13`.
 Place 1 is the first row. This seat's rows come before another seat's.
 The score orders the row. It is not whether the sentence is true.
 Checks: how many of them named this row.

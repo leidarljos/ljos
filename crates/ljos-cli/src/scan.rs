@@ -428,7 +428,14 @@ pub fn search_page(page: &SearchPage<'_>) -> String {
     out.push('\n');
     let labels = unique_prefixes(page.rows.iter().map(|row| row.id.unwrap_or("")));
     for (row, label) in page.rows.iter().zip(labels) {
-        out.push_str(&search_row(row, &label));
+        // A ticket id is what `ljos recall` takes. An eight-character cut
+        // of `Software-6mrw` is `Software`, which is not that id.
+        let id_label = if row.label == "ticket" {
+            row.id.unwrap_or("").to_string()
+        } else {
+            label
+        };
+        out.push_str(&search_row(row, &id_label));
         out.push_str("\n\n");
     }
     while out.ends_with("\n\n") {
@@ -588,7 +595,15 @@ fn search_hint(query: &str, limit: usize, asks: bool) -> String {
 }
 
 fn search_row(row: &SearchRow<'_>, id_label: &str) -> String {
-    let mut head = row.label.to_string();
+    let ticket = row.ticket.filter(|ticket| !ticket.is_empty());
+    let mut head = if row.label == "ticket" {
+        match ticket {
+            Some(id) => format!("ticket {id}"),
+            None => row.label.to_string(),
+        }
+    } else {
+        row.label.to_string()
+    };
     if !row.age.is_empty() {
         head.push_str(", ");
         head.push_str(row.age);
@@ -597,9 +612,11 @@ fn search_row(row: &SearchRow<'_>, id_label: &str) -> String {
         head.push_str(", from ");
         head.push_str(seat);
     }
-    if let Some(ticket) = row.ticket.filter(|ticket| !ticket.is_empty()) {
-        head.push_str(", ticket ");
-        head.push_str(ticket);
+    if row.label != "ticket" {
+        if let Some(id) = ticket {
+            head.push_str(", ticket ");
+            head.push_str(id);
+        }
     }
     let mut foot = format!("place {}, score {:.2}", row.place.max(1), row.score);
     if row.local {
