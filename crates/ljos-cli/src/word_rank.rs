@@ -12,7 +12,11 @@
 //! tokens. A title or a tag counts twice a body word. Query words that sit
 //! next to each other add a proximity bonus. This seat's own row is multiplied
 //! by [`SEAT_BOOST`], which is not enough to pass a clearly closer row.
-//! A query whose best row does not cover enough of its words is not printed.
+//! A row that matches any query term is a candidate. More matched terms rank
+//! higher, then rarer terms. Matching is case-insensitive. A light suffix
+//! rule treats `narration`, `narrated` and `narrate` as one word, and `video`
+//! and `videos` as one. A row that only shares a common word is left out.
+//! When nothing is close, the broader query names a term that occurs.
 
 use packset_client::Hit;
 
@@ -55,8 +59,9 @@ pub struct Doc<'a> {
 pub enum Ranked {
     /// Best first. `index` is the position in the slice passed to [`rank`].
     Hits(Vec<Scored>),
-    /// Something shared a word, and nothing covered enough of the query.
-    NoClose,
+    /// Something shared a word, and nothing cleared the floor.
+    /// `suggest` names a broader search whose term occurs in the corpus.
+    NoClose { suggest: Option<String> },
     /// Nothing shared a content word, or the query had none.
     None,
 }
@@ -65,16 +70,19 @@ pub enum Ranked {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Scored {
     pub index: usize,
+    /// Query terms this row covered, including a word-form match.
+    pub covered: usize,
     pub score: f64,
 }
 
 /// How [`order_hits`] left a search page.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WordList {
     /// Rows were reordered and weak ones removed.
     Kept,
     /// The page had rows, and none cleared the floor.
-    NoClose,
+    /// `suggest` is the broader command when a term in the corpus can be named.
+    NoClose { suggest: Option<String> },
     /// Nothing to print. The usual no-hits line applies.
     None,
 }
@@ -99,11 +107,22 @@ struct Prepared {
 }
 
 /// The line when rows existed and none cleared the floor.
+///
+/// The broader command is the longest content word. Callers that have the
+/// corpus use [`no_close_line_with`] so the named term is one that occurs.
 #[must_use]
 pub fn no_close_line(query: &str) -> String {
+    no_close_line_with(query, broader_command(query).as_deref())
+}
+
+/// [`no_close_line`] with the broader command already chosen.
+/// `cmd` is omitted when no content word is safe to print, or none of them
+/// occur in the corpus.
+#[must_use]
+pub fn no_close_line_with(query: &str, cmd: Option<&str>) -> String {
     let query = query.trim();
     let shown = quote_query(query);
-    match broader_command(query) {
+    match cmd.map(str::trim).filter(|cmd| !cmd.is_empty()) {
         Some(cmd) => format!("No close matches for {shown}. Try a broader query: `{cmd}`."),
         None => format!("No close matches for {shown}. Try a broader query."),
     }
@@ -134,34 +153,64 @@ pub fn rank(docs: &[Doc<'_>], query: &str) -> Ranked {
     }
     let prepared: Vec<Prepared> = docs.iter().map(prepare).collect();
     let df = document_frequency(&prepared, &concepts);
-    let n = prepared.len() as f64;
+    let form_df = form_document_frequency(&prepared, &concepts);
+    let n = prepared.len();
+    let n_f = n as f64;
     let avgdl = average_body_len(&prepared);
+    let mut concept_df = vec![0usize; concepts.len()];
+    for doc in &prepared {
+        for (index, concept) in concepts.iter().enumerate() {
+            if concept_covered(concept, &doc.have) {
+                concept_df[index] += 1;
+            }
+        }
+    }
+    let common: Vec<bool> = concept_df.iter().map(|hits| n >= 2 && *hits == n).collect();
     let mut any = false;
     let mut close: Vec<(usize, f64, usize, f64, usize)> = Vec::new();
-    let need = needed(concepts.len());
     for (index, doc) in prepared.iter().enumerate() {
-        let covered = concepts
+        let matched: Vec<usize> = concepts
             .iter()
-            .filter(|concept| concept_covered(concept, &doc.have))
-            .count();
-        if covered == 0 {
+            .enumerate()
+            .filter(|(_, concept)| concept_covered(concept, &doc.have))
+            .map(|(index, _)| index)
+            .collect();
+        if matched.is_empty() {
             continue;
         }
         any = true;
-        if covered < need {
+        if !keep_partial(&matched, &common, concepts.len()) {
             continue;
         }
-        let body = bm25(&doc.body.bag, doc.body.bag.len(), &concepts, &df, n, avgdl);
+        let covered = matched.len();
+        let body = bm25(
+            &doc.body.bag,
+            doc.body.bag.len(),
+            &concepts,
+            &df,
+            &form_df,
+            n_f,
+            avgdl,
+        );
         let title = bm25(
             &doc.title.bag,
             doc.title.bag.len(),
             &concepts,
             &df,
-            n,
+            &form_df,
+            n_f,
             avgdl,
         );
-        let tags = bm25(&doc.tags.bag, doc.tags.bag.len(), &concepts, &df, n, avgdl);
-        let phrase = phrase_bonus(&doc.body, &doc.title, &concepts, &df, n);
+        let tags = bm25(
+            &doc.tags.bag,
+            doc.tags.bag.len(),
+            &concepts,
+            &df,
+            &form_df,
+            n_f,
+            avgdl,
+        );
+        let phrase = phrase_bonus(&doc.body, &doc.title, &concepts, &df, n_f);
         let mut score = body + FIELD_WEIGHT * title + FIELD_WEIGHT * tags + phrase;
         // A title that names half the query must not outrank a row that names
         // all of it. Squaring the fraction is what makes a partial title lose
@@ -174,11 +223,19 @@ pub fn rank(docs: &[Doc<'_>], query: &str) -> Ranked {
         close.push((index, score, covered, phrase, doc.body.bag.len()));
     }
     if close.is_empty() {
-        return if any { Ranked::NoClose } else { Ranked::None };
+        return if any {
+            Ranked::NoClose {
+                suggest: suggest_hitting(&concepts, &concept_df),
+            }
+        } else {
+            Ranked::None
+        };
     }
+    // More matched terms first. The same coverage then prefers the rarer
+    // terms, which is the BM25 score.
     close.sort_by(|a, b| {
-        b.1.total_cmp(&a.1)
-            .then(b.2.cmp(&a.2))
+        b.2.cmp(&a.2)
+            .then(b.1.total_cmp(&a.1))
             .then(b.3.total_cmp(&a.3))
             .then(b.4.cmp(&a.4))
             .then_with(|| prepared[a.0].id.cmp(&prepared[b.0].id))
@@ -186,7 +243,11 @@ pub fn rank(docs: &[Doc<'_>], query: &str) -> Ranked {
     Ranked::Hits(
         close
             .into_iter()
-            .map(|(index, score, _, _, _)| Scored { index, score })
+            .map(|(index, score, covered, _, _)| Scored {
+                index,
+                covered,
+                score,
+            })
             .collect(),
     )
 }
@@ -219,8 +280,9 @@ pub fn order_hits(hits: &mut Vec<Hit>, query: &str, attempts: bool) -> WordList 
             // the writer scored above a lesson stays above it.
             let incoming: Vec<f64> = hits.iter().map(|hit| hit.score).collect();
             scored.sort_by(|a, b| {
-                b.score
-                    .total_cmp(&a.score)
+                b.covered
+                    .cmp(&a.covered)
+                    .then(b.score.total_cmp(&a.score))
                     .then(incoming[b.index].total_cmp(&incoming[a.index]))
                     .then(a.index.cmp(&b.index))
             });
@@ -234,9 +296,9 @@ pub fn order_hits(hits: &mut Vec<Hit>, query: &str, attempts: bool) -> WordList 
             hits.extend(scored.into_iter().filter_map(|row| taken[row.index].take()));
             WordList::Kept
         }
-        Ranked::NoClose => {
+        Ranked::NoClose { suggest } => {
             hits.clear();
-            WordList::NoClose
+            WordList::NoClose { suggest }
         }
         Ranked::None => {
             hits.clear();
@@ -332,14 +394,41 @@ fn broader_command(query: &str) -> Option<String> {
     Some(format!("ljos search {best}"))
 }
 
-/// How many of `n` concepts a row must cover. Two words must both be there.
-/// A longer query needs half, rounded up, and at least two.
-fn needed(n: usize) -> usize {
-    if n <= 2 {
-        n.max(1)
-    } else {
-        n.div_ceil(2).max(2)
+/// A partial overlap stays when it is more than one term, or the one term
+/// is not in every row. One query word always stays: that word is the subject.
+/// A word that is in every row of a corpus is common, and a row that shares
+/// only that word is not close.
+fn keep_partial(matched: &[usize], common: &[bool], query_terms: usize) -> bool {
+    if matched.is_empty() {
+        return false;
     }
+    if query_terms <= 1 || matched.len() >= 2 {
+        return true;
+    }
+    !common[matched[0]]
+}
+
+/// The longest query term that occurs, as a shell command.
+/// One hitting term is that term. A term with no row is not named.
+fn suggest_hitting(concepts: &[String], df: &[usize]) -> Option<String> {
+    if concepts.len() < 2 {
+        return None;
+    }
+    let mut best: Option<&str> = None;
+    for (word, hits) in concepts.iter().zip(df) {
+        if *hits == 0 {
+            continue;
+        }
+        let replace = best.is_none_or(|have| word.chars().count() > have.chars().count());
+        if replace {
+            best = Some(word);
+        }
+    }
+    let best = best?;
+    let safe = best
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
+    safe.then(|| format!("ljos search {best}"))
 }
 
 /// Written query words that name something. Order is the order typed.
@@ -429,7 +518,52 @@ fn concept_covered(written: &str, have: &std::collections::BTreeSet<String>) -> 
     {
         return true;
     }
-    !concept.parts.is_empty() && concept.parts.iter().all(|part| have.contains(part))
+    if !concept.parts.is_empty() && concept.parts.iter().all(|part| have.contains(part)) {
+        return true;
+    }
+    form_covered(&concept, have)
+}
+
+/// A shared prefix plus an inflection, so `narration` covers `narrated`.
+fn forms_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    if !left.bytes().all(|byte| byte.is_ascii_lowercase())
+        || !right.bytes().all(|byte| byte.is_ascii_lowercase())
+    {
+        return false;
+    }
+    let left_b = left.as_bytes();
+    let right_b = right.as_bytes();
+    let mut shared = 0usize;
+    while shared < left_b.len() && shared < right_b.len() && left_b[shared] == right_b[shared] {
+        shared += 1;
+    }
+    shared >= 5 && inflection(&left[shared..]) && inflection(&right[shared..])
+}
+
+fn inflection(rest: &str) -> bool {
+    matches!(
+        rest,
+        "" | "e" | "ed" | "es" | "s" | "ing" | "ion" | "tion" | "ation"
+    )
+}
+
+fn form_covered(concept: &Concept, have: &std::collections::BTreeSet<String>) -> bool {
+    let joined = [concept.joined.as_str(), concept.joined_stems.as_str()];
+    let joined_ok = joined
+        .iter()
+        .filter(|term| term.len() >= 2)
+        .any(|term| have.iter().any(|got| forms_match(got, term)));
+    if joined_ok {
+        return true;
+    }
+    !concept.parts.is_empty()
+        && concept
+            .parts
+            .iter()
+            .all(|part| have.iter().any(|got| forms_match(got, part)))
 }
 
 fn prepare(doc: &Doc<'_>) -> Prepared {
@@ -548,6 +682,32 @@ fn split_camel_digit(seg: &str) -> Vec<String> {
     out
 }
 
+fn form_document_frequency(
+    docs: &[Prepared],
+    concepts: &[String],
+) -> std::collections::HashMap<String, usize> {
+    let mut terms = std::collections::BTreeSet::new();
+    for written in concepts {
+        let concept = concept_of(written);
+        if concept.joined.len() >= 2 {
+            terms.insert(concept.joined);
+        }
+        if concept.joined_stems.len() >= 2 {
+            terms.insert(concept.joined_stems);
+        }
+        terms.extend(concept.parts);
+    }
+    let mut df = std::collections::HashMap::new();
+    for term in terms {
+        let n = docs
+            .iter()
+            .filter(|doc| doc.have.iter().any(|got| forms_match(got, &term)))
+            .count();
+        df.insert(term, n);
+    }
+    df
+}
+
 fn document_frequency(
     docs: &[Prepared],
     concepts: &[String],
@@ -591,6 +751,7 @@ fn bm25(
     len: usize,
     concepts: &[String],
     df: &std::collections::HashMap<String, usize>,
+    form_df: &std::collections::HashMap<String, usize>,
     n: f64,
     avgdl: f64,
 ) -> f64 {
@@ -608,9 +769,10 @@ fn bm25(
     for written in concepts {
         let concept = concept_of(written);
         let mut term_score = 0.0;
-        for term in std::iter::once(concept.joined)
-            .chain(std::iter::once(concept.joined_stems))
-            .chain(concept.parts.into_iter())
+        let mut exact = false;
+        for term in std::iter::once(concept.joined.clone())
+            .chain(std::iter::once(concept.joined_stems.clone()))
+            .chain(concept.parts.iter().cloned())
         {
             if term.len() < 2 || !seen.insert(term.clone()) {
                 continue;
@@ -622,13 +784,55 @@ fn bm25(
             if docs_with == 0 || count == 0.0 {
                 continue;
             }
+            exact = true;
             let weight = idf(n, docs_with);
             let tf = count * (K1 + 1.0) / (count + K1 * norm);
             term_score += weight * tf;
         }
+        if !exact {
+            term_score += form_term_score(&concept, &freq, form_df, n, norm);
+        }
         score += term_score;
     }
     score
+}
+
+/// BM25 for a word form when the exact stem is absent.
+/// An exact hit keeps the previous weight, so a stored lesson's score stays.
+fn form_term_score(
+    concept: &Concept,
+    freq: &std::collections::HashMap<&str, f64>,
+    form_df: &std::collections::HashMap<String, usize>,
+    n: f64,
+    norm: f64,
+) -> f64 {
+    let mut best: f64 = 0.0;
+    let mut terms = Vec::new();
+    if concept.joined.len() >= 2 {
+        terms.push(concept.joined.as_str());
+    }
+    if concept.joined_stems.len() >= 2 {
+        terms.push(concept.joined_stems.as_str());
+    }
+    terms.extend(concept.parts.iter().map(String::as_str));
+    for term in terms {
+        let Some(docs_with) = form_df.get(term).copied().filter(|docs| *docs > 0) else {
+            continue;
+        };
+        let mut count = 0.0;
+        for (got, times) in freq {
+            if forms_match(got, term) {
+                count += times;
+            }
+        }
+        if count == 0.0 {
+            continue;
+        }
+        let weight = idf(n, docs_with);
+        let tf = count * (K1 + 1.0) / (count + K1 * norm);
+        best = best.max(weight * tf);
+    }
+    best
 }
 
 fn phrase_bonus(
@@ -733,6 +937,65 @@ mod tests {
             "xylophone quadrature",
             "a ferry timetable for the docks"
         ));
+        assert!(shares_term("narration", "GPRidge narrated video set"));
+        assert!(shares_term("narrate", "GPRidge narrated video set"));
+        assert!(shares_term("narrated", "A narrated ridge walk."));
+        assert!(shares_term("videos", "GPRidge narrated video set"));
+        assert!(shares_term("video", "Two videos of the ridge."));
+        assert!(!shares_term("xylophone", "GPRidge narrated video set"));
+    }
+
+    #[test]
+    fn a_partial_title_outranks_one_shared_word() {
+        let ticket = Doc {
+            id: "Software-6mrw",
+            own: true,
+            title: "GPRidge narrated video set",
+            tags: "",
+            body: "Milestone: the ridge walk is filmed.",
+        };
+        let tape = Doc {
+            id: "tape",
+            own: true,
+            title: "",
+            tags: "",
+            body: "A video tape of the harbor.",
+        };
+        let docs = [ticket, tape];
+        let rows = match rank(&docs, "GPRidge video narration") {
+            Ranked::Hits(rows) => rows,
+            other => panic!("the title was not a hit: {other:?}"),
+        };
+        assert_eq!(rows[0].index, 0, "the ticket should rank first");
+        assert!(
+            rows[0].covered >= 2,
+            "two title words should count: {rows:?}"
+        );
+        let folded = match rank(&docs, "gpridge VIDEO Narration") {
+            Ranked::Hits(rows) => rows,
+            other => panic!("case folding missed the title: {other:?}"),
+        };
+        assert_eq!(folded[0].index, 0);
+    }
+
+    #[test]
+    fn a_broader_query_names_a_term_that_occurs() {
+        let docs: Vec<Doc<'_>> = (0..4)
+            .map(|_| Doc {
+                id: "tape",
+                own: true,
+                title: "",
+                tags: "",
+                body: "The video catalog is on the shelf.",
+            })
+            .collect();
+        match rank(&docs, "GPRidge video narration") {
+            Ranked::NoClose { suggest } => {
+                assert_eq!(suggest.as_deref(), Some("ljos search video"));
+            }
+            other => panic!("a common word alone should not be a close match: {other:?}"),
+        }
+        assert!(matches!(rank(&docs, "xylophone plankton"), Ranked::None));
     }
 
     /// The doc samples print these scores for a one-row word search.
@@ -1248,7 +1511,7 @@ mod tests {
         asks.iter()
             .map(|ask| match rank(&docs, ask.query) {
                 Ranked::Hits(scored) => scored.into_iter().map(|row| row.index).collect(),
-                Ranked::NoClose | Ranked::None => Vec::new(),
+                Ranked::NoClose { .. } | Ranked::None => Vec::new(),
             })
             .collect()
     }
@@ -1296,10 +1559,11 @@ mod tests {
             matches!(rank(&docs, "xylophone quadrature plankton"), Ranked::None),
             "a query that shares nothing should not become a list of rows"
         );
-        // One ordinary word of a long query is not a close match.
+        // One ordinary word of a long query may be a hit when that word is
+        // rare, and it is not a list of unrelated rows.
         assert!(matches!(
             rank(&docs, "escapees list_scans uppercase keys xylophone"),
-            Ranked::Hits(_) | Ranked::NoClose
+            Ranked::Hits(_) | Ranked::NoClose { .. }
         ),);
     }
 }

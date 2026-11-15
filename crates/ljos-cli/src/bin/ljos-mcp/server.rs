@@ -1633,13 +1633,15 @@ impl LjosServer {
         };
         let lexical = !ljos_cli::carries_cosine(&hits);
         let close_miss = if args.as_of.as_deref().is_none_or(|at| at.trim().is_empty()) && lexical {
-            ljos_cli::word_rank::order_hits(&mut hits, &args.query, false)
-                == ljos_cli::word_rank::WordList::NoClose
+            match ljos_cli::word_rank::order_hits(&mut hits, &args.query, false) {
+                ljos_cli::word_rank::WordList::NoClose { suggest } => Some(suggest),
+                ljos_cli::word_rank::WordList::Kept | ljos_cli::word_rank::WordList::None => None,
+            }
         } else {
             if args.as_of.as_deref().is_none_or(|at| at.trim().is_empty()) {
                 refine_default_hits(&mut hits, &args.query, false);
             }
-            false
+            None
         };
         let unrelated = if lexical {
             false
@@ -1649,8 +1651,8 @@ impl LjosServer {
         note_lookups(&hits);
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
-        let mut reading = if close_miss {
-            ljos_cli::word_rank::no_close_line(&args.query)
+        let mut reading = if let Some(suggest) = close_miss.as_ref() {
+            ljos_cli::word_rank::no_close_line_with(&args.query, suggest.as_deref())
         } else if hits.is_empty() && unrelated {
             ljos_cli::NOTHING_RELEVANT.trim().to_string()
         } else if hits.is_empty() && ljos_cli::nothing_stored() {

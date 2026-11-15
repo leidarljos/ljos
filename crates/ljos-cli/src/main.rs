@@ -4915,15 +4915,19 @@ fn run_command() -> Result<()> {
             // A word ranking re-scores the rows it was given. The encoder
             // path keeps the seat wall and the cosine floor.
             let (mut close_miss, unrelated) = if ranking.mode == "lexical" {
-                let missed = ljos_cli::word_rank::order_hits(&mut hits, &asked, attempts)
-                    == ljos_cli::word_rank::WordList::NoClose;
+                let missed = match ljos_cli::word_rank::order_hits(&mut hits, &asked, attempts) {
+                    ljos_cli::word_rank::WordList::NoClose { suggest } => Some(suggest),
+                    ljos_cli::word_rank::WordList::Kept | ljos_cli::word_rank::WordList::None => {
+                        None
+                    }
+                };
                 (missed, false)
             } else {
                 ljos_cli::refine_default_hits(&mut hits, &asked, attempts);
                 ljos_cli::drop_word_floor(&mut hits, &asked, false);
                 let unrelated = ljos_cli::drop_weak_cross_seat(&mut hits, &asked, false);
                 ljos_cli::prefer_calling_seat(&mut hits);
-                (false, unrelated)
+                (None, unrelated)
             };
             // A dated search is the pack as it stood. A source filter asked
             // for slot rows only. Tickets are the live tracker, so neither
@@ -4937,13 +4941,15 @@ fn run_command() -> Result<()> {
                 ljos_cli::ticket_search::merge(&mut hits, &asked);
             }
             if !hits.is_empty() {
-                close_miss = false;
+                close_miss = None;
             }
             let matched = hits.len();
             hits.truncate(limit as usize);
             ljos_cli::note_lookups(&hits);
             ranking = ljos_cli::ranking_for_printed(ranking, &hits);
-            let close_line = close_miss.then(|| ljos_cli::word_rank::no_close_line(&asked));
+            let close_line = close_miss
+                .as_ref()
+                .map(|suggest| ljos_cli::word_rank::no_close_line_with(&asked, suggest.as_deref()));
             // A shorter search would miss too when the store is empty, so
             // that page names remember. A store that already holds a lesson
             // names a shorter query instead.
@@ -4956,7 +4962,9 @@ fn run_command() -> Result<()> {
                 let suggestion = if empty_store {
                     Some(ljos_cli::scan::store_lesson_command(&asked))
                 } else if hits.is_empty() {
-                    ljos_cli::word_rank::shorter_search(&asked)
+                    close_miss
+                        .clone()
+                        .unwrap_or_else(|| ljos_cli::word_rank::shorter_search(&asked))
                 } else {
                     None
                 };

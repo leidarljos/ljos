@@ -249,6 +249,62 @@ fn an_unrelated_query_returns_nothing() {
 }
 
 #[test]
+fn a_word_form_in_the_title_is_found_while_the_encoder_loads() {
+    let seat = Seat::open(false);
+    let out = seat.search(&["search", "GPRidge video narration"]);
+    shows_ticket(&out);
+    let said = text(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stdout.contains("No close matches"),
+        "a title with two exact words and a word form was a miss:\n{said}"
+    );
+    assert!(
+        !stdout.contains("ljos search narration"),
+        "the miss named a term that is not in the title:\n{said}"
+    );
+    assert!(
+        stderr.contains("These are word matches, and meaning search will be ready shortly.")
+            && !stderr.contains("rerun"),
+        "the word-matches line was missing:\n{said}"
+    );
+    let ticket_at = stdout.find(TICKET).expect("ticket");
+    let lesson_at = stdout.find("filed beside").expect("lesson");
+    assert!(ticket_at < lesson_at, "{stdout}");
+}
+
+#[test]
+fn a_word_form_in_the_title_is_found_after_the_encoder_has_answered() {
+    let seat = Seat::open(true);
+    let out = seat.search(&["search", "GPRidge video narration"]);
+    shows_ticket(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("No close matches"),
+        "meaning search missed the title:\n{}",
+        text(&out)
+    );
+    let ticket_at = stdout.find(TICKET).expect("ticket");
+    let lesson_at = stdout.find("filed beside").expect("lesson");
+    assert!(ticket_at < lesson_at, "{stdout}");
+}
+
+#[test]
+fn a_query_that_hits_nothing_still_says_nothing_matched() {
+    let cold = Seat::open(false);
+    let out = cold.search(&["search", "zzzznotaword"]);
+    hides_ticket(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Nothing matched zzzznotaword."),
+        "the miss wording changed:\n{}",
+        text(&out)
+    );
+    assert!(!stdout.contains("No close matches"), "{}", text(&out));
+}
+
+#[test]
 fn json_keeps_the_old_fields_and_adds_the_ticket_title() {
     let seat = Seat::open(true);
     let out = seat.search(&["search", TITLE, "--json"]);

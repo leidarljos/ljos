@@ -206,7 +206,9 @@ fn band(query: &str, title: &str, notes: &str) -> Option<Band> {
     if words.is_empty() {
         return None;
     }
-    if covers_all(&words, title) || covers_all(&content_words(title), query) {
+    // Any title term is enough. Two exact words and a word form land here,
+    // and an almost-full title has already returned [`Band::Near`].
+    if words.iter().any(|word| covers(word, title)) {
         return Some(Band::Title);
     }
     let blob = format!("{title}\n{notes}");
@@ -332,6 +334,16 @@ mod tests {
         );
         assert_eq!(band("narrated video", TITLE, NOTES), Some(Band::Title));
         assert_eq!(band("GPRidge", TITLE, NOTES), Some(Band::Title));
+        assert_eq!(
+            band("GPRidge video narration", TITLE, NOTES),
+            Some(Band::Near)
+        );
+        assert_eq!(
+            band("gpridge VIDEO Narration", TITLE, NOTES),
+            Some(Band::Near)
+        );
+        assert_eq!(band("narrate", TITLE, NOTES), Some(Band::Title));
+        assert_eq!(band("videos", TITLE, NOTES), Some(Band::Title));
         assert_eq!(band("kiln", "Fire the kiln", ""), Some(Band::Title));
         assert_eq!(band("milestone filmed", TITLE, NOTES), Some(Band::Notes));
         assert_eq!(band("zzzznotaword", TITLE, NOTES), None);
