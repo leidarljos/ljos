@@ -3022,7 +3022,7 @@ fn main() {
         eprintln!("{line}");
         if ljos_cli::fault_detail() {
             let detail = format!("{e:#}");
-            if ljos_cli::fault_detail_differs(&detail, &line) {
+            if ljos_cli::fault_detail_worth_showing(&detail, &line) {
                 eprintln!("{detail}");
             }
         }
@@ -6232,7 +6232,7 @@ fn run_command() -> Result<()> {
                 eprintln!("{line}");
                 if ljos_cli::fault_detail() {
                     let detail = format!("{e:#}");
-                    if ljos_cli::fault_detail_differs(&detail, &line) {
+                    if ljos_cli::fault_detail_worth_showing(&detail, &line) {
                         eprintln!("{detail}");
                     }
                 }

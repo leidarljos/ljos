@@ -21540,6 +21540,51 @@ pub fn fault_detail_differs(detail: &str, line: &str) -> bool {
     flatten_line(detail) != line
 }
 
+/// Whether `--verbose` should print `detail` after `line`.
+///
+/// A chain that only repeats the line, including a cause whose text is
+/// already in that line, is not printed again.
+#[must_use]
+pub fn fault_detail_worth_showing(detail: &str, line: &str) -> bool {
+    if !fault_detail_differs(detail, line) {
+        return false;
+    }
+    let line_flat = flatten_line(line);
+    for part in detail.lines() {
+        let part = part.trim();
+        if part.is_empty() || part == "Caused by:" {
+            continue;
+        }
+        let part = part.trim_start_matches("Caused by:").trim();
+        let flat = flatten_line(part);
+        let rest = flat
+            .strip_prefix(line_flat.as_str())
+            .unwrap_or(flat.as_str())
+            .trim()
+            .trim_start_matches(':')
+            .trim();
+        if !rest.is_empty() && !line_flat.contains(rest) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod fault_detail_show {
+    use super::fault_detail_worth_showing;
+
+    #[test]
+    fn a_verbose_chain_that_repeats_the_line_is_not_shown() {
+        let line = "Remember: POST /v1/atoms failed: bad response: the writer refused this seat's token, so run `packset stop && packset ensure`.";
+        let detail = format!("{line}: bad response: the writer refused this seat's token, so run `packset stop && packset ensure`.");
+        assert!(!fault_detail_worth_showing(&detail, line));
+        assert!(!fault_detail_worth_showing(line, line));
+        let fresh = format!("{line}\n\nCaused by:\n    connection refused");
+        assert!(fault_detail_worth_showing(&fresh, line));
+    }
+}
+
 /// The command line a failure tells the person to run again.
 fn current_invocation() -> String {
     let mut words = vec!["ljos".to_string()];
