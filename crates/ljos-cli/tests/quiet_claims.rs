@@ -366,7 +366,7 @@ fn a_seat_sees_its_two_stale_claims_and_not_another_seats() {
 
     let sat = world.ok("ada", &["sitting", sitting]);
     assert!(
-        sat.contains("2 quiet claims (`ljos claims --mine`)"),
+        sat.contains("2 quiet claims are still yours (ljos claims --mine)"),
         "{sat}"
     );
     assert!(quiet_lines(&sat).is_empty(), "{sat}");
@@ -437,7 +437,7 @@ fn claims_past_the_handful_end_on_one_more_line() {
 
     let sat = world.ok("ada", &["sitting", &ids[4]]);
     assert!(
-        sat.contains("4 quiet claims (`ljos claims --mine`)"),
+        sat.contains("4 quiet claims are still yours (ljos claims --mine)"),
         "{sat}"
     );
     assert!(quiet_lines(&sat).is_empty(), "{sat}");
@@ -505,7 +505,7 @@ fn the_banner_keeps_fresh_claims_and_folds_stale_ones() {
 
     let short = world.ok("ada", &["sitting", sitting]);
     assert!(
-        short.contains("1 quiet claim (`ljos claims --mine`)"),
+        short.contains("1 quiet claim is still yours (ljos claims --mine)"),
         "{short}"
     );
     assert!(

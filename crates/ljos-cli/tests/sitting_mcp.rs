@@ -160,8 +160,8 @@ fn a_sitting_claims_when_mcp_json_names_a_missing_binary() {
         host.calls()
     );
     assert!(
-        said.contains("without: ljos-mcp, ljos-policyd, MCP tools"),
-        "{said}"
+        !said.contains("without:"),
+        "the short sitting named optional tools:\n{said}"
     );
     assert!(!said.contains("nothing was claimed"), "{said}");
     assert!(
@@ -172,9 +172,10 @@ fn a_sitting_claims_when_mcp_json_names_a_missing_binary() {
 }
 
 /// The seat has neither `ljos-mcp` nor `ljos-policyd` on its PATH, and its
-/// MCP config names a binary that is not there.
+/// MCP config names a binary that is not there. The short sitting still
+/// claims. Those rows wait for `--verbose`.
 #[test]
-fn a_default_sitting_names_the_missing_pieces_on_one_line() {
+fn a_default_sitting_leaves_optional_tools_for_verbose() {
     let host = Host::open(true);
     std::fs::create_dir_all(host.root.path().join("run")).unwrap();
     let out = host.ljos(&["sitting", &host.issue]);
@@ -185,16 +186,13 @@ fn a_default_sitting_names_the_missing_pieces_on_one_line() {
     let claimed = at(&format!("tracker: {} STARTED", host.issue)).expect(&said);
     let summary = at("ljos is").expect(&said);
     assert!(claimed < summary, "the claim is not first:\n{said}");
-    let missing: Vec<&&str> = lines
-        .iter()
-        .filter(|l| l.contains("ljos-mcp") || l.contains("ljos-policyd") || l.contains("MCP"))
-        .collect();
-    assert_eq!(
-        missing,
-        [&"without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)"],
+    assert!(
+        lines.iter().all(|line| {
+            !line.contains("ljos-mcp") && !line.contains("ljos-policyd") && !line.contains("MCP")
+        }),
         "{said}"
     );
-    assert_eq!(said.matches("ljos doctor --all").count(), 1, "{said}");
+    assert_eq!(said.matches("ljos doctor --all").count(), 0, "{said}");
     for line in &lines {
         assert_eq!(
             lines.iter().filter(|l| *l == line).count(),

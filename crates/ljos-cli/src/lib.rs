@@ -34166,6 +34166,25 @@ fn kernel_release() -> String {
 /// How long an OOM kill keeps the host row failing.
 pub const OOM_RECENT_S: u64 = 86_400;
 
+/// How long a kill keeps the short sitting's one host line.
+pub const OOM_HOUR_S: u64 = 3_600;
+
+/// Whether the last recorded OOM kill is inside [`OOM_HOUR_S`].
+///
+/// [`host_row`] writes the count and the time it last rose. A kill the
+/// doctor still calls recent, because it was inside a day, is quiet here
+/// once that hour has passed. No record means the sitting has nothing to date.
+fn oom_kill_within_hour() -> bool {
+    let path = runtime_dir().join("oom-seen");
+    let Some((count, at)) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| parse_oom_seen(&text))
+    else {
+        return false;
+    };
+    count > 0 && epoch_s().saturating_sub(at) < OOM_HOUR_S
+}
+
 fn parse_oom_seen(text: &str) -> Option<(u64, u64)> {
     let mut it = text.split_whitespace();
     Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
@@ -34438,8 +34457,9 @@ fn said_elsewhere_in_sitting(word: &str, name: &str, state: &str) -> bool {
     }
 }
 
-/// The line a sitting prints under its doctor when a `warn` row failed:
-/// what the row means for the work that follows.
+/// The line a short sitting prints when the kernel killed a process within
+/// the last hour. A kill older than that stays on the doctor row, which
+/// `--verbose` still prints. The line is one sentence.
 #[must_use]
 pub fn sitting_warn_line(rows: &[Habitat]) -> Option<String> {
     let names: Vec<&str> = rows
@@ -34447,11 +34467,11 @@ pub fn sitting_warn_line(rows: &[Habitat]) -> Option<String> {
         .filter(|h| !h.ok && WARN_ROWS.contains(&h.name))
         .map(|h| h.name)
         .collect();
-    if names.is_empty() {
+    if names.is_empty() || !oom_kill_within_hour() {
         return None;
     }
     Some(format!(
-        "{}: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next\n",
+        "{}: the kernel killed a process within the last hour\n",
         names.join(", ")
     ))
 }
@@ -34957,9 +34977,25 @@ thread_local! {
     static SAID_DEGRADED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+thread_local! {
+    /// Hand-backs, kept claims and quiet claims folded into one line.
+    static FOLD_HANDED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FOLD_KEPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FOLD_QUIET: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FOLD_SAID: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn reset_claim_fold() {
+    FOLD_HANDED.with(|n| n.set(0));
+    FOLD_KEPT.with(|n| n.set(0));
+    FOLD_QUIET.with(|n| n.set(0));
+    FOLD_SAID.with(|said| said.set(false));
+}
+
 /// Start a quiet sitting. A second degraded line in the same sitting is dropped.
 pub fn begin_quiet_sitting() {
     SAID_DEGRADED.with(|said| said.set(false));
+    reset_claim_fold();
 }
 
 fn note_degraded(out: &mut String) {
@@ -35070,18 +35106,20 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     _ => {}
                 }
             }
-            // The `without:` line carries the one pointer to the full rows.
-            // A degraded encoder is one line of its own, not a parenthetical
-            // on the ready line and not the doctor's warn row.
-            out.push_str(&summary_verdict(
-                &down,
-                &[],
-                &working_parts(&words),
-                false,
-                "",
-            ));
-            out.push('\n');
-            out.push_str(&act);
+            // A ready headline is status. The short sitting says it only
+            // when something does not answer. A degraded encoder is one
+            // line of its own, not a parenthetical on that headline.
+            let verdict = summary_verdict(&down, &[], &working_parts(&words), false, "");
+            if !verdict.starts_with("ljos is ready") {
+                out.push_str(&verdict);
+                out.push('\n');
+            }
+            for line in act.lines() {
+                if short_doctor_line(line) {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
             if memory {
                 note_degraded(out);
             }
@@ -35115,7 +35153,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
             for l in lines {
                 if is_memory_noise_line(l) {
                     note_degraded(out);
-                } else if !l.starts_with("0 due") && !l.trim().is_empty() {
+                } else if !due_schedule(l) && !l.trim().is_empty() {
                     out.push_str(l);
                     out.push('\n');
                 }
@@ -35141,7 +35179,11 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
         }
         "reclaim" => {
             for l in lines {
-                if l.starts_with("kept ") || l.starts_with("handed back") {
+                if l.starts_with("handed back ") {
+                    FOLD_HANDED.with(|n| n.set(n.get() + 1));
+                } else if l.starts_with("kept ") {
+                    FOLD_KEPT.with(|n| n.set(n.get() + 1));
+                } else if reclaim_trouble(l) {
                     out.push_str(l);
                     out.push('\n');
                 }
@@ -35159,25 +35201,26 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     quiet += n;
                     continue;
                 }
-                if is_memory_noise_line(l) {
-                    note_degraded(out);
+                if is_memory_noise_line(l) || routine_git_line(l) || l.starts_with("gen=") {
+                    if is_memory_noise_line(l) {
+                        note_degraded(out);
+                    }
                     continue;
                 }
-                if !l.starts_with("gen=") && !l.trim().is_empty() {
+                if !l.trim().is_empty() {
                     out.push_str(&compact_tracker_line(l));
                 }
             }
-            if quiet > 0 {
-                let noun = if quiet == 1 { "claim" } else { "claims" };
-                out.push_str(&format!("{quiet} quiet {noun} (`ljos claims --mine`)\n"));
-            }
+            FOLD_QUIET.with(|n| n.set(n.get() + quiet));
+            out.push_str(&claims_fold_line());
         }
         "sync" => {
             for l in lines {
-                if !l.contains("names no scope") && !l.trim().is_empty() {
-                    out.push_str(l);
-                    out.push('\n');
+                if routine_git_line(l) || l.trim().is_empty() {
+                    continue;
                 }
+                out.push_str(l);
+                out.push('\n');
             }
         }
         // A sync line printed ahead of the first section. The compact
@@ -35206,10 +35249,10 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
 
 /// A sitting's report cut to what a person acts on. The full report goes
 /// section by section (`== doctor`, `== island: TITLE`, ...); this keeps
-/// the doctor's summary and the rows that need action, the memories the
-/// island found, open blockers, the playbook's name, a panel, a reclaim
-/// that moved something, and the claim, then says the issue is held.
-/// `ljos sitting --verbose` prints the full report.
+/// the claim, one line for hand-backs and quiet claims, a refusal, the
+/// memories the island found, and open blockers, then says the issue is
+/// held. Per-claim hand-backs, a commit that landed, a routine sync line,
+/// `gen=` and the due schedule wait for `ljos sitting --verbose`.
 #[must_use]
 pub fn compact_sitting(full: &str, issue: &str) -> String {
     begin_quiet_sitting();
@@ -35244,6 +35287,7 @@ pub fn compact_sitting(full: &str, issue: &str) -> String {
         }
     }
     compact_section(section, &section_lines, &mut out, &mut memories);
+    out.push_str(&claims_fold_line());
     if !memories.is_empty() {
         out.push_str("What the seat remembers for this task:\n");
         for m in &memories {
@@ -35283,6 +35327,8 @@ pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String 
         let mut out = String::new();
         note_degraded(&mut out);
         out
+    } else if routine_git_line(first) {
+        String::new()
     } else if first.starts_with("tracker:")
         || first.starts_with("tracker git:")
         || first.starts_with("ranked by words")
@@ -35298,6 +35344,138 @@ pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String 
         String::new()
     };
     suppress_repeated_status(&raw)
+}
+
+/// A doctor line the short sitting keeps. The `without:` pointer and a
+/// host warning older than an hour wait for `--verbose`.
+fn short_doctor_line(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with("without:") {
+        return false;
+    }
+    if line.starts_with("host:")
+        && line.contains("kernel killed")
+        && !line.contains("within the last hour")
+    {
+        return false;
+    }
+    true
+}
+
+/// A due summary (`16 due; 4 scheduled`). An error that starts with `due:`
+/// is not one.
+fn due_schedule(line: &str) -> bool {
+    let line = line.trim();
+    let Some((count, rest)) = line.split_once(" due") else {
+        return false;
+    };
+    !count.is_empty()
+        && count.bytes().all(|byte| byte.is_ascii_digit())
+        && (rest.is_empty() || rest.starts_with(';') || rest.starts_with(' '))
+}
+
+/// A reclaim line that is a failure, not the quiet "nothing to hand back".
+///
+/// A missing graph is said on `--verbose`. The sitting still claims, and
+/// that claim is what creates the graph.
+fn reclaim_trouble(line: &str) -> bool {
+    let line = line.trim();
+    !line.is_empty()
+        && !line.starts_with("no claim quiet")
+        && !line.starts_with("off (")
+        && !line.starts_with("skipped:")
+}
+
+/// One line for hand-backs, claims a runner still holds, and quiet claims.
+/// Empty when this sitting already printed it, or when there is nothing to say.
+fn claims_fold_line() -> String {
+    if FOLD_SAID.with(std::cell::Cell::get) {
+        return String::new();
+    }
+    let handed = FOLD_HANDED.with(std::cell::Cell::get);
+    let kept = FOLD_KEPT.with(std::cell::Cell::get);
+    let quiet = FOLD_QUIET.with(std::cell::Cell::get);
+    if handed == 0 && kept == 0 && quiet == 0 {
+        return String::new();
+    }
+    FOLD_SAID.with(|said| said.set(true));
+    let mut parts = Vec::new();
+    if handed > 0 {
+        parts.push(format!(
+            "handed back {}",
+            count_noun(handed, "quiet claim", "quiet claims")
+        ));
+    }
+    if kept > 0 {
+        parts.push(format!("kept {kept} still running"));
+    }
+    if quiet > 0 {
+        let verb = if quiet == 1 { "is" } else { "are" };
+        parts.push(format!(
+            "{} {verb} still yours (ljos claims --mine)",
+            count_noun(quiet, "quiet claim", "quiet claims")
+        ));
+    }
+    format!("{}\n", parts.join("; "))
+}
+
+fn count_noun(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// A tracker or sync line that reports a commit that landed, or a sync the
+/// mode skipped. A refusal, a failed push and a remote that was not reached
+/// stay on the short output.
+#[must_use]
+pub fn routine_git_line(line: &str) -> bool {
+    let line = line.trim();
+    if line.starts_with("sync: not fetched")
+        || line.starts_with("sync: off (")
+        || (line.starts_with("sync:") && line.contains("names no scope"))
+    {
+        return true;
+    }
+    if !line.starts_with("tracker git:") {
+        return false;
+    }
+    const TROUBLE: &[&str] = &[
+        "refused",
+        "failed",
+        "could not",
+        "ignored",
+        "not a git",
+        "another writer",
+        "deferred",
+        "not started",
+        "push queued",
+        "still running",
+        "not reached",
+    ];
+    !TROUBLE.iter().any(|mark| line.contains(mark))
+}
+
+/// `text` with [`routine_git_line`] lines removed. Other lines stay, in order.
+#[must_use]
+pub fn without_routine_git(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for line in text.lines() {
+        if routine_git_line(line) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !text.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 /// A tracker drift line as a compact sitting prints it: the counts alone.
@@ -40338,7 +40516,8 @@ project, with no note, deed or finish for a day, are named here,\n   \
 the oldest three, then `+N more (ljos claims --mine)` when more\n   \
 remain. Claims untouched for longer than `LJOS_STALE_DAYS` (7 when\n   \
 unset) are one line, `N claims untouched for D+ days: ljos claims --stale`,\n   \
-and those three are the newer ones. Nothing is released.",
+and those three are the newer ones. Nothing is released. The short\n   \
+form folds hand-backs and quiet claims into one line. `--verbose` prints each one.",
     },
     SittingSection {
         name: "doctor",
@@ -40346,7 +40525,7 @@ and those three are the newer ones. Nothing is released.",
         step: "`== doctor`. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;\n   \
 `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.\n   \
 A `warn` on `host` means the kernel killed a process within a day. The\n   \
-sitting opens; run one build or test suite at a time.",
+sitting opens. The short form prints one line when that kill was within the last hour.",
     },
     SittingSection {
         name: "sync",
@@ -40369,7 +40548,8 @@ check a shown claim against the work, then run `ljos graded ID`\n   \
 (`--lapsed` when it is no longer true). `graded` takes only a claim a due page showed in the\n   \
 last hour, so a saved list cannot be graded unread; `ljos due --all`\n   \
 lists everything to read and puts none of it up. The review clock\n   \
-moves only when you grade, and a backlog is left due, not drained.",
+moves only when you grade, and a backlog is left due, not drained.\n   \
+The short form leaves this count for `--verbose`.",
     },
     SittingSection {
         name: "island",
@@ -54451,6 +54631,12 @@ mod tests {
 
     #[test]
     fn a_recent_oom_kill_warns_and_the_sitting_says_so() {
+        let _guard = env_guard();
+        let run = tempfile::tempdir().unwrap();
+        let dir = run.path().join("ljos");
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: the env guard puts the variable back.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", run.path()) };
         let host = Habitat {
             name: "host",
             state: "6.12.94+; 70 OOM kills since boot, the last within a day".into(),
@@ -54460,15 +54646,26 @@ mod tests {
         let rows = [host];
         assert!(healthy(&rows));
         assert!(failing_for_sitting(&rows).is_empty());
+        let now = epoch_s();
+        std::fs::write(dir.join("oom-seen"), format!("3 {now}\n")).unwrap();
         let line = sitting_warn_line(&rows).expect("a warn line");
-        assert!(line.starts_with("host: the kernel killed"), "{line}");
-        assert!(line.contains("one build or test suite at a time"), "{line}");
+        assert_eq!(
+            line,
+            "host: the kernel killed a process within the last hour\n"
+        );
+        std::fs::write(
+            dir.join("oom-seen"),
+            format!("3 {}\n", now.saturating_sub(OOM_HOUR_S)),
+        )
+        .unwrap();
+        assert_eq!(sitting_warn_line(&rows), None);
         let calm = Habitat {
             name: "host",
             state: "6.12.94+; no OOM kills since boot".into(),
             ok: true,
         };
         assert_eq!(doctor_word(&calm), "ok");
+        std::fs::write(dir.join("oom-seen"), format!("3 {now}\n")).unwrap();
         assert_eq!(sitting_warn_line(&[calm]), None);
     }
 
@@ -64581,12 +64778,10 @@ mod tests {
         );
         let sat = compact_sitting(&full, "Software-x");
         assert!(
-            sat.starts_with(
-                "ljos is ready: memory and command guard work.\n\
-                 info\ttickets\t`vissue identity` exited 1: not inside a tracker\n"
-            ),
+            sat.contains("info\ttickets\t`vissue identity` exited 1: not inside a tracker\n"),
             "{sat}"
         );
+        assert!(!sat.contains("ljos is ready"), "{sat}");
     }
 
     #[test]
@@ -64641,7 +64836,7 @@ mod tests {
             encoder_degraded_state()
         );
         let sat = compact_sitting(&full, "Software-x");
-        assert!(sat.contains("ljos is ready: memory works."), "{sat}");
+        assert!(!sat.contains("ljos is ready"), "{sat}");
         assert!(sat.contains(MEMORY_DEGRADED_LINE.trim_end()), "{sat}");
         assert!(!sat.contains("lexical-only"), "{sat}");
         assert!(!sat.contains(ENCODER_DEGRADED), "{sat}");
@@ -64778,15 +64973,14 @@ mod tests {
         let short = compact_sitting(full, "Software-x");
         assert_eq!(
             short,
-            "ljos is ready: memory, tracker and command guard work.\n\
-memory degraded: ranked by words\n\
-2 due; the soonest: abc\n\
+            "memory degraded: ranked by words\n\
 claimed Software-x for ljos-bot@ux-fix\n\
 What the seat remembers for this task:\n\
 - Prefer plain words in denials.\n\
 - Keep hooks under 8 s.\n\
 Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sitting; `ljos sitting Software-x --verbose` prints every section.\n"
         );
+        assert!(!short.contains("2 due"), "{short}");
     }
 
     #[test]
@@ -64819,7 +65013,7 @@ next: day-2  measure the files
             "{short}"
         );
         assert!(
-            short.contains("32 quiet claims (`ljos claims --mine`)"),
+            short.contains("32 quiet claims are still yours (ljos claims --mine)"),
             "{short}"
         );
         assert!(short.contains("next: day-2  measure the files"), "{short}");
@@ -64833,7 +65027,7 @@ day-new  fresh title  2 days  ljos finish day-new / ljos note day-new \"...\"
 ";
         let folded = compact_sitting(stale, "day-1");
         assert!(
-            folded.contains("1 quiet claim (`ljos claims --mine`)"),
+            folded.contains("1 quiet claim is still yours (ljos claims --mine)"),
             "{folded}"
         );
         assert!(
@@ -64990,9 +65184,6 @@ host: the kernel killed a process within a day; the sitting opens, and one build
         assert_eq!(
             compact_sitting(full, "ljos-a5q4"),
             "tracker: ljos-a5q4 STARTED under ljosbot@2wbpt11jxn\n\
-ljos is ready: memory works.\n\
-without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)\n\
-host: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next\n\
 ljos-a5q4 is yours. `ljos finish ljos-a5q4 --lesson \"...\"` closes the sitting; `ljos sitting ljos-a5q4 --verbose` prints every section.\n"
         );
         let with_extras = format!("{full}info\tsigning key\tnone yet\n");
@@ -65001,10 +65192,9 @@ ljos-a5q4 is yours. `ljos finish ljos-a5q4 --lesson \"...\"` closes the sitting;
             .lines()
             .filter(|l| l.contains("ljos doctor --all"))
             .collect();
-        assert_eq!(
-            pointers,
-            ["without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)"],
-            "{short}"
+        assert!(
+            pointers.is_empty(),
+            "the short sitting repeated the doctor pointer: {short}"
         );
 
         let refused = "== doctor\nok\tmemory\tanswers\n\
@@ -65012,6 +65202,76 @@ warn\ttickets\tvissue 0.22.0 root=/t prefix=Software; 3 unpushed; last push refu
         assert!(
             compact_sitting(refused, "x").contains("last push refused: no credential"),
             "a tracker row with more than its drift is kept"
+        );
+    }
+
+    #[test]
+    fn a_short_sitting_folds_handbacks_and_hides_plumbing() {
+        let full = "\
+== reclaim
+handed back Software-eiw4: quiet 5678s and no conversation on this host holds it; gen=5
+handed back Omni-hgn2: quiet 5675s and no conversation on this host holds it; gen=7
+kept ljos-au1w: quiet 5521s, but the runner is still running
+could not hand back ljos-bad: the graph refused
+== claim
+tracker: ljos-u5he STARTED under seat
+gen=5
+day-old  old  2 days  ljos finish day-old / ljos note day-old \"...\"
++34 more (ljos claims --mine)
+tracker git: committed chore(issues): ljos-u5he claimed by seat; not pushed (LJOS_TRACKER_GIT=commit)
+== blockers
+blocked-by: other-1
+== doctor
+host: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next
+host: the kernel killed a process within the last hour
+== sync
+sync: not fetched (LJOS_TRACKER_GIT=commit)
+sync: the remote was not reached
+== due
+16 due; 4 scheduled, next at 2026-11-15T13:55:10.026Z
+";
+        let short = compact_sitting(full, "ljos-u5he");
+        assert!(
+            short.contains("could not hand back ljos-bad: the graph refused"),
+            "{short}"
+        );
+        assert!(short.contains("blockers: blocked-by: other-1"), "{short}");
+        assert!(
+            short.contains("tracker: ljos-u5he STARTED under seat"),
+            "{short}"
+        );
+        assert!(
+            short.contains(
+                "handed back 2 quiet claims; kept 1 still running; 35 quiet claims are still yours (ljos claims --mine)"
+            ),
+            "{short}"
+        );
+        assert!(
+            short.contains("host: the kernel killed a process within the last hour"),
+            "{short}"
+        );
+        assert!(
+            short.contains("sync: the remote was not reached"),
+            "{short}"
+        );
+        assert!(!short.contains("gen="), "{short}");
+        assert!(!short.contains("tracker git:"), "{short}");
+        assert!(!short.contains("within a day"), "{short}");
+        assert!(!short.contains("not fetched"), "{short}");
+        assert!(!short.contains("16 due"), "{short}");
+        assert!(!short.contains("Software-eiw4"), "{short}");
+        assert!(short.contains("ljos-u5he is yours"), "{short}");
+        let refused = "tracker git: commit refused: Author identity unknown\n";
+        assert_eq!(
+            without_routine_git(refused),
+            refused,
+            "a refusal stays on the short output"
+        );
+        assert_eq!(
+            without_routine_git(
+                "tracker git: committed chore(issues): x claimed by ada; not pushed (LJOS_TRACKER_GIT=commit)\n"
+            ),
+            ""
         );
     }
 

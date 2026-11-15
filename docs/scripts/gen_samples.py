@@ -425,7 +425,9 @@ def _agent_env(home: Path, ljos: Path, extra: dict[str, str] | None = None) -> d
 
 def _show(argv: list[str], env: dict[str, str], cwd: Path, display: str, timeout: float = 60) -> str:
     code, text = _pty_run(argv, env, cwd, timeout)
-    if code != 0 and not text.lstrip().startswith("label ") and not text.lstrip().startswith("sitting "):
+    head = text.lstrip()
+    refused = head.startswith(("label ", "sitting ", "claim:")) or "held by another" in head
+    if code != 0 and not refused:
         raise SystemExit(f"{display} exited {code}:\n{text}")
     body = text.rstrip("\n")
     return f"$ {display}\n{body}\n"
@@ -1235,10 +1237,11 @@ def sitting_plan_sample(ljos: Path) -> str:
         'day-ab12 is yours. `ljos finish day-ab12 --lesson "..."`',
         "ticked day-cd34",
         "next: day-ef56  pick a default",
-        "tracker git: committed",
     ):
         if needle not in block:
             raise SystemExit(f"gen_samples: sitting sample missing {needle!r}:\n{block}")
+    if "tracker git:" in block and "refused" not in block and "failed" not in block:
+        raise SystemExit(f"gen_samples: sitting sample printed a commit that landed:\n{block}")
     if "/tmp" in block or "ljos-doc-sitting" in block:
         raise SystemExit(f"gen_samples: sitting sample names a temporary directory:\n{block}")
     return block

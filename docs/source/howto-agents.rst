@@ -164,7 +164,6 @@ One session holds a ticket. The other session's claim is refused and names the h
    project: demo
    demo-1  TODO  [#C]  Measure the files
    file: /home/ada/data/vissue/tracker/Software/demo/issues.org
-   tracker git: committed chore(issues): demo-1 filed by claude-f2pu9d56g0; no remote, kept local
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos claim demo-1
    gen=2
@@ -179,7 +178,6 @@ One session holds a ticket. The other session's claim is refused and names the h
    project: demo
    demo-2  TODO  [#C]  Write the note
    file: /home/ada/data/vissue/tracker/Software/demo/issues.org
-   tracker git: committed chore(issues): demo-2 filed by claude-dxw6sq4j7l; no remote, kept local
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos claim demo-2
    gen=2
@@ -190,10 +188,8 @@ One session holds a ticket. The other session's claim is refused and names the h
    finished demo-2 as done
    no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, so run `ljos finish demo-2 --lesson "..."`
    sitting ended; ticket demo-2 open for review
-   tracker git: committed chore(issues): demo-2 finished by claude-dxw6sq4j7l; no remote, kept local
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos sitting demo-1
-   sitting demo-1: checking blockers
    claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`.
 
 .. END ljos-sample agents-tickets

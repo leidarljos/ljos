@@ -389,11 +389,7 @@ fn promised_in_readme(cmd: &str) -> Vec<&'static str> {
         Some("search") if cmd.contains("lexical default") => {
             vec!["matched by words (encoder not installed)"]
         }
-        Some("file") => vec![
-            "project:",
-            "tracker git: committed",
-            "no remote, kept local",
-        ],
+        Some("file") => vec!["project:"],
         _ => Vec::new(),
     }
 }
@@ -451,14 +447,13 @@ fn expect_output(cmd: &str, output: &str) {
             }
         }
         Some("file") => {
-            for key in [
-                "project:",
-                "Pick a codec",
-                "tracker git: committed",
-                "no remote, kept local",
-            ] {
+            for key in ["project:", "Pick a codec"] {
                 assert!(output.contains(key), "{cmd}\nmissing {key}\n{output}");
             }
+            assert!(
+                !output.contains("tracker git: committed"),
+                "{cmd}\na commit that landed was printed:\n{output}"
+            );
             assert!(output.contains("demo-"), "file printed no id:\n{output}");
             assert!(
                 output.lines().any(|line| line.contains('/')),

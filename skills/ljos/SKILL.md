@@ -112,11 +112,12 @@ sitting that gets that far.
    the oldest three, then `+N more (ljos claims --mine)` when more
    remain. Claims untouched for longer than `LJOS_STALE_DAYS` (7 when
    unset) are one line, `N claims untouched for D+ days: ljos claims --stale`,
-   and those three are the newer ones. Nothing is released.
+   and those three are the newer ones. Nothing is released. The short
+   form folds hand-backs and quiet claims into one line. `--verbose` prints each one.
 4. `== doctor`. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
    A `warn` on `host` means the kernel killed a process within a day. The
-   sitting opens; run one build or test suite at a time.
+   sitting opens. The short form prints one line when that kill was within the last hour.
 5. `== sync`, left out when the repository names no scope. The sitting pulls
    the other machines' logs for this scope and takes them before the island
    is walked. `ljos sync` runs the same pull and push by hand.
@@ -128,6 +129,7 @@ sitting that gets that far.
    last hour, so a saved list cannot be graded unread; `ljos due --all`
    lists everything to read and puts none of it up. The review clock
    moves only when you grade, and a backlog is left due, not drained.
+   The short form leaves this count for `--verbose`.
 8. `== island`. `ljos island` on the issue's title. The sitting takes the strongest
    eight. The number on a row is the activation spread along links.
    `--as NAME` walks that persona's weights. `--fire` after the island
@@ -586,7 +588,10 @@ same four steps are:
 
 Whatever the outcome, the claim and the finish commit the ticket when the tracker is a git checkout.
 `ljos claim` commits that claim, `sitting` commits after its claim and `finish` at the end of the work.
-Each commits the ticket's `issues.org` (that file alone), pushes it, and prints a `tracker git:` line.
+Each commits the ticket's `issues.org` (that file alone) and pushes it.
+`ljos claim` prints a `tracker git:` line.
+`ljos sitting`, `ljos note`, `ljos finish` and `ljos file` print that line with `--verbose`.
+A refusal is printed either way.
 A claim or a closure that stays in one working tree does not exist for any other host.
 `LJOS_TRACKER_GIT=push` commits, rebases with the per-issue field merge, and pushes, and never forces.
 A failed push stays queued.

@@ -198,10 +198,9 @@ A ticket
    project: demo
    demo-2f5j  TODO  [#C]  Pick a codec
    file: /home/you/.local/share/vissue/tracker/Software/demo/issues.org
-   tracker git: committed chore(issues): demo-2f5j filed by alice; no remote, kept local
 
 The id is the only line on standard output, so ``id=$(LJOS_SEAT=alice ljos file ...)`` captures it.
-The heading, the path and the commit line are on standard error. The id in the heading is the same one.
+The heading and the path are on standard error. A commit that landed is not printed. ``ljos file --verbose`` prints it. A refusal is still printed. The id in the heading is the same one.
 The ``file:`` line is the absolute path. ``/home/you`` above names the home directory.
 Under a runner that already recorded a seat, ljos names both and writes as ``LJOS_SEAT``.
 With no git identity the heading is still written, and the last line is ``tracker git: commit refused: Author identity unknown. Set git user.name and user.email, then run the command again``.
@@ -222,22 +221,17 @@ A plan files one parent and its checklist in a single tracker commit, claims the
      day-ef56  pick a default
      day-gh78  write the note
    next: day-cd34  measure the files
-   tracker git: committed chore(issues): day-ab12 filed, day-cd34 filed, day-ef56 filed, day-gh78 filed by alice; no remote, kept local
-   sitting day-ab12: checking blockers
    tracker: day-ab12 STARTED under alice
-   tracker git: committed chore(issues): day-ab12 claimed by alice; no remote, kept local
-   ljos is ready: memory, tracker and command guard work.
    memory degraded: ranked by words
    next: day-cd34  measure the files
    day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
    $ LJOS_SEAT=alice ljos finish day-cd34
    ticked day-cd34
    next: day-ef56  pick a default
-   tracker git: committed chore(issues): day-cd34 ticked by alice; no remote, kept local
    $ LJOS_SEAT=alice ljos ready --mine
    next: day-ef56  pick a default
 
-The ids are the ones that run printed. The parent is claimed. Each item stays open until ``ljos finish`` ticks it. A sitting with no ``--verbose`` prints what needs action. With ``--no-embed`` the pack has no encoder, so the sitting prints ``memory degraded: ranked by words``. Quiet claims are a count that points at ``ljos claims --mine``. Claims untouched for longer than ``LJOS_STALE_DAYS`` (7) are one line, ``ljos claims --stale``. ``ljos sitting ISSUE --verbose`` prints every section.
+The ids are the ones that run printed. The parent is claimed. Each item stays open until ``ljos finish`` ticks it. A sitting with no ``--verbose`` prints the claim, one line for claims still held, what the seat remembers, and the close. With ``--no-embed`` the pack has no encoder, so the sitting prints ``memory degraded: ranked by words``. Quiet claims are ``N quiet claims are still yours (ljos claims --mine)``. Claims untouched for longer than ``LJOS_STALE_DAYS`` (7) are one line, ``ljos claims --stale``. ``ljos sitting ISSUE --verbose`` prints every section.
 Under a runner the holder on the ``STARTED`` line can be ``alice`` plus ``@`` and a session tag. The claim command below prints the seat name.
 
 A second seat
@@ -263,7 +257,6 @@ Bob can file another ticket. To help on this one, bob writes a note.
 
    $ LJOS_SEAT=alice ljos note demo-2f5j "the codec is one file"
    demo-2f5j: noted
-   tracker git: committed chore(issues): demo-2f5j noted by alice; no remote, kept local
    $ ljos timeline demo-2f5j
    timeline of demo-2f5j: Pick a codec
    events  shown 4 of 4, oldest first

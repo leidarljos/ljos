@@ -221,11 +221,19 @@ fn parallel_persona_votes_and_notes_all_land_in_one_tracker() {
             let out = child.wait_with_output().unwrap();
             let said = text(&out);
             assert!(out.status.success(), "{issue} {what}: {said}");
-            assert!(
-                said.contains("tracker git: committed")
-                    || said.contains("tracker git: nothing to commit"),
-                "{issue} {what}: {said}"
-            );
+            if what.starts_with("note ") {
+                assert!(
+                    !said.contains("tracker git: committed")
+                        && !said.contains("tracker git: nothing to commit"),
+                    "{issue} {what} printed the commit line:\n{said}"
+                );
+            } else {
+                assert!(
+                    said.contains("tracker git: committed")
+                        || said.contains("tracker git: nothing to commit"),
+                    "{issue} {what}: {said}"
+                );
+            }
             for bad in ["refused", "index.lock", "unstable object", "fatal:"] {
                 assert!(!said.contains(bad), "{issue} {what}: {said}");
             }

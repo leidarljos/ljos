@@ -1000,8 +1000,8 @@ enum Cmd {
     ///
     /// A child of the issue this conversation holds, unless `--parent`
     /// names another or `--top` none, in the parent's project. `-p` naming
-    /// another project files at its top level. The tracker's line and the
-    /// commit line go to stderr.
+    /// another project files at its top level. The heading and the path go
+    /// to stderr. A commit that landed is printed with `--verbose`. A refusal is still printed.
     ///
     /// Example: `LJOS_SEAT=alice ljos file "Pick a codec" -p demo`
     File {
@@ -1044,6 +1044,9 @@ enum Cmd {
         /// that pass it.
         #[arg(short = 'q', long = "porcelain", alias = "quiet", alias = "id-only")]
         porcelain: bool,
+        /// Print the tracker commit line. Without it, a commit that landed is quiet. A refusal is still printed.
+        #[arg(long)]
+        verbose: bool,
     },
     /// Append `Options: A, B` to an issue. Two or more, separated by commas.
     ///
@@ -1086,6 +1089,9 @@ enum Cmd {
         /// The note, or an issue id and then the note.
         #[arg(value_name = "WORDS", required = true, num_args = 1..)]
         words: Vec<String>,
+        /// Print the tracker commit line. Without it, a commit that landed is quiet. A refusal is still printed.
+        #[arg(long)]
+        verbose: bool,
     },
     /// List one seat's tracker commits.
     ///
@@ -2193,7 +2199,7 @@ enum Cmd {
         /// The recipe copied in before the ticket is recalled. Absent, a word from the closed set in the title, else sit. Kept until finish or release.
         #[arg(long)]
         playbook: Option<String>,
-        /// Print every section in full: the doctor's rows, recall, timeline, reclaim. Without it the command prints what needs action and what the seat remembers.
+        /// Print every section in full: the doctor's rows, recall, timeline, reclaim, each hand-back and the commit line. Without it the command prints the claim, one line for claims still held, what the seat remembers, and the close.
         #[arg(long)]
         verbose: bool,
     },
@@ -4052,8 +4058,15 @@ fn run_command() -> Result<()> {
         ljos_cli::flush_queued_lessons();
     }
     let mut sitting_budget = match &cmd {
-        Cmd::Sitting { issue, plan, .. } => {
-            if plan.is_none() {
+        Cmd::Sitting {
+            issue,
+            plan,
+            verbose,
+            ..
+        } => {
+            // The line is how a held lock shows life before the claim.
+            // The short form waits for the claim itself.
+            if *verbose && plan.is_none() {
                 println!(
                     "sitting {}: checking blockers",
                     issue.as_deref().unwrap_or("plan")
@@ -4866,6 +4879,7 @@ fn run_command() -> Result<()> {
             quorum,
             deadline,
             porcelain: _,
+            verbose,
         } => {
             // The same unknown-seat line `ljos remember` prints. A seat
             // taken from the most recent write is already `unknown-<host>`,
@@ -4958,9 +4972,13 @@ fn run_command() -> Result<()> {
                 Ok(said) => rest.push_str(&said),
                 Err(e) => eprintln!("ljos file: {e:#}"),
             }
+            if !verbose {
+                rest = ljos_cli::without_routine_git(&rest);
+            }
             // The id is the only line on stdout, so `ID=$(ljos file ...)`
-            // captures the id the docs name. The tracker's own line and
-            // the commit line go to stderr. `--porcelain` is the same.
+            // captures the id the docs name. The heading and the path go
+            // to stderr. A commit that landed is printed with `--verbose`.
+            // A refusal is still printed. `--porcelain` is the same.
             if !id.is_empty() {
                 if defaulted {
                     eprintln!("filed in Software, the default project");
@@ -4973,7 +4991,7 @@ fn run_command() -> Result<()> {
         Cmd::Options { issue, options } => {
             print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
         }
-        Cmd::Note { words } => {
+        Cmd::Note { words, verbose } => {
             let (issue, text, inferred) = match note_target(&words) {
                 Ok(found) => found,
                 Err(err) if err.to_string().contains("no issue is held") => {
@@ -4993,7 +5011,14 @@ fn run_command() -> Result<()> {
             )?;
             let pending = ljos_cli::retry_pending_claim(&issue);
             if !pending.is_empty() {
-                print!("{pending}");
+                print!(
+                    "{}",
+                    if verbose {
+                        pending
+                    } else {
+                        ljos_cli::without_routine_git(&pending)
+                    }
+                );
             }
             if inferred {
                 println!("noted on {issue}");
@@ -5005,7 +5030,15 @@ fn run_command() -> Result<()> {
                 Ok(line) => print!("{line}"),
                 Err(e) => eprintln!("ljos note: {e:#}"),
             }
-            print!("{}", ljos_cli::persist_tracker(&issue, "noted"));
+            let persisted = ljos_cli::persist_tracker(&issue, "noted");
+            print!(
+                "{}",
+                if verbose {
+                    persisted
+                } else {
+                    ljos_cli::without_routine_git(&persisted)
+                }
+            );
         }
         Cmd::Slot {
             issue,
@@ -6208,9 +6241,16 @@ fn run_command() -> Result<()> {
         } => {
             let issue = if let Some(title) = plan {
                 let opened = ljos_cli::plan::open_plan(project.as_deref(), &title, &items)?;
-                print!("{}", opened.text);
+                let plan_text = if verbose {
+                    opened.text
+                } else {
+                    ljos_cli::without_routine_git(&opened.text)
+                };
+                print!("{plan_text}");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
-                println!("sitting {}: checking blockers", opened.parent);
+                if verbose {
+                    println!("sitting {}: checking blockers", opened.parent);
+                }
                 let _ = std::io::Write::flush(&mut std::io::stdout());
                 opened.parent
             } else {
@@ -6285,21 +6325,26 @@ fn run_command() -> Result<()> {
                     Err(e) => eprintln!("ljos finish: note queue: {e:#}"),
                 }
             }
+            let said = finish(
+                &issue,
+                &status,
+                lesson.or(lesson_text).as_deref(),
+                outcome.as_deref(),
+                new_option,
+                beta,
+                &assignee_for("finish", assignee.as_deref(), false)?,
+                gen,
+                close,
+                verbose,
+            )
+            .map_err(ticket_error)?;
             print!(
                 "{}",
-                finish(
-                    &issue,
-                    &status,
-                    lesson.or(lesson_text).as_deref(),
-                    outcome.as_deref(),
-                    new_option,
-                    beta,
-                    &assignee_for("finish", assignee.as_deref(), false)?,
-                    gen,
-                    close,
-                    verbose,
-                )
-                .map_err(ticket_error)?
+                if verbose {
+                    said
+                } else {
+                    ljos_cli::without_routine_git(&said)
+                }
             );
         }
         Cmd::Reopen { issue } => {

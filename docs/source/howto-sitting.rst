@@ -21,34 +21,28 @@ Set ``LJOS_SEAT`` to the seat that files it. Once ``vissue.toml`` lists seats, t
      day-cd34  measure the files
      day-ef56  pick a default
    next: day-cd34  measure the files
-   tracker git: committed chore(issues): day-ab12 filed, day-cd34 filed, day-ef56 filed by ada; no remote, kept local
-   sitting day-ab12: checking blockers
    tracker: day-ab12 STARTED under ada
-   tracker git: committed chore(issues): day-ab12 claimed by ada; no remote, kept local
    memory skipped: packsetd busy
-   ljos is ready: tracker works.
    warn    crates.io   did not answer, so the version check was skipped
-   without: ljos-mcp, ljos-policyd (`ljos doctor --all` for why)
    memory degraded: ranked by words
    next: day-cd34  measure the files
    day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
    $ ljos finish day-cd34
    ticked day-cd34
    next: day-ef56  pick a default
-   tracker git: committed chore(issues): day-cd34 ticked by ada; no remote, kept local
    $ ljos ready --mine
    next: day-ef56  pick a default
 
 .. END ljos-sample sitting-plan
 
-``ljos ready --mine`` names the next unfinished item. ``ljos finish ITEM`` ticks that item off. A sitting without ``--verbose`` is the short form: what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``memory degraded: ranked by words``. A pack that answers 503, or does not answer, is one line, ``memory skipped: packsetd busy``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold, and about a second otherwise. Quiet claims are a count of the project file already opened for the ticket. A claim untouched for longer than ``LJOS_STALE_DAYS`` (7) is left out of that count. The line is ``N claims untouched for 7+ days: ljos claims --stale``. ``ljos claims --stale`` lists them, oldest first. ``ljos release --stale`` prints the same list, and ``ljos release --stale --yes`` hands each claim back. The ticket goes back to TODO.
+``ljos ready --mine`` names the next unfinished item. ``ljos finish ITEM`` ticks that item off. A sitting without ``--verbose`` prints the claim, one line when claims were handed back or are still held, what the seat remembers, and the close. A degraded pack is one line, ``memory degraded: ranked by words``. A pack that answers 503, or does not answer, is one line, ``memory skipped: packsetd busy``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold, and about a second otherwise. Quiet claims are that one line, ``N quiet claims are still yours (ljos claims --mine)``. A hand-back is the same line, ``handed back N quiet claims``. Each claim is on ``--verbose``. A claim untouched for longer than ``LJOS_STALE_DAYS`` (7) is left out of that count. The line is ``N claims untouched for 7+ days: ljos claims --stale``. ``ljos claims --stale`` lists them, oldest first. ``ljos release --stale`` prints the same list, and ``ljos release --stale --yes`` hands each claim back. The ticket goes back to TODO.
 
 Start a sitting, and end one
 ============================
 
 .. code:: console
 
-   $ ljos sitting proj-1a2b
+   $ ljos sitting proj-1a2b --verbose
    == doctor
    ok  vissue  ...
    ok  seat    alice, holding as alice (from LJOS_SEAT)

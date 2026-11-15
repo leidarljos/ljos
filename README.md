@@ -163,7 +163,7 @@ Run `ljos doctor` from your home directory. In a checkout that has `.ljos/gates.
 `ljos remember` prints the lesson and the first eight characters of its id. With no seat set and no session id in this process, the write uses `unknown-` plus the host name, and the line says so. A conversation that already has a seat record writes as that seat. A session id only on a parent does not name the seat.
 `ljos search "lexical default"` prints that lesson. A query that shares no word with the stored text, such as `which fusion`, prints `` No hits for "which fusion", so run `ljos search fusion`. ``
 This seat's hits come first. Another seat's lesson is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is `Nothing relevant was found.` A busy pack ranks by words and still returns a hit that names the subject.
-`ljos file` prints the new id, then `project:`, the heading, the path, and `tracker git: committed ... no remote, kept local`.
+`ljos file` prints the new id on stdout. Standard error has `project:`, the heading and the path. A commit that landed is not printed. `ljos file --verbose` prints the `tracker git:` line. A refusal is still printed.
 
 Mem0's default add runs a model over the text. The sentence above is stored as written.
 The ticket is an Org heading in a git repository, which you can open. beads stores the same kind of queue in Dolt.

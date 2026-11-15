@@ -500,7 +500,10 @@ same four steps are:
 
 Whatever the outcome, the claim and the finish commit the ticket when the tracker is a git checkout.
 `ljos claim` commits that claim, `sitting` commits after its claim and `finish` at the end of the work.
-Each commits the ticket's `issues.org` (that file alone), pushes it, and prints a `tracker git:` line.
+Each commits the ticket's `issues.org` (that file alone) and pushes it.
+`ljos claim` prints a `tracker git:` line.
+`ljos sitting`, `ljos note`, `ljos finish` and `ljos file` print that line with `--verbose`.
+A refusal is printed either way.
 A claim or a closure that stays in one working tree does not exist for any other host.
 `LJOS_TRACKER_GIT=push` commits, rebases with the per-issue field merge, and pushes, and never forces.
 A failed push stays queued.

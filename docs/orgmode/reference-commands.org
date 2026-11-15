@@ -242,7 +242,7 @@ doctor --all --fix --verbose
 due --all --json --judge
 evidence
 export --json --machine --out
-file --body --deadline --options --parent --porcelain --priority --project --quorum --tags --top --type
+file --body --deadline --options --parent --porcelain --priority --project --quorum --tags --top --type --verbose
 findings --all --issue --remember
 finish --assignee --beta --close --gen --lesson --new-option --outcome --status --verbose
 forget --json --why
@@ -281,7 +281,7 @@ mesh pull --from --seat
 mesh push --lane --seat --to
 mesh status
 mesh up --hostname --key-file --login-server
-note
+note --verbose
 offboard --dry-run --harness --runner
 onboard --dry-run --example --harness --skills
 open-panel --cwd --log --prompt-file --session

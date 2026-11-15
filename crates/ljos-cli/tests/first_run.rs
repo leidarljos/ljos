@@ -834,9 +834,13 @@ fn expect_documented(command: &str, output: &str) {
         assert!(output.contains(NO_HITS), "{command}\n{output}");
     }
     if command.contains("ljos file") && command.contains("Pick a codec") {
-        for key in ["project:", "Pick a codec", "tracker git:"] {
+        for key in ["project:", "Pick a codec"] {
             assert!(output.contains(key), "{command}\nmissing {key}\n{output}");
         }
+        assert!(
+            !output.contains("tracker git: committed"),
+            "{command}\na commit that landed was printed:\n{output}"
+        );
     }
     if command.contains("sitting") && command.contains("--plan") {
         assert!(output.contains("next:"), "{command}\n{output}");

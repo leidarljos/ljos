@@ -99,8 +99,17 @@ fn assert_only_id(out: &Output, id: &str) {
         format!("{id}\n"),
         "{said}"
     );
+}
+
+fn assert_file_note(out: &Output) {
+    let said = text(out);
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("tracker"), "{said}");
+    assert!(err.contains("project:"), "{said}");
+    assert!(err.contains("file:"), "{said}");
+    assert!(
+        !err.contains("tracker git:"),
+        "a commit that landed was printed:\n{said}"
+    );
 }
 
 #[test]
@@ -108,6 +117,7 @@ fn a_plain_file_capture_is_the_id() {
     let world = World::new();
     let filed = world.ljos(&["file", "title here", "--top", "-p", "papers"]);
     assert_only_id(&filed, "papers-2jco");
+    assert_file_note(&filed);
     let err = String::from_utf8_lossy(&filed.stderr);
     assert!(
         err.contains("papers-2jco  TODO  [#A]  title here"),
@@ -131,6 +141,7 @@ fn porcelain_file_prints_only_the_new_id() {
         let filed = world.ljos(&["file", flag, "title here", "--top", "-p", "papers"]);
         let said = text(&filed);
         assert_only_id(&filed, "papers-2jco");
+        assert_file_note(&filed);
         let err = String::from_utf8_lossy(&filed.stderr);
         assert!(
             err.contains("papers-2jco  TODO  [#A]  title here"),
