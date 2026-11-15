@@ -58,7 +58,7 @@ It does not by itself exit 1.
 With =vissue= installed and no tracker configured, the row is info and this failure does not by itself exit 1:
 
 #+begin_src text
-info	tickets	vissue failed (exit 1): not inside a tracker, so run `ljos onboard`.
+info	tickets	vissue failed (exit 1): /tmp/seat is not a tracker: it holds neither vissue.toml nor Software/. Name one with --root, or set VISSUE_ROOT, so run `ljos onboard`.
 #+end_src
 
 =VISSUE_ROOT= pointing at a directory that is not there fails the doctor.
