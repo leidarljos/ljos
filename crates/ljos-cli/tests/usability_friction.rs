@@ -176,13 +176,27 @@ fn file_and_finish_do_not_ask_and_name_a_missing_tool_in_one_line() {
 
 #[test]
 fn cards_name_the_directory_when_both_files_are_missing() {
-    let out = run(&["cards"], &[]);
+    let home = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["cards"])
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", home.path())
+        .env("XDG_RUNTIME_DIR", home.path().join("run"))
+        .env("LJOS_SEAT", "saddle")
+        .current_dir(home.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
         "{text} {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let shown = home.path().canonicalize().unwrap();
+    assert!(text.contains(&format!("in {}.", shown.display())), "{text}");
+    assert!(!text.contains("in .."), "{text}");
     assert!(text.contains("no USER.md or MEMORY.md"), "{text}");
     assert!(
         text.contains("ljos reads them and does not write them"),

@@ -5629,9 +5629,18 @@ fn run_command() -> Result<()> {
         Cmd::Cards { dir } => {
             let out = cards(&dir)?;
             if out.is_empty() {
+                // `.` plus the sentence period read as the parent directory.
+                let joined = if dir.is_absolute() {
+                    dir.clone()
+                } else {
+                    std::env::current_dir()
+                        .map(|cwd| cwd.join(&dir))
+                        .unwrap_or_else(|_| dir.clone())
+                };
+                let shown = joined.canonicalize().unwrap_or(joined);
                 println!(
                     "no USER.md or MEMORY.md in {}. Write them there, or pass --dir. ljos reads them and does not write them.",
-                    dir.display()
+                    shown.display()
                 );
             } else {
                 print!("{out}");
