@@ -54,6 +54,18 @@ A run on another machine needs ljos and the tracker there.
    $ ljos cloud up
    $ ljos vote $id --for ship --confidence 0.8 --used none
 
+With no ``LJOS_TRACKER_REMOTE`` and no ``LJOS_CLOUD_AGE_SECRET``, ``ljos cloud up`` still exits 0.
+The binaries are installed either way, and push mode stays off.
+The command names each missing variable:
+
+.. code:: text
+
+   tracker: LJOS_TRACKER_REMOTE is unset and no tracker checkout is in the workspace, so this machine has no shared tracker
+   cloud age: LJOS_CLOUD_AGE_SECRET is unset, so no identity for scope cloud was written. Set LJOS_CLOUD_AGE_SECRET to the name of the variable that holds the age identity.
+
+Set those and run the command again when the ballot has to reach the other runs.
+A machine that only needed the binaries can leave them unset.
+
 The run's harness id is the ballot's session, so two runs count twice and a run or subagent that votes again counts once.
 When nothing names the run but the seat, ``ljos vote`` and the tally call the session unverified.
 Persona ballots and Jev ballots are advisory.
@@ -83,12 +95,18 @@ same pair supersedes it.
 Move the trust rows without an outcome
 ======================================
 
+.. BEGIN ljos-sample calibrate
+
 .. code:: console
 
+   $ ljos calibrate -p demo
+   ljos-consensus is not on PATH. Install it with `cargo install --locked ljos-consensus`.
    $ ljos calibrate -p demo
    alice weighs bob at 0.917
    alice weighs carol at 0.643
    ...
+
+.. END ljos-sample calibrate
 
 The command needs one project issue with two or more ballots. With fewer it
 names that and exits 1.

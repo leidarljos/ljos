@@ -62,6 +62,12 @@ impl Pty {
         cmd.stderr(Self::stdio_dup(self.slave.as_raw_fd()));
     }
 
+    /// Point `cmd`'s stdin at this terminal, so `is_terminal` is true.
+    /// Call this before [`Self::spawn`].
+    pub fn attach_stdin(&self, cmd: &mut Command) {
+        cmd.stdin(Self::stdio_dup(self.slave.as_raw_fd()));
+    }
+
     /// A copy of `fd` owned by a `Stdio`. The original stays open.
     fn stdio_dup(fd: i32) -> Stdio {
         // SAFETY: `fd` is open. `dup` returns a new descriptor, which

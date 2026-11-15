@@ -1022,7 +1022,291 @@ def tutorial_search(ljos: Path) -> dict[str, str]:
     return {"search": search, "prefer": prefer, "index": index}
 
 
-def rewritten(doctor: str, help_text: str, agents: dict[str, str], tutorials: dict[str, str]) -> dict[Path, str]:
+def _howto_seat(ljos: Path, prefix: str) -> tuple[Path, dict[str, str], Path]:
+    """A scratch seat whose pack port is closed, so memory is down.
+
+    curl is a stub, so a missing program's row does not take a crates.io
+    version. The tools the sitting needs are linked under the seat.
+    """
+    for name in ("vissue", "claimdag", "deedar", "git", "bash", "packset", "packsetd"):
+        _need_tool(name)
+    home = Path(tempfile.mkdtemp(prefix=prefix))
+    for rel in (
+        ".config/ljos",
+        ".local/state/ljos",
+        ".cache",
+        ".local/share",
+        "run",
+        "tmp",
+        "work",
+        "bin",
+        "stub",
+    ):
+        (home / rel).mkdir(parents=True)
+    bind = home / "bin"
+    bind.joinpath("ljos").symlink_to(ljos)
+    from shutil import which
+
+    for name in ("vissue", "claimdag", "deedar", "git", "bash", "packset", "packsetd"):
+        found = which(name)
+        if found:
+            bind.joinpath(name).symlink_to(found)
+    stub = home / "stub/curl"
+    stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    subprocess.run(
+        ["git", "config", "--file", str(home / "gitconfig"), "user.name", "Ada Example"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "--file", str(home / "gitconfig"), "user.email", "ada@example.com"],
+        check=True,
+    )
+    # off, not a closed port: onboard still finishes, and the sitting says
+    # the pack is down.
+    env = _agent_env(
+        home,
+        ljos,
+        {
+            "PACKSET_URL": "off",
+            "LJOS_SYNC_HOST": "laptop",
+            "LJOS_SEAT": "ada",
+        },
+    )
+    env["PATH"] = f"{home / 'stub'}:{bind}:/usr/bin:/bin"
+    return home, env, home / "work"
+
+
+def _drop_home(home: Path) -> None:
+    import shutil
+
+    shutil.rmtree(home, ignore_errors=True)
+
+
+_DAY_IDS = ("day-ab12", "day-cd34", "day-ef56")
+_DAY_ID = re.compile(r"\bday-[a-z0-9]{4}\b")
+
+
+def _stand_in_ids(text: str) -> str:
+    seen: dict[str, str] = {}
+
+    def issue(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        if raw not in seen:
+            if len(seen) >= len(_DAY_IDS):
+                raise SystemExit(f"gen_samples: more plan ids than stand-ins:\n{text}")
+            seen[raw] = _DAY_IDS[len(seen)]
+        return seen[raw]
+
+    return _DAY_ID.sub(issue, text)
+
+
+def shell_hook_sample(ljos: Path) -> str:
+    """The shell-only prompt line, from bash piping into this binary."""
+    _need_tool("bash")
+    home = Path(tempfile.mkdtemp(prefix="ljos-doc-hook-"))
+    try:
+        (home / "tmp").mkdir()
+        env = _agent_env(home, ljos, {"PACKSET_URL": "off", "prompt": "hello"})
+        env["PATH"] = f"{ljos.parent}:/usr/bin:/bin"
+        code, text = _pty_run(
+            ["bash", "-c", 'echo "$prompt" | ljos hook --prompt'],
+            env,
+            home,
+            60,
+        )
+    finally:
+        _drop_home(home)
+    if code != 0:
+        raise SystemExit(f"gen_samples: hook --prompt exited {code}:\n{text}")
+    lines = text.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith("label prompt-origin:"))
+    except StopIteration as exc:
+        raise SystemExit(f"gen_samples: hook printed no prompt-origin label:\n{text}") from exc
+    label_lines = [lines[start]]
+    for line in lines[start + 1 :]:
+        if not line or line.startswith("{") or line.startswith("label "):
+            break
+        label_lines.append(line)
+    label = "\n".join(label_lines)
+    for needle in (
+        "label prompt-origin:",
+        "not stored as the person's words",
+        "parent process is",
+        "`bash`",
+        "not a known runner",
+    ):
+        if needle not in label:
+            raise SystemExit(f"gen_samples: hook label missing {needle!r}:\n{label}")
+    if "/tmp" in label or "ljos-doc-hook" in label:
+        raise SystemExit(f"gen_samples: hook label names a temporary directory:\n{label}")
+    head = (
+        "$ ljos onboard --harness example-host --skills ~/.example-host/skills\n"
+        "ok\tskill\twrote /home/you/.example-host/skills/ljos/SKILL.md\n"
+        "ok\tenv\twrote /home/you/.config/ljos/example-host.env; "
+        "source /home/you/.config/ljos/example-host.env\n"
+        "$ source ~/.config/ljos/example-host.env\n"
+        '$ echo "$prompt" | ljos hook --prompt\n'
+    )
+    return f"{head}{label}\n$ ljos policy -- git push --force\n"
+
+
+def calibrate_sample(ljos: Path) -> str:
+    """What calibrate prints when ljos-consensus is not installed, then the settled lines."""
+    home = Path(tempfile.mkdtemp(prefix="ljos-doc-calibrate-"))
+    try:
+        (home / "tmp").mkdir()
+        env = _agent_env(home, ljos, {"PACKSET_URL": "off"})
+        env["PATH"] = f"{ljos.parent}:/usr/bin:/bin"
+        code, text = _pty_run(["ljos", "calibrate", "-p", "demo"], env, home, 30)
+    finally:
+        _drop_home(home)
+    if code == 0:
+        raise SystemExit(f"gen_samples: calibrate found ljos-consensus:\n{text}")
+    line = text.strip()
+    expect = "ljos-consensus is not on PATH. Install it with `cargo install --locked ljos-consensus`."
+    if line != expect:
+        raise SystemExit(f"gen_samples: calibrate missing-tool line was:\n{line}")
+    return (
+        "$ ljos calibrate -p demo\n"
+        f"{line}\n"
+        "$ ljos calibrate -p demo\n"
+        "alice weighs bob at 0.917\n"
+        "alice weighs carol at 0.643\n"
+        "...\n"
+    )
+
+
+def sitting_plan_sample(ljos: Path) -> str:
+    """`ljos sitting --plan` with the pack down, then finish and ready."""
+    home, env, cwd = _howto_seat(ljos, "ljos-doc-sitting-")
+    try:
+        code, text = _pty_run(["ljos", "onboard"], env, cwd, 120)
+        if code != 0:
+            raise SystemExit(f"gen_samples: sitting onboard exited {code}:\n{text}")
+        code, planned = _pty_run(
+            [
+                "ljos",
+                "sitting",
+                "--plan",
+                "Ship the codec",
+                "-p",
+                "day",
+                "--",
+                "measure the files",
+                "pick a default",
+            ],
+            env,
+            cwd,
+            120,
+        )
+        if code != 0:
+            raise SystemExit(f"gen_samples: sitting --plan exited {code}:\n{planned}")
+        ids = _DAY_ID.findall(planned)
+        if len(ids) < 2:
+            raise SystemExit(f"gen_samples: sitting --plan printed no ids:\n{planned}")
+        child = ids[1]
+        code, ticked = _pty_run(["ljos", "finish", child], env, cwd, 60)
+        if code != 0:
+            raise SystemExit(f"gen_samples: finish exited {code}:\n{ticked}")
+        code, ready = _pty_run(["ljos", "ready", "--mine"], env, cwd, 60)
+        if code != 0:
+            raise SystemExit(f"gen_samples: ready exited {code}:\n{ready}")
+    finally:
+        _drop_home(home)
+    block = (
+        '$ ljos sitting --plan "Ship the codec" -p day -- "measure the files" "pick a default"\n'
+        f"{planned.strip()}\n"
+        f"$ ljos finish {child}\n"
+        f"{ticked.strip()}\n"
+        "$ ljos ready --mine\n"
+        f"{ready.strip()}\n"
+    )
+    block = block.replace(str(home), "/home/ada")
+    block = _stand_in_ids(block)
+    for needle in (
+        "day-ab12  Ship the codec",
+        "day-cd34  measure the files",
+        "day-ef56  pick a default",
+        "next: day-cd34  measure the files",
+        "memory skipped: packsetd busy",
+        "memory degraded: ranked by words",
+        'day-ab12 is yours. `ljos finish day-ab12 --lesson "..."`',
+        "ticked day-cd34",
+        "next: day-ef56  pick a default",
+        "tracker git: committed",
+    ):
+        if needle not in block:
+            raise SystemExit(f"gen_samples: sitting sample missing {needle!r}:\n{block}")
+    if "/tmp" in block or "ljos-doc-sitting" in block:
+        raise SystemExit(f"gen_samples: sitting sample names a temporary directory:\n{block}")
+    return block
+
+
+def receive_sample(ljos: Path) -> str:
+    """`ljos receive` for a handover bag that cites no deeds."""
+    home, env, cwd = _howto_seat(ljos, "ljos-doc-receive-")
+    try:
+        code, text = _pty_run(["ljos", "onboard"], env, cwd, 120)
+        if code != 0:
+            raise SystemExit(f"gen_samples: receive onboard exited {code}:\n{text}")
+        code, filed = _pty_run(
+            ["ljos", "file", "Ship the fuse change?", "-p", "proj"],
+            env,
+            cwd,
+            60,
+        )
+        if code != 0:
+            raise SystemExit(f"gen_samples: receive file exited {code}:\n{filed}")
+        found = re.search(r"\bproj-[a-z0-9]{4}\b", filed)
+        if found is None:
+            raise SystemExit(f"gen_samples: receive file printed no id:\n{filed}")
+        issue = found.group(0)
+        bag = home / "bag"
+        code, packed = _pty_run(
+            ["ljos", "handover", "--out", str(bag), "--issue", issue],
+            env,
+            cwd,
+            60,
+        )
+        if code != 0:
+            raise SystemExit(f"gen_samples: handover exited {code}:\n{packed}")
+        keep = home / "peer.head"
+        code, got = _pty_run(
+            ["ljos", "receive", str(bag), "--keep", str(keep)],
+            env,
+            cwd,
+            60,
+        )
+        if code != 0:
+            raise SystemExit(f"gen_samples: receive exited {code}:\n{got}")
+    finally:
+        _drop_home(home)
+    body = got.strip()
+    body = body.replace(str(bag), "/tmp/bag")
+    body = body.replace(str(keep), "~/.local/share/ljos/peer.head")
+    body = body.replace(str(home), "/home/ada")
+    body = re.sub(r"\b[0-9a-f]{12,}\b", "0123456789abcdef", body)
+    if "no deeds enclosed" not in body:
+        raise SystemExit(f"gen_samples: receive sample is not an empty bag:\n{body}")
+    if "/tmp/" in body.replace("/tmp/bag", "") or "ljos-doc-receive" in body:
+        raise SystemExit(f"gen_samples: receive sample names a temporary directory:\n{body}")
+    return (
+        "$ ljos receive /tmp/bag --keep ~/.local/share/ljos/peer.head\n"
+        f"{body}\n"
+    )
+
+
+_WALK_PAGES = {
+    "shell-hook": "howto-runner",
+    "calibrate": "howto-vote",
+    "sitting-plan": "howto-sitting",
+    "receive-empty": "howto-handover",
+}
+
+
+def rewritten(doctor: str, help_text: str, agents: dict[str, str], tutorials: dict[str, str], walks: dict[str, str]) -> dict[Path, str]:
     out: dict[Path, str] = {}
     regions = [
         (ROOT / "docs/orgmode/howto-check.org", "# BEGIN ljos-sample doctor", "# END ljos-sample doctor", org_src(doctor)),
@@ -1069,6 +1353,24 @@ def rewritten(doctor: str, help_text: str, agents: dict[str, str], tutorials: di
                 rst_src(body, "console"),
             )
         )
+    for key, page in _WALK_PAGES.items():
+        body = walks[key]
+        regions.append(
+            (
+                ROOT / "docs/orgmode" / f"{page}.org",
+                f"# BEGIN ljos-sample {key}",
+                f"# END ljos-sample {key}",
+                org_src(body, "console"),
+            )
+        )
+        regions.append(
+            (
+                ROOT / "docs/source" / f"{page}.rst",
+                f".. BEGIN ljos-sample {key}",
+                f".. END ljos-sample {key}",
+                rst_src(body, "console"),
+            )
+        )
     texts: dict[Path, str] = {}
     for path, begin, end, body in regions:
         current = texts.get(path)
@@ -1093,7 +1395,13 @@ def main() -> int:
     doctor, help_text = samples_from(ljos)
     tutorials = {"timeline": tutorial_timeline(ljos)}
     tutorials.update(tutorial_search(ljos))
-    files = rewritten(doctor, help_text, agent_samples(ljos), tutorials)
+    walks = {
+        "shell-hook": shell_hook_sample(ljos),
+        "calibrate": calibrate_sample(ljos),
+        "sitting-plan": sitting_plan_sample(ljos),
+        "receive-empty": receive_sample(ljos),
+    }
+    files = rewritten(doctor, help_text, agent_samples(ljos), tutorials, walks)
     changed = [path for path, text in files.items() if text != path.read_text(encoding="utf-8")]
     if args.check:
         if changed:

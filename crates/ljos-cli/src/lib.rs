@@ -1547,6 +1547,165 @@ fn filled(argv: &[String], server: &Path, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// The onboard line when `program` is not installed. The same line names
+/// the command to run after it is.
+fn not_on_path_line(program: &str, harness: &str) -> String {
+    format!(
+        "{program} is not on PATH and must be installed, so run `ljos onboard --harness {harness}`."
+    )
+}
+
+/// A program a `sh -c` register command runs, when that program is not on
+/// PATH. `sh` itself is, so the failure used to be `sh failed (exit 127)`.
+fn shell_target_missing(argv: &[String]) -> Option<String> {
+    let script = register_c_script(argv)?;
+    for word in command_words(script) {
+        if shell_builtin(&word) || on_path(&word) {
+            continue;
+        }
+        return Some(word);
+    }
+    None
+}
+
+/// The script after `-c`, when `argv` is a shell. Anything else is `None`.
+fn register_c_script(argv: &[String]) -> Option<&str> {
+    let bin = argv.first()?.as_str();
+    let shell = bin == "sh" || bin == "bash" || bin.ends_with("/sh") || bin.ends_with("/bash");
+    if !shell {
+        return None;
+    }
+    argv.iter()
+        .position(|word| word == "-c")
+        .and_then(|at| argv.get(at + 1).map(String::as_str))
+}
+
+/// Words in command position: the start of the script, and the word after
+/// a pipe or a list operator. Quotes hide the operators inside them.
+fn command_words(script: &str) -> Vec<String> {
+    let chars: Vec<char> = script.chars().collect();
+    let mut words = Vec::new();
+    let mut buf = String::new();
+    let mut command = true;
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    let flush = |buf: &mut String, command: &mut bool, words: &mut Vec<String>| {
+        if buf.is_empty() {
+            return;
+        }
+        let word = std::mem::take(buf);
+        if *command && !word.starts_with('-') && !word.contains('=') {
+            words.push(word);
+        }
+        *command = false;
+    };
+    while i < chars.len() {
+        let ch = chars[i];
+        if let Some(mark) = quote {
+            if ch == mark {
+                quote = None;
+            } else {
+                buf.push(ch);
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            i += 1;
+            if i < chars.len() {
+                buf.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            i += 1;
+            continue;
+        }
+        let op = matches!(ch, '|' | '&' | ';' | '\n' | '(' | ')');
+        if op {
+            flush(&mut buf, &mut command, &mut words);
+            if (ch == '|' || ch == '&') && chars.get(i + 1) == Some(&ch) {
+                i += 1;
+            }
+            command = true;
+            i += 1;
+            continue;
+        }
+        if ch.is_whitespace() {
+            flush(&mut buf, &mut command, &mut words);
+            i += 1;
+            continue;
+        }
+        buf.push(ch);
+        i += 1;
+    }
+    flush(&mut buf, &mut command, &mut words);
+    words
+}
+
+fn shell_builtin(word: &str) -> bool {
+    matches!(
+        word,
+        "printf"
+            | "echo"
+            | "true"
+            | "false"
+            | "test"
+            | "["
+            | "exit"
+            | "cd"
+            | "export"
+            | "set"
+            | "eval"
+            | "exec"
+            | "command"
+            | "type"
+            | "read"
+            | "shift"
+            | "return"
+            | "local"
+            | "wait"
+            | "ulimit"
+            | "umask"
+            | "alias"
+            | "unalias"
+            | ":"
+            | "."
+            | "source"
+            | "break"
+            | "continue"
+            | "getopts"
+            | "hash"
+            | "jobs"
+            | "fg"
+            | "bg"
+            | "kill"
+            | "trap"
+            | "times"
+            | "unset"
+    )
+}
+
+/// The program named by `sh failed (exit 127): hermes: not found`, or the
+/// macOS form `command not found`. `None` when the line is some other failure.
+fn missing_from_failure(text: &str) -> Option<String> {
+    if !text.contains("(exit 127)") {
+        return None;
+    }
+    let parts: Vec<&str> = text.split(": ").collect();
+    let last = parts.last()?.trim();
+    if last != "not found" && last != "command not found" {
+        return None;
+    }
+    let name = parts.get(parts.len().saturating_sub(2))?.trim();
+    if name.is_empty() || name.contains(' ') || name == "sh" || name == "bash" {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 /// Pronouns and defaults, not product names. A runner's own `LJOS_SEAT`
 /// is treated the same way in [`resolve_assignee`]: the process naming
 /// itself is omitted, so occupancy falls through to the session.
@@ -6734,10 +6893,16 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             if !on_path(&argv[0]) {
                 return Step {
                     what,
-                    detail: format!(
-                        "{} is not on PATH and must be installed, so run `ljos onboard --harness {}`.",
-                        argv[0], h.name
-                    ),
+                    detail: not_on_path_line(&argv[0], &h.name),
+                    ok: false,
+                };
+            }
+            // `sh -c '… hermes …'` is on PATH as sh. The program the script
+            // runs is what the person has to install.
+            if let Some(missing) = shell_target_missing(&argv) {
+                return Step {
+                    what,
+                    detail: not_on_path_line(&missing, &h.name),
                     ok: false,
                 };
             }
@@ -6754,11 +6919,18 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
                     detail: with_server_note(format!("ran {}", argv.join(" ")), &plan),
                     ok: true,
                 },
-                Err(e) => Step {
-                    what,
-                    detail: e.to_string().lines().next().unwrap_or("").to_string(),
-                    ok: false,
-                },
+                Err(e) => {
+                    let detail = e.to_string().lines().next().unwrap_or("").to_string();
+                    let detail = missing_from_failure(&detail)
+                        .filter(|name| !on_path(name))
+                        .map(|name| not_on_path_line(&name, &h.name))
+                        .unwrap_or(detail);
+                    Step {
+                        what,
+                        detail,
+                        ok: false,
+                    }
+                }
             }
         }
         Some(false) if h.json_config().is_some() => {
@@ -61309,6 +61481,55 @@ mod tests {
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
         let hermes = all.harness.iter().find(|h| h.name == "hermes").unwrap();
         assert_eq!(hermes.probe, s(&["hermes", "mcp", "test", "ljos"]));
+    }
+
+    #[test]
+    fn a_shell_register_names_the_missing_program() {
+        let script = "printf 'Y\\n' | hermes mcp add ljos --command /usr/bin/ljos-mcp";
+        let argv = vec!["sh".into(), "-c".into(), script.into()];
+        assert_eq!(
+            super::shell_target_missing(&argv).as_deref(),
+            Some("hermes")
+        );
+        assert_eq!(
+            super::missing_from_failure("sh failed (exit 127): hermes: not found").as_deref(),
+            Some("hermes")
+        );
+        assert_eq!(
+            super::missing_from_failure("sh failed (exit 127): sh: hermes: command not found")
+                .as_deref(),
+            Some("hermes")
+        );
+        assert_eq!(
+            super::missing_from_failure("sh failed (exit 127): sh: 1: hermes: not found")
+                .as_deref(),
+            Some("hermes")
+        );
+        assert!(super::missing_from_failure("sh failed (exit 1): refused").is_none());
+        let present = vec!["sh".into(), "-c".into(), "printf 'Y\\n' | true".into()];
+        assert!(super::shell_target_missing(&present).is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let server = dir.path().join("ljos-mcp");
+        std::fs::write(&server, b"bin").unwrap();
+        let h = super::Harness {
+            name: "hermes".into(),
+            register: vec![
+                "sh".into(),
+                "-c".into(),
+                "printf 'Y\\n' | hermes mcp add ljos --command {server}".into(),
+            ],
+            config: Some(dir.path().join("missing.yaml").display().to_string()),
+            marker: Some("  ljos:".into()),
+            ..super::Harness::default()
+        };
+        let step = super::register_step(&h, &server, false);
+        assert!(!step.ok, "{step:?}");
+        assert_eq!(
+            step.detail,
+            "hermes is not on PATH and must be installed, so run `ljos onboard --harness hermes`."
+        );
+        assert!(!step.detail.contains("exit 127"), "{step:?}");
     }
 
     #[test]

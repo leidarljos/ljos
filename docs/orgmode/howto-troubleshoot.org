@@ -8,19 +8,19 @@ Exit 1 when a =no= row is a required part, the pack, the note queue, or a tracke
 A =warn= row does not change the exit code.
 These blocks copy the lines that command printed.
 The home in them is =/tmp/seat=, except the Model Context Protocol (MCP) blocks, which used =/tmp/seat-probe=.
-A crates.io number is the version the registry returned for that run.
+When the registry answers, a missing program's row names that version. These blocks do not pin one.
 
 * The pack writer
 
 A checkout that had only =ljos= and =ljos-mcp= on =PATH= printed this summary and these pack rows.
-The other missing programs used the same shape, not on PATH, then =cargo install --locked= and the crate name, with the crates.io version when the registry answered.
+The other missing programs used the same shape, not on PATH, then =cargo install --locked= and the crate name. When the registry answers, the row also names that version.
 Exit 1.
 
 #+begin_src text
 $ ljos doctor
 ljos is not ready: ljos-policyd, vissue, deedar, claimdag, packset, packsetd and memory do not answer. Optional extras: `ljos doctor --all`.
-no	packset	not on PATH, and crates.io lists 0.18.1, so run `cargo install --locked packset`.
-no	packsetd	not on PATH, and crates.io lists 0.18.1, so run `cargo install --locked packset`.
+no	packset	not on PATH, so run `cargo install --locked packset`.
+no	packsetd	not on PATH, so run `cargo install --locked packset`.
 no	memory	http://127.0.0.1:8761 does not answer. no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.
 #+end_src
 

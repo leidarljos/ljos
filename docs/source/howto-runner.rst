@@ -120,7 +120,11 @@ call it.
 A runner that registers servers by a command of its own, or reads them
 from a config file, can be described once in
 ``~/.config/ljos/harnesses.toml`` and onboarded in one verb.
-``ljos onboard --example`` prints the shape:
+Write the tables into that file first, or run ``ljos onboard --example``,
+which prints them. Until the name is in the file,
+``ljos onboard --harness`` for that name exits 1 and the line says to run
+``ljos onboard --example``.
+``ljos onboard --example`` prints this shape:
 
 .. code:: toml
 
@@ -145,9 +149,10 @@ from a config file, can be described once in
 
 ``--dry-run`` reports what would be written. The name ``runner`` in the example
 is not a program. Until that program is on ``PATH``, the mcp line is
-``no`` and says ``runner is not on PATH``. The same line names ``ljos onboard --harness runner`` as the command to run after that program is installed, and the command exits 1. The skill
-line can still be ``ok``. Copy the tables from ``ljos onboard --example``.
-That file also passes ``XDG_RUNTIME_DIR`` for a runner that rebuilds its
+``no`` and says ``runner is not on PATH and must be installed, so run `ljos onboard --harness runner-with-a-command`.``
+That is the command to run after the program is installed, and this
+command exits 1. The skill line can still be ``ok``.
+The example file also passes ``XDG_RUNTIME_DIR`` for a runner that rebuilds its
 environment.
 
 The command harness runs a hook only after you trust it. After ``ljos onboard --harness codex``,
@@ -185,6 +190,8 @@ Seat a shell-only agent
 Example Host runs shell commands on a Linux box. It is not an MCP runner and
 it has no command hook, so the env file names its seat.
 
+.. BEGIN ljos-sample shell-hook
+
 .. code:: console
 
    $ ljos onboard --harness example-host --skills ~/.example-host/skills
@@ -192,8 +199,13 @@ it has no command hook, so the env file names its seat.
    ok  env wrote /home/you/.config/ljos/example-host.env; source /home/you/.config/ljos/example-host.env
    $ source ~/.config/ljos/example-host.env
    $ echo "$prompt" | ljos hook --prompt
+   label prompt-origin: not stored as the person's words (parent process is `bash`,
+   not a known runner)
    $ ljos policy -- git push --force
 
+.. END ljos-sample shell-hook
+
+The label is the shell that ran the pipe. Bash is not a known runner, so the prompt is not stored as the person's words.
 ``--skills DIR`` writes the protocol there. ``ljos onboard --harness shell --skills DIR``
 is the same shape under the name ``shell``. The env file sets
 ``LJOS_SEAT`` to the runner's name. Nothing is registered as an MCP server

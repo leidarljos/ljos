@@ -38,16 +38,21 @@ scratch stores; ``scripts/herd.sh`` is the concurrent contention check.
 Receive from the same sender again
 ==================================
 
+.. BEGIN ljos-sample receive-empty
+
 .. code:: console
 
-   $ ljos receive /tmp/bag --keep ~/.local/share/ljos/peer.head      # the first time
-   ...
-   3 deeds proven against a log of 34 entries, root 9c1e...
-   kept this head in /home/you/.local/share/ljos/peer.head; pass it to --since next time
-   $ ljos handover --out /tmp/bag2 --issue proj-1a2b --since-size 34  # the sender, next time
-   $ ljos receive /tmp/bag2 --since ~/.local/share/ljos/peer.head --keep ~/.local/share/ljos/peer.head
+   $ ljos receive /tmp/bag --keep ~/.local/share/ljos/peer.head
+   issues=1 deeds=0 files=2
+   the payload matches the manifest, and the manifest carries a signature this check did not verify: `deedar vouch check /tmp/bag/manifest-sha256.txt` says whether a key you accept made it
+   no deeds enclosed
+   signed by 0123456789abcdef (accepted)
+   0 atoms enclosed, 0 trust rows
 
-``--keep`` writes the head of the log the bag carried. Tell the sender its
+.. END ljos-sample receive-empty
+
+The sample is a bag with no deeds.
+``--keep`` writes the head of the log the bag carried, once a bag has one. Tell the sender its
 ``size``; ``handover --since-size`` puts the bridge from that size into the
 bag. ``--since`` then needs the bridge to start at the head you kept and end
 at the one in the bag, so a sender who rewrote the log in between fails the

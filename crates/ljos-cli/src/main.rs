@@ -2342,6 +2342,11 @@ enum Cmd {
 /// The status clap uses when the arguments could not be read.
 const USAGE_STATUS: i32 = 2;
 
+/// What `ljos statusline` prints at a terminal. The runner pipes JSON.
+fn statusline_tty_hint() -> &'static str {
+    "ljos: statusline reads the runner's status JSON on stdin, so pipe that JSON to it."
+}
+
 /// One sentence for a mistyped command or flag. Other parse errors stay
 /// with clap. Exit [`USAGE_STATUS`].
 ///
@@ -5546,6 +5551,12 @@ fn run_command() -> Result<()> {
             );
         }
         Cmd::Statusline => {
+            // A runner pipes its status JSON. At a terminal, with nothing
+            // piped, reading stdin waits forever.
+            if std::io::stdin().is_terminal() {
+                eprintln!("{}", statusline_tty_hint());
+                std::process::exit(USAGE_STATUS);
+            }
             let mut input = String::new();
             let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
             println!("{}", ljos_cli::statusline(&input));
@@ -6596,6 +6607,14 @@ mod help_list {
 #[cfg(test)]
 mod usage_hint {
     use super::*;
+
+    #[test]
+    fn statusline_at_a_terminal_names_the_pipe() {
+        assert_eq!(
+            statusline_tty_hint(),
+            "ljos: statusline reads the runner's status JSON on stdin, so pipe that JSON to it."
+        );
+    }
 
     #[test]
     fn edits_count_a_missing_letter_and_a_swap() {

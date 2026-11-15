@@ -3148,8 +3148,11 @@ fn normalize_identity(text: &str) -> String {
 fn ensure_cloud_age() -> Result<String> {
     let name = match named_secret() {
         NamedSecret::Unset => {
+            // Exit stays 0. The binaries are installed either way. The line
+            // names the variable a later run needs; running this command
+            // again does not invent the identity.
             return Ok(format!(
-                "cloud age: {CLOUD_AGE_SECRET} is unset and scope cloud has no identity on this machine, so run `ljos cloud up`."
+                "cloud age: {CLOUD_AGE_SECRET} is unset, so no identity for scope cloud was written. Set {CLOUD_AGE_SECRET} to the name of the variable that holds the age identity."
             ));
         }
         NamedSecret::Bad(why) => bail!("cloud up: {CLOUD_AGE_SECRET} {why}"),

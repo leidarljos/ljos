@@ -3103,7 +3103,18 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
     std::env::remove_var("LJOS_CLOUD_AGE_KEY");
 
     let bare = ljos_cli::cloud::up(false).unwrap();
+    assert!(bare.contains("LJOS_TRACKER_REMOTE is unset"), "{bare}");
     assert!(bare.contains("LJOS_CLOUD_AGE_SECRET is unset"), "{bare}");
+    assert!(
+        bare.contains(
+            "Set LJOS_CLOUD_AGE_SECRET to the name of the variable that holds the age identity."
+        ),
+        "{bare}"
+    );
+    assert!(
+        !bare.contains("so run `ljos cloud up`"),
+        "cloud up told the seat to run itself again:\n{bare}"
+    );
     let path = ljos_cli::sync::cloud_identity_path();
     assert!(
         path.starts_with(&home),
