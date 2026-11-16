@@ -22,6 +22,7 @@ pub mod book_queue;
 pub mod bookkeep;
 pub mod call_deadline;
 pub mod capture;
+mod claim_age;
 pub mod cloud;
 mod cloud_guard;
 mod cloud_hook;
@@ -42069,6 +42070,15 @@ fn format_show(card: &Value) -> String {
     }
     let mut out = scan::line_with_title(&format!("{head}  "), title, scan::COLS);
     out.push('\n');
+    if let Some(who) = card["claimed_by"]
+        .as_str()
+        .map(str::trim)
+        .filter(|who| !who.is_empty())
+    {
+        let line = claim_age::phrase(who, card["claimed_at"].as_str(), claim_age::now_here());
+        out.push_str(&scan::wrap_hang(&line, scan::COLS, "  ", "  "));
+        out.push('\n');
+    }
     let blockers = blocker_rows(card);
     if blockers.is_empty() {
         out.push_str("blockers: none\n");
@@ -42125,9 +42135,93 @@ pub fn ready_view(project: Option<&str>, json: bool) -> Result<String> {
         let rows = vissue_core::agent::issues_json(&layout, project, None, true)?;
         return Ok(format!("{}\n", serde_json::to_string_pretty(&rows)?));
     }
-    Ok(scan::ready_text(&vissue_core::report::ready(
-        &layout, project,
+    let recs = vissue_core::catalog::load_recs(&layout)?;
+    Ok(scan::ready_text(&ready_board(
+        &recs,
+        project,
+        claim_age::now_here(),
     )?))
+}
+
+/// The ready rows, with each claim aged from its stamp and `now`.
+///
+/// The tracker's own ready line subtracts calendar dates, which is `-1d`
+/// for a claim taken earlier the same local day when that date is still
+/// yesterday in UTC. This line uses [`claim_age`] instead.
+fn ready_board(
+    recs: &[vissue_core::views::IssueRec],
+    project: Option<&str>,
+    now: chrono::DateTime<chrono::FixedOffset>,
+) -> Result<String> {
+    let rows = vissue_core::catalog::CatalogService::from_recs(recs)
+        .ready(project)
+        .map_err(anyhow::Error::from)?;
+    let by_id: std::collections::HashMap<&str, &vissue_core::views::IssueRec> = recs
+        .iter()
+        .map(|rec| (rec.heading.id.as_str(), rec))
+        .collect();
+    let mut raw = String::new();
+    for row in &rows {
+        let suffix = by_id
+            .get(row.id.as_str())
+            .map(|rec| claim_age::suffix(rec.heading.claimed_by(), rec.heading.claimed_at(), now))
+            .unwrap_or_default();
+        raw.push_str(&format!(
+            "{:<22} {:<9} [#{}]  {}{}\n",
+            row.id, row.state, row.priority, row.title, suffix
+        ));
+    }
+    Ok(raw)
+}
+
+/// Who holds which ticket. Same columns as `vissue claims`, with the age
+/// taken from the claim instant rather than a calendar-day subtraction.
+///
+/// # Errors
+///
+/// The tracker cannot be read, or the rows cannot be written as JSON.
+pub fn claims_view(holder: Option<&str>, project: Option<&str>, json: bool) -> Result<String> {
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    layout.require_tracker()?;
+    let recs = vissue_core::catalog::load_recs(&layout)?;
+    let now = claim_age::now_here();
+    let mut rows = vissue_core::catalog::CatalogService::from_recs(&recs)
+        .claims(holder, project)
+        .map_err(anyhow::Error::from)?;
+    for row in &mut rows {
+        let Some(stamp) = row.claimed_at.as_deref() else {
+            continue;
+        };
+        let Some(days) = claim_age::days(stamp, now) else {
+            continue;
+        };
+        row.age_days = days;
+    }
+    if json {
+        return Ok(format!("{}\n", serde_json::to_value(&rows)?));
+    }
+    let mut out = String::new();
+    for row in &rows {
+        let age = row
+            .claimed_at
+            .as_deref()
+            .and_then(|stamp| claim_age::at(stamp, now))
+            .unwrap_or_else(|| "?d".to_string());
+        out.push_str(&format!(
+            "{:<22} {:<9} [#{}]  {:>4}  {}  {} ({})\n",
+            row.id,
+            row.state,
+            row.priority,
+            age,
+            row.holder.as_deref().unwrap_or("?"),
+            row.title,
+            row.project
+        ));
+    }
+    if rows.is_empty() {
+        out.push_str("no live claims\n");
+    }
+    Ok(out)
 }
 
 /// The blockers of an issue that are still open, as `id (STATE)`, read

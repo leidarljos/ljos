@@ -5516,6 +5516,16 @@ fn run_command() -> Result<()> {
             if days.is_some() {
                 bail!("claims: --days is for --stale");
             }
+            // Extra words stay on the vissue binary, which has flags this
+            // command forwards. With none, the age is counted here from the
+            // claim instant. The binary subtracts calendar dates.
+            if args.is_empty() {
+                print!(
+                    "{}",
+                    ljos_cli::claims_view(by.or(agent).as_deref(), project.as_deref(), json)?
+                );
+                return Ok(());
+            }
             // vissue names the holder filter `--by`; `--agent` is ljos's word.
             let mapped: Vec<String> = args
                 .iter()
