@@ -570,7 +570,8 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
         "verdict": "deny",
         "why": "a force push rewrites a published branch",
         "name": "kiln",
-        "to": "bee"
+        "to": "bee",
+        "seat": "ada"
     });
     let mut stdin = child.stdin.take().unwrap();
     writeln!(

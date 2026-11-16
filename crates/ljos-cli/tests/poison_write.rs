@@ -423,7 +423,7 @@ fn mcp_user_prefer_of_a_plant_is_the_agents() {
         serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
             "name": "ljos_prefer",
-            "arguments": {"text": PLANT, "user": true, "why": "the deploy form asks for it"}}}),
+            "arguments": {"seat": "probe", "text": PLANT, "user": true, "why": "the deploy form asks for it"}}}),
     ];
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -1021,9 +1021,13 @@ fn mcp_call_with(cmd: Command, tool: &str, arguments: serde_json::Value) -> serd
 fn mcp_call_meta(
     mut cmd: Command,
     tool: &str,
-    arguments: serde_json::Value,
+    mut arguments: serde_json::Value,
     meta: serde_json::Value,
 ) -> serde_json::Value {
+    if let Some(map) = arguments.as_object_mut() {
+        map.entry("seat")
+            .or_insert_with(|| serde_json::Value::String("probe".into()));
+    }
     let mut child = cmd.stdin(Stdio::piped()).spawn().unwrap();
     let lines = [
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {

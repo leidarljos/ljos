@@ -185,7 +185,7 @@ fn the_mcp_release_and_complete_tools_answer_a_blank_id_at_once() {
             stdin,
             "{}",
             serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
-                "name": tool, "arguments": {"node": ""}}})
+                "name": tool, "arguments": {"seat": "saddle", "node": ""}}})
         )
         .unwrap();
         stdin.flush().unwrap();

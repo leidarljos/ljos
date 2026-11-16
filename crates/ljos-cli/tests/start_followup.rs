@@ -135,7 +135,7 @@ fn the_write_after_start_stays_on_the_issue_start_opened() {
         &call(
             2,
             "ljos_start",
-            serde_json::json!({"task": "fix the gate", "repo": product.display().to_string()}),
+            serde_json::json!({"seat": "saddle", "task": "fix the gate", "repo": product.display().to_string()}),
         ),
     );
     let mut answers = std::collections::BTreeMap::new();
@@ -145,7 +145,7 @@ fn the_write_after_start_stays_on_the_issue_start_opened() {
         &call(
             3,
             "ljos_file",
-            serde_json::json!({"title": "a follow up write"}),
+            serde_json::json!({"seat": "saddle", "title": "a follow up write"}),
         ),
     );
     answers.insert(3, read_id(&mut stdout, 3));

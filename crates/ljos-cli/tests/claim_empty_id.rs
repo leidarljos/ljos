@@ -184,7 +184,7 @@ fn the_mcp_claim_tool_answers_a_blank_id_at_once() {
         stdin,
         "{}",
         serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-            "name": "ljos_claim", "arguments": {"node": ""}}})
+            "name": "ljos_claim", "arguments": {"seat": "saddle", "node": ""}}})
     )
     .unwrap();
     let answer = lines

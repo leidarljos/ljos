@@ -3235,6 +3235,44 @@ tokio::task_local! {
     static CALL_CONVERSATION: String;
 }
 
+thread_local! {
+    /// The seat of the MCP call a blocking worker is running.
+    /// A worker has no task-local [`CALL_SEAT`]. The value is this call's
+    /// seat, and it is dropped when the worker returns. Another call's
+    /// worker does not read it.
+    static BOUND_CALL_SEAT: std::cell::RefCell<Option<Seat>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The seat installed on this thread while a blocking worker runs one call.
+pub struct BoundCallSeat {
+    previous: Option<Seat>,
+}
+
+impl BoundCallSeat {
+    #[must_use]
+    pub fn enter(seat: Seat) -> Self {
+        let previous = BOUND_CALL_SEAT.with(|slot| slot.replace(Some(seat)));
+        Self { previous }
+    }
+}
+
+impl Drop for BoundCallSeat {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        BOUND_CALL_SEAT.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// The seat of the MCP call running on this task or this thread.
+/// `None` outside a call. A seat left by another call is not here.
+#[must_use]
+pub fn call_seat_now() -> Option<Seat> {
+    if let Ok(seat) = CALL_SEAT.try_with(Clone::clone) {
+        return Some(seat);
+    }
+    BOUND_CALL_SEAT.with(|slot| slot.borrow().clone())
+}
+
 /// Run `f` as the thread a runner named on this call, when it named one.
 /// A runner that spawns one server for many conversations names each in
 /// the call's metadata rather than in the server's environment.
@@ -4565,7 +4603,7 @@ fn warn_seat_disagreement() {
 /// session id. Search and recall still treat the runner's name as one family.
 #[must_use]
 pub fn whoami() -> Seat {
-    if let Ok(seat) = CALL_SEAT.try_with(Clone::clone) {
+    if let Some(seat) = call_seat_now() {
         return seat;
     }
     let seat = whoami_resolved();
@@ -5140,6 +5178,21 @@ fn live_harness_session() -> Option<LiveSession> {
     Some(live_from(family, "hook session", id))
 }
 
+/// The seat this process's own stamped session names.
+///
+/// The id is read from this process. An ancestor's id, `LJOS_SEAT`, a
+/// seats file, and a seat remembered from another call are not this seat.
+/// `None` when this process has no session id of its own.
+#[must_use]
+pub fn stamped_session_seat() -> Option<Seat> {
+    let session = live_harness_session()?;
+    Some(Seat {
+        holder: holder_for_session(&session.name, &session.id),
+        seat: session.name,
+        source: session_seat_source(session.key),
+    })
+}
+
 /// A seat a file or a person named. The harness default is not one of these.
 fn named_seat_record(seat: &Seat) -> bool {
     let source = seat.source.as_str();
@@ -5320,7 +5373,7 @@ impl std::fmt::Display for Derived {
 /// login user, and that is named enough. The process tree is not a seat.
 #[must_use]
 pub fn derived_seat(who: &Seat) -> Option<Derived> {
-    let named = CALL_SEAT.try_with(|_| ()).is_ok()
+    let named = call_seat_now().is_some()
         || ANNOUNCED.get().is_some()
         || named_var("LJOS_SEAT").is_some()
         || named_var("VISSUE_AGENT").is_some()
@@ -5629,7 +5682,7 @@ pub fn seat_name() -> String {
 pub fn checked_seat() -> Option<String> {
     hook_actor()
         .or_else(|| seated().map(|s| s.seat))
-        .or_else(|| CALL_SEAT.try_with(|s| s.seat.clone()).ok())
+        .or_else(|| call_seat_now().map(|s| s.seat))
 }
 
 /// Name [`checked_seat`] on a `git` child that may commit to the tracker,
@@ -50182,6 +50235,9 @@ pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Re
     }
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     let mut cmd = Command::new(path);
+    if let Some(seat) = checked_seat() {
+        cmd.env("LJOS_SEAT", &seat);
+    }
     if let Some(who) = identity_or_seat(identity) {
         cmd.env("VISSUE_AGENT", who);
     }
@@ -50528,9 +50584,13 @@ fn run_captured_within(
     deadline = deadline.min(cap).max(std::time::Duration::from_millis(1));
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     let mut cmd = Command::new(&path);
+    if let Some(seat) = checked_seat() {
+        cmd.env("LJOS_SEAT", &seat);
+    }
     if let Some(who) = identity
         .map(str::to_string)
         .or_else(|| seated().map(|s| s.seat))
+        .or_else(checked_seat)
     {
         cmd.env("VISSUE_AGENT", who);
     }

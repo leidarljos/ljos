@@ -177,6 +177,8 @@ The seat is the name an agent works under. ``LJOS_SEAT`` sets it, and so does a 
 in ``~/.config/ljos/env`` or a row in ``~/.config/ljos/seats.toml``. ``ljos-mcp`` does not take
 the seat from the client that connected. A read with none of those set looks at every seat.
 A write uses ``unknown-`` plus the host name, and says to set ``LJOS_SEAT``.
+An MCP write on a shared server needs the ``seat`` argument when that session has no stamped seat of its own.
+The call is refused in one line, and the write is not stored under a guessed seat. A read still runs.
 ``ljos seat`` prints the seat, the holder, and where each name came from.
 
 With ``LJOS_SEAT`` unset, a session of Claude Code, Codex or Cursor sits as the runner's name plus a short id of the session id in this process. An id that exists only on a parent does not count.

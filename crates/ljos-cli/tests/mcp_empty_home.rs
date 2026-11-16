@@ -261,7 +261,7 @@ fn a_missing_pack_names_the_next_step_and_the_client_is_not_the_seat() {
         serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
             "name": "ljos_search", "arguments": {"query": "lexical default"}}}),
         serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
-            "name": "ljos_rule", "arguments": {"pattern": "*--force*", "verdict": "deny", "why": "a force push rewrites a published branch"}}}),
+            "name": "ljos_rule", "arguments": {"seat": "saddle", "pattern": "*--force*", "verdict": "deny", "why": "a force push rewrites a published branch"}}}),
         serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
             "name": "ljos_doctor", "arguments": {}}}),
     ];

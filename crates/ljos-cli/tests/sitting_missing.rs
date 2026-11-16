@@ -124,7 +124,7 @@ fn a_sitting_on_a_missing_issue_names_it_and_writes_nothing() {
             "clientInfo":{"name":"probe","version":"0"}}}),
         serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
         serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-            "name":"ljos_sitting","arguments":{"issue": MISSING}}}),
+            "name":"ljos_sitting","arguments":{"seat":"saddle","issue": MISSING}}}),
     ] {
         writeln!(stdin, "{line}").unwrap();
     }

@@ -213,7 +213,7 @@ fn a_blank_mcp_note_goes_on_the_held_issue() {
     for line in [
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#,
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ljos_note","arguments":{"text":"x"}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ljos_note","arguments":{"seat":"saddle","text":"x"}}}"#,
     ] {
         writeln!(stdin, "{line}").unwrap();
     }
@@ -250,7 +250,7 @@ fn a_note_with_no_issue_is_stored_unattached() {
     for line in [
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#,
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ljos_note","arguments":{"text":"zircon without a ticket"}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ljos_note","arguments":{"seat":"saddle","text":"zircon without a ticket"}}}"#,
     ] {
         writeln!(stdin, "{line}").unwrap();
     }

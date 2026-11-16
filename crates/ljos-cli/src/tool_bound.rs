@@ -182,8 +182,10 @@ pub async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, tokio::task::JoinError> {
     let ticket = ticket();
+    let seat = crate::call_seat_now();
     tokio::task::spawn_blocking(move || {
         let _guard = ticket.map(Ticket::bind);
+        let _seat = seat.map(crate::BoundCallSeat::enter);
         f()
     })
     .await

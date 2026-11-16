@@ -1338,7 +1338,7 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
         let mut child = cmd.spawn().unwrap();
         let mut params = serde_json::json!({
             "name": "ljos_sitting",
-            "arguments": {"issue": ISSUE}
+            "arguments": {"seat": "inky", "issue": ISSUE}
         });
         if let Some(m) = meta {
             params["_meta"] = m;
@@ -2545,7 +2545,7 @@ fn a_bare_mcp_sitting_is_not_bound_to_the_last_shell_that_ran_ljos() {
         let mut child = cmd.spawn().unwrap();
         let mut params = serde_json::json!({
             "name": "ljos_sitting",
-            "arguments": {"issue": ISSUE}
+            "arguments": {"seat": "inky", "issue": ISSUE}
         });
         if let Some(m) = meta {
             params["_meta"] = m;
@@ -2704,7 +2704,8 @@ fn rv_mcp_call(home: &Box_, pack_url: &str, meta: Option<serde_json::Value>) -> 
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut child = cmd.spawn().unwrap();
-    let mut params = serde_json::json!({"name": "ljos_sitting", "arguments": {"issue": ISSUE}});
+    let mut params =
+        serde_json::json!({"name": "ljos_sitting", "arguments": {"seat": "inky", "issue": ISSUE}});
     if let Some(m) = meta {
         params["_meta"] = m;
     }
@@ -3211,7 +3212,7 @@ fn a_bare_mcp_sitting_answers_the_same_outside_a_cargo_test_runner() {
         let mut child = cmd.spawn().unwrap();
         let mut params = serde_json::json!({
             "name": "ljos_sitting",
-            "arguments": {"issue": ISSUE}
+            "arguments": {"seat": "inky", "issue": ISSUE}
         });
         if let Some(m) = meta {
             params["_meta"] = m;

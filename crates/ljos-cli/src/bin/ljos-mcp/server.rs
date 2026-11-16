@@ -144,7 +144,7 @@ fn as_tool_error(e: McpError) -> Result<CallToolResponse, McpError> {
 /// What every bot hears at initialize. Short on purpose: the runner injects
 /// this into the model's context, and the tools do the bookkeeping.
 pub const SERVER_INSTRUCTIONS: &str = "\
-Use LJOS_SEAT if set, else the seat from seats.map. `ljos seat` prints it.
+Pass seat on a write. A shared server does not guess a seat. LJOS_SEAT and seats.map name a seat for a read, and a read still runs with none. `ljos seat` prints the seat.
 Before any repo work, call ljos_start with the repo or the issue and the task. It recalls and claims.
 Git commits are booked automatically.
 Call ljos_note for your own working notes on the issue: what you tried, found or decided.
@@ -354,21 +354,80 @@ fn seat_argument(
     }
 }
 
-/// Habitat children and the blocking book read the process environment.
-/// One stdio server sits one bot, so this call's seat is that process's seat.
-fn bind_seat_env(seat: &str) {
-    unsafe {
-        std::env::set_var("LJOS_SEAT", seat);
-        std::env::set_var("VISSUE_AGENT", seat);
+const SEAT_PROPERTY: &str =
+    "This seat's name. A write needs seat on a shared server. A read still runs with none.";
+
+/// One line for a write that named no seat and has no stamped seat of its own.
+fn missing_seat_line(tool: &str) -> String {
+    format!("{tool}: pass the seat argument. A write on a shared server needs seat.")
+}
+
+/// Whether this call writes under a seat. A read still runs with none.
+/// `ljos_deed` without an accession, `ljos_vote` with no ballot, and
+/// `ljos_bump_plan` with `dry_run` are reads. A habit with no value, a
+/// findings call that only lists, a group list, and an island that does
+/// not fire are reads too.
+fn write_needs_named_seat(
+    name: &str,
+    args: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    if runs_without_seat(name) {
+        return false;
+    }
+    match name {
+        "ljos_deed" | "ljos_vote" | "ljos_bump_plan" => writes_tracker(name, args),
+        "ljos_habit" => args
+            .and_then(|map| map.get("value"))
+            .is_some_and(|value| !value.is_null()),
+        "ljos_findings" => {
+            let remember = args
+                .and_then(|map| map.get("remember"))
+                .is_some_and(|value| *value == serde_json::Value::Bool(true));
+            let issue = args
+                .and_then(|map| map.get("issue"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty());
+            remember || issue
+        }
+        "ljos_group" => args.is_some_and(|map| {
+            let listed = |key: &str| {
+                map.get(key)
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|items| !items.is_empty())
+            };
+            listed("add") || listed("remove")
+        }),
+        "ljos_island" => args
+            .and_then(|map| map.get("fire"))
+            .is_some_and(|value| *value == serde_json::Value::Bool(true)),
+        _ => true,
     }
 }
 
-const SEAT_PROPERTY: &str =
-    "This seat's name. Optional. With none, ljos resolves a seat, and a read still runs.";
+/// One line on whether `ljos_finish` closed `issue`, and why not.
+/// Empty when `text` already says the ticket was closed.
+fn finish_close_line(issue: &str, text: &str) -> String {
+    if text.contains("was not closed:")
+        || text
+            .lines()
+            .any(|line| line.starts_with("closed the ticket "))
+    {
+        return String::new();
+    }
+    let why = if text.contains("is not claimed") {
+        "it is not claimed"
+    } else if text.contains("stays claimed") {
+        "it stays claimed"
+    } else {
+        "ljos_finish does not close a ticket"
+    };
+    format!("ticket {issue} was not closed: {why}\n")
+}
 
 /// Every listed tool accepts `seat`. The handlers ignore the field; the
 /// server reads it before the handler runs. It is not required in the
-/// schema: `LJOS_SEAT` in the server's environment supplies it.
+/// schema. A write on a shared server still has to pass it, or the
+/// session has to carry a stamped seat of its own.
 fn offer_seat(schema: &mut serde_json::Map<String, serde_json::Value>) {
     let properties = schema
         .entry("properties")
@@ -2276,19 +2335,31 @@ impl LjosServer {
                     "ljos_finish: pass the issue, or call ljos_start first"
                 ))
             })?;
-        let text = finish(
+        let assignee = call_assignee("finish", args.assignee.as_deref())?;
+        let mut text = match finish(
             &issue,
             args.status.as_deref().unwrap_or("done"),
             args.lesson.as_deref(),
             args.outcome.as_deref(),
             args.new_option,
             LEARN_BETA,
-            &call_assignee("finish", args.assignee.as_deref())?,
+            &assignee,
             args.gen,
             false,
             false,
-        )
-        .map_err(refused)?;
+        ) {
+            Ok(text) => text,
+            Err(err) => {
+                let mut text = format!("{err:#}");
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&finish_close_line(&issue, &text));
+                let text = text.trim_end().to_string();
+                return Err(refused(anyhow::anyhow!(text)));
+            }
+        };
+        text.push_str(&finish_close_line(&issue, &text));
         ljos_cli::bookkeep::note_finished(&issue);
         Ok(Json(Said { text, aside: None }))
     }
@@ -3883,14 +3954,45 @@ impl ServerHandler for LjosServer {
             .peer
             .peer_info()
             .map(|info| info.client_info.name.clone());
+        // This call's seat. A `seat` argument is this call's alone.
+        // A session id stamped in this process, with `LJOS_SEAT` set, keeps
+        // that name and the session tags the holder. A stamped session with
+        // no `LJOS_SEAT` is that session's seat. A seats file and a seat
+        // another call left behind are not used. A write with no argument
+        // and no stamped session is refused, and nothing is written under
+        // a guess.
+        let stamped = if seat_text.is_none() {
+            ljos_cli::stamped_session_seat()
+        } else {
+            None
+        };
+        let named_env = std::env::var("LJOS_SEAT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if seat_text.is_none()
+            && stamped.is_none()
+            && write_needs_named_seat(&name, request.arguments.as_ref())
+        {
+            return Ok(attach_next(
+                &name,
+                as_tool_error(refused(anyhow::anyhow!(missing_seat_line(&name))))?,
+            ));
+        }
         let kind = mcp_seat_kind(&name);
-        let resolved = ljos_cli::tool_bound::blocking(move || {
-            ljos_cli::seat_resolve::prepare(seat_text.clone(), kind);
+        let resolved = if let (Some(seat), true) = (stamped, named_env.is_none()) {
             note_connected_client(client.as_deref());
-            ljos_cli::resolve_call_seat(seat_text.as_deref())
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("seat: {e}"), None))?;
+            Ok(seat)
+        } else {
+            let seat_text = seat_text.clone();
+            ljos_cli::tool_bound::blocking(move || {
+                ljos_cli::seat_resolve::prepare(seat_text.clone(), kind);
+                note_connected_client(client.as_deref());
+                ljos_cli::resolve_call_seat(seat_text.as_deref())
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("seat: {e}"), None))?
+        };
         // The guard and the reading tools act under no seat, so a seat
         // this tracker does not know never stops them.
         let seat = match resolved {
@@ -3913,11 +4015,6 @@ impl ServerHandler for LjosServer {
                 if let Err(e) = checked {
                     return Ok(attach_next(&name, as_tool_error(refused(e))?));
                 }
-            }
-            if !ljos_cli::seat_resolve::reads_every(&seat.seat)
-                && !seat.source.contains("unknown seat")
-            {
-                bind_seat_env(&seat.seat);
             }
         }
         // A server spawned per call has no idle thread left running. The
@@ -4146,6 +4243,23 @@ mod tests {
             text.to_ascii_lowercase().contains("unknown") && text.contains("close"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_finish_says_whether_the_ticket_closed() {
+        let open =
+            "finished probe-a1b2 as done\nsitting ended; ticket probe-a1b2 open for review\n";
+        let line = finish_close_line("probe-a1b2", open);
+        assert_eq!(
+            line,
+            "ticket probe-a1b2 was not closed: ljos_finish does not close a ticket\n"
+        );
+        assert!(
+            finish_close_line("probe-a1b2", "closed the ticket probe-a1b2 as DONE\n").is_empty()
+        );
+        let claimed = "tracker: probe-a1b2 stays claimed by ada\n";
+        assert!(finish_close_line("probe-a1b2", claimed).contains("stays claimed"));
+        assert!(missing_seat_line("ljos_note").contains("seat"));
     }
 
     /// A schema `tools/list` may send: an object, no draft identifier, and
