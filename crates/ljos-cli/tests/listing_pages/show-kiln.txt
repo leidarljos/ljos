@@ -3,3 +3,6 @@ stderr:
 stdout:
 demo-kiln  TODO  [#B]  Fire the kiln
 blockers: none
+
+<age>
+  The damper sticks when the morning is cold. Þéttingin er gömul.

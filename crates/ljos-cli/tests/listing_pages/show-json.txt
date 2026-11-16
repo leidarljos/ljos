@@ -1,4 +1,4 @@
 status 0
 stderr:
 stdout:
-{"id":"demo-kiln","project":"demo","state":"TODO","priority":"B","title":"Fire the kiln","blocked_by":[]}
+{"id":"demo-kiln","project":"demo","state":"TODO","priority":"B","title":"Fire the kiln","blocked_by":[],"body":"","notes":[{"text":"The damper sticks when the morning is cold. Þéttingin er gömul.","age":"<age>","seat":""}]}

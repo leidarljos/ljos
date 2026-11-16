@@ -42264,15 +42264,21 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
 
 /// One ticket, with each blocker and whether that blocker is still open.
 ///
+/// The body follows the header. The most recent notes follow the body,
+/// newest last, each with its age and the seat that wrote it. `all`
+/// prints every note. Otherwise the page keeps [`SHOW_NOTES`] and names
+/// the command that prints the rest.
+///
 /// # Errors
 ///
 /// The tracker cannot be read, or `issue` is not in it.
-pub fn show_issue(issue: &str) -> Result<String> {
+pub fn show_issue(issue: &str, all: bool) -> Result<String> {
     let card = show_card(issue)?;
-    Ok(format_show(&card))
+    Ok(format_show(&card, all))
 }
 
-/// One ticket as JSON: id, project, state, priority, title, and each blocker.
+/// One ticket as JSON: id, project, state, priority, title, each blocker,
+/// the body, and every note (newest last, with its age and seat).
 ///
 /// # Errors
 ///
@@ -42280,6 +42286,16 @@ pub fn show_issue(issue: &str) -> Result<String> {
 pub fn show_json(issue: &str) -> Result<String> {
     let card = show_card(issue)?;
     let blockers = blocker_rows(&card);
+    let notes: Vec<Value> = show_notes(&card)
+        .into_iter()
+        .map(|note| {
+            serde_json::json!({
+                "text": note.text,
+                "age": note.age,
+                "seat": note.seat,
+            })
+        })
+        .collect();
     let doc = serde_json::json!({
         "id": card["id"].as_str().unwrap_or(issue),
         "project": card["project"].as_str().unwrap_or(""),
@@ -42287,6 +42303,8 @@ pub fn show_json(issue: &str) -> Result<String> {
         "priority": card["priority"].as_str().unwrap_or(""),
         "title": card["title"].as_str().unwrap_or(""),
         "blocked_by": blockers,
+        "body": show_body(&card),
+        "notes": notes,
     });
     Ok(format!("{doc}\n"))
 }
@@ -42299,7 +42317,17 @@ fn show_card(issue: &str) -> Result<Value> {
     }
 }
 
-fn format_show(card: &Value) -> String {
+/// How many notes a plain `ljos show` prints. `--all` prints the rest.
+const SHOW_NOTES: usize = 8;
+
+/// One note on the show page, oldest first once [`show_notes`] has ordered them.
+struct ShowNote {
+    text: String,
+    age: String,
+    seat: String,
+}
+
+fn format_show(card: &Value, all: bool) -> String {
     let id = card["id"].as_str().unwrap_or("");
     let state = card["state"].as_str().unwrap_or("");
     let title = card["title"].as_str().unwrap_or("");
@@ -42322,22 +42350,121 @@ fn format_show(card: &Value) -> String {
     let blockers = blocker_rows(card);
     if blockers.is_empty() {
         out.push_str("blockers: none\n");
-        return out;
+    } else {
+        out.push_str("blockers:\n");
+        for blocker in blockers {
+            let id = blocker["id"].as_str().unwrap_or("");
+            let state = blocker["state"].as_str().unwrap_or("?");
+            let kind = if blocker["open"].as_bool().unwrap_or(true) {
+                "open"
+            } else {
+                "closed"
+            };
+            let line = format!("{id}  {state}  {kind}");
+            out.push_str(&scan::wrap_hang(&line, scan::COLS, "  ", "  "));
+            out.push('\n');
+        }
     }
-    out.push_str("blockers:\n");
-    for blocker in blockers {
-        let id = blocker["id"].as_str().unwrap_or("");
-        let state = blocker["state"].as_str().unwrap_or("?");
-        let kind = if blocker["open"].as_bool().unwrap_or(true) {
-            "open"
-        } else {
-            "closed"
-        };
-        let line = format!("{id}  {state}  {kind}");
-        out.push_str(&scan::wrap_hang(&line, scan::COLS, "  ", "  "));
+    append_show_prose(&mut out, card, all);
+    out
+}
+
+/// The body, then the notes. A blank line separates them from the header.
+fn append_show_prose(out: &mut String, card: &Value, all: bool) {
+    let body = show_body(card);
+    if !body.is_empty() {
+        out.push('\n');
+        out.push_str(&scan::wrap(&body, scan::COLS));
         out.push('\n');
     }
-    out
+    let notes = show_notes(card);
+    let earlier = if all || notes.len() <= SHOW_NOTES {
+        0
+    } else {
+        notes.len() - SHOW_NOTES
+    };
+    let shown = notes.into_iter().skip(earlier);
+    let mut any = false;
+    for note in shown {
+        if !any {
+            out.push('\n');
+            any = true;
+        }
+        let head = note_head(&note);
+        if !head.is_empty() {
+            out.push_str(&scan::wrap(&head, scan::COLS));
+            out.push('\n');
+        }
+        if !note.text.is_empty() {
+            out.push_str(&scan::wrap_hang(&note.text, scan::COLS, "  ", "  "));
+            out.push('\n');
+        }
+    }
+    if earlier > 0 {
+        let id = card["id"].as_str().unwrap_or("");
+        let word = if earlier == 1 { "note" } else { "notes" };
+        let line = format!("{earlier} earlier {word}; run `ljos show {id} --all`");
+        out.push_str(&scan::wrap(&line, scan::COLS));
+        out.push('\n');
+    }
+}
+
+fn show_body(card: &Value) -> String {
+    card["body"].as_str().unwrap_or("").trim().to_string()
+}
+
+fn note_head(note: &ShowNote) -> String {
+    match (note.age.is_empty(), note.seat.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => note.age.clone(),
+        (true, false) => note.seat.clone(),
+        (false, false) => format!("{}, {}", note.age, note.seat),
+    }
+}
+
+/// Notes a person wrote, oldest first. A `Noted by` line names the seat of
+/// the note under it. A claim release is the tracker's own bookkeeping.
+fn show_notes(card: &Value) -> Vec<ShowNote> {
+    let mut pending: Option<String> = None;
+    let mut newest_first = Vec::new();
+    for entry in card["logbook"].as_array().into_iter().flatten() {
+        if let Some(note) = entry["note"].as_str() {
+            let note = note.trim();
+            if note.is_empty() || note.starts_with(vissue_core::model::CLAIM_RELEASED_NOTE) {
+                continue;
+            }
+            let at = entry["timestamp"].as_str().unwrap_or("");
+            newest_first.push(ShowNote {
+                text: note.to_string(),
+                age: note_age(at),
+                seat: pending.take().unwrap_or_default(),
+            });
+            continue;
+        }
+        if let Some((verb, seat)) = logbook_json_text(entry)
+            .as_deref()
+            .and_then(|text| parse_logbook_act(&format!("- {text}")))
+        {
+            if verb.eq_ignore_ascii_case("noted") {
+                pending = Some(seat);
+            }
+        }
+    }
+    newest_first.reverse();
+    newest_first
+}
+
+/// How long ago an org stamp was, in the words [`age_of`] uses.
+fn note_age(stamp: &str) -> String {
+    let text = stamp
+        .trim()
+        .trim_start_matches(['[', '<'])
+        .trim_end_matches([']', '>']);
+    let date = text.get(..10).filter(|date| {
+        let bytes = date.as_bytes();
+        bytes.len() == 10 && bytes[4] == b'-' && bytes[7] == b'-'
+    });
+    age_of(date, &now_local())
 }
 
 fn blocker_rows(card: &Value) -> Vec<Value> {
@@ -45799,6 +45926,43 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
         Ok(true)
     })
     .unwrap_or(false)
+}
+
+/// Name the seat on a note when the tracker commit did not.
+///
+/// [`persist_tracker`] writes `- Noted by SEAT` when it commits. Tracker
+/// git off leaves the note with no seat, and `ljos show` would have
+/// nothing to name. A line already at the top of the logbook is left
+/// as it is.
+pub fn stamp_note_seat(issue: &str) {
+    let Ok(path) = tracker_issue_path(issue) else {
+        return;
+    };
+    let seat = tracker_seat();
+    if logbook_opens_with_note_seat(&path, issue, &seat) {
+        return;
+    }
+    stamp_seat_logbook(&path, issue, "noted", &seat);
+}
+
+fn logbook_opens_with_note_seat(path: &Path, issue: &str, seat: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(id_at) = lines.iter().position(|line| line_is_issue_id(line, issue)) else {
+        return false;
+    };
+    let Some(book) = lines[id_at..]
+        .iter()
+        .position(|line| line.trim() == ":LOGBOOK:")
+    else {
+        return false;
+    };
+    let want = format!("- Noted by {seat} ");
+    lines
+        .get(id_at + book + 1)
+        .is_some_and(|line| line.trim().starts_with(&want))
 }
 
 /// Use vissue's blocking write lock normally, but honor an armed wall
@@ -83682,19 +83846,22 @@ mod claim_chunks_tests {
             "title": title,
             "blocked_by": [],
         });
-        let shown = super::format_show(&card);
+        let shown = super::format_show(&card, false);
         let line = shown.lines().next().unwrap();
         assert!(line.chars().count() <= super::scan::COLS, "{line}");
         assert!(line.starts_with("ljos-633g  TODO  [#A]  guard:"), "{line}");
         assert!(line.ends_with("..."), "{line}");
         assert!(!shown.contains(&format!("\n  {title}")), "{shown}");
-        let blank = super::format_show(&serde_json::json!({
-            "id": "ljos-blank",
-            "state": "TODO",
-            "priority": "C",
-            "title": "  ",
-            "blocked_by": [],
-        }));
+        let blank = super::format_show(
+            &serde_json::json!({
+                "id": "ljos-blank",
+                "state": "TODO",
+                "priority": "C",
+                "title": "  ",
+                "blocked_by": [],
+            }),
+            false,
+        );
         assert!(
             blank
                 .lines()
