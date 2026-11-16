@@ -12522,6 +12522,7 @@ fn writer_refusal(err: &anyhow::Error) -> bool {
 /// [`DENSE_ALONE_AT`], is marked so a later sort keeps it ahead of a row
 /// that only shares a word. The caller ranks and cuts.
 pub fn search_ranked(query: &str, limit: u32) -> Result<Vec<Hit>> {
+    let _busy = pack_link::BusyRetry::enter();
     wait_until_health_open()?;
     answer_after_start(|| search_ranked_now(query, limit))
 }
@@ -14624,6 +14625,7 @@ pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
                     | ENCODER_FAILED_REASON
                     | WRITER_DOWN_REASON
                     | WRITER_BUSY_REASON
+                    | MEMORY_SEARCH_BUSY_REASON
             )
         {
             return ranking_sentence(ranking, false);
@@ -14654,6 +14656,7 @@ fn ranking_sentence(ranking: &Ranking, shown: bool) -> String {
             | "encoder unavailable"
             | WRITER_DOWN_REASON
             | WRITER_BUSY_REASON
+            | MEMORY_SEARCH_BUSY_REASON
     ) {
         return format!("{}\n", lexical_reason(ranking, shown));
     }
@@ -14697,6 +14700,9 @@ fn lexical_reason(ranking: &Ranking, shown: bool) -> String {
     if ranking.reason == WRITER_BUSY_REASON {
         return writer_busy_search_line(shown);
     }
+    if ranking.reason == MEMORY_SEARCH_BUSY_REASON {
+        return MEMORY_SEARCH_BUSY_LINE.to_string();
+    }
     ranking.reason.to_string()
 }
 
@@ -14705,6 +14711,13 @@ pub const WRITER_DOWN_REASON: &str = "writer is not running";
 
 /// The ranking reason when the writer is up and did not answer in time.
 pub const WRITER_BUSY_REASON: &str = "writer is busy";
+
+/// The ranking reason when the writer reported busy until the short wait
+/// ran out. The line is [`MEMORY_SEARCH_BUSY_LINE`].
+pub const MEMORY_SEARCH_BUSY_REASON: &str = "memory search was busy";
+
+/// The one line when search used words because the writer stayed busy.
+pub const MEMORY_SEARCH_BUSY_LINE: &str = "Used word search because memory search was busy.";
 
 thread_local! {
     static WRITER_FALLBACK: std::cell::RefCell<Option<(u64, String)>> =
@@ -15119,6 +15132,7 @@ fn answer_after_start<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
 /// The pack refused the connection, or the search failed for a reason
 /// that is not a busy writer or a deadline.
 pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
+    let _busy = pack_link::BusyRetry::enter();
     wait_until_health_open()?;
     answer_after_start(|| search_hits_settled(query, limit))
 }
@@ -78214,6 +78228,18 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ranking_line(&missing)
         );
         note_writer_fallback(3, "");
+        let memory_busy = Ranking {
+            mode: "lexical",
+            reason: MEMORY_SEARCH_BUSY_REASON,
+        };
+        assert_eq!(
+            ranking_line(&memory_busy),
+            "Used word search because memory search was busy.\n"
+        );
+        assert_eq!(
+            search_rank_line(&memory_busy, &[]),
+            "Used word search because memory search was busy.\n"
+        );
         let busy = Ranking {
             mode: "lexical",
             reason: WRITER_BUSY_REASON,

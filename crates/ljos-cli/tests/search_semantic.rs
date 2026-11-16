@@ -347,11 +347,14 @@ fn a_busy_writer_names_the_reason_and_the_next_command() {
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("");
-    assert!(
-        first.starts_with("The memory writer is busy")
-            && first.contains("rerun `ljos search")
-            && (first.contains("in 1 second") || first.contains("seconds")),
+    assert_eq!(
+        first, "Used word search because memory search was busy.",
         "first line: {first}\n{said}"
+    );
+    assert!(!said.contains("pack busy, try again"), "{said}");
+    assert!(
+        !said.contains("the pack search did not answer in time"),
+        "{said}"
     );
     for writer in writers {
         let _ = writer.join();

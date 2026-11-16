@@ -761,12 +761,14 @@ it cannot stretch these calls past the caps. A 503 waits the `Retry-After`
 seconds once and sends the same request with the same deadline. A second
 503, or a deadline that has passed, stops. The command prints the JSON
 `error` field on one line and does not retry for the rest of the timeout.
+A search or a recall keeps asking a writer that reports busy, with a
+short pause that grows, for about two seconds, and then stops.
 A call that stays silent until its budget runs out is not tried again.
 An interactive command prints `pack busy, try again` and exits 75.
-When search still does not answer it ranks the stored snapshot by words.
-The first line says the writer is busy and names the command to rerun,
-with how many seconds to wait. A writer that is not running names
-`packset ensure`.
+When search still has no meaning rank it uses word search and prints
+`Used word search because memory search was busy.`
+A writer that is not running names `packset ensure`.
+A tracker write does not spend that wait.
 A sitting prints that listing and its recall before the review sweep.
 The sweep runs outside the recall clock and finishes on the pack's own budget.
 

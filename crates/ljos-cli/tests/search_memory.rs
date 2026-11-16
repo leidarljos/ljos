@@ -675,7 +675,12 @@ fn a_busy_pack_still_ranks_this_seats_lesson_by_words() {
     assert!(stdout.contains(OWN_RINGS), "{said}");
     assert!(!stdout.contains("disk fill"), "{said}");
     assert!(
-        stderr.contains("matched by words"),
+        stderr.contains("Used word search because memory search was busy."),
         "the busy pack did not fall back to words: {said}"
+    );
+    assert!(!said.contains("pack busy, try again"), "{said}");
+    assert!(
+        !said.contains("the pack search did not answer in time"),
+        "{said}"
     );
 }

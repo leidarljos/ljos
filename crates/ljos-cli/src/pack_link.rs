@@ -472,6 +472,71 @@ struct Raw {
 /// A sitting or MCP pack read. Longer reads keep their own budgets.
 const SHORT_READ: Duration = Duration::from_secs(1);
 
+/// How long a search or a recall may keep asking a writer that reports busy.
+/// The first pause is [`SEARCH_BUSY_FIRST`], and each later pause triples
+/// up to [`SEARCH_BUSY_CAP`]. The sum stays inside this bound, which is a
+/// few seconds, so a writer that is serving another seat can still answer
+/// by meaning. Tracker writes do not enter this wait.
+const SEARCH_BUSY_BUDGET: Duration = Duration::from_secs(2);
+const SEARCH_BUSY_FIRST: Duration = Duration::from_millis(50);
+const SEARCH_BUSY_CAP: Duration = Duration::from_millis(400);
+
+thread_local! {
+    static BUSY_RETRY_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BUSY_RETRY_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Ask a busy writer again on `GET /v1/search` while this guard is held.
+///
+/// Search and recall enter it. A sitting, a hook, and a tracker write do
+/// not, so those calls keep the one `Retry-After` and do not spend this
+/// budget. Nested guards share the outer start, so one command's waits
+/// add up to [`SEARCH_BUSY_BUDGET`] rather than that bound per call.
+pub struct BusyRetry;
+
+impl BusyRetry {
+    #[must_use]
+    pub fn enter() -> Self {
+        BUSY_RETRY_DEPTH.with(|depth| {
+            if depth.get() == 0 {
+                BUSY_RETRY_START.with(|start| start.set(Some(Instant::now())));
+            }
+            depth.set(depth.get().saturating_add(1));
+        });
+        Self
+    }
+}
+
+impl Drop for BusyRetry {
+    fn drop(&mut self) {
+        BUSY_RETRY_DEPTH.with(|depth| {
+            let left = depth.get().saturating_sub(1);
+            depth.set(left);
+            if left == 0 {
+                BUSY_RETRY_START.with(|start| start.set(None));
+            }
+        });
+    }
+}
+
+fn busy_retry_held() -> bool {
+    BUSY_RETRY_DEPTH.with(|depth| depth.get() > 0)
+}
+
+fn search_read(method: &str, path: &str) -> bool {
+    method == "GET" && path.split('?').next().unwrap_or(path) == "/v1/search"
+}
+
+/// Time left for another busy search pause: the search budget, the frozen
+/// deadline, and the command deadline, whichever ends first.
+fn busy_room() -> Duration {
+    let started = BUSY_RETRY_START.with(|start| start.get().unwrap_or_else(Instant::now));
+    let left = SEARCH_BUSY_BUDGET.saturating_sub(started.elapsed());
+    let held = held_remaining().unwrap_or(left);
+    let command = command_remaining().unwrap_or(left);
+    left.min(held).min(command)
+}
+
 /// How long one MCP pack read may take.
 ///
 /// The usual read is [`SHORT_READ`], so a silent writer cannot spend the
@@ -1364,6 +1429,9 @@ impl PacksetClient {
     /// returned as the answer and not followed. A 503 waits `Retry-After`
     /// once and is sent again with the same deadline. A second 503, or a
     /// deadline that has passed, is the JSON `error` field and stops.
+    /// A search or a recall, while [`BusyRetry`] is held, asks `GET /v1/search`
+    /// again with a short growing pause until [`SEARCH_BUSY_BUDGET`] runs
+    /// out. A 503 that says the pack is still loading keeps the one wait.
     pub(crate) fn roundtrip(
         &self,
         method: &str,
@@ -1423,6 +1491,12 @@ impl PacksetClient {
         let answer = self.exchange(addr, &call, allow, budget)?;
         let answer = match answer.status {
             408 => return Err(degrade(&answer.body, method, true)),
+            503 if busy_retry_held()
+                && search_read(method, path)
+                && !crate::pack_still_starting(&answer.body) =>
+            {
+                self.ask_until_free(addr, &call, allow, budget, answer)?
+            }
             503 => match answer
                 .retry_after
                 .filter(|wait| !deadline_passed() && retry_room(*wait))
@@ -1454,6 +1528,37 @@ impl PacksetClient {
             }
         }
         Ok(answer)
+    }
+
+    /// Ask `call` again while the writer reports busy. The pause grows and
+    /// stops at [`busy_room`]. A later answer that is not a busy 503, including
+    /// a load, is returned for the caller to read. Running out of room is the
+    /// writer's busy line, as a read shed, so search can say it used words.
+    fn ask_until_free(
+        &self,
+        addr: SocketAddr,
+        call: &Wire<'_>,
+        allow: bool,
+        timeout: Duration,
+        mut latest: Answer,
+    ) -> Result<Answer, Error> {
+        let mut wait = SEARCH_BUSY_FIRST;
+        loop {
+            let room = busy_room();
+            if room < Duration::from_millis(20) || wait > room {
+                return Err(degrade(&latest.body, "GET", false));
+            }
+            std::thread::sleep(wait.min(room));
+            if deadline_passed() {
+                return Err(degrade(&latest.body, "GET", false));
+            }
+            let next = self.exchange(addr, call, allow, timeout)?;
+            if next.status != 503 || crate::pack_still_starting(&next.body) {
+                return Ok(next);
+            }
+            latest = next;
+            wait = wait.saturating_mul(3).min(SEARCH_BUSY_CAP);
+        }
     }
 
     fn exchange(
@@ -2421,6 +2526,7 @@ mod tests {
             std::env::remove_var("PACKSET_TOKEN");
             std::env::remove_var("PACKSET_TOKEN_FILE");
             std::env::remove_var("PACKSET_TIMEOUT_MS");
+            std::env::remove_var("PACKSET_WORKSPACE");
             std::env::remove_var("LJOS_IN_HOOK");
             std::env::set_var("PACKSET_HOME", home.path());
         }
@@ -2656,6 +2762,133 @@ mod tests {
         assert_eq!(err.to_string(), "busy", "{err}");
         assert_eq!(seen.lock().unwrap().len(), 1, "the long wait was taken");
         assert!(took < std::time::Duration::from_millis(500), "{took:?}");
+    }
+
+    /// The daemon's busy answer: 503, `Retry-After: 1`, and the busy error.
+    /// The first `busy` searches say that, then the next search answers.
+    fn busy_then_hit(
+        busy: usize,
+    ) -> (
+        super::PacksetClient,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        serve(move |n, req| {
+            let search = req.lines().next().unwrap_or("").contains("GET /v1/search");
+            if search && n < busy {
+                (
+                    503,
+                    r#"{"error":"packsetd is busy: every worker is answering and the queue is full; try again"}"#
+                        .into(),
+                    Some(1),
+                )
+            } else if search {
+                (
+                    200,
+                    r#"{"hits":[{"id":"seam","kind":"lesson","text":"d-SEAMS migrate video","score":0.9}]}"#
+                        .into(),
+                    None,
+                )
+            } else {
+                (200, "ok".into(), None)
+            }
+        })
+    }
+
+    #[test]
+    fn a_search_asks_a_busy_writer_again_and_then_reads() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
+        let _retry = super::BusyRetry::enter();
+        let (client, seen) = busy_then_hit(3);
+        let started = std::time::Instant::now();
+        let (hits, _) = client
+            .search_fetched("seat", "d-SEAMS migrate video", 5, None, false)
+            .unwrap();
+        let took = started.elapsed();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "d-SEAMS migrate video");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            4,
+            "three busy answers, then the hit"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "the pauses waited out Retry-After: {took:?}"
+        );
+        assert!(
+            took >= std::time::Duration::from_millis(400),
+            "the search did not pause between busy answers: {took:?}"
+        );
+    }
+
+    #[test]
+    fn a_search_that_stays_busy_stops_inside_the_budget() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
+        let _retry = super::BusyRetry::enter();
+        let (client, seen) = serve(|_, req| {
+            if req.lines().next().unwrap_or("").contains("GET /v1/search") {
+                (
+                    503,
+                    r#"{"error":"packsetd is busy: every worker is answering and the queue is full; try again"}"#
+                        .into(),
+                    Some(1),
+                )
+            } else {
+                (200, "ok".into(), None)
+            }
+        });
+        let started = std::time::Instant::now();
+        let err = client
+            .search_fetched("seat", "d-SEAMS migrate video", 5, None, false)
+            .unwrap_err();
+        let took = started.elapsed();
+        assert!(err.to_string().contains("packsetd is busy"), "{err}");
+        let asked = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|req| req.lines().next().unwrap_or("").contains("GET /v1/search"))
+            .count();
+        assert!(asked > 2, "a busy search was asked only {asked} times");
+        assert!(
+            took < std::time::Duration::from_secs(3),
+            "the busy wait ran past a few seconds: {took:?}"
+        );
+        assert!(
+            took >= std::time::Duration::from_millis(1_200),
+            "the busy wait ended before the budget: {took:?}"
+        );
+    }
+
+    /// A tracker write shares the client and must not spend the search wait.
+    #[test]
+    fn a_write_does_not_wait_out_a_busy_search() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _retry = super::BusyRetry::enter();
+        let (client, seen) = serve(|_, _| (503, r#"{"error":"packsetd is busy"}"#.into(), Some(0)));
+        let started = std::time::Instant::now();
+        let err = client
+            .roundtrip(
+                "POST",
+                "/v1/atoms",
+                &[],
+                Some(b"{}"),
+                false,
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap_err();
+        let took = started.elapsed();
+        assert!(err.to_string().contains("packsetd is busy"), "{err}");
+        assert_eq!(seen.lock().unwrap().len(), 2, "a write is sent again once");
+        assert!(
+            took < std::time::Duration::from_millis(500),
+            "the write waited on the search budget: {took:?}"
+        );
     }
 
     #[test]
