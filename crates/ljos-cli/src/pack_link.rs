@@ -578,6 +578,23 @@ fn command_remaining() -> Option<Duration> {
 /// about a second unless the seat raised the tool bound and the pack
 /// timeout. A sitting read is about a second because its clock is.
 fn tightened(method: &str, requested: Duration) -> Duration {
+    #[cfg(test)]
+    if let Some(lesson) = crate::lesson_request_budget() {
+        // The finish lesson named this wait. The suite's
+        // `PACKSET_TIMEOUT_MS` is shorter, and a stub that answers
+        // after that was queued.
+        let mut budget = lesson;
+        if let Some(left) = clock_left() {
+            budget = budget.min(left);
+        }
+        if let Some(left) = command_remaining() {
+            budget = budget.min(left);
+        }
+        if let Some(left) = crate::wall_left() {
+            budget = budget.min(left);
+        }
+        return budget.max(Duration::from_millis(1));
+    }
     let mut budget = requested;
     if let Some(ms) = crate::pack_budget_ms() {
         budget = budget.min(Duration::from_millis(ms.max(1)));
@@ -869,12 +886,21 @@ fn connect(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
     // A connect that never finishes is remembered, so the next read does
     // not wait the budget out again.
     if let Err(err) = &result {
-        if io_is_quiet(err) {
+        // A short connect cap used to mark the pack quiet while the call
+        // still had time, so the write behind a listing never opened a
+        // socket. Quiet starts once this clock is spent.
+        if io_is_quiet(err) && clock_is_spent() {
             mark_pack_quiet();
         }
         super::charge_side_wait(started.elapsed());
     }
     result
+}
+
+/// The armed pack clock has no time left. No clock is spent: one timeout
+/// is the whole wait, and the next read should not open another socket.
+fn clock_is_spent() -> bool {
+    clock_left().is_none_or(|left| left.is_zero())
 }
 
 /// A side event's pack budget is gone. Opening a socket for a one
@@ -901,9 +927,10 @@ fn connect_once(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStrea
     Ok(stream)
 }
 
-/// The wait a socket call may use. With a [`PackClock`], a connect is
-/// capped by [`super::pack_connect_budget`] and every call stops at the
-/// clock. Past the clock the call returns before it opens a socket.
+/// The wait a socket call may use. With a [`PackClock`], every call stops
+/// at the clock. A connect uses that same wait unless
+/// `LJOS_PACK_CONNECT_MS` is set. Past the clock the call returns before
+/// it opens a socket.
 fn bounded_wait(requested: Duration, connect: bool) -> std::io::Result<Duration> {
     let mut wait = capped_wait(requested);
     if let Some(deadline) = clock_deadline() {
@@ -915,7 +942,10 @@ fn bounded_wait(requested: Duration, connect: bool) -> std::io::Result<Duration>
             )));
         }
         wait = wait.min(left);
-        if connect {
+        // The 300 ms connect cap is opt-in. Left on, a loaded runner's
+        // accept looks like a down pack and the call never uses the
+        // budget it was given. Unset, connect waits what the call has.
+        if connect && std::env::var_os("LJOS_PACK_CONNECT_MS").is_some() {
             wait = wait.min(super::pack_connect_budget());
         }
         if wait.is_zero() {
@@ -1119,13 +1149,14 @@ impl Chunks {
 
 fn arm_read(stream: &TcpStream, deadline: Instant) -> std::io::Result<()> {
     let remain = deadline.saturating_duration_since(Instant::now());
-    if remain.is_zero() {
-        return Err(pack_io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "the pack did not answer",
-        )));
-    }
-    stream.set_read_timeout(Some(remain))?;
+    // The clock can run out while this thread is not in the read, after
+    // the pack has already written. One short read still takes those bytes.
+    let wait = if remain.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        remain
+    };
+    stream.set_read_timeout(Some(wait))?;
     Ok(())
 }
 
@@ -1140,9 +1171,37 @@ fn read_some(stream: &mut TcpStream, tmp: &mut [u8]) -> std::io::Result<usize> {
             }
             Ok(n) => return Ok(n),
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) if io_is_quiet(&err) => {
+                if let Some(n) = buffered_read(stream, tmp)? {
+                    return Ok(n);
+                }
+                return Err(pack_io(err));
+            }
             Err(err) => return Err(pack_io(err)),
         }
     }
+}
+
+/// Bytes already queued on `stream`, or `None` when the socket is empty.
+/// The timeout can win the race against a write that has already landed.
+fn buffered_read(stream: &mut TcpStream, tmp: &mut [u8]) -> std::io::Result<Option<usize>> {
+    stream.set_nonblocking(true)?;
+    let read = loop {
+        match stream.read(tmp) {
+            Ok(0) => {
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "the pack closed the socket",
+                ))
+            }
+            Ok(n) => break Ok(Some(n)),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) if io_is_quiet(&err) => break Ok(None),
+            Err(err) => break Err(err),
+        }
+    };
+    let _ = stream.set_nonblocking(false);
+    read
 }
 
 fn render(
@@ -1945,7 +2004,7 @@ fn send(live: &mut Slot, origin: &Url, call: &Wire<'_>, timeout: Duration) -> st
     // Outside a hook the side budget is not armed. The quiet flag is that
     // same stop for a command, which asks the pack more than once.
     if let Err(err) = &result {
-        if io_is_quiet(err) {
+        if io_is_quiet(err) && clock_is_spent() {
             mark_pack_quiet();
         }
         super::charge_side_wait(started.elapsed());

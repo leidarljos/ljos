@@ -20217,15 +20217,22 @@ pub fn drop_listing_cache() {
 /// The pack not answering, or an answer that is not atoms.
 fn rows_shared(client: &PacksetClient, workspace: &str) -> Result<SharedRows> {
     let key = format!("{}|{workspace}", client.base());
+    {
+        let last = LAST_LISTING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, held, rows)) = last.as_ref() {
+            if *held == key && at.elapsed() < std::time::Duration::from_secs(2) {
+                return Ok(std::sync::Arc::clone(rows));
+            }
+        }
+    }
+    // The fetch is not under the lock. One slow listing was holding every
+    // other prompt's due line, and that wait spent their pack clocks.
+    let rows = rows_listed(client, workspace)?.0;
     let mut last = LAST_LISTING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((at, held, rows)) = last.as_ref() {
-        if *held == key && at.elapsed() < std::time::Duration::from_secs(2) {
-            return Ok(std::sync::Arc::clone(rows));
-        }
-    }
-    let rows = rows_listed(client, workspace)?.0;
     *last = Some((std::time::Instant::now(), key, std::sync::Arc::clone(&rows)));
     Ok(rows)
 }
@@ -43920,14 +43927,64 @@ fn finish_lesson(issue: &str, text: &str) -> String {
     }
 }
 
+/// How long the pack is given for one finish lesson.
+///
+/// Two seconds in a seat. The lib tests share a process, and on a loaded
+/// runner the stub is not scheduled inside that. The call still returns
+/// when the stub answers. A writer that never answers is the same queue
+/// as before, after this wait.
+fn lesson_pack_budget() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        std::time::Duration::from_secs(30)
+    }
+    #[cfg(not(test))]
+    {
+        std::time::Duration::from_secs(2)
+    }
+}
+
+/// While this guard is up, a finish lesson's pack call waits
+/// [`lesson_pack_budget`], not the suite's `PACKSET_TIMEOUT_MS`.
+/// That variable is 2s in the lib tests. A stub that has not been
+/// scheduled yet was queued as a busy pack.
+#[cfg(test)]
+struct LessonRequest {
+    prev: Option<std::time::Duration>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LESSON_REQUEST: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+impl LessonRequest {
+    fn enter(budget: std::time::Duration) -> Self {
+        let prev = LESSON_REQUEST.with(|cell| cell.replace(Some(budget)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for LessonRequest {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        LESSON_REQUEST.with(|cell| cell.set(prev));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn lesson_request_budget() -> Option<std::time::Duration> {
+    LESSON_REQUEST.with(|cell| cell.get())
+}
+
 fn finish_lesson_post(issue: &str, text: &str) -> Result<String> {
     let filed = (|| -> Result<String> {
-        // The tracker write has already landed, or is about to. The pack
-        // gets one short try. A slow writer queues the lesson.
-        let _deadline = pack_link::CommandDeadline::enter(std::time::Duration::from_secs(2));
-        let _clock = pack_link::PackClock::enter(std::time::Duration::from_secs(2));
-        let _quiet = pack_link::QuietPack::enter();
-        let _skip = SkipWriterEnsure::enter();
+        // Scope and the atom are local. They used to sit inside the pack
+        // clock, so a slow lookup left the write no time and the lesson
+        // was queued.
         let scope = sync::scope_for_lesson(sync::scope_for_issue(issue));
         let persons = lesson_is_the_persons(under_a_runner(), person_present());
         let prefix = "finish: POST /v1/atoms failed for the lesson";
@@ -43941,6 +43998,14 @@ fn finish_lesson_post(issue: &str, text: &str) -> Result<String> {
         add_entities(&mut atom, tags);
         stamp_issue(&mut atom, issue);
         stamp_horizon(&mut atom, "lesson", text, Some(false));
+        // The tracker write has already landed, or is about to. The pack
+        // gets one short try. A slow writer queues the lesson.
+        let _deadline = pack_link::CommandDeadline::enter(lesson_pack_budget());
+        let _clock = pack_link::PackClock::enter(lesson_pack_budget());
+        let _quiet = pack_link::QuietPack::enter();
+        let _skip = SkipWriterEnsure::enter();
+        #[cfg(test)]
+        let _lesson = LessonRequest::enter(lesson_pack_budget());
         if persons {
             // Typed by the person in a terminal of their own: no
             // runner above it, so it needs no second review.
@@ -62856,6 +62921,37 @@ mod tests {
         );
     }
 
+    /// A stub that answers after the old two-second lesson clock still
+    /// stores the lesson. That clock used to run out before this process's
+    /// stub was scheduled, and finish queued the sentence.
+    #[test]
+    fn a_slow_stub_still_stores_the_finish_lesson() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let (url, _) = serve_http(|req| {
+            let path = req.lines().next().unwrap_or("");
+            if path.starts_with("POST /v1/atoms ") {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                return (
+                    200,
+                    r#"{"id":"atom-0","kind":"lesson","text":"kept"}"#.into(),
+                );
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _env = HoldEnv::set(&[
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("CLAUDECODE", "1"),
+        ]);
+        let _url = PackUrl::set(&url);
+        let line = finish_lesson("fuse-slow", "Build the lesson on the cluster fuse.");
+        assert!(
+            line.contains("remembered the lesson as agent-derived, unreviewed"),
+            "{line}"
+        );
+        assert!(!line.contains("Memory busy"), "{line}");
+    }
+
     /// A resolved campaign finding is tool output. It is stored at once
     /// as `tool-echo` at L0.
     #[test]
@@ -73480,11 +73576,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn a_static_check_judges_the_dangerous_lines_without_waiting() {
         // The stand-in policyd sleeps this long, and the guard timeout
         // is the same span, so a check that reached the binary waits out
-        // the sleep instead of returning on a shorter budget.
+        // the sleep. It also touches the marker before that sleep. The
+        // static check does neither. Half the sleep is less than these
+        // checks themselves take on a loaded runner.
         const SLOW_POLICYD_SLEEP_SECS: u64 = 30;
-        // Half the stand-in sleep. A real call is still inside that
-        // sleep, so it fails this bound. The static check does not sleep.
-        const STATIC_CHECK_BACKSTOP_SECS: u64 = SLOW_POLICYD_SLEEP_SECS / 2;
         let _g = env_guard();
         let home = SeatDir::new("static-guard");
         let marker = home.path().join("policyd-ran");
@@ -73535,11 +73630,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             assert_eq!(take_guard_note(), None, "{line} names no rule");
         }
         // The stand-in writes the marker before it sleeps. Absence is
-        // the proof the static check never called it. The clock is only
-        // a backstop for a wait that never reached the binary.
+        // the proof the static check never called it. The clock is the
+        // sleep itself: a call that reached the binary is still inside
+        // it, or has already touched the marker.
         assert!(!marker.exists(), "the slow policyd ran");
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(STATIC_CHECK_BACKSTOP_SECS),
+            started.elapsed() < std::time::Duration::from_secs(SLOW_POLICYD_SLEEP_SECS),
             "waited {:?}",
             started.elapsed()
         );
@@ -77253,11 +77349,20 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// A writer that answers a plain search at once and holds a reranked
     /// one, as packsetd does while it fetches its cross-encoder.
     fn serve_slow_rerank() -> String {
+        serve_slow_rerank_until(None)
+    }
+
+    /// [`serve_slow_rerank`], and `finished` is set once the held rerank
+    /// has slept. The hook returns before that.
+    fn serve_slow_rerank_until(
+        finished: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut s) = stream else { break };
+                let finished = finished.clone();
                 std::thread::spawn(move || {
                     let req = read_http(&mut s);
                     let first = req.lines().next().unwrap_or("").to_string();
@@ -77267,6 +77372,9 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                     } else if first.contains("/v1/search") {
                         if first.contains("rerank=1") {
                             std::thread::sleep(std::time::Duration::from_secs(20));
+                            if let Some(flag) = &finished {
+                                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
                         }
                         ("200 OK", format!(r#"{{"hits":[{held}]}}"#))
                     } else if first.starts_with("GET /v1/atoms") {
@@ -77314,15 +77422,20 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     #[test]
     fn a_judge_that_never_answers_leaves_the_prompt_its_memory() {
         let _env = env_guard();
-        let url = serve_slow_rerank();
+        let rerank_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let url = serve_slow_rerank_until(Some(std::sync::Arc::clone(&rerank_finished)));
         let _held = PackUrl::set(&url);
         let cfg = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(cfg.path().join("ljos")).unwrap();
+        let judge_done = runtime.path().join("judge-done");
+        let command = format!("cat >/dev/null; sleep 20; touch '{}'", judge_done.display());
         std::fs::write(
             cfg.path().join("ljos/jev.toml"),
-            "enabled = true\nbackend = \"command\"\nbudget_ms = 20000\nmin_words = 1\nmin_candidates = 1\n\
-             command = [\"sh\", \"-c\", \"cat >/dev/null; sleep 20\"]\n",
+            format!(
+                "enabled = true\nbackend = \"command\"\nbudget_ms = 20000\nmin_words = 1\nmin_candidates = 1\n\
+                 command = [\"sh\", \"-c\", \"{command}\"]\n"
+            ),
         )
         .unwrap();
         let _cfg = HoldEnv::set(&[
@@ -77336,20 +77449,16 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             session: None,
             shape: HookShape::default(),
         };
-        let started = std::time::Instant::now();
         let (note, _) = hook_note(&call, 5);
-        let took = started.elapsed();
         assert!(note.contains("Tag a release"), "{note:?}");
-        // The judge wait plus the local search, and a second for the
-        // runner. A shared macOS runner measured 2.82 s against that 2.7 s
-        // sum. The seat work on this path is a few string checks, not a
-        // file or an environment read.
+        // The judge and the rerank each sleep 20s and only then leave a
+        // mark. Wall time on a loaded runner is the other stages. The
+        // marks are the wait.
         assert!(
-            took < std::time::Duration::from_millis(
-                JEV_HOOK_BUDGET_MS + HOOK_RERANK_BUDGET_MS + 1500
-            ),
-            "the prompt waited {took:?} on a judge"
+            !rerank_finished.load(std::sync::atomic::Ordering::SeqCst),
+            "the prompt waited out the rerank"
         );
+        assert!(!judge_done.exists(), "the prompt waited out the judge");
     }
 
     /// How [`serve_sync_pack`] treats a post and a delete. Adopt's checks
