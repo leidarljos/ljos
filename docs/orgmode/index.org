@@ -68,7 +68,7 @@ ljos is ready: memory, tracker and command guard work. Optional extras: `ljos do
 
 With no seat named, the =seat source= row warns that the read uses every seat. When the encoder is not installed, an =encoder= row follows and names =cargo binstall --locked packset-embed=. The =sitting-gate= row is =info= and says =not active here= when no agent runner is above the shell. The config row says the defaults stand when nothing is set. The =ljos config= row warns that the file is missing and names =ljos doctor --fix=. Run =ljos doctor= from your home directory. In a checkout, the config row names =.ljos/gates.toml= instead.
 
-From a checkout, that script installs the programs. A release attaches the same script as =install.sh=.
+From a checkout, that script installs the published release. The release is a complete install of ljos and the sibling tools. A release attaches the same script as =install.sh=.
 The copy on the 0.41.1 release asked for a vissue archive that project does not publish. The 0.41.2 script fetches the archive the vissue release publishes.
 =--no-embed= leaves out the encoder, and search matches words.
 The installer checks each download against its published SHA-256 sum.

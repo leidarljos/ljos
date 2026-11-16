@@ -33,6 +33,18 @@ fn install_sh() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install.sh")
 }
 
+fn checkout_version() -> String {
+    let toml =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"))
+            .unwrap();
+    toml.lines()
+        .find_map(|line| {
+            let rest = line.trim().strip_prefix("version = \"")?;
+            rest.strip_suffix('"').map(str::to_string)
+        })
+        .expect("workspace version")
+}
+
 fn said(out: &Output) -> String {
     format!(
         "{}{}",
@@ -784,7 +796,12 @@ fn a_missing_curl_names_how_to_install_one() {
         "a checkout install did not say it fetches the release:\n{text}"
     );
     assert!(
-        text.contains("cargo build --locked --release -p ljos"),
+        text.contains("complete install of ljos and the sibling tools"),
+        "{text}"
+    );
+    assert!(text.contains("--from-checkout --no-embed"), "{text}");
+    assert!(
+        !text.contains("cargo build --locked --release -p ljos"),
         "{text}"
     );
 }
@@ -1384,7 +1401,12 @@ fn a_default_pin_installs_its_release_archive() {
         let top = assets.join(stem);
         std::fs::create_dir_all(&top).unwrap();
         for bin in bins {
-            script(&top, bin, "#!/bin/sh\nprintf '%s\\n' from-latest\nexit 0\n");
+            let body = if *bin == "ljos" {
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'ljos 0.1.0'; exit 0; fi\nprintf '%s\\n' from-latest\nexit 0\n"
+            } else {
+                "#!/bin/sh\nprintf '%s\\n' from-latest\nexit 0\n"
+            };
+            script(&top, bin, body);
         }
         let archive = assets.join(format!("{stem}-{target}.tar.gz"));
         let packed = Command::new("tar")
@@ -1499,6 +1521,21 @@ exit 0
     assert!(!text.contains("has no release archive"), "{text}");
     assert!(!text.contains("from source"), "{text}");
     assert!(!cargo_log.exists(), "cargo was started:\n{text}");
+    assert!(
+        text.contains("--from-checkout"),
+        "the checkout hint did not name the install that puts programs on PATH:\n{text}"
+    );
+    assert!(
+        !text.contains("cargo build --locked --release -p ljos"),
+        "{text}"
+    );
+    let checkout = checkout_version();
+    assert!(
+        text.contains(&format!(
+            "This checkout is {checkout}, newer than the installed release 0.1.0. The installed release is a complete install of ljos and the sibling tools."
+        )),
+        "{text}"
+    );
     let installed = home.join(".local/bin/vissue");
     assert!(installed.is_file(), "{text}");
     let ran = Command::new(&installed).output().unwrap();
@@ -1728,6 +1765,156 @@ exit 0
         stdout.contains("https://docs.sigstore.dev/cosign/system_config/installation/"),
         "{stdout}"
     );
+}
+
+/// `--from-checkout` builds ljos and ljos-mcp from this tree and installs
+/// the sibling tools beside them. A stand-in cargo writes the two ljos
+/// binaries. The sibling archives are on disk, so nothing is downloaded.
+#[test]
+fn from_checkout_installs_ljos_and_the_sibling_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = "x86_64-unknown-linux-gnu";
+    let assets = dir.path().join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    let packs = [
+        (
+            "packset-v0.18.2",
+            &["packset", "packsetd", "packset-mcp"][..],
+        ),
+        ("vissue-v0.24.0", &["vissue", "vissue-mcp"][..]),
+        ("deedar-v0.4.0", &["deedar"][..]),
+        ("claimdag-v0.8.0", &["claimdag"][..]),
+        ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
+        ("consensus-v0.10.1", &["ljos-consensus"][..]),
+    ];
+    for (stem, bins) in packs {
+        let top = assets.join(stem);
+        std::fs::create_dir_all(&top).unwrap();
+        for name in bins {
+            script(&top, name, "#!/bin/sh\nexit 0\n");
+        }
+        let archive = assets.join(format!("{stem}-{target}.tar.gz"));
+        let packed = Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&assets)
+            .arg(stem)
+            .status()
+            .unwrap();
+        assert!(packed.success(), "tar {stem}");
+        std::fs::write(format!("{}.sha256", archive.display()), sha256_of(&archive)).unwrap();
+    }
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let sys = dir.path().join("sys");
+    link_tools(
+        &sys,
+        &[
+            "sh",
+            "mktemp",
+            "date",
+            "cp",
+            "chmod",
+            "mkdir",
+            "rm",
+            "mv",
+            "cat",
+            "grep",
+            "sed",
+            "awk",
+            "find",
+            "uname",
+            "wc",
+            "tr",
+            "head",
+            "cut",
+            "sort",
+            "dirname",
+            "basename",
+            "readlink",
+            "tar",
+            "gzip",
+            "sha256sum",
+        ],
+    );
+    let cargo_log = dir.path().join("cargo.log");
+    script(&bin, "rustc", "#!/bin/sh\nprintf '%s\\n' 'rustc 1.89.0'\n");
+    script(
+        &bin,
+        "cargo",
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$LJOS_CARGO_LOG"
+root=
+prev=
+for a in "$@"; do
+  case $prev in
+    --root) root=$a ;;
+  esac
+  prev=$a
+done
+mkdir -p "$root/bin"
+printf '%s\n' '#!/bin/sh' 'if [ "$1" = --version ]; then echo "ljos 9.9.9"; exit 0; fi' 'echo from-checkout' 'exit 0' > "$root/bin/ljos"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/ljos-mcp"
+chmod 755 "$root/bin/ljos" "$root/bin/ljos-mcp"
+exit 0
+"#,
+    );
+    let home = dir.path().join("home");
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .args([
+            "--from-checkout",
+            "--no-embed",
+            "--no-onboard",
+            "--no-modify-path",
+            "--target",
+            target,
+            "--asset-dir",
+        ])
+        .arg(&assets)
+        .args([
+            "--pin",
+            "packset=0.18.2",
+            "--pin",
+            "ljos-policyd=0.7.0",
+            "--pin",
+            "consensus=0.10.1",
+            "--bin-dir",
+        ])
+        .arg(home.join(".local/bin"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", format!("{}:{}", bin.display(), sys.display()))
+        .env("LJOS_CARGO_LOG", &cargo_log)
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    let log = std::fs::read_to_string(&cargo_log).unwrap_or_default();
+    assert!(
+        log.contains("--path") && log.contains("crates/ljos-cli"),
+        "cargo was not pointed at this checkout:\n{log}\n{text}"
+    );
+    assert!(
+        !text.contains("cargo build --locked --release -p ljos"),
+        "{text}"
+    );
+    assert!(!text.contains("not this checkout"), "{text}");
+    for name in PROGRAMS {
+        assert!(
+            home.join(".local/bin").join(name).is_file(),
+            "{name} was not installed:\n{text}"
+        );
+    }
+    let ran = Command::new(home.join(".local/bin/ljos")).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout).trim(),
+        "from-checkout",
+        "{text}"
+    );
+    assert!(text.contains(PATH_LINE), "{text}");
+    assert!(text.contains("ljos doctor"), "{text}");
 }
 
 #[test]

@@ -54,6 +54,10 @@
 #                   default now
 #   --from-dir DIR  take the programs from DIR instead of downloading
 #                   (a local build, or an offline copy)
+#   --from-checkout build ljos and ljos-mcp from this checkout into the
+#                   bin dir, then install the sibling tools the same way
+#                   as a normal run. Without this flag the script installs
+#                   the published release, which is a complete install
 #   --asset-dir DIR take each release archive and its .sha256 from DIR
 #                   instead of GitHub. The file names are the ones a
 #                   release publishes for this target
@@ -114,6 +118,7 @@ set -eu
 BIN_DIR=${LJOS_BIN_DIR:-$HOME/.local/bin}
 WITH_EMBED=1
 FROM_DIR=
+FROM_CHECKOUT=0
 ASSET_DIR=
 TARGET_OVERRIDE=
 ONBOARD=1
@@ -195,6 +200,7 @@ while [ $# -gt 0 ]; do
     --with-embed) WITH_EMBED=1; shift ;;
     --no-embed) WITH_EMBED=0; shift ;;
     --from-dir) FROM_DIR=$2; shift 2 ;;
+    --from-checkout) FROM_CHECKOUT=1; shift ;;
     --asset-dir) ASSET_DIR=$2; shift 2 ;;
     --target) [ $# -ge 2 ] || die "--target needs a triple"; TARGET_OVERRIDE=$2; shift 2 ;;
     --no-build) NO_BUILD=1; shift ;;
@@ -214,6 +220,13 @@ while [ $# -gt 0 ]; do
     *) die "unknown option $1 (try --help)" ;;
   esac
 done
+
+if [ "$FROM_CHECKOUT" = 1 ] && [ -n "$FROM_DIR" ]; then
+  die "pass --from-checkout or --from-dir, not both"
+fi
+if [ "$FROM_CHECKOUT" = 1 ] && [ "$CLOUD" = 1 ]; then
+  die "pass --from-checkout or --cloud, not both"
+fi
 
 # The version REPO is pinned to, or nothing for the latest release.
 pinned() {
@@ -430,22 +443,49 @@ if [ -z "$FROM_DIR" ] && [ "$PRINT_ASSETS" != 1 ] && ! supported_target "$TARGET
   SOURCE_ONLY=1
   say "$(supported_line)"
 fi
-# Run from a checkout, this script still fetches the published release.
-# Say so, and name the command that builds the tree on disk. The path is
-# taken from $0, so a PATH with no dirname still prints the line. An
-# unsupported machine has already stopped, on one line.
-if [ -z "$FROM_DIR" ] && [ "$PRINT_ASSETS" != 1 ] && [ "$SOURCE_ONLY" != 1 ]; then
+# The checkout this script was started from, when it is one. Empty for a
+# copy downloaded on its own. The path is taken from $0, so a PATH with
+# no dirname still resolves it.
+checkout_dir() {
   case $0 in
     */*/*)
-      checkout_root=${0%/*}
-      checkout_root=${checkout_root%/*}
+      r=${0%/*}
+      r=${r%/*}
       ;;
-    */*) checkout_root=. ;;
-    *) checkout_root= ;;
+    */*) r=. ;;
+    *) r= ;;
   esac
-  if [ -n "$checkout_root" ] && [ -f "$checkout_root/crates/ljos-cli/Cargo.toml" ]; then
-    say "This script installs the published release, not this checkout. To build this checkout, run \`cargo build --locked --release -p ljos\`."
+  if [ -n "$r" ] && [ -f "$r/crates/ljos-cli/Cargo.toml" ]; then
+    printf '%s' "$r"
   fi
+}
+CHECKOUT_DIR=$(checkout_dir || true)
+CHECKOUT_VER=
+# A shell read, so a PATH with no sed still prints the checkout hint.
+if [ -n "$CHECKOUT_DIR" ] && [ -f "$CHECKOUT_DIR/Cargo.toml" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      'version = "'*'"')
+        line=${line#*\"}
+        CHECKOUT_VER=${line%%\"*}
+        break
+        ;;
+    esac
+  done < "$CHECKOUT_DIR/Cargo.toml"
+fi
+if [ "$FROM_CHECKOUT" = 1 ] && [ -z "$CHECKOUT_DIR" ]; then
+  die "--from-checkout needs a checkout of ljos. Run \`sh scripts/install.sh --from-checkout\` from this repository."
+fi
+# Run from a checkout, this script still fetches the published release.
+# That release is a complete install. The other command builds this
+# checkout's ljos and ljos-mcp and installs the sibling tools into the
+# bin dir. An unsupported machine has already stopped, on one line.
+if [ -z "$FROM_DIR" ] && [ "$PRINT_ASSETS" != 1 ] && [ "$SOURCE_ONLY" != 1 ] \
+  && [ "$FROM_CHECKOUT" != 1 ] && [ -n "$CHECKOUT_DIR" ]; then
+  extra=
+  [ "$WITH_EMBED" = 0 ] && extra=" --no-embed"
+  say "This script installs the published release, not this checkout. The published release is a complete install of ljos and the sibling tools."
+  say "To install this checkout onto PATH instead, run \`sh $0 --from-checkout$extra\`."
 fi
 if [ -z "$FROM_DIR" ] && [ "$PRINT_ASSETS" != 1 ] && [ "$SOURCE_ONLY" != 1 ]; then
   miss=
@@ -644,19 +684,20 @@ for a in json.load(open(sys.argv[1]))["attestations"]:
 # does not verify). --attest stops on anything but verified.
 attest() {
   file=$1 repo=$2 digest=$3
+  err=${4:-$TMP/attest.err}
   name=$(basename "$file")
   case $VERIFIER in
     none)
       printf 'unchecked'
       return ;;
     gh)
-      if gh attestation verify "$file" --repo "$OWNER/$repo" >/dev/null 2>"$TMP/attest.err"; then
+      if gh attestation verify "$file" --repo "$OWNER/$repo" >/dev/null 2>"$err"; then
         printf 'verified'
-      elif grep -qi 'no attestations found' "$TMP/attest.err"; then
+      elif grep -qi 'no attestations found' "$err"; then
         [ "$ATTEST" = 0 ] || die "$name: $OWNER/$repo published no build attestation for it"
         printf 'missing'
       else
-        [ "$ATTEST" = 0 ] || die "$name: its build attestation does not verify: $(head -n 1 "$TMP/attest.err")"
+        [ "$ATTEST" = 0 ] || die "$name: its build attestation does not verify: $(head -n 1 "$err")"
         printf 'failed'
       fi
       return ;;
@@ -677,7 +718,7 @@ attest() {
   bundles_of "$answer" > "$answer.jsonl" 2>/dev/null || : > "$answer.jsonl"
   ok=0
   if [ "$VERIFIER" = gh-bundle ]; then
-    gh attestation verify "$file" --repo "$OWNER/$repo" --bundle "$answer.jsonl" >/dev/null 2>"$TMP/attest.err" && ok=1
+    gh attestation verify "$file" --repo "$OWNER/$repo" --bundle "$answer.jsonl" >/dev/null 2>"$err" && ok=1
   else
     # cosign 2.x reads this bundle format only behind --new-bundle-format;
     # cosign 3 reads it by default and may drop the flag.
@@ -688,7 +729,7 @@ attest() {
         if cosign verify-blob-attestation $flag --bundle "$answer.one" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity-regexp "^https://github\.com/$OWNER/$repo/\.github/workflows/" \
-            --type https://slsa.dev/provenance/v1 "$file" >/dev/null 2>"$TMP/attest.err"; then
+            --type https://slsa.dev/provenance/v1 "$file" >/dev/null 2>"$err"; then
           ok=1
           break
         fi
@@ -699,9 +740,44 @@ attest() {
   if [ "$ok" = 1 ]; then
     printf 'verified'
   else
-    [ "$ATTEST" = 0 ] || die "$name: its build attestation does not verify: $(head -n 1 "$TMP/attest.err" 2>/dev/null)"
+    [ "$ATTEST" = 0 ] || die "$name: its build attestation does not verify: $(head -n 1 "$err" 2>/dev/null)"
     printf 'failed'
   fi
+}
+
+# Start a build-attestation check for DIGEST unless that digest is already
+# being checked. Sets ATTEST_ID to the id the result is stored under. The
+# check runs while the next archive downloads. --attest does not use this.
+attest_later() {
+  digest=$1
+  file=$2
+  repo=$3
+  if [ -f "$TMP/attest-id-$digest" ]; then
+    ATTEST_ID=$(cat "$TMP/attest-id-$digest")
+    return 0
+  fi
+  ATTEST_ID=$repo-$digest
+  printf '%s\n' "$ATTEST_ID" > "$TMP/attest-id-$digest"
+  (
+    err="$TMP/attest-$ATTEST_ID.err"
+    result=$(attest "$file" "$repo" "$digest" "$err" || printf failed)
+    case $result in
+      verified|missing|unchecked|failed) ;;
+      *) result=unchecked ;;
+    esac
+    printf '%s\n' "$result" > "$TMP/status-$ATTEST_ID"
+    if [ "$result" = failed ]; then
+      head -n 1 "$err" 2>/dev/null > "$TMP/warn-$ATTEST_ID" || true
+    fi
+  ) </dev/null >/dev/null 2>&1 &
+  printf '%s\n' "$!" >> "$TMP/attest.pids"
+}
+
+wait_for_attests() {
+  [ -f "$TMP/attest.pids" ] || return 0
+  while IFS= read -r pid; do
+    wait "$pid" || true
+  done < "$TMP/attest.pids"
 }
 
 # exists when the tag is published, missing when GitHub says it is not,
@@ -817,24 +893,38 @@ install_one() {
         ;;
     esac
   fi
-  if [ -n "$ASSET_DIR" ]; then
-    cp "$ASSET_DIR/$asset.sha256" "$TMP/$asset.sha256" || die "$asset has no checksum beside it in $ASSET_DIR"
+  # vissue and vissue-mcp share one archive. The second row reuses the
+  # checksum. It does not download the sum again or check the attestation
+  # a second time.
+  if [ -f "$TMP/sum-$asset" ]; then
+    got=$(cat "$TMP/sum-$asset")
   else
-    fetch "$url.sha256" "$TMP/$asset.sha256" || die "$asset has no published checksum"
-  fi
-  want=$(sed 's/[ *].*//' "$TMP/$asset.sha256" | head -n 1)
-  got=$(sha256 "$TMP/$asset")
-  if [ "$want" != "$got" ]; then
-    rm -f "$TMP/$asset"
     if [ -n "$ASSET_DIR" ]; then
-      die "$asset: checksum mismatch. Nothing was installed. Replace the archive and run \`sh install.sh --asset-dir $ASSET_DIR\` again."
+      cp "$ASSET_DIR/$asset.sha256" "$TMP/$asset.sha256" || die "$asset has no checksum beside it in $ASSET_DIR"
+    else
+      fetch "$url.sha256" "$TMP/$asset.sha256" || die "$asset has no published checksum"
     fi
-    die "$asset: checksum mismatch. Removed the partial file. Run \`sh install.sh\` again."
+    want=$(sed 's/[ *].*//' "$TMP/$asset.sha256" | head -n 1)
+    got=$(sha256 "$TMP/$asset")
+    if [ "$want" != "$got" ]; then
+      rm -f "$TMP/$asset"
+      if [ -n "$ASSET_DIR" ]; then
+        die "$asset: checksum mismatch. Nothing was installed. Replace the archive and run \`sh install.sh --asset-dir $ASSET_DIR\` again."
+      fi
+      die "$asset: checksum mismatch. Removed the partial file. Run \`sh install.sh\` again."
+    fi
+    printf '%s\n' "$got" > "$TMP/sum-$asset"
   fi
   attested=skipped
   if [ -z "$ASSET_DIR" ]; then
-    attested=$(attest "$TMP/$asset" "$repo" "$got")
-    printf '%s\n' "$attested" >> "$TMP/attested"
+    if [ "$ATTEST" = 1 ]; then
+      attested=$(attest "$TMP/$asset" "$repo" "$got")
+      printf '%s\n' "$attested" >> "$TMP/attested"
+    else
+      attest_later "$got" "$TMP/$asset" "$repo"
+      printf '%s %s\n' "$ATTEST_ID" "$asset" >> "$TMP/attest.rows"
+      attested=pending
+    fi
   fi
   mkdir -p "$TMP/x-$repo"
   case $asset in
@@ -851,7 +941,9 @@ install_one() {
     place "$found" "$BIN_DIR/$p"
   done
   say "  $label $tag"
-  [ "$attested" != failed ] || warn "$asset: its build attestation does not verify: $(head -n 1 "$TMP/attest.err" 2>/dev/null)"
+  if [ "$attested" = failed ]; then
+    warn "$asset: its build attestation does not verify: $(head -n 1 "$TMP/attest.err" 2>/dev/null)"
+  fi
 }
 
 for pin in $PINS; do
@@ -901,17 +993,64 @@ if [ -x "$BIN_DIR/ljos" ]; then
   [ -n "$PREV_VER" ] || PREV_VER="an older ljos"
 fi
 
-printf '%s\n' "$COMPONENTS" | while read -r repo crate progs style; do
-  if [ "$CLOUD" = 1 ] && [ "$FORCE" = 0 ] && [ "$repo" = ljos ] && [ -x "$BIN_DIR/ljos" ] \
-    && "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
-    say "  ljos already provides cloud up; left in place"
-    continue
-  fi
-  if [ "$repo" = packset ] && [ "$WITH_EMBED" = 1 ]; then
-    progs="$progs,packset-embed"
-  fi
-  install_one "$repo" "$crate" "$style" "$progs"
-done
+# ljos and ljos-mcp from this checkout. The sibling tools still come from
+# their releases, which is what puts packset, vissue, deedar and claimdag
+# on PATH beside this tree's ljos.
+build_checkout() {
+  need_rust ljos
+  command -v cargo >/dev/null 2>&1 ||
+    die "no cargo to build this checkout. Install Rust $MIN_RUST or newer from https://rustup.rs and run \`sh $0 --from-checkout\` again."
+  say "  building ljos from this checkout"
+  (
+    cd "$CHECKOUT_DIR" || exit 1
+    cargo install --locked --force --quiet --path crates/ljos-cli --root "$TMP/cout"
+  ) || die "could not build ljos from this checkout. Install Rust $MIN_RUST or newer from https://rustup.rs and run \`sh $0 --from-checkout\` again."
+  for p in ljos ljos-mcp; do
+    [ -x "$TMP/cout/bin/$p" ] || die "the checkout build produced no $p"
+    place "$TMP/cout/bin/$p" "$BIN_DIR/$p"
+  done
+}
+if [ "$FROM_CHECKOUT" = 1 ]; then
+  build_checkout
+fi
+
+printf '%s\n' "$COMPONENTS" | {
+  while read -r repo crate progs style; do
+    if [ "$FROM_CHECKOUT" = 1 ] && [ "$repo" = ljos ]; then
+      continue
+    fi
+    if [ "$CLOUD" = 1 ] && [ "$FORCE" = 0 ] && [ "$repo" = ljos ] && [ -x "$BIN_DIR/ljos" ] \
+      && "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
+      say "  ljos already provides cloud up; left in place"
+      continue
+    fi
+    if [ "$repo" = packset ] && [ "$WITH_EMBED" = 1 ]; then
+      progs="$progs,packset-embed"
+    fi
+    install_one "$repo" "$crate" "$style" "$progs"
+  done
+  wait_for_attests
+}
+
+# Background checks finish before this. One archive that is shared by two
+# rows records one result twice, and a failure is warned once.
+if [ -f "$TMP/attest.rows" ]; then
+  seen=
+  while read -r id asset; do
+    [ -n "$id" ] || continue
+    result=$(cat "$TMP/status-$id" 2>/dev/null || true)
+    [ -n "$result" ] || result=unchecked
+    printf '%s\n' "$result" >> "$TMP/attested"
+    case " $seen " in
+      *" $id "*) continue ;;
+    esac
+    seen="$seen $id"
+    if [ "$result" = failed ]; then
+      detail=$(head -n 1 "$TMP/warn-$id" 2>/dev/null || true)
+      warn "$asset: its build attestation does not verify${detail:+: $detail}"
+    fi
+  done < "$TMP/attest.rows"
+fi
 
 # One line for the whole install: what the checksums and the build
 # attestations said.
@@ -1173,6 +1312,12 @@ done
 if [ -n "$live" ]; then
   say "ljos-mcp is still running (pid$live) and is the previous binary."
   say "  Restart the assistant, or run \`kill$live\`, then start it again."
+fi
+if [ -n "$CHECKOUT_VER" ] && [ "$FROM_CHECKOUT" != 1 ] && [ -x "$BIN_DIR/ljos" ]; then
+  inst=$(ver_num "$(ver_of "$BIN_DIR/ljos")")
+  if [ -n "$inst" ] && version_lt "$inst" "$CHECKOUT_VER"; then
+    say "This checkout is $CHECKOUT_VER, newer than the installed release $inst. The installed release is a complete install of ljos and the sibling tools."
+  fi
 fi
 secs=$(( $(date +%s) - START ))
 if [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; then

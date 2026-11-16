@@ -24,6 +24,10 @@ From a checkout of this repository:
    $ sh scripts/install.sh --no-embed
    $ export PATH="$HOME/.local/bin:$PATH"
 
+From a checkout, that command installs the published release.
+The release is a complete install of ljos and the sibling tools.
+To install this checkout onto PATH instead, run ``sh scripts/install.sh --from-checkout --no-embed``.
+
 A release attaches that script:
 
 .. code:: console
