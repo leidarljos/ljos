@@ -6,7 +6,6 @@
 //! the mark flag is set. The MCP tool never writes it.
 
 use anyhow::{bail, Result};
-use chrono::TimeZone;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -105,11 +104,22 @@ const MEMORY_CAP: usize = 32;
 /// `guard.jsonl` is rotated once it passes this size.
 const GUARD_CAP: u64 = 64 * 1024;
 
+/// One `deedar evidence` read. A prompt store answers at once. 400 ms was
+/// shorter than a cold start on a busy machine, and that deed was left out.
+const DEED_READ: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a digest spends walking deed accessions before it says so.
+const DEED_BUDGET: std::time::Duration = std::time::Duration::from_millis(800);
+
 /// What every seat did, newest first within the seat, seats newest first.
 ///
 /// `since` is a day (`YYYY-MM-DD`), an RFC 3339 time, `YYYY-MM-DDTHH:MM`,
-/// or `last`. `last` starts after the previous digest and says so when
-/// there was none. A missing deed store or pack leaves those rows out.
+/// or `last`. A day or a clock with no zone is UTC, and so is the clock
+/// printed on each line, so two machines list one order. The same instant
+/// breaks on the line, then the kind, the issue, the source and the
+/// identity. Seats that share a newest instant break on the seat name.
+/// `last` starts after the previous digest and says so when there was
+/// none. A missing deed store or pack leaves those rows out.
 /// A plain call stores the marker. JSON does not, unless `mark` is set.
 /// The marker is the time this call started, so a write during the call
 /// shows up next time.
@@ -807,12 +817,15 @@ fn collect_deeds(accessions: &[String], window: &Window, rows: &mut Vec<Row>) ->
     if accessions.is_empty() || which::which("deedar").is_err() {
         return String::new();
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+    let deadline = std::time::Instant::now() + DEED_BUDGET;
     let mut seen = BTreeSet::new();
     for (i, accession) in accessions.iter().enumerate() {
         if std::time::Instant::now() >= deadline {
             let left = accessions.len() - i;
-            return format!("deeds: cutoff at 800 ms, {left} accessions left\n");
+            return format!(
+                "deeds: cutoff at {} ms, {left} accessions left\n",
+                DEED_BUDGET.as_millis()
+            );
         }
         if !seen.insert(accession.clone()) {
             continue;
@@ -821,7 +834,7 @@ fn collect_deeds(accessions: &[String], window: &Window, rows: &mut Vec<Row>) ->
             "deedar",
             &["evidence", accession.as_str()],
             None,
-            std::time::Duration::from_millis(400),
+            DEED_READ,
         ) else {
             continue;
         };
@@ -967,15 +980,17 @@ fn fold_seat(seat: &str) -> String {
 fn dedup(rows: &mut Vec<Row>) {
     let mut seen = BTreeSet::new();
     rows.retain(|row| seen.insert(row.key()));
-    // A date-only or minute stamp and the git author time of the same
-    // act land within a minute of each other. Keep the later instant only
-    // when the rows came from different records of that event.
+    // Two records of one act, a minute apart or less, collapse to the
+    // later instant. Same text, different source. The sort is total, so
+    // which row survives an equal instant does not follow read order.
     rows.sort_by(|a, b| {
         a.seat
             .cmp(&b.seat)
             .then(a.kind.cmp(b.kind))
             .then(a.text.cmp(&b.text))
             .then(b.at.cmp(&a.at))
+            .then(a.source.cmp(b.source))
+            .then(a.identity.cmp(&b.identity))
     });
     let mut kept: Vec<Row> = Vec::with_capacity(rows.len());
     for row in rows.drain(..) {
@@ -1084,7 +1099,7 @@ fn grouped(rows: &[Row]) -> Vec<(String, Vec<&Row>)> {
         }
     }
     for (_, events) in &mut seats {
-        events.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.text.cmp(&b.text)));
+        events.sort_by(|a, b| newer_row(a, b));
     }
     seats.sort_by(|a, b| {
         let an = a.1.first().map(|row| row.at).unwrap_or(0);
@@ -1094,13 +1109,22 @@ fn grouped(rows: &[Row]) -> Vec<(String, Vec<&Row>)> {
     seats
 }
 
+/// Newest instant first. The same instant breaks on the line a person
+/// reads, then the kind, the issue, the source and the identity.
+fn newer_row(a: &Row, b: &Row) -> std::cmp::Ordering {
+    b.at.cmp(&a.at)
+        .then_with(|| a.text.cmp(&b.text))
+        .then_with(|| a.kind.cmp(b.kind))
+        .then_with(|| a.issue.cmp(&b.issue))
+        .then_with(|| a.source.cmp(b.source))
+        .then_with(|| a.identity.cmp(&b.identity))
+}
+
+/// UTC clock, `YYYY-MM-DD HH:MM`. The same zone `stamp_unix` reads, so
+/// the order and the numbers on the lines do not follow the machine's zone.
 fn wall(secs: i64) -> String {
     chrono::DateTime::from_timestamp(secs, 0)
-        .map(|t| {
-            t.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        })
+        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -1193,11 +1217,9 @@ fn stamp_unix(stamp: &str) -> Option<i64> {
         (0, 0, 0)
     };
     let naive = day.and_hms_opt(hour, min, sec)?;
-    Some(match chrono::Local.from_local_datetime(&naive) {
-        chrono::LocalResult::Single(t) => t.timestamp(),
-        chrono::LocalResult::Ambiguous(earlier, _) => earlier.timestamp(),
-        chrono::LocalResult::None => naive.and_utc().timestamp(),
-    })
+    // Unzoned tracker stamps are UTC. Reading them as local wall time put
+    // a seat first on one machine and second on another.
+    Some(naive.and_utc().timestamp())
 }
 
 fn unix_now() -> i64 {
@@ -1559,6 +1581,10 @@ mod tests {
     }
 
     fn isolate(root: &std::path::Path, home: &std::path::Path, path: &str) {
+        // A spent hook budget left on this thread turns the deed read into
+        // an immediate timeout, and the row never appears.
+        crate::disarm_wall();
+        crate::tool_bound::disarm();
         unsafe {
             std::env::set_var("HOME", home);
             std::env::set_var("XDG_STATE_HOME", home.join("state"));
@@ -1721,6 +1747,13 @@ mod tests {
             })
             .unwrap_or("");
         assert_eq!(first, "alice", "{text}");
+        let seats: Vec<&str> = text
+            .lines()
+            .filter(|line| {
+                !line.is_empty() && !line.starts_with(' ') && !line.starts_with("tracker:")
+            })
+            .collect();
+        assert_eq!(seats, ["alice", "carol", "bob", "erin", "ada"], "{text}");
         let alice = seat_block(&text, "alice");
         let closed = alice.find("closed probe-a").expect(&text);
         let voted = alice.find("voted probe-a for ship").expect(&text);
@@ -1743,6 +1776,10 @@ mod tests {
         );
         assert!(text.contains("cited a deed on probe-a"), "{text}");
         assert!(text.contains("deed-1 produced by ada"), "{text}");
+        assert!(
+            text.contains("2025-10-09 08:53  deed-1 produced by ada"),
+            "{text}"
+        );
         let erin = seat_block(&text, "erin");
         assert!(erin.contains("refused rm -rf /tmp/probe"), "{erin}");
         assert!(erin.contains("rewrote git status"), "{erin}");
@@ -1779,6 +1816,174 @@ mod tests {
         assert!(future.contains("nothing in that window"), "{future}");
         let past = digest(Some("2000-01-01"), false).unwrap();
         assert!(past.contains("filed probe-b"), "{past}");
+    }
+
+    /// chrono keeps the local zone for a second. The guard waits that out
+    /// on the way in and on the way out, so a later test on this thread
+    /// does not keep the zone this one set.
+    struct ZoneGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl ZoneGuard {
+        fn set(tz: &str) -> Self {
+            let prev = std::env::var_os("TZ");
+            unsafe { std::env::set_var("TZ", tz) };
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            Self { prev }
+        }
+    }
+
+    impl Drop for ZoneGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prev.take() {
+                    Some(value) => std::env::set_var("TZ", value),
+                    None => std::env::remove_var("TZ"),
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+    }
+
+    #[test]
+    fn equal_instants_do_not_follow_insertion_order() {
+        let rows_of = |order: &[(&'static str, &'static str)]| -> Vec<Row> {
+            order
+                .iter()
+                .map(|(kind, text)| {
+                    Row::new(
+                        1_700_000_000,
+                        "ada".into(),
+                        kind,
+                        (*text).into(),
+                        "probe",
+                        false,
+                    )
+                })
+                .collect()
+        };
+        let kinds = |order: &[(&'static str, &'static str)]| -> Vec<&'static str> {
+            grouped(&rows_of(order))
+                .into_iter()
+                .next()
+                .unwrap()
+                .1
+                .into_iter()
+                .map(|row| row.kind)
+                .collect()
+        };
+        let forward = [("ticket", "same line"), ("guard", "same line")];
+        let reverse = [("guard", "same line"), ("ticket", "same line")];
+        assert_eq!(kinds(&forward), kinds(&reverse));
+        assert_eq!(kinds(&forward), ["guard", "ticket"]);
+
+        let lines = |order: &[(&'static str, &'static str)]| -> Vec<String> {
+            grouped(&rows_of(order))
+                .into_iter()
+                .next()
+                .unwrap()
+                .1
+                .into_iter()
+                .map(|row| row.text.clone())
+                .collect()
+        };
+        let zebra_first = [("ticket", "zebra"), ("ticket", "alpha")];
+        let alpha_first = [("ticket", "alpha"), ("ticket", "zebra")];
+        assert_eq!(lines(&zebra_first), lines(&alpha_first));
+        assert_eq!(lines(&zebra_first), ["alpha", "zebra"]);
+
+        let seats_of = |names: &[&str]| -> Vec<String> {
+            let rows: Vec<Row> = names
+                .iter()
+                .map(|seat| {
+                    Row::new(
+                        1_700_000_000,
+                        (*seat).into(),
+                        "guard",
+                        "same".into(),
+                        "",
+                        false,
+                    )
+                })
+                .collect();
+            grouped(&rows).into_iter().map(|(seat, _)| seat).collect()
+        };
+        assert_eq!(seats_of(&["carol", "ada"]), seats_of(&["ada", "carol"]));
+        assert_eq!(seats_of(&["carol", "ada"]), ["ada", "carol"]);
+    }
+
+    #[test]
+    fn digest_order_holds_in_another_zone_when_deedar_is_slow() {
+        let _lock = crate::test_env_lock();
+        // POSIX `XXX-16` is sixteen hours east of UTC. Read as a local
+        // wall time, alice's 09:14 is older than bob's 18:00Z, and bob
+        // would lead. A deed read that sleeps past 400 ms used to vanish.
+        let _zone = ZoneGuard::set("XXX-16");
+        let dir = tempfile::tempdir().unwrap();
+        let root = tracker(dir.path());
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let stub = bin.join("deedar");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\nsleep 0.6\nprintf 'time=1760000000\\nproducedBy=ada\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            root.join("Software/probe/issues.org"),
+            "\
+* DONE [#C] Close the probe
+:PROPERTIES:
+:ID:         probe-a
+:DEEDS:      deed-1
+:END:
+:LOGBOOK:
+- State \"DONE\" from \"TODO\" [2026-10-29 Thu 09:14]
+- Finished by alice [2026-10-29 Thu 09:14]
+:END:
+",
+        )
+        .unwrap();
+        git(&root, &["add", "."], "2020-01-01T00:00:00Z");
+        git(
+            &root,
+            &["commit", "-q", "-m", "seed"],
+            "2020-01-01T00:00:00Z",
+        );
+        let (url, stored) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        stored.lock().unwrap().push(serde_json::json!({
+            "id": "mem1",
+            "kind": "fact",
+            "text": "the rail is steel",
+            "ts": "2026-10-28T18:00:00Z",
+            "origin": "user-declared",
+            "source": {"seat": "bob", "at": "2026-10-28T18:00:00Z"}
+        }));
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        isolate(&root, &home, &path);
+        unsafe { std::env::set_var("PACKSET_URL", &url) };
+
+        let text = digest(None, false).unwrap();
+        let seats: Vec<&str> = text
+            .lines()
+            .filter(|line| {
+                !line.is_empty() && !line.starts_with(' ') && !line.starts_with("tracker:")
+            })
+            .collect();
+        assert_eq!(seats, ["alice", "bob", "ada"], "{text}");
+        assert!(
+            text.contains("2025-10-09 08:53  deed-1 produced by ada"),
+            "{text}"
+        );
+        assert!(text.contains("2026-10-29 09:14  closed probe-a"), "{text}");
+        assert!(
+            text.contains("2026-10-28 18:00  memory: the rail is steel"),
+            "{text}"
+        );
     }
 
     #[test]
