@@ -2054,13 +2054,14 @@ enum Cmd {
     },
     /// Connect ljos to a coding runner, or print the MCP entry to paste into one.
     ///
-    /// With no `--harness`, a terminal onboards every runner it finds, and
-    /// a pipe prints the JSON entry. MCP is the tool server the runner starts.
+    /// With no `--harness`, ljos onboards every runner it finds.
+    /// A pipe prints the MCP entry on stdout and the setup lines on stderr.
+    /// MCP is the tool server the runner starts.
     /// `--example` prints harnesses.toml. A step that does not land exits 1.
     ///
     /// Example: `ljos onboard`
     Onboard {
-        /// A runner named in ~/.config/ljos/harnesses.toml or shipped with ljos; `all` onboards every runner found on this machine, and `json` prints the entry to paste anywhere. Absent: `all` at a terminal, `json` into a pipe.
+        /// A runner named in ~/.config/ljos/harnesses.toml or shipped with ljos; `all` onboards every runner found on this machine, and `json` prints the entry to paste anywhere. Absent: `all`. A pipe prints the entry on stdout and the setup lines on stderr. `json` sets nothing up.
         #[arg(long)]
         harness: Option<String>,
         /// Report what would be written and write nothing.
@@ -6448,27 +6449,31 @@ fn run_command() -> Result<()> {
                 print!("{HARNESSES_EXAMPLE}");
                 return Ok(());
             }
-            let harness = harness.unwrap_or_else(|| {
-                if std::io::stdout().is_terminal() {
-                    "all".to_string()
-                } else {
-                    "json".to_string()
-                }
-            });
+            // A pipe used to print the entry and skip the stores, so the
+            // next `ljos file` had no tracker. The stores are set up
+            // either way. The entry stays the only text on stdout.
+            let piped = harness.is_none() && !std::io::stdout().is_terminal();
+            let harness = harness.unwrap_or_else(|| "all".to_string());
             let steps = if harness == "all" {
                 ljos_cli::onboard_detected(dry_run, skills.as_deref())?
             } else {
                 onboard_to(&harness, dry_run, skills.as_deref())?
             };
-            // With no runner named, the entry is for pasting: print the
-            // JSON alone, so it parses as it stands.
+            // `--harness json` prints the entry alone, so it parses as it stands.
             if harness == "json" {
                 for s in &steps {
                     println!("{}", s.detail);
                 }
                 return Ok(());
             }
-            print!("{}", format_steps(&steps));
+            let lines = format_steps(&steps);
+            if piped {
+                let entry = ljos_cli::server_entry()?;
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+                eprint!("{lines}");
+            } else {
+                print!("{lines}");
+            }
             if steps.iter().any(|s| !s.ok) {
                 std::process::exit(1);
             }

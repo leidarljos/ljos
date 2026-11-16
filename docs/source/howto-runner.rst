@@ -84,8 +84,8 @@ over stdio:
    $ ljos onboard --harness json
    {"mcpServers": {"ljos": {"type": "stdio", "command": "ljos-mcp", "args": [], "env": {}}}}
 
-``ljos onboard`` at a terminal, with no output format named, onboards every runner it finds.
-A pipe prints the same JSON, and onboard in json form prints it at a terminal too.
+``ljos onboard`` with no ``--harness`` onboards every runner it finds, at a terminal or in a pipe, and a pipe prints that JSON on stdout with the setup lines on stderr after the tracker, the memory writer and the deed store are set up.
+``ljos onboard --harness json`` prints the JSON alone and leaves those stores unchanged.
 Paste it where the runner keeps its MCP servers. The ``env`` is empty on
 purpose. The server does not take the seat from the client that connects.
 Set ``LJOS_SEAT`` in that entry's ``env``, or a ``seat=`` line in
