@@ -323,6 +323,55 @@ fn prefix_of(id: &str, len: usize) -> &str {
     }
 }
 
+/// The id `ljos search` prints.
+///
+/// The shortest prefix of `id` that starts one id in `store`. It keeps at
+/// least eight hex digits of the trailing hex run when that run is long
+/// enough. `local:0123abcd…` keeps `local:` and then eight hex digits. A
+/// plain hex id takes eight digits. A shorter id is printed whole.
+/// `ljos forget` accepts the result.
+#[must_use]
+pub fn shown_prefix(id: &str, store: &[&str]) -> String {
+    let id = id.trim();
+    if id.is_empty() {
+        return String::new();
+    }
+    let width = id.chars().count();
+    let mut len = prefix_floor(id).min(width);
+    while len < width {
+        let prefix = prefix_of(id, len);
+        if !prefix_shared(prefix, id, store) {
+            return prefix.to_string();
+        }
+        len += 1;
+    }
+    id.to_string()
+}
+
+/// Characters until the prefix holds eight hex digits of the trailing hex
+/// run. The run is the hex digits at the end of `id`. No such run: eight
+/// characters, or the whole id when it is shorter.
+fn prefix_floor(id: &str) -> usize {
+    let chars: Vec<char> = id.chars().collect();
+    let mut tail = chars.len();
+    while tail > 0 && chars[tail - 1].is_ascii_hexdigit() {
+        tail -= 1;
+    }
+    let hex = chars.len() - tail;
+    if hex == 0 {
+        return chars.len().min(8);
+    }
+    tail + hex.min(8)
+}
+
+/// True when some id in `store` other than `id` starts with `prefix`.
+fn prefix_shared(prefix: &str, id: &str, store: &[&str]) -> bool {
+    store
+        .iter()
+        .map(|other| other.trim())
+        .any(|other| !other.is_empty() && other != id && other.starts_with(prefix))
+}
+
 /// One claim: a short head, the text under it, then an optional foot.
 /// `indent` is the head's left margin. The text and the foot sit two
 /// columns further in.
@@ -440,6 +489,9 @@ pub struct SearchPage<'a> {
     /// This seat's rows come first. A word ranking leaves this false: the
     /// word score already includes a small boost, and a closer row stays ahead.
     pub seat_ahead: bool,
+    /// Ids the printed prefix is unique among. Empty means the rows on
+    /// this page.
+    pub store: &'a [&'a str],
 }
 
 /// The human search page.
@@ -462,14 +514,19 @@ pub fn search_page(page: &SearchPage<'_>) -> String {
         out.push_str("Place 1 is the first row.\n");
     }
     out.push('\n');
-    let labels = unique_prefixes(page.rows.iter().map(|row| row.id.unwrap_or("")));
-    for (row, label) in page.rows.iter().zip(labels) {
-        // A ticket id is what `ljos recall` takes. An eight-character cut
-        // of `Software-6mrw` is `Software`, which is not that id.
+    let page_ids: Vec<&str> = page.rows.iter().filter_map(|row| row.id).collect();
+    let store = if page.store.is_empty() {
+        page_ids.as_slice()
+    } else {
+        page.store
+    };
+    for row in page.rows {
+        // A ticket id is what `ljos recall` takes. A cut of `Software-6mrw`
+        // is not that id.
         let id_label = if row.label == "ticket" {
             row.id.unwrap_or("").to_string()
         } else {
-            label
+            shown_prefix(row.id.unwrap_or(""), store)
         };
         out.push_str(&search_row(row, &id_label));
         out.push_str("\n\n");
@@ -940,6 +997,7 @@ mod tests {
             query: "kiln",
             reading,
             seat_ahead,
+            store: &[],
         };
         let meaning = search_page(&page(false, true));
         assert_eq!(
@@ -970,6 +1028,48 @@ mod tests {
                 "{page}"
             );
         }
+    }
+
+    #[test]
+    fn a_shown_prefix_is_eight_hex_digits_and_unique_in_the_store() {
+        let shared = format!("45{}", "a".repeat(40));
+        let local_a = format!("local:{shared}1111111111111111111111");
+        let local_b = format!("local:{shared}2222222222222222222222");
+        let local_c = format!("local:45{}3333333333333333333333", "b".repeat(40));
+        let plain_a = format!("{}{}", "a".repeat(8), "1".repeat(56));
+        let plain_b = format!("{}{}", "a".repeat(8), "2".repeat(56));
+        let plain_c = format!("{}{}", "b".repeat(8), "3".repeat(56));
+        let ids = [
+            local_a.as_str(),
+            local_b.as_str(),
+            local_c.as_str(),
+            plain_a.as_str(),
+            plain_b.as_str(),
+            plain_c.as_str(),
+        ];
+        let want = [
+            format!("local:{shared}1"),
+            format!("local:{shared}2"),
+            "local:45bbbbbb".to_string(),
+            format!("{}1", "a".repeat(8)),
+            format!("{}2", "a".repeat(8)),
+            "b".repeat(8),
+        ];
+        for (id, prefix) in ids.iter().zip(want) {
+            let shown = shown_prefix(id, &ids);
+            assert_eq!(shown, prefix, "{id}");
+            assert!(id.starts_with(&shown));
+            let hex = shown
+                .chars()
+                .rev()
+                .take_while(|ch| ch.is_ascii_hexdigit())
+                .count();
+            assert!(hex >= 8, "{shown}");
+            let hits = ids.iter().filter(|other| other.starts_with(&shown)).count();
+            assert_eq!(hits, 1, "{shown}");
+        }
+        assert_eq!(shown_prefix("id-24", &["id-24"]), "id-24");
+        assert_eq!(shown_prefix("local:ab", &["local:ab"]), "local:ab");
     }
 
     #[test]

@@ -1179,7 +1179,8 @@ pub struct SearchPage {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HitRow {
-    /// The atom's id, when it has one.
+    /// The id `ljos search` prints: the shortest unique prefix in the store,
+    /// at least eight hex digits. A ticket keeps its id. `ljos_forget` takes this.
     pub id: Option<String>,
     /// `lesson` or `preference`, or another kind the pack holds.
     pub kind: String,
@@ -1649,6 +1650,8 @@ impl LjosServer {
             ljos_cli::drop_weak_cross_seat(&mut hits, &args.query, false)
         };
         note_lookups(&hits);
+        let id_space = ljos_cli::search_id_space(&hits);
+        let id_refs: Vec<&str> = id_space.iter().map(String::as_str).collect();
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
         let mut reading = if let Some(suggest) = close_miss.as_ref() {
@@ -1672,7 +1675,7 @@ impl LjosServer {
                 .into_iter()
                 .map(|h| HitRow {
                     label: kind_label(&h),
-                    id: h.id,
+                    id: ljos_cli::search_hit_id(&h.kind, h.id.as_deref(), &id_refs),
                     kind: h.kind,
                     text: h.text,
                     score: h.score,

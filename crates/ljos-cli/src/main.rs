@@ -755,13 +755,14 @@ enum Cmd {
     RetireNotes,
     /// Retire one memory by id. The text stays, marked retired.
     ///
-    /// `ljos search` prints the id. A prefix of 8 or more characters is
-    /// enough. `--why` names the stored file that withdrew it, an id from
-    /// `deedar create`. Omit `--why` when there is no such file.
+    /// `ljos search` prints the id. Eight hex characters are enough, and
+    /// more when several memories share them. `--why` names the stored file
+    /// that withdrew it, an id from `deedar create`. Omit `--why` when there
+    /// is no such file.
     ///
     /// Example: `ljos forget a6ae2751`
     Forget {
-        /// The memory id `ljos search` prints, or a prefix of 8 or more characters.
+        /// The memory id `ljos search` prints. Eight hex characters are enough.
         id: String,
         /// Id of the stored file that withdrew the memory. Refused when `deedar` does not know it.
         #[arg(long)]
@@ -4946,6 +4947,7 @@ fn run_command() -> Result<()> {
             let matched = hits.len();
             hits.truncate(limit as usize);
             ljos_cli::note_lookups(&hits);
+            let id_space = ljos_cli::search_id_space(&hits);
             ranking = ljos_cli::ranking_for_printed(ranking, &hits);
             let close_line = close_miss
                 .as_ref()
@@ -4970,11 +4972,12 @@ fn run_command() -> Result<()> {
                 };
                 print!(
                     "{}",
-                    ljos_cli::search_json_empty(
+                    ljos_cli::search_json_stored(
                         &hits,
                         Some(&ranking),
                         empty,
-                        suggestion.as_deref()
+                        suggestion.as_deref(),
+                        &id_space,
                     )
                 );
             } else {
@@ -5002,13 +5005,14 @@ fn run_command() -> Result<()> {
                     print!(
                         "{}",
                         ljos_cli::scan::for_reader(
-                            &ljos_cli::format_search(
+                            &ljos_cli::format_search_stored(
                                 &hits,
                                 matched,
                                 capped,
                                 explain,
                                 &asked,
                                 ranking.mode != "lexical",
+                                &id_space,
                             ),
                             human_color()
                         )

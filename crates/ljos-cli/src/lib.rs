@@ -15266,19 +15266,36 @@ pub fn search_json(hits: &[Hit], ranking: Option<&Ranking>) -> String {
 /// [`search_json`] that names an empty answer. `empty` is set when the
 /// only rows were another seat's hits under the similarity floor.
 /// `suggestion` is the shorter command, present only when `hits` is empty.
+/// The id is unique among the rows on the page.
 pub fn search_json_empty(
     hits: &[Hit],
     ranking: Option<&Ranking>,
     empty: Option<&str>,
     suggestion: Option<&str>,
 ) -> String {
+    search_json_stored(hits, ranking, empty, suggestion, &[])
+}
+
+/// [`search_json_empty`] with the ids the prefix must be unique among.
+pub fn search_json_stored(
+    hits: &[Hit],
+    ranking: Option<&Ranking>,
+    empty: Option<&str>,
+    suggestion: Option<&str>,
+    store: &[String],
+) -> String {
     let mine = seat_name();
+    let refs: Vec<&str> = if store.is_empty() {
+        hits.iter().filter_map(|hit| hit.id.as_deref()).collect()
+    } else {
+        store.iter().map(String::as_str).collect()
+    };
     let rows: Vec<Value> = hits
         .iter()
         .enumerate()
         .map(|(index, hit)| {
             let mut row = serde_json::json!({
-                "id": hit.id,
+                "id": search_hit_id(&hit.kind, hit.id.as_deref(), &refs),
                 "kind": hit.kind,
                 "text": hit.text,
                 "score": hit.score,
@@ -23286,11 +23303,9 @@ pub fn packset_forget(id: &str, why: Option<&str>) -> Result<Value> {
             ids.push(imported);
         }
     }
-    let resolved = if trimmed.len() < 32 {
-        resolve_forget_id(trimmed, &ids)?
-    } else {
-        trimmed.to_string()
-    };
+    // A printed search id can be longer than 32 characters when several
+    // `local:` rows share a long hex run. Resolve that prefix too.
+    let resolved = resolve_forget_id(trimmed, &ids)?;
     if let Some(retired) = memory_port::retire_imported(&resolved, why)? {
         if let Ok(client) = &packed {
             let workspace = client.workspace();
@@ -23328,7 +23343,7 @@ fn forget_delete_error(id: &str, err: impl Into<anyhow::Error>) -> anyhow::Error
     let err = err.into();
     if missing_atom(&err) {
         anyhow::anyhow!(
-            "forget: no memory has id {id}. `ljos search` prints the id. A prefix of 8 or more characters is enough"
+            "forget: no memory has id {id}. `ljos search` prints the id. Eight hex characters are enough, and more when several memories share them"
         )
     } else {
         err.context(format!("forget: the pack did not retire {id}"))
@@ -46740,14 +46755,15 @@ pub fn search_reading(n: usize, seat_ahead: bool) -> &'static str {
 /// The human search page. `explain` (`ljos search --explain`) opens with
 /// [`search_reading`]. Without it the page is one line on place. An empty
 /// answer is [`scan::nothing_matched_line`]. The id on each row is the
-/// eight-character prefix. The ranker score is not printed. `--json` does
-/// not use this.
+/// prefix [`search_hit_id`] prints. The ranker score is not printed.
+/// `--json` uses the same prefix.
 pub fn format_hits(hits: &[Hit], explain: bool) -> String {
     format_search(hits, hits.len(), false, explain, "", true)
 }
 
 /// [`format_hits`] with the count before the limit cut. `capped` means the
 /// pack filled the page it was asked for, so more rows may exist.
+/// Uniqueness is among the rows on the page.
 #[must_use]
 pub fn format_search(
     hits: &[Hit],
@@ -46756,6 +46772,20 @@ pub fn format_search(
     explain: bool,
     query: &str,
     seat_ahead: bool,
+) -> String {
+    format_search_stored(hits, matched, capped, explain, query, seat_ahead, &[])
+}
+
+/// [`format_search`] with the ids the prefix must be unique among.
+#[must_use]
+pub fn format_search_stored(
+    hits: &[Hit],
+    matched: usize,
+    capped: bool,
+    explain: bool,
+    query: &str,
+    seat_ahead: bool,
+    store: &[String],
 ) -> String {
     let now = now_utc();
     let mine = seat_name();
@@ -46793,6 +46823,7 @@ pub fn format_search(
             },
         )
         .collect();
+    let refs: Vec<&str> = store.iter().map(String::as_str).collect();
     scan::search_page(&scan::SearchPage {
         rows: &rows,
         shown: hits.len(),
@@ -46802,7 +46833,57 @@ pub fn format_search(
         query,
         reading,
         seat_ahead,
+        store: &refs,
     })
+}
+
+/// Pack atom ids and imported row ids. The same list `ljos forget` matches.
+pub fn memory_ids() -> Vec<String> {
+    let mut ids: Vec<String> = pack()
+        .ok()
+        .and_then(|client| atoms_lean(&client, &client.workspace()).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|atom| {
+            atom["id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+        })
+        .collect();
+    for imported in memory_port::import_row_ids() {
+        if !ids.iter().any(|id| id == &imported) {
+            ids.push(imported);
+        }
+    }
+    ids
+}
+
+/// [`memory_ids`] plus any hit id that list does not already hold.
+#[must_use]
+pub fn search_id_space(hits: &[Hit]) -> Vec<String> {
+    let mut ids = memory_ids();
+    for hit in hits {
+        let Some(id) = hit.id.as_deref().map(str::trim).filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        if !ids.iter().any(|have| have == id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
+}
+
+/// The id search prints for one hit. A ticket keeps its id. Any other id
+/// is [`scan::shown_prefix`] over `store`.
+#[must_use]
+pub fn search_hit_id(kind: &str, id: Option<&str>, store: &[&str]) -> Option<String> {
+    let id = id.map(str::trim).filter(|id| !id.is_empty())?;
+    if kind == "ticket" {
+        return Some(id.to_string());
+    }
+    Some(scan::shown_prefix(id, store))
 }
 
 /// The ticket a hit was filed on, from an `issue:ID` entity.
@@ -68089,6 +68170,32 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "ffffffff"
         );
         assert_eq!(resolve_short_id("forget", &ids[1], &ids).unwrap(), ids[1]);
+    }
+
+    #[test]
+    fn a_search_prefix_resolves_for_forget_and_accept() {
+        let shared = format!("45{}", "a".repeat(40));
+        let ids = vec![
+            format!("local:{shared}1111111111111111111111"),
+            format!("local:{shared}2222222222222222222222"),
+            format!("local:45{}3333333333333333333333", "b".repeat(40)),
+            format!("{}{}", "a".repeat(8), "1".repeat(56)),
+            format!("{}{}", "a".repeat(8), "2".repeat(56)),
+        ];
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        for id in &ids {
+            let shown = scan::shown_prefix(id, &refs);
+            assert!(shown.len() > 8 || id.chars().all(|ch| ch.is_ascii_hexdigit()));
+            assert!(
+                shown.len() > 32 || !shown.starts_with("local:45a"),
+                "the long local prefix must pass the old 32-character gate: {shown}"
+            );
+            assert_eq!(resolve_forget_id(&shown, &ids).unwrap(), *id);
+            assert_eq!(resolve_short_id("accept", &shown, &ids).unwrap(), *id);
+            assert_eq!(resolve_short_id("graded", &shown, &ids).unwrap(), *id);
+        }
+        let err = resolve_forget_id("local:45", &ids).unwrap_err().to_string();
+        assert!(err.contains("starts 3 ids"), "{err}");
     }
 
     #[test]

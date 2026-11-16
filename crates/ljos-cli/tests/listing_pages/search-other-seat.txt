@@ -10,7 +10,7 @@ lesson, from an agent, today, from bob, ticket demo-tile
   https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-
   readings/line-4/workshop-north/session-that-is-one-long-url-so-a-person-can-
   see-where-it-breaks
-  place 1, checks 2/3, id idkiln03
+  place 1, checks 2/3, id idkiln03cccccc
 
 ticket demo-tile
   Glaze the tile after reading

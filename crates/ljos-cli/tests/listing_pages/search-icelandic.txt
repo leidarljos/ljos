@@ -9,4 +9,4 @@ lesson, from an agent, yesterday, ticket demo-kiln
   The damper sticks.
   Open the flue before the kiln reaches temperature.
   Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
-  place 1, checks 3/3, id idkiln02
+  place 1, checks 3/3, id idkiln02bbbbbb
