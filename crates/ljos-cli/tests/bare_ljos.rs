@@ -233,6 +233,40 @@ fn help_search_prints_the_search_page() {
 }
 
 #[test]
+fn listing_words_point_at_ready_and_claims() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = |word: &str| {
+        format!(
+            "ljos: no command {word}, and the closest is ready, so run `ljos ready`. `ljos claims` lists what is held.\n"
+        )
+    };
+    for word in ["list", "ls", "issues", "tickets", "todo", "LIST"] {
+        let out = run(dir.path(), &[word], &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{word}\n{said}");
+        assert!(out.stdout.is_empty(), "{word}\n{said}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), line(word), "{word}");
+    }
+    let extra = run(dir.path(), &["list", "kiln"], &[]);
+    let said = text(&extra);
+    assert_eq!(extra.status.code(), Some(2), "{said}");
+    assert!(extra.stdout.is_empty(), "{said}");
+    assert_eq!(String::from_utf8_lossy(&extra.stderr), line("list"));
+    let help = run(dir.path(), &["help", "list"], &[]);
+    let said = text(&help);
+    assert_eq!(help.status.code(), Some(2), "{said}");
+    assert!(help.stdout.is_empty(), "{said}");
+    assert_eq!(String::from_utf8_lossy(&help.stderr), line("list"));
+    let memories = run(dir.path(), &["memories", "list", "--help"], &[]);
+    let said = text(&memories);
+    assert!(memories.status.success(), "{said}");
+    assert!(
+        !String::from_utf8_lossy(&memories.stderr).contains("no command list"),
+        "{said}"
+    );
+}
+
+#[test]
 fn help_for_a_mistyped_command_names_the_real_one() {
     let dir = tempfile::tempdir().unwrap();
     let out = run(dir.path(), &["help", "serch"], &[]);

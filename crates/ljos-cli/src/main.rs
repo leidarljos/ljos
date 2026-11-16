@@ -2499,9 +2499,25 @@ fn root_synonym(typed: &str) -> Option<&'static str> {
     }
 }
 
+/// `list`, `ls`, `issues`, `tickets` and `todo` are not commands.
+///
+/// A person reaching for a board means the ready list. Claims is where a
+/// ticket already in hand shows up. The word is not run.
+fn listing_sentence(typed: &str) -> Option<String> {
+    match typed.to_ascii_lowercase().as_str() {
+        "list" | "ls" | "issues" | "tickets" | "todo" => Some(format!(
+            "ljos: no command {typed}, and the closest is ready, so run `ljos ready`. `ljos claims` lists what is held."
+        )),
+        _ => None,
+    }
+}
+
 fn command_sentence(typed: &str, args: &[String]) -> String {
     let path = command_words(args, typed);
     let here = words_at(&path);
+    if let Some(line) = listing_sentence(typed).filter(|_| here.at.is_empty()) {
+        return line;
+    }
     let picked = if here.at.is_empty() {
         root_synonym(typed).map(str::to_string)
     } else {
@@ -3275,6 +3291,10 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
         if let Some(sub) = current.find_subcommand(name) {
             current = sub;
             continue;
+        }
+        if let Some(line) = listing_sentence(name).filter(|_| current.get_name() == "ljos") {
+            eprintln!("{line}");
+            std::process::exit(USAGE_STATUS);
         }
         let names = child_names(current);
         let picked = if current.get_name() == "ljos" {
