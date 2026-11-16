@@ -1337,10 +1337,18 @@ enum Cmd {
     },
     /// Record that a ticket waits on another, or drop that edge.
     ///
-    /// Example: `ljos block proj-1a2b --on proj-9c3d`
+    /// `ljos block ISSUE OTHER` is `ljos block ISSUE --on OTHER`.
+    /// Further ids are further tickets it waits on.
+    /// `--off ID` drops that edge.
+    /// A following id beside `--on` or `--off` is refused.
+    ///
+    /// Example: `ljos block proj-1a2b proj-9c3d`
     Block {
         /// The ticket that waits.
         issue: String,
+        /// A ticket it waits on. The same as `--on`. Repeat for several.
+        #[arg(value_name = "OTHER")]
+        also: Vec<String>,
         /// The ticket it waits on.
         #[arg(long, value_name = "ID", conflicts_with = "off")]
         on: Option<String>,
@@ -2548,6 +2556,9 @@ fn listing_sentence(typed: &str) -> Option<String> {
 fn command_sentence(typed: &str, args: &[String]) -> String {
     let path = command_words(args, typed);
     let here = words_at(&path);
+    if let Some(line) = ticket_id_sentence(typed, &here.at, here.form.as_ref()) {
+        return line;
+    }
     if let Some(line) = listing_sentence(typed).filter(|_| here.at.is_empty()) {
         return line;
     }
@@ -2711,6 +2722,8 @@ struct UsageWords {
     at: Vec<String>,
     commands: Vec<String>,
     flags: Vec<String>,
+    /// What an id-taking verb expected, and the command from its example line.
+    form: Option<(String, String)>,
 }
 
 fn words_at(path: &[String]) -> UsageWords {
@@ -2739,7 +2752,106 @@ fn words_at_inner(path: &[String]) -> UsageWords {
         at,
         commands: child_names(&cmd),
         flags: flag_spellings(&cmd),
+        form: ticket_form(&cmd),
     }
+}
+
+/// An extra word that is a ticket id, on a verb that takes one.
+///
+/// The line names what that verb's id argument says, and the command from
+/// its example. A word that is not an id stays a missing command.
+fn ticket_id_sentence(
+    typed: &str,
+    at: &[String],
+    form: Option<&(String, String)>,
+) -> Option<String> {
+    if at.is_empty() || !vissue_id(typed) {
+        return None;
+    }
+    let (expected, example) = form?;
+    let verb = at.join(" ");
+    Some(format!(
+        "ljos: {verb} expected {expected}, so run `{example}`."
+    ))
+}
+
+fn ticket_form(cmd: &clap::Command) -> Option<(String, String)> {
+    let mut expected = None;
+    for arg in cmd.get_arguments() {
+        if arg.get_index().is_none() || !arg_takes_ticket(arg) {
+            continue;
+        }
+        let help = arg.get_help().map(plain_styled).unwrap_or_default();
+        let phrase = expected_phrase(&help);
+        if !phrase.is_empty() {
+            expected = Some(phrase);
+            break;
+        }
+    }
+    let expected = expected?;
+    let example = example_form(cmd)?;
+    Some((expected, example))
+}
+
+fn arg_takes_ticket(arg: &clap::Arg) -> bool {
+    if let Some(names) = arg.get_value_names() {
+        for name in names {
+            if name.eq_ignore_ascii_case("issue") || name.eq_ignore_ascii_case("node") {
+                return true;
+            }
+        }
+    }
+    let Some(help) = arg.get_help() else {
+        return false;
+    };
+    let help = plain_styled(help).to_ascii_lowercase();
+    help.contains("tracker id")
+        || help.contains("ticket id")
+        || help.contains("issue id")
+        || help.contains("the ticket")
+}
+
+fn expected_phrase(help: &str) -> String {
+    let sentence = help.split(['.', '\n']).next().unwrap_or(help).trim();
+    let mut chars = sentence.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let rest: String = chars.collect();
+    let lower = match rest.chars().next() {
+        Some(next)
+            if first.is_ascii_uppercase() && (next.is_lowercase() || next.is_whitespace()) =>
+        {
+            first.to_ascii_lowercase()
+        }
+        None if first.is_ascii_uppercase() => first.to_ascii_lowercase(),
+        _ => first,
+    };
+    format!("{lower}{rest}")
+}
+
+fn example_form(cmd: &clap::Command) -> Option<String> {
+    let blobs = [cmd.get_long_about(), cmd.get_about()];
+    for blob in blobs.into_iter().flatten() {
+        if let Some(form) = example_in(&plain_styled(blob)) {
+            return Some(form);
+        }
+    }
+    None
+}
+
+fn example_in(text: &str) -> Option<String> {
+    let at = text.find("Example:")?;
+    let rest = text[at + "Example:".len()..].trim_start();
+    let start = rest.find('`')?;
+    let tail = &rest[start + 1..];
+    let end = tail.find('`')?;
+    let form = &tail[..end];
+    (!form.is_empty()).then(|| form.to_string())
+}
+
+fn plain_styled(text: &clap::builder::StyledStr) -> String {
+    text.to_string()
 }
 
 fn child_names(cmd: &clap::Command) -> Vec<String> {
@@ -3028,6 +3140,25 @@ fn warn_other_sitting(wrote: &str, quiet: bool, inferred: bool, finish: bool) {
         };
         eprintln!("{line}");
     }
+}
+
+/// A `block` line that names the edge twice, or names a word that is not an id.
+///
+/// Following ids are `--on`. `--on` or `--off` on the same line is the other
+/// way to name that edge. A word that is not an id is still not a command.
+fn block_usage_line(cmd: &Cmd) -> Option<String> {
+    let Cmd::Block { also, on, off, .. } = cmd else {
+        return None;
+    };
+    if !also.is_empty() && (on.is_some() || off.is_some()) {
+        return Some(
+            "block: a following id stands in for --on, so drop --on and --off.".to_string(),
+        );
+    }
+    let word = also.iter().find(|word| !vissue_id(word))?;
+    Some(format!(
+        "ljos: no command {word}, so run `ljos block --help`."
+    ))
 }
 
 /// An empty or whitespace id on `note` or `finish`.
@@ -3332,6 +3463,11 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
             continue;
         }
         if let Some(line) = listing_sentence(name).filter(|_| current.get_name() == "ljos") {
+            eprintln!("{line}");
+            std::process::exit(USAGE_STATUS);
+        }
+        let verb: Vec<String> = topic[..i].to_vec();
+        if let Some(line) = ticket_id_sentence(name, &verb, ticket_form(current).as_ref()) {
             eprintln!("{line}");
             std::process::exit(USAGE_STATUS);
         }
@@ -4314,6 +4450,12 @@ fn run_command() -> Result<()> {
     if let Some(line) = blank_ticket_line(&cmd) {
         eprintln!("{line}");
         std::process::exit(1);
+    }
+    // A following id on `block` is `--on`. A mix with `--on` or `--off`,
+    // or a word that is not an id, is a usage error. Refuse before the seat.
+    if let Some(line) = block_usage_line(&cmd) {
+        eprintln!("{line}");
+        std::process::exit(USAGE_STATUS);
     }
     ljos_cli::seat_resolve::prepare(seat_flag, seat_kind(&cmd));
     // A lesson left while the pack was busy goes out on the next call
@@ -5549,11 +5691,24 @@ fn run_command() -> Result<()> {
             };
             print!("{said}");
         }
-        Cmd::Block { issue, on, off } => {
-            let said = match (on, off) {
-                (Some(on), None) => ljos_cli::block_edge(&issue, &on, false)?,
-                (None, Some(off)) => ljos_cli::block_edge(&issue, &off, true)?,
-                _ => bail!("block: pass --on ID to add an edge, or --off ID to drop one"),
+        Cmd::Block {
+            issue,
+            also,
+            on,
+            off,
+        } => {
+            let said = if !also.is_empty() {
+                let mut out = String::new();
+                for id in &also {
+                    out.push_str(&ljos_cli::block_edge(&issue, id, false)?);
+                }
+                out
+            } else {
+                match (on, off) {
+                    (Some(on), None) => ljos_cli::block_edge(&issue, &on, false)?,
+                    (None, Some(off)) => ljos_cli::block_edge(&issue, &off, true)?,
+                    _ => bail!("block: pass --on ID to add an edge, or --off ID to drop one"),
+                }
             };
             print!("{said}");
         }

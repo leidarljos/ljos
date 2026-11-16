@@ -198,8 +198,8 @@ The line says what went wrong and the command that fixes it.
    Stores: none. Print this list, or the help of one command. ``--all`` lists every command, including those left off the short list. ``ljos`` with no arguments prints what ljos is, the seat and where it came from, then ``install``, ``doctor``, ``remember`` and ``search``, and names this page. A read with no seat named says it uses every seat, because no seat was named.
 ``options ISSUE A,B``
    Stores: tracker. Append ``Options: A, B`` to an issue. Two or more, separated by commas. Fewer than two is refused.
-``block ISSUE --on ID|--off ID``
-   Stores: tracker. Record that one ticket waits on another. ``--on`` adds that edge. ``--off`` drops it.
+``block ISSUE [OTHER...] [--on ID|--off ID]``
+   Stores: tracker. Record that one ticket waits on another. A following id is the same as ``--on``. Further ids are further tickets it waits on. ``--on`` adds that edge. ``--off`` drops it. A following id beside ``--on`` or ``--off`` is refused.
 ``export --out FILE [--machine NAME] [--json]``
    Stores: pack, tracker. The same command as ``memory export``.
 ``proposals [--seat SEAT] [--status STATUS] [--settle]``

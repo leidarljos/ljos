@@ -121,6 +121,53 @@ fn a_mistyped_command_names_the_closest_and_exits_2() {
 }
 
 #[test]
+fn an_extra_ticket_id_names_the_form_and_exits_2() {
+    let home = Home::new();
+    let cases = [
+        (
+            &["show", "demo-kiln", "demo-tile"][..],
+            "ljos: show expected the tracker id, so run `ljos show proj-1a2b`.",
+        ),
+        (
+            &["claim", "demo-kiln", "demo-tile"][..],
+            "ljos: claim expected a tracker id, or a 32-hex claim-graph id, so run `LJOS_SEAT=alice ljos claim demo-2f5j`.",
+        ),
+        (
+            &["sitting", "demo-kiln", "demo-tile"][..],
+            "ljos: sitting expected the tracker id of the issue, so run `LJOS_SEAT=alice ljos sitting --plan \"Ship the codec\" -p day -- \"measure the files\"`.",
+        ),
+        (
+            &["help", "show", "demo-tile"][..],
+            "ljos: show expected the tracker id, so run `ljos show proj-1a2b`.",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = home.run(args, &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert!(
+            !String::from_utf8_lossy(&out.stderr).contains("no command"),
+            "{args:?}\n{said}"
+        );
+    }
+}
+
+#[test]
+fn a_word_after_block_that_is_not_an_id_is_still_no_command() {
+    let home = Home::new();
+    let out = home.run(&["block", "demo-kiln", "hello"], &[]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "ljos: no command hello, so run `ljos block --help`."
+    );
+    assert!(out.stdout.is_empty(), "{said}");
+}
+
+#[test]
 fn a_mistyped_flag_names_the_closest_and_exits_2() {
     let home = Home::new();
     let out = home.run(&["search", "--limt", "5", "kiln"], &[]);

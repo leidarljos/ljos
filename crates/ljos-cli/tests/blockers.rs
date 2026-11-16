@@ -185,6 +185,77 @@ fn an_open_blocker_leaves_the_ticket_off_the_ready_list() {
 }
 
 #[test]
+fn two_ids_record_the_same_wait_as_on() {
+    let board = Board::new();
+    let said = board.ok(&["block", &board.a, &board.b]);
+    assert!(
+        said.contains(&format!("block: {} waits on {}", board.a, board.b)),
+        "{said}"
+    );
+    assert_eq!(board.heading(&board.a).blocked_by(), vec![board.b.clone()]);
+
+    let more = board.ok(&["block", &board.c, &board.a, &board.b]);
+    assert!(
+        more.contains(&format!("block: {} waits on {}", board.c, board.a)),
+        "{more}"
+    );
+    assert!(
+        more.contains(&format!("block: {} waits on {}", board.c, board.b)),
+        "{more}"
+    );
+    assert_eq!(
+        board.heading(&board.c).blocked_by(),
+        vec![board.a.clone(), board.b.clone()]
+    );
+}
+
+#[test]
+fn a_following_id_beside_on_or_off_is_refused() {
+    let board = Board::new();
+    let line = "block: a following id stands in for --on, so drop --on and --off.";
+    for args in [
+        vec![
+            "block",
+            board.a.as_str(),
+            board.b.as_str(),
+            "--on",
+            board.c.as_str(),
+        ],
+        vec![
+            "block",
+            board.a.as_str(),
+            board.b.as_str(),
+            "--off",
+            board.c.as_str(),
+        ],
+        vec![
+            "block",
+            board.a.as_str(),
+            "--on",
+            board.b.as_str(),
+            board.c.as_str(),
+        ],
+        vec![
+            "block",
+            board.a.as_str(),
+            "--off",
+            board.b.as_str(),
+            board.c.as_str(),
+        ],
+    ] {
+        let out = board.ljos(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{}", text(&out));
+        let lines: Vec<_> = err.lines().filter(|line| !line.trim().is_empty()).collect();
+        assert_eq!(lines, [line], "{args:?}\n{}", text(&out));
+        assert!(out.stdout.is_empty(), "{args:?}\n{}", text(&out));
+    }
+    assert!(board.heading(&board.a).blocked_by().is_empty());
+    assert!(board.heading(&board.b).blocked_by().is_empty());
+    assert!(board.heading(&board.c).blocked_by().is_empty());
+}
+
+#[test]
 fn a_missing_ticket_is_named_and_nothing_is_written() {
     let board = Board::new();
     let missing = board.ljos(&["block", &board.a, "--on", "probe-nosuch"]);
