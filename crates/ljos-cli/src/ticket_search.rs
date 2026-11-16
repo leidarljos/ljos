@@ -8,9 +8,16 @@
 //! A title match comes before a notes match. An exact title, or one a word
 //! or a typo away, is placed first. The printed text is the title. The id
 //! is the ticket id, which `ljos recall` accepts.
+//!
+//! The encoder ranks a stored title, so `sign-in` sits next to every other
+//! sign-in title and a ticket whose body or notes hold the query never
+//! moves. After the merge, a ticket this seat has claimed is placed with
+//! this seat's rows when its title, body or notes cover two query terms.
+//! Another seat's ticket stays after those rows. That is the line the page
+//! prints, that this seat's rows come before another seat's.
 
 use packset_client::Hit;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use vissue_core::views::IssueRec;
 
 /// How close a ticket is to the query. Earlier bands are printed first.
@@ -34,32 +41,34 @@ struct Found {
 /// matches, follow those memories. `hits` is unchanged when the tracker
 /// has no match, or when it cannot be read.
 pub fn merge(hits: &mut Vec<Hit>, query: &str) {
-    let mut found = collect(query);
-    if found.is_empty() {
-        return;
+    let records = tickets();
+    let mut found = collect_records(&records, query);
+    if !found.is_empty() {
+        let have: BTreeSet<String> = hits.iter().filter_map(|hit| hit.id.clone()).collect();
+        found.retain(|row| row.hit.id.as_ref().is_none_or(|id| !have.contains(id)));
+        if !found.is_empty() {
+            let (mut front, mut back): (Vec<Found>, Vec<Found>) = found
+                .into_iter()
+                .partition(|row| matches!(row.band, Band::Exact | Band::Near));
+            if hits.is_empty() {
+                score_intrinsic(&mut front);
+                score_intrinsic(&mut back);
+            } else {
+                let max = hits.iter().fold(0.0_f64, |top, hit| top.max(hit.score));
+                let min = hits.iter().fold(f64::MAX, |low, hit| low.min(hit.score));
+                lift(&mut front, max);
+                sink(&mut back, min);
+            }
+            let mut merged = Vec::with_capacity(front.len() + hits.len() + back.len());
+            merged.extend(front.into_iter().map(|row| row.hit));
+            merged.append(hits);
+            merged.extend(back.into_iter().map(|row| row.hit));
+            *hits = merged;
+        }
     }
-    let have: BTreeSet<String> = hits.iter().filter_map(|hit| hit.id.clone()).collect();
-    found.retain(|row| row.hit.id.as_ref().is_none_or(|id| !have.contains(id)));
-    if found.is_empty() {
-        return;
-    }
-    let (mut front, mut back): (Vec<Found>, Vec<Found>) = found
-        .into_iter()
-        .partition(|row| matches!(row.band, Band::Exact | Band::Near));
-    if hits.is_empty() {
-        score_intrinsic(&mut front);
-        score_intrinsic(&mut back);
-    } else {
-        let max = hits.iter().fold(0.0_f64, |top, hit| top.max(hit.score));
-        let min = hits.iter().fold(f64::MAX, |low, hit| low.min(hit.score));
-        lift(&mut front, max);
-        sink(&mut back, min);
-    }
-    let mut merged = Vec::with_capacity(front.len() + hits.len() + back.len());
-    merged.extend(front.into_iter().map(|row| row.hit));
-    merged.append(hits);
-    merged.extend(back.into_iter().map(|row| row.hit));
-    *hits = merged;
+    // The pack may already have returned these tickets, ranked by the
+    // title embedding. Claim and the body still have to move them.
+    place_claimed(hits, query, &records);
 }
 
 fn score_intrinsic(rows: &mut [Found]) {
@@ -93,19 +102,18 @@ fn intrinsic(band: Band) -> f64 {
     }
 }
 
-fn collect(query: &str) -> Vec<Found> {
+fn collect_records(rows: &[IssueRec], query: &str) -> Vec<Found> {
     let query = query.trim();
     if query.is_empty() {
         return Vec::new();
     }
-    let rows = tickets();
     let titles: Vec<&str> = rows
         .iter()
         .map(|rec| rec.heading.title.trim())
         .filter(|title| !title.is_empty())
         .collect();
     let mut found = Vec::new();
-    for rec in &rows {
+    for rec in rows {
         let title = rec.heading.title.trim();
         let id = rec.heading.id.trim();
         if title.is_empty() || id.is_empty() {
@@ -194,6 +202,127 @@ fn push_note(notes: &mut String, text: &str) {
         notes.push('\n');
     }
     notes.push_str(text);
+}
+
+/// Title, body and logbook notes, which is what a lexical match reads.
+fn search_blob(rec: &IssueRec) -> String {
+    let notes = notes_text(&rec.heading);
+    let title = rec.heading.title.trim();
+    if notes.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title}\n{notes}")
+    }
+}
+
+fn claimed_slug(rec: &IssueRec) -> String {
+    rec.heading
+        .claimed_by()
+        .map(crate::canonical_seat_name)
+        .unwrap_or_default()
+}
+
+/// Stamp the claimant so the page can put this seat's rows first.
+/// A ticket nobody has claimed is not given a seat: it is not another
+/// seat's row, and it is not this seat's either.
+fn stamp_claimant(hit: &mut Hit, slug: &str, mine: &str) {
+    if slug.is_empty() || hit.entities.iter().any(|tag| tag.starts_with("seat:")) {
+        return;
+    }
+    let label = if crate::canonical_seat_name(mine) == slug {
+        mine
+    } else {
+        slug
+    };
+    hit.entities.push(format!("seat:{label}"));
+}
+
+fn by_id(records: &[IssueRec]) -> BTreeMap<&str, &IssueRec> {
+    let mut map = BTreeMap::new();
+    for rec in records {
+        map.entry(rec.heading.id.as_str()).or_insert(rec);
+    }
+    map
+}
+
+/// How many query terms the ticket's title, body and notes cover.
+fn ticket_coverage(query: &str, rec: &IssueRec) -> usize {
+    crate::word_rank::term_coverage(query, &search_blob(rec))
+}
+
+/// A claimed ticket whose title, body or notes cover two query terms.
+/// One shared word, such as `sign-in`, is not enough: that word is in
+/// titles that are not about the query.
+fn owned_match(query: &str, rec: &IssueRec, mine: &str) -> bool {
+    let mine = crate::canonical_seat_name(mine);
+    !mine.is_empty() && claimed_slug(rec) == mine && ticket_coverage(query, rec) >= 2
+}
+
+fn lead_title(query: &str, rec: &IssueRec, titles: &[&str]) -> bool {
+    let notes = notes_text(&rec.heading);
+    matches!(
+        band(query, rec.heading.title.trim(), &notes, titles),
+        Some(Band::Exact | Band::Near)
+    )
+}
+
+/// Exact and near titles stay first. Then a ticket this seat claimed
+/// whose body or notes cover the query. Then this seat's other rows.
+/// Another seat's rows are last, which is what the page header says.
+fn place_claimed(hits: &mut Vec<Hit>, query: &str, records: &[IssueRec]) {
+    if hits.is_empty() || records.is_empty() {
+        return;
+    }
+    let mine = crate::seat_name();
+    let index = by_id(records);
+    let titles: Vec<&str> = records
+        .iter()
+        .map(|rec| rec.heading.title.trim())
+        .filter(|title| !title.is_empty())
+        .collect();
+    for hit in hits.iter_mut() {
+        let Some(id) = hit.id.as_deref() else {
+            continue;
+        };
+        let Some(rec) = index.get(id).copied() else {
+            continue;
+        };
+        stamp_claimant(hit, &claimed_slug(rec), &mine);
+    }
+    let mut lead = Vec::new();
+    let mut owned = Vec::new();
+    let mut home = Vec::new();
+    let mut away = Vec::new();
+    for hit in hits.drain(..) {
+        let rec = hit.id.as_deref().and_then(|id| index.get(id).copied());
+        if rec.is_some_and(|rec| lead_title(query, rec, &titles)) {
+            lead.push(hit);
+        } else if rec.is_some_and(|rec| owned_match(query, rec, &mine)) {
+            owned.push(hit);
+        } else if crate::other_seat(&hit.entities, &mine).is_some() {
+            away.push(hit);
+        } else {
+            home.push(hit);
+        }
+    }
+    owned.sort_by(|left, right| {
+        let cover = |hit: &Hit| {
+            hit.id
+                .as_deref()
+                .and_then(|id| index.get(id).copied())
+                .map(|rec| ticket_coverage(query, rec))
+                .unwrap_or(0)
+        };
+        cover(right)
+            .cmp(&cover(left))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut ordered = Vec::with_capacity(lead.len() + owned.len() + home.len() + away.len());
+    ordered.extend(lead);
+    ordered.extend(owned);
+    ordered.extend(home);
+    ordered.extend(away);
+    *hits = ordered;
 }
 
 fn band(query: &str, title: &str, notes: &str, corpus: &[&str]) -> Option<Band> {

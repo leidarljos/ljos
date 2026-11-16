@@ -359,15 +359,24 @@ fn is_weak_word(word: &str) -> bool {
 /// such as `sha1` against `SHA-1`.
 #[must_use]
 pub fn shares_term(query: &str, text: &str) -> bool {
+    term_coverage(query, text) > 0
+}
+
+/// How many query terms occur in `text`.
+///
+/// Identifier splits and stems count, so `sign-in` covers `signed-in` and
+/// `SHA-1` covers `sha1`. A stop word is not a term.
+#[must_use]
+pub fn term_coverage(query: &str, text: &str) -> usize {
     let concepts = concepts(query);
     if concepts.is_empty() {
-        return false;
+        return 0;
     }
-    let field = analyze(text);
-    let have: std::collections::BTreeSet<String> = field.bag.into_iter().collect();
+    let have: std::collections::BTreeSet<String> = analyze(text).bag.into_iter().collect();
     concepts
         .iter()
-        .any(|concept| concept_covered(concept, &have))
+        .filter(|concept| concept_covered(concept, &have))
+        .count()
 }
 
 /// Order `docs` for `query`. See the module note for what the score is.
@@ -1163,6 +1172,24 @@ mod tests {
             "xylophone quadrature",
             "a ferry timetable for the docks"
         ));
+        assert_eq!(
+            term_coverage(
+                "usglobalmail sign-in preflight",
+                "Odysee sign-in link relay"
+            ),
+            1
+        );
+        assert_eq!(
+            term_coverage("usglobalmail sign-in preflight", "referral codes"),
+            0
+        );
+        assert_eq!(
+            term_coverage(
+                "usglobalmail sign-in preflight",
+                "The usglobalmail sign-in preflight is the archive check."
+            ),
+            3
+        );
         assert!(shares_term("narration", "GPRidge narrated video set"));
         assert!(shares_term("narrate", "GPRidge narrated video set"));
         assert!(shares_term("narrated", "A narrated ridge walk."));
