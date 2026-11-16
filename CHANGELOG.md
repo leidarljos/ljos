@@ -5,6 +5,155 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.44.0 (2026-11-16)
+
+### Features
+
+- `ljos release --stale` releases this seat's claims that have been quiet longer than the hand-back window and whose conversation is not running.
+  `--older-than` sets that window, and `--dry-run` prints the count and changes nothing.
+  The ticket stays open.
+  A sitting that still keeps quiet claims names `ljos release --stale`.
+
+### Fixes
+
+- A claim whose recorded process has exited says the ticket is still held.
+  The line names `ljos release` and `ljos sitting`.
+- A finish lesson in the unit tests waits for the stub's answer.
+  A two second cap was queueing the sentence while that stub had not run yet.
+  The judge and the static guard are decided by the stand-in finishing, not by the runner's wall clock.
+- A one-word search that hits nothing names `ljos remember` with that word in quotes.
+  A query names a shorter search when the query has more than one word.
+  An empty store names `TEXT`.
+- A search that shows rows while the encoder is loading says they are word-match results.
+  The command to rerun stays on that line only when the search shows nothing.
+- A search waits for the encoder when the memory server reports a remaining load that fits in `LJOS_SEARCH_WARMUP_WAIT` (5 seconds, `0` does not wait), and not past `LJOS_CALL_TIMEOUT`, then ranks by meaning.
+  A remaining time that is missing or longer than that budget still falls back to word matches.
+  A tracker ticket whose title matches is still included on that word page and on the meaning page after the wait.
+  `ljos search --json` adds `waited_ms` when that wait ran.
+- A search waits while the pack is starting, on `LJOS_SEARCH_WARMUP_WAIT` (5 seconds, `0` does not wait), and not past the call deadline.
+  An empty page is printed only after the pack has answered, in the same words as any other miss.
+  When the budget runs out the line is `Memory is starting, so try again in a few seconds.` and the command exits non-zero.
+  The Model Context Protocol (MCP) search returns that sentence as an error.
+  `ljos remember` and a finish lesson wait the same way.
+  A pack that is already open and busy still queues the lesson, and finish still closes.
+- A search with no hits prints no match-mode line.
+  The line says nothing matched.
+  The line names a shorter query when one content word is shorter than the query.
+  That command is plain text, and it sits on its own line when the sentence would split it.
+  The json output adds a suggestion field with that command when it is named.
+- A sitting whose pack is busy, unreachable, or out of time says these are word matches, and the sitting continues.
+  `ljos finish --lesson` queues that lesson when the pack cannot take it.
+  `ljos remember` queues that lesson too.
+  The line names the one write that is waiting.
+  The next call that reaches a healthy pack sends each queued lesson once.
+- A stored lesson past the reading score says it was saved, names the sentence to change, and gives the score and the aim of 14.
+  A single short sentence prints no hint.
+  Two short sentences print no hint.
+  That hint is absent below 20 words, after removal of identifiers, paths, code spans, commit hashes and version strings.
+  `ljos remember --json` carries `grade`, `target` and `flagged_sentence`.
+- A timeline note keeps `[end HASH]` whole when the row wraps.
+  The getting-started timeline sample is that command's output.
+- A tracker git step that fails on a bad object, a missing object, or a pack with no index names the repository and `ljos doctor` instead of git's raw error.
+  `ljos doctor` prints the repair steps and does not run them.
+  The tracker file is still written when that git step fails.
+- A tracker write prints nothing about tracker git or the sealed log when the write commits.
+  So does a push that is pushed.
+  A refused commit, a refused push, or a push that was skipped is one sentence that names the command to run.
+  That sentence does not name a host directory or a segment file.
+  `ljos file`, `ljos note`, `ljos sitting` and `ljos finish` print those lines with `--verbose`.
+  `--json` keeps them in `tracker_git` and `sync`.
+- A unit test's silent pack no longer makes another thread queue its lesson.
+  Each test thread reads its own config directory, so one rewrite does not stop the others.
+- A word search keeps a row that shares any query term, ranks more matched terms and rarer terms higher, and treats a word form such as narration and narrated as the same word.
+  The broader query it names is a term that occurs, so a term with no row is not suggested.
+  `ljos search "GPRidge video narration"` finds the ticket GPRidge narrated video set while the encoder is loading and after it has answered.
+- An MCP search and an MCP recall append one line to `recall.log`, the same line `ljos search` and `ljos recall` append.
+  The seat on that line is the one the call named, or the one the session or the environment names.
+  The line stays the time, the seat, the verb and the text, so a reader that matches `search` or `recall` still counts it.
+- An MCP write takes the `seat` argument on that call, or the recorded seat of that session.
+  A shared server does not reuse a seat from another call, from `LJOS_SEAT`, or from a seats file.
+  A write with neither is refused in one line that names `seat`, and a read still runs.
+  `ljos_finish` says in one line whether the ticket was closed, and why not.
+- An external call stops at `LJOS_CALL_TIMEOUT` seconds, 60 when that is unset.
+  A child that does not answer is killed, including its process group, and one line names the part and what was not written.
+  After a few seconds one line says `waiting on <part>...`.
+- Ordered MCP answers leave in the order the calls were read.
+  A fast refusal no longer passes a call that was read ahead of it.
+- The search page no longer prints a ranker score that does not order the rows.
+  The legend is one line, and `ljos search --explain` says how a meaning score and a word score differ.
+  Rows shown while the encoder is loading say they are word matches and that meaning search will be ready shortly.
+- Tracker verbs write the org file without waiting on packsetd or a quiet claim graph.
+  A sitting still writes the tracker when its claim graph does not answer within about two seconds.
+  The sitting says so in one line.
+  `ljos note` and `ljos finish` keep that write when the pack is down, and queue the lesson instead of failing.
+  `ljos remember` queues a lesson and exits 0 when the pack is busy.
+  `ljos search` falls back to word-ranked local rows when the pack is down or the encoder is loading.
+  A tracker commit waits about two seconds.
+  The commit defers after that wait.
+  The next writer commits what was left.
+  `ljos file` prints the new id alone on the first line of stdout, and `--id-only` prints only that id.
+  `ljos start` is `ljos sitting`.
+- `--verbose` does not print a cause whose text is already in the error line.
+- `ljos cards` names the directory when `USER.md` and `MEMORY.md` are missing.
+  A working directory of `.` no longer reads as the parent.
+- `ljos doctor` names `ljos onboard` when the working directory is not a tracker.
+  The troubleshoot page quotes that line.
+- `ljos file -p` drops a leading segment that repeats the tracker directory or its org prefix.
+  `ljos file -p` refuses any other slash.
+  A new issue id does not contain `/`.
+  A held issue the tracker does not have is cleared before any filing line, and the ticket is filed at the top of the project.
+  A ticket that already sits under a doubled project path is found by its old id and by that id with the leading segment removed.
+- `ljos file` says a new ticket is not under a held issue in another project.
+  The line names the held issue's project and `ljos file --parent`.
+- `ljos file` with no seat named prints the same line as `ljos remember`: the write uses `unknown-` and the host name, so run `export LJOS_SEAT=NAME`.
+- `ljos list`, `ljos ls`, `ljos issues`, `ljos tickets` and `ljos todo` name `ljos ready`, and `ljos claims` lists what is held.
+- `ljos mcp` answers initialize and tools/list with the tracker unset, the pack writer unset, the claim graph unset, and the seat unset.
+  A note returns one sentence naming VISSUE_ROOT when the note needs a tracker.
+  Discovery does not start packsetd.
+  Discovery does not reach the network.
+- `ljos mcp` answers tools/list at once on a machine with no seat, no PACKSET_HOME, and no packsetd.
+  The search returns a tool error that names the next command for a missing writer, for a writer that never answers, and for a 401 answer.
+- `ljos note` and `ljos finish` with no id write on the open sitting.
+  An empty id is refused and the tracker is left alone.
+  A note or finish on another ticket still writes, and one line names the open sitting.
+- `ljos onboard` gives deedar, `DEEDAR_URL`, `PACKSET_URL` and `VISSUE_ROOT` a few-word gloss the first time it names them.
+- `ljos onboard` with no coding tool names the tracker, the memory writer and the deed store it sets up, and names `ljos doctor` as the next command.
+- `ljos prefer` repeats the `ljos remember` wording when the seat is absent.
+  The stored row begins with `unknown-` followed by the host name.
+  Set the seat with `export LJOS_SEAT=NAME`.
+- `ljos ready` and `ljos show` keep the ticket title on the same line as the id and the priority.
+  A title that does not fit the 80-column line ends in `...`, and a blank title is `(no title)`.
+  Claims, plan and workflow lines, timeline and sitting headings, and the digest use that same line.
+  JSON still carries the full title.
+- `ljos ready`, `ljos claims` and `ljos show` age a claim from the two instants.
+  A claim from earlier the same day is minutes or hours, and a recorded time ahead of now is `just now`.
+- `ljos search` includes a tracker ticket whose title matches the query, and then one whose notes match.
+  An exact or near-exact title is the first row, while the encoder is loading and after it has answered.
+  The row names the ticket id and the title, so `ljos recall ID` opens it.
+- `ljos search` prints each memory id as the shortest prefix that one id in the store starts with, plain or `local:`, in the text page, the JSON page and the MCP search tool.
+  That prefix keeps at least eight hex digits, and `ljos forget` accepts it, including a prefix longer than 32 characters.
+- `ljos sitting` prints the claim, one line for handed-back and quiet claims, the memories, and the close.
+  Hand-backs, a commit that completes, a routine sync line, `gen=` and the due count wait for `--verbose`.
+  A host warning is one line, and only when the kernel killed a process within the last hour.
+  `ljos note`, `ljos finish` and `ljos file` leave a completed commit off the default output.
+  A refusal is still printed, and `ljos file` still prints the new id alone as the first line of stdout.
+- `ljos statusline` at a terminal prints a usage line and exits.
+  A runner whose program is missing says it is not on PATH and names `ljos onboard`.
+  `ljos cloud up` names `LJOS_TRACKER_REMOTE` and `LJOS_CLOUD_AGE_SECRET` when both are unset, and exits 0 because the binaries are installed.
+  The how-to pages show the lines those commands print.
+- `scripts/install.sh` run from a checkout says it installs the published release, and names `cargo build --locked --release -p ljos` to build that checkout.
+
+### Documentation
+
+- The getting-started remember sample uses `unknown-laptop`.
+  The suffix is the host name, and the sample does not use a runner name there.
+- The getting-started search sample is the terminal transcript, `lesson, today`.
+  A runner still prints `lesson, from an agent`.
+- The vote how-to passes `--used none` on a persona ballot.
+- `ljos` with no arguments lists install, doctor, remember and search, in that order.
+  A read with no seat named says it uses every seat, because no seat was named.
+
+
 ## 0.43.2 (2026-11-14)
 
 ### Features
