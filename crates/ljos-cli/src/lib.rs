@@ -42190,27 +42190,58 @@ fn blocker_rows(card: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// How many ready tickets a plain page prints when no count is given.
+const READY_PAGE: usize = 20;
+
 /// Tickets a seat can take: open, and not waiting on an open ticket.
 ///
 /// This is the same frontier as `vissue ready`. A blocker that is done or
-/// cancelled does not keep its ticket off the list.
+/// cancelled does not keep its ticket off the list. The text page prints
+/// the first 20 rows in tracker order unless `all` is set or `limit` names
+/// another count. JSON prints every row unless `limit` is set. A claim is
+/// still aged from its stamp.
 ///
 /// # Errors
 ///
-/// The tracker cannot be read.
-pub fn ready_view(project: Option<&str>, json: bool) -> Result<String> {
+/// The tracker cannot be read, or a limited JSON page cannot be cut.
+pub fn ready_view(
+    project: Option<&str>,
+    json: bool,
+    limit: Option<usize>,
+    all: bool,
+) -> Result<String> {
     let layout = vissue_core::Layout::resolve(None, None)?;
     layout.require_tracker()?;
     if json {
         let rows = vissue_core::agent::issues_json(&layout, project, None, true)?;
-        return Ok(format!("{}\n", serde_json::to_string_pretty(&rows)?));
+        let mut pretty = serde_json::to_string_pretty(&rows)?;
+        if let Some(limit) = limit {
+            pretty = take_json_rows(&pretty, limit)?;
+        }
+        return Ok(format!("{pretty}\n"));
     }
     let recs = vissue_core::catalog::load_recs(&layout)?;
-    Ok(scan::ready_text(&ready_board(
-        &recs,
+    let page = if all {
+        None
+    } else {
+        Some(limit.unwrap_or(READY_PAGE))
+    };
+    Ok(scan::ready_page(
+        &ready_board(&recs, project, claim_age::now_here())?,
+        page,
         project,
-        claim_age::now_here(),
-    )?))
+    ))
+}
+
+/// The first `limit` JSON rows. The text is unchanged when it already fits.
+fn take_json_rows(pretty: &str, limit: usize) -> Result<String> {
+    let mut rows: Vec<Value> =
+        serde_json::from_str(pretty).context("ready: the JSON rows could not be read")?;
+    if rows.len() > limit {
+        rows.truncate(limit);
+        return Ok(serde_json::to_string_pretty(&rows)?);
+    }
+    Ok(pretty.to_string())
 }
 
 /// The ready rows, with each claim aged from its stamp and `now`.

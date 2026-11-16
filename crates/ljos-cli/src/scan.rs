@@ -747,41 +747,82 @@ fn search_row(row: &SearchRow<'_>, id_label: &str) -> String {
 }
 
 /// `vissue ready` rows, relaid so the title is not pushed past column 80
-/// by a padded id. JSON stays with the caller.
+/// by a padded id. JSON stays with the caller. Every row is printed.
 #[must_use]
 pub fn ready_text(raw: &str) -> String {
+    ready_page(raw, None, None)
+}
+
+enum ReadyPiece {
+    Row(ReadyRow),
+    Loose(String),
+}
+
+/// The ready page. `limit` is how many tickets to print. `None` prints
+/// every row. `project` is the `-p` name on a page that leaves rows out,
+/// when that name is one word.
+#[must_use]
+pub fn ready_page(raw: &str, limit: Option<usize>, project: Option<&str>) -> String {
     let raw = strip_ansi(raw);
-    let mut rows = Vec::new();
-    let mut loose = Vec::new();
+    let mut pieces = Vec::new();
     for line in raw.lines() {
         if line.trim().is_empty() {
             continue;
         }
         if let Some(row) = parse_ready(line) {
-            rows.push(row);
+            pieces.push(ReadyPiece::Row(row));
         } else {
-            loose.push(line.to_string());
+            pieces.push(ReadyPiece::Loose(line.to_string()));
         }
     }
-    let total = rows.len() + loose.len();
-    let mut out = count_line("ready", total, total, "");
+    let total = pieces.len();
+    let take = limit.unwrap_or(total).min(total);
+    let mut out = count_line("ready", take, total, "");
     out.push('\n');
     if total == 0 {
         out.push_str("no open ticket is free of an open blocker, so run `ljos file TITLE`.\n");
         return out;
     }
     out.push_str("open and not waiting on an open ticket, so run `ljos show ID`.\n");
-    for row in &rows {
+    for piece in pieces.into_iter().take(take) {
         out.push('\n');
-        out.push_str(&ready_row(row));
-        out.push('\n');
+        match piece {
+            ReadyPiece::Row(row) => {
+                out.push_str(&ready_row(&row));
+                out.push('\n');
+            }
+            ReadyPiece::Loose(line) => {
+                out.push_str(&wrap(&line, COLS));
+                out.push('\n');
+            }
+        }
     }
-    for line in &loose {
-        out.push('\n');
-        out.push_str(&wrap(line, COLS));
-        out.push('\n');
+    if take < total {
+        out.push_str(&ready_rest(project));
     }
     out
+}
+
+/// The last line of a page that left tickets off.
+fn ready_rest(project: Option<&str>) -> String {
+    let line = match one_word_project(project) {
+        Some(name) => format!("run ljos ready -p {name} --all to see every ticket"),
+        None => "run ljos ready --all to see every ticket".to_string(),
+    };
+    let mut wrapped = wrap(&line, COLS);
+    if !wrapped.ends_with('\n') {
+        wrapped.push('\n');
+    }
+    wrapped
+}
+
+/// A project name that can stand as one `-p` argument.
+fn one_word_project(project: Option<&str>) -> Option<&str> {
+    let name = project.map(str::trim).filter(|name| !name.is_empty())?;
+    if name.split_whitespace().nth(1).is_some() {
+        return None;
+    }
+    Some(name)
 }
 
 struct ReadyRow {
@@ -889,6 +930,51 @@ mod tests {
         let plain = ready_text(colored);
         assert!(!plain.contains('\u{1b}'), "{plain}");
         assert!(plain.contains("Kiln damper schedule"), "{plain}");
+    }
+
+    #[test]
+    fn a_hidden_ready_page_names_the_command_that_lists_the_rest() {
+        let mut raw = String::new();
+        for n in 0..3 {
+            raw.push_str(&format!(
+                "{:<22} {:<9} [#{}]  ticket {n}\n",
+                format!("demo-{n:04}"),
+                "TODO",
+                "B"
+            ));
+        }
+        let text = ready_page(&raw, Some(2), None);
+        assert!(text.contains("ready  shown 2 of 3"), "{text}");
+        assert!(text.contains("demo-0000"), "{text}");
+        assert!(text.contains("demo-0001"), "{text}");
+        assert!(!text.contains("demo-0002"), "{text}");
+        assert!(
+            text.trim_end()
+                .ends_with("run ljos ready --all to see every ticket"),
+            "{text}"
+        );
+        let named = ready_page(&raw, Some(1), Some("probe"));
+        assert!(
+            named
+                .trim_end()
+                .ends_with("run ljos ready -p probe --all to see every ticket"),
+            "{named}"
+        );
+        let words = ready_page(&raw, Some(1), Some("two words"));
+        assert!(
+            words
+                .trim_end()
+                .ends_with("run ljos ready --all to see every ticket"),
+            "{words}"
+        );
+        assert!(!words.contains("-p "), "{words}");
+        let all = ready_page(&raw, None, Some("probe"));
+        assert!(all.contains("ready  shown 3 of 3"), "{all}");
+        assert!(!all.contains("to see every ticket"), "{all}");
+        assert!(
+            all.lines().all(|line| line.chars().count() <= COLS),
+            "{all}"
+        );
     }
 
     /// Headings taken from tickets whose titles used to leave the line.

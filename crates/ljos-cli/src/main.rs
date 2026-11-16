@@ -1347,6 +1347,11 @@ enum Cmd {
     },
     /// List tickets that are open and not waiting on another open ticket.
     ///
+    /// The page prints the first 20, in tracker order, headed `ready  shown X of Y`.
+    /// `--limit N` prints N tickets. `--all` prints every ticket. A page that
+    /// leaves some out ends with `run ljos ready --all to see every ticket`,
+    /// and with `-p NAME` when one project was named in a single word.
+    /// `--json` prints every row unless `--limit` is set.
     /// `--mine` names the next unfinished item of each plan this seat holds.
     ///
     /// Example: `ljos ready`
@@ -1354,12 +1359,18 @@ enum Cmd {
         /// Only this project.
         #[arg(short = 'p', long)]
         project: Option<String>,
-        /// Print JSON rows.
+        /// Print JSON rows. Every row, unless `--limit` is set.
         #[arg(long, conflicts_with = "mine")]
         json: bool,
         /// The next unfinished item of each plan this seat holds.
         #[arg(long, conflicts_with = "json")]
         mine: bool,
+        /// How many tickets to print. The default page prints 20.
+        #[arg(long, value_name = "N", conflicts_with_all = ["all", "mine"])]
+        limit: Option<usize>,
+        /// Print every ticket on the page.
+        #[arg(long, conflicts_with_all = ["limit", "mine"])]
+        all: bool,
     },
     /// Show who holds which ticket.
     ///
@@ -5492,6 +5503,8 @@ fn run_command() -> Result<()> {
             project,
             json,
             mine,
+            limit,
+            all,
         } => {
             if mine {
                 print!("{}", ljos_cli::plan::ready_mine(project.as_deref())?);
@@ -5499,7 +5512,7 @@ fn run_command() -> Result<()> {
                 print!(
                     "{}",
                     ljos_cli::scan::for_reader(
-                        &ljos_cli::ready_view(project.as_deref(), json)?,
+                        &ljos_cli::ready_view(project.as_deref(), json, limit, all)?,
                         human_color()
                     )
                 );
