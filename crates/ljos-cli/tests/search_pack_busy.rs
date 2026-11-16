@@ -122,6 +122,7 @@ fn search(url: &str, home: &Path, args: &[&str]) -> (std::process::Output, Durat
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", home.join("run"))
         .env("LJOS_SEAT", "ada")
         .env("LJOS_TRACKER_GIT", "off")
         .env("LJOS_HOOKD", "off")
@@ -150,6 +151,7 @@ fn a_busy_writer_still_answers_by_meaning() {
     let home = root.path().join("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     std::fs::create_dir_all(home.join(".local/state")).unwrap();
+    std::fs::create_dir_all(home.join("run")).unwrap();
     let (url, searches) = serve(3);
     let (out, took) = search(&url, &home, &["search", "d-SEAMS migrate video"]);
     let text = said(&out);
@@ -174,6 +176,7 @@ fn a_writer_that_stays_busy_uses_one_word_line() {
     let home = root.path().join("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     std::fs::create_dir_all(home.join(".local/state")).unwrap();
+    std::fs::create_dir_all(home.join("run")).unwrap();
     let (url, searches) = serve(usize::MAX);
     let (out, took) = search(&url, &home, &["search", WORD_QUERY]);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();

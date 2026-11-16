@@ -561,8 +561,8 @@ pub struct SearchArgs {
     /// learnt since left out. Omit for now.
     #[serde(default)]
     pub as_of: Option<String>,
-    /// Lowest score to return when a row does not name a subject word.
-    /// Omit for 0.34. `0` returns every row, including a weak word match.
+    /// Lowest score to return. A score runs from 0 to 100. Omit for 34.
+    /// `0` returns every row, including a weak word match.
     #[serde(default)]
     pub min_score: Option<f64>,
 }
@@ -1683,7 +1683,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. If the pack is still starting, the tool returns an error: Memory is starting, so try again in a few seconds. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Pass min_score to drop a row under that score when it does not name a subject word; 0 returns every row, and the default is 0.34. Follow with ljos_island for the cluster the task touches.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A single generic word is not that subject, and then the similarity has to be high. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. If the pack is still starting, the tool returns an error: Memory is starting, so try again in a few seconds. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Pass min_score to drop a row under that score when it does not name a subject word; 0 returns every row, and the default is 34. Follow with ljos_island for the cluster the task touches.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -1764,7 +1764,7 @@ impl LjosServer {
                     id: ljos_cli::search_hit_id(&h.kind, h.id.as_deref(), &id_refs),
                     kind: h.kind,
                     text: h.text,
-                    score: h.score,
+                    score: ljos_cli::word_rank::printed_score(h.score),
                     age: age_of(h.ts.as_deref(), &now),
                     from: other_seat(&h.entities, &mine),
                     ts: h.ts,

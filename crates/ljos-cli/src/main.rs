@@ -777,7 +777,8 @@ enum Cmd {
     ///
     /// This seat's hits come first. Another seat's hit is kept when it names
     /// the subject, or when the encoder's cosine reaches 0.66. The cosine is
-    /// how close the stored text is to the query, from 0 to 1. A short list
+    /// how close the stored text is to the query, from 0 to 1. A generic word
+    /// is not the subject. Another seat then needs a high similarity. A short list
     /// is not padded with a weaker cross-seat hit. When those were the only
     /// rows, the line is `Nothing relevant was found.` No match-mode line is
     /// printed on that empty page. A tracker ticket whose
@@ -785,8 +786,7 @@ enum Cmd {
     /// near-exact title is the first row, while the encoder is loading and
     /// after. The row names the ticket id and the title, so `ljos recall ID`
     /// opens it. The page names the place and the checks. It does not print
-    /// the ranker score, because a meaning score and a word score are
-    /// different scales and a meaning score does not order the rows.
+    /// the ranker score.
     /// `--explain` says how the rows are ordered. `--json` keeps the score.
     /// A search that found
     /// nothing prints no match-mode line. The line is `Nothing matched "QUERY"`.
@@ -799,10 +799,12 @@ enum Cmd {
     /// too, and the line names `ljos remember`. `--json` adds `suggestion`
     /// with the command the line names, and leaves the other fields as they
     /// are. A row that does not name a subject word is left out when its
-    /// score is under `--min-score` (0.34 when omitted). A row that only
+    /// score is under `--min-score`. A score runs from 0 to 100. A row that only
     /// shares a stopword or a common weak word is left out. `--min-score 0`
     /// prints every row. When that floor removes every row, the line is
     /// `No relevant matches for "QUERY".` and it names `--min-score 0`.
+    /// A meaning row from another seat that only shares a generic word is
+    /// left out unless the encoder's similarity is high.
     /// A busy memory store is asked again for about two seconds.
     /// When it answers, the rows are ranked by meaning. When it stays
     /// busy, the rows are ranked by words and a hit that names the subject
@@ -863,8 +865,8 @@ enum Cmd {
         /// Include failed commands. They are stored as attempts and left out of the default list.
         #[arg(long)]
         attempts: bool,
-        /// Lowest score to keep when a row does not name a subject word. 0 prints every row, including a weak word match.
-        #[arg(long, value_name = "SCORE", default_value = "0.34")]
+        /// Lowest score to keep. 34 when omitted. 0 prints every row, including a weak word match.
+        #[arg(long, value_name = "SCORE", default_value = "34")]
         min_score: f64,
     },
     /// List memories that contradict each other.

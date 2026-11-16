@@ -134,17 +134,40 @@ pub fn no_close_line_with(query: &str, cmd: Option<&str>) -> String {
 /// local snapshot returned for `ridley-core landing order rebase review`.
 /// A one-word subject search such as `fusing` scores about 0.35, so this
 /// line leaves that row in. `0` turns the floor off.
-pub const DEFAULT_MIN_SCORE: f64 = 0.34;
+pub const DEFAULT_MIN_SCORE: f64 = 34.0;
+
+/// The score a person reads, from 0 to 100.
+///
+/// A word match is a fraction of the query, so 0.33 is 33. A meaning score
+/// the pack already reports on this scale, such as 71 or 100, stays.
+#[must_use]
+pub fn printed_score(score: f64) -> f64 {
+    if !score.is_finite() || score <= 0.0 {
+        return 0.0;
+    }
+    let scaled = if score <= 1.0 { score * 100.0 } else { score };
+    scaled.min(100.0)
+}
 
 /// Words that show up in lessons about other work. One of them, or a run
 /// of them, is not the subject of a longer query. `test` and `error` are
 /// not on this list: a query is often about those.
 const WEAK: &[&str] = &[
-    "add", "also", "change", "check", "code", "core", "data", "file", "find", "fix", "help",
-    "info", "item", "just", "line", "list", "make", "more", "name", "need", "new", "note", "order",
-    "page", "please", "review", "run", "search", "set", "show", "task", "text", "thing", "time",
-    "type", "update", "use", "user", "way", "work",
+    "add", "also", "amount", "case", "change", "check", "code", "core", "count", "data", "end",
+    "file", "find", "fix", "full", "group", "help", "high", "info", "item", "just", "level",
+    "line", "list", "low", "make", "more", "name", "need", "new", "note", "number", "order",
+    "page", "part", "please", "point", "problem", "rate", "result", "review", "run", "safety",
+    "search", "set", "show", "side", "size", "system", "task", "text", "thing", "time", "total",
+    "type", "update", "use", "user", "value", "way", "weight", "work",
 ];
+
+/// Similarity another seat must reach when it shares no distinctive term.
+///
+/// [`crate::CROSS_SEAT_COSINE`] still keeps a row that names one of those
+/// terms and is only short of half of them. A fused score is not this
+/// number: `71` is how the pack combined its ballots, not how close the
+/// text is.
+const OTHER_SEAT_SIMILARITY: f64 = 0.80;
 
 /// The line when the floor removed every row.
 ///
@@ -190,12 +213,15 @@ pub fn apply_relevance_floor(hits: &mut Vec<Hit>, query: &str, min_score: f64) -
 
 /// Whether `hit` is worth printing for `query` at `min_score`.
 ///
-/// A row that shares a subject word stays, including a stem such as
+/// A row that shares a distinctive word stays, including a stem such as
 /// `narration` against `narrated`, even when the stored score is only the
 /// placeholder for a word the overlap count missed. A longer query that
-/// the row meets only in a stopword or a common weak word does not stay.
-/// A row that shares no word stays when its score is at the floor, which
-/// is a pack hit whose text does not spell the query.
+/// the row meets only in a stopword or a common weak word does not stay,
+/// and neither does a meaning score that is only a fused ballot total.
+/// Another seat has to cover half of the distinctive terms, or reach
+/// [`OTHER_SEAT_SIMILARITY`] when it covers none. A row that shares no
+/// word stays on this seat when its score is at the floor, which is how a
+/// tag search returns a lesson that does not spell the tag.
 #[must_use]
 pub fn keeps_row(hit: &Hit, query: &str, min_score: f64) -> bool {
     if min_score <= 0.0 {
@@ -208,21 +234,70 @@ pub fn keeps_row(hit: &Hit, query: &str, min_score: f64) -> bool {
         return false;
     }
     let blob = hit_blob(hit);
-    let covered = covered_terms(query, &blob);
-    if covered.iter().any(|term| !term_is_weak(term)) {
-        return true;
-    }
-    // A longer query that this row meets only in a common weak word is
-    // the off-topic lesson. The score does not rescue it.
-    if !covered.is_empty() && query_has_strong(query) {
-        return false;
-    }
     if shares_only_stopwords(query, &blob) {
         return false;
     }
-    // No word of the subject. A pack score at the floor still answers,
-    // which is how a tag search returns a lesson that does not spell the tag.
-    hit.score >= min_score
+    let covered = covered_terms(query, &blob);
+    let distinctive = covered.iter().filter(|term| !term_is_weak(term)).count();
+    let query_distinctive = concepts(query)
+        .iter()
+        .filter(|term| !term_is_weak(term))
+        .count();
+    let other = from_another_seat(hit);
+    let cosine = hit_cosine(hit);
+    if query_distinctive == 0 {
+        if covered.is_empty() {
+            return similarity_keeps(other, cosine, false)
+                || (!other && printed_score(hit.score) >= min_score);
+        }
+        return printed_score(hit.score) >= min_score || similarity_keeps(other, cosine, true);
+    }
+    if enough_distinctive(distinctive, query_distinctive, other) {
+        return true;
+    }
+    if similarity_keeps(other, cosine, distinctive > 0) {
+        return true;
+    }
+    // No distinctive word. This seat's pack hit that shares nothing still
+    // answers. A shared generic word does not, at any fused score.
+    distinctive == 0 && covered.is_empty() && !other && printed_score(hit.score) >= min_score
+}
+
+/// Half of the distinctive terms, rounded up. This seat needs one.
+fn enough_distinctive(covered: usize, total: usize, other: bool) -> bool {
+    if covered == 0 || total == 0 {
+        return false;
+    }
+    if !other {
+        return true;
+    }
+    covered >= total.div_ceil(2)
+}
+
+/// `cosine` is the encoder's similarity, from 0 to 1. Absent means the
+/// pack did not send one. A score above 1 is a fused total and is not read.
+fn similarity_keeps(other: bool, cosine: Option<f64>, has_distinctive: bool) -> bool {
+    let Some(cosine) = cosine else {
+        return false;
+    };
+    let bar = if other && !has_distinctive {
+        OTHER_SEAT_SIMILARITY
+    } else {
+        super::CROSS_SEAT_COSINE
+    };
+    cosine >= bar
+}
+
+fn from_another_seat(hit: &Hit) -> bool {
+    super::other_seat(&hit.entities, &super::seat_name()).is_some()
+}
+
+fn hit_cosine(hit: &Hit) -> Option<f64> {
+    hit.entities.iter().find_map(|tag| {
+        tag.strip_prefix("cosine:")
+            .and_then(|raw| raw.parse::<f64>().ok())
+            .filter(|cosine| cosine.is_finite() && (0.0..=1.0).contains(cosine))
+    })
 }
 
 fn hit_blob(hit: &Hit) -> String {
@@ -263,10 +338,6 @@ fn covered_terms(query: &str, text: &str) -> Vec<String> {
         .into_iter()
         .filter(|term| shares_term(term, text))
         .collect()
-}
-
-fn query_has_strong(query: &str) -> bool {
-    concepts(query).iter().any(|term| !term_is_weak(term))
 }
 
 fn term_is_weak(term: &str) -> bool {
@@ -1924,21 +1995,68 @@ mod tests {
         assert!(hits[0].text.contains("Oak"), "{hits:?}");
         let mut only = vec![high];
         only[0].score = 0.2;
+        only[0].entities.retain(|tag| !tag.starts_with("cosine:"));
+        only[0].entities.push("cosine:0.20".into());
         assert!(apply_relevance_floor(
             &mut only,
             "xylophone plankton",
             DEFAULT_MIN_SCORE
         ));
         // A pack hit the tag search returned, whose text does not spell the tag.
-        let mut tagged = vec![lesson(
+        let mut tagged_hit = lesson(
             "Courier retries a dropped letter before the quay opens.",
             1.0,
-        )];
+        );
+        tagged_hit.entities.clear();
+        let mut tagged = vec![tagged_hit];
         assert!(!apply_relevance_floor(
             &mut tagged,
             "cue-tag1 mail wake",
             DEFAULT_MIN_SCORE
         ));
         assert_eq!(tagged.len(), 1);
+    }
+
+    /// Another seat's meaning hit. The fused score is 71 and the only shared
+    /// word is `safety`. That is not a similarity and it does not name
+    /// webdav, drain, or delete.
+    #[test]
+    fn a_cross_seat_meaning_hit_needs_a_distinctive_term_or_a_high_cosine() {
+        let _env = crate::test_env_lock();
+        unsafe { std::env::set_var("LJOS_SEAT", "ada") };
+        let query = "webdav drain delete safety";
+        let travel = "travel weighs safety at 1.000.";
+        let mut weak = lesson(travel, 71.0);
+        weak.entities = vec!["seat:travel".into(), "cosine:0.71".into()];
+        weak.ballots = Some(2);
+        weak.of = Some(3);
+        let mut hits = vec![weak];
+        assert!(
+            apply_relevance_floor(&mut hits, query, DEFAULT_MIN_SCORE),
+            "a generic word must not carry another seat: {hits:?}"
+        );
+        let mut shown = lesson(travel, 71.0);
+        shown.entities = vec!["seat:travel".into(), "cosine:0.71".into()];
+        let mut kept = vec![shown];
+        assert!(!apply_relevance_floor(&mut kept, query, 0.0));
+        assert_eq!(kept.len(), 1);
+
+        let mut close = lesson("The copy is removed only after the new one is stored.", 0.4);
+        close.entities = vec!["seat:travel".into(), "cosine:0.86".into()];
+        let mut hits = vec![close];
+        assert!(!apply_relevance_floor(&mut hits, query, DEFAULT_MIN_SCORE));
+        assert_eq!(hits.len(), 1, "a high similarity still answers");
+
+        let mut named = lesson(
+            "WebDAV drain delete keeps the previous copy until the new one is stored.",
+            0.9,
+        );
+        named.entities = vec!["seat:ada".into()];
+        let mut other = lesson(travel, 71.0);
+        other.entities = vec!["seat:travel".into(), "cosine:0.71".into()];
+        let mut hits = vec![other, named];
+        assert!(!apply_relevance_floor(&mut hits, query, DEFAULT_MIN_SCORE));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].text.contains("WebDAV"), "{hits:?}");
     }
 }

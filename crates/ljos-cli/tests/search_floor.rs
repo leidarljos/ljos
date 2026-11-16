@@ -37,9 +37,8 @@ fn keep(dir: &Path, id: &str, text: &str) {
     std::fs::write(path, serde_json::to_vec_pretty(&body).unwrap()).unwrap();
 }
 
-/// A pack that has answered and holds nothing for this query. The rows
-/// under test are the local snapshot.
-fn empty_pack() -> String {
+/// A pack that has answered. `search_body` is the `/v1/search` payload.
+fn pack(search_body: &'static str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
@@ -61,7 +60,7 @@ fn empty_pack() -> String {
                 let body = if path == "/v1/status" {
                     r#"{"embedder":{"available":true,"answering":true,"enabled":true},"search":{"ranks":["fused","relevance"]}}"#
                 } else if path == "/v1/search" {
-                    r#"{"hits":[],"rank":"relevance"}"#
+                    search_body
                 } else if path == "/v1/atoms" {
                     r#"{"atoms":[]}"#
                 } else {
@@ -78,6 +77,15 @@ fn empty_pack() -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+fn empty_pack() -> String {
+    pack(r#"{"hits":[],"rank":"relevance"}"#)
+}
+
+const SAFETY: &str = "travel weighs safety at 1.000.";
+const WEBDAV: &str = "WebDAV drain delete keeps the previous copy until the new one is stored.";
+const SAFETY_ONLY: &str = r#"{"hits":[{"id":"travel-safety","kind":"lesson","text":"travel weighs safety at 1.000.","score":71.0,"ballots":2,"of":3,"cosine":0.71,"entities":["seat:travel"]}],"rank":"relevance"}"#;
+const SAFETY_AND_WEBDAV: &str = r#"{"hits":[{"id":"travel-safety","kind":"lesson","text":"travel weighs safety at 1.000.","score":71.0,"ballots":2,"of":3,"cosine":0.71,"entities":["seat:travel"]},{"id":"own-webdav","kind":"lesson","text":"WebDAV drain delete keeps the previous copy until the new one is stored.","score":0.91,"cosine":0.9,"entities":["seat:ada"]}],"rank":"relevance"}"#;
+
 struct Seat {
     root: tempfile::TempDir,
     url: String,
@@ -85,6 +93,10 @@ struct Seat {
 
 impl Seat {
     fn open() -> Self {
+        Self::at(empty_pack())
+    }
+
+    fn at(url: String) -> Self {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         std::fs::create_dir_all(home.join(".config")).unwrap();
@@ -107,10 +119,7 @@ impl Seat {
             "local:desk0001",
             "The notes are on the desk by the window.",
         );
-        Self {
-            root,
-            url: empty_pack(),
-        }
+        Self { root, url }
     }
 
     fn run(&self, args: &[&str]) -> std::process::Output {
@@ -207,9 +216,10 @@ fn min_score_zero_shows_the_weak_row_and_a_real_query_still_hits() {
         .and_then(|hit| hit["score"].as_f64())
         .unwrap_or(0.0);
     assert!(
-        (score - 0.33).abs() < 0.01,
-        "the reported word score is 0.33, got {score}"
+        (score - 33.333).abs() < 1.0,
+        "a one-third word match prints near 33 on the 0 to 100 scale, got {score}"
     );
+    assert!(score > 1.0 && score <= 100.0, "{score}");
 
     let narrated = seat.run(&["search", "GPRidge video narration"]);
     let (stdout, stderr) = text(&narrated);
@@ -258,7 +268,104 @@ fn json_names_the_floor_and_help_names_the_flag() {
     let (stdout, stderr) = text(&help);
     assert!(help.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains("--min-score"), "{stdout}");
-    assert!(stdout.contains("0.34"), "{stdout}");
+    assert!(stdout.contains("0 to 100"), "{stdout}");
+    assert!(stdout.contains("34"), "{stdout}");
+}
+
+#[test]
+fn a_cross_seat_meaning_hit_on_a_generic_word_is_not_an_answer() {
+    let query = "webdav drain delete safety";
+    let seat = Seat::at(pack(SAFETY_ONLY));
+    let out = seat.run(&["search", query]);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("No relevant matches for"),
+        "{stdout}{stderr}"
+    );
+    assert!(stdout.contains("--min-score 0"), "{stdout}");
+    assert!(!stdout.contains("travel weighs"), "{stdout}{stderr}");
+    assert!(!stdout.contains("checks 2/3"), "{stdout}");
+    assert!(
+        !stderr.contains("matched by"),
+        "an empty page prints no match-mode line:\n{stderr}"
+    );
+
+    let shown = seat.run(&["search", "--min-score", "0", "--json", query]);
+    let (stdout, stderr) = text(&shown);
+    assert!(shown.status.success(), "{stdout}{stderr}");
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("json: {err}\n{stdout}{stderr}");
+    });
+    let hit = doc["hits"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["text"].as_str() == Some(SAFETY)))
+        .unwrap_or_else(|| panic!("min-score 0 should show the generic row: {doc}"));
+    let score = hit["score"].as_f64().unwrap_or(0.0);
+    assert!((score - 71.0).abs() < 0.01, "fused score 71, got {score}");
+
+    let both = Seat::at(pack(SAFETY_AND_WEBDAV));
+    let kept = both.run(&["search", query]);
+    let (stdout, stderr) = text(&kept);
+    assert!(kept.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains(WEBDAV), "{stdout}{stderr}");
+    assert!(!stdout.contains("travel weighs"), "{stdout}{stderr}");
+    assert!(stderr.contains("matched by meaning"), "{stderr}");
+}
+
+#[test]
+fn word_and_meaning_rows_print_scores_on_one_scale() {
+    let word = Seat::open();
+    let word_out = word.run(&[
+        "search",
+        "--min-score",
+        "0",
+        "--json",
+        "ridley-core landing order rebase review",
+    ]);
+    let (stdout, stderr) = text(&word_out);
+    assert!(word_out.status.success(), "{stdout}{stderr}");
+    let word_doc: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    let word_score = word_doc["hits"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row["text"].as_str().unwrap_or("").contains("JOSS"))
+        })
+        .and_then(|row| row["score"].as_f64())
+        .unwrap_or_else(|| panic!("word row missing: {word_doc}"));
+
+    let meaning = Seat::at(pack(SAFETY_ONLY));
+    let meaning_out = meaning.run(&[
+        "search",
+        "--min-score",
+        "0",
+        "--json",
+        "webdav drain delete safety",
+    ]);
+    let (stdout, stderr) = text(&meaning_out);
+    assert!(meaning_out.status.success(), "{stdout}{stderr}");
+    let meaning_doc: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    let meaning_score = meaning_doc["hits"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|row| row["score"].as_f64())
+        .unwrap_or_else(|| panic!("meaning row missing: {meaning_doc}"));
+
+    for score in [word_score, meaning_score] {
+        assert!(
+            (1.0..=100.0).contains(&score),
+            "printed scores share 0 to 100, got word {word_score} meaning {meaning_score}"
+        );
+    }
+    assert!(
+        (word_score - 33.333).abs() < 1.0,
+        "the word match that was 0.33 prints near 33, got {word_score}"
+    );
+    assert!(
+        (meaning_score - 71.0).abs() < 0.01,
+        "the meaning match stays 71, got {meaning_score}"
+    );
 }
 
 #[test]

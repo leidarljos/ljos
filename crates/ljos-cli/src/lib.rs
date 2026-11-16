@@ -15480,7 +15480,7 @@ pub fn search_json_stored(
                 "id": search_hit_id(&hit.kind, hit.id.as_deref(), &refs),
                 "kind": hit.kind,
                 "text": hit.text,
-                "score": hit.score,
+                "score": word_rank::printed_score(hit.score),
                 "place": index + 1,
             });
             if let Some(ticket) = issue_on(&hit.entities) {
@@ -47171,9 +47171,9 @@ pub fn search_reading(n: usize, seat_ahead: bool) -> &'static str {
     if n == 0 {
         "Nothing matched."
     } else if seat_ahead {
-        "Place 1 is the first row, and this seat's rows come before another seat's. A meaning score runs from 0 to 1 and does not by itself order the rows. A word score is a different scale and can be much larger. The fraction is how many checks named the row. Neither is whether the sentence is true. A later line on the same matter replaces an earlier one."
+        "Place 1 is the first row, and this seat's rows come before another seat's. A score runs from 0 to 100. The fraction is how many checks named the row. Neither is whether the sentence is true. A later line on the same matter replaces an earlier one."
     } else {
-        "Place 1 is the first row. A word score orders the row and includes a small boost for this seat. A closer row from another seat stays ahead. A meaning score is a different scale, from 0 to 1. The fraction is how many checks named the row. Neither is whether the sentence is true."
+        "Place 1 is the first row. A score runs from 0 to 100. The fraction is how many checks named the row. Neither is whether the sentence is true."
     }
 }
 
@@ -80639,10 +80639,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(!plain.contains('\u{1b}'));
         std::env::remove_var("NO_COLOR");
         let explained = format_hits(&hits, true);
-        assert!(
-            explained.contains("does not by itself order the rows"),
-            "{explained}"
-        );
+        assert!(explained.contains("0 to 100"), "{explained}");
         assert!(!explained.contains("0.90"), "{explained}");
         assert!(
             explained.contains("Use pnpm instead of npm."),

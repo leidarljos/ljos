@@ -1095,7 +1095,7 @@ mod tests {
             local: false,
         };
         let rows = [row(1, 68.0, "idkiln01"), row(2, 101.0, "idkiln02")];
-        let reading = "Place 1 is the first row, and this seat's rows come before another seat's. A meaning score runs from 0 to 1 and does not by itself order the rows. A word score is a different scale.";
+        let reading = "Place 1 is the first row, and this seat's rows come before another seat's. A score runs from 0 to 100.";
         let page = |explain: bool, seat_ahead: bool| SearchPage {
             rows: &rows,
             shown: 2,
@@ -1125,10 +1125,7 @@ mod tests {
             "{words}"
         );
         let explained = search_page(&page(true, true));
-        assert!(
-            explained.contains("does not by itself order the rows"),
-            "{explained}"
-        );
+        assert!(explained.contains("0 to 100"), "{explained}");
         assert!(!explained.contains("68.00"), "{explained}");
         for page in [&meaning, &words, &explained] {
             assert!(
