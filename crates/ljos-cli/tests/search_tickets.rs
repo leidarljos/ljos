@@ -24,21 +24,9 @@ struct Seat {
 
 impl Seat {
     fn open(warm: bool) -> Self {
-        let root = tempfile::tempdir().unwrap().keep();
-        for sub in [
-            "home/.config/ljos",
-            "home/.local/state/ljos",
-            "home/.local/share",
-            "run",
-            "work",
-            "tracker/Software/Software",
-        ] {
-            std::fs::create_dir_all(root.join(sub)).unwrap();
-        }
-        std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
-        std::fs::write(
-            root.join("tracker/Software/Software/issues.org"),
-            format!(
+        Self::open_with(
+            warm,
+            &format!(
                 "\
 #+TITLE: Software issues
 #+VISSUE: 1
@@ -56,7 +44,22 @@ impl Seat {
 "
             ),
         )
-        .unwrap();
+    }
+
+    fn open_with(warm: bool, issues: &str) -> Self {
+        let root = tempfile::tempdir().unwrap().keep();
+        for sub in [
+            "home/.config/ljos",
+            "home/.local/state/ljos",
+            "home/.local/share",
+            "run",
+            "work",
+            "tracker/Software/Software",
+        ] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        std::fs::write(root.join("tracker/Software/Software/issues.org"), issues).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         thread::spawn(move || serve(listener, warm));
@@ -330,4 +333,98 @@ fn json_keeps_the_old_fields_and_adds_the_ticket_title() {
     }
     assert!(hits[1].get("title").is_none(), "{said}");
     assert_eq!(hits[1]["kind"], "lesson", "{said}");
+}
+
+/// Several tickets a person would file. A query that shares only `update`,
+/// `note` or `fix` does not return those titles. A kiln, a parser and a
+/// one-word subject still do.
+#[test]
+fn a_single_common_word_does_not_return_the_ticket() {
+    let issues = "\
+#+TITLE: Software issues
+#+VISSUE: 1
+#+CATEGORY: Software
+#+TODO: TODO STARTED BLOCKED | DONE CANCELLED
+
+* TODO [#B] Update the mailbox index
+:PROPERTIES:
+:ID:         Software-mail
+:END:
+
+* TODO [#B] Update the docs site
+:PROPERTIES:
+:ID:         Software-docs
+:END:
+
+* TODO [#C] Add a note to the readme
+:PROPERTIES:
+:ID:         Software-note
+:END:
+
+* TODO [#B] Fix the parser timeout
+:PROPERTIES:
+:ID:         Software-pars
+:END:
+
+* TODO [#A] Fire the kiln overnight
+:PROPERTIES:
+:ID:         Software-kiln
+:END:
+
+* TODO [#B] GPRidge narrated video set
+:PROPERTIES:
+:ID:         Software-vid1
+:END:
+";
+    let seat = Seat::open_with(true, issues);
+    let missed = seat.search(&["search", "update the note about search"]);
+    let said = text(&missed);
+    assert!(missed.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&missed.stdout);
+    for id in [
+        "Software-mail",
+        "Software-docs",
+        "Software-note",
+        "Software-pars",
+    ] {
+        assert!(
+            !stdout.contains(id),
+            "{id} matched one common word:\n{said}"
+        );
+    }
+    assert!(
+        stdout.contains("Nothing matched") || stdout.contains("Nothing relevant"),
+        "{said}"
+    );
+
+    let kiln = seat.search(&["search", "kiln overnight"]);
+    let said = text(&kiln);
+    assert!(kiln.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&kiln.stdout);
+    assert!(stdout.contains("Software-kiln"), "{said}");
+    assert!(stdout.contains("Fire the kiln overnight"), "{said}");
+    assert!(!stdout.contains("Software-mail"), "{said}");
+
+    let parser = seat.search(&["search", "parser timeout"]);
+    let said = text(&parser);
+    assert!(parser.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&parser.stdout);
+    assert!(stdout.contains("Software-pars"), "{said}");
+    assert!(!stdout.contains("Software-mail"), "{said}");
+
+    let named = seat.search(&["search", "GPRidge"]);
+    let said = text(&named);
+    assert!(named.status.success(), "{said}");
+    assert!(
+        String::from_utf8_lossy(&named.stdout).contains("Software-vid1"),
+        "{said}"
+    );
+
+    let mixed = seat.search(&["search", "update the kiln temperature"]);
+    let said = text(&mixed);
+    assert!(mixed.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&mixed.stdout);
+    assert!(stdout.contains("Software-kiln"), "{said}");
+    assert!(!stdout.contains("Software-mail"), "{said}");
+    assert!(!stdout.contains("Software-docs"), "{said}");
 }

@@ -19,7 +19,7 @@ Name the seat you are, and add it before any other:
    $ ljos seat add carol
 
 ``ljos seat`` prints the name in use. A read with no name set prints ``every-seat``.
-A write with no name set uses ``unknown-`` and the host name, and the command says so.
+A write with no name set uses the login name, or a short stable name when that login is missing, and the first write says so.
 If you added another seat first, the next line tells you to run ``ljos seat add`` for your own seat.
 That row is how you get back on the list.
 

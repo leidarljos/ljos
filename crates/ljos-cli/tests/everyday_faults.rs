@@ -328,11 +328,15 @@ fn a_write_with_no_seat_names_the_export() {
     let said = text(&out);
     assert!(
         String::from_utf8_lossy(&out.stderr)
-            .contains("ljos: no seat was named and this write uses unknown-"),
+            .contains("ljos: no seat was named and this write uses "),
         "{said}"
     );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("so run `export LJOS_SEAT=NAME`."),
+        "{said}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("unknown-"),
         "{said}"
     );
     let preferred = home.run(
@@ -346,10 +350,9 @@ fn a_write_with_no_seat_names_the_export() {
     let said = text(&preferred);
     let err = String::from_utf8_lossy(&preferred.stderr);
     assert!(
-        err.contains("ljos: no seat was named and this write uses unknown-"),
-        "{said}"
+        !err.contains("no seat was named"),
+        "the seat hint was printed again:\n{said}"
     );
-    assert!(err.contains("so run `export LJOS_SEAT=NAME`."), "{said}");
 }
 
 #[test]

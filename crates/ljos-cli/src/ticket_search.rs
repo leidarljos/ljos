@@ -98,15 +98,21 @@ fn collect(query: &str) -> Vec<Found> {
     if query.is_empty() {
         return Vec::new();
     }
+    let rows = tickets();
+    let titles: Vec<&str> = rows
+        .iter()
+        .map(|rec| rec.heading.title.trim())
+        .filter(|title| !title.is_empty())
+        .collect();
     let mut found = Vec::new();
-    for rec in tickets() {
+    for rec in &rows {
         let title = rec.heading.title.trim();
         let id = rec.heading.id.trim();
         if title.is_empty() || id.is_empty() {
             continue;
         }
         let notes = notes_text(&rec.heading);
-        let Some(band) = band(query, title, &notes) else {
+        let Some(band) = band(query, title, &notes, &titles) else {
             continue;
         };
         found.push(Found {
@@ -190,7 +196,7 @@ fn push_note(notes: &mut String, text: &str) {
     notes.push_str(text);
 }
 
-fn band(query: &str, title: &str, notes: &str) -> Option<Band> {
+fn band(query: &str, title: &str, notes: &str, corpus: &[&str]) -> Option<Band> {
     let query = query.trim();
     let title = title.trim();
     if query.is_empty() || title.is_empty() {
@@ -206,13 +212,44 @@ fn band(query: &str, title: &str, notes: &str) -> Option<Band> {
     if words.is_empty() {
         return None;
     }
-    // Any title term is enough. Two exact words and a word form land here,
-    // and an almost-full title has already returned [`Band::Near`].
-    if words.iter().any(|word| covers(word, title)) {
+    // One query word is the subject. Two shared words name the ticket.
+    // A longer query that shares only one common word does not: `update`
+    // is in many titles, and `kiln` is not.
+    let shared: Vec<&String> = words.iter().filter(|word| covers(word, title)).collect();
+    let title_hit = if words.len() == 1 {
+        !shared.is_empty()
+    } else if shared.len() >= 2 {
+        true
+    } else if let Some(word) = shared.first() {
+        !common_title_word(word, corpus)
+    } else {
+        false
+    };
+    if title_hit {
         return Some(Band::Title);
     }
     let blob = format!("{title}\n{notes}");
     covers_all(&words, &blob).then_some(Band::Notes)
+}
+
+/// Words that label a ticket without naming its subject. One of them,
+/// shared with a longer query, is not a title match.
+const COMMON_TITLE: &[&str] = &[
+    "add", "change", "fix", "make", "new", "note", "set", "update", "use", "work", "issue",
+    "ticket", "file", "search", "find", "show", "list", "run", "check", "help", "need", "thing",
+    "item", "task", "page", "line", "text", "name", "type", "way", "time", "user", "data", "code",
+    "info", "please", "also", "just", "more",
+];
+
+fn common_title_word(word: &str, corpus: &[&str]) -> bool {
+    if COMMON_TITLE
+        .iter()
+        .any(|item| word.eq_ignore_ascii_case(item) || crate::word_rank::shares_term(word, item))
+    {
+        return true;
+    }
+    let n = corpus.len();
+    n >= 2 && corpus.iter().filter(|title| covers(word, title)).count() == n
 }
 
 /// Same content words, one content word apart, or a short typo.
@@ -317,36 +354,64 @@ mod tests {
     const TITLE: &str = "GPRidge narrated video set";
     const NOTES: &str = "Milestone: the ridge walk is filmed.";
 
+    fn at(query: &str, title: &str, notes: &str) -> Option<Band> {
+        band(query, title, notes, &[title])
+    }
+
     #[test]
     fn a_title_match_outranks_notes_and_an_unrelated_query_misses() {
-        assert_eq!(band(TITLE, TITLE, NOTES), Some(Band::Exact));
+        assert_eq!(at(TITLE, TITLE, NOTES), Some(Band::Exact));
         assert_eq!(
-            band("gpridge narrated video set", TITLE, NOTES),
+            at("gpridge narrated video set", TITLE, NOTES),
             Some(Band::Exact)
         );
         assert_eq!(
-            band("the GPRidge narrated video set", TITLE, NOTES),
+            at("the GPRidge narrated video set", TITLE, NOTES),
+            Some(Band::Near)
+        );
+        assert_eq!(at("GPRidge narrated video", TITLE, NOTES), Some(Band::Near));
+        assert_eq!(at("narrated video", TITLE, NOTES), Some(Band::Title));
+        assert_eq!(at("GPRidge", TITLE, NOTES), Some(Band::Title));
+        assert_eq!(
+            at("GPRidge video narration", TITLE, NOTES),
             Some(Band::Near)
         );
         assert_eq!(
-            band("GPRidge narrated video", TITLE, NOTES),
+            at("gpridge VIDEO Narration", TITLE, NOTES),
             Some(Band::Near)
         );
-        assert_eq!(band("narrated video", TITLE, NOTES), Some(Band::Title));
-        assert_eq!(band("GPRidge", TITLE, NOTES), Some(Band::Title));
+        assert_eq!(at("narrate", TITLE, NOTES), Some(Band::Title));
+        assert_eq!(at("videos", TITLE, NOTES), Some(Band::Title));
+        assert_eq!(at("kiln", "Fire the kiln", ""), Some(Band::Title));
+        assert_eq!(at("milestone filmed", TITLE, NOTES), Some(Band::Notes));
+        assert_eq!(at("zzzznotaword", TITLE, NOTES), None);
+        assert_eq!(at("the", TITLE, NOTES), None);
+    }
+
+    /// Titles a person would file. `update`, `note` and `fix` show up on
+    /// more than one, and they do not name the work.
+    #[test]
+    fn a_single_common_word_is_not_a_title_match() {
+        let corpus = [
+            "Update the mailbox index",
+            "Update the docs site",
+            "Add a note to the readme",
+            "Fix the parser timeout",
+            "Fire the kiln overnight",
+            "GPRidge narrated video set",
+        ];
+        let hit = |query: &str, title: &str| band(query, title, "", &corpus);
+        assert_eq!(hit("update the note about search", corpus[0]), None);
+        assert_eq!(hit("update the note about search", corpus[2]), None);
+        assert_eq!(hit("please fix the glaze", corpus[3]), None);
+        assert_eq!(hit("kiln overnight", corpus[4]), Some(Band::Title));
         assert_eq!(
-            band("GPRidge video narration", TITLE, NOTES),
-            Some(Band::Near)
+            hit("update the kiln temperature", corpus[4]),
+            Some(Band::Title)
         );
-        assert_eq!(
-            band("gpridge VIDEO Narration", TITLE, NOTES),
-            Some(Band::Near)
-        );
-        assert_eq!(band("narrate", TITLE, NOTES), Some(Band::Title));
-        assert_eq!(band("videos", TITLE, NOTES), Some(Band::Title));
-        assert_eq!(band("kiln", "Fire the kiln", ""), Some(Band::Title));
-        assert_eq!(band("milestone filmed", TITLE, NOTES), Some(Band::Notes));
-        assert_eq!(band("zzzznotaword", TITLE, NOTES), None);
-        assert_eq!(band("the", TITLE, NOTES), None);
+        assert_eq!(hit("update the kiln temperature", corpus[0]), None);
+        assert_eq!(hit("parser timeout", corpus[3]), Some(Band::Title));
+        assert_eq!(hit("GPRidge", corpus[5]), Some(Band::Title));
+        assert_eq!(hit("update", corpus[0]), Some(Band::Title));
     }
 }

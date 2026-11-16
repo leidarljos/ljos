@@ -238,8 +238,13 @@ fn file_with_no_seat_names_the_unknown_seat() {
     let out = fresh.ljos_env(&[("LJOS_SYNC_HOST", "box")], file);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains(notice),
-        "a first file did not name the unknown seat:\n{err}"
+        err.contains("no seat was named and this write uses "),
+        "a first file did not name the seat:\n{err}"
+    );
+    assert!(err.contains("so run `export LJOS_SEAT=NAME`."), "{err}");
+    assert!(
+        !err.contains("unknown-"),
+        "the fallback still used the host name:\n{err}"
     );
     let again = Bench::new();
     let log = again.root.join("home/.state/ljos/seat-writes.log");

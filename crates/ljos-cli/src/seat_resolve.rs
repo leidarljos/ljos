@@ -20,7 +20,7 @@ pub enum Kind {
     Keep,
     /// Read every seat.
     Read,
-    /// Write as `unknown-<hostname>`.
+    /// Write as the login name, or a short stable name when that login is missing.
     Write,
 }
 
@@ -44,9 +44,9 @@ pub fn prepare(flag: Option<String>, kind: Kind) {
     KIND.with(|cell| cell.set(kind));
 }
 
-/// The rest of this command writes, so a missing seat is `unknown-<host>`
-/// and [`announce_unknown`] can name it. The `--seat` flag already stored
-/// by [`prepare`] stays.
+/// The rest of this command writes, so a missing seat is the login name,
+/// or a short stable name, and [`announce_unknown`] can name it. The
+/// `--seat` flag already stored by [`prepare`] stays.
 pub fn mark_write() {
     KIND.with(|cell| cell.set(Kind::Write));
 }
@@ -62,10 +62,11 @@ pub(crate) fn announce_unknown(seat: &crate::Seat) {
     say_unknown(&seat.seat);
 }
 
-/// The same line when this write's seat is already `unknown-<host>`,
-/// including a seat taken from the most recent write. A named seat stays quiet.
+/// The same line when this write's seat is the fallback, including a seat
+/// taken from the most recent write that is still `unknown-<host>`.
+/// A named seat stays quiet. The line is printed once for this state directory.
 pub fn announce_named_unknown(seat: &crate::Seat) {
-    if seat.seat.starts_with("unknown-") {
+    if seat.source.contains("unknown seat") || seat.seat.starts_with("unknown-") {
         say_unknown(&seat.seat);
     }
 }
@@ -74,7 +75,31 @@ fn say_unknown(seat: &str) {
     if NOTICED.with(|cell| cell.replace(true)) {
         return;
     }
+    if hint_recorded() {
+        return;
+    }
     eprintln!("{}", notice(seat));
+    record_hint();
+}
+
+fn hint_recorded() -> bool {
+    hint_path().is_some_and(|path| path.is_file())
+}
+
+fn record_hint() {
+    let Some(path) = hint_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, "1\n");
+}
+
+fn hint_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    std::env::var_os("XDG_STATE_HOME")?;
+    Some(crate::state_base_dir().join("seat-hint"))
 }
 
 /// The seat and the rule phrase, when one of the six rules matches.
@@ -99,6 +124,7 @@ pub(crate) fn named_from_env() -> Option<(String, &'static str)> {
         parent_seat: parent.as_deref(),
         write_log: &write_log,
         host: &host,
+        user: None,
     };
     pick(&inputs)
 }
@@ -107,12 +133,13 @@ pub(crate) fn named_from_env() -> Option<(String, &'static str)> {
 /// `None` for [`Kind::Keep`].
 pub(crate) fn command_fallback() -> Option<crate::Seat> {
     let kind = KIND.with(|cell| cell.get());
-    fallback_seat(kind, &crate::sync::host())
+    fallback_from(kind, &crate::sync::host(), login_name().as_deref())
 }
 
 /// A seat for a call that used to return `seat-unresolved`.
 pub(crate) fn unresolved_seat() -> crate::Seat {
-    command_fallback().unwrap_or_else(|| unknown_seat(&crate::sync::host()))
+    command_fallback()
+        .unwrap_or_else(|| write_seat_fallback(&crate::sync::host(), login_name().as_deref()))
 }
 
 /// True when `mine` is the read-every-seat sentinel.
@@ -160,6 +187,10 @@ pub(crate) struct Inputs<'a> {
     pub parent_seat: Option<&'a str>,
     pub write_log: &'a str,
     pub host: &'a str,
+    /// `USER` or `LOGNAME`, when one is a usable seat. Tests set this
+    /// directly. Production reads the login in [`login_name`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub user: Option<&'a str>,
 }
 
 /// The first matching rule: the seat and the phrase doctor prints.
@@ -194,7 +225,7 @@ pub(crate) fn choose(inputs: &Inputs<'_>, kind: Kind) -> Option<(String, &'stati
     if let Some(found) = pick(inputs) {
         return Some(found);
     }
-    fallback_seat(kind, inputs.host).map(|seat| {
+    fallback_from(kind, inputs.host, inputs.user).map(|seat| {
         let rule = if seat.seat == EVERY_SEAT {
             "no seat rule matched; reading every seat"
         } else {
@@ -204,22 +235,19 @@ pub(crate) fn choose(inputs: &Inputs<'_>, kind: Kind) -> Option<(String, &'stati
     })
 }
 
-fn fallback_seat(kind: Kind, host: &str) -> Option<crate::Seat> {
+fn fallback_from(kind: Kind, host: &str, user: Option<&str>) -> Option<crate::Seat> {
     match kind {
         Kind::Keep => None,
         Kind::Read => Some(whole(
             EVERY_SEAT,
             "no seat rule matched; reading every seat",
         )),
-        Kind::Write => {
-            let name = unknown_for(host);
-            Some(whole(&name, "no seat rule matched; using an unknown seat"))
-        }
+        Kind::Write => Some(write_seat_fallback(host, user)),
     }
 }
 
-fn unknown_seat(host: &str) -> crate::Seat {
-    let name = unknown_for(host);
+fn write_seat_fallback(host: &str, user: Option<&str>) -> crate::Seat {
+    let name = write_fallback_name(user, host);
     whole(&name, "no seat rule matched; using an unknown seat")
 }
 
@@ -231,13 +259,42 @@ fn whole(name: &str, source: &str) -> crate::Seat {
     }
 }
 
-fn unknown_for(host: &str) -> String {
-    let host = host.trim();
-    if host.is_empty() {
-        "unknown-host".to_string()
-    } else {
-        format!("unknown-{host}")
+/// The seat a write uses when no rule matched.
+///
+/// A usable login name is that name. Without one, the name is `seat-`
+/// plus six hex digits of the host, so a runner hostname is not the seat.
+/// The same host always yields the same name. An explicit seat is not
+/// passed here.
+#[must_use]
+pub fn write_fallback_name(user: Option<&str>, host: &str) -> String {
+    if let Some(name) = user.and_then(usable) {
+        return name;
     }
+    let host = host.trim();
+    let host = if host.is_empty() { "host" } else { host };
+    let mut hash = 0x811c_9dc5_u32;
+    for byte in host.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("seat-{:06x}", hash & 0x00ff_ffff)
+}
+
+fn login_name() -> Option<String> {
+    for key in ["USER", "LOGNAME"] {
+        if let Ok(value) = std::env::var(key) {
+            if let Some(name) = usable(&value) {
+                return Some(name);
+            }
+        }
+    }
+    // A shell that cleared `USER` still has an account. Unit tests keep
+    // the name they passed in [`Inputs::user`] and do not read this.
+    #[cfg(not(test))]
+    if let Some(name) = crate::process_account().and_then(|name| usable(&name)) {
+        return Some(name);
+    }
+    None
 }
 
 /// A name that can be a seat. A subagent id, a pronoun and an empty
@@ -477,6 +534,7 @@ mod tests {
             parent_seat: None,
             write_log: "",
             host: "box",
+            user: None,
         }
     }
 
@@ -589,7 +647,7 @@ mod tests {
 
     #[test]
     fn reads_fall_back_to_every_seat_and_writes_to_unknown() {
-        let inputs = blank();
+        let mut inputs = blank();
         assert!(pick(&inputs).is_none());
         assert_eq!(
             choose(&inputs, Kind::Read).unwrap(),
@@ -599,15 +657,37 @@ mod tests {
             )
         );
         let (seat, rule) = choose(&inputs, Kind::Write).unwrap();
-        assert_eq!(seat, "unknown-box");
+        let fallback = write_fallback_name(None, "box");
+        assert_eq!(seat, fallback);
+        assert!(seat.starts_with("seat-"), "{seat}");
+        assert!(!seat.contains("box"), "{seat}");
+        assert!(!seat.starts_with("unknown-"), "{seat}");
         assert_eq!(rule, "no seat rule matched; using an unknown seat");
         assert!(choose(&inputs, Kind::Keep).is_none());
-        let line = notice("unknown-box");
+        let line = notice(&seat);
         assert_eq!(
             line,
-            "ljos: no seat was named and this write uses unknown-box, so run `export LJOS_SEAT=NAME`."
+            format!(
+                "ljos: no seat was named and this write uses {seat}, so run `export LJOS_SEAT=NAME`."
+            )
         );
         assert!(!line.contains('\n'), "{line}");
+        inputs.user = Some("ada");
+        assert_eq!(choose(&inputs, Kind::Write).unwrap().0, "ada");
+        inputs.user = Some("seat");
+        assert_eq!(choose(&inputs, Kind::Write).unwrap().0, fallback);
+    }
+
+    #[test]
+    fn a_missing_login_stays_the_same_short_name() {
+        let host = "runnervm-abc123";
+        let once = write_fallback_name(None, host);
+        assert_eq!(once, write_fallback_name(None, host));
+        assert!(once.starts_with("seat-"));
+        assert_eq!(once.len(), "seat-".len() + 6);
+        assert!(!once.contains("runner"), "{once}");
+        assert!(!once.contains(host), "{once}");
+        assert_eq!(write_fallback_name(Some("ada"), host), "ada");
     }
 
     #[test]

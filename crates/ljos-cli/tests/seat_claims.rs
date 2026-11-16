@@ -148,7 +148,11 @@ fn a_raw_or_legacy_name_does_not_hold_the_claim() {
     assert!(!said.contains("label seat-unresolved"), "{said}");
     assert!(!calls.contains("example-host-sand-sub"), "{calls}");
     assert!(
-        calls.contains("unknown-") || said.contains("unknown-"),
+        !calls.contains("unknown-") && !said.contains("unknown-"),
         "{said}\n{calls}"
+    );
+    assert!(
+        calls.contains("VISSUE_AGENT=") && !calls.contains("VISSUE_AGENT=\n"),
+        "the fallback seat was not named:\n{calls}"
     );
 }

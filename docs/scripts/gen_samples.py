@@ -1042,8 +1042,10 @@ def tutorial_search(ljos: Path) -> dict[str, str]:
             raise SystemExit(f"gen_samples: {name} sample did not rank by words:\n{body}")
         if "/tmp" in body or "ljos-doc-search" in body:
             raise SystemExit(f"gen_samples: {name} sample names a temporary directory")
-    if "unknown-laptop" not in search:
-        raise SystemExit(f"gen_samples: search sample did not use the sample host:\n{search}")
+    if "this write uses ada" not in search:
+        raise SystemExit(f"gen_samples: search sample did not use the sample login:\n{search}")
+    if "unknown-" in search:
+        raise SystemExit(f"gen_samples: search sample still uses an unknown host:\n{search}")
     if _STANDING not in search:
         raise SystemExit(f"gen_samples: search sample did not say the lesson stands:\n{search}")
     return {"search": search, "prefer": prefer, "index": index}

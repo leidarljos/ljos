@@ -4624,9 +4624,9 @@ pub fn whoami() -> Seat {
     } else {
         distinguish_harness_session(seat)
     };
-    // `unknown-<host>` is what a write uses when nothing named a seat.
-    // A session id replaces that name, so the line waits until here and
-    // names the seat the write actually uses.
+    // The login name, or a short stable name, is what a write uses when
+    // nothing named a seat. A session id replaces that name, so the line
+    // waits until here and names the seat the write actually uses.
     seat_resolve::announce_unknown(&seat);
     seat
 }
@@ -4663,8 +4663,9 @@ fn whoami_resolved() -> Seat {
         .or_else(|| program.as_ref().map(|p| p.seat.clone()))
         .or_else(|| agent.clone())
         .unwrap_or_else(login_user);
-    // No rule named a seat. A read looks at every seat. A write uses
-    // unknown-<hostname>. Anything else keeps the login user below.
+    // No rule named a seat. A read looks at every seat. A write uses the
+    // login name, or a short stable name. Anything else keeps the login
+    // user below.
     if named.is_none()
         && program
             .as_ref()
@@ -4920,7 +4921,8 @@ fn seat_roster(slug: &str) -> std::collections::BTreeSet<String> {
 ///
 /// The call passed a name that is neither the announced seat, a harness
 /// id, nor a seat the tracker knows. A missing seat is not an error: the
-/// read runs against every seat, and a write uses `unknown-<hostname>`.
+/// read runs against every seat, and a write uses the login name, or a
+/// short stable name when that login is missing.
 pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     load_seat_env();
     let from_call = arg
@@ -5767,9 +5769,9 @@ fn occupancy_scope(assignee: &str, issue: &str) -> String {
 pub fn seat_source_row(who: &Seat) -> Habitat {
     if who.source.starts_with("no seat rule matched") {
         let detail = who.source.trim_end_matches('.');
-        // A write that matched nothing is `unknown-<host>`. The phrase
-        // names that seat, so a short doctor still says which host.
-        let state = if who.seat.starts_with("unknown-") {
+        // A write that matched nothing names the seat it picked, so a
+        // short doctor still says which name, and how to set one.
+        let state = if who.source.contains("using an unknown seat") {
             format!(
                 "{detail}; the seat is {}, so run `export LJOS_SEAT=NAME`.",
                 who.seat
@@ -50515,6 +50517,15 @@ pub fn run_within(
     print!("{}", said.stdout);
     eprint!("{}", said.stderr);
     Ok(())
+}
+
+/// [`run_within`] that hands the habitat's output back instead of printing it.
+///
+/// # Errors
+///
+/// `bin` is not on `PATH`, it did not answer in time, or it exited non-zero.
+pub fn run_for(bin: &str, args: &[impl AsRef<str>], deadline: std::time::Duration) -> Result<Said> {
+    run_captured_within(bin, args, None, deadline)
 }
 
 /// The identity a ballot is cast under: the persona named, else the seat

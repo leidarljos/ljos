@@ -132,6 +132,15 @@ fn a_note_goes_to_the_ticket_and_not_to_memory() {
         !stdout.contains("noted in memory") && !stdout.contains("memory kept no copy"),
         "the note still talks about memory:\n{stdout}"
     );
+    assert_eq!(
+        stdout.matches("proj-aaaa: noted").count(),
+        1,
+        "the confirmation should be one line:\n{stdout}{stderr}"
+    );
+    assert!(
+        !stdout.contains("noted on "),
+        "a second confirmation followed the note:\n{stdout}"
+    );
 }
 
 /// No queue, no retry, no leftover state: the tracker took the note and

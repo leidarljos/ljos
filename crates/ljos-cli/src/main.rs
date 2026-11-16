@@ -3480,7 +3480,8 @@ fn take_seat_flag(args: &[std::ffi::OsString]) -> (Option<String>, Vec<std::ffi:
 }
 
 /// Reads look at every seat when none of the rules match. The writes
-/// that used to stop, and remember, note and file, use `unknown-<hostname>`.
+/// that used to stop, and remember, note and file, use the login name,
+/// or a short stable name when that login is missing.
 fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
     use ljos_cli::seat_resolve::Kind;
     match cmd {
@@ -5191,9 +5192,9 @@ fn run_command() -> Result<()> {
             verbose,
             json,
         } => {
-            // The same unknown-seat line `ljos remember` prints. A seat
-            // taken from the most recent write is already `unknown-<host>`,
-            // and the commit line alone does not say to name one.
+            // The same seat line `ljos remember` prints. A seat taken from
+            // the most recent write that is still the fallback, and the
+            // commit line alone does not say to name one.
             ljos_cli::seat_resolve::announce_named_unknown(&ljos_cli::whoami());
             if let Some(parent) = parent.as_deref() {
                 stop_ticket(parent);
@@ -5370,17 +5371,18 @@ fn run_command() -> Result<()> {
             let (issue, text, inferred) = note_target(&words)?;
             // The note is the tracker write. Reconciling a claim the
             // graph did not take waits until that write has landed, and
-            // only for a short bound.
-            ljos_cli::run_within(
+            // only for a short bound. The tracker prints `{id}: noted`
+            // and nothing else is added to that confirmation: a second
+            // `noted on` line used to follow it.
+            let captured = ljos_cli::run_for(
                 "vissue",
                 &["note", &issue, &text],
                 ljos_cli::tracker_verb_wait(),
             )?;
+            eprint!("{}", captured.stderr);
             warn_other_sitting(&issue, quiet, inferred);
-            let mut said = ljos_cli::retry_pending_claim(&issue);
-            if inferred {
-                said.push_str(&format!("noted on {issue}\n"));
-            }
+            let mut said = format!("{issue}: noted\n");
+            said.push_str(&ljos_cli::retry_pending_claim(&issue));
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
                 said.push_str(&line);
             }
@@ -5389,6 +5391,7 @@ fn run_command() -> Result<()> {
                 Err(e) => eprintln!("ljos note: {e:#}"),
             }
             said.push_str(&ljos_cli::persist_tracker(&issue, "noted"));
+            ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
             print!("{}", render_write(&said, git_detail(verbose), json, None));
         }
         Cmd::Slot {

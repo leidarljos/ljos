@@ -318,13 +318,14 @@ fn the_remember_sample_uses_a_neutral_host() {
     ] {
         let text = repo_file(rel);
         assert!(
-            text.contains("unknown-laptop"),
-            "{rel} does not use the neutral host"
+            text.contains("this write uses ada"),
+            "{rel} does not use the sample login"
         );
         for name in runners {
             assert!(
-                !text.contains(&format!("unknown-{name}")),
-                "{rel} uses the runner name {name} as a host"
+                !text.contains(&format!("unknown-{name}"))
+                    && !text.contains(&format!("uses {name}")),
+                "{rel} uses the runner name {name} as a seat"
             );
         }
     }

@@ -182,12 +182,24 @@ fn a_read_with_no_seat_covers_every_seat_and_a_write_names_unknown() {
         String::from_utf8_lossy(&write.stdout),
         String::from_utf8_lossy(&write.stderr)
     );
-    assert!(write_text.contains("this write uses unknown-box"), "{text}");
+    assert!(write_text.contains("this write uses "), "{text}");
     assert!(
         write_text.contains("so run `export LJOS_SEAT=NAME`."),
         "{text}"
     );
+    assert!(!write_text.contains("unknown-"), "{text}");
     assert!(!write_text.contains("label seat-unresolved"), "{text}");
+
+    let again = world.ljos(
+        &["remember", "Measure the files before picking a codec."],
+        &[],
+    );
+    let again_text = said(&again);
+    let again_err = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        !again_err.contains("no seat was named"),
+        "the seat hint was printed again:\n{again_text}"
+    );
 }
 
 /// A conversation that already has a seat is that seat. The unknown-host

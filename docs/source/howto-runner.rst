@@ -109,7 +109,7 @@ The how-to :doc:`Run two agents on one repository <howto-agents>` is two session
 A read with no seat named looks at every seat. Set one with ``export LJOS_SEAT=NAME``.
 After a client connects, ``ljos seat`` in that server's environment still
 reads ``LJOS_SEAT``. The name the client sent is not the source. A write
-with none set uses ``unknown-`` and the host name, and says to set ``LJOS_SEAT``.
+with none set uses the login name, or a short stable name when that login is missing, and the first write says to set ``LJOS_SEAT``.
 
 The protocol goes where the agent reads its instructions: ``ljos protocol``
 prints it, the server serves the same text at ``ljos://protocol`` and names

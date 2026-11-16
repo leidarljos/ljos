@@ -386,7 +386,7 @@ fn settled(term: &pty::Pty) -> String {
 fn promised_in_readme(cmd: &str) -> Vec<&'static str> {
     match ljos_verb(cmd).as_deref() {
         Some("doctor") => DOCTOR.to_vec(),
-        Some("remember") => vec!["unknown-"],
+        Some("remember") => vec!["login name"],
         Some("search") if cmd.contains("lexical default") => {
             vec!["matched by words (encoder not installed)"]
         }
@@ -423,11 +423,15 @@ fn expect_output(cmd: &str, output: &str) {
                 assert!(output.contains(key), "{cmd}\nmissing {key:?}\n{output}");
             }
             // No named seat. A read that matched no rule says every seat.
-            // A write that had to pick one is `unknown-` plus the host, and
-            // a later read names that write. Install may have done either.
+            // A write that had to pick one names that seat, and a later
+            // read names that write. Install may have done either.
             assert!(
-                output.contains("every seat") || output.contains("unknown-"),
-                "{cmd}\nseat source named neither every seat nor the unknown host\n{output}"
+                output.contains("every seat")
+                    || output.contains("export LJOS_SEAT=NAME")
+                    || output.contains("this write uses ")
+                    || output.contains("most recent write")
+                    || output.contains("named by"),
+                "{cmd}\nseat source named neither every seat nor the fallback\n{output}"
             );
         }
         Some("remember") => {
@@ -436,7 +440,7 @@ fn expect_output(cmd: &str, output: &str) {
                 has_short_id(output),
                 "remember did not print the first eight characters of the id:\n{output}"
             );
-            assert!(output.contains("unknown-"), "{cmd}\n{output}");
+            assert!(!output.contains("unknown-"), "{cmd}\n{output}");
         }
         Some("search") if cmd.contains("lexical default") => {
             assert!(output.contains(LESSON), "{cmd}\n{output}");

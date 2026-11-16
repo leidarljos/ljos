@@ -19,7 +19,8 @@ the issue's tags, and were not filed on the issue, are listed under
 Related, with shown N of M. An id the tracker does not hold names =ljos search=,
 =ljos ready= and =ljos file=.
 With no =LJOS_SEAT=, the command says no seat was named and uses
-=unknown-= plus the host name. Set the seat before a lesson you want
+the login name, or a short stable name when that login is missing.
+The line is printed once. Set the seat before a lesson you want
 under your own name.
 
 A pack that answers 503, including =packsetd is busy: memory pressure=,

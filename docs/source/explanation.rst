@@ -176,7 +176,7 @@ Who is sitting
 The seat is the name an agent works under. ``LJOS_SEAT`` sets it, and so does a ``seat=`` line
 in ``~/.config/ljos/env`` or a row in ``~/.config/ljos/seats.toml``. ``ljos-mcp`` does not take
 the seat from the client that connected. A read with none of those set looks at every seat.
-A write uses ``unknown-`` plus the host name, and says to set ``LJOS_SEAT``.
+A write uses the login name, or a short stable name when that login is missing, and the first such write says to set ``LJOS_SEAT``.
 An MCP write on a shared server needs the ``seat`` argument when that session has no stamped seat of its own.
 The call is refused in one line, and the write is not stored under a guessed seat. A read still runs.
 ``ljos seat`` prints the seat, the holder, and where each name came from.
@@ -188,7 +188,7 @@ An exported ``LJOS_SEAT`` is the seat for every session that carries it.
 The holder is ``SEAT@session``, and the session id is the one the runner gives.
 
 On a fresh tracker with no seat list, any seat may write. An unset seat with no conversation
-record writes as ``unknown-`` plus the host name, and says so. A conversation that already has a
+record writes as the login name, or as a short stable name when that login is missing, and the first write says so. A conversation that already has a
 seat record writes as that seat. Once the tracker's ``vissue.toml`` lists seats, a tracker write
 from a seat it does not list is refused.
 

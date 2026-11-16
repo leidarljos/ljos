@@ -174,8 +174,8 @@ Search and recall use the runner's name as the family, so a lesson is not split 
 An exported =LJOS_SEAT= is the seat for every session that carries it.
 The holder is =SEAT@session=, and the session id is the one the runner gives.
 
-On a fresh tracker with no seat list, any seat may write. An unset seat writes under its login
-seat with a warning. Once the tracker's =vissue.toml= lists seats, a tracker write from a seat it
+On a fresh tracker with no seat list, any seat may write. An unset seat writes as the login
+name, or as a short stable name when that login is missing, and the first such write says to set =LJOS_SEAT=. Once the tracker's =vissue.toml= lists seats, a tracker write from a seat it
 does not list is refused.
 
 - =ljos seat add NAME= writes the seat's row in =vissue.toml=.

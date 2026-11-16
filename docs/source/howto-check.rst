@@ -65,7 +65,7 @@ Repair what doctor can
 ``ljos doctor --fix`` repairs the problems that are local and reversible, then prints the doctor again.
 Each repair is one line.
 Each problem it leaves is one line, and that line names the one command to run.
-A row doctor can repair ends with ``run `ljos doctor --fix` ``.
+A row doctor can repair ends with ``ljos doctor --fix``.
 
 It creates a missing ljos home (``$XDG_STATE_HOME/ljos``, or ``~/.local/state/ljos``) and a ``ljos.toml`` that sets no keys, so the defaults stand.
 It renames a stale lock or pid file whose process is gone, adding ``.bak`` to the name.

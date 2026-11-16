@@ -129,7 +129,7 @@ Trust it again after an upgrade rewrites one.
 # BEGIN ljos-sample tutorial-search
 #+begin_src console
 $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
-ljos: no seat was named and this write uses unknown-laptop, so run `export LJOS_SEAT=NAME`.
+ljos: no seat was named and this write uses ada, so run `export LJOS_SEAT=NAME`.
 remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
   id a6ae2751, next review 2026-11-12 21:40 +00:00
 standing: the hook shows it from the next prompt it bears on
@@ -144,7 +144,8 @@ lesson, today
 #+end_src
 # END ljos-sample tutorial-search
 
-The id and the review time are the ones that run printed. The name after =unknown-= is the host name. The sample uses =laptop=, which is not a runner name.
+The id and the review time are the ones that run printed. The name is the login name. This sample's login is ada.
+That line is printed on the first write that had to pick a seat. A later write in the same place does not print it again. A conversation that already has a seat record writes as that seat and does not print the line.
 Typed at a terminal, the search row says =lesson, today=.
 Under a runner the same row says =lesson, from an agent=.
 A preference stored at that terminal is =preference, today=.
@@ -159,7 +160,6 @@ A busy pack ranks by words and still returns a hit that names the subject. The f
 # BEGIN ljos-sample tutorial-prefer
 #+begin_src console
 $ ljos prefer "CombMNZ over RRF for fusing two ballots."
-ljos: no seat was named and this write uses unknown-laptop, so run `export LJOS_SEAT=NAME`.
 remembered (preference): CombMNZ over RRF for fusing two ballots.
   id f8b725a9, next review 2026-11-12 21:40 +00:00
 $ ljos search fusing

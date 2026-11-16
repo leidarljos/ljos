@@ -320,7 +320,7 @@ fn runs_without_seat(name: &str) -> bool {
 }
 
 /// Search, recall, status and doctor read every seat when none is named.
-/// Every other tool writes as `unknown-<hostname>` rather than stopping.
+/// Every other tool writes as the login name, or a short stable name, rather than stopping.
 fn mcp_seat_kind(name: &str) -> ljos_cli::seat_resolve::Kind {
     let verb = name.trim_start_matches("ljos_");
     if matches!(
