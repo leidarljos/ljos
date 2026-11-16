@@ -561,6 +561,10 @@ pub struct SearchArgs {
     /// learnt since left out. Omit for now.
     #[serde(default)]
     pub as_of: Option<String>,
+    /// Lowest score to return when a row does not name a subject word.
+    /// Omit for 0.34. `0` returns every row, including a weak word match.
+    #[serde(default)]
+    pub min_score: Option<f64>,
 }
 
 /// A reading of a habit, or the question which readings stand.
@@ -1679,7 +1683,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. If the pack is still starting, the tool returns an error: Memory is starting, so try again in a few seconds. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Follow with ljos_island for the cluster the task touches.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. If the pack is still starting, the tool returns an error: Memory is starting, so try again in a few seconds. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Pass min_score to drop a row under that score when it does not name a subject word; 0 returns every row, and the default is 0.34. Follow with ljos_island for the cluster the task touches.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -1690,6 +1694,15 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<Json<SearchPage>, McpError> {
+        let min_score = match args.min_score {
+            None => ljos_cli::word_rank::DEFAULT_MIN_SCORE,
+            Some(score) if score.is_finite() && score >= 0.0 => score,
+            Some(_) => {
+                return Err(refused(anyhow::anyhow!(
+                    "search: min_score takes a number from 0 up."
+                )));
+            }
+        };
         // The same line `ljos search` appends, under the seat this call
         // already resolved.
         ljos_cli::log_recall("search", &args.query);
@@ -1719,12 +1732,15 @@ impl LjosServer {
         } else {
             ljos_cli::drop_weak_cross_seat(&mut hits, &args.query, false)
         };
+        let emptied = ljos_cli::word_rank::apply_relevance_floor(&mut hits, &args.query, min_score);
         note_lookups(&hits);
         let id_space = ljos_cli::search_id_space(&hits);
         let id_refs: Vec<&str> = id_space.iter().map(String::as_str).collect();
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
-        let mut reading = if let Some(suggest) = close_miss.as_ref() {
+        let mut reading = if emptied {
+            ljos_cli::word_rank::no_relevant_line(&args.query)
+        } else if let Some(suggest) = close_miss.as_ref() {
             ljos_cli::word_rank::no_close_line_with(&args.query, suggest.as_deref())
         } else if hits.is_empty() && unrelated {
             ljos_cli::NOTHING_RELEVANT.trim().to_string()

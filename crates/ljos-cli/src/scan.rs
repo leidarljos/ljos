@@ -601,6 +601,28 @@ pub fn nothing_matched_page(query: &str) -> String {
     }
 }
 
+/// The page when a relevance floor removed every row. The hint names
+/// `--min-score 0`. It stays whole, on the next line when the sentence
+/// does not fit.
+#[must_use]
+pub fn no_relevant_page(query: &str) -> String {
+    let query = query.trim();
+    let shown = crate::word_rank::quote_query(query);
+    let head = format!("No relevant matches for {shown}.");
+    let hint = "Pass --min-score 0 to see every row.";
+    let one = format!("{head} {hint}");
+    if one.chars().count() <= COLS && !one.contains('\n') {
+        return ended(&one);
+    }
+    let mut out = wrap(&head, COLS);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(hint);
+    out.push('\n');
+    out
+}
+
 /// A search before anything has been stored. A shorter query would miss
 /// too, so the sentence names the command that stores a lesson. One word
 /// is quoted in that command. Several words stay `TEXT`, because no one

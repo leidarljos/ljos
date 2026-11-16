@@ -128,6 +128,161 @@ pub fn no_close_line_with(query: &str, cmd: Option<&str>) -> String {
     }
 }
 
+/// Lowest score kept for a row that does not name a subject word.
+///
+/// Two words of a six-word query is 0.33, which is the unrelated lesson a
+/// local snapshot returned for `ridley-core landing order rebase review`.
+/// A one-word subject search such as `fusing` scores about 0.35, so this
+/// line leaves that row in. `0` turns the floor off.
+pub const DEFAULT_MIN_SCORE: f64 = 0.34;
+
+/// Words that show up in lessons about other work. One of them, or a run
+/// of them, is not the subject of a longer query. `test` and `error` are
+/// not on this list: a query is often about those.
+const WEAK: &[&str] = &[
+    "add", "also", "change", "check", "code", "core", "data", "file", "find", "fix", "help",
+    "info", "item", "just", "line", "list", "make", "more", "name", "need", "new", "note", "order",
+    "page", "please", "review", "run", "search", "set", "show", "task", "text", "thing", "time",
+    "type", "update", "use", "user", "way", "work",
+];
+
+/// The line when the floor removed every row.
+///
+/// The hint names `--min-score 0`, which prints the rows the floor removed.
+#[must_use]
+pub fn no_relevant_line(query: &str) -> String {
+    let shown = quote_query(query.trim());
+    format!("No relevant matches for {shown}. Pass --min-score 0 to see every row.")
+}
+
+/// The command `--json` names when the floor removed every row.
+#[must_use]
+pub fn min_score_off_command(query: &str) -> String {
+    let query = query.trim();
+    let unsafe_query = query.is_empty()
+        || query
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '"' | '`' | '\\'));
+    if unsafe_query {
+        return "ljos search --min-score 0".to_string();
+    }
+    if query.contains(char::is_whitespace) {
+        format!("ljos search \"{query}\" --min-score 0")
+    } else {
+        format!("ljos search {query} --min-score 0")
+    }
+}
+
+/// Drop rows the floor does not keep. `min_score` of 0 keeps every row.
+///
+/// Returns whether rows were present and none remain, which is the page
+/// [`no_relevant_line`] names. A ticket stays: the tracker match already
+/// refused a single common word.
+#[must_use]
+pub fn apply_relevance_floor(hits: &mut Vec<Hit>, query: &str, min_score: f64) -> bool {
+    if min_score <= 0.0 || hits.is_empty() {
+        return false;
+    }
+    let before = hits.len();
+    hits.retain(|hit| keeps_row(hit, query, min_score));
+    before > 0 && hits.is_empty()
+}
+
+/// Whether `hit` is worth printing for `query` at `min_score`.
+///
+/// A row that shares a subject word stays, including a stem such as
+/// `narration` against `narrated`, even when the stored score is only the
+/// placeholder for a word the overlap count missed. A longer query that
+/// the row meets only in a stopword or a common weak word does not stay.
+/// A row that shares no word stays when its score is at the floor, which
+/// is a pack hit whose text does not spell the query.
+#[must_use]
+pub fn keeps_row(hit: &Hit, query: &str, min_score: f64) -> bool {
+    if min_score <= 0.0 {
+        return true;
+    }
+    if hit.kind == "ticket" {
+        return true;
+    }
+    if !hit.score.is_finite() || hit.score < 0.0 {
+        return false;
+    }
+    let blob = hit_blob(hit);
+    let covered = covered_terms(query, &blob);
+    if covered.iter().any(|term| !term_is_weak(term)) {
+        return true;
+    }
+    // A longer query that this row meets only in a common weak word is
+    // the off-topic lesson. The score does not rescue it.
+    if !covered.is_empty() && query_has_strong(query) {
+        return false;
+    }
+    if shares_only_stopwords(query, &blob) {
+        return false;
+    }
+    // No word of the subject. A pack score at the floor still answers,
+    // which is how a tag search returns a lesson that does not spell the tag.
+    hit.score >= min_score
+}
+
+fn hit_blob(hit: &Hit) -> String {
+    let mut blob = hit.text.clone();
+    for tag in &hit.entities {
+        if let Some(rest) = tag
+            .strip_prefix("title:")
+            .or_else(|| tag.strip_prefix("tag:"))
+        {
+            blob.push(' ');
+            blob.push_str(rest);
+        }
+    }
+    blob
+}
+
+fn shares_only_stopwords(query: &str, text: &str) -> bool {
+    let have: std::collections::BTreeSet<String> = raw_words(text).into_iter().collect();
+    let shared: Vec<String> = raw_words(query)
+        .into_iter()
+        .filter(|word| have.contains(word))
+        .collect();
+    !shared.is_empty()
+        && shared
+            .iter()
+            .all(|word| is_stop(word) || word.chars().count() < 3)
+}
+
+fn raw_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn covered_terms(query: &str, text: &str) -> Vec<String> {
+    concepts(query)
+        .into_iter()
+        .filter(|term| shares_term(term, text))
+        .collect()
+}
+
+fn query_has_strong(query: &str) -> bool {
+    concepts(query).iter().any(|term| !term_is_weak(term))
+}
+
+fn term_is_weak(term: &str) -> bool {
+    let concept = concept_of(term);
+    let parts = if concept.parts.is_empty() {
+        vec![concept.joined]
+    } else {
+        concept.parts
+    };
+    !parts.is_empty() && parts.iter().all(|part| is_weak_word(part))
+}
+
+fn is_weak_word(word: &str) -> bool {
+    WEAK.binary_search(&word).is_ok()
+}
+
 /// Whether `text` shares one content word with `query`, after identifier
 /// splits. The local snapshot uses this to keep a row the old overlap missed,
 /// such as `sha1` against `SHA-1`.
@@ -1565,5 +1720,225 @@ mod tests {
             rank(&docs, "escapees list_scans uppercase keys xylophone"),
             Ranked::Hits(_) | Ranked::NoClose { .. }
         ),);
+    }
+
+    fn lesson(text: &str, score: f64) -> Hit {
+        Hit {
+            id: Some(format!("local:{score}")),
+            text: text.to_string(),
+            score,
+            kind: "lesson".into(),
+            ts: None,
+            entities: vec!["seat:ada".into()],
+            ballots: None,
+            of: None,
+            rerank_score: None,
+            labels: Vec::new(),
+        }
+    }
+
+    /// Overlap the local snapshot used to print: query words found in the
+    /// text, split on anything that is not a letter or a digit.
+    fn overlap_score(text: &str, query: &str) -> f64 {
+        let words = |raw: &str| -> Vec<String> {
+            raw.split(|c: char| !c.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(str::to_lowercase)
+                .collect()
+        };
+        let query = words(query);
+        if query.is_empty() {
+            return 0.0;
+        }
+        let body = words(text);
+        let hit = query
+            .iter()
+            .filter(|word| body.iter().any(|item| item == *word))
+            .count();
+        hit as f64 / query.len() as f64
+    }
+
+    const RIDLEY: &str = "ridley-core landing order rebase review";
+    const JOSS: &str =
+        "The JOSS editor keeps review comments in document order beside the line they mark.";
+    const NARRATED: &str = "GPRidge narrated video set is the milestone for the ridge walk.";
+    const RIDLEY_LESSON: &str =
+        "Ridley-core landing order is rebase, then review, before the branch is pushed.";
+
+    #[test]
+    fn weak_words_stay_sorted_for_the_lookup() {
+        let mut sorted = WEAK.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(WEAK, sorted.as_slice());
+    }
+
+    #[test]
+    fn an_off_topic_lesson_at_the_reported_score_is_dropped() {
+        let score = overlap_score(JOSS, RIDLEY);
+        assert!(
+            (score - 0.33).abs() < 0.01,
+            "the reported row scored 0.33, got {score}"
+        );
+        let mut hits = vec![
+            lesson(JOSS, score),
+            lesson(
+                "The damper sticks when the kiln is cold.",
+                overlap_score("The damper sticks when the kiln is cold.", RIDLEY),
+            ),
+            lesson(NARRATED, overlap_score(NARRATED, RIDLEY)),
+        ];
+        hits.retain(|hit| hit.score > 0.0);
+        assert!(
+            apply_relevance_floor(&mut hits, RIDLEY, DEFAULT_MIN_SCORE),
+            "the floor should remove every row: {hits:?}"
+        );
+        assert!(hits.is_empty());
+        let line = no_relevant_line(RIDLEY);
+        assert!(line.starts_with("No relevant matches for \""), "{line}");
+        assert!(line.contains(RIDLEY), "{line}");
+        assert!(line.contains("--min-score 0"), "{line}");
+    }
+
+    #[test]
+    fn min_score_zero_keeps_the_off_topic_row() {
+        let mut hits = vec![lesson(JOSS, overlap_score(JOSS, RIDLEY))];
+        assert!(!apply_relevance_floor(&mut hits, RIDLEY, 0.0));
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn exact_stemmed_and_partial_overlap_stay() {
+        let mut hits = vec![lesson(NARRATED, overlap_score(NARRATED, NARRATED))];
+        assert!(!apply_relevance_floor(
+            &mut hits,
+            NARRATED,
+            DEFAULT_MIN_SCORE
+        ));
+        assert_eq!(hits.len(), 1, "exact");
+
+        let partial = "narrated video";
+        let mut hits = vec![lesson(NARRATED, overlap_score(NARRATED, partial))];
+        assert!(!apply_relevance_floor(
+            &mut hits,
+            partial,
+            DEFAULT_MIN_SCORE
+        ));
+        assert_eq!(hits.len(), 1, "partial");
+
+        // `narration` shares no exact word with `narrated`, so the snapshot
+        // score is the placeholder above the old no-subject floor. The stem
+        // still names the subject, and the row stays.
+        let mut hits = vec![lesson(NARRATED, 0.21)];
+        assert!(!apply_relevance_floor(
+            &mut hits,
+            "GPRidge video narration",
+            DEFAULT_MIN_SCORE
+        ));
+        assert_eq!(hits.len(), 1, "stemmed title");
+        let mut hits = vec![lesson("A narrated ridge walk.", 0.21)];
+        assert!(!apply_relevance_floor(
+            &mut hits,
+            "narration",
+            DEFAULT_MIN_SCORE
+        ));
+        assert_eq!(hits.len(), 1, "stemmed word");
+    }
+
+    #[test]
+    fn a_stemmed_hit_does_not_outrank_the_exact_word() {
+        let score = |body: &str, query: &str| {
+            let docs = [Doc {
+                id: "a",
+                own: true,
+                title: "",
+                tags: "",
+                body,
+            }];
+            match rank(&docs, query) {
+                Ranked::Hits(rows) => rows[0].score,
+                other => panic!("{query} was not a hit: {other:?}"),
+            }
+        };
+        let exact = score(NARRATED, "narrated");
+        let stemmed = score(NARRATED, "narration");
+        assert!(exact + 1e-9 >= stemmed, "exact {exact} stemmed {stemmed}");
+        assert!(stemmed > 0.0, "{stemmed}");
+    }
+
+    #[test]
+    fn a_real_landing_lesson_stays_and_the_joss_note_does_not() {
+        let mut hits = vec![
+            lesson(JOSS, overlap_score(JOSS, RIDLEY)),
+            lesson(RIDLEY_LESSON, overlap_score(RIDLEY_LESSON, RIDLEY)),
+        ];
+        assert!(!apply_relevance_floor(&mut hits, RIDLEY, DEFAULT_MIN_SCORE));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].text.contains("Ridley-core"), "{hits:?}");
+    }
+
+    #[test]
+    fn a_stopword_or_a_single_weak_word_is_not_a_match() {
+        let stop = "The notes are on the desk by the window.";
+        let weak = "Please review the glossary before the talk.";
+        let mut hits = vec![
+            lesson(stop, overlap_score(stop, "the kiln schedule")),
+            lesson(weak, overlap_score(weak, "kiln review")),
+        ];
+        assert!(
+            hits.iter().all(|hit| hit.score > 0.0),
+            "the rows do overlap: {hits:?}"
+        );
+        assert!(
+            apply_relevance_floor(&mut hits, "the kiln schedule", DEFAULT_MIN_SCORE)
+                || hits.is_empty()
+        );
+        let mut weak_only = vec![lesson(weak, overlap_score(weak, "kiln review"))];
+        assert!(apply_relevance_floor(
+            &mut weak_only,
+            "kiln review",
+            DEFAULT_MIN_SCORE
+        ));
+        let mut one = vec![lesson(weak, 1.0)];
+        assert!(!apply_relevance_floor(
+            &mut one,
+            "review",
+            DEFAULT_MIN_SCORE
+        ));
+        assert_eq!(one.len(), 1, "a query that is the weak word stays");
+    }
+
+    #[test]
+    fn a_low_meaning_score_drops_and_a_high_one_stays() {
+        let mut low = lesson("A ferry timetable for the docks.", 0.2);
+        low.entities.push("cosine:0.20".into());
+        let mut high = lesson("Oak Tree on Nov 23 is the morning plan.", 0.91);
+        high.entities.push("semantic:1".into());
+        high.entities.push("cosine:0.84".into());
+        let mut hits = vec![low, high.clone()];
+        assert!(!apply_relevance_floor(
+            &mut hits,
+            "morning plan for the oak",
+            DEFAULT_MIN_SCORE
+        ));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].text.contains("Oak"), "{hits:?}");
+        let mut only = vec![high];
+        only[0].score = 0.2;
+        assert!(apply_relevance_floor(
+            &mut only,
+            "xylophone plankton",
+            DEFAULT_MIN_SCORE
+        ));
+        // A pack hit the tag search returned, whose text does not spell the tag.
+        let mut tagged = vec![lesson(
+            "Courier retries a dropped letter before the quay opens.",
+            1.0,
+        )];
+        assert!(!apply_relevance_floor(
+            &mut tagged,
+            "cue-tag1 mail wake",
+            DEFAULT_MIN_SCORE
+        ));
+        assert_eq!(tagged.len(), 1);
     }
 }

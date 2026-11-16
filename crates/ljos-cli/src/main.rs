@@ -798,7 +798,12 @@ enum Cmd {
     /// add the command. When nothing is stored, a shorter search would miss
     /// too, and the line names `ljos remember`. `--json` adds `suggestion`
     /// with the command the line names, and leaves the other fields as they
-    /// are. A busy memory store is asked again for about two seconds.
+    /// are. A row that does not name a subject word is left out when its
+    /// score is under `--min-score` (0.34 when omitted). A row that only
+    /// shares a stopword or a common weak word is left out. `--min-score 0`
+    /// prints every row. When that floor removes every row, the line is
+    /// `No relevant matches for "QUERY".` and it names `--min-score 0`.
+    /// A busy memory store is asked again for about two seconds.
     /// When it answers, the rows are ranked by meaning. When it stays
     /// busy, the rows are ranked by words and a hit that names the subject
     /// stays. Search fell back, and the one line is
@@ -858,6 +863,9 @@ enum Cmd {
         /// Include failed commands. They are stored as attempts and left out of the default list.
         #[arg(long)]
         attempts: bool,
+        /// Lowest score to keep when a row does not name a subject word. 0 prints every row, including a weak word match.
+        #[arg(long, value_name = "SCORE", default_value = "0.34")]
+        min_score: f64,
     },
     /// List memories that contradict each other.
     ///
@@ -4833,7 +4841,11 @@ fn run_command() -> Result<()> {
             import_id,
             json,
             attempts,
+            min_score,
         } => {
+            if !min_score.is_finite() || min_score < 0.0 {
+                bail!("search: --min-score takes a number from 0 up, not {min_score}.");
+            }
             ljos_cli::log_recall("search", &query.join(" "));
             // A cold encoder gets long enough to load and be asked again.
             // A warm pack keeps the short budget. Past it the word ranking
@@ -5003,6 +5015,8 @@ fn run_command() -> Result<()> {
             if !dated && !filter.active() {
                 ljos_cli::ticket_search::merge(&mut hits, &asked);
             }
+            let floor_emptied =
+                ljos_cli::word_rank::apply_relevance_floor(&mut hits, &asked, min_score);
             if !hits.is_empty() {
                 close_miss = None;
             }
@@ -5020,11 +5034,15 @@ fn run_command() -> Result<()> {
             let empty_store =
                 hits.is_empty() && close_line.is_none() && !unrelated && ljos_cli::nothing_stored();
             if json {
-                let empty = close_line
+                let relevant = floor_emptied.then(|| ljos_cli::word_rank::no_relevant_line(&asked));
+                let empty = relevant
                     .as_deref()
+                    .or(close_line.as_deref())
                     .or(unrelated.then_some(ljos_cli::NOTHING_RELEVANT));
                 let suggestion = if empty_store {
                     Some(ljos_cli::scan::store_lesson_command(&asked))
+                } else if floor_emptied {
+                    Some(ljos_cli::word_rank::min_score_off_command(&asked))
                 } else if hits.is_empty() {
                     close_miss
                         .clone()
@@ -5047,7 +5065,15 @@ fn run_command() -> Result<()> {
                 if !rank.is_empty() {
                     eprint!("{rank}");
                 }
-                if let Some(line) = close_line {
+                if floor_emptied {
+                    print!(
+                        "{}",
+                        ljos_cli::scan::for_reader(
+                            &ljos_cli::scan::no_relevant_page(&asked),
+                            human_color()
+                        )
+                    );
+                } else if let Some(line) = close_line {
                     let mut page = ljos_cli::scan::wrap(&line, ljos_cli::scan::COLS);
                     if !page.ends_with('\n') {
                         page.push('\n');

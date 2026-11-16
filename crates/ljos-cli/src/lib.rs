@@ -40758,7 +40758,7 @@ fn listed_word_hits(
     order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
     order.truncate(limit);
     let proven = pack().ok().is_some_and(|client| pack_proven(&client));
-    order
+    let mut hits: Vec<Hit> = order
         .into_iter()
         .filter_map(|i| {
             record_listed(live[i], proven);
@@ -40767,7 +40767,9 @@ fn listed_word_hits(
             hit.ts = written_at(live[i]);
             Some(hit)
         })
-        .collect()
+        .collect();
+    let _ = word_rank::apply_relevance_floor(&mut hits, cue, word_rank::DEFAULT_MIN_SCORE);
+    hits
 }
 
 fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
@@ -40781,6 +40783,11 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
             for cue in &cues {
                 memory_port::append_recall(&mut hits, cue, RELATED_MEMORY_CAP);
             }
+            let _ = word_rank::apply_relevance_floor(
+                &mut hits,
+                &cues.join(" "),
+                word_rank::DEFAULT_MIN_SCORE,
+            );
             if hits.is_empty() {
                 bail!(PACK_READ_BUSY_LINE);
             }
@@ -40856,6 +40863,11 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
             Err(_) => break,
         }
     }
+    let _ = word_rank::apply_relevance_floor(
+        &mut related,
+        &cues.join(" "),
+        word_rank::DEFAULT_MIN_SCORE,
+    );
     Ok(recall_lines(
         &own,
         related,
