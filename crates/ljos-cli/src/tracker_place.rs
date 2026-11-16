@@ -456,6 +456,19 @@ fn root_vissue_would_use(here: &Path) -> (PathBuf, bool) {
     (here.to_path_buf(), true)
 }
 
+/// Whether a `vissue` process started now would take the working directory
+/// as its tracker. A root named in the environment, a `vissue.toml` already
+/// in that directory, and the seat's configured tracker are not this.
+/// vissue's own fallback then writes `vissue.toml` into the directory the
+/// command was run from.
+#[must_use]
+pub fn vissue_would_init_cwd() -> bool {
+    let Ok(here) = std::env::current_dir() else {
+        return false;
+    };
+    root_vissue_would_use(&here).1
+}
+
 /// Whether vissue would create or edit issues under `root`. A missing
 /// directory is not written. A guess is written only when it already
 /// looks like a tracker; a named root that exists is written.

@@ -13246,12 +13246,12 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
     argv.push("decision,panel".into());
     argv.push(title);
     issue_spot::forget_reads();
-    let out = std::process::Command::new(which::which("vissue").context("vissue not on PATH")?)
-        .args(&argv)
+    let mut cmd = std::process::Command::new(which::which("vissue").context("vissue not on PATH")?);
+    cmd.args(&argv)
         .env("VISSUE_AGENT", seat_name())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("vissue create")?;
+        .stdin(std::process::Stdio::null());
+    shield_product_cwd(&mut cmd);
+    let out = cmd.output().context("vissue create")?;
     if !out.status.success() {
         bail!(
             "vissue create: {}",
@@ -42946,9 +42946,11 @@ pub fn sitting_stream_started(
     let _listing = ListingMemo::enter();
     // A missing ticket is named and left alone. The habitat probes below
     // run `vissue` in the working directory, and that writes `vissue.toml`
-    // into a product checkout that is not the tracker.
+    // into a product checkout that is not the tracker. Any failure is that
+    // miss when the working directory is the fallback root: a later probe
+    // must not be what creates the tracker.
     if let Err(err) = issue_title(issue) {
-        if tracker_misses(&err, issue) {
+        if tracker_misses(&err, issue) || tracker_place::vissue_would_init_cwd() {
             return Err(unknown_ticket(issue));
         }
     }
@@ -50454,6 +50456,36 @@ fn route_vissue(cmd: &mut std::process::Command, bin: &str, args: &[impl AsRef<s
     }
     for (key, value) in hook_timed("vissue_route", || issue_spot::route_env(&words)) {
         cmd.env(key, value);
+    }
+    // A product checkout is not a tracker. vissue's fallback would take that
+    // directory and write `vissue.toml` into it. The child stands in a
+    // private directory instead, so the checkout is left as it was.
+    shield_product_cwd(cmd);
+}
+
+/// A directory a shielded `vissue` may initialise, never the product checkout.
+fn vissue_private_dir() -> Option<PathBuf> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!("ljos-vissue-{}", std::process::id()));
+        std::fs::create_dir_all(&path).ok().map(|_| path)
+    })
+    .clone()
+}
+
+/// Point `vissue` away from a product checkout it would otherwise initialise.
+fn shield_product_cwd(cmd: &mut std::process::Command) {
+    if !tracker_place::vissue_would_init_cwd() {
+        return;
+    }
+    let Ok(here) = std::env::current_dir() else {
+        return;
+    };
+    if tracker_place::product_checkout(&here).is_none() {
+        return;
+    }
+    if let Some(dir) = vissue_private_dir() {
+        cmd.current_dir(dir);
     }
 }
 
