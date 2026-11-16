@@ -45780,6 +45780,10 @@ pub fn allow_basis() -> Result<Basis> {
 /// pack's 500-character soft cap each, cut at sentence ends, and a lone
 /// sentence past the cap cut at a word. A memory given as a paragraph or
 /// a session used to be refused whole and stored nowhere.
+///
+/// A sentence is whatever [`packset_core::prose::sentences`] counts. An
+/// abbreviation, a decimal or a citation is not a break, so a lesson of
+/// two sentences stays one row. A longer text is one claim per pair.
 #[must_use]
 pub fn claim_chunks(text: &str) -> Vec<String> {
     const CAP: usize = 480;
@@ -45788,27 +45792,16 @@ pub fn claim_chunks(text: &str) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
     }
-    if text.chars().count() <= CAP && sentence_ends(text) <= SENTENCES {
+    let sentences = packset_core::prose::sentences(text);
+    // Two sentences, or a line the pack does not split, stay as typed.
+    if sentences.len() <= SENTENCES && text.chars().count() <= CAP {
         return vec![text.to_string()];
     }
-    let mut sentences: Vec<String> = Vec::new();
-    let mut start = 0;
-    let bytes = text.as_bytes();
-    for (i, b) in bytes.iter().enumerate() {
-        let ends = matches!(b, b'.' | b'!' | b'?')
-            && bytes.get(i + 1).is_none_or(|n| n.is_ascii_whitespace());
-        if ends || *b == b'\n' {
-            let piece = text[start..=i].trim();
-            if !piece.is_empty() {
-                sentences.push(piece.to_string());
-            }
-            start = i + 1;
-        }
-    }
-    let tail = text[start..].trim();
-    if !tail.is_empty() {
-        sentences.push(tail.to_string());
-    }
+    let sentences = if sentences.is_empty() {
+        vec![text.to_string()]
+    } else {
+        sentences
+    };
     let mut out: Vec<String> = Vec::new();
     let mut held = String::new();
     let mut held_n = 0usize;
@@ -45834,19 +45827,6 @@ pub fn claim_chunks(text: &str) -> Vec<String> {
         out.push(held);
     }
     out
-}
-
-fn sentence_ends(text: &str) -> usize {
-    let bytes = text.as_bytes();
-    bytes
-        .iter()
-        .enumerate()
-        .filter(|(i, b)| {
-            matches!(b, b'.' | b'!' | b'?')
-                && bytes.get(i + 1).is_none_or(|n| n.is_ascii_whitespace())
-        })
-        .count()
-        .max(1)
 }
 
 /// `sentence` in pieces of at most `cap` characters, cut between words.
@@ -83850,6 +83830,14 @@ mod claim_chunks_tests {
         assert_eq!(
             claim_chunks("Use rg. It is faster."),
             ["Use rg. It is faster."]
+        );
+        // `e.g.` is not a third sentence. The pack keeps this as two
+        // sentences, and so does remember.
+        let cited = "Use a ring, e.g. the instanton. It converges.";
+        assert_eq!(claim_chunks(cited), [cited]);
+        assert_eq!(
+            claim_chunks("BM25+ beats BM25: 0.635 vs 0.615 hit@1 on turns. It is the default."),
+            ["BM25+ beats BM25: 0.635 vs 0.615 hit@1 on turns. It is the default."]
         );
         assert!(claim_chunks("  \n ").is_empty());
     }

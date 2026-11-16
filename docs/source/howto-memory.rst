@@ -10,8 +10,10 @@ Remember a lesson
 =================
 
 ``ljos remember`` stores one lesson as written. A claim is two sentences at
-most. A longer text is stored as one claim per pair of sentences, and the
-line names that and ``ljos search``.
+most, counted the same way the pack counts them, so an abbreviation or a
+decimal does not start a second lesson. A longer text is stored as one
+claim per pair of sentences. The command says it was split, then prints
+each stored id and its text, and names ``ljos search``.
 The pack's limit is 29 words a sentence. A sentence the person types is
 kept, and ``ljos remember --verbose`` names the count and the limit.
 A sentence from anywhere else that passes that limit is kept on this

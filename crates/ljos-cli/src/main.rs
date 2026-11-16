@@ -584,6 +584,11 @@ enum Cmd {
     ///
     /// Example: `ljos remember "The lexical default is BM25+."`
     ///
+    /// One or two sentences are one lesson. The sentence break is the pack's,
+    /// so an abbreviation is not a second lesson. A longer text is stored as
+    /// one claim per pair of sentences. The command says it was split and
+    /// prints each stored id and its text.
+    ///
     /// A long lesson may print a hint after it is saved. The hint names the
     /// sentence to change and the reading score. A short lesson prints no hint.
     ///
@@ -782,9 +787,11 @@ enum Cmd {
     /// is not padded with a weaker cross-seat hit. When those were the only
     /// rows, the line is `Nothing relevant was found.` No match-mode line is
     /// printed on that empty page. A tracker ticket whose
-    /// title matches is included, and then one whose notes match. An exact or
+    /// title matches is included, and then one whose body or notes match. An exact or
     /// near-exact title is the first row, while the encoder is loading and
-    /// after. The row names the ticket id and the title, so `ljos recall ID`
+    /// after. A ticket this seat has claimed, whose title, body or notes
+    /// cover two query terms, is placed with this seat's rows, ahead of
+    /// another project's ticket that only shares a generic word. The row names the ticket id and the title, so `ljos recall ID`
     /// opens it. The page names the place and the checks. It does not print
     /// the ranker score.
     /// `--explain` says how the rows are ordered. `--json` keeps the score.
@@ -3271,6 +3278,37 @@ fn render_write(full: &str, detail: bool, json: bool, id: Option<&str>) -> Strin
     }
 }
 
+/// The id `ljos search` prints, and the text that was stored.
+fn stored_claim(body: &serde_json::Value, fallback: &str) -> (String, String) {
+    let id = body["id"].as_str().unwrap_or("");
+    let mut short: String = id.chars().take(8).collect();
+    if short.is_empty() {
+        short = "?".to_string();
+    }
+    let text = body["text"]
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or(fallback.trim());
+    (short, text.to_string())
+}
+
+/// Stdout when one remember stored several claims. The first line says it
+/// was split. Each claim then names its id and its text, so the first
+/// sentence is not dropped from the page.
+fn split_claims_page(n: usize, rows: &[(String, String)]) -> String {
+    let mut out = ljos_cli::remember_split_line(n);
+    out.push('\n');
+    for (id, text) in rows {
+        out.push_str("id ");
+        out.push_str(id);
+        out.push('\n');
+        out.push_str(text);
+        out.push('\n');
+    }
+    out
+}
+
 fn write_ack(body: &serde_json::Value, verbose: bool) -> String {
     // The pack keeps a person's hard sentence and says why it would have
     // refused it; that goes to stderr, so the one line a script reads
@@ -4580,10 +4618,15 @@ fn run_command() -> Result<()> {
             ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
             // A paragraph or a session is several claims: each goes in on
             // its own, where the whole was refused at the pack's cap.
+            // Two sentences stay one row. A longer text is split, and
+            // stdout names every stored id and its text.
             let chunks = ljos_cli::claim_chunks(&text);
-            if chunks.len() > 1 {
+            let split_n = chunks.len();
+            let split = split_n > 1;
+            if split {
                 eprintln!("{}", ljos_cli::remember_split_line(chunks.len()));
             }
+            let mut stored: Vec<(String, String)> = Vec::new();
             for text in chunks {
                 // A person at the terminal, and words from their latest
                 // prompt, are their lesson. Any other text is a standing
@@ -4611,7 +4654,12 @@ fn run_command() -> Result<()> {
                         )
                     }
                 })?;
-                if body["duplicate"].as_bool() == Some(true) {
+                let duplicate = body["duplicate"].as_bool() == Some(true);
+                let queued = body["queued"].as_bool() == Some(true);
+                if split && (duplicate || !queued) {
+                    stored.push(stored_claim(&body, &text));
+                }
+                if duplicate {
                     continue;
                 }
                 if body["queued"].as_bool() == Some(true) {
@@ -4625,7 +4673,7 @@ fn run_command() -> Result<()> {
                     let mut printed = body.clone();
                     ljos_cli::readability::attach(&mut printed);
                     println!("{}", serde_json::to_string_pretty(&printed)?);
-                } else {
+                } else if !split {
                     println!("{}", write_ack(&body, verbose));
                 }
                 eprintln!("{}", ljos_cli::remember_note(&body));
@@ -4644,6 +4692,9 @@ fn run_command() -> Result<()> {
                             .join(", ")
                     );
                 }
+            }
+            if split && !json && !stored.is_empty() {
+                print!("{}", split_claims_page(split_n, &stored));
             }
         }
         Cmd::Prefer {
