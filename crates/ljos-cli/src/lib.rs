@@ -12200,11 +12200,49 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     (out, ids)
 }
 
-/// How long a prompt waits for Jev's judgment, search and network call
-/// together. Past it the local search, which ran beside the judgment,
-/// answers: a judge behind a slow or black-holed route must not hold a
-/// prompt up to the runner's cut-off.
+/// How long a prompt waits for Jev after the pack search has returned.
+/// The search keeps [`HOOK_RERANK_BUDGET_MS`]. Past this wait the hits
+/// already in hand answer, so a judge behind a slow or black-holed route
+/// does not hold a prompt up to the runner's cut-off.
 pub const JEV_HOOK_BUDGET_MS: u64 = 700;
+
+// A test thread's judge wait, in place of `JEV_HOOK_BUDGET_MS`.
+// The admission tests hold a long one. A loaded host can spend the
+// short wait before `sh` has printed the answer, and those tests
+// check which memory is admitted. The short wait has its own test.
+#[cfg(test)]
+thread_local! {
+    static JEV_HOOK_BUDGET_OVERRIDE: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn jev_hook_budget_ms() -> u64 {
+    #[cfg(test)]
+    if let Some(ms) = JEV_HOOK_BUDGET_OVERRIDE.with(std::cell::Cell::get) {
+        return ms;
+    }
+    JEV_HOOK_BUDGET_MS
+}
+
+/// Holds a judge wait on the calling test thread until it drops.
+#[cfg(test)]
+#[must_use]
+struct JudgeBudget(Option<u64>);
+
+#[cfg(test)]
+impl JudgeBudget {
+    fn hold(ms: u64) -> Self {
+        Self(JEV_HOOK_BUDGET_OVERRIDE.with(|cell| cell.replace(Some(ms))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for JudgeBudget {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        JEV_HOOK_BUDGET_OVERRIDE.with(|cell| cell.set(prev));
+    }
+}
 
 /// What the pack's fused search found for a prompt, with the encoder's
 /// signal per hit. `None` when the search failed or ran out of budget.
@@ -12212,11 +12250,12 @@ type Pool = Option<Vec<(Hit, DenseSignal)>>;
 
 /// Jev's judgment of the prompt, and the local search that answers when
 /// Jev does not. With Jev on, the pack is searched once, here, and the
-/// judge reads the same hits on its own thread; it is waited for only
-/// until [`JEV_HOOK_BUDGET_MS`] from the start. The local search comes
-/// back as `Some` when it ran, so the caller does not repeat it. Two
-/// searches of one cue at once cost the hook the slower of the two, about
-/// 190 ms against 115 ms for one.
+/// judge reads those hits on its own thread. The wait is
+/// [`JEV_HOOK_BUDGET_MS`] from when that thread starts. The search time
+/// stays on the search budget. The local search comes back as `Some`
+/// when it ran, so the caller does not repeat it. Two searches of one
+/// cue at once cost the hook the slower of the two, about 190 ms against
+/// 115 ms for one.
 fn judged_with_local(
     call: &HookCall,
     cue: &str,
@@ -12224,7 +12263,6 @@ fn judged_with_local(
     if call.event != "UserPromptSubmit" || !jev::enabled() {
         return (judged_prompt(call, cue), None);
     }
-    let started = std::time::Instant::now();
     let local = hook_timed("pool_search", || {
         with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
             search_with_signals(cue, RERANK_POOL)
@@ -12242,9 +12280,10 @@ fn judged_with_local(
             let _ = tx.send(judged_prompt_over(&call, &cue, hits));
         });
     }
-    let left =
-        std::time::Duration::from_millis(JEV_HOOK_BUDGET_MS).saturating_sub(started.elapsed());
-    let judged = rx.recv_timeout(left).ok().flatten();
+    let judged = rx
+        .recv_timeout(std::time::Duration::from_millis(jev_hook_budget_ms()))
+        .ok()
+        .flatten();
     (judged, Some(local))
 }
 
@@ -60459,6 +60498,10 @@ mod tests {
     #[test]
     fn the_judge_admits_an_old_memory_that_names_the_subject() {
         let _env = env_guard();
+        // The hook wait is 700 ms after the search. A loaded runner can
+        // take longer than that to spawn `sh`, and this test checks the
+        // admission, not that wait.
+        let _wait = super::JudgeBudget::hold(15_000);
         let runtime = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
@@ -60528,6 +60571,9 @@ mod tests {
     #[test]
     fn the_judge_alone_does_not_admit_a_claim_with_no_word_in_common() {
         let _env = env_guard();
+        // Same wait as the aged admission test. The local cosine path
+        // happens to agree, so a dropped judge would still pass.
+        let _wait = super::JudgeBudget::hold(15_000);
         let runtime = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
