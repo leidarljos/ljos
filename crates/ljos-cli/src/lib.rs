@@ -2560,9 +2560,10 @@ fn clean_shell_environ(env: Vec<(String, String)>, is_self: bool) -> Vec<(String
 }
 
 /// The environment a runner stamped this process's conversation into: the
-/// one the outermost process above this one was started with, read from
+/// nearest shell above this one that names a conversation, read from
 /// `/proc`, so neither `VAR=id ljos`, `VAR=id git commit`, `export VAR=id`
 /// nor an intermediate program that builds its own environment changes it.
+/// An outer shell that names a different conversation does not replace it.
 /// The runtime directory and the home are the exception. They choose which
 /// ancestors count, and a later call under another directory reads again.
 fn stamp_env() -> Vec<(String, String)> {
@@ -2703,12 +2704,28 @@ fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
                 env.iter()
                     .any(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
             })
+        } else if is_shell(comm) {
+            // A shell started as `ID=conv bash` carries that id ahead of
+            // `PWD`. Cleaning it off would leave the outer shell's id,
+            // and this conversation would sit as that one. The id on the
+            // shell is the conversation. An id on `ljos` itself is not
+            // read here.
+            proc_tree::environ(*pid).filter(|env| {
+                env.iter()
+                    .any(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
+            })
         } else {
             stamped_id(*pid)
         };
         if let Some(env) = env_opt {
             if is_shell(comm) {
                 best_shell = Some(env);
+                // The nearest shell that names a conversation is this
+                // conversation. An outer shell of the same seat is another
+                // conversation, and its id does not replace this one.
+                // A shell with no id is not this arm: the walk continues
+                // to the shell that carries the id.
+                break;
             } else {
                 best_any = Some(env);
             }
@@ -22584,10 +22601,19 @@ pub const EMPTY_TICKET_ID: &str =
 /// No id was given and this conversation holds no ticket.
 pub const NO_OPEN_SITTING: &str = "no open sitting, so run `ljos sitting ISSUE`.";
 
-/// `note` or `finish` wrote `wrote` while this conversation holds `open`.
+/// `note` wrote `wrote` while this conversation holds `open`.
 #[must_use]
 pub fn other_sitting_line(wrote: &str, open: &str) -> String {
     format!("note written to {wrote}; your open sitting is {open}")
+}
+
+/// `finish` finished `wrote` while this conversation holds `open`.
+///
+/// The named id was finished. The line names that id and the open
+/// sitting. It does not call the finish a note.
+#[must_use]
+pub fn other_finish_line(wrote: &str, open: &str) -> String {
+    format!("finished {wrote}; your open sitting is {open}")
 }
 
 /// Store `text` as an unattached note and return the one label line.
@@ -40187,6 +40213,22 @@ fn conversation_ancestry() -> Vec<(u32, String)> {
         .collect()
 }
 
+/// Whether a hold that names `record_conv` is this conversation's.
+///
+/// A record written before the conversation line existed names none, and
+/// stays. A process with no conversation id stays on the holder and
+/// process checks. A subagent reads the sitting its parent holds. Two
+/// conversation ids on one seat do not.
+fn hold_conversation_is_ours(record_conv: Option<&str>) -> bool {
+    let Some(record_conv) = record_conv else {
+        return true;
+    };
+    let Some(mine) = cursor_conversation() else {
+        return true;
+    };
+    mine == record_conv || subagent_id(&mine)
+}
+
 /// [`held_from_records_in`] with each record's [`Hold`], and only the
 /// records `keep` takes, sorted newest first.
 fn records_in(
@@ -40224,8 +40266,19 @@ fn records_in(
         if lines.get(6).is_some_and(|g| !g.is_empty() && *g != graph) {
             continue;
         }
-        let by_process = !is_session(comm) && *record_seat == seat && pids.iter().any(|p| p == pid);
-        let ours = holders.iter().any(|h| h == holder) || by_process;
+        let record_conv = lines
+            .get(8)
+            .copied()
+            .map(str::trim)
+            .filter(|id| !id.is_empty());
+        // A shared runner pid is not this conversation. The record's
+        // conversation id, when it has one, has to be this process's.
+        // A subagent still reads the sitting its parent holds.
+        let conv_ok = hold_conversation_is_ours(record_conv);
+        let by_process =
+            !is_session(comm) && *record_seat == seat && pids.iter().any(|p| p == pid) && conv_ok;
+        let by_holder = holders.iter().any(|h| h == holder) && conv_ok;
+        let ours = by_holder || by_process;
         let hold = Hold {
             assignee: (*holder).to_string(),
             seat: (*record_seat).to_string(),
@@ -64467,6 +64520,53 @@ mod tests {
         assert_eq!(
             held_from_records_in(&[], dir.path(), &chain, "bob", graph).as_deref(),
             Some("acme-bob1")
+        );
+    }
+
+    /// Two conversations of one seat share the runner pid. The hold the
+    /// other conversation wrote is not this conversation's sitting.
+    #[test]
+    fn another_conversations_hold_on_the_same_seat_is_not_ours() {
+        let _env = env_guard();
+        std::env::set_var("CURSOR_CONVERSATION_ID", "conv-inner-bbbb-2222");
+        let dir = tempfile::tempdir().unwrap();
+        let chain = [(9001_u32, "ljos".to_string()), (4086, "node".to_string())];
+        std::fs::write(
+            dir.path().join("hold-outer"),
+            "ljosbot@outer\nljosbot\n4086\nnode\n2026-11-16T00:00:00Z\nljos-rpud\n-\n\nconv-outer-aaaa-1111\n",
+        )
+        .unwrap();
+        assert_eq!(
+            held_from_records_in(&[], dir.path(), &chain, "ljosbot", "-"),
+            None,
+            "a shared runner pid lent the other conversation's sitting"
+        );
+        assert_eq!(
+            held_from_records_in(
+                &["ljosbot@outer".to_string()],
+                dir.path(),
+                &chain,
+                "ljosbot",
+                "-"
+            ),
+            None,
+            "the other conversation's holder was taken for this one"
+        );
+        std::fs::write(
+            dir.path().join("hold-inner"),
+            "ljosbot@inner\nljosbot\n4086\nnode\n2026-11-16T01:00:00Z\nljos-yw6t\n-\n\nconv-inner-bbbb-2222\n",
+        )
+        .unwrap();
+        assert_eq!(
+            held_from_records_in(
+                &["ljosbot@inner".to_string()],
+                dir.path(),
+                &chain,
+                "ljosbot",
+                "-"
+            )
+            .as_deref(),
+            Some("ljos-yw6t")
         );
     }
 

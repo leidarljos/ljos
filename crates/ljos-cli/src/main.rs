@@ -2318,11 +2318,14 @@ enum Cmd {
     },
     /// Finish work on a ticket: remember the lesson, strengthen the memories it used, hand the claim back.
     ///
-    /// With no id, this finishes the issue this conversation holds.
+    /// A sitting is one conversation's claim on an issue.
+    /// With no id, this finishes that issue.
     /// With none open, it exits 1 and names `ljos sitting ISSUE`.
     /// An empty id exits 1 and writes nothing.
-    /// A named id that is not that issue is still finished, and stderr
-    /// names both. `--quiet` leaves that line off.
+    /// A named id that is not that issue is still finished. stderr names
+    /// that id and the issue this conversation holds.
+    /// `--quiet` leaves that line off.
+    /// Another conversation of this seat is not that issue.
     /// With no lesson, a ticket that is still TODO and that nobody has claimed is left as it is.
     /// The line names `ljos sitting ISSUE`.
     ///
@@ -3009,7 +3012,8 @@ fn note_target(words: &[String]) -> Result<(String, String, bool)> {
 
 /// One stderr line when `wrote` is not the open sitting. An inferred id
 /// is that sitting. `--quiet` leaves the line off, and does not ask.
-fn warn_other_sitting(wrote: &str, quiet: bool, inferred: bool) {
+/// `finish` names the finished id. `note` says a note was written.
+fn warn_other_sitting(wrote: &str, quiet: bool, inferred: bool, finish: bool) {
     if quiet || inferred {
         return;
     }
@@ -3017,7 +3021,12 @@ fn warn_other_sitting(wrote: &str, quiet: bool, inferred: bool) {
         return;
     };
     if open != wrote {
-        eprintln!("{}", ljos_cli::other_sitting_line(wrote, &open));
+        let line = if finish {
+            ljos_cli::other_finish_line(wrote, &open)
+        } else {
+            ljos_cli::other_sitting_line(wrote, &open)
+        };
+        eprintln!("{line}");
     }
 }
 
@@ -5425,7 +5434,7 @@ fn run_command() -> Result<()> {
                 ljos_cli::tracker_verb_wait(),
             )?;
             eprint!("{}", captured.stderr);
-            warn_other_sitting(&issue, quiet, inferred);
+            warn_other_sitting(&issue, quiet, inferred, false);
             let mut said = format!("{issue}: noted\n");
             said.push_str(&ljos_cli::retry_pending_claim(&issue));
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
@@ -6720,9 +6729,10 @@ fn run_command() -> Result<()> {
                 ljos_cli::on_disk(&issue)
             };
             ljos_cli::begin_quiet_sitting();
+            let assignee = assignee_for("sitting", assignee.as_deref(), false)?;
             let printed = sitting_stream_started(
                 &issue,
-                &assignee_for("sitting", assignee.as_deref(), false)?,
+                &assignee,
                 &cards_dir,
                 anyway,
                 playbook.as_deref(),
@@ -6826,7 +6836,7 @@ fn run_command() -> Result<()> {
                 verbose,
             )
             .map_err(ticket_error)?;
-            warn_other_sitting(&issue, quiet, inferred);
+            warn_other_sitting(&issue, quiet, inferred, true);
             print!("{}", render_write(&said, git_detail(verbose), json, None));
         }
         Cmd::Reopen { issue } => {

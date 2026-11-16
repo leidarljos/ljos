@@ -28,7 +28,7 @@ Set ``LJOS_SEAT`` to the seat that files it. Once ``vissue.toml`` lists seats, t
    next: day-cd34  measure the files
    day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
    $ ljos finish day-cd34
-   note written to day-cd34; your open sitting is day-ab12
+   finished day-cd34; your open sitting is day-ab12
    ticked day-cd34
    next: day-ef56  pick a default
    $ ljos ready --mine

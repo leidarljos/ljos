@@ -312,8 +312,12 @@ fn a_finish_on_another_ticket_warns_and_still_writes() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.lines()
-            .any(|line| line == ljos_cli::other_sitting_line(OTHER, OPEN)),
+            .any(|line| line == ljos_cli::other_finish_line(OTHER, OPEN)),
         "{text}"
+    );
+    assert!(
+        !err.contains("note written"),
+        "finish called itself a note:\n{text}"
     );
 }
 
