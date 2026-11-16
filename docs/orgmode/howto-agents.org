@@ -102,6 +102,8 @@ lesson, from an agent, today, from claude-f2pu9d56g0
 #+end_src
 # END ljos-sample agents-memory
 
+The id on a search row opens with =ljos show=. A =local:= id opens the same way.
+
 * Mail the other session
 
 Session two stores a lesson, so the pack has heard from it. =ljos send= prints =sent ID from SEAT to RECIPIENT=. The recipient's inbox shows the message. The sender's inbox shows a receipt once that message has been read, not the message itself. A name no seat has written under is refused, and the line lists every seat that has. =--new-seat= writes to a seat that has not started.

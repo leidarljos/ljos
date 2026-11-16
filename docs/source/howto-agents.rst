@@ -114,6 +114,8 @@ Search and recall treat every session of one runner as one family. The second se
 
 .. END ljos-sample agents-memory
 
+The id on a search row opens with ``ljos show``. A ``local:`` id opens the same way.
+
 Mail the other session
 ======================
 

@@ -98,7 +98,7 @@ Retire a claim with its reason
    $ ljos search "lexical default"
    $ ljos forget a6ae2751 --why deed-review-2026-09
 
-Copy the id from ``ljos search``. Eight hex characters are enough, and more when several memories share them.
+Copy the id from ``ljos search``. Eight hex characters are enough, and more when several memories share them. ``ljos show`` opens that id, including a ``local:`` id.
 ``--why`` is a deed id. Omit it when you have no deed. An id the pack does
 not hold names ``ljos search`` again.
 ``ljos memories review --edit ID --text TEXT`` writes a new row and keeps

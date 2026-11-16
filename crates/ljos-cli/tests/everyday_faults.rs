@@ -126,7 +126,7 @@ fn an_extra_ticket_id_names_the_form_and_exits_2() {
     let cases = [
         (
             &["show", "demo-kiln", "demo-tile"][..],
-            "ljos: show expected the tracker id, so run `ljos show proj-1a2b`.",
+            "ljos: show expected a ticket id, or a memory id, so run `ljos show proj-1a2b`.",
         ),
         (
             &["claim", "demo-kiln", "demo-tile"][..],
@@ -138,7 +138,7 @@ fn an_extra_ticket_id_names_the_form_and_exits_2() {
         ),
         (
             &["help", "show", "demo-tile"][..],
-            "ljos: show expected the tracker id, so run `ljos show proj-1a2b`.",
+            "ljos: show expected a ticket id, or a memory id, so run `ljos show proj-1a2b`.",
         ),
     ];
     for (args, want) in cases {
@@ -190,7 +190,7 @@ fn an_unknown_ticket_names_ready_and_exits_1() {
     let line = one_line(&out.stderr);
     assert_eq!(
         line,
-        "issue demo-none not found. `ljos ready` lists the open tickets."
+        "issue demo-none not found. It is neither a ticket nor a memory. `ljos search` finds a memory. `ljos ready` lists the open tickets."
     );
     assert!(out.stdout.is_empty(), "{said}");
 }

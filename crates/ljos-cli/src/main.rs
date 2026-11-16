@@ -1374,20 +1374,28 @@ enum Cmd {
         #[arg(long, value_name = "ID", conflicts_with = "on")]
         off: Option<String>,
     },
-    /// Show one ticket: its body, its notes, and the tickets it waits on.
+    /// Show one ticket, or one memory.
     ///
-    /// The body is printed under the header. The title and the body wrap to
-    /// the terminal. The page prints the eight most recent notes, newest
-    /// last. Each note carries its age and the seat that wrote it. A longer
-    /// log names how many notes are earlier and the command that prints the
-    /// rest. `--all` prints every note. `--verbose` is the same flag.
-    ///
-    /// An unknown id exits 1 and names `ljos ready`. An id that matches more
-    /// than one ticket exits 1 and names one `ljos show` command.
+    /// A ticket id prints that ticket: its body, its notes, and the tickets
+    /// it waits on. The body is printed under the header. The title and the
+    /// body wrap to the terminal. The page prints the eight most recent
+    /// notes, newest last. Each note carries its age and the seat that wrote
+    /// it. A longer log names how many notes are earlier and the command that
+    /// prints the rest. `--all` prints every note. `--verbose` is the same
+    /// flag.
+    /// A memory id prints that memory. The id may be the full atom id, the
+    /// short prefix `ljos search` and `ljos remember` print, or the `local:`
+    /// form. The page wraps the text to 80 columns and names the kind, the
+    /// level, the origin, the seat, the session, when it was written, whether
+    /// it is accepted, retired or superseded, the tickets it cites, and the
+    /// memories it links to.
+    /// An unknown id exits 1 and says it is neither a ticket nor a memory.
+    /// An id that matches more than one memory lists those ids.
+    /// An id that matches more than one ticket exits 1 and names one `ljos show` command.
     ///
     /// Example: `ljos show proj-1a2b`
     Show {
-        /// The tracker id.
+        /// A ticket id, or a memory id.
         issue: String,
         /// Print one JSON object with the body and every note. The human page is left off.
         #[arg(long)]
@@ -3094,6 +3102,15 @@ fn shell_word(word: &str) -> String {
     } else {
         word.to_string()
     }
+}
+
+/// Print a show lookup failure and exit 1. Any other error stays a fault.
+fn show_error(err: anyhow::Error) -> anyhow::Error {
+    if ljos_cli::show_memory::is_show_fault(&err) {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+    ticket_error(err)
 }
 
 /// Print a ticket lookup failure and exit 1.
@@ -5798,17 +5815,11 @@ fn run_command() -> Result<()> {
             print!("{said}");
         }
         Cmd::Show { issue, json, all } => {
-            stop_ticket(&issue);
+            let said = ljos_cli::show_memory::show_any(&issue, json, all).map_err(show_error)?;
             if json {
-                print!("{}", ljos_cli::show_json(&issue).map_err(ticket_error)?);
+                print!("{said}");
             } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(
-                        &ljos_cli::show_issue(&issue, all).map_err(ticket_error)?,
-                        human_color()
-                    )
-                );
+                print!("{}", ljos_cli::scan::for_reader(&said, human_color()));
             }
         }
         Cmd::Ready {
