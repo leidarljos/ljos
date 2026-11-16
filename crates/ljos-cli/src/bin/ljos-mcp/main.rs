@@ -85,7 +85,10 @@ async fn serve() -> anyhow::Result<()> {
     // its own task, which the runtime may poll newest first.
     let (read, write) = stdio();
     let running = server::LjosService(server::LjosServer::from_env())
-        .serve((server::InboundOrder::new(read), write))
+        .serve((
+            server::InboundOrder::new(read),
+            server::OutboundOrder::new(write),
+        ))
         .await?;
     let ended = running.waiting().await;
     ljos_cli::retire_seat(ljos_cli::runner_pid());

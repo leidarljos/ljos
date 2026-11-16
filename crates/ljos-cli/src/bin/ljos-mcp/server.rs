@@ -3596,13 +3596,18 @@ fn call_queue() -> std::sync::MutexGuard<'static, std::collections::VecDeque<Que
 
 fn ensure_queued(id: &RequestId, order: Order) {
     let mut queue = call_queue();
-    if queue.iter().any(|call| &call.id == id) {
-        return;
+    let fresh = !queue.iter().any(|call| &call.id == id);
+    if fresh {
+        queue.push_back(QueuedCall {
+            id: id.clone(),
+            kind: order,
+        });
     }
-    queue.push_back(QueuedCall {
-        id: id.clone(),
-        kind: order,
-    });
+    drop(queue);
+    // The answer has to leave in this same order. The handler lock drops
+    // before rmcp writes the bytes, and a fast refusal would otherwise
+    // pass a later call on the way out.
+    note_ordered_response(id);
 }
 
 fn release_call(id: &RequestId) {
@@ -3677,6 +3682,184 @@ fn register_inbound_line(line: &[u8]) {
     let order = call_order(&call.params.name);
     if order != Order::Free {
         ensure_queued(&id, order);
+    }
+}
+
+/// Ids of ordered calls, in the order the lines were read. The stdout
+/// wrapper holds a later answer until the earlier one has been written.
+static RESPONSE_ORDER: std::sync::Mutex<std::collections::VecDeque<RequestId>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+fn response_order() -> std::sync::MutexGuard<'static, std::collections::VecDeque<RequestId>> {
+    RESPONSE_ORDER.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+fn note_ordered_response(id: &RequestId) {
+    let mut order = response_order();
+    if !order.iter().any(|queued| queued == id) {
+        order.push_back(id.clone());
+    }
+}
+
+fn response_id(line: &[u8]) -> Option<RequestId> {
+    let value = serde_json::from_slice::<serde_json::Value>(line).ok()?;
+    match value.get("id")? {
+        serde_json::Value::Number(number) => number.as_i64().map(RequestId::Number),
+        serde_json::Value::String(text) => Some(RequestId::String(text.clone().into())),
+        _ => None,
+    }
+}
+
+struct OutState {
+    pending: Vec<u8>,
+    outgoing: Vec<u8>,
+    held: Vec<(RequestId, Vec<u8>)>,
+}
+
+impl OutState {
+    fn peel(&mut self) {
+        while let Some(at) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=at).collect();
+            let mut body = line.clone();
+            body.pop();
+            if body.last() == Some(&b'\r') {
+                body.pop();
+            }
+            if let Some(id) = response_id(&body) {
+                let queued = response_order().iter().any(|queued| queued == &id);
+                if queued {
+                    self.held.push((id, line));
+                    self.release_ready();
+                    continue;
+                }
+            }
+            self.outgoing.extend_from_slice(&line);
+        }
+    }
+
+    /// Write every held answer whose earlier ordered calls are already out.
+    fn release_ready(&mut self) {
+        let mut order = response_order();
+        while let Some(head) = order.front() {
+            let Some(at) = self.held.iter().position(|(id, _)| id == head) else {
+                break;
+            };
+            let (_, line) = self.held.remove(at);
+            self.outgoing.extend_from_slice(&line);
+            order.pop_front();
+        }
+    }
+}
+
+fn drive_out<W: tokio::io::AsyncWrite>(
+    mut inner: std::pin::Pin<&mut W>,
+    state: &mut OutState,
+    cx: &mut std::task::Context<'_>,
+) -> std::task::Poll<std::io::Result<()>> {
+    loop {
+        if state.outgoing.is_empty() {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        match inner.as_mut().poll_write(cx, &state.outgoing) {
+            std::task::Poll::Ready(Ok(0)) => {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "mcp stdout closed",
+                )));
+            }
+            std::task::Poll::Ready(Ok(n)) => {
+                state.outgoing.drain(..n);
+            }
+            std::task::Poll::Ready(Err(err)) => return std::task::Poll::Ready(Err(err)),
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+        }
+    }
+}
+
+/// Stdout, with ordered tool answers written in the order the calls were read.
+///
+/// rmcp runs each call on its own task and writes the answer after the
+/// handler returns. The handler lock is already gone by then, so a refusal
+/// that returns at once can be written before the call read ahead of it.
+/// The connection writes here one at a time; the buffer does not need its
+/// own lock.
+pub struct OutboundOrder<W> {
+    inner: W,
+    state: OutState,
+}
+
+impl<W> OutboundOrder<W> {
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            state: OutState {
+                pending: Vec::new(),
+                outgoing: Vec::new(),
+                held: Vec::new(),
+            },
+        }
+    }
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for OutboundOrder<W> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        if !this.state.outgoing.is_empty() {
+            match drive_out(std::pin::Pin::new(&mut this.inner), &mut this.state, cx) {
+                std::task::Poll::Ready(Ok(())) => {}
+                std::task::Poll::Ready(Err(err)) => return std::task::Poll::Ready(Err(err)),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+        this.state.pending.extend_from_slice(buf);
+        this.state.peel();
+        match drive_out(std::pin::Pin::new(&mut this.inner), &mut this.state, cx) {
+            // The bytes are in `pending` or `outgoing`. A later flush
+            // finishes a write the pipe did not take yet. Returning
+            // `Pending` here would hand the same bytes back to the caller.
+            std::task::Poll::Ready(Ok(())) | std::task::Poll::Pending => {
+                std::task::Poll::Ready(Ok(buf.len()))
+            }
+            std::task::Poll::Ready(Err(err)) => std::task::Poll::Ready(Err(err)),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        match drive_out(std::pin::Pin::new(&mut this.inner), &mut this.state, cx) {
+            std::task::Poll::Ready(Ok(())) => {}
+            other => return other,
+        }
+        std::pin::Pin::new(&mut this.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if !this.state.pending.is_empty() && !this.state.pending.ends_with(b"\n") {
+            this.state.pending.push(b'\n');
+        }
+        this.state.peel();
+        // A call that never answered does not keep the rest in the process.
+        let held: Vec<Vec<u8>> = this.state.held.drain(..).map(|(_, line)| line).collect();
+        for line in held {
+            this.state.outgoing.extend_from_slice(&line);
+        }
+        response_order().clear();
+        match drive_out(std::pin::Pin::new(&mut this.inner), &mut this.state, cx) {
+            std::task::Poll::Ready(Ok(())) => {}
+            other => return other,
+        }
+        std::pin::Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }
 
@@ -4616,6 +4799,70 @@ mod tests {
 
     fn clear_call_queue() {
         call_queue().clear();
+        response_order().clear();
+    }
+
+    /// A later answer waits until the call read ahead of it has been written.
+    #[test]
+    fn a_later_ordered_answer_waits_for_the_one_read_first() {
+        let _guard = CALL_QUEUE_TEST
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        clear_call_queue();
+        note_ordered_response(&RequestId::Number(9));
+        note_ordered_response(&RequestId::Number(10));
+        let line = |id: i64| {
+            format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"isError\":true}}}}\n")
+        };
+        let mut out = OutboundOrder::new(MemWrite(Vec::new()));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            use tokio::io::AsyncWriteExt;
+            out.write_all(line(10).as_bytes()).await.unwrap();
+            out.write_all(line(9).as_bytes()).await.unwrap();
+            out.flush().await.unwrap();
+        });
+        let got = String::from_utf8(out.inner.0.clone()).unwrap();
+        let ids = response_ids_of(&got);
+        assert_eq!(ids, vec![9, 10], "{got}");
+        clear_call_queue();
+    }
+
+    struct MemWrite(Vec<u8>);
+
+    impl tokio::io::AsyncWrite for MemWrite {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.get_mut().0.extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    fn response_ids_of(text: &str) -> Vec<i64> {
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|value| value.get("id").and_then(serde_json::Value::as_i64))
+            .collect()
     }
 
     fn queued_ids() -> Vec<RequestId> {
