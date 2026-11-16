@@ -815,9 +815,10 @@ enum Cmd {
     /// to rerun and, when a remaining time is reported, about how many
     /// seconds are left. A failed or missing encoder
     /// names the command that fixes it. `--json` puts
-    /// `semantic` or `lexical` in `ranking`. A pack that is down, busy, or
-    /// still loading its encoder ranks by words from what is stored locally,
-    /// prints one line that the search fell back, and exits 0.
+    /// `semantic` or `lexical` in `ranking`. A pack that is down or busy
+    /// ranks by words from what is stored locally, prints one line that the
+    /// search fell back, naming why and the command that fixes it
+    /// (`packset ensure`, or rerun after a few seconds), and exits 0.
     /// The pack is this seat's memory store.
     Search {
         /// Words to look for.
@@ -4908,17 +4909,30 @@ fn run_command() -> Result<()> {
                         .to_ascii_lowercase()
                         .contains("closed the socket");
                     let down = ljos_cli::pack_unreachable(&err) || closed;
-                    if ljos_cli::is_read_shed(&err) {
-                        eprintln!("{}", ljos_cli::pack_fault_line(&err));
-                    } else if !ljos_cli::is_deadline_miss(&err) && !down {
-                        eprintln!("{}", ljos_cli::pack_busy_sentence());
-                    }
-                    eprint!("{}", ljos_cli::SITTING_WORDS_LINE);
+                    // One line, printed with the rows. A writer that is not
+                    // listening names `packset ensure`. A writer that is
+                    // busy names the command to rerun and how long to wait.
+                    let reason = if down {
+                        ljos_cli::WRITER_DOWN_REASON
+                    } else {
+                        let detail = if ljos_cli::is_read_shed(&err) {
+                            ljos_cli::pack_fault_line(&err)
+                        } else {
+                            String::new()
+                        };
+                        let secs = if ljos_cli::is_read_shed(&err) {
+                            1
+                        } else {
+                            ljos_cli::SEARCH_PACK_BUDGET.as_secs().max(1)
+                        };
+                        ljos_cli::note_writer_fallback(secs, &detail);
+                        ljos_cli::WRITER_BUSY_REASON
+                    };
                     (
                         ljos_cli::search_by_words(&asked, fetch),
                         ljos_cli::Ranking {
                             mode: "lexical",
-                            reason: "the pack search did not answer",
+                            reason,
                         },
                     )
                 }

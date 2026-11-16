@@ -14607,7 +14607,10 @@ pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
         if ranking.mode == "lexical"
             && matches!(
                 ranking.reason,
-                ENCODER_LOADING_REASON | ENCODER_FAILED_REASON
+                ENCODER_LOADING_REASON
+                    | ENCODER_FAILED_REASON
+                    | WRITER_DOWN_REASON
+                    | WRITER_BUSY_REASON
             )
         {
             return ranking_sentence(ranking, false);
@@ -14633,12 +14636,21 @@ fn ranking_sentence(ranking: &Ranking, shown: bool) -> String {
     }
     if matches!(
         ranking.reason,
-        ENCODER_LOADING_REASON | ENCODER_FAILED_REASON | "encoder unavailable"
+        ENCODER_LOADING_REASON
+            | ENCODER_FAILED_REASON
+            | "encoder unavailable"
+            | WRITER_DOWN_REASON
+            | WRITER_BUSY_REASON
     ) {
         return format!("{}\n", lexical_reason(ranking, shown));
     }
-    // Word ranking is how a local snapshot is stored. The line names that.
-    // It does not ask for a rerun.
+    // The pack answered and returned none of these rows. Words are how the
+    // local snapshot is stored. The line says that, and does not ask for a
+    // rerun: the writer already answered.
+    if ranking.reason == "local memory snapshot" {
+        return "matched by words (local snapshot): the pack search returned none of these rows\n"
+            .to_string();
+    }
     if let Some(note) = expected_word_note(ranking.reason) {
         return format!("matched by words ({note})\n");
     }
@@ -14666,7 +14678,73 @@ fn lexical_reason(ranking: &Ranking, shown: bool) -> String {
     if ranking.reason == "encoder unavailable" {
         return encoder_missing_search_line();
     }
+    if ranking.reason == WRITER_DOWN_REASON {
+        return writer_down_search_line(shown);
+    }
+    if ranking.reason == WRITER_BUSY_REASON {
+        return writer_busy_search_line(shown);
+    }
     ranking.reason.to_string()
+}
+
+/// The ranking reason when the writer is not listening.
+pub const WRITER_DOWN_REASON: &str = "writer is not running";
+
+/// The ranking reason when the writer is up and did not answer in time.
+pub const WRITER_BUSY_REASON: &str = "writer is busy";
+
+thread_local! {
+    static WRITER_FALLBACK: std::cell::RefCell<Option<(u64, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Remember why this search is using the word ranking, and how many
+/// seconds the next try should wait. `detail` is the writer's own line,
+/// empty when it sent none.
+pub fn note_writer_fallback(secs: u64, detail: &str) {
+    let detail = detail.trim();
+    let detail = if detail.is_empty() || detail == "degraded" || detail == PACK_READ_BUSY_LINE {
+        String::new()
+    } else {
+        detail.to_string()
+    };
+    WRITER_FALLBACK.with(|cell| *cell.borrow_mut() = Some((secs.max(1), detail)));
+}
+
+fn writer_fallback() -> (u64, String) {
+    WRITER_FALLBACK.with(|cell| cell.borrow().clone().unwrap_or_else(|| (1, String::new())))
+}
+
+fn writer_down_search_line(shown: bool) -> String {
+    let what = if shown {
+        "these rows were matched by words"
+    } else {
+        "nothing was matched by words"
+    };
+    format!("The memory writer is not running, so {what}; run `packset ensure`.")
+}
+
+fn writer_busy_search_line(shown: bool) -> String {
+    let (secs, detail) = writer_fallback();
+    let what = if shown {
+        "these rows were matched by words"
+    } else {
+        "nothing was matched by words"
+    };
+    let because = if detail.is_empty() {
+        "The memory writer is busy".to_string()
+    } else {
+        format!("The memory writer is busy ({detail})")
+    };
+    let wait = if secs == 1 {
+        "1 second".to_string()
+    } else {
+        format!("{secs} seconds")
+    };
+    format!(
+        "{because}, so {what}; rerun `{}` in {wait}.",
+        current_invocation()
+    )
 }
 
 /// The parenthetical on [`ranking_line`] when words are the mode this
@@ -78052,7 +78130,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(printed.reason, "local memory snapshot");
         assert_eq!(
             ranking_line(&printed),
-            "matched by words (local snapshot)\n"
+            "matched by words (local snapshot): the pack search returned none of these rows\n"
         );
         assert!(!ranking_line(&printed).contains("rerun"));
         let missing = Ranking {
@@ -78075,15 +78153,38 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ),
             ranking_line(&missing)
         );
-        let fallback = Ranking {
+        note_writer_fallback(3, "");
+        let busy = Ranking {
             mode: "lexical",
-            reason: "the pack search did not answer",
+            reason: WRITER_BUSY_REASON,
+        };
+        let busy_line = ranking_line(&busy);
+        assert!(
+            busy_line
+                .starts_with("The memory writer is busy, so nothing was matched by words; rerun `")
+                && busy_line.contains("in 3 seconds."),
+            "{busy_line}"
+        );
+        let shown = search_rank_line(
+            &busy,
+            &[hit("oak", "Oak Tree on Nov 23 is the morning plan.", 0.2)],
+        );
+        assert!(
+            shown.contains("these rows were matched by words") && shown.contains("rerun `"),
+            "{shown}"
+        );
+        let down = Ranking {
+            mode: "lexical",
+            reason: WRITER_DOWN_REASON,
         };
         assert_eq!(
-            ranking_line(&fallback),
-            "matched by words: the pack search did not answer\n"
+            ranking_line(&down),
+            "The memory writer is not running, so nothing was matched by words; run `packset ensure`.\n"
         );
-        assert!(!ranking_line(&fallback).contains("rerun"));
+        assert!(
+            search_rank_line(&down, &[]).contains("packset ensure"),
+            "an empty page still names the command that starts the writer"
+        );
         assert_eq!(
             ranking_line(&Ranking {
                 mode: "semantic",
@@ -78099,11 +78200,6 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             search_rank_line(&semantic, &[]),
             "",
             "an empty page does not say the rows were matched by meaning"
-        );
-        assert_eq!(
-            search_rank_line(&fallback, &[]),
-            "",
-            "an empty page does not say the rows were matched by words"
         );
     }
 

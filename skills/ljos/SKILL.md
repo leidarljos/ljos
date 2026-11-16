@@ -763,8 +763,10 @@ seconds once and sends the same request with the same deadline. A second
 `error` field on one line and does not retry for the rest of the timeout.
 A call that stays silent until its budget runs out is not tried again.
 An interactive command prints `pack busy, try again` and exits 75.
-When search still does not answer it ranks the stored snapshot by words
-and prints `ranked by words; the pack search did not answer in time`.
+When search still does not answer it ranks the stored snapshot by words.
+The first line says the writer is busy and names the command to rerun,
+with how many seconds to wait. A writer that is not running names
+`packset ensure`.
 A sitting prints that listing and its recall before the review sweep.
 The sweep runs outside the recall clock and finishes on the pack's own budget.
 

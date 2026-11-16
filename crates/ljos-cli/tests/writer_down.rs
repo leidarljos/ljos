@@ -422,7 +422,8 @@ fn walk_commands(seat: &Seat, case: &Case, dead: u16) {
         case.name
     );
     assert!(
-        search_said.contains("ranked by words; the pack search did not answer in time"),
+        search_said.contains("The memory writer is not running")
+            && search_said.contains("packset ensure"),
         "search {} did not say it fell back\n{search_said}",
         case.name
     );

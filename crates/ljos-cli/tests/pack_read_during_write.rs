@@ -313,11 +313,9 @@ fn a_held_write_does_not_fail_readers() {
             );
         } else {
             assert!(
-                stderr.contains("ranked by words; the pack search did not answer in time"),
-                "{what}:\n{said}"
-            );
-            assert!(
-                said.contains("every worker is answering"),
+                stderr.contains("The memory writer is busy (every worker is answering)")
+                    && stderr.contains("rerun `")
+                    && stderr.contains("in 1 second"),
                 "{what}:\n{said}"
             );
             assert!(

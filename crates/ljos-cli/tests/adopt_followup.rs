@@ -480,7 +480,7 @@ fn a_refused_pack_search_is_one_line_and_exits_75() {
     let said = text(&out);
     assert!(out.status.success(), "{said}");
     assert!(
-        said.contains("ranked by words; the pack search did not answer in time"),
+        said.contains("The memory writer is not running") && said.contains("packset ensure"),
         "{said}"
     );
     assert!(!said.contains("Caused by"), "{said}");

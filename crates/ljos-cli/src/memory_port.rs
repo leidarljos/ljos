@@ -2726,8 +2726,11 @@ fn merge_into(
     if extras.is_empty() {
         return;
     }
-    let room = limit.saturating_sub(extras.len()).min(hits.len());
-    hits.truncate(room);
+    // Pack hits stay in front. Giving the slot the whole page used to drop
+    // a healthy writer's semantic hits, and the line then said the page was
+    // only the local snapshot.
+    let kept = limit.min(hits.len());
+    hits.truncate(kept);
     let left = limit.saturating_sub(hits.len());
     hits.extend(extras.into_iter().take(left));
 }
@@ -4273,6 +4276,50 @@ mod tests {
         assert_eq!(hits[0].id, before[0].id);
         assert_eq!(hits[0].text, before[0].text);
         assert_eq!(hits[0].score, before[0].score);
+    }
+
+    /// A page of slot rows does not push the pack's hit out. The writer's
+    /// row stays first, and the slot fills only the room that is left.
+    #[test]
+    fn slot_rows_do_not_replace_pack_hits() {
+        let (_dir, target) = place("slot");
+        let kept = target.home.join("kept");
+        for n in 0..12 {
+            let text = format!("ferry timetable note {n} about the docks");
+            write_stored(
+                &kept,
+                &format!("{n}.json"),
+                &stored_row(&format!("local:note-{n}"), &text, &["seat:ada"]),
+            );
+        }
+        let mut hits = vec![Hit {
+            id: Some("pack-oak".into()),
+            text: "The ferry timetable lists Oak Tree at dawn.".into(),
+            score: 0.9,
+            kind: "lesson".into(),
+            ts: None,
+            entities: vec!["seat:ada".into()],
+            ballots: None,
+            of: None,
+            rerank_score: None,
+            labels: Vec::new(),
+        }];
+        merge_into(
+            &mut hits,
+            &target,
+            "ferry timetable",
+            5,
+            &SourceFilter::default(),
+            false,
+            Some(crate::NO_SUBJECT_FLOOR),
+        );
+        assert_eq!(hits[0].id.as_deref(), Some("pack-oak"));
+        assert!(hits.len() <= 5, "{:?}", hits.len());
+        assert!(
+            hits.iter().any(|hit| hit.id.as_deref() == Some("pack-oak")),
+            "the pack hit was dropped: {:?}",
+            hits.iter().map(|hit| hit.id.clone()).collect::<Vec<_>>()
+        );
     }
 
     fn stored_row(id: &str, text: &str, entities: &[&str]) -> Row {
