@@ -2754,6 +2754,81 @@ pub(crate) fn import_row_ids() -> Vec<String> {
     ids
 }
 
+/// Local rows `ljos show` can open, retired ones included.
+///
+/// Search leaves a retired row out. Show still opens it, so the stored
+/// text, the seat and the ticket stay readable after `ljos forget`.
+pub(crate) fn show_copies() -> Vec<Value> {
+    let place = Place::current();
+    let mut kept = std::collections::BTreeMap::new();
+    for row in import_rows(&place.home) {
+        keep_show_row(&mut kept, row);
+    }
+    for row in load_export_rows(&place) {
+        keep_show_row(&mut kept, row);
+    }
+    for row in load_attempts(&place) {
+        keep_show_row(&mut kept, row);
+    }
+    kept.into_values().map(copy_atom).collect()
+}
+
+fn keep_show_row(kept: &mut std::collections::BTreeMap<String, Row>, row: Row) {
+    if row.id.is_empty() {
+        return;
+    }
+    match kept.get(&row.id) {
+        Some(old) if !old.text.trim().is_empty() => {}
+        _ => {
+            kept.insert(row.id.clone(), row);
+        }
+    }
+}
+
+fn copy_atom(row: Row) -> Value {
+    let origin = row.origin.trim().to_string();
+    let level = if origin == crate::admit::ORIGIN_USER {
+        crate::admit::LEVEL_EXPLICIT.to_string()
+    } else if origin.is_empty() {
+        String::new()
+    } else {
+        crate::admit::LEVEL_L0.to_string()
+    };
+    let mut source = serde_json::Map::new();
+    if !row.seat.trim().is_empty() {
+        source.insert("seat".into(), Value::String(row.seat.trim().to_string()));
+    }
+    if !row.at.trim().is_empty() {
+        source.insert("at".into(), Value::String(row.at.trim().to_string()));
+    }
+    if !row.basis.trim().is_empty() {
+        source.insert("basis".into(), Value::String(row.basis.trim().to_string()));
+    }
+    let mut atom = serde_json::Map::new();
+    let retired = row_retired(&row);
+    atom.insert("id".into(), Value::String(row.id));
+    atom.insert("text".into(), Value::String(row.text));
+    atom.insert("kind".into(), Value::String(row.kind));
+    if !origin.is_empty() {
+        atom.insert("origin".into(), Value::String(origin));
+    }
+    if !level.is_empty() {
+        atom.insert("level".into(), Value::String(level));
+    }
+    atom.insert(
+        "entities".into(),
+        Value::Array(row.entities.into_iter().map(Value::String).collect()),
+    );
+    atom.insert("source".into(), Value::Object(source));
+    if retired {
+        atom.insert("tombstone".into(), Value::Bool(true));
+    }
+    if let Some(why) = row.retracted_by.filter(|why| !why.trim().is_empty()) {
+        atom.insert("forgotten".into(), Value::String(why));
+    }
+    Value::Object(atom)
+}
+
 /// Retire the imported row `id` names. The file stays, with `retired` set,
 /// and search leaves the row out. `None` when the slot has no such row.
 ///
@@ -2791,6 +2866,7 @@ fn import_rows(home: &Path) -> Vec<Row> {
     let mut rows = Vec::new();
     let root = home.join("imports");
     let Ok(seats) = std::fs::read_dir(&root) else {
+        load_kept_rows(home, &mut rows);
         return rows;
     };
     let mut seats: Vec<_> = seats.filter_map(|entry| entry.ok()).collect();
@@ -2813,6 +2889,11 @@ fn import_rows(home: &Path) -> Vec<Row> {
             }
         }
     }
+    load_kept_rows(home, &mut rows);
+    rows
+}
+
+fn load_kept_rows(home: &Path, rows: &mut Vec<Row>) {
     let kept = home.join("kept");
     if let Ok(entries) = std::fs::read_dir(&kept) {
         let mut entries: Vec<_> = entries.filter_map(|entry| entry.ok()).collect();
@@ -2826,7 +2907,6 @@ fn import_rows(home: &Path) -> Vec<Row> {
             }
         }
     }
-    rows
 }
 
 fn retire_indexes(home: &Path, id: &str, why: Option<&str>) -> Result<Option<RetiredImport>> {

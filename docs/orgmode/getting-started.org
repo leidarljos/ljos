@@ -144,7 +144,7 @@ lesson, today
 #+end_src
 # END ljos-sample tutorial-search
 
-The id and the review time are the ones that run printed. The name is the login name. This sample's login is ada.
+The id and the review time are the ones that run printed. =ljos show a6ae2751= opens that memory. A =local:= id opens the same way. The name is the login name. This sample's login is ada.
 That line is printed on the first write that had to pick a seat. A later write in the same place does not print it again. A conversation that already has a seat record writes as that seat and does not print the line.
 Typed at a terminal, the search row says =lesson, today=.
 Under a runner the same row says =lesson, from an agent=.

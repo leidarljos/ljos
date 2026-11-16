@@ -81,6 +81,7 @@ mod seat_mcp_layout;
 pub mod seat_resolve;
 pub mod seat_roster;
 mod share_io;
+pub mod show_memory;
 pub mod sitting_gate;
 pub mod slot;
 pub mod subagent;
