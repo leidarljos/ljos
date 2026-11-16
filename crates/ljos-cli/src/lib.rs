@@ -12449,37 +12449,60 @@ pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, best: f64) -> bool {
 ///
 /// The fallback search's error.
 pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSignal)>> {
-    let raw = (|| -> Option<Vec<(Hit, DenseSignal)>> {
-        let client = pack().ok()?;
+    let raw = (|| -> Result<Option<Vec<(Hit, DenseSignal)>>> {
+        let client = match pack() {
+            Ok(client) => client,
+            Err(_) => return Ok(None),
+        };
         let ms = std::env::var("PACKSET_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|ms| *ms > 0)
             .unwrap_or(HOOK_RERANK_BUDGET_MS);
         let timeout = std::time::Duration::from_millis(ms);
-        let (body, _) = search_relevant(&client, cue, limit, false, timeout).ok()?;
-        let found: Vec<(Hit, DenseSignal)> = body["hits"]
-            .as_array()?
-            .iter()
-            .map(|v| {
-                let hit: Hit = serde_json::from_value(v.clone()).ok()?;
-                let signal = DenseSignal {
-                    rank: v["dense_rank"].as_u64().and_then(|r| u32::try_from(r).ok()),
-                    cosine: v["cosine"].as_f64(),
-                };
-                Some((hit, signal))
-            })
-            .collect::<Option<_>>()?;
+        // A 401 or 403 is the writer's answer. Falling through to another
+        // search hides it behind an empty page, and the model never sees
+        // the command that fixes the token.
+        let (body, _) = match search_relevant(&client, cue, limit, false, timeout) {
+            Ok(pair) => pair,
+            Err(err) if writer_refusal(&err) => return Err(err),
+            Err(_) => return Ok(None),
+        };
+        let found: Option<Vec<(Hit, DenseSignal)>> = body["hits"].as_array().and_then(|hits| {
+            hits.iter()
+                .map(|v| {
+                    let hit: Hit = serde_json::from_value(v.clone()).ok()?;
+                    let signal = DenseSignal {
+                        rank: v["dense_rank"].as_u64().and_then(|r| u32::try_from(r).ok()),
+                        cosine: v["cosine"].as_f64(),
+                    };
+                    Some((hit, signal))
+                })
+                .collect()
+        });
+        let Some(found) = found else {
+            return Ok(None);
+        };
         keep_search_origins(&client, found.iter().map(|(h, _)| h));
-        Some(found)
+        Ok(Some(found))
     })();
     match raw {
-        Some(found) => Ok(found),
-        None => Ok(packset_search_opts(cue, limit, false)?
+        Ok(Some(found)) => Ok(found),
+        Err(err) => Err(err),
+        Ok(None) => Ok(packset_search_opts(cue, limit, false)?
             .into_iter()
             .map(|h| (h, DenseSignal::default()))
             .collect()),
     }
+}
+
+/// Whether `err` is a writer that answered and refused the token.
+/// That is not a down writer: the next command is the one the line names.
+fn writer_refusal(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}");
+    text.contains("answered 401")
+        || text.contains("answered 403")
+        || text.contains("refused this seat's token")
 }
 
 /// Hits for a plain-language task. The encoder's first hit, when it clears
@@ -16050,6 +16073,21 @@ fn search_relevant(
         }
         if let Some(hits) = body["hits"].as_array_mut() {
             hits.extend(extra);
+        }
+    }
+    // No stored row survived the refusal. An empty page would read as
+    // "nothing matched", and the command that fixes the token would stay
+    // on stderr, which the model does not read.
+    if matches!(fetched.0.status, 401 | 403) {
+        let empty = body
+            .get("hits")
+            .and_then(Value::as_array)
+            .is_none_or(|hits| hits.is_empty());
+        if empty {
+            bail!(
+                "search: {}",
+                writer_refused_line(client.base(), fetched.0.status)
+            );
         }
     }
     if open {

@@ -66,6 +66,9 @@ The script names the cause and the command that fixes it.
 
 The programs go to =~/.local/bin=. They are =ljos=, =ljos-mcp=, =packset=,
 =packsetd=, =packset-mcp=, =vissue=, =vissue-mcp=, =deedar=, =claimdag=, =ljos-policyd= and =ljos-consensus=.
+An assistant that starts =ljos mcp= lists its tools before any of those are running.
+No seat, no =PACKSET_HOME=, and no =packsetd= are required for that list.
+A search then says to install =packset= or to run =packset ensure=, as a tool error the model can read.
 The installer checks each download against its published SHA-256 sum.
 It builds from source with =cargo= where a platform has no release.
 =--no-embed= leaves out the encoder. Search then matches words, and a search prints =matched by words (encoder not installed)= and names =cargo binstall --locked packset-embed=.

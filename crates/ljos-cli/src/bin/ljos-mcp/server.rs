@@ -1334,6 +1334,17 @@ fn refused(e: anyhow::Error) -> McpError {
     if let Some(label) = ljos_cli::policy_label::as_policy(&e) {
         return McpError::internal_error(format!("label {}: {}", label.label, label.detail), None);
     }
+    // A writer that answered 401 or 403 is up. The generic down-writer
+    // line would hide the refusal, because that sentence also names
+    // `packset ensure`.
+    let full = format!("{e:#}");
+    if let Some(line) = full.lines().find(|line| {
+        line.contains("answered 401")
+            || line.contains("answered 403")
+            || line.contains("refused this seat's token")
+    }) {
+        return McpError::internal_error(line.trim().to_string(), None);
+    }
     // A down writer is one sentence that names the next step. The chain
     // under it is `Connection refused (os error 111)`, which does not.
     if let Some(line) = ljos_cli::pack_down_message(&e) {
@@ -4002,6 +4013,25 @@ async fn forward_call(
         .map_err(|e| fail(&e))
 }
 
+/// `packsetd timed out` names the socket, not the command that starts the
+/// writer. The down-writer line does.
+fn explained_bound(line: String) -> String {
+    if line == "packsetd timed out" {
+        ljos_cli::pack_down_line()
+    } else {
+        line
+    }
+}
+
+/// A tool result for a call that ran out of time. A protocol error is what
+/// a client renders as an internal error and then drops the tool list for.
+fn bound_tool_error(tool: &str, line: String) -> ServerResult {
+    ServerResult::CallToolResult(CallToolResult::error(vec![
+        ContentBlock::text(explained_bound(line)),
+        ContentBlock::text(next_step(tool)),
+    ]))
+}
+
 /// The rmcp service for ljos. A tool call claims its lifetime slot and
 /// queue place here, before rmcp applies request checks that may refuse
 /// the call before it reaches `call_tool`.
@@ -4029,17 +4059,17 @@ impl rmcp::Service<rmcp::RoleServer> for LjosService {
                 rmcp::Service::handle_request(&self.0, request, context).await
             };
             match tokio::time::timeout(budget, run).await {
-                Ok(Ok(result)) => match ljos_cli::tool_bound::failure() {
-                    Some(line) => Err(McpError::internal_error(line, None)),
-                    None => Ok(result),
-                },
+                // The handler already folded a recorded timeout into a tool
+                // result. A protocol error here is what a client shows as
+                // "internal error" and then drops the tool list for.
+                Ok(Ok(result)) => Ok(result),
                 Ok(Err(err)) => match ljos_cli::tool_bound::failure() {
-                    Some(line) => Err(McpError::internal_error(line, None)),
+                    Some(line) => Ok(bound_tool_error(&tool, line)),
                     None => Err(err),
                 },
-                Err(_) => Err(McpError::internal_error(
+                Err(_) => Ok(bound_tool_error(
+                    &tool,
                     ljos_cli::tool_bound::timeout_line(),
-                    None,
                 )),
             }
         })
@@ -4276,7 +4306,7 @@ impl ServerHandler for LjosServer {
         if let Some(line) = ljos_cli::tool_bound::failure() {
             return Ok(attach_next(
                 &name,
-                CallToolResult::error(vec![ContentBlock::text(line)]).into(),
+                CallToolResult::error(vec![ContentBlock::text(explained_bound(line))]).into(),
             ));
         }
         Ok(attach_next(&name, response))

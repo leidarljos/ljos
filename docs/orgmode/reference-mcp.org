@@ -25,6 +25,11 @@ without the =ljos_= prefix, where =core= stands for the core set. A call
 to a tool the server does not list is refused with the shell command to
 run instead. A tool that fails answers with =isError= set and the reason
 as text, so the model reads it as a tool result.
+=tools/list= does not wait on a seat, a tracker, =PACKSET_HOME=, or a running
+=packsetd=, so a fresh machine still receives the whole set it asked for.
+A search or another pack tool with no writer, or a writer that answers 401,
+is that tool error and names =cargo install --locked packset= or
+=packset ensure=. It is not a protocol error, and it does not drop the list.
 
 =ljos_recall= adds a Code context section when =graphify-out/graph.json= is in the working directory's repository.
 The section is the same one =ljos recall= prints.

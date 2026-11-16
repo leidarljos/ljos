@@ -477,3 +477,298 @@ fn a_missing_habitat_binary_names_doctor() {
     assert!(said.contains("ljos doctor"), "{said}");
     assert!(!said.contains("cannot find binary path"), "{said}");
 }
+
+/// A fresh home has no seat file, no `PACKSET_HOME`, and no writer.
+/// `tools/list` is still the whole set, and a search is a tool error that
+/// names the install. A protocol error would drop the list.
+#[test]
+fn tools_list_is_the_full_set_with_an_empty_home_and_no_box_env() {
+    let home = tempfile::tempdir().unwrap();
+    // Not the default port. A writer another test left on 8761 belongs to
+    // another home and is not this seat's pack.
+    let held = refused_port::RefusedPort::reserve();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["mcp"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home.path())
+        .env("USER", "walk")
+        .env("LOGNAME", "walk")
+        .env("LJOS_MCP_TOOLS", "all")
+        .env("PACKSET_PORT", held.port().to_string())
+        .env("PACKSET_TIMEOUT_MS", "400")
+        .env("LJOS_PACK_TIMEOUT_MS", "400")
+        .env_remove("LJOS_SEAT")
+        .env_remove("VISSUE_AGENT")
+        .env_remove("VISSUE_ROOT")
+        .env_remove("PACKSET_HOME")
+        .env_remove("PACKSET_URL")
+        .env_remove("PACKSET_TOKEN")
+        .env_remove("PACKSET_TOKEN_FILE")
+        .env_remove("LJOS_HOME")
+        .current_dir(home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(20));
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    });
+    let lines = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "probe", "version": "0"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "ljos_search", "arguments": {"query": "lexical default"}}}),
+    ];
+    let started = std::time::Instant::now();
+    let mut stdin = child.stdin.take().unwrap();
+    for line in &lines {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let elapsed = started.elapsed();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "discovery took {elapsed:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "stderr:\n{stderr}");
+    for line in stdout.lines().filter(|line| !line.is_empty()) {
+        serde_json::from_str::<serde_json::Value>(line)
+            .unwrap_or_else(|err| panic!("stdout is not JSON: {err}: {line}\nstderr:\n{stderr}"));
+    }
+    let answers: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let by_id = |id: u64| {
+        answers
+            .iter()
+            .find(|answer| answer["id"] == id)
+            .unwrap_or_else(|| panic!("no answer {id}\nstdout:\n{stdout}\nstderr:\n{stderr}"))
+            .clone()
+    };
+    let list = by_id(2);
+    assert!(list.get("error").is_none(), "{list}");
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, EVERY_TOOL, "stdout:\n{stdout}");
+    let search = by_id(3);
+    assert!(
+        search.get("error").is_none(),
+        "a protocol error drops the tool list: {search}"
+    );
+    assert_eq!(search["result"]["isError"], true, "{search}");
+    let said = search.to_string();
+    assert!(
+        (said.contains("packset is not on PATH")
+            && said.contains("cargo install --locked packset"))
+            || said.contains("packset ensure"),
+        "{said}"
+    );
+    assert!(!said.contains("os error"), "{said}");
+    assert!(!said.contains("Nothing matched"), "{said}");
+}
+
+/// A writer that accepts and then says nothing used to come back as a
+/// protocol error (`packsetd timed out`). The list stays, and the search
+/// is a tool error that names the next command.
+#[test]
+fn a_silent_writer_is_a_tool_error_and_the_list_stays() {
+    use std::io::Read;
+    use std::net::TcpListener;
+    let home = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home.path())
+        .env("USER", "walk")
+        .env("LJOS_MCP_TOOLS", "all")
+        .env("PACKSET_URL", format!("http://{addr}"))
+        .env("LJOS_MCP_TIMEOUT_MS", "700")
+        .env_remove("LJOS_SEAT")
+        .env_remove("PACKSET_HOME")
+        .env_remove("PACKSET_TOKEN")
+        .current_dir(home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(20));
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    });
+    let lines = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "probe", "version": "0"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "ljos_search", "arguments": {"query": "lexical default"}}}),
+    ];
+    let mut stdin = child.stdin.take().unwrap();
+    for line in &lines {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("panicked"),
+        "stderr:\n{stderr}\nstdout:\n{stdout}"
+    );
+    let answers: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let by_id = |id: u64| {
+        answers
+            .iter()
+            .find(|answer| answer["id"] == id)
+            .unwrap_or_else(|| panic!("no answer {id}\nstdout:\n{stdout}\nstderr:\n{stderr}"))
+            .clone()
+    };
+    let list = by_id(2);
+    assert!(list.get("error").is_none(), "{list}");
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, EVERY_TOOL);
+    let search = by_id(3);
+    assert!(
+        search.get("error").is_none(),
+        "a protocol error drops the tool list: {search}"
+    );
+    assert_eq!(search["result"]["isError"], true, "{search}");
+    let said = search.to_string();
+    assert!(
+        said.contains("packset ensure") || said.contains("cargo install --locked packset"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("\"code\":-32603") && !said.contains("packsetd timed out"),
+        "{said}"
+    );
+}
+
+/// A writer that answers 401 for this home's token is a tool error, the
+/// same sentence `ljos search` prints. An empty "nothing matched" page
+/// hides the refusal.
+#[test]
+fn a_refused_token_is_a_tool_error_and_the_list_stays() {
+    use std::io::Read;
+    use std::net::TcpListener;
+    let home = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let body = r#"{"error":"token"}"#;
+            let msg = format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, msg.as_bytes());
+        }
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home.path())
+        .env("USER", "walk")
+        .env("LJOS_MCP_TOOLS", "all")
+        .env("PACKSET_URL", format!("http://{addr}"))
+        .env("PACKSET_TOKEN", "seat-token")
+        .env("PACKSET_WORKSPACE", "seat")
+        .env("PACKSET_TIMEOUT_MS", "800")
+        .env_remove("LJOS_SEAT")
+        .env_remove("PACKSET_HOME")
+        .current_dir(home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(20));
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    });
+    let lines = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "probe", "version": "0"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "ljos_search", "arguments": {"query": "lexical default"}}}),
+    ];
+    let mut stdin = child.stdin.take().unwrap();
+    for line in &lines {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("panicked"),
+        "stderr:\n{stderr}\nstdout:\n{stdout}"
+    );
+    let answers: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let by_id = |id: u64| {
+        answers
+            .iter()
+            .find(|answer| answer["id"] == id)
+            .unwrap_or_else(|| panic!("no answer {id}\nstdout:\n{stdout}\nstderr:\n{stderr}"))
+            .clone()
+    };
+    let list = by_id(2);
+    assert!(list.get("error").is_none(), "{list}");
+    assert_eq!(
+        list["result"]["tools"].as_array().expect("tools").len(),
+        EVERY_TOOL.len()
+    );
+    let search = by_id(3);
+    assert!(search.get("error").is_none(), "{search}");
+    assert_eq!(search["result"]["isError"], true, "{search}");
+    let said = search.to_string();
+    assert!(said.contains("answered 401"), "{said}");
+    assert!(said.contains("packset ensure"), "{said}");
+    assert!(!said.contains("Nothing matched"), "{said}");
+}
