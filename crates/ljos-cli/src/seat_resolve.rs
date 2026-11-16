@@ -262,7 +262,9 @@ fn whole(name: &str, source: &str) -> crate::Seat {
 /// The seat a write uses when no rule matched.
 ///
 /// A usable login name is that name. Without one, the name is `seat-`
-/// plus six hex digits of the host, so a runner hostname is not the seat.
+/// plus seven hex digits of the host, so a runner hostname is not the
+/// seat. Six digits are an old pid tag: `seat-7acf43` folds to `seat`,
+/// which is not a seat, and a claim or a later export then misses it.
 /// The same host always yields the same name. An explicit seat is not
 /// passed here.
 #[must_use]
@@ -277,7 +279,7 @@ pub fn write_fallback_name(user: Option<&str>, host: &str) -> String {
         hash ^= u32::from(*byte);
         hash = hash.wrapping_mul(0x0100_0193);
     }
-    format!("seat-{:06x}", hash & 0x00ff_ffff)
+    format!("seat-{:07x}", hash & 0x0fff_ffff)
 }
 
 fn login_name() -> Option<String> {
@@ -684,10 +686,26 @@ mod tests {
         let once = write_fallback_name(None, host);
         assert_eq!(once, write_fallback_name(None, host));
         assert!(once.starts_with("seat-"));
-        assert_eq!(once.len(), "seat-".len() + 6);
+        assert_eq!(once, write_fallback_name(Some("runner"), host));
+        let suffix = once.strip_prefix("seat-").expect("seat- prefix");
+        assert_eq!(suffix.len(), 7, "{once}");
+        assert!(suffix.bytes().all(|b| b.is_ascii_hexdigit()), "{once}");
         assert!(!once.contains("runner"), "{once}");
         assert!(!once.contains(host), "{once}");
         assert_eq!(write_fallback_name(Some("ada"), host), "ada");
+        // `runner` is not a seat, so a GitHub-hosted runner uses this name.
+        // Seven hex digits stay whole. Six are an old pid tag and fold to
+        // `seat`, which a claim refuses and an export does not repeat.
+        for sample in ["box", "runnervm-abc123", "ip-10-0-140-140", ""] {
+            let name = write_fallback_name(None, sample);
+            assert_eq!(
+                crate::canonical_seat_name(&name),
+                name,
+                "{sample} -> {name}"
+            );
+            assert_eq!(usable(&name).as_deref(), Some(name.as_str()), "{name}");
+            assert_eq!(crate::claim_holder(&name).unwrap(), name, "{name}");
+        }
     }
 
     #[test]
