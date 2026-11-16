@@ -1,3 +1,5 @@
-`ljos ready` prints the first 20 tickets in tracker order, headed `ready  shown X of Y`.
-`--limit N` prints N, `--all` prints every ticket, and a page that leaves tickets off names `ljos ready --all`.
-`--json` prints every row unless `--limit` is set, and a claim is still aged from its stamp.
+`ljos ready` prints the first 20 tickets, headed `ready  shown X of Y`.
+A ticket this seat has started comes first, then higher priority, then a newer ticket.
+`-n N` prints N tickets and `--all` prints every ticket.
+A page that leaves tickets off names the command that prints the rest.
+`--json` prints every row unless `-n` is set, and `--mine` still names the next plan item.

@@ -1,9 +1,11 @@
-//! `ljos ready` prints the first page of tickets in tracker order.
+//! `ljos ready` prints the first page of tickets a seat can take.
 //!
-//! Twenty is the page. `--limit N` prints N, `--all` prints every ticket,
-//! and a page that leaves tickets off names the command that lists them.
-//! `--json` prints every row unless `--limit` is set. `--mine` is the plan
-//! line it already was. A claim on the row is still aged from its stamp.
+//! Twenty is the page. `-n` and `--limit` print that many, `--all` prints
+//! every ticket, and a short page names the command that prints the rest.
+//! This seat's started tickets come first, then higher priority, then a
+//! newer ticket. `--json` prints every row unless `-n` is set, in that
+//! order. `--mine` is the plan line it already was. A claim on the row is
+//! still aged from its stamp.
 
 ljos_test_boot::harness!();
 
@@ -98,15 +100,22 @@ fn json_ids(page: &str) -> Vec<String> {
         .collect()
 }
 
+fn page_head(page: &str) -> &str {
+    page.split("\n\n").next().unwrap_or(page)
+}
+
 #[test]
-fn the_default_page_is_the_first_twenty_in_tracker_order() {
+fn the_default_page_names_the_command_for_the_rest() {
     let board = Board::open(23);
     let page = board.ok(&["ready"]);
-    assert!(page.starts_with("ready  shown 20 of 23\n"), "{page}");
+    let head = page_head(&page);
     assert!(
-        page.trim_end()
-            .ends_with("run ljos ready --all to see every ticket"),
+        head.starts_with("ready  shown 20 of 23, so run `ljos ready -n 23`."),
         "{page}"
+    );
+    assert!(
+        !page.trim_end().ends_with("so run `ljos ready -n 23`."),
+        "the command belongs on the header, not after the rows:\n{page}"
     );
     let shown = ticket_ids(&page);
     assert_eq!(shown.len(), 20, "{page}");
@@ -119,8 +128,8 @@ fn the_default_page_is_the_first_twenty_in_tracker_order() {
     let all = board.ok(&["ready", "--all"]);
     assert!(all.starts_with("ready  shown 23 of 23\n"), "{all}");
     assert!(
-        !all.contains("to see every ticket"),
-        "a full page still names --all:\n{all}"
+        !page_head(&all).contains("-n "),
+        "a full page still names a command:\n{all}"
     );
     let every = ticket_ids(&all);
     assert_eq!(every.len(), 23, "{all}");
@@ -132,48 +141,136 @@ fn the_default_page_is_the_first_twenty_in_tracker_order() {
     );
     assert!(all.contains("by saddle"), "{all}");
 
-    let five = board.ok(&["ready", "--limit", "5"]);
-    assert!(five.starts_with("ready  shown 5 of 23\n"), "{five}");
-    assert_eq!(ticket_ids(&five), every[..5]);
+    let five = board.ok(&["ready", "-n", "5"]);
     assert!(
-        five.trim_end()
-            .ends_with("run ljos ready --all to see every ticket"),
+        page_head(&five).starts_with("ready  shown 5 of 23, so run `ljos ready -n 23`."),
         "{five}"
     );
+    assert_eq!(ticket_ids(&five), every[..5]);
+    let long = board.ok(&["ready", "--limit", "5"]);
+    assert_eq!(ticket_ids(&long), ticket_ids(&five), "{long}");
 
-    let exact = board.ok(&["ready", "--limit", "23"]);
+    let exact = board.ok(&["ready", "-n", "23"]);
     assert!(exact.starts_with("ready  shown 23 of 23\n"), "{exact}");
-    assert!(!exact.contains("to see every ticket"), "{exact}");
+    assert!(!page_head(&exact).contains("-n "), "{exact}");
 
-    let none = board.ok(&["ready", "--limit", "0"]);
-    assert!(none.starts_with("ready  shown 0 of 23\n"), "{none}");
-    assert!(ticket_ids(&none).is_empty(), "{none}");
+    let none = board.ok(&["ready", "-n", "0"]);
     assert!(
-        none.trim_end()
-            .ends_with("run ljos ready --all to see every ticket"),
+        page_head(&none).starts_with("ready  shown 0 of 23, so run `ljos ready -n 23`."),
         "{none}"
     );
+    assert!(ticket_ids(&none).is_empty(), "{none}");
 
     let json = board.ok(&["ready", "--json"]);
     assert_eq!(json_ids(&json), every);
-    let limited = board.ok(&["ready", "--json", "--limit", "4"]);
+    let limited = board.ok(&["ready", "--json", "-n", "4"]);
     assert_eq!(json_ids(&limited), every[..4]);
 
     let narrowed = board.ok(&["ready", "-p", "probe"]);
     assert!(
-        narrowed.starts_with("ready  shown 20 of 23\n"),
-        "{narrowed}"
-    );
-    assert!(
-        narrowed
-            .trim_end()
-            .ends_with("run ljos ready -p probe --all to see every ticket"),
+        page_head(&narrowed)
+            .starts_with("ready  shown 20 of 23, so run `ljos ready -p probe -n 23`."),
         "{narrowed}"
     );
 
     let mine = board.ok(&["ready", "--mine"]);
     assert_eq!(mine, "no unfinished item\n");
     assert!(!board.ids.is_empty());
+}
+
+#[test]
+fn started_work_comes_before_priority_and_newer_tickets() {
+    let board = Board::open(0);
+    std::fs::write(board.root.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    let org = board.root.join("Software/probe/issues.org");
+    std::fs::create_dir_all(org.parent().unwrap()).unwrap();
+    std::fs::write(
+        &org,
+        "\
+#+TITLE: probe
+#+VISSUE: 1
+#+CATEGORY: probe
+#+TODO: TODO STARTED | DONE
+
+* STARTED [#C] Mine late
+:PROPERTIES:
+:ID:         probe-m1
+:CREATED:    [2026-08-01 Sat 09:00]
+:CLAIMED_BY: saddle
+:CLAIMED_AT: [2026-08-01 Sat 09:00]
+:END:
+
+* STARTED [#A] Mine early
+:PROPERTIES:
+:ID:         probe-m2
+:CREATED:    [2026-02-01 Sun]
+:CLAIMED_BY: saddle
+:CLAIMED_AT: [2026-02-01 Sun 08:00]
+:END:
+
+* STARTED [#A] Theirs newest
+:PROPERTIES:
+:ID:         probe-t1
+:CREATED:    [2026-07-01 Wed 18:40]
+:CLAIMED_BY: other
+:CLAIMED_AT: [2026-07-01 Wed 18:40]
+:END:
+
+* TODO [#A] New high
+:PROPERTIES:
+:ID:         probe-a1
+:CREATED:    [2026-06-01 Mon]
+:END:
+
+* TODO [#A] Old high
+:PROPERTIES:
+:ID:         probe-a2
+:CREATED:    [2026-01-02 Fri]
+:END:
+
+* TODO [#B] Mid
+:PROPERTIES:
+:ID:         probe-b1
+:CREATED:    [2026-03-01 Sun]
+:END:
+
+* TODO [#C] Low
+:PROPERTIES:
+:ID:         probe-c1
+:CREATED:    [2026-01-01 Thu]
+:END:
+
+* TODO [#A] Wait
+:PROPERTIES:
+:ID:         probe-w1
+:BLOCKED_BY: probe-a1
+:CREATED:    [2026-09-01 Tue]
+:END:
+",
+    )
+    .unwrap();
+    let want = [
+        "probe-m2", "probe-m1", "probe-t1", "probe-a1", "probe-a2", "probe-b1", "probe-c1",
+    ];
+    let all = board.ok(&["ready", "--all"]);
+    assert!(all.starts_with("ready  shown 7 of 7\n"), "{all}");
+    assert_eq!(ticket_ids(&all), want, "{all}");
+    assert!(
+        !all.contains("probe-w1"),
+        "an open blocker stayed on the page:\n{all}"
+    );
+    assert!(all.contains("claimed"), "{all}");
+
+    let two = board.ok(&["ready", "-n", "2"]);
+    assert!(
+        page_head(&two).contains("ready  shown 2 of 7, so run `ljos ready -n 7`."),
+        "{two}"
+    );
+    assert_eq!(ticket_ids(&two), want[..2]);
+    let json = board.ok(&["ready", "--json", "-n", "3"]);
+    assert_eq!(json_ids(&json), want[..3]);
+    let every = board.ok(&["ready", "--json"]);
+    assert_eq!(json_ids(&every), want);
 }
 
 #[test]

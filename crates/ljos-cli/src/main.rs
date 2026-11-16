@@ -1363,11 +1363,13 @@ enum Cmd {
     },
     /// List tickets that are open and not waiting on another open ticket.
     ///
-    /// The page prints the first 20, in tracker order, headed `ready  shown X of Y`.
-    /// `--limit N` prints N tickets. `--all` prints every ticket. A page that
-    /// leaves some out ends with `run ljos ready --all to see every ticket`,
-    /// and with `-p NAME` when one project was named in a single word.
-    /// `--json` prints every row unless `--limit` is set.
+    /// A ticket this seat has started comes first. Its state is STARTED.
+    /// Higher priority comes next, then a newer ticket.
+    /// The page prints the first 20, headed `ready  shown X of Y`.
+    /// `-n N` prints N tickets. `--limit N` is the same flag. `--all` prints every ticket.
+    /// A page that leaves tickets off names the command that prints the rest.
+    /// That command keeps `-p NAME` when the project was named.
+    /// `--json` prints every row unless `-n` is set. The rows are in the same order.
     /// `--mine` names the next unfinished item of each plan this seat holds.
     ///
     /// Example: `ljos ready`
@@ -1375,14 +1377,14 @@ enum Cmd {
         /// Only this project.
         #[arg(short = 'p', long)]
         project: Option<String>,
-        /// Print JSON rows. Every row, unless `--limit` is set.
+        /// Print JSON rows. Every row, in the same order, unless `-n` is set.
         #[arg(long, conflicts_with = "mine")]
         json: bool,
         /// The next unfinished item of each plan this seat holds.
         #[arg(long, conflicts_with = "json")]
         mine: bool,
-        /// How many tickets to print. The default page prints 20.
-        #[arg(long, value_name = "N", conflicts_with_all = ["all", "mine"])]
+        /// How many tickets to print. `-n` is this flag. The default page prints 20.
+        #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["all", "mine"])]
         limit: Option<usize>,
         /// Print every ticket on the page.
         #[arg(long, conflicts_with_all = ["limit", "mine"])]

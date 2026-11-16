@@ -42312,15 +42312,16 @@ const READY_PAGE: usize = 20;
 
 /// Tickets a seat can take: open, and not waiting on an open ticket.
 ///
-/// This is the same frontier as `vissue ready`. A blocker that is done or
-/// cancelled does not keep its ticket off the list. The text page prints
-/// the first 20 rows in tracker order unless `all` is set or `limit` names
-/// another count. JSON prints every row unless `limit` is set. A claim is
-/// still aged from its stamp.
+/// This is the same frontier as `vissue ready`, read through the list
+/// query. A blocker that is done or cancelled does not keep its ticket
+/// off the list. Rows are this seat's STARTED work, then higher priority,
+/// then newer. The text page prints the first 20 unless `all` is set or
+/// `limit` names another count. JSON prints every row unless `limit` is
+/// set, in that same order. A claim is still aged from its stamp.
 ///
 /// # Errors
 ///
-/// The tracker cannot be read, or a limited JSON page cannot be cut.
+/// The tracker cannot be read.
 pub fn ready_view(
     project: Option<&str>,
     json: bool,
@@ -42329,36 +42330,126 @@ pub fn ready_view(
 ) -> Result<String> {
     let layout = vissue_core::Layout::resolve(None, None)?;
     layout.require_tracker()?;
-    if json {
-        let rows = vissue_core::agent::issues_json(&layout, project, None, true)?;
-        let mut pretty = serde_json::to_string_pretty(&rows)?;
-        if let Some(limit) = limit {
-            pretty = take_json_rows(&pretty, limit)?;
-        }
-        return Ok(format!("{pretty}\n"));
-    }
     let recs = vissue_core::catalog::load_recs(&layout)?;
+    let mut rows = vissue_core::catalog::CatalogService::from_recs(&recs)
+        .ready(project)
+        .map_err(anyhow::Error::from)?;
+    order_ready(&mut rows, &recs);
+    if json {
+        if let Some(limit) = limit {
+            rows.truncate(limit);
+        }
+        return Ok(format!("{}\n", serde_json::to_string_pretty(&rows)?));
+    }
     let page = if all {
         None
     } else {
         Some(limit.unwrap_or(READY_PAGE))
     };
     Ok(scan::ready_page(
-        &ready_board(&recs, project, claim_age::now_here())?,
+        &ready_lines(&rows, &recs, claim_age::now_here()),
         page,
         project,
     ))
 }
 
-/// The first `limit` JSON rows. The text is unchanged when it already fits.
-fn take_json_rows(pretty: &str, limit: usize) -> Result<String> {
-    let mut rows: Vec<Value> =
-        serde_json::from_str(pretty).context("ready: the JSON rows could not be read")?;
-    if rows.len() > limit {
-        rows.truncate(limit);
-        return Ok(serde_json::to_string_pretty(&rows)?);
+/// This seat's STARTED tickets, then higher priority, then newer.
+///
+/// Newer is the `:CREATED:` stamp, and a later line in the file when that
+/// stamp is the same day. The list query already dropped a ticket that
+/// waits on an open ticket. This only orders what it kept.
+fn order_ready(rows: &mut [vissue_core::views::IssueRow], recs: &[vissue_core::views::IssueRec]) {
+    let seat = ready_seat();
+    let by_id: std::collections::HashMap<&str, &vissue_core::views::IssueRec> = recs
+        .iter()
+        .map(|rec| (rec.heading.id.as_str(), rec))
+        .collect();
+    rows.sort_by(|a, b| {
+        ready_rank(a, by_id.get(a.id.as_str()).copied(), &seat).cmp(&ready_rank(
+            b,
+            by_id.get(b.id.as_str()).copied(),
+            &seat,
+        ))
+    });
+}
+
+fn ready_seat() -> String {
+    let raw = seat_resolve::named_from_env()
+        .map(|(name, _)| name)
+        .unwrap_or_else(seat_name);
+    canonical_seat_name(&raw)
+}
+
+fn ready_rank(
+    row: &vissue_core::views::IssueRow,
+    rec: Option<&vissue_core::views::IssueRec>,
+    seat: &str,
+) -> (
+    bool,
+    u8,
+    char,
+    std::cmp::Reverse<chrono::NaiveDate>,
+    std::cmp::Reverse<u32>,
+    std::cmp::Reverse<usize>,
+    String,
+) {
+    let mine = !seat.is_empty()
+        && row.state == "STARTED"
+        && row
+            .claimed_by
+            .as_deref()
+            .is_some_and(|who| canonical_seat_name(who) == seat);
+    let (band, priority) = priority_band(&row.priority);
+    let (day, minutes) = rec
+        .and_then(|rec| created_stamp(&rec.heading))
+        .unwrap_or((chrono::NaiveDate::MIN, 0));
+    let line = rec.map(|rec| rec.heading.line_start).unwrap_or(0);
+    (
+        !mine,
+        band,
+        priority,
+        std::cmp::Reverse(day),
+        std::cmp::Reverse(minutes),
+        std::cmp::Reverse(line),
+        row.id.clone(),
+    )
+}
+
+/// `A` before `B`. A priority that is not a letter comes after those.
+fn priority_band(priority: &str) -> (u8, char) {
+    let ch = priority.chars().next().unwrap_or('\0');
+    if ch.is_ascii_uppercase() {
+        (0, ch)
+    } else {
+        (1, ch)
     }
-    Ok(pretty.to_string())
+}
+
+/// The `:CREATED:` day and, when the stamp has a clock, the minute of that day.
+fn created_stamp(heading: &vissue_core::IssueHeading) -> Option<(chrono::NaiveDate, u32)> {
+    let raw = heading.properties.get("CREATED")?;
+    let day = vissue_core::model::parse_stamp_date(raw)?;
+    Some((day, stamp_minutes(raw)))
+}
+
+fn stamp_minutes(raw: &str) -> u32 {
+    let inner = raw
+        .trim()
+        .trim_start_matches(['<', '['])
+        .trim_end_matches(['>', ']']);
+    let clock = inner.split_whitespace().nth(2).unwrap_or("");
+    let Some((hour, rest)) = clock.split_once(':') else {
+        return 0;
+    };
+    let Ok(hour) = hour.parse::<u32>() else {
+        return 0;
+    };
+    let minute = rest
+        .split(':')
+        .next()
+        .and_then(|text| text.parse::<u32>().ok())
+        .unwrap_or(0);
+    hour.saturating_mul(60).saturating_add(minute)
 }
 
 /// The ready rows, with each claim aged from its stamp and `now`.
@@ -42366,20 +42457,17 @@ fn take_json_rows(pretty: &str, limit: usize) -> Result<String> {
 /// The tracker's own ready line subtracts calendar dates, which is `-1d`
 /// for a claim taken earlier the same local day when that date is still
 /// yesterday in UTC. This line uses [`claim_age`] instead.
-fn ready_board(
+fn ready_lines(
+    rows: &[vissue_core::views::IssueRow],
     recs: &[vissue_core::views::IssueRec],
-    project: Option<&str>,
     now: chrono::DateTime<chrono::FixedOffset>,
-) -> Result<String> {
-    let rows = vissue_core::catalog::CatalogService::from_recs(recs)
-        .ready(project)
-        .map_err(anyhow::Error::from)?;
+) -> String {
     let by_id: std::collections::HashMap<&str, &vissue_core::views::IssueRec> = recs
         .iter()
         .map(|rec| (rec.heading.id.as_str(), rec))
         .collect();
     let mut raw = String::new();
-    for row in &rows {
+    for row in rows {
         let suffix = by_id
             .get(row.id.as_str())
             .map(|rec| claim_age::suffix(rec.heading.claimed_by(), rec.heading.claimed_at(), now))
@@ -42389,7 +42477,7 @@ fn ready_board(
             row.id, row.state, row.priority, row.title, suffix
         ));
     }
-    Ok(raw)
+    raw
 }
 
 /// Who holds which ticket. Same columns as `vissue claims`, with the age

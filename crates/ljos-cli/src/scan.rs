@@ -781,8 +781,7 @@ enum ReadyPiece {
 }
 
 /// The ready page. `limit` is how many tickets to print. `None` prints
-/// every row. `project` is the `-p` name on a page that leaves rows out,
-/// when that name is one word.
+/// every row. `project` is the `-p` name on a page that leaves rows out.
 #[must_use]
 pub fn ready_page(raw: &str, limit: Option<usize>, project: Option<&str>) -> String {
     let raw = strip_ansi(raw);
@@ -799,7 +798,12 @@ pub fn ready_page(raw: &str, limit: Option<usize>, project: Option<&str>) -> Str
     }
     let total = pieces.len();
     let take = limit.unwrap_or(total).min(total);
-    let mut out = count_line("ready", take, total, "");
+    let note = if take < total {
+        format!("so run `{}`.", ready_more(project, total))
+    } else {
+        String::new()
+    };
+    let mut out = count_line("ready", take, total, &note);
     out.push('\n');
     if total == 0 {
         out.push_str("no open ticket is free of an open blocker, so run `ljos file TITLE`.\n");
@@ -819,32 +823,54 @@ pub fn ready_page(raw: &str, limit: Option<usize>, project: Option<&str>) -> Str
             }
         }
     }
-    if take < total {
-        out.push_str(&ready_rest(project));
-    }
     out
 }
 
-/// The last line of a page that left tickets off.
-fn ready_rest(project: Option<&str>) -> String {
-    let line = match one_word_project(project) {
-        Some(name) => format!("run ljos ready -p {name} --all to see every ticket"),
-        None => "run ljos ready --all to see every ticket".to_string(),
-    };
-    let mut wrapped = wrap(&line, COLS);
-    if !wrapped.ends_with('\n') {
-        wrapped.push('\n');
+/// The command that prints the tickets a short page left off.
+fn ready_more(project: Option<&str>, total: usize) -> String {
+    match project_arg(project) {
+        Some(name) => format!("ljos ready -p {name} -n {total}"),
+        None => format!("ljos ready -n {total}"),
     }
-    wrapped
 }
 
-/// A project name that can stand as one `-p` argument.
-fn one_word_project(project: Option<&str>) -> Option<&str> {
+/// A `-p` argument a person can copy. A name of several words is quoted.
+/// A name that would change in a shell is left off.
+fn project_arg(project: Option<&str>) -> Option<String> {
     let name = project.map(str::trim).filter(|name| !name.is_empty())?;
-    if name.split_whitespace().nth(1).is_some() {
+    if name.chars().any(|ch| {
+        ch.is_control()
+            || matches!(
+                ch,
+                '`' | '"'
+                    | '\\'
+                    | '$'
+                    | '\''
+                    | ';'
+                    | '&'
+                    | '|'
+                    | '<'
+                    | '>'
+                    | '('
+                    | ')'
+                    | '{'
+                    | '}'
+                    | '['
+                    | ']'
+                    | '*'
+                    | '?'
+                    | '~'
+                    | '#'
+                    | '!'
+                    | '='
+            )
+    }) {
         return None;
     }
-    Some(name)
+    if name.contains(char::is_whitespace) {
+        return Some(format!("\"{name}\""));
+    }
+    Some(name.to_string())
 }
 
 struct ReadyRow {
@@ -970,29 +996,26 @@ mod tests {
         assert!(text.contains("demo-0000"), "{text}");
         assert!(text.contains("demo-0001"), "{text}");
         assert!(!text.contains("demo-0002"), "{text}");
+        let head = text.split("demo-0000").next().unwrap_or(&text);
         assert!(
-            text.trim_end()
-                .ends_with("run ljos ready --all to see every ticket"),
+            head.contains("ready  shown 2 of 3, so run `ljos ready -n 3`."),
             "{text}"
         );
         let named = ready_page(&raw, Some(1), Some("probe"));
+        let named_head = named.split("demo-0000").next().unwrap_or(&named);
         assert!(
-            named
-                .trim_end()
-                .ends_with("run ljos ready -p probe --all to see every ticket"),
+            named_head.contains("so run `ljos ready -p probe -n 3`."),
             "{named}"
         );
         let words = ready_page(&raw, Some(1), Some("two words"));
+        let words_head = words.split("demo-0000").next().unwrap_or(&words);
         assert!(
-            words
-                .trim_end()
-                .ends_with("run ljos ready --all to see every ticket"),
+            words_head.contains("so run `ljos ready -p \"two words\" -n 3`."),
             "{words}"
         );
-        assert!(!words.contains("-p "), "{words}");
         let all = ready_page(&raw, None, Some("probe"));
         assert!(all.contains("ready  shown 3 of 3"), "{all}");
-        assert!(!all.contains("to see every ticket"), "{all}");
+        assert!(!all.contains("ljos ready"), "{all}");
         assert!(
             all.lines().all(|line| line.chars().count() <= COLS),
             "{all}"
