@@ -1804,10 +1804,21 @@ pub(crate) fn runner_session_id() -> Option<String> {
 /// stamped. A person reads `saddle@k3j9x0a1b2` on a board and knows whose
 /// claim it is; a bare conversation id said nothing. `LJOS_SESSION_ID`
 /// alone is a name a person or an env file chose, and is kept as written.
+///
+/// A person at their own terminal is one seat. A conversation id the
+/// shell was started with does not tag that holder, so a sitting names
+/// the seat. Under a runner the tag stays, and two conversations do not
+/// share a claim.
 fn session_holder(seat: &str) -> Option<(String, String)> {
     let (id, keys) = session_actor()?;
     if keys == "LJOS_SESSION_ID" {
         return Some((id, keys));
+    }
+    // A person at their own terminal is one seat. The id a runner left
+    // on the shell does not tag the holder, so the sitting names the seat.
+    // Under a runner the tag stays.
+    if person_present() {
+        return None;
     }
     Some((holder_for_session(seat, &id), keys))
 }
@@ -70174,6 +70185,44 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             no_terminal.0 && !no_terminal.1,
             "a variable with no terminal was not a runner: {no_terminal:?}"
         );
+    }
+
+    /// A person at a terminal sits as the seat they named. A conversation
+    /// id on that shell does not add a session tag. The same id with no
+    /// terminal tags the holder, which is the runner's conversation.
+    #[test]
+    fn a_person_at_a_terminal_sits_as_the_seat_not_the_runner_session() {
+        let _env = env_guard();
+        let id = "bc-872164c1-e14f-56d0-a32e-fc0bd5afad41";
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "alice");
+            std::env::set_var("CURSOR_CONVERSATION_ID", id);
+            std::env::set_var("CURSOR_AGENT", "1");
+        }
+        super::PERSON_AT_TERMINAL.with(|p| p.set(true));
+        let at = super::whoami();
+        let person = super::person_present();
+        super::PERSON_AT_TERMINAL.with(|p| p.set(false));
+        let away = super::whoami();
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("CURSOR_CONVERSATION_ID");
+            std::env::remove_var("CURSOR_AGENT");
+        }
+        assert_eq!(at.seat, "alice", "{at:?}");
+        assert_eq!(away.seat, "alice", "{away:?}");
+        if person {
+            assert_eq!(at.holder, "alice", "{at:?}");
+            assert!(
+                !at.source.contains("session"),
+                "a terminal sitting named a runner session: {at:?}"
+            );
+        }
+        assert!(
+            away.holder.contains('@'),
+            "a runner session did not tag the holder: {away:?}"
+        );
+        assert!(away.source.contains("CURSOR_CONVERSATION_ID"), "{away:?}");
     }
 
     /// The cause [`super::runner_cause`] gives for a process tree, a
