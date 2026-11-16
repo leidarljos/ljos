@@ -1356,7 +1356,13 @@ enum Cmd {
         #[arg(long, value_name = "ID", conflicts_with = "on")]
         off: Option<String>,
     },
-    /// Show one ticket, including the tickets it waits on.
+    /// Show one ticket: its body, its notes, and the tickets it waits on.
+    ///
+    /// The body is printed under the header. The title and the body wrap to
+    /// the terminal. The page prints the eight most recent notes, newest
+    /// last. Each note carries its age and the seat that wrote it. A longer
+    /// log names how many notes are earlier and the command that prints the
+    /// rest. `--all` prints every note. `--verbose` is the same flag.
     ///
     /// An unknown id exits 1 and names `ljos ready`. An id that matches more
     /// than one ticket exits 1 and names one `ljos show` command.
@@ -1365,9 +1371,12 @@ enum Cmd {
     Show {
         /// The tracker id.
         issue: String,
-        /// Print one JSON object. The human page is left off.
+        /// Print one JSON object with the body and every note. The human page is left off.
         #[arg(long)]
         json: bool,
+        /// Print every note. `--verbose` is the same flag.
+        #[arg(long, visible_alias = "verbose")]
+        all: bool,
     },
     /// List tickets that are open and not waiting on another open ticket.
     ///
@@ -5587,6 +5596,7 @@ fn run_command() -> Result<()> {
                 Err(e) => eprintln!("ljos note: {e:#}"),
             }
             said.push_str(&ljos_cli::persist_tracker(&issue, "noted"));
+            ljos_cli::stamp_note_seat(&issue);
             ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
             print!("{}", render_write(&said, git_detail(verbose), json, None));
         }
@@ -5712,7 +5722,7 @@ fn run_command() -> Result<()> {
             };
             print!("{said}");
         }
-        Cmd::Show { issue, json } => {
+        Cmd::Show { issue, json, all } => {
             stop_ticket(&issue);
             if json {
                 print!("{}", ljos_cli::show_json(&issue).map_err(ticket_error)?);
@@ -5720,7 +5730,7 @@ fn run_command() -> Result<()> {
                 print!(
                     "{}",
                     ljos_cli::scan::for_reader(
-                        &ljos_cli::show_issue(&issue).map_err(ticket_error)?,
+                        &ljos_cli::show_issue(&issue, all).map_err(ticket_error)?,
                         human_color()
                     )
                 );
