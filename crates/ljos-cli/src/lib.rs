@@ -15863,7 +15863,10 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
     let (tx, rx) = std::sync::mpsc::channel();
     let cue = cue.to_string();
     std::thread::spawn(move || {
-        let found = packset_search_reranked(&cue, limit);
+        // The caller stops waiting at `ms`. The same bound has to cover
+        // the socket, or this thread keeps the writer's connection until
+        // a longer timeout and the next read on that writer waits too.
+        let found = with_pack_timeout(ms, || packset_search_reranked(&cue, limit));
         let _ = tx.send((found, CLAIMS_READ.with(std::cell::Cell::get)));
     });
     let Ok((found, read)) = rx.recv_timeout(std::time::Duration::from_millis(ms)) else {
@@ -18200,8 +18203,8 @@ pub(crate) fn data_base() -> Option<PathBuf> {
 ///
 /// Unit tests with no `XDG_CONFIG_HOME` use a directory under the build
 /// output, not the login's `~/.config`. A machine that has user rules must
-/// not change a hook or a guard test. The directory is created once and the
-/// environment is not written, so tests do not race on it.
+/// not change a hook or a guard test. Each test thread has its own
+/// directory, and the environment is not written.
 pub(crate) fn config_base() -> Option<PathBuf> {
     #[cfg(test)]
     if let Some(path) = CONFIG_OVERRIDE.with(|slot| slot.borrow().clone()) {
@@ -18224,7 +18227,7 @@ fn resolve_config_base(xdg: Option<&Path>, home: Option<&Path>) -> Option<PathBu
     #[cfg(test)]
     {
         let _ = home;
-        Some(isolated_config_home().to_path_buf())
+        Some(isolated_config_home())
     }
     #[cfg(not(test))]
     {
@@ -18250,34 +18253,56 @@ pub(crate) fn with_config_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
     })
 }
 
-/// The config directory unit tests read when `XDG_CONFIG_HOME` is unset.
+/// Directories [`isolated_config_home`] made, removed when the process ends.
 #[cfg(test)]
-pub(crate) fn isolated_config_home() -> &'static Path {
-    use std::sync::OnceLock;
-    // A static is never dropped, so a `TempDir` held here stayed behind
-    // after every run. The directory is removed when the test process
-    // exits instead.
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    extern "C" fn remove_isolated_config_home() {
-        if let Some(dir) = DIR.get() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
+static ISOLATED_CONFIGS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+extern "C" fn remove_isolated_config_homes() {
+    let Ok(dirs) = ISOLATED_CONFIGS.lock() else {
+        return;
+    };
+    for dir in dirs.iter() {
+        let _ = std::fs::remove_dir_all(dir);
     }
-    DIR.get_or_init(|| {
+}
+
+/// The config directory unit tests read when `XDG_CONFIG_HOME` is unset.
+///
+/// One directory per thread. The lib tests share a process, and one
+/// `user-rules.json` for all of them made a reader wait out another
+/// thread's rewrite. A hook and a guard read that file on every line, so
+/// the wait pushed them past their budgets and a finish queued its lesson.
+#[cfg(test)]
+pub(crate) fn isolated_config_home() -> PathBuf {
+    use std::cell::RefCell;
+    use std::sync::Once;
+    thread_local! {
+        static DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+    static HOOK: Once = Once::new();
+    DIR.with(|slot| {
+        if let Some(dir) = slot.borrow().clone() {
+            return dir;
+        }
         let dir = tempfile::Builder::new()
             .prefix("ljos-isolated-config-")
             .tempdir()
             .expect("isolated config directory")
             .keep();
         std::fs::create_dir_all(dir.join("ljos")).expect("isolated config dir");
-        // SAFETY: `atexit` takes a plain function with no arguments, which
-        // only reads the static set just before it is registered.
-        unsafe {
-            libc::atexit(remove_isolated_config_home);
-        }
+        // SAFETY: `atexit` takes a plain function with no arguments. It
+        // reads the list this call fills, and it is registered once.
+        HOOK.call_once(|| unsafe {
+            libc::atexit(remove_isolated_config_homes);
+        });
+        ISOLATED_CONFIGS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(dir.clone());
+        *slot.borrow_mut() = Some(dir.clone());
         dir
     })
-    .as_path()
 }
 
 fn named_env(key: &str) -> Option<String> {
@@ -74097,6 +74122,13 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let got = resolve_config_base(None, Some(home)).expect("isolated base");
         assert_ne!(got, home.join(".config"));
         assert_eq!(got, isolated_config_home());
+        let other = std::thread::spawn(isolated_config_home)
+            .join()
+            .expect("config dir");
+        assert_ne!(
+            got, other,
+            "two test threads were reading one user-rules file"
+        );
         let planted = SeatDir::new("login-rules");
         let config = planted.path().join(".config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();

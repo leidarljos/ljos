@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+#[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -727,13 +728,26 @@ fn degrade(body: &str, method: &str, deadline: bool) -> Error {
     Error::Unavailable(line)
 }
 
-/// The pack accepted a connection and then stayed silent, or the connect
-/// itself never finished. While a [`QuietPack`] guard is alive, the first
-/// such read still waits out its budget and a later read returns before it
-/// opens another socket. A consensus reading asks several times. Without
-/// the stop, each ask waited the whole budget and the command sat for the
-/// sum. Dropping the guard clears it, so a later call can try the pack again.
+// The pack accepted a connection and then stayed silent, or the connect
+// itself never finished. While a [`QuietPack`] guard is alive, the first
+// such read still waits out its budget and a later read returns before it
+// opens another socket. A consensus reading asks several times. Without
+// the stop, each ask waited the whole budget and the command sat for the
+// sum. Dropping the guard clears it, so a later call can try the pack again.
+//
+// Unit tests share one process and run on many threads. A silent pack on
+// one thread is not the next thread's pack, so the flag stays on the
+// thread that saw it. A command or an MCP call keeps the flag for the
+// process, so a task that resumes on another worker still skips the second wait.
+#[cfg(test)]
+thread_local! {
+    static PACK_QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static QUIET_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(not(test))]
 static PACK_QUIET: AtomicBool = AtomicBool::new(false);
+#[cfg(not(test))]
 static QUIET_HELD: AtomicUsize = AtomicUsize::new(0);
 
 /// Remember one quiet pack for the reads this guard covers.
@@ -744,6 +758,14 @@ impl QuietPack {
     /// quiet read already seen, so the pile starts with a fresh try.
     #[must_use]
     pub fn enter() -> Self {
+        #[cfg(test)]
+        QUIET_HELD.with(|held| {
+            if held.get() == 0 {
+                PACK_QUIET.with(|quiet| quiet.set(false));
+            }
+            held.set(held.get().saturating_add(1));
+        });
+        #[cfg(not(test))]
         if QUIET_HELD.fetch_add(1, Ordering::AcqRel) == 0 {
             PACK_QUIET.store(false, Ordering::Relaxed);
         }
@@ -753,6 +775,15 @@ impl QuietPack {
 
 impl Drop for QuietPack {
     fn drop(&mut self) {
+        #[cfg(test)]
+        QUIET_HELD.with(|held| {
+            let left = held.get().saturating_sub(1);
+            held.set(left);
+            if left == 0 {
+                PACK_QUIET.with(|quiet| quiet.set(false));
+            }
+        });
+        #[cfg(not(test))]
         if QUIET_HELD.fetch_sub(1, Ordering::AcqRel) == 1 {
             PACK_QUIET.store(false, Ordering::Relaxed);
         }
@@ -760,17 +791,35 @@ impl Drop for QuietPack {
 }
 
 fn holding_quiet() -> bool {
-    QUIET_HELD.load(Ordering::Relaxed) > 0
+    #[cfg(test)]
+    {
+        QUIET_HELD.with(|held| held.get() > 0)
+    }
+    #[cfg(not(test))]
+    {
+        QUIET_HELD.load(Ordering::Relaxed) > 0
+    }
 }
 
 fn pack_quiet() -> bool {
-    holding_quiet() && PACK_QUIET.load(Ordering::Relaxed)
+    #[cfg(test)]
+    {
+        holding_quiet() && PACK_QUIET.with(|quiet| quiet.get())
+    }
+    #[cfg(not(test))]
+    {
+        holding_quiet() && PACK_QUIET.load(Ordering::Relaxed)
+    }
 }
 
 fn mark_pack_quiet() {
-    if holding_quiet() {
-        PACK_QUIET.store(true, Ordering::Relaxed);
+    if !holding_quiet() {
+        return;
     }
+    #[cfg(test)]
+    PACK_QUIET.with(|quiet| quiet.set(true));
+    #[cfg(not(test))]
+    PACK_QUIET.store(true, Ordering::Relaxed);
 }
 
 /// The tool call's own bound is spent. A shorter read, one atom inside
@@ -1954,6 +2003,25 @@ mod tests {
 
     fn reads() -> usize {
         TABLE_READS.with(std::cell::Cell::get)
+    }
+
+    /// One thread's silent pack is not the next thread's. The lib tests
+    /// share a process, and a finish on the second thread was queueing its
+    /// lesson because the first had marked the pack quiet.
+    #[test]
+    fn a_quiet_pack_on_one_thread_does_not_silence_another() {
+        let gate = super::QuietPack::enter();
+        super::mark_pack_quiet();
+        assert!(super::pack_quiet());
+        let other = std::thread::spawn(|| {
+            let _gate = super::QuietPack::enter();
+            super::pack_quiet()
+        })
+        .join()
+        .expect("quiet thread");
+        assert!(!other, "another thread's pack was treated as already quiet");
+        drop(gate);
+        assert!(!super::pack_quiet());
     }
 
     #[test]
