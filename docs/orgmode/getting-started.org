@@ -47,7 +47,7 @@ The vissue release publishes =vissue-v<version>-<target>.tar.gz=.
 
 The script names the cause and the command that fixes it.
 
-- No network, or the release download fails. Check the connection and run =sh install.sh= again. A version you name is =sh install.sh --version VER=. Archives already on disk are =sh install.sh --asset-dir DIR=.
+- There is no network, or the release download fails. Check the connection and run =sh install.sh= again. A version you name is =sh install.sh --version VER=. Archives already on disk are =sh install.sh --asset-dir DIR=.
 - The OS or CPU is not Linux or macOS on x86_64 or aarch64. The script prints one line naming those systems and =cargo install --locked= for the seat programs. On Windows, run the script inside WSL.
 - =curl= or =wget=, =tar=, or =sha256sum= is missing. On macOS the checksum tool is =shasum=. The script names the missing tool. Install it and run =sh install.sh= again. Programs already unpacked are =sh install.sh --from-dir DIR=.
 - A checksum does not match, or the download stops early. The script stops, deletes the partial file, and says to run =sh install.sh= again.
@@ -145,10 +145,10 @@ Under a runner the same row says =lesson, from an agent=.
 A preference stored at that terminal is =preference, today=.
 Under a runner the preference row is =preference, from an agent, not checked=.
 Search matches words when the encoder is absent. =ljos search fusing= finds a preference that contains that word.
-=ljos search "which fusion"= shares no word with either sentence and prints =Nothing matched "which fusion". Try a shorter query, such as: ljos search fusion=. No match-mode line is printed.
+=ljos search "which fusion"= shares no word with either sentence and prints =Nothing matched "which fusion". Try a shorter query, such as: ljos search fusion=. A match-mode line is not printed.
 When the encoder ranked the page, this seat's hits come first. A word ranking gives this seat a small boost instead, and a closer row from another seat stays ahead. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.
 That floor is the one the prompt hook uses for a hit the encoder lists at the top.
-A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is =Nothing relevant was found.= No match-mode line is printed on that empty page.
+A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is =Nothing relevant was found.= A match-mode line is not printed on that empty page.
 A busy pack ranks by words and still returns a hit that names the subject.
 
 # BEGIN ljos-sample tutorial-prefer
