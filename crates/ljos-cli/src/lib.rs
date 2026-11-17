@@ -29,6 +29,7 @@ mod cloud_hook;
 pub mod command_prefs;
 pub mod config_diag;
 pub mod converge;
+mod cwd_probe;
 mod deedbag;
 pub mod digest;
 mod doctor_fix;
@@ -14162,36 +14163,19 @@ fn cwd_project() -> Option<(String, String)> {
 /// Whether the working directory is a git checkout.
 #[must_use]
 pub fn in_work_tree() -> bool {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["rev-parse", "--is-inside-work-tree"])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env("GIT_CONFIG_COUNT", "0");
-    let Ok(out) = bounded_output(&mut cmd) else {
+    if cwd_probe::walks_off() {
         return false;
-    };
-    out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
+    }
+    cwd_probe::git_line(None, &["rev-parse", "--is-inside-work-tree"]).as_deref() == Some("true")
 }
 
 fn checkout_root(dir: &Path) -> Option<PathBuf> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env("GIT_CONFIG_COUNT", "0");
-    let out = bounded_output(&mut cmd).ok()?;
-    if !out.status.success() {
+    if cwd_probe::skip_walk(dir) {
         return None;
     }
-    let text = String::from_utf8(out.stdout).ok()?;
-    let path = text.trim();
-    if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
+    cwd_probe::git_line(Some(dir), &["rev-parse", "--show-toplevel"])
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
 }
 
 fn ljos_toml_project(path: &Path) -> Option<String> {
@@ -19497,6 +19481,9 @@ pub fn normalize_tracker_env() {
                 }
             }
         }
+        // Before the pin states this directory. A named project, a FUSE
+        // mount, or a stat that does not answer leaves it unread.
+        cwd_probe::settle();
         tracker_place::pin_root();
     });
 }
@@ -39306,6 +39293,32 @@ pub fn attach_to_issue(issue: &str, text: &str) -> Result<String> {
     Ok(format!("noted on {issue}\n{said}{persisted}"))
 }
 
+/// Commit the one project file `project` names. A missing file is said
+/// here. The other projects under the prefix are not listed: an umbrella
+/// name such as `Software` is the parent of every project, and listing
+/// them opens each board.
+fn persist_filed_project(project: &str, id: &str) -> String {
+    let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
+    if matches!(mode.as_str(), "off" | "0" | "false") {
+        return "tracker git: off (LJOS_TRACKER_GIT)\n".into();
+    }
+    let batched = TRACKER_BATCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some();
+    if batched {
+        return persist_tracker(id, "filed");
+    }
+    let Ok(layout) = vissue_core::Layout::resolve(None, None) else {
+        return format!("tracker git: could not find {id}\n");
+    };
+    let path = layout.project_issues_path(project);
+    if path.is_file() {
+        return persist_tracker_file(&path, id, "filed");
+    }
+    format!("tracker git: could not find {id}\n")
+}
+
 /// Create a tracker issue, persist its inbox or project file, and
 /// record a panel candidate, returning `(id, stdout, persisted,
 /// candidate)`. Both `ljos file` and subagent child filing share this
@@ -39324,7 +39337,7 @@ pub fn file_issue(
     quorum_deadline: Option<(usize, &str)>,
 ) -> Result<(String, String, String, Result<String>)> {
     let project = project_name(project).map_err(anyhow::Error::msg)?;
-    let mut argv: Vec<String> = vec!["create".into(), "-p".into(), project];
+    let mut argv: Vec<String> = vec!["create".into(), "-p".into(), project.clone()];
     for (flag, value) in [
         ("--parent", parent),
         ("-t", kind),
@@ -39363,7 +39376,9 @@ pub fn file_issue(
         .map(std::path::PathBuf::from);
     let persisted = match inbox {
         Some(path) => persist_tracker_file(&path, &id, "filed"),
-        None => persist_tracker(&id, "filed"),
+        // The project is the one `-p` or the parent named. Looking the id
+        // up would list every child of an umbrella project.
+        None => persist_filed_project(&project, &id),
     };
     let candidate = if id.is_empty() {
         Ok(String::new())
@@ -52090,7 +52105,7 @@ fn stop_output_group(child: &mut std::process::Child) {
         unsafe { libc::kill(-pid, libc::SIGKILL) };
     }
     let _ = child.kill();
-    let _ = child.wait();
+    reap_child(child);
 }
 
 /// Join `handle`. When it is still blocked because a grandchild holds the
@@ -52137,7 +52152,21 @@ fn stop_captured(child: &mut std::process::Child, group: bool) {
         unsafe { libc::kill(-pid, libc::SIGKILL) };
     }
     let _ = child.kill();
-    let _ = child.wait();
+    reap_child(child);
+}
+
+/// Wait until `child` exits, but not past a short grace. A child stuck in
+/// an uninterruptible read of a mount must not keep the command after the
+/// deadline: this process exits and the child is reparented.
+fn reap_child(child: &mut std::process::Child) {
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if std::time::Instant::now() >= until => return,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
 }
 
 /// [`run_captured_as`] that stops the child at `deadline`. Stdout and
@@ -52239,6 +52268,14 @@ fn run_captured_within(
                     bail!(line);
                 }
                 let line = call_deadline::stall_line(bin, &words, deadline);
+                // The tracker write did not happen. Exit here, before any
+                // id is printed, so stdout stays empty and the status is
+                // a failure. A later `?` used to be able to print and return.
+                if line.contains("the tracker was not written")
+                    || line.contains("the note was not written")
+                {
+                    call_deadline::stop(&line);
+                }
                 let capped = caller >= cap && wall_left().map(|left| left >= cap).unwrap_or(true);
                 if capped {
                     call_deadline::stop(&line);

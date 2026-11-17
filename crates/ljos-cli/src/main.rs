@@ -5669,7 +5669,7 @@ fn run_command() -> Result<()> {
                 (Some(n), Some(d)) => Some((n, d)),
                 _ => None,
             };
-            let (id, text, persisted, candidate) = ljos_cli::file_issue(
+            let (id, text, persisted, candidate) = match ljos_cli::file_issue(
                 &project,
                 parent.as_deref(),
                 kind.as_deref(),
@@ -5680,8 +5680,22 @@ fn run_command() -> Result<()> {
                 &ljos_cli::seat_name(),
                 false,
                 qd,
-            )
-            .map_err(ticket_error)?;
+            ) {
+                Ok(filed) => filed,
+                Err(err) => {
+                    // A tracker that did not answer has written nothing.
+                    // The id must not appear on stdout, and the status is
+                    // a failure. `call_deadline::stop` already exits for
+                    // the line it prints; this is the same for a line that
+                    // came back as an error.
+                    let raw = err.to_string();
+                    if ljos_cli::call_deadline::stalled(&raw) {
+                        eprintln!("{}", ljos_cli::user_fault_line(&err));
+                        std::process::exit(1);
+                    }
+                    return Err(ticket_error(err));
+                }
+            };
             // A failure above printed nothing that says the ticket was filed.
             if !id.is_empty() {
                 if let Some(gone) = &dropped {
