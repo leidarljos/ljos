@@ -15001,10 +15001,24 @@ pub fn nothing_stored() -> bool {
 ///
 /// Returns whether any cross-seat hit was dropped.
 pub fn drop_weak_cross_seat(hits: &mut Vec<Hit>, query: &str, lexical: bool) -> bool {
+    drop_weak_cross_seat_for(hits, query, lexical, None)
+}
+
+/// [`drop_weak_cross_seat`] while keeping lessons filed on the current
+/// ticket's project. A project named in the query is current too.
+pub fn drop_weak_cross_seat_for(
+    hits: &mut Vec<Hit>,
+    query: &str,
+    lexical: bool,
+    issue: Option<&str>,
+) -> bool {
     let mine = seat_name();
     let mut dropped = false;
     hits.retain(|hit| {
         if !foreign_memory(hit, &mine) {
+            return true;
+        }
+        if hit_matches_project(hit, query, issue) {
             return true;
         }
         if names_the_subject(&hit.text, query) {
@@ -15102,12 +15116,6 @@ fn encoder_failed_search_line(reason: &str) -> String {
 
 fn encoder_missing_search_line() -> String {
     format!("matched by words (encoder not installed), so run `{ENCODER_INSTALL_COMMAND}`.")
-}
-
-fn encoder_has_answered_now() -> bool {
-    read_encoder_status()
-        .as_ref()
-        .is_some_and(encoder_has_answered)
 }
 
 /// A failure the search can answer with the word ranking. A pack that
@@ -15478,18 +15486,10 @@ fn search_hits_settled(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
     }
     match search_direct(query, limit) {
         Ok(hits) => {
-            // An encoder that is not installed is lexical for good. Saying
-            // it is still loading sends the reader to wait for a model
-            // that will not start. A cold encoder, one that is present and
-            // has not answered, is handled above.
-            let ranking =
-                if let Some(ranking) = ranking_now().filter(|ranking| ranking.mode == "lexical") {
-                    ranking
-                } else if encoder_has_answered_now() {
-                    ranking_now().unwrap_or_else(semantic_ranking)
-                } else {
-                    lexical_ranking(ENCODER_LOADING_REASON)
-                };
+            // A cold encoder is handled above. An older writer can omit
+            // `answering` while its normal search is already semantic; that
+            // missing field is not evidence that the model is warming.
+            let ranking = ranking_now().unwrap_or_else(semantic_ranking);
             Ok((hits, ranking))
         }
         Err(err) => Err(err),
@@ -41440,7 +41440,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
         let own = tagged_with_issue(listing.atoms.as_ref(), issue);
         let cues = recall_cues(issue);
         let related = if listing.searched {
-            searched_hits(listing.atoms.as_ref(), &own)
+            searched_hits(listing.atoms.as_ref(), &own, &listing.query, issue)
         } else {
             related_from_listing(listing.atoms.as_ref(), &cues, &own)
         };
@@ -41553,9 +41553,9 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
 }
 
 /// Search hits already ranked by the writer, minus the issue's own rows.
-/// The order is the writer's. A word test here would drop a memory that
-/// the encoder matched and the ticket did not spell.
-fn searched_hits(atoms: &[Value], own: &[Hit]) -> Vec<Hit> {
+/// This seat and the ticket's project come first. A weak row from another
+/// seat is omitted; a strong encoder match still stays.
+fn searched_hits(atoms: &[Value], own: &[Hit], query: &str, issue: &str) -> Vec<Hit> {
     let skip: std::collections::BTreeSet<&str> =
         own.iter().filter_map(|hit| hit.id.as_deref()).collect();
     let mut hits = Vec::new();
@@ -41587,6 +41587,8 @@ fn searched_hits(atoms: &[Value], own: &[Hit]) -> Vec<Hit> {
             break;
         }
     }
+    drop_weak_cross_seat_for(&mut hits, query, false, Some(issue));
+    prefer_search_context(&mut hits, query, Some(issue));
     hits
 }
 
@@ -43567,6 +43569,19 @@ fn sitting_ticket_text(issue: &str, title: &str) -> String {
     parts.join("\n")
 }
 
+/// The bounded pack search for a sitting: its title and tracker project.
+/// Body and old notes can describe another ticket and do not select the
+/// lessons shown for this one.
+fn sitting_search_text(issue: &str, title: &str) -> String {
+    let project = issue_spot::find(issue)
+        .map(|spot| spot.rec().project.clone())
+        .or_else(|| issue_spot::project_of(issue).map(str::to_string));
+    match project.filter(|project| !word_rank::shares_term(project, title)) {
+        Some(project) => format!("{title} {project}"),
+        None => title.to_string(),
+    }
+}
+
 /// Content words of `ticket` with the project-wide ones taken out.
 fn sitting_terms(ticket: &str) -> Vec<String> {
     prompt_words(ticket)
@@ -43884,6 +43899,7 @@ struct SittingListing {
     atoms: std::sync::Arc<Vec<Value>>,
     ok: bool,
     searched: bool,
+    query: String,
 }
 
 impl Clone for SittingListing {
@@ -43892,6 +43908,7 @@ impl Clone for SittingListing {
             atoms: std::sync::Arc::clone(&self.atoms),
             ok: self.ok,
             searched: self.searched,
+            query: self.query.clone(),
         }
     }
 }
@@ -43926,17 +43943,20 @@ impl SittingListingGuard {
                     atoms: std::sync::Arc::new(atoms),
                     ok: true,
                     searched,
+                    query: ticket.to_string(),
                 },
                 Err(_) => SittingListing {
                     atoms: std::sync::Arc::new(Vec::new()),
                     ok: false,
                     searched: false,
+                    query: ticket.to_string(),
                 },
             },
             Err(_) => SittingListing {
                 atoms: std::sync::Arc::new(Vec::new()),
                 ok: false,
                 searched: false,
+                query: ticket.to_string(),
             },
         };
         SITTING_LISTING.with(|slot| *slot.borrow_mut() = Some(listing));
@@ -44261,7 +44281,7 @@ pub fn sitting_stream_started(
     // pack costs this budget once. The sweep is not part of it: that
     // write used to run after the clock was dropped and wait on its own.
     let _quiet_pack = pack_link::QuietPack::enter();
-    let ticket = sitting_ticket_text(issue, &title);
+    let ticket = sitting_search_text(issue, &title);
     let _listing = SittingListingGuard::enter(&ticket);
     let mut fell_back = false;
     // The search is over, whether it answered or the deadline passed.
@@ -48641,6 +48661,33 @@ fn foreign_memory(hit: &Hit, mine: &str) -> bool {
 /// group in the order it arrived. Another seat's hit stays in the list.
 pub fn prefer_calling_seat(hits: &mut [Hit]) {
     prefer_seat(hits);
+}
+
+/// This seat first, then lessons on the current ticket's project, then
+/// other seats. The order inside each group is the pack's order.
+pub fn prefer_search_context(hits: &mut [Hit], query: &str, issue: Option<&str>) {
+    let mine = seat_name();
+    hits.sort_by_key(|hit| {
+        if !foreign_memory(hit, &mine) {
+            0
+        } else if hit_matches_project(hit, query, issue) {
+            1
+        } else {
+            2
+        }
+    });
+}
+
+fn hit_matches_project(hit: &Hit, query: &str, issue: Option<&str>) -> bool {
+    let Some(hit_project) = issue_on(&hit.entities).and_then(issue_spot::project_of) else {
+        return false;
+    };
+    let current = issue.and_then(issue_spot::project_of);
+    current.is_some_and(|project| project.eq_ignore_ascii_case(hit_project))
+        || word_rank::shares_term(hit_project, query)
+        || hit_project
+            .rsplit_once('/')
+            .is_some_and(|(_, project)| word_rank::shares_term(project, query))
 }
 
 fn prefer_seat<H: std::borrow::Borrow<Hit>>(rows: &mut [H]) {
