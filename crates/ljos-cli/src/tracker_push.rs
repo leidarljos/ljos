@@ -1983,8 +1983,12 @@ body b
         );
     }
 
+    /// The locale test puts a stand-in git first on `PATH` and a French
+    /// locale on the process. This init waits for that stand-in to leave,
+    /// or `git init` runs it and exits with the French host line.
     #[test]
     fn the_atoms_driver_stops_before_the_pack_when_the_tracker_has_no_scope() {
+        let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let out = crate::git_at(root)
