@@ -227,14 +227,14 @@ fn a_bad_line_names_the_command_and_the_server_stays_up() {
         if value["id"] == 10 {
             let line = first_line(&value);
             assert!(value["result"]["isError"] == true, "{value}");
-            assert!(line.contains("ljos help"), "{line}");
+            assert!(line.contains("ljos help ljos_nope"), "{line}");
             assert!(!line.contains('\n'), "{line}");
             saw_tool = true;
         }
         if value["id"] == 11 {
             let line = first_line(&value);
             assert!(value["result"]["isError"] == true, "{value}");
-            assert!(line.contains("ljos help search"), "{line}");
+            assert!(line.contains("ljos help ljos_search"), "{line}");
             assert!(!line.contains('\n'), "{line}");
             saw_args = true;
         }
@@ -294,10 +294,26 @@ fn a_busy_pack_names_the_search_to_run_again() {
         "ljos_search",
         serde_json::json!({"query": "kiln door"}),
     );
-    let raw = search.to_string();
+    let reading = search["result"]["structuredContent"]["reading"]
+        .as_str()
+        .unwrap_or("");
     assert!(
-        raw.contains("The pack is busy") && raw.contains("ljos search"),
-        "{search}"
+        reading.contains("The pack is busy") && reading.contains("ljos search \"kiln door\""),
+        "{reading}"
+    );
+    let quoted = call(
+        &mut session,
+        4,
+        "ljos_search",
+        serde_json::json!({"query": "\""}),
+    );
+    let quoted = quoted["result"]["structuredContent"]["reading"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        quoted.contains("ljos search kiln") && !quoted.contains("QUERY"),
+        "{quoted}"
     );
     assert!(session.alive());
     let remember = call(

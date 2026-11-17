@@ -1370,22 +1370,64 @@ fn search_can_wait(err: &anyhow::Error) -> bool {
             || ljos_cli::is_deadline_miss(err))
 }
 
-/// `ljos search` plus the query, short enough for one line.
+/// `ljos search` with the query the caller sent, quoted when it has a space.
+/// A query that cannot sit in the command keeps a shorter safe word from it.
+/// With none, the line names `ljos search kiln`.
 fn search_command(query: &str) -> String {
     let flat: String = query.split_whitespace().collect::<Vec<_>>().join(" ");
-    let flat = flat.replace('`', "");
     let flat: String = flat.chars().take(80).collect();
-    if flat.is_empty() {
-        "ljos search".to_string()
-    } else if flat.contains(' ') {
-        format!("ljos search \"{flat}\"")
+    if command_token(&flat) {
+        if flat.contains(char::is_whitespace) {
+            return format!("ljos search \"{flat}\"");
+        }
+        return format!("ljos search {flat}");
+    }
+    ljos_cli::word_rank::shorter_search(query).unwrap_or_else(|| "ljos search kiln".to_string())
+}
+
+/// Whether `text` can be one shell word, or one double-quoted argument.
+fn command_token(text: &str) -> bool {
+    !text.is_empty()
+        && !text
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '"' | '`' | '\\' | '$'))
+}
+
+/// `ljos help` plus the tool the client sent, when that name is one word.
+/// Otherwise plain `ljos help`.
+fn help_command(name: &str) -> String {
+    let name = name.trim();
+    if command_token(name) && !name.chars().any(char::is_whitespace) {
+        format!("ljos help {name}")
     } else {
-        format!("ljos search {flat}")
+        "ljos help".to_string()
     }
 }
 
 fn busy_search_line(command: &str) -> String {
     format!("The pack is busy, so run `{command}`.")
+}
+
+/// The empty-store sentence, with the query in the remember command.
+/// A query that cannot be quoted names the kiln lesson instead of a stand-in.
+fn empty_store_concrete(query: &str) -> String {
+    let flat: String = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (shown, cmd) = if command_token(&flat) && !flat.is_empty() {
+        let shown = if flat.contains(char::is_whitespace) {
+            format!("\"{flat}\"")
+        } else {
+            flat.clone()
+        };
+        (shown, format!("ljos remember \"{flat}\""))
+    } else {
+        (
+            "this query".to_string(),
+            "ljos remember \"Seat the kiln door only when cold.\"".to_string(),
+        )
+    };
+    format!(
+        "Nothing matched {shown}. A shorter search would miss too. Try storing a lesson, such as: {cmd}"
+    )
 }
 
 /// How much of one row a tool result keeps. The rest is `ljos search`.
@@ -1420,9 +1462,9 @@ fn plain_arguments(name: &str, response: CallToolResponse) -> CallToolResponse {
     if !text.starts_with("failed to deserialize parameters") {
         return response;
     }
-    let verb = name.trim_start_matches("ljos_");
+    let help = help_command(name);
     CallToolResult::error(vec![ContentBlock::text(format!(
-        "{name}: the arguments do not match the tool, so run `ljos help {verb}`."
+        "{name}: the arguments do not match the tool, so run `{help}`."
     ))])
     .into()
 }
@@ -1869,7 +1911,7 @@ impl LjosServer {
         } else if hits.is_empty() && unrelated {
             ljos_cli::NOTHING_RELEVANT.trim().to_string()
         } else if hits.is_empty() && ljos_cli::nothing_stored() {
-            ljos_cli::scan::empty_store_line(&args.query)
+            empty_store_concrete(&args.query)
         } else if hits.is_empty() {
             ljos_cli::scan::nothing_matched_line(&args.query)
         } else {
@@ -4415,8 +4457,9 @@ impl ServerHandler for LjosServer {
         }
         if Self::tool_router().get(&request.name).is_none() {
             let missing = request.name.to_string();
+            let help = help_command(&missing);
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "{missing} is not a tool, so run `ljos help`."
+                "{missing} is not a tool, so run `{help}`."
             ))])
             .into());
         }
