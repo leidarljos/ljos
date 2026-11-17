@@ -33457,6 +33457,7 @@ pub fn doctor() -> Vec<Habitat> {
     doctor_push(&mut out, seat_binary_row());
     doctor_extend(&mut out, version_skew::rows());
     doctor_push(&mut out, git_hooks::doctor_row());
+    doctor_extend(&mut out, git_identity_row());
     doctor_push(
         &mut out,
         sitting_gate::doctor_row(std::env::current_dir().ok().as_deref()),
@@ -33494,6 +33495,54 @@ pub fn doctor() -> Vec<Habitat> {
     }
     doctor_extend(&mut out, doctor_fix::rows());
     out
+}
+
+/// Whether git can name the author and committer of a tracker commit.
+///
+/// The question is asked in the tracker checkout, so a `user.name` set only
+/// there counts, and git answers it the way a commit would: config, the
+/// `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables, and the account name. With
+/// no identity a tracker write stays on disk and the commit is refused, so
+/// the row is a warning that names the two commands. A git that cannot be
+/// asked leaves the row out.
+fn git_identity_row() -> Option<Habitat> {
+    let dir = git_identity_dir();
+    for var in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
+        let out = git_in(&dir, &["var", var])?;
+        if out.status.success() {
+            continue;
+        }
+        if !git_names_no_author(&String::from_utf8_lossy(&out.stderr)) {
+            return None;
+        }
+        return Some(Habitat {
+            name: "git identity",
+            state: format!(
+                "git has no author for a commit, so tracker writes stay uncommitted. \
+                 Set one with {GIT_IDENTITY_FIX}"
+            ),
+            ok: false,
+        });
+    }
+    Some(Habitat {
+        name: "git identity",
+        state: "git names the author of a tracker commit".into(),
+        ok: true,
+    })
+}
+
+/// The directory a tracker commit runs in: the tracker root when it is a
+/// directory, else the working directory, else the home directory.
+fn git_identity_dir() -> PathBuf {
+    if let Ok(layout) = vissue_core::Layout::resolve(None, None) {
+        if layout.root().is_dir() {
+            return layout.root().to_path_buf();
+        }
+    }
+    std::env::current_dir()
+        .ok()
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// A row only while the guard is off in this process (`LJOS_OFF`, or a
@@ -36125,7 +36174,10 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     {
         return "warn";
     }
-    if (row.name == "guard bypass" || row.name == "seat source" || row.name == "policyd config")
+    if (row.name == "guard bypass"
+        || row.name == "seat source"
+        || row.name == "policyd config"
+        || row.name == "git identity")
         && !row.ok
     {
         return "warn";
@@ -48131,10 +48183,23 @@ pub(crate) fn created_issue_id(text: &str) -> String {
     }
 }
 
+/// The two commands that give git an author for a commit.
+const GIT_IDENTITY_FIX: &str = "`git config --global user.name \"Your Name\"` and \
+     `git config --global user.email \"you@example.com\"`";
+
+/// Whether what git printed says it has no author for a commit.
+fn git_names_no_author(said: &str) -> bool {
+    said.contains("Author identity unknown")
+        || said.contains("Committer identity unknown")
+        || said.contains("unable to auto-detect email")
+}
+
 /// Attach the fix when git stopped because it has no author.
 fn explain_git_refusal(said: &str) -> String {
-    if said.contains("Author identity unknown") || said.contains("unable to auto-detect email") {
-        format!("{said}. Set git user.name and user.email, then run the command again")
+    if git_names_no_author(said) {
+        format!(
+            "Author identity unknown. Set it with {GIT_IDENTITY_FIX}, then run the command again"
+        )
     } else {
         said.to_string()
     }
@@ -48202,6 +48267,22 @@ demo-zcre  TODO  [#C]  Pick a parser
         let said = explain_git_refusal("Author identity unknown");
         assert!(said.contains("user.name"), "{said}");
         assert!(said.contains("user.email"), "{said}");
+        assert!(
+            said.contains("`git config --global user.name \"Your Name\"`"),
+            "{said}"
+        );
+        assert!(
+            said.contains("`git config --global user.email \"you@example.com\"`"),
+            "{said}"
+        );
+        let guessed = explain_git_refusal(
+            "fatal: unable to auto-detect email address (got 'ada@host.(none)')",
+        );
+        assert_eq!(guessed, said, "the host name is not part of the answer");
+        assert_eq!(
+            explain_git_refusal("fatal: cannot lock ref"),
+            "fatal: cannot lock ref"
+        );
     }
 }
 

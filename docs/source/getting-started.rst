@@ -100,6 +100,7 @@ The tracker commits each change, so git needs an identity:
    ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
 
+Without those two commands, ``ljos doctor`` adds a ``warn`` row named ``git identity`` that names them, and a tracker write is refused with the same two commands.
 On a clean install the ready line names memory, the tracker and the command guard.
 Run ``ljos doctor`` from your home directory. In a checkout that has ``.ljos/gates.toml``, the config row names that file.
 With no seat named, a ``seat source`` row warns that the read uses every seat.
@@ -201,7 +202,7 @@ The id is the only line on standard output, so ``id=$(LJOS_SEAT=alice ljos file 
 The heading and the path are on standard error. A commit that landed is not printed. ``ljos file --verbose`` prints it. A refusal is still printed. The id in the heading is the same one.
 The ``file:`` line is the absolute path. ``/home/you`` above names the home directory.
 Under a runner that already recorded a seat, ljos names both and writes as ``LJOS_SEAT``.
-With no git identity the heading is still written, and the last line is ``The tracker commit was refused: Author identity unknown. Set git user.name and user.email, then run the command again.``
+With no git identity the heading is still written, and the last line is ``The tracker commit was refused: Author identity unknown. Set it with `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`, then run the command again.``
 ``ljos doctor`` then warns that the issue file is uncommitted.
 
 The file is Org. ``vissue show demo-2f5j`` prints the heading, and the tracker repository is the one ``ljos doctor --all`` names under ``tracker``.
