@@ -239,7 +239,7 @@ fn mark_ordered(id: &str) -> Result<()> {
     let project = hit.project.clone();
     vissue_core::store::with_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &path)?;
-        crate::keep_claim_stamps_on_disk(&mut doc);
+        crate::keep_claim_stamps_on_disk(&mut doc, id);
         let heading = doc
             .headings
             .iter_mut()
@@ -488,7 +488,7 @@ mod tests {
         vissue_core::store::with_issues_lock(&issues_file(&root, "day"), || {
             let path = issues_file(&root, "day");
             let mut doc = vissue_core::IssueDoc::parse_file("day", &path)?;
-            crate::keep_claim_stamps_on_disk(&mut doc);
+            crate::keep_claim_stamps_on_disk(&mut doc, &opened.parent);
             let heading = doc
                 .headings
                 .iter_mut()

@@ -44,11 +44,16 @@ impl Board {
     }
 
     fn ljos(&self, args: &[&str]) -> Output {
+        self.ljos_with_seat("saddle", args)
+    }
+
+    fn ljos_with_seat(&self, seat: &str, args: &[&str]) -> Output {
+        let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.dir.path())
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
+            .env("PATH", path)
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .env("XDG_DATA_HOME", self.home.join(".local/share"))
@@ -56,7 +61,7 @@ impl Board {
             .env("XDG_RUNTIME_DIR", self.dir.path().join("run"))
             .env("VISSUE_ROOT", &self.root)
             .env("VISSUE_NO_ROUTE", "1")
-            .env("LJOS_SEAT", "saddle")
+            .env("LJOS_SEAT", seat)
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
             .env("LJOS_ASK_PACK", "off")
@@ -84,6 +89,10 @@ impl Board {
     fn finish(&self, id: &str) {
         let layout = vissue_core::Layout::new(&self.root, "Software");
         vissue_core::ops::update(&layout, id, Some("DONE"), None, None, None).unwrap();
+    }
+
+    fn issues_path(&self) -> std::path::PathBuf {
+        self.root.join("Software/probe/issues.org")
     }
 }
 
@@ -277,4 +286,108 @@ fn a_ticket_like_word_after_block_suggests_on() {
         "{err}"
     );
     assert!(board.heading(&board.a).blocked_by().is_empty());
+}
+
+#[test]
+fn block_keeps_same_minute_note_state_and_claim_lines_on_all_tickets() {
+    let board = Board::new();
+    let minute = "2026-11-17 Tue 17:13";
+    let log = |name: &str| {
+        format!(
+            ":LOGBOOK:\n- Note: \"{name} note\" [{minute}]\n- State \"STARTED\" from \"TODO\" [{minute}]\n- Claimed by saddle [{minute}]\n:END:\n"
+        )
+    };
+    let tracker = format!(
+        "#+TITLE: probe issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
+* TODO [#C] alpha\n:PROPERTIES:\n:ID:         {}\n:END:\n{}\n\
+* TODO [#C] beta\n:PROPERTIES:\n:ID:         {}\n:END:\n{}\n\
+* TODO [#C] gamma\n:PROPERTIES:\n:ID:         {}\n:END:\n{}\n",
+        board.a,
+        log("alpha"),
+        board.b,
+        log("beta"),
+        board.c,
+        log("gamma")
+    );
+    std::fs::write(board.issues_path(), tracker).unwrap();
+
+    let said = board.ok(&["block", &board.a, "--on", &board.b]);
+    assert!(said.contains("waits on"), "{said}");
+
+    let org = std::fs::read_to_string(board.issues_path()).unwrap();
+    for name in ["alpha", "beta", "gamma"] {
+        let note = format!("- Note: \"{name} note\" [{minute}]");
+        let state = format!("- State \"STARTED\" from \"TODO\" [{minute}]");
+        let claim = format!("- Claimed by saddle [{minute}]");
+        assert_eq!(org.matches(&note).count(), 1, "{org}");
+        assert_eq!(org.matches(&state).count(), 3, "{org}");
+        assert_eq!(org.matches(&claim).count(), 3, "{org}");
+    }
+
+    let shown = board.ok(&["show", &board.a]);
+    assert!(shown.contains("alpha note"), "{shown}");
+}
+
+#[test]
+fn block_after_concurrent_claims_and_notes_keeps_each_tickets_own_logbook_rows() {
+    let board = Board::new();
+    let seats = [
+        ("bounty".to_string(), board.a.clone()),
+        ("fortranbot".to_string(), board.b.clone()),
+        ("commbot".to_string(), board.c.clone()),
+    ];
+    let board_ref = &board;
+    std::thread::scope(|scope| {
+        for (seat, id) in seats {
+            scope.spawn(move || {
+                let claimed = board_ref.ljos_with_seat(&seat, &["claim", id.as_str()]);
+                assert!(claimed.status.success(), "{seat}\n{}", text(&claimed));
+                let note = format!("{seat} note at noon");
+                let noted = board_ref.ljos_with_seat(&seat, &["note", id.as_str(), &note]);
+                assert!(noted.status.success(), "{seat}\n{}", text(&noted));
+            });
+        }
+    });
+
+    let path = board.issues_path();
+    let fixed = "[2026-11-17 Tue 12:00]";
+    let normalized = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if let Some(tail) = line.trim().strip_prefix("- Noted by ") {
+                let seat = tail.split(" [").next().unwrap_or("").trim();
+                return format!("- Claimed by {seat} {fixed}");
+            }
+            if line.contains("- Claimed by ") || line.contains("- Note: \"") {
+                if let Some((head, _)) = line.rsplit_once('[') {
+                    return format!("{}{}", head.trim_end(), fixed);
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&path, normalized).unwrap();
+
+    let said = board.ok(&["block", &board.a, "--on", &board.b]);
+    assert!(said.contains("waits on"), "{said}");
+    let org = std::fs::read_to_string(path).unwrap();
+
+    for (seat, id) in [
+        ("bounty", &board.a),
+        ("fortranbot", &board.b),
+        ("commbot", &board.c),
+    ] {
+        let note = format!("- Note: \"{seat} note at noon\" {fixed}");
+        let claim = format!("- Claimed by {seat} {fixed}");
+        assert_eq!(org.matches(&note).count(), 1, "{id}\n{org}");
+        assert_eq!(org.matches(&claim).count(), 1, "{id}\n{org}");
+        let shown = board.ok(&["show", id]);
+        assert!(
+            shown.contains(&format!("{seat} note at noon")),
+            "{id}\n{shown}"
+        );
+    }
 }

@@ -40125,49 +40125,117 @@ fn line_carries_claim_stamp(line: &str) -> bool {
     line.contains("Claimed-by:") || line.contains("Claimed by ")
 }
 
+fn strip_claim_stamp(note: &str) -> Option<String> {
+    for marker in [" Claimed-by:", " Claimed by "] {
+        let Some((head, tail)) = note.rsplit_once(marker) else {
+            continue;
+        };
+        let Some(pos) = tail.rfind('[') else {
+            continue;
+        };
+        return Some(format!("{} {}", head.trim_end(), tail[pos..].trim()));
+    }
+    None
+}
+
+fn claim_stamp_note_head(line: &str) -> Option<&str> {
+    if !line.trim_start().starts_with("- Note:") {
+        return None;
+    }
+    for marker in [" Claimed-by:", " Claimed by "] {
+        if let Some((head, _)) = line.rsplit_once(marker) {
+            return Some(head);
+        }
+    }
+    None
+}
+
+fn claim_stamp_matches_entry(src: &str, rendered: &str, timestamp: &str) -> bool {
+    if timestamp.is_empty() || !src.contains(timestamp) {
+        return false;
+    }
+    let src = src.trim();
+    let rendered = rendered.trim();
+    src == rendered
+        || strip_claim_stamp(src).is_some_and(|stripped| stripped.trim() == rendered)
+        || matches!(
+            (claim_stamp_note_head(src), claim_stamp_note_head(rendered)),
+            (Some(left), Some(right)) if left.trim() == right.trim()
+        )
+}
+
+fn claim_stamp_lines_for_issue(source: &str, issue: &str) -> Vec<String> {
+    let mut in_target = false;
+    let mut in_logbook = false;
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_end();
+        let raw = trimmed.trim();
+        if raw.starts_with("* ") {
+            in_target = false;
+            in_logbook = false;
+            continue;
+        }
+        if raw.starts_with(":ID:") {
+            in_target = raw
+                .split_once(":ID:")
+                .map(|(_, right)| right.trim() == issue)
+                .unwrap_or(false);
+            continue;
+        }
+        if !in_target {
+            continue;
+        }
+        if raw == ":LOGBOOK:" {
+            in_logbook = true;
+            continue;
+        }
+        if raw == ":END:" && in_logbook {
+            in_logbook = false;
+            continue;
+        }
+        if in_logbook && line_carries_claim_stamp(trimmed) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
 /// Keep logbook lines that carry an old `Claimed-by` stamp. vissue's render
 /// folds the stamp into the note and the next parse does not read the same
 /// line. The original line is stored as the entry's raw text, which render
 /// writes back unchanged.
-pub(crate) fn keep_claim_stamp_lines(doc: &mut vissue_core::IssueDoc, source: &str) {
-    let mut stamps: Vec<(&str, bool)> = source
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| line_carries_claim_stamp(line))
-        .map(|line| (line, false))
-        .collect();
+pub(crate) fn keep_claim_stamp_lines(doc: &mut vissue_core::IssueDoc, source: &str, issue: &str) {
+    let stamps = claim_stamp_lines_for_issue(source, issue);
     if stamps.is_empty() {
         return;
     }
-    for heading in &mut doc.headings {
-        for entry in &mut heading.logbook {
-            let rendered = entry.render();
-            if let Some((_, used)) = stamps
-                .iter_mut()
-                .find(|(src, used)| !*used && src.trim() == rendered.trim())
-            {
-                *used = true;
-                continue;
-            }
-            let Some((src, used)) = stamps.iter_mut().find(|(src, used)| {
-                !*used && !entry.timestamp.is_empty() && src.contains(entry.timestamp.as_str())
-            }) else {
-                continue;
-            };
-            if src.trim() != rendered.trim() {
-                entry.raw = Some(src.trim().to_string());
-                *used = true;
-            }
+    let Some(heading) = doc.headings.iter_mut().find(|heading| heading.id == issue) else {
+        return;
+    };
+    for entry in &mut heading.logbook {
+        let rendered = entry.render();
+        if stamps.iter().any(|src| src.trim() == rendered.trim()) {
+            continue;
+        }
+        let Some(src) = stamps
+            .iter()
+            .find(|src| claim_stamp_matches_entry(src, &rendered, entry.timestamp.as_str()))
+        else {
+            continue;
+        };
+        if src.trim() != rendered.trim() {
+            entry.raw = Some(src.trim().to_string());
         }
     }
 }
 
 /// [`keep_claim_stamp_lines`] for the file `doc` was parsed from.
-pub(crate) fn keep_claim_stamps_on_disk(doc: &mut vissue_core::IssueDoc) {
+pub(crate) fn keep_claim_stamps_on_disk(doc: &mut vissue_core::IssueDoc, issue: &str) {
     let Ok(source) = std::fs::read_to_string(&doc.path) else {
         return;
     };
-    keep_claim_stamp_lines(doc, &source);
+    keep_claim_stamp_lines(doc, &source, issue);
 }
 
 /// Drop the tracker's claim on `issue` when `holder` holds it. The claim
@@ -40203,7 +40271,7 @@ pub fn unstamp_tracker(issue: &str, holder: &str, reopen: bool) -> Result<Option
     };
     let said = vissue_core::store::with_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &path)?;
-        keep_claim_stamps_on_disk(&mut doc);
+        keep_claim_stamps_on_disk(&mut doc, issue);
         let Some(h) = doc.headings.iter_mut().find(|h| h.id == issue) else {
             return Ok(None);
         };
@@ -42897,7 +42965,7 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
     let file_path = path.clone();
     let changed = vissue_core::store::with_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &file_path)?;
-        keep_claim_stamps_on_disk(&mut doc);
+        keep_claim_stamps_on_disk(&mut doc, issue);
         let heading = doc
             .headings
             .iter_mut()
@@ -43002,7 +43070,7 @@ pub fn reparent_issue(issue: &str, parent: &str) -> Result<String> {
     let file_path = path.clone();
     let prior = vissue_core::store::with_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &file_path)?;
-        keep_claim_stamps_on_disk(&mut doc);
+        keep_claim_stamps_on_disk(&mut doc, issue);
         let heading = doc
             .headings
             .iter_mut()
@@ -66288,7 +66356,7 @@ mod tests {
 ";
         let path = std::path::PathBuf::from("issues.org");
         let mut doc = vissue_core::IssueDoc::parse("sample", path.clone(), board).unwrap();
-        super::keep_claim_stamp_lines(&mut doc, board);
+        super::keep_claim_stamp_lines(&mut doc, board, "probe-a1b2");
         let rendered = doc.render_string();
         let stamp = "- Note: \"kept the drawer\" Claimed-by: saddle [2026-10-18 Sun 07:00]";
         assert!(
@@ -66296,7 +66364,7 @@ mod tests {
             "render dropped the Claimed-by stamp: {rendered}"
         );
         let mut again = vissue_core::IssueDoc::parse("sample", path, &rendered).unwrap();
-        super::keep_claim_stamp_lines(&mut again, &rendered);
+        super::keep_claim_stamp_lines(&mut again, &rendered, "probe-a1b2");
         assert_eq!(again.render_string(), rendered);
         assert!(
             again.headings[0].logbook[0]
