@@ -20,8 +20,8 @@ use ljos_cli::{
     packset_search_as_of, panel_steps, parse_every, personas_from_pack, playbooks_from_pack,
     policy_with_memory, predictions_of, protocol_text, read_campaign, receive, refine_default_hits,
     release, remember_findings, resolve_assignee, rows_about, run_captured, runner_pid,
-    search_ranked, search_reading, seat_name, settle_discount, sitting_gated, timeline,
-    topic_words, tracker_show_json, trust_from_pack, with_discount, write_persona,
+    search_ranked, seat_name, settle_discount, sitting_gated, timeline, topic_words,
+    tracker_show_json, trust_from_pack, with_discount, write_persona,
     write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA,
     POLICY_TCB,
 };
@@ -1276,6 +1276,18 @@ pub struct LearnPage {
     pub rows: Vec<TrustRow>,
 }
 
+/// The reading `ljos_search` returns. A row carries a score and no checks
+/// fraction, so the sentence does not mention one.
+fn mcp_search_reading(n: usize, seat_ahead: bool) -> &'static str {
+    if n == 0 {
+        "Nothing matched."
+    } else if seat_ahead {
+        "Place 1 is the first row, and this seat's rows come before another seat's. The score on a row runs from 0 to 100. It is not whether the sentence is true. A later line on the same matter replaces an earlier one."
+    } else {
+        "Place 1 is the first row. The score on a row runs from 0 to 100. It is not whether the sentence is true."
+    }
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SearchPage {
     /// What the score is, and what an empty list means.
@@ -1858,7 +1870,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A single generic word is not that subject, and then the similarity has to be high. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. The pack is starting when health is not-ready, or the JSON says ready is false or code is starting. Words in the query are not that signal. If the pack stays starting, the tool ranks by words and the reading starts with: Used word search because memory is still starting. A dated search has no word fallback and returns: Memory is starting, so try again in a few seconds. A pack that reports busy is asked again for a short time. If it stays busy, the tool ranks by words and the reading is one line that names `ljos search` and the quoted query. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Pass min_score to drop a row under that score when it does not name a subject word; 0 returns every row, and the default is 34. Follow with ljos_island for the cluster the task touches.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. Each row carries that score. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A single generic word is not that subject, and then the similarity has to be high. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. The pack is starting when health is not-ready, or the JSON says ready is false or code is starting. Words in the query are not that signal. If the pack stays starting, the tool ranks by words and the reading starts with: Used word search because memory is still starting. A dated search has no word fallback and returns: Memory is starting, so try again in a few seconds. A pack that reports busy is asked again for a short time. If it stays busy, the tool ranks by words and the reading is one line that names `ljos search` and the quoted query. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Pass min_score to drop a row under that score when it does not name a subject word; 0 returns every row, and the default is 34. Follow with ljos_island for the cluster the task touches.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -1942,12 +1954,20 @@ impl LjosServer {
         } else if hits.is_empty() {
             ljos_cli::scan::nothing_matched_line(&args.query)
         } else {
-            search_reading(
+            mcp_search_reading(
                 hits.len(),
                 args.as_of.as_deref().is_none_or(|at| at.trim().is_empty()),
             )
             .to_string()
         };
+        if let Some(ranking) = ljos_cli::ranking_now() {
+            let line =
+                ljos_cli::search_rank_for_person(&ljos_cli::search_rank_line(&ranking, &hits));
+            let note = line.trim();
+            if note.contains("encoder not installed") && !reading.contains(note) {
+                reading = format!("{note}\n{reading}");
+            }
+        }
         if !waiting {
             if let Some(note) = ljos_cli::search_token_note() {
                 reading.push('\n');

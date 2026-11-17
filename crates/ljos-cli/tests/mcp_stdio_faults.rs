@@ -58,6 +58,21 @@ fn hits() -> String {
     })
 }
 
+fn lexical_hits() -> String {
+    pack(|path| {
+        if path.starts_with("/v1/search") {
+            (
+                200,
+                r#"{"hits":[{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","text":"The greeting prints only when GREET is yes.","kind":"lesson","score":0.4}]}"#,
+            )
+        } else if path.starts_with("/v1/status") {
+            (200, r#"{"embedder":{"available":false}}"#)
+        } else {
+            (200, r#"{"ready":true,"atoms":[]}"#)
+        }
+    })
+}
+
 fn busy() -> String {
     pack(|_path| (503, r#"{"error":"busy","line":"busy, retrying"}"#))
 }
@@ -292,6 +307,32 @@ fn a_missing_seat_and_a_missing_tracker_name_the_command() {
     assert_eq!(filed["result"]["isError"], true, "{filed}");
     assert!(line.contains("`ljos onboard`"), "{line}");
     assert!(bare.alive());
+}
+
+#[test]
+fn a_word_search_names_the_missing_encoder() {
+    let url = lexical_hits();
+    let mut session = Session::open(&[("PACKSET_URL", &url)]);
+    let search = call(
+        &mut session,
+        2,
+        "ljos_search",
+        serde_json::json!({"query": "greeting", "seat": "ada"}),
+    );
+    assert_ne!(search["result"]["isError"], true, "{search}");
+    let reading = search["result"]["structuredContent"]["reading"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        reading.contains("encoder not installed")
+            && reading.contains("cargo binstall --locked packset-embed"),
+        "{reading}"
+    );
+    assert!(
+        !reading.contains("fraction") && !reading.contains("how many checks"),
+        "{reading}"
+    );
+    assert!(session.alive());
 }
 
 #[test]
