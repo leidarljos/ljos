@@ -391,3 +391,36 @@ fn block_after_concurrent_claims_and_notes_keeps_each_tickets_own_logbook_rows()
         );
     }
 }
+
+#[test]
+fn block_keeps_legacy_claimed_by_rows_on_every_ticket() {
+    let board = Board::new();
+    let minute = "[2026-11-17 Tue 17:13]";
+    let tracker = format!(
+        "#+TITLE: probe issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
+* TODO [#C] alpha\n:PROPERTIES:\n:ID:         {}\n:END:\n:LOGBOOK:\n\
+- Note: \"noon\" Claimed-by: saddle {minute}\n\
+- Note: \"noon\" Claimed-by: other {minute}\n\
+- Note: \"noon\" {minute}\n\
+:END:\n\
+* TODO [#C] beta\n:PROPERTIES:\n:ID:         {}\n:END:\n:LOGBOOK:\n\
+- Note: \"beta note\" Claimed-by: fortran {minute}\n\
+- Note: \"beta plain\" {minute}\n\
+:END:\n",
+        board.a, board.b
+    );
+    std::fs::write(board.issues_path(), tracker).unwrap();
+
+    let said = board.ok(&["block", &board.a, "--on", &board.b]);
+    assert!(said.contains("waits on"), "{said}");
+    let org = std::fs::read_to_string(board.issues_path()).unwrap();
+    for line in [
+        format!("- Note: \"noon\" Claimed-by: saddle {minute}"),
+        format!("- Note: \"noon\" Claimed-by: other {minute}"),
+        format!("- Note: \"noon\" {minute}"),
+        format!("- Note: \"beta note\" Claimed-by: fortran {minute}"),
+        format!("- Note: \"beta plain\" {minute}"),
+    ] {
+        assert_eq!(org.matches(line.as_str()).count(), 1, "{line}\n{org}");
+    }
+}

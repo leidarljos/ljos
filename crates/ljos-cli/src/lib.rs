@@ -40197,8 +40197,15 @@ fn claim_stamp_matches_entry(src: &str, rendered: &str, timestamp: &str) -> bool
     }
     let src = src.trim();
     let rendered = rendered.trim();
-    src == rendered
-        || strip_claim_stamp(src).is_some_and(|stripped| stripped.trim() == rendered)
+    if src == rendered {
+        return true;
+    }
+    // A plain note at this minute renders with no claim marker. Treating the
+    // stamp with the marker removed as that note would move the stamp onto it.
+    if !line_carries_claim_stamp(rendered) {
+        return false;
+    }
+    strip_claim_stamp(src).is_some_and(|stripped| stripped.trim() == rendered)
         || matches!(
             (claim_stamp_note_head(src), claim_stamp_note_head(rendered)),
             (Some(left), Some(right)) if left.trim() == right.trim()
@@ -40246,27 +40253,51 @@ fn claim_stamp_lines_for_issue(source: &str, issue: &str) -> Vec<String> {
 /// folds the stamp into the note and the next parse does not read the same
 /// line. The original line is stored as the entry's raw text, which render
 /// writes back unchanged.
+///
+/// `issue` is the ticket the caller is editing. A later `write` renders every
+/// heading in the file, so each ticket's stamps are restored from that
+/// ticket alone. One stamp is applied to one row.
 pub(crate) fn keep_claim_stamp_lines(doc: &mut vissue_core::IssueDoc, source: &str, issue: &str) {
+    if !issue.is_empty() && !doc.headings.iter().any(|heading| heading.id == issue) {
+        return;
+    }
+    let ids: Vec<String> = doc
+        .headings
+        .iter()
+        .map(|heading| heading.id.clone())
+        .collect();
+    for id in ids {
+        restore_claim_stamps(doc, source, &id);
+    }
+}
+
+fn restore_claim_stamps(doc: &mut vissue_core::IssueDoc, source: &str, issue: &str) {
     let stamps = claim_stamp_lines_for_issue(source, issue);
     if stamps.is_empty() {
         return;
     }
+    let mut used = vec![false; stamps.len()];
     let Some(heading) = doc.headings.iter_mut().find(|heading| heading.id == issue) else {
         return;
     };
     for entry in &mut heading.logbook {
         let rendered = entry.render();
-        if stamps.iter().any(|src| src.trim() == rendered.trim()) {
+        if let Some(index) = stamps
+            .iter()
+            .enumerate()
+            .position(|(index, src)| !used[index] && src.trim() == rendered.trim())
+        {
+            used[index] = true;
             continue;
         }
-        let Some(src) = stamps
-            .iter()
-            .find(|src| claim_stamp_matches_entry(src, &rendered, entry.timestamp.as_str()))
-        else {
+        let Some(index) = stamps.iter().enumerate().position(|(index, src)| {
+            !used[index] && claim_stamp_matches_entry(src, &rendered, entry.timestamp.as_str())
+        }) else {
             continue;
         };
-        if src.trim() != rendered.trim() {
-            entry.raw = Some(src.trim().to_string());
+        if stamps[index].trim() != rendered.trim() {
+            entry.raw = Some(stamps[index].trim().to_string());
+            used[index] = true;
         }
     }
 }
@@ -66684,6 +66715,51 @@ mod tests {
             "import lost the stamp: {:?}",
             again.headings[0].logbook[0]
         );
+    }
+
+    /// A rewrite of one ticket renders the whole file. Legacy `Claimed-by`
+    /// rows on other tickets have to stay on those tickets, and two rows
+    /// that share a minute on one ticket have to stay on their own lines.
+    #[test]
+    fn claim_stamp_restore_keeps_every_ticket_and_same_minute_rows() {
+        let minute = "[2026-11-17 Tue 17:13]";
+        let board = format!(
+            "#+TITLE: probe issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
+* TODO [#C] alpha\n:PROPERTIES:\n:ID:         aaa-1111\n:END:\n:LOGBOOK:\n\
+- Note: \"noon\" Claimed-by: saddle {minute}\n\
+- Note: \"noon\" Claimed-by: other {minute}\n\
+- Note: \"noon\" {minute}\n\
+- Note: \"alpha plain\" {minute}\n\
+- Claimed by saddle {minute}\n\
+- State \"STARTED\" from \"TODO\" {minute}\n\
+:END:\n\
+* TODO [#C] beta\n:PROPERTIES:\n:ID:         bbb-2222\n:END:\n:LOGBOOK:\n\
+- Note: \"beta note\" Claimed-by: fortran {minute}\n\
+- Note: \"beta plain\" {minute}\n\
+- Claimed by fortran {minute}\n\
+:END:\n"
+        );
+        let path = std::path::PathBuf::from("issues.org");
+        let mut doc = vissue_core::IssueDoc::parse("probe", path, &board).unwrap();
+        super::keep_claim_stamp_lines(&mut doc, &board, "aaa-1111");
+        let rendered = doc.render_string();
+        for line in [
+            format!("- Note: \"noon\" Claimed-by: saddle {minute}"),
+            format!("- Note: \"noon\" Claimed-by: other {minute}"),
+            format!("- Note: \"noon\" {minute}"),
+            format!("- Note: \"alpha plain\" {minute}"),
+            format!("- Claimed by saddle {minute}"),
+            format!("- State \"STARTED\" from \"TODO\" {minute}"),
+            format!("- Note: \"beta note\" Claimed-by: fortran {minute}"),
+            format!("- Note: \"beta plain\" {minute}"),
+            format!("- Claimed by fortran {minute}"),
+        ] {
+            assert_eq!(
+                rendered.matches(line.as_str()).count(),
+                1,
+                "row moved or dropped: {line}\n{rendered}"
+            );
+        }
     }
 
     #[test]
