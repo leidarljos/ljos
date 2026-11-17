@@ -357,6 +357,18 @@ fn env_fault() -> Fault {
     Fault::None
 }
 
+fn fault_is_slow(fault: Fault) -> bool {
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        matches!(fault, Fault::Slow)
+    }
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    {
+        let _ = fault;
+        false
+    }
+}
+
 fn immediate(fault: Fault, op: Op) -> Option<IoError> {
     let _ = op;
     match fault {
@@ -385,17 +397,7 @@ fn io<T: Send + 'static>(
     std::thread::Builder::new()
         .name("ljos-share".to_string())
         .spawn(move || {
-            let result = if {
-                #[cfg(any(test, feature = "test-hooks"))]
-                {
-                    matches!(fault, Fault::Slow)
-                }
-                #[cfg(not(any(test, feature = "test-hooks")))]
-                {
-                    let _ = &fault;
-                    false
-                }
-            } {
+            let result = if fault_is_slow(fault) {
                 // The caller stops at `bound`. This thread must not write
                 // the file after that, or a reported failure would still land.
                 std::thread::sleep(bound + Duration::from_millis(250));
