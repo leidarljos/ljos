@@ -338,6 +338,13 @@ fn note_finish_file_and_claim_on_a_missing_issue_write_nothing() {
                 text.contains(MISSING) && text.contains("`ljos search`"),
                 "ljos note did not name {MISSING} and `ljos search`:\n{text}"
             );
+        } else if args[0] == "claim" {
+            assert!(!out.status.success(), "{text}");
+            assert!(out.stdout.is_empty(), "{text}");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr).trim(),
+                format!("issue {MISSING} not found. `ljos ready` lists the open tickets.")
+            );
         }
     }
 }

@@ -14003,6 +14003,12 @@ pub fn on_disk(id: &str) -> String {
         .unwrap_or_else(|| id.to_string())
 }
 
+/// Whether `id` names a ticket in the tracker.
+#[must_use]
+pub fn ticket_exists(id: &str) -> bool {
+    issue_spot::find(id.trim()).is_some()
+}
+
 /// The parent a held id may file under.
 ///
 /// `Ok(Some)` is the heading id, which is the held id when it is already
