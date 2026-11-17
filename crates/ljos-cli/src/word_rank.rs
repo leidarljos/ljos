@@ -161,6 +161,11 @@ const WEAK: &[&str] = &[
     "type", "update", "use", "user", "value", "way", "weight", "work",
 ];
 
+/// Words that name a kind of page rather than a project. Sorted for search.
+const GENERIC: &[&str] = &[
+    "doc", "docs", "embed", "record", "records", "release", "video",
+];
+
 /// Similarity another seat must reach when it shares no distinctive term.
 ///
 /// [`crate::CROSS_SEAT_COSINE`] still keeps a row that names one of those
@@ -377,6 +382,46 @@ pub fn term_coverage(query: &str, text: &str) -> usize {
         .iter()
         .filter(|concept| concept_covered(concept, &have))
         .count()
+}
+
+/// Query terms that occur in `text`, in the order they were typed.
+#[must_use]
+pub fn covered_query_terms(query: &str, text: &str) -> Vec<String> {
+    let concepts = concepts(query);
+    if concepts.is_empty() {
+        return Vec::new();
+    }
+    let have: std::collections::BTreeSet<String> = analyze(text).bag.into_iter().collect();
+    concepts
+        .into_iter()
+        .filter(|concept| concept_covered(concept, &have))
+        .collect()
+}
+
+/// Whether `term` is a common word that does not name a project or a subject.
+///
+/// `docs`, `release` and `video` are the ones a long query shares with an
+/// unrelated ticket. A weak word such as `update` counts too. A project
+/// token such as `d-seams` does not.
+#[must_use]
+pub fn generic_term(term: &str) -> bool {
+    let concept = concept_of(term);
+    // The joined form is the word as written. A stem such as `emb` from
+    // `embed` is not a second word that has to be generic on its own.
+    if generic_word(term) || generic_word(&concept.joined) {
+        return true;
+    }
+    !concept.parts.is_empty() && concept.parts.iter().all(|part| generic_word(part))
+}
+
+fn listed_generic(word: &str) -> bool {
+    GENERIC.binary_search(&word).is_ok() || is_weak_word(word) || is_stop(word)
+}
+
+fn generic_word(word: &str) -> bool {
+    let lower = word.to_lowercase();
+    let stemmed = stem(&lower);
+    listed_generic(&lower) || listed_generic(&stemmed)
 }
 
 /// Order `docs` for `query`. See the module note for what the score is.
@@ -1189,6 +1234,19 @@ mod tests {
                 "The usglobalmail sign-in preflight is the archive check."
             ),
             3
+        );
+        assert!(generic_term("docs"));
+        assert!(generic_term("release"));
+        assert!(generic_term("video"));
+        assert!(generic_term("videos"));
+        assert!(generic_term("embed"));
+        assert!(generic_term("records"));
+        assert!(!generic_term("d-seams"));
+        assert!(!generic_term("readcon"));
+        assert!(!generic_term("migrate"));
+        assert_eq!(
+            covered_query_terms("d-SEAMS migrate video docs embed", "Embed the docs video"),
+            ["video", "docs", "embed"]
         );
         assert!(shares_term("narration", "GPRidge narrated video set"));
         assert!(shares_term("narrate", "GPRidge narrated video set"));

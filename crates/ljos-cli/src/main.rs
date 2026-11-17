@@ -789,9 +789,13 @@ enum Cmd {
     /// printed on that empty page. A tracker ticket whose
     /// title matches is included, and then one whose body or notes match. An exact or
     /// near-exact title is the first row, while the encoder is loading and
-    /// after. A ticket this seat has claimed, whose title, body or notes
-    /// cover two query terms, is placed with this seat's rows, ahead of
-    /// another project's ticket that only shares a generic word. The row names the ticket id and the title, so `ljos recall ID`
+    /// after. A ticket this seat filed, claimed, or noted, whose title, body
+    /// or notes cover two query terms, is placed with this seat's rows. The
+    /// newest note weighs more than an older one. A ticket in a project this
+    /// seat works in comes before another project's ticket that only shares a
+    /// generic word such as docs, release, or video. A ticket with no seat
+    /// tag is not this seat's, unless the tracker roster names only this seat.
+    /// The row names the ticket id and the title, so `ljos recall ID`
     /// opens it. The page names the place and the checks. It does not print
     /// the ranker score.
     /// `--explain` says how the rows are ordered. `--json` keeps the score.

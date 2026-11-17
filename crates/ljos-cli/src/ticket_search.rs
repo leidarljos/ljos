@@ -11,10 +11,20 @@
 //!
 //! The encoder ranks a stored title, so `sign-in` sits next to every other
 //! sign-in title and a ticket whose body or notes hold the query never
-//! moves. After the merge, a ticket this seat has claimed is placed with
-//! this seat's rows when its title, body or notes cover two query terms.
-//! Another seat's ticket stays after those rows. That is the line the page
-//! prints, that this seat's rows come before another seat's.
+//! moves. After the merge, a ticket this seat filed, claimed, or noted is
+//! placed with this seat's rows when its title, body or notes match. The
+//! newest note weighs more than an older one. A ticket in a project this
+//! seat works in comes before another project's ticket that only shares a
+//! generic word such as docs, release, or video. Another seat's ticket
+//! stays after this seat's rows. That is the line the page prints, that
+//! this seat's rows come before another seat's.
+//!
+//! A pack row with no `seat:` tag is this seat's memory: the pack stamps
+//! another seat when the row is theirs. A ticket is not that store. Who
+//! filed it, who holds or held the claim, and who wrote its notes are the
+//! tracker facts, and a missing tag does not make another seat's ticket
+//! this seat's. The one local case is a tracker whose `seats` roster names
+//! only this seat. An empty roster is not that case: any seat may write.
 
 use packset_client::Hit;
 use std::collections::{BTreeMap, BTreeSet};
@@ -67,8 +77,9 @@ pub fn merge(hits: &mut Vec<Hit>, query: &str) {
         }
     }
     // The pack may already have returned these tickets, ranked by the
-    // title embedding. Claim and the body still have to move them.
-    place_claimed(hits, query, &records);
+    // title embedding. Who filed, claimed, or noted them still has to
+    // move them, including a match the title embedding never returned.
+    place_rows(hits, query, &records);
 }
 
 fn score_intrinsic(rows: &mut [Found]) {
@@ -215,26 +226,216 @@ fn search_blob(rec: &IssueRec) -> String {
     }
 }
 
-fn claimed_slug(rec: &IssueRec) -> String {
-    rec.heading
-        .claimed_by()
-        .map(crate::canonical_seat_name)
-        .unwrap_or_default()
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TouchKind {
+    Filed,
+    Claim,
+    Note,
 }
 
-/// Stamp the claimant so the page can put this seat's rows first.
-/// A ticket nobody has claimed is not given a seat: it is not another
-/// seat's row, and it is not this seat's either.
-fn stamp_claimant(hit: &mut Hit, slug: &str, mine: &str) {
-    if slug.is_empty() || hit.entities.iter().any(|tag| tag.starts_with("seat:")) {
+struct Touch {
+    seat: String,
+    /// Later is larger. A missing stamp is zero.
+    when: i64,
+    kind: TouchKind,
+}
+
+struct Facts {
+    touches: Vec<Touch>,
+}
+
+impl Facts {
+    fn owns(&self, mine: &str) -> bool {
+        let mine = crate::canonical_seat_name(mine);
+        !mine.is_empty() && self.touches.iter().any(|touch| touch.seat == mine)
+    }
+
+    fn recency(&self, mine: &str) -> i64 {
+        let mine = crate::canonical_seat_name(mine);
+        self.touches
+            .iter()
+            .filter(|touch| touch.seat == mine)
+            .map(|touch| touch.when)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The seat to show when this seat has no part in the ticket.
+    ///
+    /// A note outweighs a claim or a filing when it is the later fact.
+    /// Among notes, the newest one weighs the most.
+    fn other_seat(&self, mine: &str) -> Option<String> {
+        if self.owns(mine) {
+            return None;
+        }
+        let notes = self
+            .touches
+            .iter()
+            .filter(|touch| touch.kind == TouchKind::Note);
+        notes
+            .max_by_key(|touch| touch.when)
+            .or_else(|| self.touches.iter().max_by_key(|touch| touch.when))
+            .map(|touch| touch.seat.clone())
+    }
+
+    fn names_other(&self, mine: &str) -> bool {
+        let mine = crate::canonical_seat_name(mine);
+        self.touches.iter().any(|touch| touch.seat != mine)
+    }
+}
+
+fn named_seat(raw: &str) -> Option<String> {
+    let seat = crate::canonical_seat_name(raw);
+    (!seat.is_empty()).then_some(seat)
+}
+
+fn facts_of(rec: &IssueRec) -> Facts {
+    let mut touches = Vec::new();
+    if let Some(seat) = rec.heading.claimed_by().and_then(named_seat) {
+        touches.push(Touch {
+            seat,
+            when: stamp_ord(rec.heading.claimed_at().unwrap_or("")),
+            kind: TouchKind::Claim,
+        });
+    }
+    for entry in &rec.heading.logbook {
+        let Some(text) = crate::logbook_text(entry) else {
+            continue;
+        };
+        let when = stamp_ord(&entry.timestamp);
+        if let Some(seat) = released_holder(&text) {
+            touches.push(Touch {
+                seat,
+                when,
+                kind: TouchKind::Claim,
+            });
+            continue;
+        }
+        let Some((verb, seat)) = crate::parse_logbook_act(&format!("- {text}")) else {
+            continue;
+        };
+        let Some(seat) = named_seat(&seat) else {
+            continue;
+        };
+        let verb = verb.to_ascii_lowercase();
+        let kind = if verb.starts_with("noted") {
+            TouchKind::Note
+        } else if verb.starts_with("filed") {
+            TouchKind::Filed
+        } else if verb.starts_with("claimed") || verb.starts_with("released") {
+            TouchKind::Claim
+        } else {
+            continue;
+        };
+        touches.push(Touch { seat, when, kind });
+    }
+    Facts { touches }
+}
+
+/// `claim released: WHO held since ...` names the seat that held the claim.
+fn released_holder(text: &str) -> Option<String> {
+    let rest = text.trim().strip_prefix("claim released:")?.trim();
+    let who = rest.split_whitespace().next().unwrap_or("");
+    named_seat(who)
+}
+
+/// Digits of an org stamp, date then clock, so a later note sorts higher.
+fn stamp_ord(ts: &str) -> i64 {
+    let stamp = ts.trim().trim_matches(|ch| ch == '[' || ch == ']');
+    let mut date = 0_i64;
+    let mut digits = 0_u32;
+    for ch in stamp.chars() {
+        if digits == 8 {
+            break;
+        }
+        if ch.is_ascii_digit() {
+            date = date * 10 + i64::from(ch as u8 - b'0');
+            digits += 1;
+        }
+    }
+    if digits < 8 {
+        return 0;
+    }
+    let clock = stamp.split_whitespace().find_map(|token| {
+        let (hour, minute) = token.split_once(':')?;
+        let hour = hour.parse::<i64>().ok()?;
+        let minute = minute.get(..2)?.parse::<i64>().ok()?;
+        Some(hour * 100 + minute)
+    });
+    date * 10_000 + clock.unwrap_or(0)
+}
+
+struct Scope {
+    cwd: Option<std::path::PathBuf>,
+    /// Projects this seat has filed, claimed, or noted, lowercased.
+    projects: BTreeSet<String>,
+    /// The roster names this seat and nobody else.
+    solo: bool,
+}
+
+fn scope_of(records: &[IssueRec], mine: &str) -> Scope {
+    let cwd = vissue_core::Layout::resolve(None, None)
+        .ok()
+        .map(|layout| layout.root().to_path_buf());
+    let mut projects = BTreeSet::new();
+    for rec in records {
+        if facts_of(rec).owns(mine) {
+            let name = rec.project.trim().to_lowercase();
+            if !name.is_empty() {
+                projects.insert(name);
+            }
+        }
+    }
+    let roster = crate::tracker_roster_names();
+    let mine = crate::canonical_seat_name(mine);
+    let solo = roster.len() == 1
+        && roster
+            .iter()
+            .any(|seat| crate::canonical_seat_name(seat) == mine);
+    Scope {
+        cwd,
+        projects,
+        solo,
+    }
+}
+
+fn in_cwd(scope: &Scope, path: &std::path::Path) -> bool {
+    scope
+        .cwd
+        .as_ref()
+        .is_some_and(|root| path.starts_with(root))
+}
+
+fn in_working_project(rec: &IssueRec, scope: &Scope) -> bool {
+    let name = rec.project.trim();
+    !name.is_empty()
+        && scope
+            .projects
+            .iter()
+            .any(|project| project.eq_ignore_ascii_case(name))
+}
+
+/// The roster names only this seat, the ticket is in that tracker, and no
+/// fact names another seat. That is the untagged ticket that is local.
+fn solo_local(rec: &IssueRec, scope: &Scope, facts: &Facts, mine: &str) -> bool {
+    scope.solo && in_cwd(scope, &rec.path) && !facts.names_other(mine)
+}
+
+fn has_seat_tag(hit: &Hit) -> bool {
+    hit.entities.iter().any(|tag| tag.starts_with("seat:"))
+}
+
+fn set_seat(hit: &mut Hit, seat: &str) {
+    let seat = seat.trim();
+    if seat.is_empty() {
         return;
     }
-    let label = if crate::canonical_seat_name(mine) == slug {
-        mine
-    } else {
-        slug
-    };
-    hit.entities.push(format!("seat:{label}"));
+    hit.entities.retain(|tag| !tag.starts_with("seat:"));
+    hit.entities.push(format!("seat:{seat}"));
+}
+
+fn is_ticket_hit(hit: &Hit) -> bool {
+    hit.kind == "ticket"
 }
 
 fn by_id(records: &[IssueRec]) -> BTreeMap<&str, &IssueRec> {
@@ -250,12 +451,14 @@ fn ticket_coverage(query: &str, rec: &IssueRec) -> usize {
     crate::word_rank::term_coverage(query, &search_blob(rec))
 }
 
-/// A claimed ticket whose title, body or notes cover two query terms.
-/// One shared word, such as `sign-in`, is not enough: that word is in
-/// titles that are not about the query.
-fn owned_match(query: &str, rec: &IssueRec, mine: &str) -> bool {
-    let mine = crate::canonical_seat_name(mine);
-    !mine.is_empty() && claimed_slug(rec) == mine && ticket_coverage(query, rec) >= 2
+fn any_band(query: &str, rec: &IssueRec, titles: &[&str]) -> bool {
+    let notes = notes_text(&rec.heading);
+    band(query, rec.heading.title.trim(), &notes, titles).is_some()
+}
+
+/// Two query terms, or a title band. One shared generic word is not a match.
+fn query_match(query: &str, rec: &IssueRec, titles: &[&str]) -> bool {
+    ticket_coverage(query, rec) >= 2 || any_band(query, rec, titles)
 }
 
 fn lead_title(query: &str, rec: &IssueRec, titles: &[&str]) -> bool {
@@ -266,20 +469,139 @@ fn lead_title(query: &str, rec: &IssueRec, titles: &[&str]) -> bool {
     )
 }
 
-/// Exact and near titles stay first. Then a ticket this seat claimed
-/// whose body or notes cover the query. Then this seat's other rows.
-/// Another seat's rows are last, which is what the page header says.
-fn place_claimed(hits: &mut Vec<Hit>, query: &str, records: &[IssueRec]) {
-    if hits.is_empty() || records.is_empty() {
+fn generic_only(query: &str, rec: &IssueRec) -> bool {
+    let covered = crate::word_rank::covered_query_terms(query, &search_blob(rec));
+    !covered.is_empty()
+        && covered
+            .iter()
+            .all(|term| crate::word_rank::generic_term(term))
+}
+
+/// Another project's ticket that only shares words such as docs, release, or video.
+fn unrelated_generic(rec: &IssueRec, scope: &Scope, query: &str) -> bool {
+    if in_working_project(rec, scope) {
+        return false;
+    }
+    // No project from this seat's own facts: the tracker under the working
+    // directory is the repo it is searching, and a ticket there is not an
+    // unrelated project.
+    if scope.projects.is_empty() && in_cwd(scope, &rec.path) {
+        return false;
+    }
+    generic_only(query, rec)
+}
+
+fn hit_for(rec: &IssueRec) -> Hit {
+    let id = rec.heading.id.trim();
+    Hit {
+        id: Some(id.to_string()),
+        text: rec.heading.title.trim().to_string(),
+        score: intrinsic(Band::Notes),
+        kind: "ticket".to_string(),
+        ts: None,
+        entities: vec![format!("issue:{id}")],
+        ballots: None,
+        of: None,
+        rerank_score: None,
+        labels: Vec::new(),
+    }
+}
+
+/// Pull in a match the encoder did not return: a ticket this seat filed,
+/// claimed, or noted, or one in a project those facts name.
+fn ensure_matches(
+    hits: &mut Vec<Hit>,
+    query: &str,
+    records: &[IssueRec],
+    mine: &str,
+    scope: &Scope,
+    titles: &[&str],
+) {
+    let have: BTreeSet<String> = hits
+        .iter()
+        .filter_map(|hit| hit.id.as_deref().map(str::to_string))
+        .collect();
+    let mut extra = Vec::new();
+    for rec in records {
+        let id = rec.heading.id.trim();
+        if id.is_empty() || have.contains(id) || !query_match(query, rec, titles) {
+            continue;
+        }
+        let facts = facts_of(rec);
+        if facts.owns(mine) || in_working_project(rec, scope) {
+            extra.push(hit_for(rec));
+        }
+    }
+    hits.extend(extra);
+}
+
+fn stamp_ticket(hit: &mut Hit, rec: &IssueRec, facts: &Facts, scope: &Scope, mine: &str) {
+    if !is_ticket_hit(hit) {
+        return;
+    }
+    if facts.owns(mine) || solo_local(rec, scope, facts, mine) {
+        set_seat(hit, mine);
+        return;
+    }
+    if has_seat_tag(hit) {
+        return;
+    }
+    if let Some(seat) = facts.other_seat(mine) {
+        set_seat(hit, &seat);
+    }
+}
+
+fn demote_unrelated(
+    rows: &mut Vec<Hit>,
+    index: &BTreeMap<&str, &IssueRec>,
+    scope: &Scope,
+    query: &str,
+) {
+    let mut keep = Vec::new();
+    let mut sink = Vec::new();
+    for hit in rows.drain(..) {
+        let rec = hit.id.as_deref().and_then(|id| index.get(id).copied());
+        let generic =
+            rec.is_some_and(|rec| is_ticket_hit(&hit) && unrelated_generic(rec, scope, query));
+        if generic {
+            sink.push(hit);
+        } else {
+            keep.push(hit);
+        }
+    }
+    keep.extend(sink);
+    *rows = keep;
+}
+
+/// Exact and near titles stay first. Then a ticket this seat filed, claimed,
+/// or noted, when the title, body, or notes match. The newest of those facts
+/// is first. Then this seat's memories, and a ticket in the one-seat roster.
+/// Then tickets nobody's facts name. Another seat's rows are last.
+///
+/// An untagged ticket is not put in this seat's group. It sits before a row
+/// that names another seat, so the header stays true, and a project this
+/// seat works in still outranks an unrelated ticket that only shares a
+/// generic word.
+fn place_rows(hits: &mut Vec<Hit>, query: &str, records: &[IssueRec]) {
+    if records.is_empty() || query.trim().is_empty() {
         return;
     }
     let mine = crate::seat_name();
-    let index = by_id(records);
+    let scope = scope_of(records, &mine);
     let titles: Vec<&str> = records
         .iter()
         .map(|rec| rec.heading.title.trim())
         .filter(|title| !title.is_empty())
         .collect();
+    ensure_matches(hits, query, records, &mine, &scope, &titles);
+    if hits.is_empty() {
+        return;
+    }
+    let index = by_id(records);
+    let mut known: BTreeMap<String, Facts> = BTreeMap::new();
+    for rec in records {
+        known.insert(rec.heading.id.clone(), facts_of(rec));
+    }
     for hit in hits.iter_mut() {
         let Some(id) = hit.id.as_deref() else {
             continue;
@@ -287,18 +609,35 @@ fn place_claimed(hits: &mut Vec<Hit>, query: &str, records: &[IssueRec]) {
         let Some(rec) = index.get(id).copied() else {
             continue;
         };
-        stamp_claimant(hit, &claimed_slug(rec), &mine);
+        let Some(facts) = known.get(id) else {
+            continue;
+        };
+        stamp_ticket(hit, rec, facts, &scope, &mine);
     }
     let mut lead = Vec::new();
     let mut owned = Vec::new();
     let mut home = Vec::new();
+    let mut open = Vec::new();
     let mut away = Vec::new();
     for hit in hits.drain(..) {
         let rec = hit.id.as_deref().and_then(|id| index.get(id).copied());
+        let facts = hit.id.as_deref().and_then(|id| known.get(id));
         if rec.is_some_and(|rec| lead_title(query, rec, &titles)) {
             lead.push(hit);
-        } else if rec.is_some_and(|rec| owned_match(query, rec, &mine)) {
+        } else if rec.is_some_and(|rec| {
+            facts.is_some_and(|facts| facts.owns(&mine)) && query_match(query, rec, &titles)
+        }) {
             owned.push(hit);
+        } else if is_ticket_hit(&hit) {
+            if crate::other_seat(&hit.entities, &mine).is_some() {
+                away.push(hit);
+            } else if rec
+                .is_some_and(|rec| facts.is_some_and(|facts| solo_local(rec, &scope, facts, &mine)))
+            {
+                home.push(hit);
+            } else {
+                open.push(hit);
+            }
         } else if crate::other_seat(&hit.entities, &mine).is_some() {
             away.push(hit);
         } else {
@@ -306,6 +645,13 @@ fn place_claimed(hits: &mut Vec<Hit>, query: &str, records: &[IssueRec]) {
         }
     }
     owned.sort_by(|left, right| {
+        let recency = |hit: &Hit| {
+            hit.id
+                .as_deref()
+                .and_then(|id| known.get(id))
+                .map(|facts| facts.recency(&mine))
+                .unwrap_or(0)
+        };
         let cover = |hit: &Hit| {
             hit.id
                 .as_deref()
@@ -313,14 +659,19 @@ fn place_claimed(hits: &mut Vec<Hit>, query: &str, records: &[IssueRec]) {
                 .map(|rec| ticket_coverage(query, rec))
                 .unwrap_or(0)
         };
-        cover(right)
-            .cmp(&cover(left))
+        recency(right)
+            .cmp(&recency(left))
+            .then_with(|| cover(right).cmp(&cover(left)))
             .then_with(|| left.id.cmp(&right.id))
     });
-    let mut ordered = Vec::with_capacity(lead.len() + owned.len() + home.len() + away.len());
+    demote_unrelated(&mut open, &index, &scope, query);
+    demote_unrelated(&mut away, &index, &scope, query);
+    let mut ordered =
+        Vec::with_capacity(lead.len() + owned.len() + home.len() + open.len() + away.len());
     ordered.extend(lead);
     ordered.extend(owned);
     ordered.extend(home);
+    ordered.extend(open);
     ordered.extend(away);
     *hits = ordered;
 }
@@ -478,7 +829,7 @@ fn edit_within(left: &str, right: &str, max: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{band, Band};
+    use super::{band, stamp_ord, Band};
 
     const TITLE: &str = "GPRidge narrated video set";
     const NOTES: &str = "Milestone: the ridge walk is filmed.";
@@ -542,5 +893,12 @@ mod tests {
         assert_eq!(hit("parser timeout", corpus[3]), Some(Band::Title));
         assert_eq!(hit("GPRidge", corpus[5]), Some(Band::Title));
         assert_eq!(hit("update", corpus[0]), Some(Band::Title));
+    }
+
+    #[test]
+    fn a_later_note_stamp_sorts_above_an_older_one() {
+        assert!(stamp_ord("[2026-11-16 Mon 18:30]") > stamp_ord("[2026-11-01 Sun 09:00]"));
+        assert_eq!(stamp_ord("not a stamp"), 0);
+        assert_eq!(stamp_ord(""), 0);
     }
 }
