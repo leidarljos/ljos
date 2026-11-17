@@ -3038,7 +3038,7 @@ fn head_blob(root: &Path, rel: &str) -> Result<Vec<u8>> {
 /// Block SIGPIPE on the calling thread. `main` restores the default
 /// action, so a write to an `age` that already exited would end the
 /// process. Blocked, the write returns EPIPE and age's status is read.
-fn block_sigpipe_here() {
+pub(crate) fn block_sigpipe_here() {
     // SAFETY: sigemptyset initializes the set before it is read, and
     // pthread_sigmask changes only this thread's mask.
     unsafe {

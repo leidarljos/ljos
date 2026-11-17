@@ -43580,7 +43580,10 @@ fn output_within(
             .take()
             .ok_or_else(|| std::io::Error::other("the child has no stdin"))?;
         let bytes = bytes.to_vec();
-        Some(std::thread::spawn(move || input.write_all(&bytes)))
+        Some(std::thread::spawn(move || {
+            sync::block_sigpipe_here();
+            input.write_all(&bytes)
+        }))
     } else {
         None
     };
