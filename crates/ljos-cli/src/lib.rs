@@ -53432,10 +53432,18 @@ fn tool_failure(
         Some(code) => format!("failed (exit {code})"),
         None => format!("failed ({status})"),
     };
-    if why.is_empty() {
+    let line = if why.is_empty() {
         format!("{bin} {how}")
     } else {
         format!("{bin} {how}: {why}")
+    };
+    // A product checkout is shielded into a private directory. vissue then
+    // names that directory. The person has no tracker, so the next command
+    // is onboard. A tracker that is already named never stands there.
+    if bin == "vissue" && line.contains("ljos-vissue-") {
+        tracker_place::MISSING_TRACKER.to_string()
+    } else {
+        line
     }
 }
 
