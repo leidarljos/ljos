@@ -18806,6 +18806,12 @@ fn writer_rejects_this_home(client: &PacksetClient) -> Option<String> {
     matches!(answer.status, 401 | 403).then(|| writer_refused_line(client.base(), answer.status))
 }
 
+/// `PACKSET_URL=...` from `packset ensure`, with the words a first onboard uses.
+fn gloss_started_writer(line: &str) -> String {
+    line.trim()
+        .replacen("PACKSET_URL=", "PACKSET_URL (memory writer address)=", 1)
+}
+
 /// Have a pack writer up before anything else is wired: a runner onboarded
 /// to a seat with no writer would meet every memory verb failing. `packset
 /// ensure` starts one when none answers and is idempotent when one does.
@@ -18891,7 +18897,7 @@ fn pack_step(dry: bool) -> Step {
                 what,
                 detail: format!(
                     "started a writer: {}",
-                    said.stdout.lines().next().unwrap_or("").trim()
+                    gloss_started_writer(said.stdout.lines().next().unwrap_or(""))
                 ),
                 ok: true,
             },
@@ -70421,6 +70427,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "{}",
             pack.detail
         );
+        let started = super::gloss_started_writer("PACKSET_URL=http://127.0.0.1:8761");
+        assert_eq!(
+            started,
+            "PACKSET_URL (memory writer address)=http://127.0.0.1:8761"
+        );
+        assert_eq!(super::gloss_started_writer("writer ready"), "writer ready");
     }
 
     #[test]
