@@ -1891,7 +1891,10 @@ mod tests {
             Duration::from_millis(100),
             |_: &str| -> std::io::Result<Vec<std::net::SocketAddr>> {
                 std::thread::sleep(Duration::from_secs(3));
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "fixture DNS"))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "fixture DNS",
+                ))
             },
         );
         let started = std::time::Instant::now();
