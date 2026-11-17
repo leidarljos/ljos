@@ -1,0 +1,1 @@
+A sitting on a decision ticket in a pack with no personas now prints one line that says no panel is seated and names `ljos persona NAME --anchor A --view ...`, where it said "the panel could not be written" and stored the refusal as an attempt.
