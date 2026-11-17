@@ -8,6 +8,10 @@
 //! seat are resolved without reading this directory. A network or FUSE
 //! mount is left unread. Any other probe, git discovery included, gives
 //! up after [`CWD_PROBE`].
+//!
+//! A git hook is not probed. Git has already opened that checkout and is
+//! waiting on the hook. A stat thread that has not started is not a mount
+//! that refused to answer.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -46,10 +50,19 @@ pub(crate) fn walks_off() -> bool {
 /// Leave a working directory that must not be read, before the tracker or
 /// the seat looks at it.
 pub(crate) fn settle() {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    // `ljos git-hook` runs while the parent git waits for this process.
+    // The checkout is the one git already opened. Spending the probe
+    // budget here, or leaving the directory because the stat thread has
+    // not been scheduled yet, holds that commit. `file` and `sitting` are
+    // the commands this probe is for.
+    if command_is_git_hook(&args) {
+        return;
+    }
     let Ok(here) = std::env::current_dir() else {
         return;
     };
-    let named = project_named(&std::env::args().skip(1).collect::<Vec<_>>());
+    let named = project_named(&args);
     // A network or FUSE mount is left without a stat. getattr is the wait.
     if remote_or_fuse(&here) {
         park(&here);
@@ -126,6 +139,31 @@ fn park(here: &Path) {
     if std::fs::create_dir_all(&park).is_ok() {
         let _ = std::env::set_current_dir(&park);
     }
+}
+
+/// Whether `args`, after the program name, are `ljos git-hook`.
+///
+/// Flags may precede the subcommand. A `git-hook` after `--` is an
+/// argument of another command.
+#[must_use]
+fn command_is_git_hook(args: &[String]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--" {
+            return false;
+        }
+        if matches!(arg, "--seat" | "--assignee" | "--parent" | "--event") {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return arg == "git-hook";
+    }
+    false
 }
 
 /// Whether `args`, after the program name, already name a project.
@@ -264,17 +302,52 @@ fn timed_metadata(path: &Path) -> Option<()> {
     timed_is_file(path).map(|_| ())
 }
 
-/// `Some` when `path` could be stated in [`CWD_PROBE`].
+/// What the stat thread has reported.
+enum Note {
+    /// The thread is running and is about to state the path.
+    Started,
+    /// The stat returned.
+    Stated(bool),
+}
+
+/// `Some` when `path` could be stated in [`CWD_PROBE`], or when the stat
+/// thread had not started.
 ///
-/// The stat runs on another thread. A mount that never answers does not
-/// keep this thread, and the process can leave. `None` is that timeout.
+/// The stat runs on another thread so a mount that never answers does not
+/// keep this thread. `None` is that case: the worker reached the stat and
+/// the stat did not return. A worker that has not started has not stated
+/// the path. That delay is a late schedule, not a mount that refused to
+/// answer, and the caller stays in the directory.
 fn timed_is_file(path: &Path) -> Option<bool> {
     let path = path.to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(path.is_file());
+        let _ = tx.send(Note::Started);
+        let _ = tx.send(Note::Stated(path.is_file()));
     });
-    rx.recv_timeout(CWD_PROBE).ok()
+    let started = match rx.recv_timeout(CWD_PROBE) {
+        Ok(Note::Started) => true,
+        Ok(Note::Stated(found)) => return Some(found),
+        Err(_) => false,
+    };
+    let stated = if started {
+        match rx.recv_timeout(CWD_PROBE) {
+            Ok(Note::Stated(found)) => Some(found),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    probe_answer(started, stated)
+}
+
+/// `None` only when the worker reached the stat and the stat did not
+/// return. A worker that has not started has not seen a hung mount.
+fn probe_answer(started: bool, stated: Option<bool>) -> Option<bool> {
+    if !started {
+        return Some(false);
+    }
+    stated
 }
 
 /// `git args` in `dir` (`None` is the working directory), or `None` when
@@ -378,6 +451,34 @@ mod tests {
         assert!(!project_named(&args(&["sitting"])));
         assert!(!project_named(&args(&["note", "hello"])));
         assert!(!project_named(&args(&["file", "-p"])));
+    }
+
+    #[test]
+    fn a_git_hook_is_not_a_command_that_probes_its_directory() {
+        let args = |words: &[&str]| {
+            words
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(command_is_git_hook(&args(&["git-hook", "pre-commit"])));
+        assert!(command_is_git_hook(&args(&[
+            "--seat",
+            "inky",
+            "git-hook",
+            "pre-commit"
+        ])));
+        assert!(!command_is_git_hook(&args(&["file", "-p", "demo"])));
+        assert!(!command_is_git_hook(&args(&["hook"])));
+        assert!(!command_is_git_hook(&args(&["--", "git-hook"])));
+    }
+
+    #[test]
+    fn a_stat_that_has_not_started_is_not_a_hung_mount() {
+        assert_eq!(probe_answer(false, None), Some(false));
+        assert_eq!(probe_answer(true, Some(true)), Some(true));
+        assert_eq!(probe_answer(true, Some(false)), Some(false));
+        assert_eq!(probe_answer(true, None), None);
     }
 
     #[test]

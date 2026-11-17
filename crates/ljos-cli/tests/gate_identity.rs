@@ -1762,13 +1762,9 @@ fn a_tmux_window_allows_the_sitting_conversation_and_refuses_another() {
             "Z's tmux new-window commit hook",
         );
         let _ = home.bash(&[("CURSOR_CONVERSATION_ID", CONV_Z)], &z_cmd);
-        let t0 = Instant::now();
-        while !z_done.exists() && t0.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let z_rc = std::fs::read_to_string(&z_done).unwrap_or_default();
+        let z_rc = exit_status(&z_done, Duration::from_secs(5));
         assert_eq!(
-            z_rc.trim(),
+            z_rc,
             "0",
             "Z's tmux commit was refused (server started by {first}): {}",
             std::fs::read_to_string(&z_err).unwrap_or_default()
@@ -1787,13 +1783,9 @@ fn a_tmux_window_allows_the_sitting_conversation_and_refuses_another() {
             "X's tmux new-window commit hook",
         );
         let _ = home.bash(&[("CURSOR_CONVERSATION_ID", CONV_X)], &x_cmd);
-        let t0 = Instant::now();
-        while !x_done.exists() && t0.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let x_rc = std::fs::read_to_string(&x_done).unwrap_or_default();
+        let x_rc = exit_status(&x_done, Duration::from_secs(5));
         assert_eq!(
-            x_rc.trim(),
+            x_rc,
             "0",
             "X's tmux commit failed (server started by {first}): {}",
             std::fs::read_to_string(&x_err).unwrap_or_default()
@@ -1849,16 +1841,7 @@ fn a_tmux_pane_is_not_judged_as_the_last_conversation_to_name_tmux() {
         std::fs::write(&file, body).unwrap();
         (go, done, file)
     };
-    let wait_rc = |done: &Path| {
-        let t0 = Instant::now();
-        while !done.exists() && t0.elapsed() < Duration::from_secs(10) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        std::fs::read_to_string(done)
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
+    let wait_rc = |done: &Path| exit_status(done, Duration::from_secs(10));
 
     // X starts the server and a window that commits once told to.
     let start = home.bash(&x, &format!("{tmux_s} new-session -d -s x 'sleep 60'"));
@@ -1911,14 +1894,32 @@ fn rv_tmux() -> PathBuf {
 }
 
 fn rv_wait(done: &Path) -> String {
+    exit_status(done, Duration::from_secs(15))
+}
+
+/// The exit status a pane writes with `echo $? > path`.
+///
+/// The redirect creates `path` empty, then `echo` writes the status. A
+/// read that stops when the file merely exists reports an empty status
+/// for a commit that did write one. The limit is unchanged: a command
+/// that has not written a status by then still answers empty.
+fn exit_status(path: &Path, limit: Duration) -> String {
     let t0 = Instant::now();
-    while !done.exists() && t0.elapsed() < Duration::from_secs(15) {
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let status = text.trim();
+            if !status.is_empty() {
+                return status.to_string();
+            }
+        }
+        if t0.elapsed() >= limit {
+            return std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
-    std::fs::read_to_string(done)
-        .unwrap_or_default()
-        .trim()
-        .to_string()
 }
 
 /// A pane script that waits for `WHO.go`, commits, and writes its exit
