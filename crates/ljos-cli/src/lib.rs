@@ -46010,10 +46010,10 @@ fn note_seat_recorded(path: &Path, issue: &str, seat: &str) -> bool {
     };
     let start = (0..=id_at)
         .rev()
-        .find(|i| heading_line(&lines[*i]))
+        .find(|i| heading_line(lines[*i]))
         .unwrap_or(0);
     let end = ((id_at + 1)..lines.len())
-        .find(|i| heading_line(&lines[*i]))
+        .find(|i| heading_line(lines[*i]))
         .unwrap_or(lines.len());
     let Some(rel) = lines[start..end]
         .iter()
