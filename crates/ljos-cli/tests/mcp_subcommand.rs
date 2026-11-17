@@ -176,3 +176,43 @@ fn server_json_and_the_readme_name_the_same_server() {
     assert_eq!(package["packageArguments"][0]["value"], "mcp");
     assert_eq!(package["transport"]["type"], "stdio");
 }
+
+#[test]
+fn ljos_mcp_rejects_unexpected_arguments_with_onboard_guidance() {
+    for (bin, args, want) in [
+        (
+            env!("CARGO_BIN_EXE_ljos"),
+            &["mcp", "setup"][..],
+            "ljos onboard",
+        ),
+        (
+            env!("CARGO_BIN_EXE_ljos-mcp"),
+            &["setup"][..],
+            "ljos onboard --harness json",
+        ),
+        (
+            env!("CARGO_BIN_EXE_ljos"),
+            &["mcp", "--bogus"][..],
+            "ljos mcp --help",
+        ),
+    ] {
+        let out = Command::new(bin)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(want), "{args:?}: {err}");
+    }
+
+    let ver = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["mcp", "--version"])
+        .output()
+        .unwrap();
+    assert!(ver.status.success());
+    assert!(String::from_utf8_lossy(&ver.stdout).contains("ljos-mcp"));
+}
