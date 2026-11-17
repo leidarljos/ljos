@@ -42371,7 +42371,7 @@ pub fn show_issue(issue: &str, all: bool) -> Result<String> {
 pub fn show_json(issue: &str) -> Result<String> {
     let card = show_card(issue)?;
     let blockers = blocker_rows(&card);
-    let notes: Vec<Value> = show_notes(&card)
+    let notes: Vec<Value> = show_notes(&card, true)
         .into_iter()
         .map(|note| {
             serde_json::json!({
@@ -42462,7 +42462,7 @@ fn append_show_prose(out: &mut String, card: &Value, all: bool) {
         out.push_str(&scan::wrap(&body, scan::COLS));
         out.push('\n');
     }
-    let notes = show_notes(card);
+    let notes = show_notes(card, all);
     let earlier = if all || notes.len() <= SHOW_NOTES {
         0
     } else {
@@ -42509,13 +42509,19 @@ fn note_head(note: &ShowNote) -> String {
 
 /// Notes a person wrote, oldest first. A `Noted by` line names the seat of
 /// the note under it. A claim release is the tracker's own bookkeeping.
-fn show_notes(card: &Value) -> Vec<ShowNote> {
+/// Signature lines and the other machinery stay off the plain page. `all`
+/// keeps them, and so does `--json`.
+fn show_notes(card: &Value, keep_machinery: bool) -> Vec<ShowNote> {
     let mut pending: Option<String> = None;
     let mut newest_first = Vec::new();
     for entry in card["logbook"].as_array().into_iter().flatten() {
         if let Some(note) = entry["note"].as_str() {
             let note = note.trim();
-            if note.is_empty() || note.starts_with(vissue_core::model::CLAIM_RELEASED_NOTE) {
+            if note.is_empty()
+                || note.starts_with(vissue_core::model::CLAIM_RELEASED_NOTE)
+                || (!keep_machinery && undo::machinery(note))
+            {
+                pending.take();
                 continue;
             }
             let at = entry["timestamp"].as_str().unwrap_or("");

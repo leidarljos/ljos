@@ -175,6 +175,16 @@ fn a_filed_body_and_two_notes_show_on_the_page() {
     assert_eq!(notes[0]["text"].as_str(), Some(FIRST));
     assert_eq!(notes.last().unwrap()["text"].as_str(), Some("note 9"));
     assert_eq!(all["body"].as_str(), Some(BODY));
+
+    board.ok(&["note", &id, "ballot-sig: saddle keep ab cd"]);
+    let plain = board.ok(&["show", &id]);
+    assert!(
+        !plain.contains("ballot-sig"),
+        "a signature line is not a note a person reads:\n{plain}"
+    );
+    assert!(plain.contains("note 9"), "{plain}");
+    let full = board.ok(&["show", &id, "--all"]);
+    assert!(full.contains("ballot-sig: saddle keep ab cd"), "{full}");
 }
 
 /// The body is wrapped, so the page may split it. The words stay in order.

@@ -1936,9 +1936,11 @@ enum Cmd {
     /// Show what the votes decide, and whether a push may proceed.
     ///
     /// First the seat ballots alone, which are what the push check uses,
-    /// then the weighted settle over every ballot as advice: shares, who
-    /// leads, influence, and what each anchor did. An anchor is how far a
-    /// persona holds its own view, from 0 to 1.
+    /// then the tracker's weighted settle over every ballot as advice:
+    /// the count, each seat's social power, and the option with its share
+    /// of the group's weight. That advice does not clear a push. The model
+    /// crate's reading, with shares and influence, is `--json`. An anchor
+    /// is how far a persona keeps its own view, from 0 to 1.
     ///
     /// The model crate's settle weighs each model family as one voter. A
     /// ballot's family is the model its verified slot records, else the
@@ -6633,6 +6635,10 @@ fn run_command() -> Result<()> {
             if let Some(line) = ljos_cli::slot::families_in_words(&families, have_model) {
                 print!("{line}");
             }
+            // The page a person reads is the tracker's weighted settle.
+            // The model crate's shares and influence stay on `--json`.
+            let tracker_in_steps = steps.iter().any(|step| step.bin == "vissue");
+            let mut printed_tracker = false;
             for step in steps {
                 let settle = step.bin == "ljos-consensus"
                     && step.args.first().map(String::as_str) == Some("settle");
@@ -6646,13 +6652,50 @@ fn run_command() -> Result<()> {
                     {
                         println!("dissent: {line}");
                     }
+                    printed_tracker = true;
                     continue;
                 }
                 if !settle {
                     run(step.bin, &step.args)?;
                     continue;
                 }
+                // The model settle still runs, so a stall is the same wait
+                // the call deadline already names. The page a person reads
+                // is the tracker's weighted settle when that command answers.
                 let said = run_captured(step.bin, &step.args)?;
+                if on_path("vissue") && !tracker_in_steps && !printed_tracker {
+                    if let Ok(tracker) =
+                        ljos_cli::consensus_steps_anchored(&id, false, true, &trust, &personas)
+                    {
+                        let mut page = String::new();
+                        let mut answered = true;
+                        for tracker_step in tracker {
+                            match run_captured(tracker_step.bin, &tracker_step.args) {
+                                Ok(tracker_said) => {
+                                    page.push_str(&tracker_said.stdout);
+                                    for line in ljos_cli::dissent_lines(&format!(
+                                        "{}\n{}",
+                                        tracker_said.stdout, tracker_said.stderr
+                                    )) {
+                                        page.push_str(&format!("dissent: {line}\n"));
+                                    }
+                                }
+                                Err(_) => {
+                                    answered = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if answered && !page.is_empty() {
+                            print!("{page}");
+                            printed_tracker = true;
+                            continue;
+                        }
+                    }
+                }
+                if printed_tracker || tracker_in_steps {
+                    continue;
+                }
                 match ljos_cli::settle_in_words(&said.stdout, &anchors) {
                     Some(words) => print!("{words}"),
                     None => print!("{}", said.stdout),
