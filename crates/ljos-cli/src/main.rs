@@ -3056,7 +3056,9 @@ fn run_command() -> Result<()> {
                         return Ok(());
                     }
                 }
-                if let Some(reason) = ljos_cli::stop_audit(&input, stop_active) {
+                if let Some(reason) =
+                    ljos_cli::hook_timed("stop_audit", || ljos_cli::stop_audit(&input, stop_active))
+                {
                     println!("{}", ljos_cli::block_output(call.shape, &reason));
                 }
                 return Ok(());
@@ -3071,7 +3073,9 @@ fn run_command() -> Result<()> {
             if call.event == "Stop" && call.shape != ljos_cli::HookShape::Context && !agy_idle {
                 // At a usage limit the stores hear what the conversation
                 // knows before the runner cuts it off.
-                if let Some(reason) = ljos_cli::limit_stop(&input, call.session.as_deref()) {
+                if let Some(reason) = ljos_cli::hook_timed("limit_stop", || {
+                    ljos_cli::limit_stop(&input, call.session.as_deref())
+                }) {
                     println!("{}", ljos_cli::block_output(call.shape, &reason));
                     return Ok(());
                 }
@@ -3081,7 +3085,9 @@ fn run_command() -> Result<()> {
                     println!("{}", ljos_cli::block_output(call.shape, &reason));
                     return Ok(());
                 }
-                if let Some(reason) = ljos_cli::stop_audit(&input, stop_active) {
+                if let Some(reason) =
+                    ljos_cli::hook_timed("stop_audit", || ljos_cli::stop_audit(&input, stop_active))
+                {
                     println!("{}", ljos_cli::block_output(call.shape, &reason));
                     return Ok(());
                 }
@@ -3090,7 +3096,7 @@ fn run_command() -> Result<()> {
                 // idle. Each letter is receipted once delivered, so the
                 // next stop is not held for it again.
                 if subagent.is_none() {
-                    let (mail, ids) = ljos_cli::mail::stop_note();
+                    let (mail, ids) = ljos_cli::hook_timed("stop_mail", ljos_cli::mail::stop_note);
                     if !mail.is_empty() {
                         println!("{}", ljos_cli::block_output(call.shape, &mail));
                         let _ = std::io::Write::flush(&mut std::io::stdout());

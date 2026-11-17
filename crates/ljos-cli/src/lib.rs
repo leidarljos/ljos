@@ -43534,6 +43534,13 @@ fn output_within(
 ) -> std::io::Result<std::process::Output> {
     use std::io::{Read, Write};
     use std::process::Stdio;
+    let deadline = wall_left().map_or(deadline, |left| left.min(deadline));
+    if deadline.is_zero() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "hook budget spent",
+        ));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

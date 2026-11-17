@@ -611,6 +611,13 @@ struct Attempt {
 /// A miss is still an attempt, so the log can score a timeout.
 fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Attempt {
     let started = std::time::Instant::now();
+    let mut bounded = j.clone();
+    if let Some(left) = crate::wall_left() {
+        bounded.budget_ms = bounded
+            .budget_ms
+            .min(u64::try_from(left.as_millis()).unwrap_or(u64::MAX));
+    }
+    let j = &bounded;
     let backend = j.backend.name();
     let model = j.model.clone();
     let miss = |status: &'static str, latency_ms: u128| Attempt {
@@ -705,12 +712,19 @@ fn post(
 
 /// Ask each judge at once, each inside its own budget.
 fn ask_all(judges: &[(String, Judge, String)], body: &Value, cache_days: u64) -> Vec<Attempt> {
+    let deadline = crate::wall_deadline();
     std::thread::scope(|scope| {
         let handles: Vec<_> = judges
             .iter()
             .map(|(name, j, key)| {
                 let name = name.clone();
                 scope.spawn(move || {
+                    // Worker threads inherit the call's absolute deadline.
+                    let _wall = deadline.map(|end| {
+                        crate::arm_wall_budget_for(
+                            end.saturating_duration_since(std::time::Instant::now()),
+                        )
+                    });
                     let mut attempt = ask_one(j, key, body, cache_days);
                     attempt.name = name;
                     attempt
@@ -925,10 +939,16 @@ pub fn pool(body: &Value, replies: &[(f64, Value)]) -> Value {
     Value::Object(out)
 }
 
+fn request_budget(configured_ms: u64) -> Option<Duration> {
+    let configured = Duration::from_millis(configured_ms);
+    let remaining = crate::wall_left().map_or(configured, |left| left.min(configured));
+    (!remaining.is_zero()).then_some(remaining)
+}
+
 /// The request as Jev takes it: the body as is, the key as a bearer.
 fn jev_post(cfg: &Judge, key: &str, body: Value) -> Option<Value> {
     ureq::post(&cfg.endpoint)
-        .timeout(Duration::from_millis(cfg.budget_ms))
+        .timeout(request_budget(cfg.budget_ms)?)
         .set("Authorization", &format!("Bearer {key}"))
         .set("Content-Type", "application/json")
         .send_json(body)
@@ -1059,7 +1079,7 @@ pub fn concentration(probs: &serde_json::Map<String, Value>) -> Option<f64> {
 fn chat_post(cfg: &Judge, key: &str, body: &Value) -> Option<Value> {
     let url = format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/'));
     let mut req = ureq::post(&url)
-        .timeout(Duration::from_millis(cfg.budget_ms))
+        .timeout(request_budget(cfg.budget_ms)?)
         .set("Content-Type", "application/json");
     if !key.is_empty() {
         req = req.set("Authorization", &format!("Bearer {key}"));
@@ -1081,16 +1101,11 @@ fn chat_post(cfg: &Judge, key: &str, body: &Value) -> Option<Value> {
 fn command_post(cfg: &Judge, body: &Value) -> Option<Value> {
     let argv = cfg.command.as_deref()?;
     let (prog, args) = argv.split_first()?;
-    let secs = (cfg.budget_ms.div_ceil(1000)).max(1);
+    let budget = request_budget(cfg.budget_ms)?;
     let mut cmd = std::process::Command::new(prog);
     cmd.args(args).env("LJOS_JUDGE", "1");
     let text = body.to_string();
-    let out = crate::output_within(
-        cmd,
-        Some(text.as_bytes()),
-        std::time::Duration::from_secs(secs),
-    )
-    .ok()?;
+    let out = crate::output_within(cmd, Some(text.as_bytes()), budget).ok()?;
     if !out.status.success() {
         return None;
     }
