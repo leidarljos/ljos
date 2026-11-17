@@ -186,7 +186,15 @@ fn an_edit_names_the_list_that_hides_a_kept_row() {
     let seat = Seat::on(daemon.url());
     let (code, stdout, stderr) = seat.run(&["remember", SHORT]);
     assert_eq!(code, 0, "{stdout}{stderr}");
-    let id = stdout.split('\t').next().unwrap_or("").trim().to_string();
+    let id = stdout
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("id ")
+                .and_then(|rest| rest.split([',', ' ']).next())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
     assert!(id.len() >= 8, "{stdout}");
     let (code, edited, err) = seat.run(&[
         "memories",

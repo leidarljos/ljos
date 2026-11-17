@@ -129,6 +129,17 @@ impl Seat {
     }
 }
 
+fn lesson_id(ack: &str) -> String {
+    ack.lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("id ")
+                .and_then(|rest| rest.split([',', ' ']).next())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
 fn succeeded(out: &Output, what: &str) -> String {
     assert!(
         out.status.success(),
@@ -161,15 +172,15 @@ fn five_wordings_of_one_lesson_leave_room_for_three_others_at_a_sitting() {
 
     let (ack, said) = seat.remember(WORDINGS[0]);
     assert!(!said.contains("reinforced"), "{said}");
-    let held: String = ack.split('\t').next().unwrap().to_string();
-    let short = &held[..8];
+    let short = lesson_id(&ack);
+    assert!(short.len() >= 8, "{ack}");
     for wording in &WORDINGS[1..] {
         let (ack, said) = seat.remember(wording);
         assert!(
             said.contains(&format!("reinforced {short} instead of adding a copy")),
             "{wording}\nstdout:\n{ack}\nstderr:\n{said}"
         );
-        assert!(ack.starts_with(&held), "{ack}");
+        assert!(ack.contains(&format!("id {short}")), "{ack}");
     }
     for other in OTHERS {
         let (_, said) = seat.remember(other);
@@ -185,8 +196,8 @@ fn five_wordings_of_one_lesson_leave_room_for_three_others_at_a_sitting() {
     );
     let entry: Vec<&str> = listed
         .lines()
-        .skip_while(|l| !l.starts_with(short))
-        .take_while(|l| l.starts_with(short) || l.starts_with("    "))
+        .skip_while(|l| !l.starts_with(short.as_str()))
+        .take_while(|l| l.starts_with(short.as_str()) || l.starts_with("    "))
         .collect();
     assert!(entry.iter().any(|l| l.contains("recalled 4x")), "{listed}");
     for wording in &WORDINGS[1..] {
