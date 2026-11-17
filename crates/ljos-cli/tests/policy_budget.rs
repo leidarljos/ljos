@@ -140,6 +140,35 @@ fn recall_keeps_checker_budget(mode: &str) {
     assert_verdict(output, mode, start.elapsed());
 }
 
+fn hook_memory_keeps_checker_budget(mode: &str) {
+    let home = tempfile::tempdir().unwrap();
+    let pack = QuietPack::start();
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "memory-budget-fixture",
+        "cwd": home.path(),
+        "tool_name": "Bash",
+        "tool_input": {"command": "printf hello"}
+    });
+    let start = Instant::now();
+    let mut child = command(home.path(), mode)
+        .arg("hook")
+        .env("PACKSET_URL", &pack.address)
+        .env("PACKSET_WORKSPACE", "seat")
+        .env("LJOS_HOOKD", "off")
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_verdict(output, mode, start.elapsed());
+}
+
 fn admission_keeps_checker_budget(mode: &str) {
     let home = tempfile::tempdir().unwrap();
     let mut command = command(home.path(), mode);
@@ -201,4 +230,14 @@ fn strict_hook_keeps_checker_time_after_admission() {
 #[test]
 fn advisory_hook_keeps_checker_time_after_admission() {
     admission_keeps_checker_budget("advisory");
+}
+
+#[test]
+fn strict_hook_checks_before_reading_memory_rules() {
+    hook_memory_keeps_checker_budget("strict");
+}
+
+#[test]
+fn advisory_hook_checks_before_reading_memory_rules() {
+    hook_memory_keeps_checker_budget("advisory");
 }
