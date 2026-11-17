@@ -9868,7 +9868,7 @@ fn vissue_mcp_line(tool: &str, input: &Value) -> Option<String> {
             None => format!("vissue {verb}"),
         },
         "refile" => match text(&["parent"]) {
-            Some(parent) => format!("vissue refile {id} --parent {parent}"),
+            Some(parent) => format!("vissue refile --to {parent} {id}"),
             None => format!("vissue refile {id}"),
         },
         "note" | "append" => format!("vissue {verb} {id} note"),
@@ -14129,9 +14129,8 @@ pub fn file_placement(
 }
 
 /// The project this checkout is, and why. A `.ljos/project` line wins,
-/// then `project = "..."` in `ljos.toml`, then the git checkout's
-/// directory name. No git checkout is no project: a held issue can
-/// still name one.
+/// then `project = "..."` in `ljos.toml`. No git checkout is no project:
+/// a held issue can still name one.
 fn cwd_project() -> Option<(String, String)> {
     let cwd = std::env::current_dir().ok()?;
     let top = checkout_root(&cwd)?;
@@ -14150,14 +14149,7 @@ fn cwd_project() -> Option<(String, String)> {
             format!("project in {}", top.join("ljos.toml").display()),
         ));
     }
-    let name = top.file_name()?.to_str()?.trim().to_string();
-    if name.is_empty() {
-        return None;
-    }
-    Some((
-        name,
-        format!("the git checkout directory is {}", top.display()),
-    ))
+    None
 }
 
 /// Whether the working directory is a git checkout.
@@ -42921,6 +42913,108 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
     }
 }
 
+/// Move `issue` under `parent`, write a dated note, and persist the tracker.
+///
+/// The edit changes only that ticket's `:PARENT:` link. Unknown ids are
+/// refused before the write, and a cycle is refused before anything is
+/// changed.
+///
+/// # Errors
+///
+/// Either id is empty, either id is unknown, or the new parent would
+/// create a cycle.
+pub fn reparent_issue(issue: &str, parent: &str) -> Result<String> {
+    let issue = issue.trim();
+    let parent = parent.trim();
+    if issue.is_empty() || parent.is_empty() {
+        return Err(policy_label::labelled(
+            "input-warning",
+            "parent: pass the ticket id and the new parent id",
+        ));
+    }
+    if issue == parent {
+        bail!("parent: issue {issue} cannot name itself as parent");
+    }
+    if let Some(line) = ticket_refusal(issue) {
+        return Err(anyhow::anyhow!("{line}"));
+    }
+    if let Some(line) = ticket_refusal(parent) {
+        return Err(anyhow::anyhow!("{line}"));
+    }
+    if parent_chain_contains(parent, issue)? {
+        bail!("parent: setting {parent} as parent of {issue} would create a cycle");
+    }
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    layout.require_tracker()?;
+    let router = vissue_core::Router::load(layout)?;
+    let hit = router
+        .find_by_id(issue)
+        .map_err(|err| anyhow::anyhow!("parent: {err}"))?;
+    let path = hit.path.clone();
+    let project = hit.project.clone();
+    let layout = hit.layout.clone();
+    let file_path = path.clone();
+    let prior = vissue_core::store::with_issues_lock(&path, || {
+        let mut doc = vissue_core::IssueDoc::parse_file(&project, &file_path)?;
+        keep_claim_stamps_on_disk(&mut doc);
+        let heading = doc
+            .headings
+            .iter_mut()
+            .find(|h| h.id == issue)
+            .ok_or_else(|| vissue_core::Error::IssueNotFound {
+                id: issue.to_string(),
+            })?;
+        let before = vissue_core::props::get(&heading.properties, vissue_core::props::PARENT)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if before.as_deref() == Some(parent) {
+            return Ok(None);
+        }
+        vissue_core::props::insert(
+            &mut heading.properties,
+            vissue_core::props::PARENT,
+            parent.to_string(),
+        );
+        doc.write()?;
+        Ok(Some(before.unwrap_or_else(|| "none".to_string())))
+    })
+    .map_err(|err| policy_label::failed("effect-unavailable", anyhow::anyhow!("parent: {err}")))?;
+    let Some(was_parent) = prior else {
+        return Ok(format!("parent: {issue} is already under {parent}\n"));
+    };
+    let note = format!("parent changed: {was_parent} -> {parent}");
+    vissue_core::ops::note(&layout, issue, &note)
+        .with_context(|| format!("parent: note: {issue}"))?;
+    Ok(format!(
+        "parent: {issue} now has parent {parent}\n{}",
+        persist_tracker(issue, "reparented")
+    ))
+}
+
+fn parent_chain_contains(start: &str, needle: &str) -> Result<bool> {
+    let mut cur = start.to_string();
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        if cur == needle {
+            return Ok(true);
+        }
+        if !seen.insert(cur.clone()) {
+            return Ok(true);
+        }
+        let row = tracker_show_json(&cur)?;
+        let Some(next) = row["parent"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        else {
+            return Ok(false);
+        };
+        cur = next;
+    }
+}
+
 /// One ticket, with each blocker and whether that blocker is still open.
 ///
 /// The body follows the header. The most recent notes follow the body,
@@ -57574,9 +57668,9 @@ mod tests {
         assert_eq!((parent, project, said), (None, None, None));
     }
 
-    /// A checkout's own name beats a held issue from another project.
+    /// An explicit checkout project beats a held issue from another project.
     #[test]
-    fn file_uses_the_checkout_project_not_a_held_issue_from_elsewhere() {
+    fn file_uses_an_explicit_checkout_project_not_a_held_issue_from_elsewhere() {
         let _cwd = super::test_env_lock();
         let away = tempfile::tempdir().unwrap();
         let repo = away.path().join("leidarljos");
@@ -57594,6 +57688,8 @@ mod tests {
             assert!(out.status.success(), "{args:?}");
         };
         git(&["init", "-q"]);
+        std::fs::create_dir_all(repo.join(".ljos")).unwrap();
+        std::fs::write(repo.join(".ljos/project"), "leidarljos\n").unwrap();
         let back = std::env::current_dir().unwrap();
         std::env::set_current_dir(&repo).unwrap();
         struct Back(std::path::PathBuf);
@@ -57633,6 +57729,42 @@ mod tests {
             said.contains("`ljos file --parent wt-pareback7-ab12 TITLE`"),
             "{said}"
         );
+    }
+
+    /// A bare checkout with no `.ljos/project` or `ljos.toml` does not
+    /// invent a project from the directory name.
+    #[test]
+    fn file_does_not_take_project_from_checkout_basename() {
+        let _cwd = super::test_env_lock();
+        let away = tempfile::tempdir().unwrap();
+        let repo = away.path().join("obchk");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env("GIT_CONFIG_COUNT", "0")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+        };
+        git(&["init", "-q"]);
+        let back = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&repo).unwrap();
+        struct Back(std::path::PathBuf);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _back = Back(back);
+        let (parent, project, said) = file_placement(false, None, None, None);
+        assert_eq!(parent, None);
+        assert_eq!(project, None);
+        assert_eq!(said, None);
     }
 
     /// `-p Software/hle-mm` is the org prefix twice. The write uses `hle-mm`.

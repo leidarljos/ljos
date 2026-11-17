@@ -49,14 +49,23 @@ impl Seat {
     }
 
     fn file(&self, args: &[&str]) -> std::process::Output {
+        self.file_in(self.dir.path(), args, &[])
+    }
+
+    fn file_in(
+        &self,
+        cwd: &std::path::Path,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+    ) -> std::process::Output {
         let home = self.dir.path().join("home");
         let path = format!(
             "{}:{}",
             self.dir.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
-            .arg("file")
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        cmd.arg("file")
             .args(args)
             .env_clear()
             .env("PATH", &path)
@@ -68,11 +77,11 @@ impl Seat {
             .env("LJOS_HOLD", "rohit")
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
-            // A git checkout names its own project. This seat has none, so
-            // the hold and `vissue identity` decide where the ticket goes.
-            .current_dir(self.dir.path())
-            .output()
-            .unwrap()
+            .current_dir(cwd);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
     }
 
     fn creates(&self) -> Vec<String> {
@@ -128,42 +137,65 @@ fn porcelain_file_under_a_hold_prints_only_the_id() {
     assert!(err.contains("--top -p"), "{err}");
 }
 
-/// `vissue identity` still prints a prefix when this directory is not a
-/// git checkout. The line names that default and the `-p` command.
+/// A `vissue identity` prefix alone does not pick a project.
 #[test]
-fn a_prefix_outside_a_checkout_names_the_flag() {
+fn a_prefix_outside_a_checkout_names_p() {
     let seat = Seat::new("'vissue test' 'root=/tmp/tracker' 'prefix=ljos'");
     let out = seat.file(&["x"]);
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "{err}");
-    let creates = seat.creates();
-    assert_eq!(creates.len(), 1, "{creates:?}");
-    assert!(
-        creates[0].starts_with("vissue create -p ljos "),
-        "{creates:?}"
-    );
-    assert!(!creates[0].contains("--parent"), "{creates:?}");
-    assert!(
-        err.contains(
-            "filed in ljos. This directory is not a git checkout, so run `ljos file TITLE -p NAME`."
-        ),
-        "{err}"
-    );
-    assert!(!err.contains("this checkout's project"), "{err}");
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("name one with -p NAME"), "{err}");
+    assert!(seat.creates().is_empty(), "{:?}", seat.creates());
 }
 
 #[test]
-fn a_checkout_with_no_prefix_files_in_software() {
+fn a_checkout_with_no_prefix_names_p() {
     let seat = Seat::new("'vissue test' 'root=/tmp/tracker'");
     let out = seat.file(&["x"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("name one with -p NAME"), "{err}");
+    assert!(seat.creates().is_empty(), "{:?}", seat.creates());
+}
+
+#[test]
+fn a_scratch_checkout_without_a_project_names_p() {
+    let seat = Seat::new("'vissue test'");
+    let checkout = seat.dir.path().join("obchk");
+    std::fs::create_dir_all(&checkout).unwrap();
+    let init = Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(&checkout)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{init:?}");
+    let out = seat.file_in(&checkout, &["x"], &[]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("name one with -p NAME"), "{err}");
+    assert!(seat.creates().is_empty(), "{:?}", seat.creates());
+}
+
+#[test]
+fn a_scratch_checkout_uses_ljos_project_when_set() {
+    let seat = Seat::new("'vissue test'");
+    let checkout = seat.dir.path().join("obchk");
+    std::fs::create_dir_all(&checkout).unwrap();
+    let init = Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(&checkout)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{init:?}");
+    let out = seat.file_in(&checkout, &["x"], &[("LJOS_PROJECT", "seatproj")]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{err}");
     let creates = seat.creates();
     assert_eq!(creates.len(), 1, "{creates:?}");
     assert!(
-        creates[0].starts_with("vissue create -p Software "),
+        creates[0].starts_with("vissue create -p seatproj "),
         "{creates:?}"
     );
-    assert!(err.contains("filed in Software"), "{err}");
-    assert!(!err.contains('?'), "file asked a question:\n{err}");
 }

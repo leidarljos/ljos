@@ -265,3 +265,16 @@ fn a_missing_ticket_is_named_and_nothing_is_written() {
     assert!(said.contains("probe-nosuch"), "{said}");
     assert!(board.heading(&board.a).blocked_by().is_empty());
 }
+
+#[test]
+fn a_ticket_like_word_after_block_suggests_on() {
+    let board = Board::new();
+    let out = board.ljos(&["block", &board.a, "probe-AB12"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(
+        err.contains("looks like a ticket id") && err.contains("ljos block ISSUE --on probe-AB12"),
+        "{err}"
+    );
+    assert!(board.heading(&board.a).blocked_by().is_empty());
+}

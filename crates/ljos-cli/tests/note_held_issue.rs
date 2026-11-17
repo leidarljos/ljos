@@ -161,6 +161,19 @@ fn a_hyphenated_word_shorter_than_a_minted_id_stays_text() {
     );
 }
 
+/// A multiline value captured from another command is not one ticket id.
+#[test]
+fn a_multiline_first_argument_is_refused_as_an_id() {
+    let hab = Hab::new();
+    hab.hold("proj-aaaa");
+    let out = hab.note(&["note", "proj-bbbb\nproject: demo\nfile: /tmp/demo"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stderr.contains("must be one ticket id"), "{stderr}");
+    assert!(!hab.calls().contains("vissue note"), "{}", hab.calls());
+}
+
 /// No hold and no id. The command exits 1, names `ljos sitting ISSUE`,
 /// and does not ask the tracker to note.
 #[test]

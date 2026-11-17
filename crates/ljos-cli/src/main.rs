@@ -1080,7 +1080,9 @@ enum Cmd {
     /// names another or `--top` none, in the parent's project. `-p` naming
     /// another project files at its top level. A held issue the tracker
     /// does not have is dropped, and the ticket is filed at the top of the
-    /// project. The heading and the path go
+    /// project. With no held issue, no `--parent`, no `-p`, and no project
+    /// in checkout config or `LJOS_PROJECT`, the command exits 1 and names
+    /// `-p NAME`. The heading and the path go
     /// to stderr. A commit that landed is not printed, and neither is a push
     /// that landed. A refused commit, a refused push, or a push that was
     /// skipped is one sentence naming the command to run. `--verbose` prints
@@ -1381,6 +1383,18 @@ enum Cmd {
         /// Drop the edge to this ticket.
         #[arg(long, value_name = "ID", conflicts_with = "on")]
         off: Option<String>,
+    },
+    /// Move a ticket under another parent ticket.
+    ///
+    /// The write changes only that ticket's parent link, records a dated
+    /// note on the ticket, and commits the tracker.
+    ///
+    /// Example: `ljos parent proj-1a2b proj-9c3d`
+    Parent {
+        /// The ticket to move.
+        issue: String,
+        /// The new parent ticket.
+        parent: String,
     },
     /// Show one ticket, or one memory.
     ///
@@ -3135,12 +3149,6 @@ fn stop_ticket(id: &str) {
     }
 }
 
-/// Whether the working directory is a git checkout. A tracker prefix is
-/// not that checkout's project when this is false.
-fn cwd_is_checkout() -> bool {
-    ljos_cli::in_work_tree()
-}
-
 fn ticket_error(err: anyhow::Error) -> anyhow::Error {
     if ljos_cli::is_ticket_fault(&err) {
         eprintln!("{err}");
@@ -3164,6 +3172,12 @@ fn note_target(words: &[String]) -> Result<(String, String, bool)> {
     };
     if first.trim().is_empty() {
         bail!("{}", ljos_cli::EMPTY_TICKET_ID);
+    }
+    if rest.is_empty() && first.contains('\n') {
+        bail!(
+            "note: an id argument must be one ticket id, and {:?} is not one.",
+            first
+        );
     }
     if minted_issue_id(first) {
         return explicit_note(first, rest);
@@ -3216,6 +3230,11 @@ fn block_usage_line(cmd: &Cmd) -> Option<String> {
         );
     }
     let word = also.iter().find(|word| !vissue_id(word))?;
+    if ticket_like(word) {
+        return Some(format!(
+            "block: {word} looks like a ticket id, so run `ljos block ISSUE --on {word}`."
+        ));
+    }
     Some(format!(
         "ljos: no command {word}, so run `ljos block --help`."
     ))
@@ -3296,6 +3315,18 @@ fn minted_issue_id(word: &str) -> bool {
 /// than the default mint, and it is still the issue when nothing is held.
 fn vissue_id(word: &str) -> bool {
     vissue_id_parts(word).is_some()
+}
+
+fn ticket_like(word: &str) -> bool {
+    let Some((project, suffix)) = word.trim().split_once('-') else {
+        return false;
+    };
+    !project.trim().is_empty()
+        && !suffix.trim().is_empty()
+        && project.chars().all(|c| c.is_ascii_alphanumeric())
+        && suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn vissue_id_parts(word: &str) -> Option<(&str, &str)> {
@@ -3661,6 +3692,7 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
         Cmd::Remember { .. }
             | Cmd::Note { .. }
             | Cmd::File { .. }
+            | Cmd::Parent { .. }
             | Cmd::Sitting { .. }
             | Cmd::Finish { .. }
             | Cmd::Hook(_)
@@ -3784,6 +3816,7 @@ fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
         Cmd::Remember { .. }
         | Cmd::Note { .. }
         | Cmd::File { .. }
+        | Cmd::Parent { .. }
         | Cmd::Sitting { .. }
         | Cmd::Claim { .. }
         | Cmd::Slot { .. }
@@ -5629,41 +5662,23 @@ fn run_command() -> Result<()> {
             {
                 anyhow::bail!("{}", passed_over.unwrap_or_default().trim_end());
             }
-            // No hold, no `--parent` and no `-p`: the `prefix=` line
-            // `vissue identity` prints for this checkout. `--top` still
-            // needs a named project. No prefix files in Software.
-            // The line waits until the ticket exists.
-            let mut prefix_line = None;
+            // A plain file with no hold and no `-p` may still name one
+            // project through `LJOS_PROJECT`.
             if project.is_none() && no_hold && !top && !named_parent && !named_project {
-                let prefix = run_captured("vissue", &["identity"]).ok().and_then(|said| {
-                    said.stdout.lines().find_map(|line| {
-                        let value = line.trim().strip_prefix("prefix=")?.trim();
-                        (!value.is_empty()).then(|| value.to_string())
-                    })
-                });
-                if let Some(prefix) = prefix {
-                    prefix_line = Some(if cwd_is_checkout() {
-                        format!("filed in {prefix}, this checkout's project")
-                    } else {
-                        format!(
-                            "filed in {prefix}. This directory is not a git checkout, so run `ljos file TITLE -p NAME`."
-                        )
-                    });
-                    project = Some(prefix);
-                }
+                project = std::env::var("LJOS_PROJECT")
+                    .ok()
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty());
             }
-            let defaulted = project.is_none() && !top;
             let project = match project {
                 Some(project) => project,
                 // `--top` still needs a project the caller named. A plain
-                // file, with no checkout prefix and no hold, uses the
-                // seat's default project. Nothing is asked. The line is
-                // printed once the ticket exists, so a missing tracker
-                // stays one error line.
+                // file needs a known project from the sitting, config, or
+                // `LJOS_PROJECT`.
                 None if top => {
                     anyhow::bail!("no project: name one with -p, or a parent with --parent");
                 }
-                None => "Software".to_string(),
+                None => anyhow::bail!("no project: name one with -p NAME"),
             };
             let qd = match (quorum, deadline.as_deref()) {
                 (Some(n), Some(d)) => Some((n, d)),
@@ -5704,13 +5719,8 @@ fn run_command() -> Result<()> {
                     eprintln!(
                         "held issue {id} is on another tracker; filed at the top of {project}"
                     );
-                } else {
-                    if let Some(line) = &passed_over {
-                        eprint!("{line}");
-                    }
-                    if let Some(line) = &prefix_line {
-                        eprintln!("{line}");
-                    }
+                } else if let Some(line) = &passed_over {
+                    eprint!("{line}");
                 }
             }
             let mut rest = ljos_cli::ensure_project_line(&text, &project);
@@ -5737,9 +5747,6 @@ fn run_command() -> Result<()> {
                 ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
             }
             if json {
-                if !id.is_empty() && defaulted && dropped.is_none() {
-                    rest.insert_str(0, "filed in Software, the default project\n");
-                }
                 let text = if detail {
                     rest.clone()
                 } else {
@@ -5758,9 +5765,6 @@ fn run_command() -> Result<()> {
                     rest = ljos_cli::without_routine_git(&rest);
                 }
                 if !id.is_empty() {
-                    if defaulted && dropped.is_none() {
-                        eprintln!("filed in Software, the default project");
-                    }
                     println!("{id}");
                 }
                 eprint!("{rest}");
@@ -5926,6 +5930,11 @@ fn run_command() -> Result<()> {
                 }
             };
             print!("{said}");
+        }
+        Cmd::Parent { issue, parent } => {
+            stop_ticket(&issue);
+            stop_ticket(&parent);
+            print!("{}", ljos_cli::reparent_issue(&issue, &parent)?);
         }
         Cmd::Show { issue, json, all } => {
             let said = ljos_cli::show_memory::show_any(&issue, json, all).map_err(show_error)?;
@@ -7407,6 +7416,7 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         Cmd::OpenPanel { .. } => "open-panel",
         Cmd::BumpPlan { dry_run: false, .. } => "bump-plan",
         Cmd::Block { .. } => "block",
+        Cmd::Parent { .. } => "parent",
         _ => return None,
     })
 }
