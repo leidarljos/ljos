@@ -67,7 +67,7 @@ Each repair is one line.
 Each problem it leaves is one line, and that line names the one command to run.
 A row doctor can repair ends with ``ljos doctor --fix``.
 
-It creates a missing ljos home (``$XDG_STATE_HOME/ljos``, or ``~/.local/state/ljos``) and a ``ljos.toml`` that sets no keys, so the defaults stand.
+It creates a missing ljos home (``$XDG_STATE_HOME/ljos``, or ``~/.local/state/ljos``) and, when asked, a ``ljos.toml`` that sets no keys. A missing ``ljos.toml`` is not a warning, because the defaults apply.
 It renames a stale lock or pid file whose process is gone, adding ``.bak`` to the name.
 It starts a pack writer that is not answering with ``packset ensure`` when ``packset`` is on ``PATH``.
 It records the session seat when a runner session id is set and that seat is not recorded yet.

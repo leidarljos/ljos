@@ -62,10 +62,9 @@ Install
    info	encoder	not installed. Search matches words, so run `cargo binstall --locked packset-embed`.
    info	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
    ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
-   warn	ljos config	/home/you/.config/ljos/ljos.toml is missing, so run `ljos doctor --fix`
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
 
-With no seat named, the ``seat source`` row warns that the read uses every seat. When the encoder is not installed, an ``encoder`` row follows and names ``cargo binstall --locked packset-embed``. The ``sitting-gate`` row is ``info`` and says ``not active here`` when no agent runner is above the shell. The config row says the defaults stand when nothing is set. The ``ljos config`` row warns that the file is missing and names ``ljos doctor --fix``. Run ``ljos doctor`` from your home directory. In a checkout, the config row names ``.ljos/gates.toml`` instead.
+With no seat named, the ``seat source`` row warns that the read uses every seat. When the encoder is not installed, an ``encoder`` row follows and names ``cargo binstall --locked packset-embed``. The ``sitting-gate`` row is ``info`` and says ``not active here`` when no agent runner is above the shell. The config row says the defaults apply when nothing is set. A missing ``ljos.toml`` is not a warning. Run ``ljos doctor`` from your home directory. In a checkout, the config row names ``.ljos/gates.toml`` instead.
 
 From a checkout, that script installs the published release. The release is a complete install of ljos and the sibling tools. A release attaches the same script as ``install.sh``.
 The copy on the 0.41.1 release asked for a vissue archive that project does not publish. The 0.41.2 script fetches the archive the vissue release publishes.

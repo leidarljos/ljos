@@ -147,7 +147,6 @@ fn doctor_fix_creates_a_missing_home_and_config() {
     let seat = Seat::new("home");
     let (_code, text, _) = seat.run(&["doctor"], &[]);
     let home = row(&text, "ljos home").unwrap_or("");
-    let config = row(&text, "ljos config").unwrap_or("");
     assert!(
         home.starts_with("warn\t")
             && home.contains(&seat.state().display().to_string())
@@ -155,11 +154,10 @@ fn doctor_fix_creates_a_missing_home_and_config() {
         "{text}"
     );
     assert!(
-        config.starts_with("warn\t")
-            && config.contains(&seat.config().display().to_string())
-            && config.ends_with("run `ljos doctor --fix`"),
-        "{text}"
+        row(&text, "ljos config").is_none(),
+        "a missing ljos.toml is covered by the defaults:\n{text}"
     );
+    assert!(!text.contains("ljos.toml is missing"), "{text}");
     assert!(text.contains("seat source"), "{text}");
 
     let (_, after, err) = seat.run(&["doctor", "--fix"], &[]);
@@ -194,6 +192,42 @@ fn doctor_fix_creates_a_missing_home_and_config() {
     assert!(row(&after, "ljos home").is_none(), "{after}");
     assert!(row(&after, "ljos config").is_none(), "{after}");
     assert!(after.contains("seat source"), "{after}");
+}
+
+/// `ljos onboard` leaves the defaults in place and does not write
+/// `ljos.toml`. Doctor does not tell the person to create that file.
+#[test]
+fn doctor_after_onboard_does_not_warn_that_the_config_is_missing() {
+    let seat = Seat::new("after-onboard");
+    let (code, onboard, err) = seat.run(&["onboard"], &[]);
+    assert!(
+        !seat.config().exists(),
+        "onboard wrote a config file\n{onboard}{err}"
+    );
+    let (_, text, _) = seat.run(&["doctor"], &[]);
+    assert!(
+        row(&text, "ljos config").is_none(),
+        "onboard exited {code}\n{onboard}{err}\ndoctor:\n{text}"
+    );
+    assert!(!text.contains("ljos.toml is missing"), "{text}");
+}
+
+/// A path that exists and is not a file is still a warning. The defaults
+/// cannot be read through it.
+#[test]
+fn doctor_warns_when_the_config_path_is_not_a_file() {
+    let seat = Seat::new("config-dir");
+    std::fs::create_dir_all(seat.state()).unwrap();
+    std::fs::create_dir_all(seat.config()).unwrap();
+    let (_, text, _) = seat.run(&["doctor"], &[]);
+    let config = row(&text, "ljos config").unwrap_or("");
+    assert!(
+        config.starts_with("warn\t")
+            && config.contains("is not a file")
+            && config.contains(&seat.config().display().to_string())
+            && config.ends_with("run `ljos doctor --fix`"),
+        "{text}"
+    );
 }
 
 #[test]

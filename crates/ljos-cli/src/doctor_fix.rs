@@ -1,8 +1,9 @@
 //! Repairs `ljos doctor --fix` may make, and the rows that name them.
 //!
 //! Each repair stays inside the ljos directories and can be undone.
-//! A missing state directory and a missing `ljos.toml` are created.
-//! The config file sets no keys, so the defaults stand.
+//! A missing state directory is created. A missing `ljos.toml` is not a
+//! warning: the defaults apply when that file is absent. `--fix` still
+//! writes the file, and the file sets no keys.
 //! A lock or pid file whose recorded process is gone is renamed with a
 //! `.bak` suffix. A file that is still in use, a key, a credential, a
 //! policy file, a git hook and a runner hook are left where they are.
@@ -131,15 +132,15 @@ fn home_row() -> Option<Habitat> {
 
 fn config_row() -> Option<Habitat> {
     let path = config_file()?;
-    if path.is_file() {
+    // A missing file is the defaults. Doctor does not warn about it.
+    // A path that is present and is not a file still needs a repair.
+    if path.is_file() || !path.exists() {
         return None;
     }
-    let why = if path.exists() {
-        format!("{} is not a file", path.display())
-    } else {
-        format!("{} is missing", path.display())
-    };
-    Some(problem("ljos config", why))
+    Some(problem(
+        "ljos config",
+        format!("{} is not a file", path.display()),
+    ))
 }
 
 fn session_row() -> Option<Habitat> {

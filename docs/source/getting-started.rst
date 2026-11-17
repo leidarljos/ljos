@@ -98,7 +98,6 @@ The tracker commits each change, so git needs an identity:
    info	encoder	not installed. Search matches words, so run `cargo binstall --locked packset-embed`.
    info	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
    ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
-   warn	ljos config	/home/you/.config/ljos/ljos.toml is missing, so run `ljos doctor --fix`
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
 
 On a clean install the ready line names memory, the tracker and the command guard.
@@ -108,7 +107,7 @@ When the encoder is not installed, an ``encoder`` row follows and names ``cargo 
 The ``sitting-gate`` row follows that. With no agent runner above the shell the word is ``info``, and the person's commits, merges and pushes are not held.
 Under a runner the same row names the seat and the branches a push waits on, ``develop`` or ``main``, and the number of seats that push waits for.
 A fresh tracker has no seat list, so that number is 2. When ``vissue.toml`` lists one active seat, that seat's own vote settles the push.
-A ``warn`` or ``no`` row names anything that still needs action, and the ready line follows those rows. The config row is always printed. With nothing set it says the defaults stand. The ``ljos config`` row is the empty config file, which a new install does not have yet. ``ljos doctor --fix`` creates it, and the defaults stand. The next command is still ``ljos remember``. Add ``--all`` to see every row.
+A ``warn`` or ``no`` row names anything that still needs action, and the ready line follows those rows. The config row is always printed. With nothing set it says the defaults apply. A missing ``ljos.toml`` is not a warning, because those defaults cover it. ``ljos doctor --fix`` writes that file when asked, and the file sets no keys. The next command is still ``ljos remember``. Add ``--all`` to see every row.
 
 Two sessions of one runner do not share a seat. With ``LJOS_SEAT`` unset, Claude Code, Codex and Cursor each take a name from the session id in this process, such as ``claude-k3j9x0a1b2``. An id that exists only on a parent does not count. Mail, claims and notes use that name, so one session can write to the other. Search and recall still read the whole runner: a lesson stored by one session is there for the next. Set ``LJOS_SEAT`` to a name of your own when the sessions should be one seat. ``ljos seat`` prints the name and where it came from. The how-to :doc:`Run two agents on one repository <howto-agents>` walks that case.
 
