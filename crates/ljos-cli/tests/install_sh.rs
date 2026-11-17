@@ -379,6 +379,7 @@ impl Machine {
 
 impl Drop for Machine {
     fn drop(&mut self) {
+        ljos_test_boot::reap_listener(self.port);
         let packset = self.bin().join("packset");
         if packset.is_file() {
             let _ = self.run(&packset, Some(&self.bin())).arg("stop").output();

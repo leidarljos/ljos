@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -561,8 +562,199 @@ static void leave_foreign_cgroup(void) {
     }
 }
 
+/* 8761 is 0x2239. packsetd on that port is the default writer. A test
+ * that detaches one leaves it for the next run. Pids already listening
+ * when this process starts are left alone. */
+#define PACK_PORT_MARK ":2239"
+#define KEPT_MAX 128
+
+static pid_t kept_pid[KEPT_MAX];
+static int kept_count;
+
+static int already_kept(pid_t pid) {
+    int i;
+    for (i = 0; i < kept_count; i++) {
+        if (kept_pid[i] == pid) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int field_copy(const char *start, char *out, size_t cap) {
+    size_t n = 0;
+    while (start[n] && start[n] != ' ' && n + 1 < cap) {
+        out[n] = start[n];
+        n++;
+    }
+    out[n] = 0;
+    return n > 0;
+}
+
+/* inode of a listening socket on the default port, or 0. */
+static unsigned long inode_on_default(const char *line) {
+    const char *field[12];
+    char local[128];
+    char state[16];
+    char inode[32];
+    int n = 0;
+    const char *p = line;
+    while (*p && n < 12) {
+        while (*p == ' ') {
+            p++;
+        }
+        if (!*p) {
+            break;
+        }
+        field[n++] = p;
+        while (*p && *p != ' ') {
+            p++;
+        }
+    }
+    if (n < 10) {
+        return 0;
+    }
+    if (!field_copy(field[1], local, sizeof local)) {
+        return 0;
+    }
+    if (!field_copy(field[3], state, sizeof state)) {
+        return 0;
+    }
+    if (strcmp(state, "0A") != 0) {
+        return 0;
+    }
+    if (strlen(local) < strlen(PACK_PORT_MARK) ||
+        strcmp(local + strlen(local) - strlen(PACK_PORT_MARK), PACK_PORT_MARK) != 0) {
+        return 0;
+    }
+    if (!field_copy(field[9], inode, sizeof inode)) {
+        return 0;
+    }
+    return strtoul(inode, 0, 10);
+}
+
+static int tables_have_inode(unsigned long inode) {
+    static const char *const tables[] = {"/proc/net/tcp", "/proc/net/tcp6"};
+    size_t t;
+    for (t = 0; t < 2; t++) {
+        FILE *file = fopen(tables[t], "r");
+        char line[512];
+        if (!file) {
+            continue;
+        }
+        if (!fgets(line, sizeof line, file)) {
+            fclose(file);
+            continue;
+        }
+        while (fgets(line, sizeof line, file)) {
+            if (inode_on_default(line) == inode) {
+                fclose(file);
+                return 1;
+            }
+        }
+        fclose(file);
+    }
+    return 0;
+}
+
+static int packsetd_on_default(pid_t pid) {
+    char path[64];
+    char comm[64];
+    char link[64];
+    DIR *fds;
+    struct dirent *ent;
+    FILE *file;
+    int found = 0;
+    snprintf(path, sizeof path, "/proc/%d/comm", (int)pid);
+    file = fopen(path, "r");
+    if (!file) {
+        return 0;
+    }
+    if (!fgets(comm, sizeof comm, file)) {
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+    if (strcmp(comm, "packsetd\n") != 0) {
+        return 0;
+    }
+    snprintf(path, sizeof path, "/proc/%d/fd", (int)pid);
+    fds = opendir(path);
+    if (!fds) {
+        return 0;
+    }
+    while ((ent = readdir(fds)) != 0) {
+        ssize_t n;
+        unsigned long inode = 0;
+        if (ent->d_name[0] == '.') {
+            continue;
+        }
+        snprintf(path, sizeof path, "/proc/%d/fd/%s", (int)pid, ent->d_name);
+        n = readlink(path, link, sizeof link - 1);
+        if (n < 0) {
+            continue;
+        }
+        link[n] = 0;
+        if (sscanf(link, "socket:[%lu]", &inode) == 1 && inode != 0 &&
+            tables_have_inode(inode)) {
+            found = 1;
+            break;
+        }
+    }
+    closedir(fds);
+    return found;
+}
+
+static void remember_default_writers(void) {
+    DIR *proc = opendir("/proc");
+    struct dirent *ent;
+    if (!proc) {
+        return;
+    }
+    while ((ent = readdir(proc)) != 0 && kept_count < KEPT_MAX) {
+        char *end = 0;
+        long pid = strtol(ent->d_name, &end, 10);
+        if (!end || *end || pid <= 0) {
+            continue;
+        }
+        if (packsetd_on_default((pid_t)pid)) {
+            kept_pid[kept_count++] = (pid_t)pid;
+        }
+    }
+    closedir(proc);
+}
+
+static void reap_default_writers(void) {
+    DIR *proc = opendir("/proc");
+    struct dirent *ent;
+    if (!proc) {
+        return;
+    }
+    while ((ent = readdir(proc)) != 0) {
+        char *end = 0;
+        long pid = strtol(ent->d_name, &end, 10);
+        if (!end || *end || pid <= 1) {
+            continue;
+        }
+        if (already_kept((pid_t)pid)) {
+            continue;
+        }
+        if (!packsetd_on_default((pid_t)pid)) {
+            continue;
+        }
+        /* The writer is its own session after packset ensure. The group
+         * kill stops an encoder child. The pid kill covers a writer that
+         * is not a group leader. */
+        kill(-(pid_t)pid, SIGKILL);
+        kill((pid_t)pid, SIGKILL);
+    }
+    closedir(proc);
+}
+
 __attribute__((constructor(65535))) void ljos_test_session_cgroup(void) {
     leave_foreign_cgroup();
+    remember_default_writers();
+    atexit(reap_default_writers);
 }
 
 #else

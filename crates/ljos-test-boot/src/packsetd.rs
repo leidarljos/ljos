@@ -784,6 +784,48 @@ fn alive(pid: u32) -> bool {
     }
 }
 
+/// Stop `packsetd` if it is listening on `port`.
+///
+/// `packset ensure` detaches the writer, so the `Child` a test spawned has
+/// already exited. Drop still has to reap that listener, including when the
+/// test panics.
+pub fn reap_listener(port: u16) {
+    if port == 0 {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            return;
+        };
+        for entry in dir.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if pid == std::process::id() {
+                continue;
+            }
+            let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
+                continue;
+            };
+            if comm.trim() != "packsetd" {
+                continue;
+            }
+            if proc_listen_port(pid) == Some(port) {
+                stop_pid(pid);
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = port;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

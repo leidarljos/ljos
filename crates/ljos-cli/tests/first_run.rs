@@ -227,6 +227,13 @@ impl Seat {
 
 impl Drop for Seat {
     fn drop(&mut self) {
+        if let Some(port) = self
+            .env
+            .get("PACKSET_PORT")
+            .and_then(|raw| raw.parse().ok())
+        {
+            ljos_test_boot::reap_listener(port);
+        }
         let _ = Command::new("packset")
             .arg("stop")
             .env_clear()
