@@ -3149,6 +3149,14 @@ fn stop_ticket(id: &str) {
     }
 }
 
+fn stop_ticket_node(id: &str) {
+    let trimmed = id.trim();
+    let is_claim_graph = trimmed.len() == 32 && trimmed.bytes().all(|b| b.is_ascii_hexdigit());
+    if !trimmed.is_empty() && !is_claim_graph {
+        stop_ticket(trimmed);
+    }
+}
+
 fn ticket_error(err: anyhow::Error) -> anyhow::Error {
     if ljos_cli::is_ticket_fault(&err) {
         eprintln!("{err}");
@@ -5518,6 +5526,7 @@ fn run_command() -> Result<()> {
                     .as_deref()
                     .or(issue.as_deref())
                     .context("deed: name the issue to drop it from")?;
+                stop_ticket(ticket);
                 for a in &remove {
                     let said = uncite_deed(ticket, a)?;
                     if porcelain {
@@ -5535,6 +5544,7 @@ fn run_command() -> Result<()> {
                 }
             } else if add.is_empty() {
                 let issue = issue.as_deref().context("deed: an issue is required")?;
+                stop_ticket(issue);
                 if porcelain {
                     let said = run_captured("vissue", &["deed", issue])?;
                     for line in said.stdout.lines() {
@@ -5552,6 +5562,7 @@ fn run_command() -> Result<()> {
                 }
             } else {
                 let issue = issue.as_deref().context("deed: an issue is required")?;
+                stop_ticket(issue);
                 let mut cited = Vec::with_capacity(add.len());
                 for a in &add {
                     cited.push(ljos_cli::resolve_deed(a)?);
@@ -5771,6 +5782,7 @@ fn run_command() -> Result<()> {
             }
         }
         Cmd::Options { issue, options } => {
+            stop_ticket(&issue);
             print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
         }
         Cmd::Note {
@@ -5783,6 +5795,7 @@ fn run_command() -> Result<()> {
             // A product checkout is not a tracker. `vissue note` would
             // create one there when the id is missing.
             ljos_cli::refuse_product_init(&issue)?;
+            stop_ticket(&issue);
             // The note is the tracker write. Reconciling a claim the
             // graph did not take waits until that write has landed, and
             // only for a short bound. The tracker prints `{id}: noted`
@@ -5916,6 +5929,13 @@ fn run_command() -> Result<()> {
             on,
             off,
         } => {
+            stop_ticket(&issue);
+            for id in &also {
+                stop_ticket(id);
+            }
+            if let Some(id) = &on {
+                stop_ticket(id);
+            }
             let said = if !also.is_empty() {
                 let mut out = String::new();
                 for id in &also {
@@ -6084,6 +6104,7 @@ fn run_command() -> Result<()> {
             against,
             child,
         } => {
+            stop_ticket(&issue);
             let against_note = if let Some(reason) =
                 against.as_deref().map(str::trim).filter(|s| !s.is_empty())
             {
@@ -6385,6 +6406,7 @@ fn run_command() -> Result<()> {
             println!("{}", ljos_cli::statusline(&input));
         }
         Cmd::Playbook { issue, name } => {
+            stop_ticket(&issue);
             print!("{}", copy_playbook(&issue, &name)?);
             print!("{}", ljos_cli::persist_tracker(&issue, "bound a playbook"));
         }
@@ -6420,6 +6442,7 @@ fn run_command() -> Result<()> {
             match node.filter(|_| !next) {
                 Some(node) => {
                     let node = ljos_cli::on_disk(&node);
+                    stop_ticket_node(&node);
                     print!("{}", claim(&node, &assignee)?);
                     print!("{}", ljos_cli::persist_tracker(&node, "claimed"));
                 }
@@ -6488,6 +6511,7 @@ fn run_command() -> Result<()> {
                 );
             } else if let Some(node) = node {
                 let assignee = assignee_for("release", assignee.as_deref(), true)?;
+                stop_ticket_node(&node);
                 let said = release(&node, &assignee)?;
                 print!("{said}");
                 if !said.is_empty() {
@@ -6502,15 +6526,11 @@ fn run_command() -> Result<()> {
             status,
             gen,
             assignee,
-        } => print!(
-            "{}",
-            complete(
-                &node,
-                status.as_deref(),
-                &assignee_for("complete", assignee.as_deref(), false)?,
-                gen
-            )?
-        ),
+        } => {
+            let assignee = assignee_for("complete", assignee.as_deref(), false)?;
+            stop_ticket_node(&node);
+            print!("{}", complete(&node, status.as_deref(), &assignee, gen)?)
+        }
         Cmd::Cards { dir } => {
             let out = cards(&dir)?;
             if out.is_empty() {
@@ -6536,6 +6556,7 @@ fn run_command() -> Result<()> {
             expect,
             as_persona,
         } => {
+            stop_ticket(&issue);
             let who = ljos_cli::ballot_voter("predict", as_persona.as_deref())?;
             let body = write_prediction(&issue, &who, &expect)?;
             println!("{}", serde_json::to_string_pretty(&body)?);
@@ -6626,6 +6647,7 @@ fn run_command() -> Result<()> {
             quorum,
             deadline,
         } => {
+            stop_ticket(&id);
             // One silent pack is waited out once, inside the command budget.
             // Trust, the roster and the listing each ask, and a second wait
             // on the thirty-second default would hold the reading past it.
@@ -7012,6 +7034,9 @@ fn run_command() -> Result<()> {
             since_size,
             scope,
         } => {
+            for id in &issue {
+                stop_ticket(id);
+            }
             for line in handover_scoped(&out, &project, &issue, since_size, scope.as_deref())? {
                 println!("{line}");
             }
@@ -7273,16 +7298,19 @@ fn run_command() -> Result<()> {
             issue,
             note,
             as_persona,
-        } => match note {
-            Some(text) => {
-                let seat = ljos_cli::seat_name();
-                print!("{}", ljos_cli::undo::withdraw_note(&issue, &seat, &text)?);
+        } => {
+            stop_ticket(&issue);
+            match note {
+                Some(text) => {
+                    let seat = ljos_cli::seat_name();
+                    print!("{}", ljos_cli::undo::withdraw_note(&issue, &seat, &text)?);
+                }
+                None => {
+                    let who = ljos_cli::ballot_voter("withdraw", as_persona.as_deref())?;
+                    print!("{}", ljos_cli::undo::withdraw_ballot(&issue, &who)?);
+                }
             }
-            None => {
-                let who = ljos_cli::ballot_voter("withdraw", as_persona.as_deref())?;
-                print!("{}", ljos_cli::undo::withdraw_ballot(&issue, &who)?);
-            }
-        },
+        }
         Cmd::Calibrate { project, rounds } => {
             let rows = calibrate(&project, rounds)?;
             for row in &rows {
@@ -7307,6 +7335,7 @@ fn run_command() -> Result<()> {
             share,
             rule,
         } => {
+            stop_ticket(&id);
             let forecasts = forecasts_from_json(&ljos_cli::raw_ballot_json(&id)?)?;
             let (outcome, off) = ljos_cli::named_outcome(
                 &id,

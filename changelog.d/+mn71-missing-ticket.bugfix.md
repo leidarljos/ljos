@@ -1,0 +1,1 @@
+`ljos claim`, `ljos release`, `ljos complete`, `ljos playbook`, `ljos note`, `ljos vote`, `ljos consensus`, `ljos deed`, `ljos options`, `ljos block`, `ljos withdraw`, `ljos learn`, `ljos handover`, and `ljos predict` now refuse an unknown ticket id before acting and point to `ljos ready` or the closest ticket id.
