@@ -23,16 +23,31 @@ pub struct Opened {
 /// # Errors
 ///
 /// The title or the items are blank, or the tracker cannot be written.
-pub fn open_plan(project: Option<&str>, title: &str, items: &[String]) -> Result<Opened> {
+pub fn open_plan(
+    project: Option<&str>,
+    title: &str,
+    items: &[String],
+    top: bool,
+) -> Result<Opened> {
     let title = title.trim();
     if title.is_empty() {
         bail!("plan: the title is empty");
     }
     let items = clean_items(items)?;
     let project = crate::project_name(&named_project(project)).map_err(anyhow::Error::msg)?;
+    if !top {
+        if let Some((id, hold)) = crate::live_held_issue() {
+            if let Some(line) = stale_hold_plan_line(&id, &hold.since) {
+                eprintln!("{line}");
+            }
+        }
+    }
+    let held = if top { None } else { crate::held_issue() };
+    let (tracker_parent, _, _) =
+        crate::file_placement(top, None, Some(project.clone()), held.clone());
     let _held = Batch::enter();
     let layout = vissue_core::Layout::resolve(None, None)?;
-    let parent = create(&layout, &project, title, None, "plan")?;
+    let parent = create(&layout, &project, title, tracker_parent.as_deref(), "plan")?;
     mark_ordered(&parent)?;
     let mut children = Vec::with_capacity(items.len());
     for item in &items {
@@ -180,6 +195,24 @@ fn clean_items(items: &[String]) -> Result<Vec<String>> {
         bail!("plan: name at least one item after --");
     }
     Ok(items)
+}
+
+fn stale_hold_plan_line(id: &str, since: &str) -> Option<String> {
+    let since = since.trim();
+    if since.is_empty() {
+        return None;
+    }
+    let Ok(then) = chrono::DateTime::parse_from_rfc3339(since) else {
+        return None;
+    };
+    let now = chrono::Utc::now().with_timezone(then.offset());
+    if now.signed_duration_since(then).num_days() <= 1 {
+        return None;
+    }
+    let age = crate::claim_age::between(then, now);
+    Some(format!(
+        "this conversation still names {id} ({age} ago); `ljos sitting {id}` switches to it.\n"
+    ))
 }
 
 fn named_project(project: Option<&str>) -> String {
@@ -415,6 +448,14 @@ mod tests {
     }
 
     #[test]
+    fn an_old_hold_names_sitting_to_switch_before_a_plan() {
+        let line =
+            stale_hold_plan_line("old-plan-1a2b", "2026-11-10T00:00:00Z").expect("a stale hold");
+        assert!(line.contains("old-plan-1a2b"), "{line}");
+        assert!(line.contains("ljos sitting old-plan-1a2b"), "{line}");
+    }
+
+    #[test]
     fn a_plan_is_one_commit_and_the_next_item_advances() {
         let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
@@ -434,7 +475,7 @@ mod tests {
             "pick a default".to_string(),
             "write the note".to_string(),
         ];
-        let opened = open_plan(Some("day"), "Ship the codec", &items).unwrap();
+        let opened = open_plan(Some("day"), "Ship the codec", &items, true).unwrap();
         let subjects = log_subjects(&root);
         let filed: Vec<&String> = subjects
             .iter()

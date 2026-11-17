@@ -14149,6 +14149,72 @@ pub fn file_placement(
     (parent, project, passed_over)
 }
 
+/// The project this seat names without an explicit `-p`: `LJOS_PROJECT`,
+/// this checkout, then the `prefix=` line of `vissue identity`.
+#[must_use]
+pub fn seat_tracker_project() -> Option<String> {
+    if let Ok(name) = std::env::var("LJOS_PROJECT") {
+        let name = name.trim();
+        if !name.is_empty() {
+            if let Ok(name) = project_name(name) {
+                return Some(name);
+            }
+        }
+    }
+    if let Some((name, _)) = cwd_project() {
+        if let Ok(name) = project_name(&name) {
+            return Some(name);
+        }
+    }
+    run_captured_within(
+        "vissue",
+        &["identity"],
+        None,
+        std::time::Duration::from_secs(1),
+    )
+    .ok()
+    .and_then(|said| {
+        said.stdout.lines().find_map(|line| {
+            let value = line.trim().strip_prefix("prefix=")?.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        })
+    })
+    .and_then(|name| project_name(&name).ok())
+}
+
+/// The project this seat names without an explicit `-p`, while skipping
+/// checkout probing: `LJOS_PROJECT`, then the `prefix=` line of
+/// `vissue identity`.
+#[must_use]
+pub fn seat_tracker_project_no_cwd() -> Option<String> {
+    if let Ok(name) = std::env::var("LJOS_PROJECT") {
+        let name = name.trim();
+        if !name.is_empty() {
+            if let Ok(name) = project_name(name) {
+                return Some(name);
+            }
+        }
+    }
+    if cwd_probe::walks_off() {
+        return None;
+    }
+    if std::env::var("VISSUE_ROOT")
+        .ok()
+        .is_some_and(|root| root.trim().is_empty())
+    {
+        return None;
+    }
+    run_captured("vissue", &["identity"])
+        .ok()
+        .and_then(|said| {
+            said.stdout.lines().find_map(|line| {
+                let value = line.trim().strip_prefix("prefix=")?.trim();
+                (!value.is_empty()).then(|| value.to_string())
+            })
+        })
+        .and_then(|name| project_name(&name).ok())
+}
+
 /// The project this checkout is, and why. A `.ljos/project` line wins,
 /// then `project = "..."` in `ljos.toml`. No git checkout is no project:
 /// a held issue can still name one.
@@ -31234,7 +31300,7 @@ fn indirect_close_rule() -> Rule {
         pattern: "vissue close".into(),
         verdict: "deny".into(),
         reason: "a tracker write under a runner goes through ljos, and a person closes a ticket, \
-                 and the sitting ends while the ticket stays open, so run `ljos finish ID`."
+                 and the sitting ends while the ticket stays open, so run `ljos finish ID --lesson \"...\"`."
             .into(),
     }
 }
@@ -31449,13 +31515,13 @@ fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
         }
         "claim" => format!("ljos sitting {id}"),
         "release" => format!("ljos release {id}"),
-        "close" => format!("ljos finish {id}"),
+        "close" => format!("ljos finish {id} --lesson \"...\""),
         "cancel" => format!("ljos finish {id} --status cancelled"),
         "update" => match value(&["-s", "--state"])
             .map(str::to_ascii_uppercase)
             .as_deref()
         {
-            Some("DONE") => format!("ljos finish {id}"),
+            Some("DONE") => format!("ljos finish {id} --lesson \"...\""),
             Some("CANCELLED") => format!("ljos finish {id} --status cancelled"),
             Some("STARTED") => format!("ljos sitting {id}"),
             _ => format!("ljos note {id} \"...\""),
@@ -36936,10 +37002,7 @@ fn short_doctor_line(line: &str) -> bool {
     if line.is_empty() || line.starts_with("without:") {
         return false;
     }
-    if line.starts_with("host:")
-        && line.contains("kernel killed")
-        && !line.contains("within the last hour")
-    {
+    if line.starts_with("host:") && line.contains("kernel killed") {
         return false;
     }
     true
@@ -44736,9 +44799,6 @@ pub fn sitting_stream_started(
             "memory-unavailable: the encoder is down; the pack ranks by words alone and a weak island is not fired\n",
         );
     }
-    if let Some(line) = sitting_warn_line(&rows) {
-        piece.push_str(&line);
-    }
     // A habitat that died between the gate and here is named. The claim
     // is already taken; refusing it now would be a lie.
     let late: Vec<&str> = failing_for_sitting(&rows);
@@ -48948,17 +49008,53 @@ pub fn format_search_stored(
         )
         .collect();
     let refs: Vec<&str> = store.iter().map(String::as_str).collect();
+    let top_hint = search_finish_hint(hits);
     scan::search_page(&scan::SearchPage {
         rows: &rows,
         shown: hits.len(),
         matched,
         capped,
+        top_hint: top_hint.as_deref(),
         explain,
         query,
         reading,
         seat_ahead,
         store: &refs,
     })
+}
+
+/// When the first search row is a ticket this seat claimed, name finish with a lesson.
+#[must_use]
+pub fn search_finish_hint(hits: &[Hit]) -> Option<String> {
+    let hit = hits.first()?;
+    if hit.kind != "ticket" {
+        return None;
+    }
+    let id = hit.id.as_deref()?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let held = held_issue();
+    if held.as_deref() != Some(id) && !ticket_claimed_by_seat(id) {
+        return None;
+    }
+    Some(format!(
+        "This ticket is yours. Run `ljos finish {id} --lesson \"...\"`.\n"
+    ))
+}
+
+fn ticket_claimed_by_seat(id: &str) -> bool {
+    let Ok(layout) = vissue_core::Layout::resolve(None, None) else {
+        return false;
+    };
+    let Ok(rec) = vissue_core::Router::load(layout).and_then(|router| router.find_by_id(id)) else {
+        return false;
+    };
+    let seat = canonical_seat_name(&seat_name());
+    rec.heading
+        .claimed_by()
+        .map(|who| canonical_seat_name(who) == seat)
+        .unwrap_or(false)
 }
 
 /// One raw search row: `id`, `kind`, then the text, separated by tabs.
@@ -69496,7 +69592,7 @@ sync: the remote was not reached
             "{short}"
         );
         assert!(
-            short.contains("host: the kernel killed a process within the last hour"),
+            !short.contains("host: the kernel killed a process within the last hour"),
             "{short}"
         );
         assert!(

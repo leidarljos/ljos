@@ -1,0 +1,1 @@
+`ljos search` prints the full page hint once on the count line when more rows may exist.

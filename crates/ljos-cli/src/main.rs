@@ -2354,6 +2354,9 @@ enum Cmd {
         /// File this parent and the items after `--`, then sit the parent.
         #[arg(long, value_name = "TITLE")]
         plan: Option<String>,
+        /// No parent for the plan, even while an issue is held.
+        #[arg(long, requires = "plan")]
+        top: bool,
         /// The project the plan is filed in. Absent: this checkout's prefix, else Software.
         /// One name. A leading segment that repeats the tracker directory or its org prefix is dropped. Any other slash is refused.
         #[arg(short = 'p', long, requires = "plan")]
@@ -5709,11 +5712,15 @@ fn run_command() -> Result<()> {
             let project = match project {
                 Some(project) => project,
                 // `--top` still needs a project the caller named. A plain
-                // file needs a known project from the sitting, config, or
-                // `LJOS_PROJECT`.
-                None if top => {
-                    anyhow::bail!("no project: name one with -p, or a parent with --parent");
-                }
+                // file, with no checkout prefix and no hold, uses the
+                // seat's default project. Nothing is asked. The line is
+                // printed once the ticket exists, so a missing tracker
+                // stays one error line.
+                None if top => ljos_cli::seat_tracker_project_no_cwd().ok_or_else(|| {
+                    anyhow::anyhow!("no project: name one with -p, or a parent with --parent")
+                })?,
+                // A plain file still needs a known project from the sitting,
+                // config, or `LJOS_PROJECT`.
                 None => anyhow::bail!("no project: name one with -p NAME"),
             };
             let qd = match (quorum, deadline.as_deref()) {
@@ -7177,6 +7184,7 @@ fn run_command() -> Result<()> {
         Cmd::Sitting {
             issue,
             plan,
+            top,
             project,
             items,
             assignee,
@@ -7191,7 +7199,7 @@ fn run_command() -> Result<()> {
             let mut shown = String::new();
             let detail = git_detail(verbose);
             let issue = if let Some(title) = plan {
-                let opened = ljos_cli::plan::open_plan(project.as_deref(), &title, &items)?;
+                let opened = ljos_cli::plan::open_plan(project.as_deref(), &title, &items, top)?;
                 let quiet_plan = ljos_cli::without_routine_git(&opened.text);
                 if json {
                     full.push_str(&opened.text);

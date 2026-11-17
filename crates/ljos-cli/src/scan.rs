@@ -475,6 +475,8 @@ pub struct SearchPage<'a> {
     pub matched: usize,
     /// The pack returned a full page, so more may exist past `matched`.
     pub capped: bool,
+    /// Optional line above the count, before the rows.
+    pub top_hint: Option<&'a str>,
     /// `--explain`: the order paragraph, instead of the one legend line.
     pub explain: bool,
     /// The query, for the command that lists the rest.
@@ -495,7 +497,14 @@ pub fn search_page(page: &SearchPage<'_>) -> String {
     if page.rows.is_empty() {
         return nothing_matched_page(page.query);
     }
-    let mut out = shown_line(page);
+    let mut out = String::new();
+    if let Some(hint) = page.top_hint.filter(|line| !line.trim().is_empty()) {
+        out.push_str(hint.trim_end());
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out.push_str(&shown_line(page));
     out.push('\n');
     if page.explain {
         let reading = page.reading.trim();
@@ -536,16 +545,10 @@ fn shown_line(page: &SearchPage<'_>) -> String {
     let shown = page.shown;
     let matched = page.matched.max(shown);
     if shown < matched {
-        let mut line = format!("shown {shown} of {matched}");
-        if page.capped {
-            line.push_str(", or more");
-        }
-        line.push_str(", ");
-        line.push_str(&search_hint(
-            page.query,
-            next_limit(matched, page.capped),
-            page.capped,
-        ));
+        let line = format!(
+            "shown {shown} of {matched}, {}",
+            search_hint(page.query, next_limit(matched, page.capped), page.capped,)
+        );
         return wrap(&line, COLS);
     }
     if page.capped && shown > 0 {
@@ -1061,6 +1064,7 @@ mod tests {
             shown: 2,
             matched: 2,
             capped: false,
+            top_hint: None,
             explain,
             query: "kiln",
             reading,
@@ -1096,6 +1100,43 @@ mod tests {
                 "{page}"
             );
         }
+    }
+
+    #[test]
+    fn a_capped_search_page_names_the_next_page_once() {
+        let row = SearchRow {
+            label: "lesson",
+            age: "today",
+            from: None,
+            text: "The damper sticks.",
+            score: 68.0,
+            ballots: None,
+            id: Some("idkiln01"),
+            ticket: None,
+            place: 1,
+            local: false,
+        };
+        let rows = [row];
+        let page = SearchPage {
+            rows: &rows,
+            shown: 1,
+            matched: 19,
+            capped: true,
+            top_hint: None,
+            explain: false,
+            query: "kiln",
+            reading: "",
+            seat_ahead: false,
+            store: &[],
+        };
+        let page_text = search_page(&page);
+        let first = page_text.lines().next().unwrap_or("");
+        assert_eq!(
+            first.matches("and the next page asks for more").count(),
+            1,
+            "{first}"
+        );
+        assert!(!first.contains(", or more"), "{first}");
     }
 
     #[test]
