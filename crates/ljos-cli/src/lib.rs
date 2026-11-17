@@ -12754,16 +12754,22 @@ pub fn subagent_stop_reason(
 /// room on a loaded host.
 pub const HOOK_DEADLINE_MS: u64 = 8000;
 
-/// The longest a hook or a guard check may block on a slow pack, lock, or
-/// child process. The shortest session-end cap onboard writes is 5 s.
-/// A tool hook's cap is 10 s. This stays under 2 s.
+/// The shared budget for hook context, locks and repository reads.
+/// The command checker retains one short reserve when those reads exhaust
+/// this budget. The shortest session-end cap onboard writes is 5 s.
 pub const HOOK_WALL_BUDGET_MS: u64 = 2_000;
+
+/// A responsive checker gets this much time even after slow local reads.
+/// Every checker call in one wall budget shares the same reserve.
+const CHECK_RESERVE_MS: u64 = 250;
 
 thread_local! {
     /// When this call must be done. Set by [`arm_wall_budget`] or
     /// [`arm_hook_wall_budget`]. A pack read and a child process stop
     /// here instead of at their own timeout.
     static WALL_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+    static CHECK_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
         const { std::cell::Cell::new(None) };
     /// The pack timeout for this thread, in milliseconds. A recall thread
     /// and the verdict do not share one environment variable, so one
@@ -12777,6 +12783,9 @@ pub struct WallGuard(Option<std::time::Instant>);
 
 impl Drop for WallGuard {
     fn drop(&mut self) {
+        if self.0.is_none() {
+            CHECK_DEADLINE.with(|cell| cell.set(None));
+        }
         WALL_DEADLINE.with(|cell| cell.set(self.0.take()));
     }
 }
@@ -12796,6 +12805,9 @@ fn arm_wall_budget_for(total: std::time::Duration) -> WallGuard {
         let deadline = cell.get().map_or(wanted, |held| held.min(wanted));
         cell.replace(Some(deadline))
     });
+    if previous.is_none() {
+        CHECK_DEADLINE.with(|cell| cell.set(None));
+    }
     WallGuard(previous)
 }
 
@@ -12814,6 +12826,24 @@ pub(crate) fn wall_left() -> Option<std::time::Duration> {
     WALL_DEADLINE.with(|cell| {
         cell.get()
             .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+    })
+}
+
+/// The checker shares the remaining wall time, with one bounded reserve
+/// for slow repository reads. A shorter configured timeout still wins.
+/// Nested checks share this deadline instead of renewing the reserve.
+fn checker_wait_budget(requested: std::time::Duration) -> std::time::Duration {
+    let Some(left) = wall_left() else {
+        return requested;
+    };
+    CHECK_DEADLINE.with(|cell| {
+        let now = std::time::Instant::now();
+        let deadline = cell.get().unwrap_or_else(|| {
+            let reserve = std::time::Duration::from_millis(CHECK_RESERVE_MS);
+            now + requested.min(left.max(reserve))
+        });
+        cell.set(Some(deadline));
+        requested.min(deadline.saturating_duration_since(now))
     })
 }
 
@@ -42496,10 +42526,7 @@ pub fn tcb_answer_in(
     let Ok(mut child) = spawn_while_busy(spawn) else {
         return faulted("did not start");
     };
-    let deadline = match wall_left() {
-        Some(left) => deadline.min(left),
-        None => deadline,
-    };
+    let deadline = checker_wait_budget(deadline);
     let start = std::time::Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -42606,10 +42633,7 @@ fn advisory_tcb_answer_in(
     let Ok(mut child) = spawn_while_busy(spawn) else {
         return faulted("did not start");
     };
-    let deadline = match wall_left() {
-        Some(left) => deadline.min(left),
-        None => deadline,
-    };
+    let deadline = checker_wait_budget(deadline);
     let start = std::time::Instant::now();
     let status = loop {
         match child.try_wait() {
