@@ -1,2 +1,2 @@
 `ljos note` commits the seat line when another writer has already committed the note.
-A seat line already in the logbook is left as committed, so `issues.org` stays clean.
+The line sits at the top of the logbook, above that note, and `issues.org` stays clean.
