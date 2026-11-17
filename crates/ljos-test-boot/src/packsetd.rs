@@ -50,11 +50,12 @@ const HEALTH_IO: Duration = Duration::from_secs(1);
 /// POSIX signal numbers. Linux and macOS use the same values.
 const SIGKILL: i32 = 9;
 const SIGINT: i32 = 2;
+#[cfg(target_os = "linux")]
 const SIGTERM: i32 = 15;
 const SIG_DFL: usize = 0;
 
 /// `kill(pid, 0)` is the existence check. `ESRCH` (3) means the pid is gone.
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", test))]
 const ESRCH: i32 = 3;
 
 struct Live {
@@ -1436,6 +1437,7 @@ int main(void) {
 
     /// A packsetd for another home, started after this process, listening
     /// on the default port. Exit must leave it running.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_foreign_packsetd_survives_the_test_process_exit() {
         if std::env::var_os("LJOS_FOREIGN_PACKSETD_CHILD").is_some() {
@@ -1488,6 +1490,7 @@ int main(int argc, char **argv) {
         bin
     }
 
+    #[cfg(target_os = "linux")]
     fn foreign_parent() {
         let dir = unique_dir();
         let bin = foreign_bin(&dir);
@@ -1564,6 +1567,7 @@ int main(int argc, char **argv) {
     }
 
     // The stand-in has to outlive this process, so it is not waited on.
+    #[cfg(target_os = "linux")]
     #[allow(clippy::zombie_processes)]
     fn foreign_child() {
         let home = std::env::var("LJOS_FOREIGN_HOME").unwrap();
