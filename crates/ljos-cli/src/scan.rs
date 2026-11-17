@@ -1,9 +1,10 @@
 //! Human pages for search, recall, ready, and the hook.
 //!
-//! Each line fits [`COLS`]. The pages name the place, say shown N of M,
-//! and name the command that lists the rest. The ranker score stays off
-//! the page. `--json` and the MCP rows do not use this module. A pipe,
-//! and `NO_COLOR`, carry no ANSI.
+//! Each line fits [`COLS`]. The pages name the place and say shown N of M.
+//! A search page names the command that lists the rest. A ready page that
+//! leaves tickets off names `--limit`, `--all`, `-p` and `--mine`.
+//! The ranker score stays off the page. `--json` and the MCP rows do not
+//! use this module. A pipe, and `NO_COLOR`, carry no ANSI.
 
 /// Columns a human page fits, including a pipe read in an 80-column terminal.
 pub const COLS: usize = 80;
@@ -772,7 +773,7 @@ fn search_row(row: &SearchRow<'_>, id_label: &str) -> String {
 /// by a padded id. JSON stays with the caller. Every row is printed.
 #[must_use]
 pub fn ready_text(raw: &str) -> String {
-    ready_page(raw, None, None)
+    ready_page(raw, None)
 }
 
 enum ReadyPiece {
@@ -780,10 +781,15 @@ enum ReadyPiece {
     Loose(String),
 }
 
+/// One line under a short ready header. It names the flags that show more
+/// tickets or narrow the page.
+const READY_HINT: &str = "See more with `--limit` or `--all`. Narrow with `-p` or `--mine`.";
+
 /// The ready page. `limit` is how many tickets to print. `None` prints
-/// every row. `project` is the `-p` name on a page that leaves rows out.
+/// every row. The header is `ready  shown X of Y`. A page that leaves
+/// tickets off adds [`READY_HINT`] on the next line.
 #[must_use]
-pub fn ready_page(raw: &str, limit: Option<usize>, project: Option<&str>) -> String {
+pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
     let raw = strip_ansi(raw);
     let mut pieces = Vec::new();
     for line in raw.lines() {
@@ -798,13 +804,12 @@ pub fn ready_page(raw: &str, limit: Option<usize>, project: Option<&str>) -> Str
     }
     let total = pieces.len();
     let take = limit.unwrap_or(total).min(total);
-    let note = if take < total {
-        format!("so run `{}`.", ready_more(project, total))
-    } else {
-        String::new()
-    };
-    let mut out = count_line("ready", take, total, &note);
+    let mut out = count_line("ready", take, total, "");
     out.push('\n');
+    if take < total {
+        out.push_str(&wrap(READY_HINT, COLS));
+        out.push('\n');
+    }
     if total == 0 {
         out.push_str("no open ticket is free of an open blocker, so run `ljos file TITLE`.\n");
         return out;
@@ -824,53 +829,6 @@ pub fn ready_page(raw: &str, limit: Option<usize>, project: Option<&str>) -> Str
         }
     }
     out
-}
-
-/// The command that prints the tickets a short page left off.
-fn ready_more(project: Option<&str>, total: usize) -> String {
-    match project_arg(project) {
-        Some(name) => format!("ljos ready -p {name} -n {total}"),
-        None => format!("ljos ready -n {total}"),
-    }
-}
-
-/// A `-p` argument a person can copy. A name of several words is quoted.
-/// A name that would change in a shell is left off.
-fn project_arg(project: Option<&str>) -> Option<String> {
-    let name = project.map(str::trim).filter(|name| !name.is_empty())?;
-    if name.chars().any(|ch| {
-        ch.is_control()
-            || matches!(
-                ch,
-                '`' | '"'
-                    | '\\'
-                    | '$'
-                    | '\''
-                    | ';'
-                    | '&'
-                    | '|'
-                    | '<'
-                    | '>'
-                    | '('
-                    | ')'
-                    | '{'
-                    | '}'
-                    | '['
-                    | ']'
-                    | '*'
-                    | '?'
-                    | '~'
-                    | '#'
-                    | '!'
-                    | '='
-            )
-    }) {
-        return None;
-    }
-    if name.contains(char::is_whitespace) {
-        return Some(format!("\"{name}\""));
-    }
-    Some(name.to_string())
 }
 
 struct ReadyRow {
@@ -981,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hidden_ready_page_names_the_command_that_lists_the_rest() {
+    fn a_short_ready_page_names_how_to_see_more_or_narrow() {
         let mut raw = String::new();
         for n in 0..3 {
             raw.push_str(&format!(
@@ -991,31 +949,24 @@ mod tests {
                 "B"
             ));
         }
-        let text = ready_page(&raw, Some(2), None);
+        let text = ready_page(&raw, Some(2));
         assert!(text.contains("ready  shown 2 of 3"), "{text}");
         assert!(text.contains("demo-0000"), "{text}");
         assert!(text.contains("demo-0001"), "{text}");
         assert!(!text.contains("demo-0002"), "{text}");
-        let head = text.split("demo-0000").next().unwrap_or(&text);
-        assert!(
-            head.contains("ready  shown 2 of 3, so run `ljos ready -n 3`."),
-            "{text}"
-        );
-        let named = ready_page(&raw, Some(1), Some("probe"));
-        let named_head = named.split("demo-0000").next().unwrap_or(&named);
-        assert!(
-            named_head.contains("so run `ljos ready -p probe -n 3`."),
-            "{named}"
-        );
-        let words = ready_page(&raw, Some(1), Some("two words"));
-        let words_head = words.split("demo-0000").next().unwrap_or(&words);
-        assert!(
-            words_head.contains("so run `ljos ready -p \"two words\" -n 3`."),
-            "{words}"
-        );
-        let all = ready_page(&raw, None, Some("probe"));
-        assert!(all.contains("ready  shown 3 of 3"), "{all}");
-        assert!(!all.contains("ljos ready"), "{all}");
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("ready  shown 2 of 3"));
+        let hint = lines.next().unwrap_or("");
+        assert_eq!(hint, READY_HINT, "{text}");
+        assert!(hint.chars().count() <= COLS, "{hint}");
+        assert!(hint.contains("`--limit`"), "{hint}");
+        assert!(hint.contains("`--all`"), "{hint}");
+        assert!(hint.contains("`-p`"), "{hint}");
+        assert!(hint.contains("`--mine`"), "{hint}");
+        assert_eq!(text.matches(READY_HINT).count(), 1, "{text}");
+        let all = ready_page(&raw, None);
+        assert!(all.starts_with("ready  shown 3 of 3\n"), "{all}");
+        assert!(!all.contains(READY_HINT), "{all}");
         assert!(
             all.lines().all(|line| line.chars().count() <= COLS),
             "{all}"

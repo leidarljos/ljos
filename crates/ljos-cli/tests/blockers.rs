@@ -123,8 +123,9 @@ fn an_open_blocker_leaves_the_ticket_off_the_ready_list() {
     assert!(ready.contains(&board.c), "{ready}");
     let narrowed = board.ok(&["ready", "-p", "probe"]);
     assert!(!narrowed.contains(&board.a), "{narrowed}");
-    let rows: Vec<serde_json::Value> =
+    let doc: serde_json::Value =
         serde_json::from_str(board.ok(&["ready", "--json"]).trim()).unwrap();
+    let rows = doc["rows"].as_array().expect("rows");
     let ids: Vec<&str> = rows.iter().filter_map(|row| row["id"].as_str()).collect();
     assert!(!ids.contains(&board.a.as_str()), "{ids:?}");
     assert!(ids.contains(&board.b.as_str()), "{ids:?}");

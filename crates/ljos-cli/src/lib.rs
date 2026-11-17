@@ -42713,10 +42713,12 @@ const READY_PAGE: usize = 20;
 ///
 /// This is the same frontier as `vissue ready`, read through the list
 /// query. A blocker that is done or cancelled does not keep its ticket
-/// off the list. Rows are this seat's STARTED work, then higher priority,
-/// then newer. The text page prints the first 20 unless `all` is set or
-/// `limit` names another count. JSON prints every row unless `limit` is
-/// set, in that same order. A claim is still aged from its stamp.
+/// off the list. Rows are this seat's claims, then free tickets, then
+/// another seat's claims. Inside that, higher priority, then newer
+/// activity, then the id. Activity is the newest note, claim or filing.
+/// The text page prints the first 20 unless `all` is set or `limit`
+/// names another count. JSON prints that same page: `shown`, `total`
+/// and `rows`. A claim is still aged from its stamp.
 ///
 /// # Errors
 ///
@@ -42734,28 +42736,33 @@ pub fn ready_view(
         .ready(project)
         .map_err(anyhow::Error::from)?;
     order_ready(&mut rows, &recs);
-    if json {
-        if let Some(limit) = limit {
-            rows.truncate(limit);
-        }
-        return Ok(format!("{}\n", serde_json::to_string_pretty(&rows)?));
-    }
+    let total = rows.len();
     let page = if all {
         None
     } else {
         Some(limit.unwrap_or(READY_PAGE))
     };
+    if json {
+        if let Some(limit) = page {
+            rows.truncate(limit);
+        }
+        let doc = serde_json::json!({
+            "shown": rows.len(),
+            "total": total,
+            "rows": rows,
+        });
+        return Ok(format!("{}\n", serde_json::to_string_pretty(&doc)?));
+    }
     Ok(scan::ready_page(
         &ready_lines(&rows, &recs, claim_age::now_here()),
         page,
-        project,
     ))
 }
 
-/// This seat's STARTED tickets, then higher priority, then newer.
+/// This seat's claims, then free tickets, then another seat's claims.
 ///
-/// Newer is the `:CREATED:` stamp, and a later line in the file when that
-/// stamp is the same day. The list query already dropped a ticket that
+/// Inside each of those, higher priority, then the newest note, claim or
+/// filing, then the id. The list query already dropped a ticket that
 /// waits on an open ticket. This only orders what it kept.
 fn order_ready(rows: &mut [vissue_core::views::IssueRow], recs: &[vissue_core::views::IssueRec]) {
     let seat = ready_seat();
@@ -42779,37 +42786,49 @@ fn ready_seat() -> String {
     canonical_seat_name(&raw)
 }
 
+/// `0` is this seat, `1` is nobody, `2` is another seat.
+///
+/// A claim this seat holds is a `CLAIMED_BY` that names the seat, whether
+/// the state is STARTED or still TODO. Another seat's claim stays after
+/// tickets nobody holds, so it does not sit at the top of the page.
+fn hold_band(row: &vissue_core::views::IssueRow, seat: &str) -> u8 {
+    let Some(who) = row
+        .claimed_by
+        .as_deref()
+        .map(str::trim)
+        .filter(|who| !who.is_empty())
+    else {
+        return 1;
+    };
+    if !seat.is_empty() && canonical_seat_name(who) == seat {
+        0
+    } else {
+        2
+    }
+}
+
 fn ready_rank(
     row: &vissue_core::views::IssueRow,
     rec: Option<&vissue_core::views::IssueRec>,
     seat: &str,
 ) -> (
-    bool,
+    u8,
     u8,
     char,
-    std::cmp::Reverse<chrono::NaiveDate>,
-    std::cmp::Reverse<u32>,
-    std::cmp::Reverse<usize>,
+    std::cmp::Reverse<i64>,
+    std::cmp::Reverse<String>,
     String,
 ) {
-    let mine = !seat.is_empty()
-        && row.state == "STARTED"
-        && row
-            .claimed_by
-            .as_deref()
-            .is_some_and(|who| canonical_seat_name(who) == seat);
     let (band, priority) = priority_band(&row.priority);
-    let (day, minutes) = rec
-        .and_then(|rec| created_stamp(&rec.heading))
-        .unwrap_or((chrono::NaiveDate::MIN, 0));
-    let line = rec.map(|rec| rec.heading.line_start).unwrap_or(0);
+    let (day, clock) = rec
+        .map(|rec| activity_key(&rec.heading))
+        .unwrap_or((i64::MIN, String::new()));
     (
-        !mine,
+        hold_band(row, seat),
         band,
         priority,
         std::cmp::Reverse(day),
-        std::cmp::Reverse(minutes),
-        std::cmp::Reverse(line),
+        std::cmp::Reverse(clock),
         row.id.clone(),
     )
 }
@@ -42824,31 +42843,29 @@ fn priority_band(priority: &str) -> (u8, char) {
     }
 }
 
-/// The `:CREATED:` day and, when the stamp has a clock, the minute of that day.
-fn created_stamp(heading: &vissue_core::IssueHeading) -> Option<(chrono::NaiveDate, u32)> {
-    let raw = heading.properties.get("CREATED")?;
-    let day = vissue_core::model::parse_stamp_date(raw)?;
-    Some((day, stamp_minutes(raw)))
-}
-
-fn stamp_minutes(raw: &str) -> u32 {
-    let inner = raw
-        .trim()
-        .trim_start_matches(['<', '['])
-        .trim_end_matches(['>', ']']);
-    let clock = inner.split_whitespace().nth(2).unwrap_or("");
-    let Some((hour, rest)) = clock.split_once(':') else {
-        return 0;
+/// The newest of a note, the claim and the filing.
+///
+/// Filing is the `:CREATED:` stamp. One org file holds many tickets, so
+/// the file's own modification time is not a ticket's filing. A missing
+/// stamp sorts as the oldest instant. The id is the caller's last tie.
+fn activity_key(heading: &vissue_core::IssueHeading) -> (i64, String) {
+    let mut best: Option<(i64, String)> = None;
+    let mut keep = |stamp: Option<&str>| {
+        let Some(key) = stamp_key(stamp) else {
+            return;
+        };
+        if best.as_ref().is_none_or(|have| key > *have) {
+            best = Some(key);
+        }
     };
-    let Ok(hour) = hour.parse::<u32>() else {
-        return 0;
-    };
-    let minute = rest
-        .split(':')
-        .next()
-        .and_then(|text| text.parse::<u32>().ok())
-        .unwrap_or(0);
-    hour.saturating_mul(60).saturating_add(minute)
+    keep(heading.properties.get("CREATED").map(String::as_str));
+    keep(heading.claimed_at());
+    for entry in &heading.logbook {
+        if entry.note.is_some() {
+            keep(Some(entry.timestamp.as_str()));
+        }
+    }
+    best.unwrap_or((i64::MIN, String::new()))
 }
 
 /// The ready rows, with each claim aged from its stamp and `now`.

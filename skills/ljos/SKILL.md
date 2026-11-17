@@ -513,7 +513,7 @@ materials (SBOM), with the same ids on
 every run. `vissue ready -p P` is then the buildable frontier, each seat
 sits on one module, and a sitting on a module whose blockers are open
 is refused. A wait that is not in that bill is `ljos block ISSUE --on OTHER`,
-dropped with `--off OTHER`. `ljos ready -p P` lists that same frontier, and
+dropped with `--off OTHER`. `ljos ready -p P` lists the first 20 of that frontier (`--all` lists every ticket), and
 `ljos show ISSUE` names the blockers. A loop is refused. Resolve each finding through eb-stack's `campaign finding
 resolve` with the action and the files it changed, so the lesson below
 carries the fix.

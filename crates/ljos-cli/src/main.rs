@@ -1410,13 +1410,14 @@ enum Cmd {
     },
     /// List tickets that are open and not waiting on another open ticket.
     ///
-    /// A ticket this seat has started comes first. Its state is STARTED.
-    /// Higher priority comes next, then a newer ticket.
+    /// A ticket this seat holds comes first.
+    /// Higher priority comes next, then the newest note, claim or filing.
+    /// The id breaks the last tie.
+    /// A ticket another seat holds comes after a ticket nobody holds.
     /// The page prints the first 20, headed `ready  shown X of Y`.
     /// `-n N` prints N tickets. `--limit N` is the same flag. `--all` prints every ticket.
-    /// A page that leaves tickets off names the command that prints the rest.
-    /// That command keeps `-p NAME` when the project was named.
-    /// `--json` prints every row unless `-n` is set. The rows are in the same order.
+    /// A page that leaves tickets off adds one line naming `--limit`, `--all`, `-p` and `--mine`.
+    /// `--json` prints `shown`, `total` and `rows` for that same page and that same order.
     /// `--mine` names the next unfinished item of each plan this seat holds.
     ///
     /// Example: `ljos ready`
@@ -1424,7 +1425,7 @@ enum Cmd {
         /// Only this project.
         #[arg(short = 'p', long)]
         project: Option<String>,
-        /// Print JSON rows. Every row, in the same order, unless `-n` is set.
+        /// Print `shown`, `total` and `rows`. The same page and order as the text.
         #[arg(long, conflicts_with = "mine")]
         json: bool,
         /// The next unfinished item of each plan this seat holds.

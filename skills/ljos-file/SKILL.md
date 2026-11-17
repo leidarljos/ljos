@@ -18,8 +18,10 @@ person and by every agent on this machine. Each tracker verb takes a ticket id.
 - Note progress: `ljos note ISSUE "..."` (dated, committed).
 - A longer report is a longer note. Tags go on when filed: `--tags`.
 - Who has claimed what: `ljos claims`.
-- What is ready to work on: `ljos ready -p PROJECT` (the same list as
-  `vissue ready`). A ticket waiting on an open ticket is left out.
+- What is ready to work on: `ljos ready -p PROJECT` prints the first 20
+  of the same tickets as `vissue ready`, this seat's own first.
+  `--all` prints every ticket. `--limit N` prints N. A ticket waiting
+  on an open ticket is left out.
   `ljos block ISSUE --on OTHER` records that wait, and `--off OTHER` drops
   it. `ljos show ISSUE` names the blockers. A loop is refused.
 
