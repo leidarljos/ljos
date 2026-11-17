@@ -782,6 +782,19 @@ fn assert_step(
     elapsed: Duration,
     limit: Duration,
 ) {
+    if command.contains("LJOS_SEAT=bob ljos claim") {
+        assert!(
+            elapsed <= limit,
+            "{place}\n{command}\ntook {}s, past {}s:\n{output}",
+            elapsed.as_secs(),
+            limit.as_secs()
+        );
+        assert_plain(place, command, output);
+        assert_eq!(code, 1, "{place}\n{command}\n{output}");
+        assert_eq!(output.lines().count(), 1, "{place}\n{command}\n{output}");
+        expect_documented(command, output);
+        return;
+    }
     assert_ok(place, command, code, output, elapsed, limit);
     expect_documented(command, output);
 }
@@ -872,7 +885,11 @@ fn expect_documented(command: &str, output: &str) {
         assert!(output.contains("next:"), "{command}\n{output}");
     }
     if command.contains("--assignee bob") {
-        assert!(output.contains("claim-conflict"), "{command}\n{output}");
+        assert!(output.contains("held by another"), "{command}\n{output}");
+        assert!(
+            !output.contains("label claim-conflict"),
+            "{command}\n{output}"
+        );
         assert!(output.contains("ljos send"), "{command}\n{output}");
     }
     if command.contains("ljos offboard") {

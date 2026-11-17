@@ -199,6 +199,10 @@ sys.exit(0)
     /// `ljos` as conversation `conv`, from a shell whose parent shell
     /// already carries `OUTER` when `conv` is the inner id.
     fn ljos(&self, conv: &str, args: &[&str]) -> Output {
+        self.ljos_as(conv, SEAT, args)
+    }
+
+    fn ljos_as(&self, conv: &str, seat: &str, args: &[&str]) -> Output {
         let ljos = env!("CARGO_BIN_EXE_ljos");
         let quoted: Vec<String> = std::iter::once(ljos.to_string())
             .chain(args.iter().map(|arg| shell_quote(arg)))
@@ -225,7 +229,7 @@ sys.exit(0)
             .env("TMPDIR", root.join("tmp"))
             .env("VISSUE_ROOT", root.join("tracker"))
             .env("VISSUE_NO_ROUTE", "1")
-            .env("LJOS_SEAT", SEAT)
+            .env("LJOS_SEAT", seat)
             .env("LJOS_TRACKER_GIT", "off")
             .env("LJOS_HOOKD", "off")
             .env("PACKSET_URL", "off")
@@ -240,6 +244,30 @@ sys.exit(0)
             .output()
             .unwrap()
     }
+}
+
+#[test]
+fn claim_refusals_exit_one_and_name_the_next_command() {
+    let world = Seat::new();
+    let first = world.ljos(OUTER, &["claim", RPUD]);
+    assert!(first.status.success(), "{}", text_of(&first));
+
+    let refused = world.ljos_as(INNER, "other", &["claim", RPUD]);
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{}", text_of(&refused));
+    assert!(stdout.is_empty(), "{}", text_of(&refused));
+    assert_eq!(
+        stderr.lines().count(),
+        1,
+        "claim refusal was not one stderr line:\n{}",
+        text_of(&refused)
+    );
+    assert!(
+        stderr.contains(&format!("`ljos send {SEAT} TEXT`")),
+        "{}",
+        text_of(&refused)
+    );
 }
 
 fn shell_quote(text: &str) -> String {

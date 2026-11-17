@@ -6475,7 +6475,26 @@ fn run_command() -> Result<()> {
                 Some(node) => {
                     let node = ljos_cli::on_disk(&node);
                     stop_ticket_node(&node);
-                    print!("{}", claim(&node, &assignee)?);
+                    match ljos_cli::run_captured("vissue", &["show", &node, "--json"]) {
+                        Ok(said)
+                            if said.stdout.trim().is_empty() && !ljos_cli::ticket_exists(&node) =>
+                        {
+                            bail!("issue {node} not found");
+                        }
+                        Ok(_) => {}
+                        Err(err) if format!("{err:#}").contains("not found") => {
+                            bail!("issue {node} not found");
+                        }
+                        Err(err) => return Err(err),
+                    }
+                    let said = match claim(&node, &assignee) {
+                        Ok(said) => said,
+                        Err(err) => {
+                            eprintln!("{}", ljos_cli::user_fault_line(&err));
+                            std::process::exit(1);
+                        }
+                    };
+                    print!("{said}");
                     print!("{}", ljos_cli::persist_tracker(&node, "claimed"));
                 }
                 None => {
