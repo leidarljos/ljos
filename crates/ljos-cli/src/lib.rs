@@ -14628,8 +14628,39 @@ fn encoder_has_answered(status: &Value) -> bool {
 /// that writer is what kept the dead child.
 pub const ENCODER_RESTART_COMMAND: &str = "packset stop && packset ensure";
 
-/// The command that installs the encoder binary.
+/// The command search names for a missing encoder.
+///
+/// Doctor names [`encoder_install_command`] instead, which is a command
+/// this machine can run.
 pub const ENCODER_INSTALL_COMMAND: &str = "cargo binstall --locked packset-embed";
+
+/// The command that installs `packset-embed` with a program this machine has.
+///
+/// `cargo binstall` when `cargo-binstall` is on `PATH`. `cargo install` when
+/// `cargo` is. `sh scripts/install.sh` or `sh install.sh` when that file is
+/// in the working directory. Otherwise the release download, which installs
+/// the encoder.
+#[must_use]
+pub fn encoder_install_command() -> String {
+    if on_path("cargo-binstall") {
+        return "cargo binstall --locked packset-embed".to_string();
+    }
+    if on_path("cargo") {
+        return "cargo install --locked packset-embed".to_string();
+    }
+    if std::path::Path::new("scripts/install.sh").is_file() {
+        return "sh scripts/install.sh".to_string();
+    }
+    if std::path::Path::new("install.sh").is_file() {
+        return "sh install.sh".to_string();
+    }
+    if on_path("curl") {
+        return "curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh"
+            .to_string();
+    }
+    "wget https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh"
+        .to_string()
+}
 
 /// The encoder row opens with this when the last dense call did not answer.
 pub const ENCODER_DEGRADED: &str = "recall is degraded";
@@ -15943,7 +15974,10 @@ fn embedder_failure_reason(status: &Value) -> String {
 }
 
 fn encoder_not_installed_state() -> String {
-    format!("not installed. Search matches words, so run `{ENCODER_INSTALL_COMMAND}`.")
+    format!(
+        "not installed. Search matches words, so run `{}`.",
+        encoder_install_command()
+    )
 }
 
 /// The doctor row for the writer's encoder: loaded, loading, failed, or
@@ -34552,8 +34586,10 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 .map(check_vissue_ballot_protocol);
             let (mut state, mut ok) = match (found, have.as_deref(), latest.as_ref()) {
             (None, _, _) if *bin == "packset-embed" => (
-                "not on PATH and search stays lexical, so run `cargo binstall --locked packset-embed`."
-                    .to_string(),
+                format!(
+                    "not on PATH and search stays lexical, so run `{}`.",
+                    encoder_install_command()
+                ),
                 false,
             ),
             (None, _, _) if *bin == "ljos-hud" => (

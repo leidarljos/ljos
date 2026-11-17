@@ -92,6 +92,15 @@ fn serve_hits(embedder: &str, search_body: &str) -> Seat {
 
 fn run(seat: &Seat, args: &[&str]) -> (i32, String, String, Duration) {
     let home = seat.home.path();
+    // cargo is on PATH and cargo-binstall is not, so doctor names
+    // `cargo install` rather than `cargo binstall`.
+    std::fs::write(home.join("cargo"), "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(home.join("cargo"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
     let started = Instant::now();
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
@@ -153,6 +162,7 @@ fn assert_search_line(stderr: &str, want: &str, state: &str) {
 #[test]
 fn each_encoder_state_names_itself_on_doctor_and_on_search() {
     let install = ljos_cli::ENCODER_INSTALL_COMMAND;
+    let doctor_install = "cargo install --locked packset-embed";
     let restart = ljos_cli::ENCODER_RESTART_COMMAND;
     let cases: &[(&str, &str)] = &[
         (
@@ -195,7 +205,7 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
             )),
             "not installed" => Some((
                 "info",
-                format!("not installed. Search matches words, so run `{install}`."),
+                format!("not installed. Search matches words, so run `{doctor_install}`."),
             )),
             _ => unreachable!(),
         };
@@ -360,4 +370,89 @@ fn a_loading_search_with_no_rows_says_to_rerun() {
             "{name}: {doc}"
         );
     }
+}
+
+fn exe(dir: &std::path::Path, name: &str) {
+    std::fs::write(dir.join(name), "#!/bin/sh\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+fn packset_embed_line(path: &str, cwd: &std::path::Path) -> String {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["doctor", "--all"])
+        .current_dir(cwd)
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", home.path())
+        .env("PACKSET_URL", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("LJOS_OFF", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    text.lines()
+        .find(|line| line.split('\t').nth(1) == Some("packset-embed"))
+        .unwrap_or_else(|| panic!("no packset-embed row:\n{text}"))
+        .to_string()
+}
+
+/// `ljos doctor` names an encoder install command whose program is on this
+/// machine. `cargo binstall` is that command only when cargo-binstall is
+/// installed.
+#[test]
+fn doctor_names_an_encoder_install_command_that_runs_here() {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    exe(&bin, "curl");
+    exe(&bin, "cargo");
+    exe(&bin, "cargo-binstall");
+    let path = bin.display().to_string();
+    let cargo_only = root.path().join("cargo-only");
+    std::fs::create_dir_all(&cargo_only).unwrap();
+    exe(&cargo_only, "curl");
+    exe(&cargo_only, "cargo");
+    let curl_only = root.path().join("curl-only");
+    std::fs::create_dir_all(&curl_only).unwrap();
+    exe(&curl_only, "curl");
+    let script_home = root.path().join("checkout");
+    std::fs::create_dir_all(script_home.join("scripts")).unwrap();
+    std::fs::write(script_home.join("scripts/install.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    let bare = root.path().join("bare");
+    std::fs::create_dir_all(&bare).unwrap();
+
+    let binstall = packset_embed_line(&path, &bare);
+    assert!(
+        binstall.contains("so run `cargo binstall --locked packset-embed`."),
+        "{binstall}"
+    );
+    let cargo = packset_embed_line(&cargo_only.display().to_string(), &bare);
+    assert!(
+        cargo.contains("so run `cargo install --locked packset-embed`."),
+        "{cargo}"
+    );
+    assert!(!cargo.contains("cargo binstall"), "{cargo}");
+    let from_checkout = packset_embed_line(&curl_only.display().to_string(), &script_home);
+    assert!(
+        from_checkout.contains("so run `sh scripts/install.sh`."),
+        "{from_checkout}"
+    );
+    let release = packset_embed_line(&curl_only.display().to_string(), &bare);
+    assert!(
+        release.contains(
+            "so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."
+        ),
+        "{release}"
+    );
+    assert!(!release.contains("cargo binstall"), "{release}");
 }

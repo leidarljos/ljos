@@ -811,9 +811,13 @@ fn expect_documented(command: &str, output: &str) {
             );
             assert!(
                 output.contains(
-                    "not installed. Search matches words, so run `cargo binstall --locked packset-embed`."
+                    "not installed. Search matches words, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."
                 ),
                 "{command}\n{output}"
+            );
+            assert!(
+                !output.contains("cargo binstall"),
+                "{command}\ncargo-binstall is not on this PATH:\n{output}"
             );
         }
     }
@@ -925,15 +929,16 @@ fn the_getting_started_doctor_sample_names_the_missing_encoder() {
         let text = repo_file(rel);
         assert!(
             text.contains(
-                "info\tencoder\tnot installed. Search matches words, so run `cargo binstall --locked packset-embed`."
+                "info\tencoder\tnot installed. Search matches words, so run `cargo install --locked packset-embed`."
             ),
-            "{rel} dropped the encoder row a clean install prints"
+            "{rel} dropped the encoder row a machine with cargo prints"
         );
     }
     let readme = repo_file("../../README.md");
     assert!(
-        readme
-            .contains("an `encoder` row follows and names `cargo binstall --locked packset-embed`"),
+        readme.contains(
+            "an `encoder` row follows and names the install command this machine can run"
+        ),
         "README dropped the encoder row"
     );
 }
