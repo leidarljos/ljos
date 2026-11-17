@@ -618,8 +618,6 @@ fn release_stale_drops_older_holders_of_same_seat_and_keeps_live_and_other() {
     assert_eq!(who.as_deref(), Some("other-seat@dorx1f91mq"));
 }
 
-/// A dead hold for the graph actor must not hide a live hold on the same ticket.
-#[test]
 struct LiveSleeper(std::process::Child);
 
 impl LiveSleeper {
@@ -646,6 +644,8 @@ impl Drop for LiveSleeper {
     }
 }
 
+/// A dead hold for the graph actor must not hide a live hold on the same ticket.
+#[test]
 fn release_stale_keeps_a_ticket_when_a_live_hold_sits_beside_a_dead_one() {
     let root = tempfile::tempdir().unwrap();
     let tracker = root.path().join("tracker");
