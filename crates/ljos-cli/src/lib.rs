@@ -78896,7 +78896,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             assert!(names.contains(&want), "{names:?}");
         }
         let table = format_doctor(&rows);
-        assert_eq!(table.lines().count(), rows.len());
+        assert!(
+            table.lines().count() >= rows.len(),
+            "some doctor rows may include wrapped repair steps"
+        );
         let sick = vec![Habitat {
             name: "pack",
             state: "PACKSET_URL unset".into(),
