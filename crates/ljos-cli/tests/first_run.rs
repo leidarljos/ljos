@@ -79,17 +79,17 @@ struct Seat {
 
 impl Seat {
     fn open() -> Self {
-        let root = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/home/ubuntu"))
-            .join(format!(
-                ".ljos-first-run-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0)
-            ));
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        let root = tempfile::Builder::new()
+            .prefix(".ljos-first-run-")
+            .tempdir_in(base)
+            .unwrap_or_else(|err| panic!("seat root: {err}"))
+            .keep();
         let home = root.join("home");
         let bin = home.join(".local/bin");
         let work = home.clone();
