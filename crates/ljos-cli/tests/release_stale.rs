@@ -620,6 +620,32 @@ fn release_stale_drops_older_holders_of_same_seat_and_keeps_live_and_other() {
 
 /// A dead hold for the graph actor must not hide a live hold on the same ticket.
 #[test]
+struct LiveSleeper(std::process::Child);
+
+impl LiveSleeper {
+    fn spawn() -> Self {
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        Self(child)
+    }
+
+    fn pid(&self) -> u32 {
+        self.0.id()
+    }
+}
+
+impl Drop for LiveSleeper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn release_stale_keeps_a_ticket_when_a_live_hold_sits_beside_a_dead_one() {
     let root = tempfile::tempdir().unwrap();
     let tracker = root.path().join("tracker");
@@ -689,14 +715,8 @@ fn release_stale_keeps_a_ticket_when_a_live_hold_sits_beside_a_dead_one() {
         "no-such-runner",
         &id,
     );
-    let sleeper = Command::new("sleep")
-        .arg("30")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    write_hold(&run, &live, "dseams-paper", sleeper.id(), "sleep", &id);
+    let sleeper = LiveSleeper::spawn();
+    write_hold(&run, &live, "dseams-paper", sleeper.pid(), "sleep", &id);
 
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["release", "--stale"])
@@ -722,11 +742,7 @@ fn release_stale_keeps_a_ticket_when_a_live_hold_sits_beside_a_dead_one() {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    let _ = Command::new("kill")
-        .arg(sleeper.id().to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    drop(sleeper);
     let said = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
