@@ -45427,6 +45427,16 @@ pub fn expired_claims(rows: &[Value], now: u64, lease: u64) -> Vec<Expired> {
     out
 }
 
+/// The reclaim line when `claimdag list` did not answer.
+/// A graph nobody has created yet is a first claim, not a setting to change.
+fn reclaim_skip_line(err: &str) -> String {
+    if let Some(dir) = claim_graph_absent(err) {
+        format!("skipped: no work graph yet at {dir}. The first claim creates it.\n")
+    } else {
+        format!("skipped: the claim graph did not list: {err}\n")
+    }
+}
+
 /// Hand back every claim past `lease` whose conversation is not running.
 ///
 /// A claim whose hold record on this host names a runner that is still
@@ -45446,7 +45456,7 @@ fn reclaim_expired(lease: u64) -> String {
     let listed = match run_captured("claimdag", &["list", "--json"]) {
         Ok(said) => said.stdout,
         Err(e) => {
-            out.push_str(&format!("skipped: the claim graph did not list: {e:#}\n"));
+            out.push_str(&reclaim_skip_line(&format!("{e:#}")));
             return out;
         }
     };
@@ -57889,6 +57899,15 @@ mod tests {
             super::claim_graph_absent("claimdag failed (exit 1): work.bin is corrupt"),
             None
         );
+        let skip = super::reclaim_skip_line(fresh);
+        assert!(
+            skip.contains("no work graph yet at /h/claims")
+                && skip.contains("The first claim creates it."),
+            "{skip}"
+        );
+        assert!(!skip.contains("CLAIMDAG_DIR"), "{skip}");
+        let other = super::reclaim_skip_line("claimdag failed (exit 1): work.bin is corrupt");
+        assert!(other.contains("did not list"), "{other}");
         assert_eq!(
             super::claim_graph_absent("no work graph at /h/claims: permission denied"),
             None
