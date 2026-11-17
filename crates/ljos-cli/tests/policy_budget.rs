@@ -241,3 +241,49 @@ fn strict_hook_checks_before_reading_memory_rules() {
 fn advisory_hook_checks_before_reading_memory_rules() {
     hook_memory_keeps_checker_budget("advisory");
 }
+
+fn slow_git_keeps_checker_budget(mode: &str) {
+    let home = tempfile::tempdir().unwrap();
+    let mut command = command(home.path(), mode);
+    let git = home.path().join("git");
+    std::fs::write(
+        &git,
+        "#!/bin/sh\ncase \"$*\" in\n  *'rev-parse --show-toplevel'*) sleep 1.85; printf '%s\\n' \"$PWD\" ;;\n  *) exit 1 ;;\nesac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "slow-git-budget-fixture",
+        "cwd": home.path(),
+        "tool_name": "Bash",
+        "tool_input": {"command": "git push origin HEAD:refs/heads/topic"}
+    });
+    let start = Instant::now();
+    let mut child = command
+        .arg("hook")
+        .env("PACKSET_URL", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("CURSOR_AGENT", "1")
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_verdict(output, mode, start.elapsed());
+}
+
+#[test]
+fn strict_hook_keeps_checker_time_after_slow_git() {
+    slow_git_keeps_checker_budget("strict");
+}
+
+#[test]
+fn advisory_hook_keeps_checker_time_after_slow_git() {
+    slow_git_keeps_checker_budget("advisory");
+}
