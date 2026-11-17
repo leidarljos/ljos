@@ -16,9 +16,12 @@ use std::time::{Duration, Instant};
 const FIRST_LINE_LIMIT: Duration = Duration::from_secs(1);
 // A one-second budget keeps the held-lock test fast while exercising expiry.
 const HELD_CLAIM_BUDGET_SECS: u64 = 1;
-// The one-second claim budget gets two seconds for process teardown and
-// loaded test-runner scheduling before the assertion calls it unbounded.
-const HELD_LOCK_LIMIT: Duration = Duration::from_secs(3);
+// The held lock uses that whole second. On a quiet machine the sitting
+// reaches the lock check in about 140ms and the process is gone by about
+// 1.8s, the same before and after the search ranking commits. A loaded
+// runner stayed past 3s on that path, so the bound is 6s. A wait that
+// ignores the claim budget, such as the 20s flock, still fails.
+const HELD_LOCK_LIMIT: Duration = Duration::from_secs(6);
 // Keep the lock long enough for the sitting to encounter it, without using
 // a meaningful share of the released-lock test's five-second budget.
 const RELEASE_AFTER: Duration = Duration::from_millis(200);
