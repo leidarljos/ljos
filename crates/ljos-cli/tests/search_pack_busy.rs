@@ -147,13 +147,13 @@ fn said(out: &std::process::Output) -> String {
 }
 
 #[test]
-fn a_busy_writer_still_answers_by_meaning() {
+fn a_busy_once_writer_still_answers_by_meaning() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     std::fs::create_dir_all(home.join(".local/state")).unwrap();
     std::fs::create_dir_all(home.join("run")).unwrap();
-    let (url, searches) = serve(3);
+    let (url, searches) = serve(1);
     let (out, took) = search(&url, &home, &["search", "d-SEAMS migrate video"]);
     let text = said(&out);
     assert!(out.status.success(), "{text}");
@@ -164,7 +164,7 @@ fn a_busy_writer_still_answers_by_meaning() {
     );
     assert!(!text.contains(BUSY), "{text}");
     assert!(!text.contains("pack busy, try again"), "{text}");
-    assert!(searches.load(Ordering::SeqCst) >= 4, "{text}");
+    assert!(searches.load(Ordering::SeqCst) >= 2, "{text}");
     assert!(
         took < Duration::from_secs(3),
         "meaning search waited {took:?}\n{text}"

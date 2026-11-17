@@ -15505,7 +15505,7 @@ fn search_hits_settled(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
     if read_encoder_status().as_ref().is_some_and(encoder_cold) {
         return search_after_warmup(query, limit);
     }
-    match search_direct(query, limit) {
+    match search_direct_retry(query, limit) {
         Ok(hits) => {
             // A cold encoder is handled above. An older writer can omit
             // `answering` while its normal search is already semantic; that
@@ -15531,7 +15531,7 @@ fn search_after_warmup(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
     }
     // A pack that accepted and did not answer has already spent its
     // request. Waiting out the encoder on top of that is a second timeout.
-    let first = match search_direct(query, limit) {
+    let first = match search_direct_retry(query, limit) {
         Err(err) if is_pack_busy(&err) || is_deadline_miss(&err) || is_reported_busy(&err) => {
             return Err(err);
         }
@@ -15546,7 +15546,7 @@ fn search_after_warmup(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
         wait_for_encoder(wait)
     };
     if warm {
-        match search_direct(query, limit) {
+        match search_direct_retry(query, limit) {
             Ok(hits) => return Ok((hits, semantic_ranking())),
             Err(err) if !search_can_fall_back(&err) => return Err(err),
             Err(_) => {}
@@ -15700,15 +15700,43 @@ fn search_after_bounded_wait(
     let warm = poll_encoder(bound);
     note_search_waited(started.elapsed());
     if warm {
-        match search_direct(query, limit) {
+        match search_direct_retry(query, limit) {
             Ok(hits) => return Ok((hits, semantic_ranking())),
             Err(err) if !search_can_fall_back(&err) => return Err(err),
             Err(_) => {}
         }
     }
-    match search_direct(query, limit) {
+    match search_direct_retry(query, limit) {
         Ok(hits) => Ok((hits, lexical_ranking(ENCODER_LOADING_REASON))),
         Err(err) => Err(err),
+    }
+}
+
+fn search_direct_retry(query: &str, limit: u32) -> Result<Vec<Hit>> {
+    let wait_budget = search_busy_wait();
+    let started = std::time::Instant::now();
+    let mut pause = std::time::Duration::from_millis(80);
+    loop {
+        match search_direct(query, limit) {
+            Ok(hits) => return Ok(hits),
+            Err(err)
+                if is_pack_busy(&err)
+                    || is_deadline_miss(&err)
+                    || is_reported_busy(&err)
+                    || is_read_shed(&err) =>
+            {
+                let left = wait_budget.saturating_sub(started.elapsed());
+                if left < std::time::Duration::from_millis(1) {
+                    return Err(err);
+                }
+                let sleep = pause.min(left);
+                std::thread::sleep(sleep);
+                pause = pause
+                    .saturating_mul(2)
+                    .min(std::time::Duration::from_millis(400));
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 
@@ -52565,6 +52593,59 @@ pub fn run_captured(bin: &str, args: &[impl AsRef<str>]) -> Result<Said> {
     run_captured_as(bin, args, None)
 }
 
+fn tracker_retryable_verb(bin: &str, args: &[impl AsRef<str>]) -> bool {
+    if bin != "vissue" {
+        return false;
+    }
+    if in_push_check() {
+        return false;
+    }
+    matches!(
+        args.first().map(AsRef::as_ref).unwrap_or(""),
+        "note" | "show" | "claim" | "release" | "update" | "close" | "cancel" | "block"
+    )
+}
+
+fn tracker_retry_budget() -> std::time::Duration {
+    tracker_verb_wait()
+        .saturating_mul(2)
+        .max(std::time::Duration::from_secs(8))
+}
+
+fn tracker_retry_line(retries: usize) -> String {
+    if retries == 1 {
+        "tracker did not answer after 1 retry".to_string()
+    } else {
+        format!("tracker did not answer after {retries} retries")
+    }
+}
+
+fn note_landed(issue: &str, text: &str) -> bool {
+    let Ok(card) = tracker_show_json(issue) else {
+        return false;
+    };
+    let latest = card["logbook"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            entry["note"]
+                .as_str()
+                .map(|note| (entry["timestamp"].as_str().unwrap_or(""), note))
+        })
+        .max_by_key(|(ts, _)| ts.to_string());
+    latest.is_some_and(|(_, note)| note.trim() == text.trim())
+}
+
+fn tracker_note_already_written(args: &[impl AsRef<str>]) -> bool {
+    if args.first().map(AsRef::as_ref) != Some("note") || args.len() < 3 {
+        return false;
+    }
+    let issue = args.get(1).map(AsRef::as_ref).unwrap_or_default();
+    let text = args.get(2).map(AsRef::as_ref).unwrap_or_default();
+    !issue.trim().is_empty() && !text.trim().is_empty() && note_landed(issue, text)
+}
+
 /// How long [`run_captured`] waits. A habitat that never exits used to
 /// hold the caller with it. A tracker write can be slow; this is long
 /// enough for one, and a doctor probes policyd on a shorter wait.
@@ -52870,87 +52951,117 @@ fn run_captured_within(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("{bin}: could not start"))?;
-    let mut out_pipe = match child.stdout.take() {
-        Some(pipe) => pipe,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("{bin}: no stdout");
-        }
-    };
-    let mut err_pipe = match child.stderr.take() {
-        Some(pipe) => pipe,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("{bin}: no stderr");
-        }
-    };
-    let out_task = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = out_pipe.read_to_end(&mut buf);
-        buf
-    });
-    let err_task = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = err_pipe.read_to_end(&mut buf);
-        buf
-    });
-    let started = std::time::Instant::now();
-    let mut noted = false;
-    let waited = call_deadline::waiting_label(bin);
+    let retryable = tracker_retryable_verb(bin, args);
+    let retry_budget = tracker_retry_budget();
+    let retry_start = std::time::Instant::now();
+    let mut retries = 0usize;
     let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= deadline => {
-                stop_captured(&mut child, true);
-                let _ = join_soon(out_task);
-                let _ = join_soon(err_task);
-                if tool_bound::armed() {
-                    let line = format!("{bin} timed out");
-                    tool_bound::mark_failed(line.clone());
+    'attempt: loop {
+        let mut child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("{bin}: could not start"))?;
+        let mut out_pipe = match child.stdout.take() {
+            Some(pipe) => pipe,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("{bin}: no stdout");
+            }
+        };
+        let mut err_pipe = match child.stderr.take() {
+            Some(pipe) => pipe,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("{bin}: no stderr");
+            }
+        };
+        let out_task = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out_pipe.read_to_end(&mut buf);
+            buf
+        });
+        let err_task = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = err_pipe.read_to_end(&mut buf);
+            buf
+        });
+        let started = std::time::Instant::now();
+        let mut noted = false;
+        let waited = call_deadline::waiting_label(bin);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if started.elapsed() >= deadline => {
+                    stop_captured(&mut child, true);
+                    let _ = join_soon(out_task);
+                    let _ = join_soon(err_task);
+                    if tool_bound::armed() {
+                        let line = format!("{bin} timed out");
+                        tool_bound::mark_failed(line.clone());
+                        bail!(line);
+                    }
+                    if retryable && retries < 2 {
+                        if tracker_note_already_written(args) {
+                            return Ok(Said {
+                                stdout: String::new(),
+                                stderr: String::new(),
+                            });
+                        }
+                        let backoff = std::time::Duration::from_millis(120 * (1u64 << retries));
+                        if retry_start
+                            .elapsed()
+                            .saturating_add(backoff)
+                            .saturating_add(deadline)
+                            <= retry_budget
+                        {
+                            retries += 1;
+                            std::thread::sleep(backoff);
+                            continue 'attempt;
+                        }
+                    }
+                    let line = if retries > 0 && retryable {
+                        tracker_retry_line(retries)
+                    } else {
+                        call_deadline::stall_line(bin, &words, deadline)
+                    };
+                    // The tracker write did not happen. Exit here, before any
+                    // id is printed, so stdout stays empty and the status is
+                    // a failure. A later `?` used to be able to print and return.
+                    if line.contains("the tracker was not written")
+                        || line.contains("the note was not written")
+                    {
+                        call_deadline::stop(&line);
+                    }
+                    let capped =
+                        caller >= cap && wall_left().map(|left| left >= cap).unwrap_or(true);
+                    if capped {
+                        call_deadline::stop(&line);
+                    }
                     bail!(line);
                 }
-                let line = call_deadline::stall_line(bin, &words, deadline);
-                // The tracker write did not happen. Exit here, before any
-                // id is printed, so stdout stays empty and the status is
-                // a failure. A later `?` used to be able to print and return.
-                if line.contains("the tracker was not written")
-                    || line.contains("the note was not written")
-                {
-                    call_deadline::stop(&line);
+                Ok(None) => {
+                    call_deadline::note_waiting(&waited, started, &mut noted);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                let capped = caller >= cap && wall_left().map(|left| left >= cap).unwrap_or(true);
-                if capped {
-                    call_deadline::stop(&line);
+                Err(e) => {
+                    stop_captured(&mut child, true);
+                    let _ = join_soon(out_task);
+                    let _ = join_soon(err_task);
+                    bail!("{bin}: {e}");
                 }
-                bail!(line);
             }
-            Ok(None) => {
-                call_deadline::note_waiting(&waited, started, &mut noted);
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Err(e) => {
-                stop_captured(&mut child, true);
-                let _ = join_soon(out_task);
-                let _ = join_soon(err_task);
-                bail!("{bin}: {e}");
-            }
+        };
+        let stdout = String::from_utf8_lossy(&take_output(out_task, &mut child)).into_owned();
+        let stderr = String::from_utf8_lossy(&take_output(err_task, &mut child)).into_owned();
+        if !status.success() {
+            bail!("{}", tool_failure(bin, &status, &stdout, &stderr));
         }
-    };
-    let stdout = String::from_utf8_lossy(&take_output(out_task, &mut child)).into_owned();
-    let stderr = String::from_utf8_lossy(&take_output(err_task, &mut child)).into_owned();
-    if !status.success() {
-        bail!("{}", tool_failure(bin, &status, &stdout, &stderr));
+        return Ok(Said { stdout, stderr });
     }
-    Ok(Said { stdout, stderr })
 }
 
 /// What a habitat printed when it refused: the program once, the exit code,

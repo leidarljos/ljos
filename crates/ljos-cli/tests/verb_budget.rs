@@ -283,8 +283,60 @@ fn a_note_returns_when_the_tracker_does_not_answer() {
         "note waited {took:?}\n{said}"
     );
     assert!(!out.status.success(), "{said}");
-    assert!(
-        said.contains("tracker did not answer in 1s; the note was not written, so run it again"),
-        "{said}"
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(lines, ["tracker did not answer after 2 retries"], "{said}");
+}
+
+#[test]
+fn a_tracker_timeout_then_retry_writes_one_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let noted = dir.path().join("noted");
+    let state = dir.path().join("first");
+    script(
+        dir.path(),
+        "vissue",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = note ]; then\n  if [ ! -f '{}' ]; then\n    : > '{}'\n    sleep 2\n    exit 0\n  fi\n  printf '%s\\n' \"$*\" >> '{}'\n  exit 0\nfi\nexit 0\n",
+            state.display(),
+            state.display(),
+            noted.display()
+        ),
     );
+    let home = home_of(dir.path());
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
+    );
+    let started = Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["note", "demo-n", "hello"])
+        .current_dir(dir.path())
+        .env("PATH", &path)
+        .env("HOME", &home)
+        .env("XDG_RUNTIME_DIR", &home)
+        .env("VISSUE_ROOT", home.join("tracker"))
+        .env("PACKSET_URL", "http://127.0.0.1:9")
+        .env("LJOS_SEAT", "ada")
+        .env("LJOS_HOOKD", "off")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("LJOS_TRACKER_LOCK_WAIT", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let took = started.elapsed();
+    let said = text_of(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        took < Duration::from_secs(8),
+        "note retry exceeded budget: {took:?}\n{said}"
+    );
+    let wrote = std::fs::read_to_string(&noted).unwrap_or_default();
+    let notes: Vec<&str> = wrote.lines().collect();
+    assert_eq!(notes.len(), 1, "{wrote}");
+    assert_eq!(notes[0], "note demo-n hello", "{wrote}");
 }
