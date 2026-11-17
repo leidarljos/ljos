@@ -23313,6 +23313,15 @@ fn ticket_line(err: &anyhow::Error) -> Option<String> {
     if is_ticket_fault(err) {
         return Some(top);
     }
+    let full = format!("{err:#}");
+    let no_tracker = full.contains("not inside a tracker")
+        || full.contains("is not a tracker")
+        || full.contains("neither vissue.toml");
+    if no_tracker {
+        if let Some(line) = tracker_place::missing_tracker_line() {
+            return Some(line.to_string());
+        }
+    }
     if let Some(id) = top
         .strip_prefix("issue ")
         .and_then(|rest| rest.strip_suffix(" not found"))

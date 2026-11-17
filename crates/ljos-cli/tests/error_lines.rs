@@ -6,6 +6,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -489,4 +492,77 @@ fn debug_prints_the_cause_after_the_line() {
     );
     assert!(lines[1].contains("packset url missing"), "{err}");
     assert!(!err.contains("Caused by"), "{err}");
+}
+
+#[test]
+fn a_missing_tracker_names_ljos_onboard_and_exits_1() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let work = root.path().join("work");
+    for sub in [".config/ljos", ".local/state/ljos", ".local/share"] {
+        std::fs::create_dir_all(home.join(sub)).unwrap();
+    }
+    std::fs::create_dir_all(&work).unwrap();
+    let path_env = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+    let run_unboarded = |args: &[&str], extra_root: Option<&std::path::Path>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        cmd.args(args)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", &path_env)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_STATE_HOME", home.join(".local/state"))
+            .env("XDG_RUNTIME_DIR", root.path().join("run"))
+            .env("TMPDIR", root.path())
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("LJOS_HOOKD", "off")
+            .env("LJOS_OFF", "1")
+            .env("PACKSET_URL", "off")
+            .env("LJOS_SEAT", "alice");
+        if let Some(dir) = extra_root {
+            cmd.env("VISSUE_ROOT", dir);
+        }
+        cmd.output().unwrap()
+    };
+
+    let ready = run_unboarded(&["ready"], None);
+    let ready_said = text(&ready);
+    assert_eq!(ready.status.code(), Some(1), "{ready_said}");
+    assert_eq!(
+        one_line(&ready.stderr),
+        "No tracker found, so run `ljos onboard`."
+    );
+
+    if tools::halt(tools::Tool::Vissue) {
+        return;
+    }
+    let filed = run_unboarded(&["file", "Pick a codec", "-p", "demo"], None);
+    let filed_said = text(&filed);
+    assert_eq!(filed.status.code(), Some(1), "{filed_said}");
+    assert_eq!(
+        one_line(&filed.stderr),
+        "No tracker found, so run `ljos onboard`."
+    );
+
+    let noted = run_unboarded(&["note", "demo-1234", "note text"], None);
+    let noted_said = text(&noted);
+    assert_eq!(noted.status.code(), Some(1), "{noted_said}");
+    assert_eq!(
+        one_line(&noted.stderr),
+        "No tracker found, so run `ljos onboard`."
+    );
+
+    let missing_named = root.path().join("missing-tracker");
+    let named_out = run_unboarded(
+        &["file", "Pick a codec", "-p", "demo"],
+        Some(&missing_named),
+    );
+    let named_said = text(&named_out);
+    assert_eq!(named_out.status.code(), Some(1), "{named_said}");
+    assert!(
+        !one_line(&named_out.stderr).contains("ljos onboard"),
+        "{named_said}"
+    );
 }
