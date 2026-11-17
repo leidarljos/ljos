@@ -205,6 +205,15 @@ fn a_sitting_title_says_how_to_start_a_plan() {
         "ljos: Ship the codec is not a ticket id, so run `ljos sitting --plan \"Ship the codec\" -- \"measure the files\"`."
     );
     assert!(spaced.stdout.is_empty(), "{said}");
+
+    issues(&home, ORG);
+    let missing = home.run(&["sitting", "demo-none"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&missing);
+    assert_eq!(missing.status.code(), Some(1), "{said}");
+    let line = one_line(&missing.stderr);
+    assert!(line.starts_with("issue demo-none not found"), "{line}");
+    assert!(line.contains("`ljos ready`"), "{line}");
+    assert!(!line.contains("--plan"), "{line}");
 }
 
 #[test]

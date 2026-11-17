@@ -3221,10 +3221,6 @@ fn block_usage_line(cmd: &Cmd) -> Option<String> {
     ))
 }
 
-/// An empty or whitespace id on `note` or `finish`.
-///
-/// This is the id a script captured from `ljos file` when filing timed
-/// out. It is not "no id", which means the open sitting.
 /// `ljos sitting TITLE` without `--plan`, when TITLE is not a ticket id.
 ///
 /// The line names `--plan` and a command that files the title. An id
@@ -3250,6 +3246,10 @@ fn sitting_plan_line(cmd: &Cmd) -> Option<String> {
     ))
 }
 
+/// An empty or whitespace id on `note` or `finish`.
+///
+/// This is the id a script captured from `ljos file` when filing timed
+/// out. It is not "no id", which means the open sitting.
 fn blank_ticket_line(cmd: &Cmd) -> Option<&'static str> {
     let blank = match cmd {
         Cmd::Note { words, .. } => words.first().is_some_and(|word| word.trim().is_empty()),
