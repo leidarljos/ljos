@@ -22,13 +22,16 @@ pub struct Opened {
 ///
 /// # Errors
 ///
-/// The title or the items are blank, or the tracker cannot be written.
+/// No tracker is set up, so the line names `ljos onboard` and nothing is
+/// written. The title or the items are blank, or the tracker cannot be
+/// written.
 pub fn open_plan(
     project: Option<&str>,
     title: &str,
     items: &[String],
     top: bool,
 ) -> Result<Opened> {
+    let layout = tracker_layout()?;
     let title = title.trim();
     if title.is_empty() {
         bail!("plan: the title is empty");
@@ -46,7 +49,6 @@ pub fn open_plan(
     let (tracker_parent, _, _) =
         crate::file_placement(top, None, Some(project.clone()), held.clone());
     let _held = Batch::enter();
-    let layout = vissue_core::Layout::resolve(None, None)?;
     let parent = create(&layout, &project, title, tracker_parent.as_deref(), "plan")?;
     mark_ordered(&parent)?;
     let mut children = Vec::with_capacity(items.len());
@@ -183,6 +185,25 @@ pub fn tick_checklist(issue: &str) -> Result<Option<String>> {
     let next = next_item_line(issue);
     let persisted = crate::persist_tracker(issue, "ticked");
     Ok(Some(format!("ticked {issue}\n{next}{persisted}")))
+}
+
+/// The tracker a plan is filed in.
+///
+/// With nothing naming a tracker, the line is the one `ljos_file` gives and
+/// it names `ljos onboard`. The tracker's own refusal names the root, which
+/// is the right line for a root the person set.
+fn tracker_layout() -> Result<vissue_core::Layout> {
+    if let Some(line) = crate::tracker_place::missing_tracker_line() {
+        bail!("{line}");
+    }
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    if let Err(err) = layout.require_tracker_to_create() {
+        if crate::tracker_place::pinned(&layout.root().display().to_string()) {
+            bail!("{err}, so run `ljos onboard`.");
+        }
+        return Err(err.into());
+    }
+    Ok(layout)
 }
 
 fn clean_items(items: &[String]) -> Result<Vec<String>> {
