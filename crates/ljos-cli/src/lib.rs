@@ -65296,6 +65296,26 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     #[test]
+    fn checker_reserve_is_shared_and_respects_shorter_timeouts() {
+        use std::time::Duration;
+
+        let short = Duration::from_millis(40);
+        let wall = arm_wall_budget_for(Duration::ZERO);
+        let first = checker_wait_budget(short);
+        assert!(!first.is_zero() && first <= short, "{first:?}");
+        std::thread::sleep(Duration::from_millis(60));
+        {
+            let _nested = arm_wall_budget();
+            assert_eq!(checker_wait_budget(Duration::from_secs(1)), Duration::ZERO);
+        }
+        assert_eq!(checker_wait_budget(Duration::from_secs(1)), Duration::ZERO);
+        drop(wall);
+        assert_eq!(checker_wait_budget(short), short);
+        let _fresh = arm_wall_budget_for(Duration::ZERO);
+        assert!(!checker_wait_budget(short).is_zero());
+    }
+
+    #[test]
     fn the_guard_waits_five_seconds_unless_told_otherwise() {
         let _guard_mode = crate::guard_mode::for_test(crate::guard_mode::GuardMode::Strict);
 
