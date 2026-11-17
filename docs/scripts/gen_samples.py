@@ -1234,12 +1234,16 @@ def sitting_plan_sample(ljos: Path) -> str:
     finally:
         _drop_home(home)
     page_lines = ready_page.strip().splitlines()
-    if len(page_lines) < 5 or page_lines[0] != "ready  shown 20 of 21":
+    if len(page_lines) != 23 or page_lines[0] != "ready  shown 20 of 21":
         raise SystemExit(f"gen_samples: ready page count changed:\n{ready_page}")
-    hint = "See more with `--limit` or `--all`. Narrow with `-p` or `--mine`."
+    if any(not line.strip() for line in page_lines):
+        raise SystemExit(f"gen_samples: ready page has blank lines:\n{ready_page}")
+    if any(len(line) > 80 for line in page_lines):
+        raise SystemExit(f"gen_samples: ready page line exceeded 80 columns:\n{ready_page}")
+    hint = "More: `--limit`; `--all` prints every ticket. Narrow: `-p` (day), `--mine`."
     if page_lines[-1] != hint:
         raise SystemExit(f"gen_samples: ready page hint changed:\n{ready_page}")
-    page_excerpt = "\n".join([*page_lines[:4], "...", page_lines[-1]])
+    page_excerpt = "\n".join([*page_lines[:3], "...", page_lines[-1]])
     block = (
         '$ ljos sitting --plan "Ship the codec" -p day -- "measure the files" "pick a default"\n'
         f"{planned.strip()}\n"

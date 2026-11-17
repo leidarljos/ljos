@@ -172,12 +172,26 @@ fn json_counts(page: &str) -> (u64, u64, usize) {
     (shown, total, rows)
 }
 
-const HINT: &str = "See more with `--limit` or `--all`. Narrow with `-p` or `--mine`.";
+const HINT: &str = "More: `--limit`; `--all` prints every ticket. Narrow: `-p` (probe), `--mine`.";
 
 fn assert_short_page(page: &str, shown: usize, total: usize) {
     let mut lines = page.lines();
     let header = format!("ready  shown {shown} of {total}");
     assert_eq!(lines.next(), Some(header.as_str()), "{page}");
+    assert!(
+        !page.lines().any(|line| line.trim().is_empty()),
+        "ready page has blank lines:\n{page}"
+    );
+    assert!(
+        page.lines().all(|line| line.chars().count() <= 80),
+        "ready page exceeds 80 columns:\n{page}"
+    );
+    let expected_lines = 2 + shown + usize::from(shown < total);
+    assert_eq!(
+        page.lines().count(),
+        expected_lines,
+        "expected {expected_lines} lines:\n{page}"
+    );
     if shown < total {
         let hint = lines.last().unwrap_or("");
         assert_eq!(hint, HINT, "{page}");
@@ -467,4 +481,52 @@ fn limit_and_all_are_not_combined() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--all"), "{err}");
     assert!(err.contains("--limit"), "{err}");
+}
+
+#[test]
+fn multi_project_ready_is_one_line_per_ticket_and_names_real_prefixes() {
+    let board = Board::open(0);
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    for (project, count) in [("alpha", 12), ("beta", 11)] {
+        for n in 0..count {
+            let made = vissue_core::ops::create(
+                &layout,
+                project,
+                &format!("{project} long ticket title number {n:02} for eighty column fitting"),
+                vissue_core::CreateOpts {
+                    quiet: true,
+                    ..vissue_core::CreateOpts::default()
+                },
+            )
+            .unwrap();
+            let id = made.trim().to_string();
+            if n % 2 == 0 {
+                vissue_core::ops::claim_as(&layout, &id, false, "saddle").unwrap();
+            }
+        }
+    }
+    let page = board.ok(&["ready"]);
+    assert_eq!(ticket_ids(&page).len(), 20, "{page}");
+    assert!(
+        !page.lines().any(|line| line.trim().is_empty()),
+        "blank lines in ready page:\n{page}"
+    );
+    assert!(
+        page.lines().all(|line| line.chars().count() <= 80),
+        "line exceeded 80 columns:\n{page}"
+    );
+    let tail: String = page.lines().skip(22).collect::<Vec<_>>().join(" ");
+    assert!(
+        tail.contains("`-p` (alpha, beta)"),
+        "hint missing real project prefixes:\n{page}"
+    );
+    assert!(
+        tail.contains("`--all` prints every ticket"),
+        "hint missing --all warning:\n{page}"
+    );
+
+    let alpha = board.ok(&["ready", "-p", "alpha", "-n", "5"]);
+    let alpha_hint = alpha.lines().last().unwrap_or("");
+    assert!(alpha_hint.contains("`-p` (alpha)"), "{alpha}");
+    assert!(!alpha_hint.contains("beta"), "{alpha}");
 }

@@ -3,7 +3,5 @@ stderr:
 stdout:
 ready  shown 2 of 2
 open and not waiting on an open ticket, so run `ljos show ID`.
-
 demo-tile  STARTED  [#A]  Glaze the tile after reading https://kiln.example/l...
-
 demo-kiln  TODO  [#B]  Fire the kiln

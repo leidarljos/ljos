@@ -766,13 +766,34 @@ enum ReadyPiece {
     Loose(String),
 }
 
-/// The last line of a short ready page. It names the flags that show more
-/// tickets or narrow the page.
-const READY_HINT: &str = "See more with `--limit` or `--all`. Narrow with `-p` or `--mine`.";
+fn ready_project(id: &str) -> Option<&str> {
+    let (prefix, _) = id.rsplit_once('-')?;
+    let project = prefix.rsplit('/').next().unwrap_or(prefix).trim();
+    (!project.is_empty()).then_some(project)
+}
+
+/// The last lines of a short ready page. Names `--limit`, warns that `--all`
+/// prints every ticket, and names `-p` with the real project prefixes present
+/// and `--mine`.
+fn ready_hint(pieces: &[ReadyPiece]) -> String {
+    let prefixes: std::collections::BTreeSet<&str> = pieces
+        .iter()
+        .filter_map(|piece| match piece {
+            ReadyPiece::Row(row) => ready_project(&row.id),
+            ReadyPiece::Loose(_) => None,
+        })
+        .collect();
+    if prefixes.is_empty() {
+        "More: `--limit`; `--all` prints every ticket. Narrow: `-p` or `--mine`.".to_string()
+    } else {
+        let list = prefixes.into_iter().collect::<Vec<_>>().join(", ");
+        format!("More: `--limit`; `--all` prints every ticket. Narrow: `-p` ({list}), `--mine`.")
+    }
+}
 
 /// The ready page. `limit` is how many tickets to print. `None` prints
-/// every row. The header is `ready  shown X of Y`. A page that leaves
-/// tickets off ends with [`READY_HINT`].
+/// every row. The header is `ready  shown X of Y`. One line per ticket,
+/// fitting [`COLS`]. A page that leaves tickets off ends with [`ready_hint`].
 #[must_use]
 pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
     let raw = strip_ansi(raw);
@@ -796,8 +817,8 @@ pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
         return out;
     }
     out.push_str("open and not waiting on an open ticket, so run `ljos show ID`.\n");
+    let hint = (take < total).then(|| ready_hint(&pieces));
     for piece in pieces.into_iter().take(take) {
-        out.push('\n');
         match piece {
             ReadyPiece::Row(row) => {
                 out.push_str(&ready_row(&row));
@@ -809,8 +830,8 @@ pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
             }
         }
     }
-    if take < total {
-        out.push_str(&wrap(READY_HINT, COLS));
+    if let Some(hint) = hint {
+        out.push_str(&wrap(&hint, COLS));
         out.push('\n');
     }
     out
@@ -876,13 +897,17 @@ fn split_claim(rest: &str) -> (&str, &str) {
 }
 
 fn ready_row(row: &ReadyRow) -> String {
-    let head = format!("{}  {}  [#{}]", row.id, row.state, row.priority);
-    let mut out = line_with_title(&format!("{head}  "), &row.title, COLS);
-    if !row.claim.is_empty() {
-        out.push('\n');
-        out.push_str(&wrap_hang(&row.claim, COLS, "  ", "  "));
+    let lead = format!("{}  {}  [#{}]  ", row.id, row.state, row.priority);
+    if row.claim.is_empty() {
+        return line_with_title(&lead, &row.title, COLS);
     }
-    out
+    let tail = format!("  ({})", row.claim);
+    let used = lead.chars().count() + tail.chars().count();
+    if used < COLS {
+        let room = COLS - used;
+        return format!("{lead}{}{tail}", fit_title(&row.title, room));
+    }
+    line_with_title(&lead, &format!("{} ({})", row.title, row.claim), COLS)
 }
 
 #[cfg(test)]
@@ -911,6 +936,11 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("claimed 3d by ada"), "{text}");
+        assert_eq!(
+            text.lines().count(),
+            4,
+            "expected 1 line per ticket:\n{text}"
+        );
         assert!(
             text.lines().all(|line| line.chars().count() <= COLS),
             "{text}"
@@ -941,22 +971,64 @@ mod tests {
         assert!(!text.contains("demo-0002"), "{text}");
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some("ready  shown 2 of 3"));
+        let want_hint =
+            "More: `--limit`; `--all` prints every ticket. Narrow: `-p` (demo), `--mine`.";
         let hint = lines.last().unwrap_or("");
-        assert_eq!(hint, READY_HINT, "{text}");
+        assert_eq!(hint, want_hint, "{text}");
         assert!(hint.chars().count() <= COLS, "{hint}");
         assert!(hint.contains("`--limit`"), "{hint}");
-        assert!(hint.contains("`--all`"), "{hint}");
-        assert!(hint.contains("`-p`"), "{hint}");
+        assert!(hint.contains("`--all` prints every ticket"), "{hint}");
+        assert!(hint.contains("`-p` (demo)"), "{hint}");
         assert!(hint.contains("`--mine`"), "{hint}");
-        assert_eq!(text.matches(READY_HINT).count(), 1, "{text}");
-        assert!(text.trim_end().ends_with(READY_HINT), "{text}");
+        assert_eq!(text.matches(want_hint).count(), 1, "{text}");
+        assert!(text.trim_end().ends_with(want_hint), "{text}");
+        assert!(
+            !text.lines().any(|line| line.trim().is_empty()),
+            "blank lines in ready page:\n{text}"
+        );
         let all = ready_page(&raw, None);
         assert!(all.starts_with("ready  shown 3 of 3\n"), "{all}");
-        assert!(!all.contains(READY_HINT), "{all}");
+        assert!(!all.contains("`--limit`"), "{all}");
         assert!(
             all.lines().all(|line| line.chars().count() <= COLS),
             "{all}"
         );
+    }
+
+    #[test]
+    fn twenty_ready_tickets_with_claims_fit_one_screen_and_name_prefixes() {
+        let mut raw = String::new();
+        for n in 0..21 {
+            let prefix = if n % 2 == 0 { "alpha" } else { "beta" };
+            let id = format!("{prefix}-{n:04}");
+            let title = format!("Long ticket title number {n:02} for checking eighty column fit");
+            let suffix = if n % 3 == 0 {
+                "  (claimed 2h by ada)"
+            } else {
+                ""
+            };
+            raw.push_str(&format!(
+                "{id:<22} {:<9} [#A]  {title}{suffix}\n",
+                "STARTED"
+            ));
+        }
+        let text = ready_page(&raw, Some(20));
+        assert!(
+            text.lines().count() <= 24,
+            "expected under 24 lines, got {}:\n{text}",
+            text.lines().count()
+        );
+        assert!(
+            !text.lines().any(|line| line.trim().is_empty()),
+            "blank lines in ready page:\n{text}"
+        );
+        assert!(
+            text.lines().all(|line| line.chars().count() <= COLS),
+            "line past 80 columns:\n{text}"
+        );
+        let tail: String = text.lines().skip(22).collect::<Vec<_>>().join(" ");
+        assert!(tail.contains("alpha, beta"), "{text}");
+        assert!(tail.contains("`--all` prints every ticket"), "{text}");
     }
 
     /// Headings taken from tickets whose titles used to leave the line.

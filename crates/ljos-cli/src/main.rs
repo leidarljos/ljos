@@ -1419,9 +1419,9 @@ enum Cmd {
     /// Another seat's claims follow, with claims untouched for
     /// `LJOS_STALE_DAYS` (7 when unset) last.
     /// The id breaks the last tie.
-    /// The page prints the first 20, headed `ready  shown X of Y`.
+    /// The page prints the first 20, one line per ticket, headed `ready  shown X of Y`.
     /// `-n N` prints N tickets. `--limit N` is the same flag. `--all` prints every ticket.
-    /// A page that leaves tickets off ends with one line naming `--limit`, `--all`, `-p` and `--mine`.
+    /// A page that leaves tickets off ends with a hint naming `--limit`, `--all` (warning it prints every ticket), `-p` with the project prefixes present, and `--mine`.
     /// `--json` prints `shown`, `total` and `rows` for that same page and that same order.
     /// `--mine` names the next unfinished item of each plan this seat holds.
     ///

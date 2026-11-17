@@ -45,7 +45,7 @@ An unknown tool names ``ljos help``.
 An unknown method, or a line that is not JSON, names ``ljos mcp --help``.
 ``ljos_show`` prints the ticket ``ljos show`` prints: the header, the body, and the latest notes.
 
-``ljos_ready`` prints the same first page as ``ljos ready``. The default is 20 tickets. ``limit`` changes that count and ``all`` prints every ticket. The last line of a short page names ``--limit`` and ``--all``. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. The id breaks the final tie.
+``ljos_ready`` prints the same first page as ``ljos ready``, one line per ticket within 80 columns. The default is 20 tickets. ``limit`` changes that count and ``all`` prints every ticket. A short page ends with a hint naming ``--limit``, warning that ``--all`` prints every ticket, and listing ``-p`` with the project prefixes present and ``--mine``. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. The id breaks the final tie.
 
 ``ljos_recall`` adds a Code context section when ``graphify-out/graph.json`` is in the working directory's repository.
 The section is the same one ``ljos recall`` prints.
