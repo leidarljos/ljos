@@ -44917,13 +44917,21 @@ pub fn sitting_stream_started(
         let mut piece = String::new();
         sections.heading(&mut piece, "panel");
         let dir = runtime_dir().join(format!("panel-{issue}"));
-        match panel(issue, &dir) {
-            Ok(said) => piece.push_str(&format!(
-                "{issue} is a decision. Run the panel before the work: one subagent per brief, each casts its ballot, then `ljos consensus {issue}`. A close of a decision is refused with fewer than two ballots.\n{said}"
-            )),
-            Err(e) => piece.push_str(&format!(
-                "{issue} is a decision, and the panel could not be written: {e:#}\n"
-            )),
+        // A pack with no personas has not failed to write a panel: nobody
+        // has written one yet. Asking `panel` would also store an attempt.
+        if personas_from_pack().is_ok_and(|all| all.is_empty()) {
+            piece.push_str(&format!(
+                "{issue} is a decision. The pack has no personas yet, so no panel is seated; `ljos persona NAME --anchor A --view ...` adds one.\n"
+            ));
+        } else {
+            match panel(issue, &dir) {
+                Ok(said) => piece.push_str(&format!(
+                    "{issue} is a decision. Run the panel before the work: one subagent per brief, each casts its ballot, then `ljos consensus {issue}`. A close of a decision is refused with fewer than two ballots.\n{said}"
+                )),
+                Err(e) => piece.push_str(&format!(
+                    "{issue} is a decision, and the panel could not be written: {e:#}\n"
+                )),
+            }
         }
         piece.push_str(words_line(&mut fell_back));
         emit_piece(&mut out, &mut emit, &piece);

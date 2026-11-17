@@ -23,4 +23,5 @@ May this argv run?                            ljos-policyd   `ljos-policyd <http
 ============================================= ============== =============================================================
 
 ``ljos sitting`` opens: doctor, sync when the repository names a scope, cards, due, island, blockers, playbook, workflow when the issue carries one, panel when the issue is a decision, recall, timeline, reclaim, claim. The reclaim step, printed before claim, hands back claims quiet longer than ``LJOS_LEASE_SECS`` (900 by default, 0 turns it off) whose conversation is gone.
+A decision on a pack with no personas gets one panel line that says so and names ``ljos persona NAME --anchor A --view ...``, not an error and not a set of briefs.
 ``ljos finish`` closes the session node. Walk: `Sit <https://leidarljos.github.io/docs/sit/>`__ · `First write <https://leidarljos.github.io/docs/start/>`__.
