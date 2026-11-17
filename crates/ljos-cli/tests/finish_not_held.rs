@@ -41,9 +41,13 @@ fn finish_of_another_seats_ticket_says_send() {
     script(
         dir.path(),
         "claimdag",
-        "#!/bin/sh\ncase \"$1\" in\n  get) echo 'gen=2 assignee=0123456789abcdef0123456789abcdef state=claimed' ;;\n  complete) echo 'not assignee' >&2; exit 1 ;;\n  *) exit 0 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1\" in\n  get) echo 'gen=2 assignee=0123456789abcdef0123456789abcdef state=claimed' ;;\n  complete|release) echo \"$1: not assignee\" >&2; exit 1 ;;\n  *) exit 0 ;;\nesac\n",
     );
-    script(dir.path(), "vissue", "#!/bin/sh\nexit 0\n");
+    script(
+        dir.path(),
+        "vissue",
+        "#!/bin/sh\ncase \"$1\" in\n  show) echo '{\"id\":\"demo-uqy6\",\"state\":\"STARTED\",\"claimed_by\":\"alice\"}' ;;\nesac\nexit 0\n",
+    );
     script(dir.path(), "packset", "#!/bin/sh\nexit 1\n");
     let home = dir.path().join("home");
     std::fs::create_dir_all(home.join("run")).unwrap();

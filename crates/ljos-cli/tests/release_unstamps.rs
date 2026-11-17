@@ -46,7 +46,7 @@ fn release_reopens_and_complete_keeps_the_state() {
         dir.path(),
         "claimdag",
         &format!(
-            "#!/bin/sh\necho \"claimdag $*\" >> '{log_s}'\ncase \"$1\" in\n  release) echo gen=3 ;;\n  complete) echo done ;;\nesac\nexit 0\n"
+            "#!/bin/sh\necho \"claimdag $*\" >> '{log_s}'\ncase \"$1\" in\n  get) echo 'gen=2 state=claimed' ;;\n  release) echo gen=3 ;;\n  complete) echo done ;;\nesac\nexit 0\n"
         ),
     );
     script(
@@ -175,7 +175,7 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
         dir.path(),
         "claimdag",
         &format!(
-            "#!/bin/sh\necho \"claimdag $*\" >> '{log_s}'\ncase \"$1\" in\n  release) echo gen=3 ;;\n  complete) echo done ;;\nesac\nexit 0\n"
+            "#!/bin/sh\necho \"claimdag $*\" >> '{log_s}'\ncase \"$1\" in\n  get) echo 'gen=2 state=claimed' ;;\n  release) echo gen=3 ;;\n  complete) echo done ;;\nesac\nexit 0\n"
         ),
     );
     script(
@@ -295,7 +295,7 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
         "a finish without a close hands the issue back:\n{org}"
     );
     assert!(
-        open.contains("sitting ended; ticket proj-eeee open for review"),
+        open.contains("sitting ended; ticket proj-eeee is still open"),
         "{open}"
     );
     assert!(
@@ -338,14 +338,16 @@ fn release_hands_the_tracker_back_when_the_claim_graph_holds_nothing() {
 :CREATED:    [2026-10-11 Sun]\n:END:\n\n\
 * STARTED [#C] someone else's\n:PROPERTIES:\n:ID:         proj-iiii\n:CREATED:    [2026-10-11 Sun]\n\
 :CLAIMED_BY: inky@main\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
-* TODO [#C] nothing to hand back\n:PROPERTIES:\n:ID:         proj-jjjj\n:CREATED:    [2026-10-11 Sun]\n:END:\n";
+* TODO [#C] nothing to hand back\n:PROPERTIES:\n:ID:         proj-jjjj\n:CREATED:    [2026-10-11 Sun]\n:END:\n\n\
+* TODO [#C] session already finished\n:PROPERTIES:\n\
+:ID:         cccccccccccccccccccccccccccccccc\n:CREATED:    [2026-10-11 Sun]\n:END:\n";
     let dir = tempfile::tempdir().unwrap();
     // The refusals claimdag 0.8 gives for a node that is not claimed or
     // running, and for an id it has no node for.
     script(
         dir.path(),
         "claimdag",
-        "#!/bin/sh\ncase \"$1\" in\n  release)\n    case \"$2\" in\n      bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) echo 'release: not found' >&2 ;;\n      *) echo 'release: status ready' >&2 ;;\n    esac\n    exit 1 ;;\nesac\nexit 0\n",
+        "#!/bin/sh\ncase \"$1\" in\n  release)\n    case \"$2\" in\n      bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) echo 'release: not found' >&2 ;;\n      cccccccccccccccccccccccccccccccc) echo 'release: status done' >&2 ;;\n      *) echo 'release: status ready' >&2 ;;\n    esac\n    exit 1 ;;\nesac\nexit 0\n",
     );
     script(dir.path(), "vissue", "#!/bin/sh\nexit 0\n");
     let tracker = dir.path().join("tracker");
@@ -395,6 +397,13 @@ fn release_hands_the_tracker_back_when_the_claim_graph_holds_nothing() {
         let out = release(id);
         assert!(!out.status.success(), "release {id} passed: {out:?}");
     }
+    let already_done = release("cccccccccccccccccccccccccccccccc");
+    assert!(
+        already_done.status.success(),
+        "release of finished session: {already_done:?}"
+    );
+    assert!(already_done.stdout.is_empty(), "{already_done:?}");
+    assert!(already_done.stderr.is_empty(), "{already_done:?}");
     let org = std::fs::read_to_string(&file).unwrap();
     for (id, state) in [
         ("proj-gggg", "TODO"),

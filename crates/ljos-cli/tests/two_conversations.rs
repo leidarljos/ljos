@@ -344,7 +344,7 @@ fn two_conversations_on_one_seat_claim_and_finish_their_own_tickets() {
     let done_said = text_of(&done);
     assert!(done.status.success(), "{done_said}");
     assert!(
-        done_said.contains(&format!("finished {YW6T} as done")),
+        done_said.contains(&format!("sitting ended; ticket {YW6T} is still open")),
         "{done_said}"
     );
     assert!(done_said.contains("sitting ended"), "{done_said}");

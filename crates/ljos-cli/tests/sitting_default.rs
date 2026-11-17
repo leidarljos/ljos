@@ -162,7 +162,10 @@ fn a_finish_with_no_id_uses_the_open_sitting() {
     let out = seat.run(&["finish", "--lesson", "The melt held when it was cold."]);
     let text = said(&out);
     assert!(out.status.success(), "{text}calls:\n{}", seat.calls());
-    assert!(text.contains(&format!("finished {OPEN} as done")), "{text}");
+    assert!(
+        text.contains(&format!("sitting ended; ticket {OPEN} is still open")),
+        "{text}"
+    );
     assert!(
         !seat.calls().contains(OTHER),
         "finish wrote the other ticket:\n{}\n{text}",
@@ -301,7 +304,7 @@ fn a_finish_on_another_ticket_warns_and_still_writes() {
     let text = said(&out);
     assert!(out.status.success(), "{text}calls:\n{}", seat.calls());
     assert!(
-        text.contains(&format!("finished {OTHER} as done")),
+        text.contains(&format!("sitting ended; ticket {OTHER} is still open")),
         "{text}"
     );
     assert!(
@@ -348,7 +351,7 @@ fn quiet_hides_the_other_sitting_line() {
     let done_text = said(&done);
     assert!(done.status.success(), "{done_text}calls:\n{}", seat.calls());
     assert!(
-        done_text.contains(&format!("finished {OTHER} as done")),
+        done_text.contains(&format!("sitting ended; ticket {OTHER} is still open")),
         "{done_text}"
     );
     assert!(

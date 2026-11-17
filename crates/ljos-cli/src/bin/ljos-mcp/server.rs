@@ -4833,8 +4833,7 @@ mod tests {
 
     #[test]
     fn a_finish_says_whether_the_ticket_closed() {
-        let open =
-            "finished probe-a1b2 as done\nsitting ended; ticket probe-a1b2 open for review\n";
+        let open = "sitting ended; ticket probe-a1b2 is still open\n";
         let line = finish_close_line("probe-a1b2", open);
         assert_eq!(
             line,

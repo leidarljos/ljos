@@ -190,7 +190,10 @@ fn check(pack: &str) {
     );
     assert_fast("finish", &done, took);
     let done_said = text_of(&done);
-    assert!(done_said.contains("finished demo-busy"), "{done_said}");
+    assert!(
+        done_said.contains("sitting ended; ticket demo-busy is still open"),
+        "{done_said}"
+    );
     assert!(
         done_said.contains("Memory busy: queued 1 write, it will be saved on a later call.")
             || done_said.contains("claim graph did not answer"),

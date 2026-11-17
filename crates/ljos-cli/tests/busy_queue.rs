@@ -221,7 +221,10 @@ fn a_busy_pack_queues_the_lesson_and_a_healthy_pack_saves_it_once() {
     let finished = seat.run(&busy, &["finish", "demo-busy", "--lesson", LESSON]);
     let said = text_of(&finished);
     assert!(finished.status.success(), "{said}");
-    assert!(said.contains("finished demo-busy"), "{said}");
+    assert!(
+        said.contains("sitting ended; ticket demo-busy is still open"),
+        "{said}"
+    );
     assert!(said.contains(QUEUED), "{said}");
     assert!(!said.contains("memory skipped"), "{said}");
     let queued = seat.queue();

@@ -25077,7 +25077,7 @@ pub fn latest_note_value(v: &Value, prefix: &str) -> Option<String> {
     }
 }
 
-/// The playbook name bound on a tracker issue, if any.
+/// The playbook name bound on a claimed tracker issue, if any.
 ///
 /// # Errors
 ///
@@ -25085,28 +25085,33 @@ pub fn latest_note_value(v: &Value, prefix: &str) -> Option<String> {
 pub fn playbook_named_on(issue: &str) -> Result<Option<String>> {
     let said = run_captured("vissue", &["show", issue, "--json"])?;
     let v: Value = serde_json::from_str(&said.stdout).context("vissue show --json")?;
+    if v["claimed_by"]
+        .as_str()
+        .is_none_or(|name| name.trim().is_empty())
+    {
+        return Ok(None);
+    }
     Ok(playbook_name_from_issue(&v))
 }
 
 /// The playbook name this sitting holds, if one was bound. Tracker note is
-/// the bind that survives the process; the runtime cache is only when the
-/// tracker does not answer.
+/// the bind that survives the process; the runtime cache also covers the
+/// short interval before the tracker claim lands. An empty cache is the
+/// local drop marker for a sitting that ended.
 #[must_use]
 pub fn bound_playbook(issue: &str) -> Option<String> {
-    match playbook_named_on(issue) {
-        Ok(name) => name,
-        Err(_) => cached_playbook(issue),
+    let cache = playbook_bind_path(issue);
+    if cache.is_file() {
+        return cached_playbook(issue);
     }
+    playbook_named_on(issue).ok().flatten()
 }
 
 /// Drop the sticky name. Finish and release call this; a new task is a
-/// new sitting. Writes an empty `playbook:` note so the next sitting does
-/// not reprint the previous recipe, and unlinks the runtime cache.
+/// new sitting. The empty runtime cache masks the historical bind until
+/// the next sitting writes its name. No empty tracker note is added.
 pub fn drop_playbook(issue: &str) {
-    if bound_playbook(issue).is_some() {
-        let _ = run_captured("vissue", &["note", issue, PLAYBOOK_NOTE_PREFIX]);
-    }
-    let _ = std::fs::remove_file(playbook_bind_path(issue));
+    let _ = write_playbook_cache(issue, "");
 }
 
 /// Hold `name` on `issue` until finish or release. A different name while
@@ -39970,7 +39975,10 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
                 .chain(tracker.clone())
                 .collect();
             if !named.iter().any(|n| same_holder(n, assignee)) {
-                return Err(e);
+                bail!(
+                    "{}",
+                    not_assignee_message(node, assignee, hold.as_ref(), tracker.as_deref())
+                );
             }
             let said = run_captured("claimdag", &["release", &id, "--actor", &holder])?;
             drop_hold(&holder);
@@ -39980,6 +39988,11 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
         }
         Err(e) => {
             let text = e.to_string();
+            if finished_release_refusal(&text) {
+                drop_hold(&actor);
+                drop_playbook(node);
+                return Ok(String::new());
+            }
             let Some(why) = unheld_refusal(&text) else {
                 return Err(e);
             };
@@ -40000,9 +40013,16 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
     Ok(with_unstamp(said.stdout, node, &id, assignee, true))
 }
 
-/// What the claim graph said when a release found no claim to hand back:
-/// the node is not claimed or running (`status ready`, `status done`), or
-/// the graph has no node for the id (`not found`).
+/// A release of a session that already reached a terminal state.
+fn finished_release_refusal(text: &str) -> bool {
+    ["status done", "status failed", "status cancelled"]
+        .iter()
+        .any(|status| text.contains(&format!("release: {status}")))
+}
+
+/// What the claim graph said when a release found no live claim to hand
+/// back: the node is ready, or the graph has no node for the id. Terminal
+/// nodes are handled as quiet no-ops before this check.
 fn unheld_refusal(text: &str) -> Option<&str> {
     let (_, said) = text.rsplit_once("release: ")?;
     let said = said.trim();
@@ -40021,10 +40041,11 @@ fn line_carries_claim_stamp(line: &str) -> bool {
 /// line. The original line is stored as the entry's raw text, which render
 /// writes back unchanged.
 pub(crate) fn keep_claim_stamp_lines(doc: &mut vissue_core::IssueDoc, source: &str) {
-    let stamps: Vec<&str> = source
+    let mut stamps: Vec<(&str, bool)> = source
         .lines()
         .map(str::trim_end)
         .filter(|line| line_carries_claim_stamp(line))
+        .map(|line| (line, false))
         .collect();
     if stamps.is_empty() {
         return;
@@ -40032,18 +40053,21 @@ pub(crate) fn keep_claim_stamp_lines(doc: &mut vissue_core::IssueDoc, source: &s
     for heading in &mut doc.headings {
         for entry in &mut heading.logbook {
             let rendered = entry.render();
-            if stamps.iter().any(|src| src.trim() == rendered.trim()) {
+            if let Some((_, used)) = stamps
+                .iter_mut()
+                .find(|(src, used)| !*used && src.trim() == rendered.trim())
+            {
+                *used = true;
                 continue;
             }
-            let Some(src) = stamps
-                .iter()
-                .copied()
-                .find(|src| !entry.timestamp.is_empty() && src.contains(entry.timestamp.as_str()))
-            else {
+            let Some((src, used)) = stamps.iter_mut().find(|(src, used)| {
+                !*used && !entry.timestamp.is_empty() && src.contains(entry.timestamp.as_str())
+            }) else {
                 continue;
             };
             if src.trim() != rendered.trim() {
                 entry.raw = Some(src.trim().to_string());
+                *used = true;
             }
         }
     }
@@ -45671,19 +45695,37 @@ pub fn finish(
         "cancelled" if close => Some("CANCELLED"),
         _ => None,
     };
-    let reopen = closed_as.is_none();
-    let completed = {
-        // The claim graph gets about two seconds. Past that the tracker
-        // already holds the release, and a later call reconciles the graph.
+    let closing = closed_as.is_some();
+    let ended = {
+        // The claim graph gets about two seconds. Past that the tracker is
+        // handed back locally, and a later call reconciles the graph.
         let bound = arm_wall_budget_for(std::time::Duration::from_secs(3));
-        let completed = complete_as(issue, Some(status), assignee, gen, reopen);
+        let ended = if closing {
+            complete_as(issue, Some(status), assignee, gen, false)
+        } else {
+            if let Some(expected) = gen {
+                let id = node_for(issue)?;
+                let got = run_captured("claimdag", &["get", &id])?.stdout;
+                let live = gen_of(&got).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "finish: no generation on the claim graph's line for {issue}: {got}"
+                    )
+                })?;
+                if live != expected {
+                    bail!(
+                        "finish: generation {expected} is stale for {issue}; the live generation is {live}"
+                    );
+                }
+            }
+            release(issue, assignee)
+        };
         drop(bound);
-        completed
+        ended
     };
-    let (completed, graph_quiet) = match completed {
+    let (ended, graph_quiet) = match ended {
         Ok(done) => (done, false),
         Err(e) if graph_timed_out(&e) => {
-            let _ = unstamp_tracker(issue, assignee, reopen);
+            let _ = unstamp_tracker(issue, assignee, !closing);
             (String::new(), true)
         }
         Err(e) => {
@@ -45691,10 +45733,13 @@ pub fn finish(
             if text.contains("so run `ljos send ") {
                 bail!("{text}");
             }
-            bail!("finish: the session node for {issue} was not completed: {e:#}")
+            bail!(
+                "finish: the session node for {issue} was not {}: {e:#}",
+                if closing { "completed" } else { "handed back" }
+            )
         }
     };
-    let mut out = format!("{pending}finished {issue} as {status}\n");
+    let mut out = pending;
     if graph_quiet {
         out.push_str(LOCAL_CLAIM_LINE);
     }
@@ -45702,7 +45747,7 @@ pub fn finish(
     // had before the claim. The work was not undone: the sitting ended and
     // the ticket stays open for a person to review.
     let mut handed_back = true;
-    for line in completed.lines().filter(|l| l.starts_with("tracker: ")) {
+    for line in ended.lines().filter(|l| l.starts_with("tracker: ")) {
         if line.contains("stays claimed") {
             handed_back = false;
             out.push_str(line);
@@ -45749,7 +45794,7 @@ pub fn finish(
     }
     if let Some(option) = outcome.map(str::trim).filter(|o| !o.is_empty()) {
         let said = raw_ballot_json(issue).with_context(|| {
-            format!("finish: the session node for {issue} is completed; reading its ballots failed, `ljos learn {issue} --outcome {option}` retries")
+            format!("finish: the sitting on {issue} ended; reading its ballots failed, `ljos learn {issue} --outcome {option}` retries")
         })?;
         let forecasts = forecasts_from_json(&said)?;
         if forecasts.len() < 2 {
@@ -45794,13 +45839,14 @@ pub fn finish(
         }
         run_as("vissue", &["update", issue, "-s", state], None)
             .with_context(|| format!("finish: could not close the ticket {issue}"))?;
+        out.push_str(&format!("finished {issue} as {status}\n"));
         out.push_str(&format!("closed the ticket {issue} as {state}\n"));
         if let Some(note) = &close_note {
             out.push_str(note);
             out.push('\n');
         }
     } else if handed_back {
-        out.push_str(&format!("sitting ended; ticket {issue} open for review\n"));
+        out.push_str(&format!("sitting ended; ticket {issue} is still open\n"));
     }
     // A cloud seat's deeds leave with the tracker. A box writes nothing.
     let (deeds, deed_paths) = deedbag::on_finish(issue);
@@ -82092,14 +82138,14 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         text.matches(&super::missing_lesson_line(issue)).count()
     }
 
-    fn claimdag_for(log: &std::path::Path, complete_ok: bool) -> String {
-        let complete = if complete_ok {
-            "echo done"
+    fn claimdag_for(log: &std::path::Path, release_ok: bool) -> String {
+        let release = if release_ok {
+            "echo handed-back"
         } else {
             "echo 'the seat does not hold this node' >&2; exit 1"
         };
         format!(
-            "#!/bin/sh\necho \"claimdag $*\" >> '{log}'\ncase \"$1\" in\n  get) echo \"$2  claimed  task  gen=2  assignee=alice\" ;;\n  complete) {complete} ;;\n  *) echo ok ;;\nesac\n",
+            "#!/bin/sh\necho \"claimdag $*\" >> '{log}'\ncase \"$1\" in\n  get) echo \"$2  claimed  task  gen=2  assignee=alice\" ;;\n  release) {release} ;;\n  *) echo ok ;;\nesac\n",
             log = log.display(),
         )
     }
@@ -82108,7 +82154,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn run_finish_lesson(
         atoms: &str,
         lesson: Option<&str>,
-        complete_ok: bool,
+        release_ok: bool,
     ) -> Result<String, String> {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
@@ -82122,7 +82168,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         .unwrap();
         let calls = dir.path().join("claimdag.log");
         let fake = dir.path().join("claimdag");
-        std::fs::write(&fake, claimdag_for(&calls, complete_ok)).unwrap();
+        std::fs::write(&fake, claimdag_for(&calls, release_ok)).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -82223,7 +82269,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn a_successful_finish_prints_a_missing_lesson_once() {
         let none = r#"{"atoms":[]}"#;
         let said = run_finish_lesson(none, None, true).unwrap();
-        assert!(said.contains("finished probe-lsn1 as done"), "{said}");
+        assert!(
+            said.contains("sitting ended; ticket probe-lsn1 is still open"),
+            "{said}"
+        );
         assert!(
             !said.contains("island") && !said.contains("seed"),
             "the memory links stay behind --verbose: {said}"
@@ -82235,7 +82284,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
         let other = r#"{"atoms":[{"id":"les-o","kind":"lesson","text":"Another ticket taught this.","issue":"probe-othr","entities":["issue:probe-othr"]}]}"#;
         let said = run_finish_lesson(other, None, true).unwrap();
-        assert!(said.contains("finished probe-lsn1 as done"), "{said}");
+        assert!(
+            said.contains("sitting ended; ticket probe-lsn1 is still open"),
+            "{said}"
+        );
         assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
 
         let tomb = r#"{"atoms":[{"id":"les-t","kind":"lesson","text":"Withdrawn.","issue":"probe-lsn1","entities":["issue:probe-lsn1"],"tombstone":true}]}"#;
@@ -82252,7 +82304,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
         let own = r#"{"atoms":[{"id":"les-1","kind":"lesson","text":"The codec is one file.","issue":"probe-lsn1","entities":["issue:probe-lsn1"]}]}"#;
         let said = run_finish_lesson(own, None, true).unwrap();
-        assert!(said.contains("finished probe-lsn1 as done"), "{said}");
+        assert!(
+            said.contains("sitting ended; ticket probe-lsn1 is still open"),
+            "{said}"
+        );
         assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 0, "{said}");
 
         let entity = r#"{"atoms":[{"id":"les-e","kind":"lesson","text":"Tagged only.","entities":["issue:probe-lsn1"]}]}"#;
@@ -82289,7 +82344,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     #[test]
-    fn a_refused_lesson_leaves_the_node_completed() {
+    fn a_refused_lesson_leaves_the_node_handed_back() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
@@ -82350,13 +82405,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let log = std::fs::read_to_string(&calls).unwrap();
         let node = work_id("probe-f1n5");
         assert!(
-            log.contains(&format!("claimdag complete {node} --actor ")),
-            "the node was not completed: {log}"
+            log.contains(&format!("claimdag release {node} --actor ")),
+            "the node was not handed back: {log}"
         );
-        assert!(said.contains("finished probe-f1n5 as done"), "{said}");
         assert!(said.contains("the lesson was not kept"), "{said}");
         assert!(
-            said.contains("sitting ended; ticket probe-f1n5 open for review"),
+            said.contains("sitting ended; ticket probe-f1n5 is still open"),
             "{said}"
         );
         assert!(!said.contains("back to TODO"), "{said}");

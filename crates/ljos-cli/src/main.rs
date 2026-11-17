@@ -6434,8 +6434,11 @@ fn run_command() -> Result<()> {
                 );
             } else if let Some(node) = node {
                 let assignee = assignee_for("release", assignee.as_deref(), true)?;
-                print!("{}", release(&node, &assignee)?);
-                print!("{}", ljos_cli::persist_tracker(&node, "released"));
+                let said = release(&node, &assignee)?;
+                print!("{said}");
+                if !said.is_empty() {
+                    print!("{}", ljos_cli::persist_tracker(&node, "released"));
+                }
             } else {
                 bail!("release: pass an id, or --stale");
             }

@@ -179,9 +179,8 @@ One session holds a ticket. The other session's claim is refused and names the h
    tracker git: committed chore(issues): demo-2 claimed by claude-dxw6sq4j7l; no remote, kept local
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos finish demo-2
-   finished demo-2 as done
    no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, so run `ljos finish demo-2 --lesson "..."`
-   sitting ended; ticket demo-2 open for review
+   sitting ended; ticket demo-2 is still open
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos sitting demo-1
    claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`.
