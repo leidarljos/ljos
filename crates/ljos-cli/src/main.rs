@@ -6667,7 +6667,7 @@ fn run_command() -> Result<()> {
                 print!("{line}");
             }
             // The page a person reads is the tracker's weighted settle.
-            // The model crate's shares and influence stay on `--json`.
+            // One ask. The model crate's shares and influence stay on `--json`.
             let tracker_in_steps = steps.iter().any(|step| step.bin == "vissue");
             let mut printed_tracker = false;
             for step in steps {
