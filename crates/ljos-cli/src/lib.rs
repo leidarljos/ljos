@@ -3136,6 +3136,17 @@ pub(crate) fn stamped_sessions() -> Vec<(String, String)> {
     stamped_env_sessions()
 }
 
+/// Every usable session variable in this process's own environment,
+/// sorted. A parent that did not pass the variable in does not count.
+pub(crate) fn own_stamped_sessions() -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
+        .map(|(k, v)| (k, v.trim().to_string()))
+        .collect();
+    found.sort();
+    found
+}
+
 /// Every usable session variable in [`stamp_env`], sorted. This does not
 /// read the bound call, so a blank payload can resolve an id before the
 /// bind is stored.
@@ -3195,7 +3206,10 @@ fn write_record_ids(path: &Path, seat: &Seat, ids: &[String]) {
 
 fn read_record(path: &Path, source: String) -> Option<Seat> {
     let text = std::fs::read_to_string(path).ok()?;
-    let mine: Vec<String> = stamped_sessions().into_iter().map(|(_, id)| id).collect();
+    let mine: Vec<String> = own_stamped_sessions()
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect();
     record_for(&text, &mine, source)
 }
 
@@ -3449,11 +3463,15 @@ pub fn retire_seat(runner_pid: u32) {
 /// id and another conversation's id are not this conversation, so they
 /// do not name its seat.
 fn seat_from_session_records() -> Option<Seat> {
-    let id = cursor_conversation()?;
-    read_record(
-        &session_record_path(&id),
-        format!("this conversation's record, {id}"),
-    )
+    for (_, id) in own_stamped_sessions() {
+        if let Some(seat) = read_record(
+            &session_record_path(&id),
+            format!("this conversation's record, {id}"),
+        ) {
+            return Some(seat);
+        }
+    }
+    None
 }
 
 /// The holder recorded for `seat` by a recent MCP hook call, else the
@@ -4554,7 +4572,10 @@ pub(crate) fn mapped_box_seat() -> Option<String> {
     let text = read_plain_file(&path).ok()?;
     let value = toml::from_str::<toml::Value>(&text).ok()?;
     let table = value.as_table()?;
-    let ids: Vec<String> = stamped_sessions().into_iter().map(|(_, id)| id).collect();
+    let ids: Vec<String> = own_stamped_sessions()
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect();
     for id in ids {
         let Some(toml::Value::String(seat)) = table.get(&id) else {
             continue;
@@ -4751,7 +4772,7 @@ fn whoami_resolved() -> Seat {
         // into one process and must not leave records for each other.
         #[cfg(not(test))]
         if std::env::var_os("LJOS_IN_HOOK").is_none() && !doctor_fix::session_seat_is_recorded() {
-            for (_, id) in stamped_sessions() {
+            for (_, id) in own_stamped_sessions() {
                 write_record(&session_record_path(&id), &seat);
             }
         }

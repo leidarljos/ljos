@@ -434,7 +434,7 @@ fn lookup_ids() -> Vec<String> {
             ids.push(value);
         }
     };
-    for (_, id) in crate::stamped_sessions() {
+    for (_, id) in crate::own_stamped_sessions() {
         push(id);
     }
     for key in [
