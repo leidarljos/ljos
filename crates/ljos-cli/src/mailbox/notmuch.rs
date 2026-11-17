@@ -653,8 +653,8 @@ fn tags(row: &Value) -> Vec<String> {
 fn date(timestamp: &Value) -> String {
     timestamp
         .as_i64()
-        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
-        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .and_then(|t| crate::clock::utc_wall(crate::clock::Instant::from_unix(t)))
+        .map(|d| d.rfc3339(true))
         .unwrap_or_default()
 }
 
@@ -814,5 +814,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(text, ["hi"]);
+    }
+
+    #[test]
+    fn a_message_date_prints_as_utc_to_the_second() {
+        assert_eq!(
+            date(&serde_json::json!(1_791_813_600)),
+            "2026-10-12T14:00:00Z"
+        );
+        assert_eq!(date(&serde_json::json!(-1)), "1969-12-31T23:59:59Z");
+        assert_eq!(date(&serde_json::json!(0)), "1970-01-01T00:00:00Z");
+        assert_eq!(date(&serde_json::json!("1791813600")), "");
+        assert_eq!(date(&serde_json::json!(null)), "");
     }
 }

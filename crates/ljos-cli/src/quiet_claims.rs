@@ -8,7 +8,7 @@
 //! seat, and not kept by a conversation that is still running. A release
 //! drops the claim. It does not close the ticket.
 
-use chrono::{DateTime, Local, NaiveDate};
+use crate::clock::{self, Date};
 use vissue_core::views::IssueRec;
 use vissue_core::LogEntry;
 
@@ -94,7 +94,7 @@ pub fn list_mine() -> Result<String> {
 pub fn list_stale(days: Option<i64>, json: bool) -> Result<String> {
     let threshold = threshold_of("claims", days)?;
     let recs = load_tracker().context("claims --stale: the tracker could not be read")?;
-    let today = Local::now().date_naive();
+    let today = clock::local_today();
     let quiet = quiet_rows(&recs, &crate::seat_name(), today);
     let rows = stale_of(&quiet, today, threshold);
     if json {
@@ -119,7 +119,7 @@ pub fn list_stale(days: Option<i64>, json: bool) -> Result<String> {
 pub fn release_stale(assignee: &str, days: Option<i64>, yes: bool) -> Result<String> {
     let threshold = threshold_of("release", days)?;
     let recs = load_tracker().context("release --stale: the tracker could not be read")?;
-    let today = Local::now().date_naive();
+    let today = clock::local_today();
     let quiet = quiet_rows(&recs, assignee, today);
     let rows = stale_of(&quiet, today, threshold);
     if rows.is_empty() {
@@ -190,7 +190,7 @@ fn load_tracker() -> Result<Vec<IssueRec>> {
 }
 
 fn render(recs: &[IssueRec], seat: &str, limit: Option<usize>) -> String {
-    let today = Local::now().date_naive();
+    let today = clock::local_today();
     let rows = quiet_rows(recs, seat, today);
     // A banner (a cap) folds the untouched pile into one line. `claims
     // --mine` still lists every quiet claim, so a seat that asks for the
@@ -242,7 +242,7 @@ fn quiet_line(row: &Quiet) -> String {
     )
 }
 
-fn stale_of(rows: &[Quiet], today: NaiveDate, threshold: i64) -> Vec<&Quiet> {
+fn stale_of(rows: &[Quiet], today: Date, threshold: i64) -> Vec<&Quiet> {
     rows.iter()
         .filter(|row| is_stale(row.day, today, threshold))
         .collect()
@@ -279,7 +279,7 @@ fn render_release_preview(rows: &[&Quiet]) -> String {
     out
 }
 
-fn stale_json(row: &Quiet, today: NaiveDate) -> serde_json::Value {
+fn stale_json(row: &Quiet, today: Date) -> serde_json::Value {
     let (finish, release, note) = action_commands(&row.id);
     serde_json::json!({
         "id": row.id,
@@ -315,25 +315,25 @@ fn threshold_of(verb: &str, days: Option<i64>) -> Result<i64> {
     }
 }
 
-fn is_stale(day: Option<NaiveDate>, today: NaiveDate, threshold: i64) -> bool {
+fn is_stale(day: Option<Date>, today: Date, threshold: i64) -> bool {
     match day {
-        Some(day) => (today - day).num_days() >= threshold,
+        Some(day) => clock::days_between(day, today) >= threshold,
         None => true,
     }
 }
 
-fn age_days(day: Option<NaiveDate>, today: NaiveDate) -> Option<i64> {
-    day.map(|day| (today - day).num_days())
+fn age_days(day: Option<Date>, today: Date) -> Option<i64> {
+    day.map(|day| clock::days_between(day, today))
 }
 
 struct Quiet {
     id: String,
     title: String,
     age: String,
-    day: Option<NaiveDate>,
+    day: Option<Date>,
 }
 
-fn quiet_rows(recs: &[IssueRec], seat: &str, today: NaiveDate) -> Vec<Quiet> {
+fn quiet_rows(recs: &[IssueRec], seat: &str, today: Date) -> Vec<Quiet> {
     let want = crate::canonical_seat_name(seat);
     if want.is_empty() {
         return Vec::new();
@@ -356,9 +356,9 @@ fn quiet_rows(recs: &[IssueRec], seat: &str, today: NaiveDate) -> Vec<Quiet> {
 }
 
 /// A claim with no stamp is quiet: there is no day on which to call it fresh.
-fn quiet_for(day: Option<NaiveDate>, today: NaiveDate) -> bool {
+fn quiet_for(day: Option<Date>, today: Date) -> bool {
     match day {
-        Some(day) => (today - day).num_days() >= QUIET_DAYS,
+        Some(day) => clock::days_between(day, today) >= QUIET_DAYS,
         None => true,
     }
 }
@@ -370,17 +370,19 @@ fn held_live(heading: &vissue_core::IssueHeading, seat: &str) -> bool {
             .is_some_and(|who| crate::canonical_seat_name(who) == seat)
 }
 
+fn stamp_day(stamp: &str) -> Option<Date> {
+    let day = vissue_core::model::parse_stamp_date(stamp)?;
+    clock::parse_day(&day.to_string())
+}
+
 /// Newest day the seat noted, cited a deed, or finished, else the claim day.
-fn last_touch(rec: &IssueRec) -> Option<NaiveDate> {
-    let mut best = rec
-        .heading
-        .claimed_at()
-        .and_then(vissue_core::model::parse_stamp_date);
+fn last_touch(rec: &IssueRec) -> Option<Date> {
+    let mut best = rec.heading.claimed_at().and_then(stamp_day);
     for entry in &rec.heading.logbook {
         if !counts_as_touch(entry) {
             continue;
         }
-        let Some(day) = vissue_core::model::parse_stamp_date(&entry.timestamp) else {
+        let Some(day) = stamp_day(&entry.timestamp) else {
             continue;
         };
         best = Some(best.map_or(day, |have| have.max(day)));
@@ -418,7 +420,7 @@ fn counts_as_touch(entry: &LogEntry) -> bool {
 /// issue, so the day it was written is the day the citation landed. A
 /// shared `issues.org` is rewritten for every ticket in the project, and
 /// its modification day is not this deed's.
-fn deed_file_day(rec: &IssueRec) -> Option<NaiveDate> {
+fn deed_file_day(rec: &IssueRec) -> Option<Date> {
     if rec.heading.deeds().is_empty() {
         return None;
     }
@@ -427,16 +429,15 @@ fn deed_file_day(rec: &IssueRec) -> Option<NaiveDate> {
         return None;
     }
     let modified = rec.path.metadata().ok()?.modified().ok()?;
-    let stamped: DateTime<Local> = DateTime::from(modified);
-    Some(stamped.date_naive())
+    clock::local_day_of(modified)
 }
 
-fn age_words(day: Option<NaiveDate>, today: NaiveDate) -> String {
+fn age_words(day: Option<Date>, today: Date) -> String {
     let Some(day) = day else {
         return "undated".to_string();
     };
-    let then = day.format("%Y-%m-%d").to_string();
-    let now = today.format("%Y-%m-%d").to_string();
+    let then = clock::day_text(day);
+    let now = clock::day_text(today);
     let age = crate::age_of(Some(&then), &now);
     if age.is_empty() {
         "undated".to_string()

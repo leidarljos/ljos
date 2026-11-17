@@ -332,7 +332,7 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
                     ..mem::Filter::default()
                 },
             );
-            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let today = ljos_cli::clock::now_utc().day();
             let found = mem::stale(&all, days, &today);
             if json {
                 println!("{}", serde_json::to_string_pretty(&found)?);
@@ -5140,12 +5140,12 @@ fn run_command() -> Result<()> {
             let day = match valid_at.as_deref().map(str::trim) {
                 Some("any") => None,
                 Some(d) => {
-                    chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
+                    ljos_cli::clock::parse_day(d).ok_or_else(|| {
                         anyhow::anyhow!("search: --valid-at takes YYYY-MM-DD or any, not {d}.")
                     })?;
                     Some(d.to_string())
                 }
-                None => Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
+                None => Some(ljos_cli::clock::now_local().day()),
             };
             // Expired claims are dropped after the pack answers, so ask for
             // more than the limit and cut to it once they are gone. A day
@@ -5549,7 +5549,7 @@ fn run_command() -> Result<()> {
                 stop_ticket(parent);
             }
             if let Some(d) = &deadline {
-                chrono::DateTime::parse_from_rfc3339(d.trim())
+                ljos_cli::clock::parse_rfc3339(d.trim())
                     .map_err(|e| anyhow::anyhow!("--deadline {d:?} is not RFC 3339: {e}"))?;
             }
             let body = ljos_cli::body_with_options(body, &options.into_iter().collect::<Vec<_>>())?;

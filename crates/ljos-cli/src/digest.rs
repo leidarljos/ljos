@@ -252,7 +252,7 @@ fn parse_since(since: Option<&str>) -> Result<(Window, Option<String>, String)> 
 }
 
 fn since_unix(raw: &str) -> Option<i64> {
-    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(raw) {
+    if let Ok(t) = crate::clock::parse_rfc3339(raw) {
         return Some(t.timestamp());
     }
     if raw.len() == 10 || (raw.len() >= 16 && raw.as_bytes().get(10) == Some(&b'T')) {
@@ -1123,14 +1123,14 @@ fn newer_row(a: &Row, b: &Row) -> std::cmp::Ordering {
 /// UTC clock, `YYYY-MM-DD HH:MM`. The same zone `stamp_unix` reads, so
 /// the order and the numbers on the lines do not follow the machine's zone.
 fn wall(secs: i64) -> String {
-    chrono::DateTime::from_timestamp(secs, 0)
-        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+    crate::clock::utc_wall(crate::clock::Instant::from_unix(secs))
+        .map(|t| t.minute())
         .unwrap_or_else(|| "unknown".into())
 }
 
 fn rfc3339(secs: i64) -> String {
-    chrono::DateTime::from_timestamp(secs, 0)
-        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    crate::clock::utc_wall(crate::clock::Instant::from_unix(secs))
+        .map(|t| t.rfc3339(true))
         .unwrap_or_default()
 }
 
@@ -1200,11 +1200,11 @@ fn stamp_unix(stamp: &str) -> Option<i64> {
     if s.is_empty() {
         return None;
     }
-    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+    if let Ok(t) = crate::clock::parse_rfc3339(s) {
         return Some(t.timestamp());
     }
     let date = s.get(..10)?;
-    let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let day = crate::clock::parse_day(date)?;
     let clock = s[10..]
         .split(['T', ' '])
         .find(|part| part.len() >= 5 && part.as_bytes().get(2) == Some(&b':'));
@@ -1216,10 +1216,9 @@ fn stamp_unix(stamp: &str) -> Option<i64> {
     } else {
         (0, 0, 0)
     };
-    let naive = day.and_hms_opt(hour, min, sec)?;
     // Unzoned tracker stamps are UTC. Reading them as local wall time put
     // a seat first on one machine and second on another.
-    Some(naive.and_utc().timestamp())
+    crate::clock::epoch_secs(day, hour, min, sec)
 }
 
 fn unix_now() -> i64 {
@@ -1818,7 +1817,14 @@ mod tests {
         assert!(past.contains("filed probe-b"), "{past}");
     }
 
-    /// chrono keeps the local zone for a second. The guard waits that out
+    /// The `+00:00` form of `secs`, as a committer date.
+    fn git_date(secs: i64) -> String {
+        crate::clock::utc_wall(crate::clock::Instant::from_unix(secs))
+            .unwrap()
+            .rfc3339(false)
+    }
+
+    /// `clock::local_zone` keeps the local zone for a second. The guard waits that out
     /// on the way in and on the way out, so a later test on this thread
     /// does not keep the zone this one set.
     struct ZoneGuard {
@@ -2186,12 +2192,15 @@ mod tests {
         let (root, _) = review_filed_tracker(dir.path());
         let first = digest(Some("last"), false).unwrap();
         assert!(first.contains("filed probe-b"), "{first}");
-        let later = chrono::Utc::now() + chrono::Duration::seconds(5);
+        let later = crate::clock::utc_wall(crate::clock::Instant::from_unix(
+            crate::clock::Instant::now().timestamp() + 5,
+        ))
+        .unwrap();
         let out = crate::git_cmd()
             .arg("-C")
             .arg(&root)
             .args(["commit", "-q", "--amend", "--no-edit"])
-            .env("GIT_COMMITTER_DATE", later.to_rfc3339())
+            .env("GIT_COMMITTER_DATE", later.rfc3339(false))
             .output()
             .unwrap();
         assert!(
@@ -2208,8 +2217,7 @@ mod tests {
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, home) = review_filed_tracker(dir.path());
-        let now = chrono::Local::now();
-        let stamp = now.format("[%Y-%m-%d %a %H:%M]").to_string();
+        let stamp = crate::clock::now_local().org();
         let org = format!(
             "* DONE [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n:LOGBOOK:\n- State \"DONE\" from \"TODO\" {stamp}\n- Finished by alice {stamp}\n:END:\n"
         );
@@ -2341,7 +2349,7 @@ mod tests {
         assert!(voted < withdrew, "{opus}");
         assert!(!opus.contains("voted w1sl for REVISE"), "{opus}");
         let clock = wall(
-            chrono::DateTime::parse_from_rfc3339("2020-06-04T11:25:34Z")
+            crate::clock::parse_rfc3339("2020-06-04T11:25:34Z")
                 .unwrap()
                 .timestamp(),
         );
@@ -2425,8 +2433,7 @@ mod tests {
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, home) = review_filed_tracker(dir.path());
-        let now = chrono::Local::now();
-        let stamp = now.format("[%Y-%m-%d %a %H:%M]").to_string();
+        let stamp = crate::clock::now_local().org();
         let org = format!(
             "* DONE [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n:LOGBOOK:\n- State \"DONE\" from \"TODO\" {stamp}\n- Finished by alice {stamp}\n:END:\n"
         );
@@ -2467,12 +2474,8 @@ mod tests {
             "* TODO [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n* TODO [#C] Two\n:PROPERTIES:\n:ID:         probe-c\n:END:\n",
         )
         .unwrap();
-        let authored = chrono::DateTime::from_timestamp(marker - 600, 0)
-            .unwrap()
-            .to_rfc3339();
-        let landed = chrono::DateTime::from_timestamp(marker + 5, 0)
-            .unwrap()
-            .to_rfc3339();
+        let authored = git_date(marker - 600);
+        let landed = git_date(marker + 5);
         for args in [
             vec!["add", "."],
             vec![
@@ -2520,9 +2523,7 @@ mod tests {
             "* TODO [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n* TODO [#C] Two\n:PROPERTIES:\n:ID:         probe-old\n:END:\n",
         )
         .unwrap();
-        let old = chrono::DateTime::from_timestamp(marker - 600, 0)
-            .unwrap()
-            .to_rfc3339();
+        let old = git_date(marker - 600);
         git(&root, &["add", "."], &old);
         git(
             &root,
@@ -2653,24 +2654,12 @@ mod tests {
         // stops walking once parents fall outside the window, so a
         // backdated descendant would hide an older commit that is still
         // inside it.
-        let early = chrono::DateTime::from_timestamp(start - 86_400, 0)
-            .unwrap()
-            .to_rfc3339();
-        let mid_out = chrono::DateTime::from_timestamp(start - 3_600, 0)
-            .unwrap()
-            .to_rfc3339();
-        let edge_out = chrono::DateTime::from_timestamp(start - 1, 0)
-            .unwrap()
-            .to_rfc3339();
-        let edge_in = chrono::DateTime::from_timestamp(start, 0)
-            .unwrap()
-            .to_rfc3339();
-        let later = chrono::DateTime::from_timestamp(start + 3_600, 0)
-            .unwrap()
-            .to_rfc3339();
-        let later_filed = chrono::DateTime::from_timestamp(start + 3_601, 0)
-            .unwrap()
-            .to_rfc3339();
+        let early = git_date(start - 86_400);
+        let mid_out = git_date(start - 3_600);
+        let edge_out = git_date(start - 1);
+        let edge_in = git_date(start);
+        let later = git_date(start + 3_600);
+        let later_filed = git_date(start + 3_601);
         // Dates increase with history. The subject filings sit between the
         // introductions they are next to, still outside or inside the window.
         let noted = [
@@ -2812,5 +2801,29 @@ mod tests {
             !patch.contains("--since"),
             "last used a date cut and would miss a commit dated before the marker:\n{patch}"
         );
+    }
+
+    #[test]
+    fn stamps_read_and_print_the_instants_they_always_did() {
+        assert_eq!(stamp_unix("[2026-10-12 Mon 09:00]"), Some(1_791_795_600));
+        assert_eq!(stamp_unix("2026-10-12"), Some(1_791_763_200));
+        assert_eq!(stamp_unix("<2026-10-12 Mon 09:00:30>"), Some(1_791_795_630));
+        assert_eq!(stamp_unix("2026-10-12T14:00:00Z"), Some(1_791_813_600));
+        assert_eq!(stamp_unix("2026-10-12T09:00:00-05:00"), Some(1_791_813_600));
+        assert_eq!(
+            stamp_unix("2026-10-12 09:00 extra words"),
+            Some(1_791_795_600)
+        );
+        assert_eq!(stamp_unix("2026-02-30 09:00"), None);
+        assert_eq!(stamp_unix("2026-10-12 25:00"), None);
+        assert_eq!(stamp_unix("2026-10-12 09:00:60"), None);
+        assert_eq!(stamp_unix("not a stamp"), None);
+        assert_eq!(since_unix("2026-10-12T14:00:00Z"), Some(1_791_813_600));
+        assert_eq!(since_unix("2026-10-12"), Some(1_791_763_200));
+        assert_eq!(since_unix("yesterday"), None);
+        assert_eq!(wall(1_791_813_600), "2026-10-12 14:00");
+        assert_eq!(wall(-1), "1969-12-31 23:59");
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1_791_813_600), "2026-10-12T14:00:00Z");
     }
 }

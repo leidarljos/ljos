@@ -390,3 +390,42 @@ fn debug_prints_the_cause_after_the_line() {
     assert!(lines[1].contains("packset url missing"), "{err}");
     assert!(!err.contains("Caused by"), "{err}");
 }
+
+#[test]
+fn a_bad_valid_at_day_names_the_flag_and_exits_2() {
+    let home = Home::new();
+    for day in ["2026-02-30", "2026-13-01", "yesterday", "2026-10-12x"] {
+        let out = home.run(
+            &["search", "kiln", "--valid-at", day],
+            &[("LJOS_SEAT", "alice")],
+        );
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{day}: {said}");
+        assert_eq!(
+            one_line(&out.stderr),
+            format!("search: --valid-at takes YYYY-MM-DD or any, not {day}.")
+        );
+    }
+}
+
+#[test]
+fn a_bad_deadline_names_the_flag_and_the_reason() {
+    let home = Home::new();
+    for (at, why) in [
+        ("bogus", "premature end of input"),
+        ("2026-13-01T00:00:00Z", "input is out of range"),
+        ("2026-10-12T14:00:00Zx", "trailing input"),
+        ("2026-10-12T14:00", "premature end of input"),
+    ] {
+        let out = home.run(
+            &["file", "kiln", "--quorum", "2", "--deadline", at],
+            &[("LJOS_SEAT", "alice")],
+        );
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(1), "{at}: {said}");
+        assert_eq!(
+            one_line(&out.stderr),
+            format!("--deadline {at:?} is not RFC 3339: {why}")
+        );
+    }
+}

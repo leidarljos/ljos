@@ -692,13 +692,9 @@ pub fn stale(all: &[Memory], days: i64, today: &str) -> Vec<Stale> {
             seen.insert(key, m);
         }
     }
-    let cutoff = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d")
-        .ok()
-        .map(|d| {
-            (d - chrono::Duration::days(days))
-                .format("%Y-%m-%d")
-                .to_string()
-        });
+    let cutoff = crate::clock::parse_day(today)
+        .and_then(|d| crate::clock::days_before(d, days))
+        .map(crate::clock::day_text);
     if let Some(cutoff) = cutoff {
         for m in &newest_first {
             if dropped.contains(&m.id) || m.verdict.as_deref() == Some("keep") {
@@ -1755,6 +1751,51 @@ mod tests {
             said.contains("earlier 4x (recall and lookup were one count)"),
             "{said}"
         );
+        std::env::remove_var("XDG_STATE_HOME");
+    }
+
+    #[test]
+    fn the_age_cutoff_counts_calendar_days_back_from_today() {
+        let _env = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", dir.path());
+        let all = sample();
+        let never = |days: i64, today: &str| -> Vec<String> {
+            stale(&all, days, today)
+                .into_iter()
+                .filter(|s| s.why.starts_with("never recalled"))
+                .map(|s| s.why)
+                .collect()
+        };
+        assert!(never(8, "2026-10-20").is_empty());
+        assert_eq!(never(7, "2026-10-20"), ["never recalled since 2026-10-12"]);
+        assert_eq!(
+            never(6, "2026-10-20"),
+            [
+                "never recalled since 2026-10-13",
+                "never recalled since 2026-10-12"
+            ]
+        );
+        assert_eq!(never(3, "2026-11-02").len(), 3);
+        assert_eq!(never(3, "2026-3-1").len(), 0);
+        assert!(never(1, "2026-02-30").is_empty());
+        assert!(never(1, "soon").is_empty());
+        std::env::remove_var("XDG_STATE_HOME");
+    }
+
+    #[test]
+    fn a_day_count_past_the_calendar_names_no_cutoff_and_does_not_panic() {
+        let _env = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", dir.path());
+        let all = sample();
+        for days in [4_000_000_000, 100_000_000, i64::MAX, i64::MIN] {
+            let got = stale(&all, days, "2026-10-20");
+            assert!(
+                got.iter().all(|s| !s.why.starts_with("never recalled")),
+                "{days}"
+            );
+        }
         std::env::remove_var("XDG_STATE_HOME");
     }
 }

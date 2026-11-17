@@ -168,7 +168,7 @@ fn read_split(dir: &Path) -> (Vec<Queued>, Vec<u8>) {
 fn damaged_file(dir: &Path) -> PathBuf {
     dir.join(format!(
         "note-queue.jsonl.{}.damaged",
-        chrono::Utc::now().format("%Y-%m-%d")
+        crate::clock::now_utc().day()
     ))
 }
 
@@ -757,5 +757,21 @@ mod tests {
         .unwrap();
         assert_eq!(done.kept, [("p-1".to_string(), "id".to_string())]);
         assert!(pending_in(&dir).is_empty());
+    }
+
+    #[test]
+    fn a_damaged_file_is_named_for_the_utc_day() {
+        let name = damaged_file(Path::new("/queue"));
+        let name = name.file_name().unwrap().to_str().unwrap();
+        let day = name
+            .strip_prefix("note-queue.jsonl.")
+            .and_then(|rest| rest.strip_suffix(".damaged"))
+            .unwrap();
+        let bytes = day.as_bytes();
+        assert_eq!(bytes.len(), 10, "{name}");
+        assert!(bytes[..4].iter().all(u8::is_ascii_digit), "{name}");
+        assert_eq!((bytes[4], bytes[7]), (b'-', b'-'), "{name}");
+        assert!(bytes[5..7].iter().all(u8::is_ascii_digit), "{name}");
+        assert!(bytes[8..].iter().all(u8::is_ascii_digit), "{name}");
     }
 }

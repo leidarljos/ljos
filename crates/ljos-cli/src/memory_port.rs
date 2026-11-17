@@ -21,6 +21,7 @@ use packset_client::Hit;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::clock::{self, Instant};
 use sha2::{Digest, Sha256};
 
 /// Format tag on every header and row this command writes.
@@ -354,27 +355,34 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn parse_time(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    use chrono::TimeZone;
-    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) {
-        return Some(parsed.with_timezone(&chrono::Utc));
+fn parse_time(raw: &str) -> Option<Instant> {
+    if let Ok(parsed) = clock::parse_rfc3339(raw) {
+        return Some(parsed);
     }
-    let date = chrono::NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").ok()?;
-    let naive = date.and_hms_opt(0, 0, 0)?;
-    Some(chrono::Utc.from_utc_datetime(&naive))
+    let date = clock::parse_day(raw.trim())?;
+    clock::epoch_secs(date, 0, 0, 0).map(Instant::from_unix)
 }
 
 /// UTC as stored, then the same instant in the process zone.
-/// The zone comes from the system clock chrono already uses.
+/// The zone is the one `clock::local_zone` reads.
 /// A value that does not parse is returned unchanged.
 fn show_time(raw: &str) -> (String, Vec<String>) {
-    match parse_time(raw) {
-        Some(utc) => {
-            let utc_text = utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            let local = utc.with_timezone(&chrono::Local);
-            let local_text = local.format("%Y-%m-%d %H:%M:%S %:z").to_string();
-            (format!("{utc_text} local {local_text}"), Vec::new())
-        }
+    let walls = parse_time(raw).and_then(|at| {
+        Some((
+            clock::utc_wall(at)?,
+            clock::wall_in(at, &clock::local_zone())?,
+        ))
+    });
+    match walls {
+        Some((utc, local)) => (
+            format!(
+                "{} local {} {}",
+                utc.rfc3339(true),
+                local.second(),
+                local.offset()
+            ),
+            Vec::new(),
+        ),
         None => (raw.to_string(), vec!["time-unparsed".into()]),
     }
 }
@@ -577,7 +585,7 @@ pub(crate) fn reset_work_counts() {
 }
 
 fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    clock::now_utc().rfc3339(true)
 }
 
 /// Why a pack gate turned `why` away. The words are the pack's.
@@ -4281,15 +4289,14 @@ mod tests {
 
     #[test]
     fn a_listing_shows_the_stored_utc_and_the_system_zone() {
-        use chrono::TimeZone;
-        let utc = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 18, 0, 0).unwrap();
-        let raw = utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let (shown, labels) = show_time(&raw);
+        let raw = "2026-01-15T18:00:00Z";
+        let utc = clock::parse_rfc3339(raw).unwrap();
+        let (shown, labels) = show_time(raw);
         assert!(labels.is_empty(), "{labels:?}");
-        assert!(shown.starts_with(&raw), "{shown}");
-        let local = utc.with_timezone(&chrono::Local);
-        let local_text = local.format("%Y-%m-%d %H:%M:%S %:z").to_string();
-        assert!(shown.contains(&local_text), "{shown} vs {local_text}");
+        assert!(shown.starts_with(&format!("{raw} local ")), "{shown}");
+        let local = clock::wall_in(utc, &clock::local_zone()).unwrap();
+        let local_text = format!("{} {}", local.second(), local.offset());
+        assert!(shown.ends_with(&local_text), "{shown} vs {local_text}");
         let (bad, bad_labels) = show_time("not-a-time");
         assert_eq!(bad, "not-a-time");
         assert_eq!(bad_labels, vec!["time-unparsed".to_string()]);
@@ -5112,5 +5119,54 @@ mod tests {
             stop,
             join: Some(join),
         }
+    }
+
+    #[test]
+    fn a_stored_time_is_shown_as_utc_then_on_the_clock_of_the_process() {
+        let _env = crate::test_env_lock();
+        let shown = |tz: &'static str, raw: &'static str| {
+            unsafe { std::env::set_var("TZ", tz) };
+            std::thread::spawn(move || show_time(raw)).join().unwrap()
+        };
+        for (tz, raw, want) in [
+            (
+                "IST-5:30",
+                "2026-01-15T18:00:00Z",
+                "2026-01-15T18:00:00Z local 2026-01-15 23:30:00 +05:30",
+            ),
+            (
+                "EST5EDT,M3.2.0,M11.1.0",
+                "2026-10-12T09:00:00-05:00",
+                "2026-10-12T14:00:00Z local 2026-10-12 10:00:00 -04:00",
+            ),
+            (
+                "EST5EDT,M3.2.0,M11.1.0",
+                "2026-10-12",
+                "2026-10-12T00:00:00Z local 2026-10-11 20:00:00 -04:00",
+            ),
+            (
+                "EST5EDT,M3.2.0,M11.1.0",
+                " 2026-1-5 ",
+                "2026-01-05T00:00:00Z local 2026-01-04 19:00:00 -05:00",
+            ),
+            (
+                "UTC0",
+                "2026-12-31T23:59:60Z",
+                "2026-12-31T23:59:60Z local 2026-12-31 23:59:60 +00:00",
+            ),
+        ] {
+            assert_eq!(shown(tz, raw), (want.to_string(), Vec::new()), "{tz} {raw}");
+        }
+        for raw in ["not-a-time", "2026-13-01", "2026-10-12T14:00", ""] {
+            assert_eq!(
+                shown("UTC0", raw),
+                (raw.to_string(), vec!["time-unparsed".to_string()]),
+                "{raw:?}"
+            );
+        }
+        unsafe { std::env::remove_var("TZ") };
+        let now = now_rfc3339();
+        assert_eq!(now.len(), 20, "{now}");
+        assert!(now.ends_with('Z'), "{now}");
     }
 }

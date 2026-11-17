@@ -2,7 +2,7 @@
 //! line, the exact message bytes, and `H` = sha256 of those bytes.
 
 ljos_test_boot::harness!();
-use chrono::{Duration, TimeZone as _, Utc};
+use ljos_cli::clock::Instant;
 use ljos_cli::mailbox::config::MailConfig;
 use ljos_cli::mailbox::export::{Approval, Draft};
 use sha2::{Digest as _, Sha256};
@@ -17,8 +17,12 @@ Content-Type: text/plain; charset=utf-8\n\
 See you at noon.\n\
 \tIndented by a tab.\n";
 
-fn now() -> chrono::DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 10, 22, 12, 0, 0).unwrap()
+fn now() -> Instant {
+    ljos_cli::clock::parse_rfc3339("2026-10-22T12:00:00Z").unwrap()
+}
+
+fn hours(n: i64) -> i64 {
+    n * 3600
 }
 
 /// The owner's checks: their identity and a deny file of their own.
@@ -40,11 +44,7 @@ fn config() -> &'static MailConfig {
         .1
 }
 
-fn export(
-    draft: &Draft<'_>,
-    expires: chrono::DateTime<Utc>,
-    now: chrono::DateTime<Utc>,
-) -> anyhow::Result<Approval> {
+fn export(draft: &Draft<'_>, expires: Instant, now: Instant) -> anyhow::Result<Approval> {
     ljos_cli::mailbox::export::export(draft, config(), expires, now)
 }
 
@@ -62,7 +62,7 @@ fn draft(message: &str) -> Draft<'_> {
 
 #[test]
 fn the_file_is_the_statement_block_then_the_exact_bytes() {
-    let expires = now() + Duration::hours(2);
+    let expires = now().plus_secs(hours(2));
     let got = export(&draft(MESSAGE), expires, now()).unwrap();
     let text = String::from_utf8(got.file.clone()).unwrap();
     let (block, message) = text.split_once("\n\n").unwrap();
@@ -95,7 +95,7 @@ fn the_file_is_the_statement_block_then_the_exact_bytes() {
 #[test]
 fn the_hash_covers_the_bytes_sendmail_is_given_including_a_lone_dot() {
     let dotted = MESSAGE.replace("See you at noon.\n", "See you at noon.\n.\nStill here.\n");
-    let got = export(&draft(&dotted), now() + Duration::hours(1), now()).unwrap();
+    let got = export(&draft(&dotted), now().plus_secs(hours(1)), now()).unwrap();
     assert!(got.file.ends_with(dotted.as_bytes()));
     assert_eq!(got.hash, hex::encode(Sha256::digest(dotted.as_bytes())));
 }
@@ -103,7 +103,7 @@ fn the_hash_covers_the_bytes_sendmail_is_given_including_a_lone_dot() {
 #[test]
 fn crlf_is_refused_because_the_stored_form_is_lf() {
     let crlf = MESSAGE.replace('\n', "\r\n");
-    let err = export(&draft(&crlf), now() + Duration::hours(1), now()).unwrap_err();
+    let err = export(&draft(&crlf), now().plus_secs(hours(1)), now()).unwrap_err();
     assert!(err.to_string().contains("U+000D"), "{err}");
 }
 
@@ -159,7 +159,7 @@ fn characters_that_hide_reorder_or_break_text_are_refused_anywhere() {
             "paragraph separator",
         ),
     ] {
-        let err = export(&draft(&bad), now() + Duration::hours(1), now());
+        let err = export(&draft(&bad), now().plus_secs(hours(1)), now());
         assert!(err.is_err(), "{what} was exported");
         assert!(err.unwrap_err().to_string().contains("U+"), "{what}");
     }
@@ -174,25 +174,20 @@ fn a_denied_term_split_by_any_default_ignorable_character_is_refused() {
         ('\u{e0041}', "U+E0041", "tag character"),
     ] {
         let bad = MESSAGE.replace("noon", &format!("noon on proj{split}ect-x"));
-        let err = export(&draft(&bad), now() + Duration::hours(1), now()).unwrap_err();
+        let err = export(&draft(&bad), now().plus_secs(hours(1)), now()).unwrap_err();
         assert!(err.to_string().contains(code), "{what}: {err}");
     }
 }
 
 #[test]
 fn the_expiry_is_after_now_and_at_most_a_day_out() {
-    let ok = |hours: i64| export(&draft(MESSAGE), now() + Duration::hours(hours), now()).is_ok();
+    let ok = |n: i64| export(&draft(MESSAGE), now().plus_secs(hours(n)), now()).is_ok();
     assert!(ok(24));
     assert!(ok(1));
     assert!(!ok(0));
     assert!(!ok(-1));
     assert!(!ok(25));
-    assert!(export(
-        &draft(MESSAGE),
-        now() + Duration::hours(24) + Duration::seconds(1),
-        now()
-    )
-    .is_err());
+    assert!(export(&draft(MESSAGE), now().plus_secs(hours(24) + 1), now()).is_err());
 }
 
 #[test]
@@ -201,7 +196,7 @@ fn a_message_without_its_fixed_headers_or_a_bad_field_is_refused() {
     let no_date = MESSAGE.replace("Date: Thu, 22 Oct 2026 12:00:00 +0000\n", "");
     let no_body = MESSAGE.split("\n\n").next().unwrap().to_string();
     let in_body = MESSAGE.replace("See you", "Message-ID: <x@example.test>\nSee you");
-    let later = now() + Duration::hours(1);
+    let later = now().plus_secs(hours(1));
     for message in [&no_id, &no_date, &no_body] {
         assert!(export(&draft(message), later, now()).is_err(), "{message}");
     }
@@ -230,7 +225,7 @@ fn a_message_without_its_fixed_headers_or_a_bad_field_is_refused() {
 
 #[test]
 fn date_and_message_id_must_be_valid_not_only_present() {
-    let later = now() + Duration::hours(1);
+    let later = now().plus_secs(hours(1));
     let date = "Date: Thu, 22 Oct 2026 12:00:00 +0000\n";
     let id = "Message-ID: <draft-7@example.test>\n";
     for bad in [
@@ -259,7 +254,7 @@ fn date_and_message_id_must_be_valid_not_only_present() {
 
 #[test]
 fn a_bcc_header_is_refused_because_sendmail_t_strips_it() {
-    let later = now() + Duration::hours(1);
+    let later = now().plus_secs(hours(1));
     for bcc in ["Bcc: hidden@example.test\n", "bcc:\n hidden@example.test\n"] {
         let message = MESSAGE.replace("Subject:", &format!("{bcc}Subject:"));
         let err = export(&draft(&message), later, now()).unwrap_err();
@@ -269,7 +264,7 @@ fn a_bcc_header_is_refused_because_sendmail_t_strips_it() {
 
 #[test]
 fn every_resent_header_is_refused_because_sendmail_t_follows_it() {
-    let later = now() + Duration::hours(1);
+    let later = now().plus_secs(hours(1));
     for resent in [
         "Resent-To: other@example.test\n",
         "Resent-Cc: other@example.test\n",
@@ -287,7 +282,7 @@ fn every_resent_header_is_refused_because_sendmail_t_follows_it() {
 
 #[test]
 fn reachbook_hash_must_be_the_sha256_of_the_message() {
-    let later = now() + Duration::hours(1);
+    let later = now().plus_secs(hours(1));
     let other = MESSAGE.replace("noon", "one");
     let upper = sha(MESSAGE).to_ascii_uppercase();
     for hash in [sha(&other), &upper, "ab12cd34"] {
@@ -304,7 +299,7 @@ fn reachbook_hash_must_be_the_sha256_of_the_message() {
 
 #[test]
 fn no_approval_file_is_minted_for_a_draft_the_checks_refuse() {
-    let later = now() + Duration::hours(1);
+    let later = now().plus_secs(hours(1));
     for bad in [
         MESSAGE.replace("Owner <owner@", "Owner <other@"),
         MESSAGE.replace("friend@example.test", "pal@denied.example.test"),

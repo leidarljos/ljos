@@ -965,14 +965,14 @@ fn cutoff_path() -> Option<PathBuf> {
     )
 }
 
-fn parse_instant(raw: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+fn parse_instant(raw: &str) -> Option<crate::clock::Instant> {
     let raw = raw.trim();
     (!raw.is_empty())
-        .then(|| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        .then(|| crate::clock::parse_rfc3339(raw).ok())
         .flatten()
 }
 
-fn cutoff_instant() -> Option<chrono::DateTime<chrono::FixedOffset>> {
+fn cutoff_instant() -> Option<crate::clock::Instant> {
     let text = std::fs::read_to_string(cutoff_path()?).ok()?;
     text.lines().find_map(parse_instant)
 }
@@ -3326,5 +3326,27 @@ mod tests {
         );
         assert!(line.starts_with("User rules"), "{line}");
         assert!(line.contains("never post or reply to Alan"), "{line}");
+    }
+
+    #[test]
+    fn an_instant_compares_by_the_moment_not_the_offset() {
+        let at = |s: &str| parse_instant(s);
+        assert!(at("2026-10-12T09:00:00-05:00").is_some());
+        assert_eq!(
+            at("2026-10-12T09:00:00-05:00"),
+            at(" 2026-10-12T14:00:00Z ")
+        );
+        assert!(at("2026-10-12T13:59:59Z") < at("2026-10-12T14:00:00Z"));
+        assert!(at("2026-10-12T14:00:00.5Z") > at("2026-10-12T14:00:00Z"));
+        assert!(at("2026-10-12T14:00:00+00:00") < at("2026-10-12T14:00:01Z"));
+        for refused in [
+            "",
+            "  ",
+            "2026-10-12",
+            "2026-10-12T14:00:00",
+            "2026-13-12T14:00:00Z",
+        ] {
+            assert!(at(refused).is_none(), "{refused:?}");
+        }
     }
 }

@@ -402,12 +402,12 @@ fn snap(name: &str, actual: &str) {
 }
 
 fn atoms() -> Value {
-    let today = chrono::Utc::now()
-        .format("%Y-%m-%dT12:00:00.000Z")
-        .to_string();
-    let yesterday = (chrono::Utc::now().date_naive() - chrono::Duration::days(1))
-        .format("%Y-%m-%dT12:00:00.000Z")
-        .to_string();
+    let day = ljos_cli::clock::now_utc().date();
+    let today = format!("{}T12:00:00.000Z", ljos_cli::clock::day_text(day));
+    let yesterday = format!(
+        "{}T12:00:00.000Z",
+        ljos_cli::clock::day_text(ljos_cli::clock::days_before(day, 1).unwrap())
+    );
     let mut rows = vec![
         atom(
             "idkiln01aaaaaaaaaaaaaaaaaaaaaaaa",

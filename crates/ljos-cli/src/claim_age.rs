@@ -7,7 +7,15 @@
 //! few minutes ahead makes the same negative number. The age is the elapsed
 //! time. A stamp ahead of now, or younger than a minute, is `just now`.
 
-use chrono::{DateTime, FixedOffset, LocalResult, NaiveDateTime, Offset, TimeZone};
+use crate::clock;
+
+/// An instant and the offset from UTC the wall clock is reading, the pair
+/// a stamp is read against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Moment {
+    secs: i64,
+    offset: i32,
+}
 
 /// `just now`, `12m`, `3h`, or `4d`.
 ///
@@ -15,8 +23,8 @@ use chrono::{DateTime, FixedOffset, LocalResult, NaiveDateTime, Offset, TimeZone
 /// through 59 is `Nm`. An hour through 23 is `Nh`. A day or more is whole
 /// days, `Nd`. The text never starts with a minus.
 #[must_use]
-pub fn between(then: DateTime<FixedOffset>, now: DateTime<FixedOffset>) -> String {
-    let secs = now.signed_duration_since(then).num_seconds();
+pub fn between(then: Moment, now: Moment) -> String {
+    let secs = now.secs - then.secs;
     if secs < 60 {
         return "just now".to_string();
     }
@@ -36,8 +44,7 @@ pub fn between(then: DateTime<FixedOffset>, now: DateTime<FixedOffset>) -> Strin
 /// writes. A date with no clock is that day's midnight. `None` when the
 /// stamp is not that shape.
 #[must_use]
-pub fn instant(stamp: &str, now: DateTime<FixedOffset>) -> Option<DateTime<FixedOffset>> {
-    let offset = now.offset().fix();
+pub fn instant(stamp: &str, now: Moment) -> Option<Moment> {
     let text = stamp
         .trim()
         .trim_matches(|c: char| matches!(c, '[' | '<' | ']' | '>'));
@@ -45,31 +52,32 @@ pub fn instant(stamp: &str, now: DateTime<FixedOffset>) -> Option<DateTime<Fixed
     let date = parts.next()?;
     let clock = parts.find(|part| part.contains(':')).unwrap_or("00:00");
     let clock = clock.get(..5).unwrap_or(clock);
-    let naive = NaiveDateTime::parse_from_str(&format!("{date} {clock}"), "%Y-%m-%d %H:%M").ok()?;
-    match offset.from_local_datetime(&naive) {
-        LocalResult::Single(at) | LocalResult::Ambiguous(at, _) => Some(at),
-        LocalResult::None => None,
-    }
+    let naive = clock::parse_day_minute(&format!("{date} {clock}"))?;
+    let secs = clock::local_epoch(naive, &clock::fixed_zone(now.offset)?)?;
+    Some(Moment {
+        secs,
+        offset: now.offset,
+    })
 }
 
 /// Age of an org stamp at `now`. `None` when the stamp does not parse.
 #[must_use]
-pub fn at(stamp: &str, now: DateTime<FixedOffset>) -> Option<String> {
+pub fn at(stamp: &str, now: Moment) -> Option<String> {
     Some(between(instant(stamp, now)?, now))
 }
 
 /// Whole days between the instants. `Some(0)` when the stamp is ahead of
 /// now. `None` when the stamp does not parse. Never negative.
 #[must_use]
-pub fn days(stamp: &str, now: DateTime<FixedOffset>) -> Option<i64> {
+pub fn days(stamp: &str, now: Moment) -> Option<i64> {
     let then = instant(stamp, now)?;
-    let secs = now.signed_duration_since(then).num_seconds();
+    let secs = now.secs - then.secs;
     Some(if secs <= 0 { 0 } else { secs / 86_400 })
 }
 
 /// `claimed 12m by ada`, or `claimed by ada` when the stamp does not parse.
 #[must_use]
-pub fn phrase(who: &str, stamp: Option<&str>, now: DateTime<FixedOffset>) -> String {
+pub fn phrase(who: &str, stamp: Option<&str>, now: Moment) -> String {
     match stamp.and_then(|stamp| at(stamp, now)) {
         Some(age) => format!("claimed {age} by {who}"),
         None => format!("claimed by {who}"),
@@ -78,37 +86,34 @@ pub fn phrase(who: &str, stamp: Option<&str>, now: DateTime<FixedOffset>) -> Str
 
 /// The ready-line suffix, `  (claimed 12m by ada)`. Empty when `who` is blank.
 #[must_use]
-pub fn suffix(who: Option<&str>, stamp: Option<&str>, now: DateTime<FixedOffset>) -> String {
+pub fn suffix(who: Option<&str>, stamp: Option<&str>, now: Moment) -> String {
     let Some(who) = who.map(str::trim).filter(|who| !who.is_empty()) else {
         return String::new();
     };
     format!("  ({})", phrase(who, stamp, now))
 }
 
-/// Now in this machine's zone, as a fixed offset the age math can share
-/// with a stamp.
+/// Now in this machine's zone, with the offset the age math shares with
+/// a stamp.
 #[must_use]
-pub fn now_here() -> DateTime<FixedOffset> {
-    chrono::Local::now().fixed_offset()
+pub fn now_here() -> Moment {
+    let secs = clock::Instant::now().timestamp();
+    Moment {
+        secs,
+        offset: i32::try_from(clock::offset_secs_at(&clock::local_zone(), secs)).unwrap_or(0),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use jiff::civil::date;
 
-    fn at_offset(
-        hours_east: i32,
-        y: i32,
-        m: u32,
-        d: u32,
-        hh: u32,
-        mm: u32,
-    ) -> DateTime<FixedOffset> {
-        FixedOffset::east_opt(hours_east * 3600)
-            .unwrap()
-            .with_ymd_and_hms(y, m, d, hh, mm, 0)
-            .unwrap()
+    fn at_offset(hours_east: i32, y: i16, m: i8, d: i8, hh: i8, mm: i8) -> Moment {
+        let offset = hours_east * 3600;
+        let zone = clock::fixed_zone(offset).unwrap();
+        let secs = clock::local_epoch(date(y, m, d).at(hh, mm, 0, 0), &zone).unwrap();
+        Moment { secs, offset }
     }
 
     /// Local midnight has passed and the UTC date is still yesterday.
@@ -118,16 +123,20 @@ mod tests {
     fn a_claim_minutes_ago_across_the_utc_date_is_minutes() {
         let now = at_offset(2, 2026, 11, 16, 0, 20);
         assert_eq!(
-            now.with_timezone(&chrono::Utc).date_naive().to_string(),
+            clock::utc_wall(clock::Instant::from_unix(now.secs))
+                .unwrap()
+                .day(),
             "2026-11-15"
         );
         let stamp = "[2026-11-16 Mon 00:08]";
         let age = at(stamp, now).unwrap();
         assert_eq!(age, "12m");
         assert!(!age.starts_with('-'), "{age}");
-        let utc_day = now.with_timezone(&chrono::Utc).date_naive();
-        let local_day = chrono::NaiveDate::from_ymd_opt(2026, 11, 16).unwrap();
-        assert_eq!((utc_day - local_day).num_days(), -1);
+        let utc_day = clock::utc_wall(clock::Instant::from_unix(now.secs))
+            .unwrap()
+            .date();
+        let local_day = date(2026, 11, 16);
+        assert_eq!(clock::days_between(local_day, utc_day), -1);
         assert_eq!(days(stamp, now), Some(0));
         let suffix = suffix(Some("ada"), Some(stamp), now);
         assert_eq!(suffix, "  (claimed 12m by ada)");

@@ -23,6 +23,7 @@ pub mod bookkeep;
 pub mod call_deadline;
 pub mod capture;
 mod claim_age;
+pub mod clock;
 pub mod cloud;
 mod cloud_guard;
 mod cloud_hook;
@@ -21972,7 +21973,7 @@ pub fn set_validity(from: Option<&str>, to: Option<&str>) -> Result<()> {
     let mut tags = Vec::new();
     for (prefix, v) in [(VALID_FROM, from), (VALID_TO, to)] {
         if let Some(d) = v.map(str::trim) {
-            chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
+            clock::parse_day(d).ok_or_else(|| {
                 let flag = if prefix.starts_with("valid_from") {
                     "--valid-from"
                 } else {
@@ -22063,7 +22064,7 @@ pub fn atom_source() -> Value {
         "seat": seat.seat,
         "session": seat.holder,
         "host": sync::host(),
-        "at": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        "at": clock::now_utc().rfc3339(true),
         "via": "ljos",
     });
     if let Some(reason) = memories::write_reason() {
@@ -32904,24 +32905,20 @@ fn resolve_forget_id(input: &str, ids: &[String]) -> Result<String> {
 /// An RFC 3339 time in the given zone as `2026-10-12 09:00 -05:00`, or the
 /// text unchanged when it does not parse.
 #[must_use]
-pub fn local_when_in<Tz: chrono::TimeZone>(ts: &str, zone: &Tz) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    chrono::DateTime::parse_from_rfc3339(ts.trim()).map_or_else(
-        |_| ts.to_string(),
-        |t| {
-            t.with_timezone(zone)
-                .format("%Y-%m-%d %H:%M %:z")
-                .to_string()
-        },
-    )
+pub fn local_when_in(ts: &str, zone: &jiff::tz::TimeZone) -> String {
+    clock::parse_rfc3339(ts.trim())
+        .ok()
+        .and_then(|at| clock::wall_in(at, zone))
+        .map_or_else(
+            || ts.to_string(),
+            |wall| format!("{} {}", wall.minute(), wall.offset()),
+        )
 }
 
 /// [`local_when_in`] in this machine's zone.
 #[must_use]
 pub fn local_when(ts: &str) -> String {
-    local_when_in(ts, &chrono::Local)
+    local_when_in(ts, &clock::local_zone())
 }
 
 /// What `remember`, `prefer` and `rule` print to a person at a terminal.
@@ -42319,16 +42316,12 @@ pub fn evidence_in_words(said: &str, offset_of: fn(i64) -> i64) -> String {
         };
         let Some(zone) = i32::try_from(offset_of(secs))
             .ok()
-            .and_then(chrono::FixedOffset::east_opt)
+            .and_then(clock::fixed_zone)
         else {
             continue;
         };
-        if let Some(at) = chrono::DateTime::from_timestamp(secs, 0) {
-            out.push_str(&format!(
-                "at={}\n",
-                at.with_timezone(&zone)
-                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-            ));
+        if let Some(at) = clock::wall_in(clock::Instant::from_unix(secs), &zone) {
+            out.push_str(&format!("at={}\n", at.rfc3339(false)));
         }
     }
     out
@@ -42341,30 +42334,22 @@ pub fn evidence_here(said: &str) -> String {
 }
 
 fn local_offset(secs: i64) -> i64 {
-    use chrono::{Local, Offset, TimeZone};
-    Local
-        .timestamp_opt(secs, 0)
-        .single()
-        .map_or(0, |t| i64::from(t.offset().fix().local_minus_utc()))
+    clock::offset_secs_at(&clock::local_zone(), secs)
 }
 
 /// Now in local wall time, `YYYY-MM-DDTHH:MM:SS`, the zone of the tracker's
 /// org stamps.
 fn now_local() -> String {
-    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+    clock::now_local().iso_second()
 }
 
 /// An RFC 3339 stamp as local wall time, `YYYY-MM-DDTHH:MM`; any other shape
 /// comes back unchanged.
 fn local_stamp(ts: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(ts.trim()).map_or_else(
-        |_| ts.to_string(),
-        |t| {
-            t.with_timezone(&chrono::Local)
-                .format("%Y-%m-%dT%H:%M")
-                .to_string()
-        },
-    )
+    clock::parse_rfc3339(ts.trim())
+        .ok()
+        .and_then(|at| clock::wall_in(at, &clock::local_zone()))
+        .map_or_else(|| ts.to_string(), |wall| wall.iso_minute())
 }
 
 /// The tracker's own events on an issue: created, each state change, the
@@ -43296,7 +43281,7 @@ fn activity_key(heading: &vissue_core::IssueHeading) -> (i64, String) {
 fn ready_lines(
     rows: &[vissue_core::views::IssueRow],
     recs: &[vissue_core::views::IssueRec],
-    now: chrono::DateTime<chrono::FixedOffset>,
+    now: claim_age::Moment,
 ) -> String {
     let by_id: std::collections::HashMap<&str, &vissue_core::views::IssueRec> = recs
         .iter()
@@ -46572,7 +46557,7 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
         "- {} by {} {}",
         verb_heading(verb),
         seat.trim(),
-        chrono::Local::now().format("[%Y-%m-%d %a %H:%M]")
+        clock::now_local().org()
     );
     with_wall_bounded_issues_lock(path, || {
         let text = std::fs::read_to_string(path)?;
@@ -70110,7 +70095,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
 
     #[test]
     fn a_person_sees_the_ack_in_local_time_with_a_short_id() {
-        let zone = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        let zone = clock::fixed_zone(-5 * 3600).unwrap();
         assert_eq!(
             local_when_in("2026-10-12T14:00:00Z", &zone),
             "2026-10-12 09:00 -05:00"
@@ -70142,6 +70127,85 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(
             format_write_ack_plain(&rule, &when),
             "rule deny `terraform destroy*`: Destroy only from the release runbook.\n  id e5888767, next review 2026-10-12 09:00 -05:00"
+        );
+    }
+
+    #[test]
+    fn evidence_and_stamps_print_on_the_readers_clock() {
+        fn west(_: i64) -> i64 {
+            -18_000
+        }
+        fn east(_: i64) -> i64 {
+            19_800
+        }
+        fn odd(_: i64) -> i64 {
+            -17_762
+        }
+        fn day(_: i64) -> i64 {
+            86_400
+        }
+        let said = "kind=x\ntime=1791813600\ntime=nope\ntime=-1\n";
+        assert_eq!(
+            evidence_in_words(said, west),
+            "kind=x\ntime=1791813600\nat=2026-10-12T09:00:00-05:00\ntime=nope\ntime=-1\nat=1969-12-31T18:59:59-05:00\n"
+        );
+        assert_eq!(
+            evidence_in_words("time=1791813600\n", east),
+            "time=1791813600\nat=2026-10-12T19:30:00+05:30\n"
+        );
+        assert_eq!(
+            evidence_in_words("time=1791813600\n", odd),
+            "time=1791813600\nat=2026-10-12T09:03:58-04:56\n"
+        );
+        assert_eq!(
+            evidence_in_words("time=1791813600\n", day),
+            "time=1791813600\n"
+        );
+        let _env = test_env_lock();
+        let on = |tz: &'static str| {
+            unsafe { std::env::set_var("TZ", tz) };
+            std::thread::spawn(|| {
+                (
+                    local_stamp("2026-10-12T14:00:00Z"),
+                    local_stamp(" 2026-10-12T23:30:00-05:00 "),
+                    local_stamp("not a time"),
+                    local_when("2026-10-12T14:00:00Z"),
+                    local_offset(1_791_813_600),
+                    local_offset(1_796_083_200),
+                )
+            })
+            .join()
+            .unwrap()
+        };
+        assert_eq!(
+            on("IST-5:30"),
+            (
+                "2026-10-12T19:30".to_string(),
+                "2026-10-13T10:00".to_string(),
+                "not a time".to_string(),
+                "2026-10-12 19:30 +05:30".to_string(),
+                19_800,
+                19_800
+            )
+        );
+        assert_eq!(
+            on("EST5EDT,M3.2.0,M11.1.0"),
+            (
+                "2026-10-12T10:00".to_string(),
+                "2026-10-13T00:30".to_string(),
+                "not a time".to_string(),
+                "2026-10-12 10:00 -04:00".to_string(),
+                -14_400,
+                -18_000
+            )
+        );
+        unsafe { std::env::remove_var("TZ") };
+        let now = now_local();
+        let bytes = now.as_bytes();
+        assert_eq!(bytes.len(), 19, "{now}");
+        assert_eq!(
+            (bytes[4], bytes[7], bytes[10], bytes[13], bytes[16]),
+            (b'-', b'-', b'T', b':', b':')
         );
     }
 

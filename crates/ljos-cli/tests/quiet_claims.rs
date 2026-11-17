@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use chrono::{Duration as Days, NaiveDate};
+use ljos_cli::clock::{self, Date};
 use vissue_core::LogEntry;
 
 fn script(dir: &Path, name: &str, body: &str) {
@@ -63,15 +63,16 @@ fn empty_pack() -> (String, Arc<AtomicUsize>) {
     (format!("http://127.0.0.1:{port}"), hits)
 }
 
-fn stamp(day: NaiveDate) -> String {
-    day.format("[%Y-%m-%d %a 09:00]").to_string()
+fn stamp(day: Date) -> String {
+    clock::org_stamp(day, 9, 0)
 }
 
-fn age(day: NaiveDate, today: NaiveDate) -> String {
-    ljos_cli::age_of(
-        Some(&day.format("%Y-%m-%d").to_string()),
-        &today.format("%Y-%m-%d").to_string(),
-    )
+fn back(day: Date, days: i64) -> Date {
+    clock::days_before(day, days).unwrap()
+}
+
+fn age(day: Date, today: Date) -> String {
+    ljos_cli::age_of(Some(&clock::day_text(day)), &clock::day_text(today))
 }
 
 /// Characters kept from a title, matching the line a seat reads.
@@ -120,7 +121,7 @@ struct World {
     pack: String,
     pack_hits: Arc<AtomicUsize>,
     org: PathBuf,
-    today: NaiveDate,
+    today: Date,
 }
 
 impl World {
@@ -152,7 +153,7 @@ impl World {
             }
             ids.push(id);
         }
-        let today = chrono::Local::now().date_naive();
+        let today = clock::local_today();
         let (pack, pack_hits) = empty_pack();
         let path = layout.project_issues_path("work");
         let mut doc = vissue_core::IssueDoc::parse_file("work", &path).unwrap();
@@ -164,7 +165,7 @@ impl World {
                 .unwrap();
             heading.state = claim.state.to_string();
             if let Some(days) = claim.claim_days {
-                let when = stamp(today - Days::days(days));
+                let when = stamp(back(today, days));
                 heading
                     .properties
                     .insert("CLAIMED_BY".into(), claim.holder.to_string());
@@ -174,7 +175,7 @@ impl World {
                 heading.logbook.insert(
                     0,
                     LogEntry {
-                        timestamp: stamp(today - Days::days(days)),
+                        timestamp: stamp(back(today, days)),
                         from_state: None,
                         to_state: None,
                         note: Some("still on it".into()),
@@ -183,7 +184,7 @@ impl World {
                 );
             }
             if let Some(days) = claim.deed_days {
-                let when = stamp(today - Days::days(days));
+                let when = stamp(back(today, days));
                 heading.logbook.insert(
                     0,
                     LogEntry {
@@ -196,7 +197,7 @@ impl World {
                 );
             }
             if let Some(days) = claim.finished_days {
-                let when = stamp(today - Days::days(days));
+                let when = stamp(back(today, days));
                 heading.logbook.insert(
                     0,
                     LogEntry {
@@ -337,13 +338,9 @@ fn a_seat_sees_its_two_stale_claims_and_not_another_seats() {
         line(
             stale_deed,
             "stale alpha",
-            &age(world.today - Days::days(3), world.today),
+            &age(back(world.today, 3), world.today),
         ),
-        line(
-            stale_long,
-            long,
-            &age(world.today - Days::days(2), world.today),
-        ),
+        line(stale_long, long, &age(back(world.today, 2), world.today)),
     ];
     let before = std::fs::read(&world.org).unwrap();
 
@@ -382,7 +379,7 @@ fn a_seat_sees_its_two_stale_claims_and_not_another_seats() {
         vec![line(
             bea,
             "bea holds this",
-            &age(world.today - Days::days(4), world.today)
+            &age(back(world.today, 4), world.today)
         )],
         "{theirs}"
     );
@@ -409,21 +406,9 @@ fn claims_past_the_handful_end_on_one_more_line() {
         },
     ]);
     let shown = vec![
-        line(
-            &ids[0],
-            "oldest",
-            &age(world.today - Days::days(5), world.today),
-        ),
-        line(
-            &ids[1],
-            "older",
-            &age(world.today - Days::days(4), world.today),
-        ),
-        line(
-            &ids[2],
-            "old",
-            &age(world.today - Days::days(3), world.today),
-        ),
+        line(&ids[0], "oldest", &age(back(world.today, 5), world.today)),
+        line(&ids[1], "older", &age(back(world.today, 4), world.today)),
+        line(&ids[2], "old", &age(back(world.today, 3), world.today)),
     ];
     let mine = world.ok("ada", &["claims", "--mine"]);
     assert_eq!(quiet_lines(&mine).len(), 4, "{mine}");
@@ -483,7 +468,7 @@ fn the_banner_keeps_fresh_claims_and_folds_stale_ones() {
         vec![line(
             fresh,
             "still in hand",
-            &age(world.today - Days::days(3), world.today)
+            &age(back(world.today, 3), world.today)
         )],
         "{inbox}"
     );
@@ -536,7 +521,7 @@ fn a_wider_stale_window_leaves_the_banner_as_it_was() {
         vec![line(
             &ids[0],
             "ten days",
-            &age(world.today - Days::days(10), world.today)
+            &age(back(world.today, 10), world.today)
         )],
         "{inbox}"
     );

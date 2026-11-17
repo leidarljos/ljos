@@ -1,7 +1,7 @@
 //! Record schema v1: questions and ballots, signed as canonical JSON.
 
+use crate::clock::{self, Instant};
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, FixedOffset};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -926,14 +926,14 @@ fn slug_of(part: &str) -> Option<String> {
         .then(|| crate::seat_slug(part))
 }
 
-fn parse_hour_timestamp(text: &str) -> Result<DateTime<FixedOffset>> {
+fn parse_hour_timestamp(text: &str) -> Result<Instant> {
     // Local offsets and subseconds are distinct byte strings for one
     // instant, and each would mint its own ballot id. The plain layer
     // accepts a single UTC hour form.
     if !utc_hour_shape(text) {
         bail!("timestamp `{text}` must be YYYY-MM-DDTHH:00:00Z");
     }
-    DateTime::parse_from_rfc3339(text)
+    clock::parse_rfc3339(text)
         .with_context(|| format!("timestamp `{text}` must be YYYY-MM-DDTHH:00:00Z"))
 }
 
@@ -2846,5 +2846,30 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("entry.json"), raw).expect("write");
         check_dir(dir.path())
+    }
+
+    #[test]
+    fn an_hour_stamp_reads_one_utc_form_and_refuses_the_rest_in_words() {
+        assert_eq!(
+            parse_hour_timestamp("2026-10-12T14:00:00Z")
+                .unwrap()
+                .timestamp(),
+            1_791_813_600
+        );
+        let shape = parse_hour_timestamp("2026-10-12T14:30:00Z").unwrap_err();
+        assert_eq!(
+            format!("{shape:#}"),
+            "timestamp `2026-10-12T14:30:00Z` must be YYYY-MM-DDTHH:00:00Z"
+        );
+        let range = parse_hour_timestamp("2026-13-12T14:00:00Z").unwrap_err();
+        assert_eq!(
+            format!("{range:#}"),
+            "timestamp `2026-13-12T14:00:00Z` must be YYYY-MM-DDTHH:00:00Z: input is out of range"
+        );
+        let day = parse_hour_timestamp("2026-02-30T14:00:00Z").unwrap_err();
+        assert_eq!(
+            format!("{day:#}"),
+            "timestamp `2026-02-30T14:00:00Z` must be YYYY-MM-DDTHH:00:00Z: input is out of range"
+        );
     }
 }

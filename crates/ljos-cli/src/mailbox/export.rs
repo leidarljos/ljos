@@ -23,13 +23,13 @@
 use std::io::Read as _;
 
 use anyhow::{bail, Context as _, Result};
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use sha2::{Digest as _, Sha256};
 
 use super::config::MailConfig;
+use crate::clock::{self, Instant};
 
-/// The longest an approval file stays valid.
-pub const MAX_LIFETIME: Duration = Duration::hours(24);
+/// The longest an approval file stays valid, in seconds.
+pub const MAX_LIFETIME_SECS: i64 = 24 * 3600;
 
 /// What the outbox holds for one draft.
 pub struct Draft<'a> {
@@ -47,7 +47,7 @@ pub struct Approval {
     /// `H`: sha256 of the message bytes, the ones `sendmail` is given, hex.
     pub hash: String,
     pub nonce: String,
-    pub expires: DateTime<Utc>,
+    pub expires: Instant,
 }
 
 /// The approval file for `draft`, refused when the content checks under
@@ -56,8 +56,8 @@ pub struct Approval {
 pub fn export(
     draft: &Draft<'_>,
     config: &MailConfig,
-    expires: DateTime<Utc>,
-    now: DateTime<Utc>,
+    expires: Instant,
+    now: Instant,
 ) -> Result<Approval> {
     for (name, value) in [
         ("draft", draft.id),
@@ -70,12 +70,15 @@ pub fn export(
             ));
         }
     }
-    if expires <= now || expires - now > MAX_LIFETIME {
+    let expires_wall = clock::utc_wall(expires).filter(|_| {
+        expires > now && expires.nanos_since(now) <= i128::from(MAX_LIFETIME_SECS) * 1_000_000_000
+    });
+    let Some(expires_wall) = expires_wall else {
         return Err(crate::policy_label::labelled(
             "draft-warning",
             "export: expires must be after now and at most 24 h out",
         ));
-    }
+    };
     let message = std::str::from_utf8(draft.message).context("export: the message is not UTF-8")?;
     refuse_hiding(message)?;
     let Some((headers, _)) = message.split_once("\n\n") else {
@@ -98,7 +101,7 @@ pub fn export(
             )),
         }
     };
-    if DateTime::parse_from_rfc2822(one("date")?).is_err() {
+    if clock::parse_rfc2822(one("date")?).is_err() {
         return Err(crate::policy_label::labelled(
             "draft-warning",
             "export: Date is not an RFC 5322 date-time",
@@ -150,7 +153,7 @@ pub fn export(
         "ljos-outbox v1\ndraft {}\nreachbook-hash {}\nexpires {}\nnonce {nonce}\n\n",
         draft.id,
         draft.reachbook_hash,
-        expires.to_rfc3339_opts(SecondsFormat::Secs, true),
+        expires_wall.rfc3339(true),
     )
     .into_bytes();
     file.extend_from_slice(draft.message);

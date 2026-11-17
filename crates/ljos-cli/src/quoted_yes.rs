@@ -130,7 +130,7 @@ fn quote_words(quote: &str) -> Result<String> {
 }
 
 fn said_at(at: &str) -> Result<String> {
-    let when = chrono::DateTime::parse_from_rfc3339(at).map_err(|e| {
+    let when = crate::clock::parse_rfc3339(at).map_err(|e| {
         crate::policy_label::labelled(
             "approval-unverified",
             format!(
@@ -138,7 +138,7 @@ fn said_at(at: &str) -> Result<String> {
             ),
         )
     })?;
-    let ahead = when.timestamp() - chrono::Utc::now().timestamp();
+    let ahead = when.timestamp() - crate::clock::Instant::now().timestamp();
     if ahead > AHEAD {
         return Err(crate::policy_label::labelled(
             "approval-unverified",
@@ -259,5 +259,31 @@ mod tests {
                 "took {bad:?} as a seat"
             );
         }
+    }
+
+    #[test]
+    fn a_time_that_is_not_rfc_3339_is_refused_with_the_reason() {
+        for (at, why) in [
+            ("tomorrow", "premature end of input"),
+            ("2026-10-12 14:00", "premature end of input"),
+            ("2026-13-01T00:00:00Z", "input is out of range"),
+            ("2026-10-12T14:00:00Zx", "trailing input"),
+            (
+                "2026-10-12T14:00:00+0530",
+                "input contains invalid characters",
+            ),
+        ] {
+            let said = said_at(at).unwrap_err().to_string();
+            assert!(
+                said.contains(&format!("--at {at:?} is not RFC 3339 ({why}), such as")),
+                "{said}"
+            );
+        }
+        assert_eq!(
+            said_at("2026-10-12T14:00:00Z").unwrap(),
+            "2026-10-12T14:00:00Z"
+        );
+        let ahead = said_at("2999-01-01T00:00:00Z").unwrap_err().to_string();
+        assert!(ahead.contains("is ahead of now"), "{ahead}");
     }
 }

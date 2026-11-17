@@ -117,7 +117,7 @@ pub fn grant(
             "seat grant: pass the owner's words with --quote. Nothing was written",
         ));
     }
-    if chrono::DateTime::parse_from_rfc3339(at.trim()).is_err() {
+    if crate::clock::parse_rfc3339(at.trim()).is_err() {
         return Err(crate::policy_label::labelled(
             "grant-unverified",
             format!("seat grant: --at {at:?} is not RFC 3339. Nothing was written"),
@@ -862,5 +862,24 @@ via = \"bea\"
         assert!(said.contains("Nothing was written"), "{said}");
         let roster = std::fs::read_to_string(root.join("vissue.toml")).unwrap();
         assert!(!roster.contains("dave"), "{roster}");
+    }
+
+    #[test]
+    fn a_grant_time_that_is_not_rfc_3339_is_refused_before_anything_is_written() {
+        for at in [
+            "tomorrow",
+            "2026-10-12",
+            "2026-10-12T14:00",
+            "2026-13-01T00:00:00Z",
+            "2026-10-12T14:00:00Zx",
+        ] {
+            let said = super::grant("bob", "close=own", "the owner said so", at, "ada", None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                said.contains(&format!("--at {at:?} is not RFC 3339")),
+                "{said}"
+            );
+        }
     }
 }

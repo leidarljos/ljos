@@ -2,8 +2,8 @@
 //! seat hears why. A claim is idle when neither its claim time nor the
 //! newest tracker commit naming it falls inside the window.
 
+use crate::clock::{self, Instant};
 use anyhow::{bail, Result};
-use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -42,11 +42,8 @@ pub fn org_ts(s: &str) -> Option<i64> {
     let mut parts = t.split_whitespace();
     let date = parts.next()?;
     let time = parts.find(|p| p.contains(':')).unwrap_or("00:00");
-    let naive = NaiveDateTime::parse_from_str(&format!("{date} {time}"), "%Y-%m-%d %H:%M").ok()?;
-    Local
-        .from_local_datetime(&naive)
-        .earliest()
-        .map(|d| d.timestamp())
+    let local = clock::parse_day_minute(&format!("{date} {time}"))?;
+    clock::local_epoch(local, &clock::local_zone())
 }
 
 /// The seat a holder names: `eessi@main` is the seat `eessi`, and a legacy
@@ -103,8 +100,8 @@ fn last_commit(id: &str) -> Option<i64> {
 }
 
 fn when(t: Option<i64>) -> String {
-    t.and_then(|t| DateTime::from_timestamp(t, 0))
-        .map(|d| d.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+    t.and_then(|t| clock::wall_in(Instant::from_unix(t), &clock::local_zone()))
+        .map(|d| d.minute())
         .unwrap_or_else(|| "never".to_string())
 }
 
@@ -118,7 +115,7 @@ pub fn reap(idle: Duration, apply: bool) -> Result<String> {
             h.last = Some(h.last.map_or(c, |t| t.max(c)));
         }
     }
-    let now = Local::now().timestamp();
+    let now = Instant::now().timestamp();
     let idle_ones = idle_claims(&held, idle, now);
     let mut out = String::new();
     let hours = idle.as_secs() as f64 / 3600.0;
@@ -187,7 +184,7 @@ pub const QUORUM_NOTE: &str = "quorum: ";
 /// a deadline before `now`, and no `quorum timed out` note yet. From
 /// `vissue export` (one JSON issue a line).
 #[must_use]
-pub fn due_quorums(export: &str, now: DateTime<chrono::Utc>) -> Vec<(String, usize, String)> {
+pub fn due_quorums(export: &str, now: Instant) -> Vec<(String, usize, String)> {
     let mut due = Vec::new();
     for line in export.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -215,10 +212,7 @@ pub fn due_quorums(export: &str, now: DateTime<chrono::Utc>) -> Vec<(String, usi
         let Some((n, at)) = rest.split_once(" by ") else {
             continue;
         };
-        let (Ok(n), Ok(at_t)) = (
-            n.trim().parse::<usize>(),
-            DateTime::parse_from_rfc3339(at.trim()),
-        ) else {
+        let (Ok(n), Ok(at_t)) = (n.trim().parse::<usize>(), clock::parse_rfc3339(at.trim())) else {
             continue;
         };
         if at_t < now {
@@ -262,8 +256,8 @@ pub fn gate_quorum(id: &str, needed: usize, deadline: Option<&str>) -> Result<Qu
     let past = deadline
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .and_then(|d| DateTime::parse_from_rfc3339(d).ok())
-        .is_some_and(|at| at < chrono::Utc::now());
+        .and_then(|d| clock::parse_rfc3339(d).ok())
+        .is_some_and(|at| at < Instant::now());
     if !past {
         return Ok(QuorumGate::Short { have, needed });
     }
@@ -291,7 +285,7 @@ fn enforce_quorum_deadlines(apply: bool) -> String {
         return String::new();
     };
     let mut out = String::new();
-    for (id, n, at) in due_quorums(&said.stdout, chrono::Utc::now()) {
+    for (id, n, at) in due_quorums(&said.stdout, Instant::now()) {
         if !apply {
             out.push_str(&format!("would check {id}: quorum {n} was due {at}\n"));
             continue;
@@ -327,7 +321,7 @@ mod tests {
         let closed = r#"{"id":"d-4","state":"DONE","logbook":[{"note":"quorum: 3 by 2000-01-01T00:00:00Z"}]}"#;
         let plain = r#"{"id":"d-5","state":"TODO","logbook":[]}"#;
         let all = [past, future, lapsed, closed, plain].join("\n");
-        let due = due_quorums(&all, chrono::Utc::now());
+        let due = due_quorums(&all, Instant::now());
         assert_eq!(
             due,
             vec![("d-1".to_string(), 3, "2000-01-01T00:00:00Z".to_string())]
@@ -365,6 +359,67 @@ mod tests {
             .map(|h| h.id)
             .collect();
         assert_eq!(ids, ["a-1", "a-3"]);
+    }
+
+    #[test]
+    fn a_tracker_stamp_is_read_on_the_clock_of_the_process() {
+        let _env = crate::test_env_lock();
+        let read = |tz: &'static str, stamp: &'static str| {
+            unsafe { std::env::set_var("TZ", tz) };
+            std::thread::spawn(move || (org_ts(stamp), when(org_ts(stamp))))
+                .join()
+                .unwrap()
+        };
+        let eastern = "EST5EDT,M3.2.0,M11.1.0";
+        assert_eq!(
+            read(eastern, "[2026-10-13 Tue 16:01]"),
+            (Some(1_791_921_660), "2026-10-13 16:01".to_string())
+        );
+        assert_eq!(read(eastern, "[2026-10-13 Tue]").0, Some(1_791_864_000));
+        assert_eq!(
+            read(eastern, "<2026-10-13 Tue 16:01>").0,
+            Some(1_791_921_660)
+        );
+        assert_eq!(read(eastern, "2026-10-13 16:01:59").0, None);
+        assert_eq!(
+            read("IST-5:30", "[2026-10-13 Tue 16:01]").0,
+            Some(1_791_887_460)
+        );
+        assert_eq!(
+            read("UTC0", "[2026-10-13 Tue 16:01]").0,
+            Some(1_791_907_260)
+        );
+        assert_eq!(
+            read(eastern, "[2026-11-01 Sun 01:30]").0,
+            Some(1_793_514_600)
+        );
+        assert_eq!(read(eastern, "[2026-03-08 Sun 02:30]").0, None);
+        assert_eq!(read(eastern, "[2026-02-30 Mon 10:00]").0, None);
+        assert_eq!(read(eastern, "[2026-10-13 Tue 24:00]").0, None);
+        assert_eq!(read(eastern, "[nothing]").0, None);
+        assert_eq!(when(None), "never");
+        unsafe { std::env::remove_var("TZ") };
+    }
+
+    #[test]
+    fn a_quorum_is_due_once_its_deadline_has_passed() {
+        let line = |at: &str| {
+            format!(
+                "{{\"id\":\"t-1\",\"state\":\"TODO\",\"logbook\":[{{\"note\":\"quorum: 3 by {at}\"}}]}}\n"
+            )
+        };
+        let now = crate::clock::parse_rfc3339("2026-10-12T14:00:00Z").unwrap();
+        let due = |at: &str| due_quorums(&line(at), now).len();
+        assert_eq!(due("2026-10-12T13:59:59Z"), 1);
+        assert_eq!(due("2026-10-12T14:00:00Z"), 0);
+        assert_eq!(due("2026-10-12T09:00:00-05:00"), 0);
+        assert_eq!(due("2026-10-12T08:59:59-05:00"), 1);
+        assert_eq!(due("tomorrow"), 0);
+        let got = due_quorums(&line("2026-10-12T13:00:00Z"), now);
+        assert_eq!(
+            got,
+            [("t-1".to_string(), 3, "2026-10-12T13:00:00Z".to_string())]
+        );
     }
 }
 

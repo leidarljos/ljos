@@ -992,8 +992,8 @@ fn record_failure(at: &KeyDir, now: u64) -> std::io::Result<()> {
 fn utc(secs: u64) -> String {
     i64::try_from(secs)
         .ok()
-        .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
-        .map_or_else(|| secs.to_string(), |t| t.format("%H:%M UTC").to_string())
+        .and_then(|s| crate::clock::utc_wall(crate::clock::Instant::from_unix(s)))
+        .map_or_else(|| secs.to_string(), |t| format!("{} UTC", t.clock()))
 }
 
 /// Fill `out` with the hash of `pass` under `salt`. The working memory,
@@ -1459,12 +1459,10 @@ fn status_at(path: &Path) -> String {
         Ok(Ok(meta)) => {
             let when = meta
                 .modified()
-                .map(|t| {
-                    chrono::DateTime::<chrono::Utc>::from(t)
-                        .format("%Y-%m-%d %H:%M:%S UTC")
-                        .to_string()
-                })
-                .unwrap_or_else(|_| "an unknown time".into());
+                .ok()
+                .and_then(crate::clock::Instant::from_system)
+                .and_then(crate::clock::utc_wall)
+                .map_or_else(|| "an unknown time".into(), |t| format!("{} UTC", t.second()));
             format!("person-key: set, written {when} ({})", path.display())
         }
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => format!(
@@ -2218,5 +2216,13 @@ mod tests {
             physical, logical,
             "following the link before .. leaves the logical path"
         );
+    }
+
+    #[test]
+    fn a_lockout_names_the_utc_minute_it_ends() {
+        assert_eq!(utc(1_791_813_600), "14:00 UTC");
+        assert_eq!(utc(0), "00:00 UTC");
+        assert_eq!(utc(86_399), "23:59 UTC");
+        assert_eq!(utc(u64::MAX), u64::MAX.to_string());
     }
 }

@@ -116,7 +116,7 @@ impl Seat {
         }
         let path = layout.project_issues_path("work");
         let mut doc = vissue_core::IssueDoc::parse_file("work", &path).unwrap();
-        let today = chrono::Local::now().date_naive();
+        let today = ljos_cli::clock::local_today();
         let ages = [3_i64, 3, 0, 3, 3];
         for ((heading_id, holder), days) in ids.iter().zip(holders).zip(ages) {
             let heading = doc
@@ -125,9 +125,11 @@ impl Seat {
                 .find(|heading| heading.id == *heading_id)
                 .unwrap();
             heading.state = "STARTED".to_string();
-            let when = (today - chrono::Duration::days(days))
-                .format("[%Y-%m-%d %a 09:00]")
-                .to_string();
+            let when = ljos_cli::clock::org_stamp(
+                ljos_cli::clock::days_before(today, days).unwrap(),
+                9,
+                0,
+            );
             heading
                 .properties
                 .insert("CLAIMED_BY".into(), holder.to_string());
