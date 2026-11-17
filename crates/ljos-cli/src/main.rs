@@ -3176,6 +3176,17 @@ fn ticket_error(err: anyhow::Error) -> anyhow::Error {
     err
 }
 
+/// Stop before vissue when nothing names a tracker.
+///
+/// The server already says to run `ljos onboard`. The command line used
+/// to hand vissue a private directory and print that path.
+fn need_tracker() -> Result<()> {
+    if let Some(line) = ljos_cli::tracker_place::missing_tracker_line() {
+        bail!("{line}");
+    }
+    Ok(())
+}
+
 /// Where a `ljos note` line goes, and whether the issue was inferred.
 ///
 /// A default mint is the issue. Any other vissue id is the issue when
@@ -5644,6 +5655,7 @@ fn run_command() -> Result<()> {
             verbose,
             json,
         } => {
+            need_tracker()?;
             // The same seat line `ljos remember` prints. A seat taken from
             // the most recent write that is still the fallback, and the
             // commit line alone does not say to name one.
@@ -7213,6 +7225,7 @@ fn run_command() -> Result<()> {
             verbose,
             json,
         } => {
+            // A sitting on an unknown id names that id. Onboard would hide it.
             let mut memories = Vec::new();
             let mut full = String::new();
             let mut shown = String::new();
@@ -7334,6 +7347,7 @@ fn run_command() -> Result<()> {
                     (open, true)
                 }
             };
+            need_tracker()?;
             stop_ticket(&issue);
             {
                 let _deadline =

@@ -86,6 +86,60 @@ fn note_without_a_ticket_names_sitting() {
     assert_eq!(stderr, [ljos_cli::NO_OPEN_SITTING]);
 }
 
+/// A product checkout with no tracker. The line names `ljos onboard`.
+/// It does not name the private directory vissue would have stood in.
+#[test]
+fn file_without_a_tracker_names_onboard() {
+    let dir = tempfile::tempdir().unwrap();
+    let product = dir.path().join("greet");
+    std::fs::create_dir_all(&product).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&product)
+            .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(product.join("greet.sh"), "echo hello\n").unwrap();
+    let home = dir.path().join("home");
+    for sub in [".config", ".local/state", ".local/share", "run"] {
+        std::fs::create_dir_all(home.join(sub)).unwrap();
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["file", "Print hello only when GREET is yes", "-p", "greet"])
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("PACKSET_URL", "off")
+        .env("LJOS_SEAT", "ada")
+        .env("LJOS_TRACKER_GIT", "off")
+        .current_dir(&product)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{stdout}{err}");
+    let lines: Vec<_> = err.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(lines, ["No tracker found, so run `ljos onboard`."], "{err}");
+    assert!(!err.contains("ljos-vissue"), "{err}");
+    assert!(!err.contains("VISSUE_ROOT"), "{err}");
+    assert!(
+        !product.join("vissue.toml").exists(),
+        "file wrote a tracker"
+    );
+}
+
 #[test]
 fn file_and_finish_do_not_ask_and_name_a_missing_tool_in_one_line() {
     let file = run(&["file", "Repair the kiln door"], &[]);
@@ -120,6 +174,7 @@ fn file_and_finish_do_not_ask_and_name_a_missing_tool_in_one_line() {
             err[0].contains("not on PATH")
                 || err[0].contains("unreachable")
                 || err[0].contains("not found")
+                || err[0].contains("`ljos onboard`")
                 || err[0].contains("packset ensure")
                 || err[0].contains("cargo install --locked packset"),
             "{err:?}"
