@@ -3,6 +3,11 @@
 //! The reported search was `ridley-core landing order rebase review` on a
 //! seat whose snapshot held a JOSS editor note. Word overlap scored that
 //! note 0.33. The page is empty unless `--min-score 0` is set.
+//!
+//! The same file pins what a newcomer meets on a first sweep of `ljos search`:
+//! the refused empty query, the floor that every row has to reach once
+//! `--min-score` is named, the next command after a one-word miss, and the
+//! help page.
 
 ljos_test_boot::harness!();
 
@@ -600,4 +605,89 @@ fn a_one_word_miss_in_a_stored_set_names_the_next_command() {
         "a miss with a shorter word to try still names it:\n{stdout}"
     );
     assert!(!stdout.contains("ljos memories list"), "{stdout}");
+}
+
+#[test]
+fn the_help_is_short_paragraphs_and_three_examples_with_every_fact() {
+    let seat = Seat::open();
+    let out = seat.run(&["search", "--help"]);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    let description = stdout.split("\nUsage:").next().unwrap_or(&stdout);
+    let paragraphs: Vec<&str> = description
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|para| !para.is_empty())
+        .collect();
+    assert!(
+        paragraphs.len() >= 12,
+        "the description is {} paragraphs:\n{description}",
+        paragraphs.len()
+    );
+    for para in &paragraphs {
+        let words = para.split_whitespace().count();
+        assert!(words <= 70, "a paragraph of {words} words:\n{para}");
+    }
+    let examples: Vec<&str> = paragraphs
+        .iter()
+        .copied()
+        .filter(|para| para.starts_with("Example: `ljos search"))
+        .collect();
+    assert_eq!(examples.len(), 3, "{description}");
+    for example in &examples {
+        assert!(example.ends_with('`'), "{example}");
+    }
+    assert!(
+        description.split_whitespace().count() < 1100,
+        "the description grew past the words it needs"
+    );
+
+    for fact in [
+        "0.66",
+        "from 0 to 1",
+        "`Nothing relevant was found.`",
+        "No match-mode line is printed on that empty page",
+        "`ljos recall ID`",
+        "`--explain`",
+        "`--json`",
+        "`semantic` or `lexical` in `ranking`",
+        "`--porcelain`",
+        "separated by tabs",
+        "A receipt, a mail row and another seat's bookkeeping",
+        "`Nothing matched \"QUERY\"`",
+        "`Try a shorter query, such as: ljos search WORD`",
+        "Stop words are skipped",
+        "the earlier word wins a tie",
+        "`ljos memories list`",
+        "`ljos remember`",
+        "`suggestion`",
+        "from 0 to 100",
+        "under 34",
+        "`--min-score SCORE`",
+        "`--min-score 0`",
+        "outside 0 to 100 exits 2",
+        "`No relevant matches for \"QUERY\".`",
+        "`LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset, `0` does not wait)",
+        "`Retry-After`",
+        "`retry_ms`",
+        "`Used word search because memory search was busy`",
+        "`LJOS_SEARCH_WARMUP_WAIT` seconds (5 when unset, `0` does not wait)",
+        "`LJOS_CALL_TIMEOUT`",
+        "`LJOS_SEARCH_WAIT` (3 when unset)",
+        "`/health`",
+        "`not-ready` or `not ready`",
+        "`code` is `starting`",
+        "`Used word search because memory is still starting.`",
+        "`Memory is starting, so try again in a few seconds.`",
+        "exits non-zero",
+        "`These are word matches, and meaning search will be ready shortly.`",
+        "`packset ensure`",
+        "and exits 0",
+        "The pack is this seat's memory store.",
+    ] {
+        assert!(
+            description.contains(fact),
+            "the help lost `{fact}`:\n{description}"
+        );
+    }
 }

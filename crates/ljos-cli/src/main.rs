@@ -782,79 +782,91 @@ enum Cmd {
     },
     /// Show what ljos remembers about a topic, best match first.
     ///
+    /// The pack is this seat's memory store. This seat's hits come first. Another seat's hit is
+    /// kept when it names the subject, or when the encoder's cosine reaches 0.66. The cosine is
+    /// how close the stored text is to the query, from 0 to 1.
+    ///
+    /// A generic word is not the subject. Another seat then needs a high similarity, so a
+    /// meaning row from another seat that only shares a generic word is left out unless the
+    /// encoder's similarity is high. A short list is not padded with a weaker cross-seat hit.
+    ///
+    /// When those were the only rows, the line is `Nothing relevant was found.` No match-mode
+    /// line is printed on that empty page.
+    ///
+    /// A tracker ticket whose title matches is included, and then one whose body or notes
+    /// match. An exact or near-exact title is the first row, while the encoder is loading and
+    /// after. The row names the ticket id and the title, so `ljos recall ID` opens it.
+    ///
+    /// A ticket this seat filed, claimed, or noted, whose title, body or notes cover two query
+    /// terms, is placed with this seat's rows. The newest note weighs more than an older one.
+    ///
+    /// A ticket in a project this seat works in comes before another project's ticket that only
+    /// shares a generic word such as docs, release, or video. A ticket with no seat tag is not
+    /// this seat's, unless the tracker roster names only this seat.
+    ///
+    /// The page names the place and the checks. It does not print the ranker score. `--explain`
+    /// says how the rows are ordered. `--json` keeps the score, and puts `semantic` or
+    /// `lexical` in `ranking`.
+    ///
+    /// `--porcelain` prints one row per hit, the id, the kind and the text, separated by tabs,
+    /// and leaves this page off. A receipt, a mail row and another seat's bookkeeping stay off
+    /// the page, the JSON and the porcelain rows.
+    ///
+    /// A search with no query exits 2. The line names an example query and `ljos memories
+    /// list`.
+    ///
+    /// A search that found nothing prints no match-mode line. The line is `Nothing matched
+    /// "QUERY"`. When a content word is shorter than QUERY, it adds `Try a shorter query, such
+    /// as: ljos search WORD`. Stop words are skipped. The longest content word is the one
+    /// named, and the earlier word wins a tie. The command is plain text, on its own line when
+    /// the sentence would split it.
+    ///
+    /// A query that is already that word adds `Try browsing memories, such as: ljos memories
+    /// list` instead. When nothing is stored, a shorter search would miss too, and the line
+    /// names `ljos remember` with the query in quotes. `--json` adds `suggestion` with the
+    /// command the line names, and leaves the other fields as they are.
+    ///
+    /// A score runs from 0 to 100. A row that does not name a subject word is left out when its
+    /// score is under 34, and so is a row that only shares a stopword or a common weak word.
+    /// `--min-score SCORE` sets that line. `--min-score 0` prints every row.
+    ///
+    /// With `--min-score SCORE`, every row under SCORE is left out, including a row that names
+    /// a subject word. A SCORE outside 0 to 100 exits 2. When that floor removes every row, the
+    /// line is `No relevant matches for "QUERY".` and it names `--min-score 0`.
+    ///
+    /// A busy memory store is asked again for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset,
+    /// `0` does not wait). The wait follows `Retry-After` or a JSON `retry_ms`. When it
+    /// answers, the rows are ranked by meaning. When it stays busy, the rows are ranked by
+    /// words and a hit that names the subject stays. Search fell back, and the one line is
+    /// `Used word search because memory search was busy`.
+    ///
+    /// While the encoder is still loading, a remaining time that fits in
+    /// `LJOS_SEARCH_WARMUP_WAIT` seconds (5 when unset, `0` does not wait) is waited out,
+    /// inside `LJOS_CALL_TIMEOUT`, and the search then ranks by meaning. A remaining time that
+    /// is absent or longer than that budget keeps `LJOS_SEARCH_WAIT` (3 when unset).
+    ///
+    /// The pack is starting when `/health` is `not-ready` or `not ready`, or the JSON says
+    /// `ready` is false or `code` is `starting`. Words in the query are not that signal. That
+    /// same warmup budget is waited out. When it runs out, search ranks by words and the one
+    /// line is `Used word search because memory is still starting.`
+    ///
+    /// A dated search has no word fallback, so the line is `Memory is starting, so try again in
+    /// a few seconds.` and the command exits non-zero.
+    ///
+    /// If the encoder is still loading and rows are shown, the line is `These are word matches,
+    /// and meaning search will be ready shortly.` When nothing is shown, one line names the
+    /// command to rerun and, when a remaining time is reported, about how many seconds are
+    /// left. A failed or missing encoder names the command that fixes it.
+    ///
+    /// A pack that is down ranks by words from what is stored locally, prints one line that
+    /// names `packset ensure`, and exits 0. A pack that stays busy ranks by words and prints
+    /// the busy line above.
+    ///
     /// Example: `ljos search "lexical default"`
     ///
-    /// This seat's hits come first. Another seat's hit is kept when it names
-    /// the subject, or when the encoder's cosine reaches 0.66. The cosine is
-    /// how close the stored text is to the query, from 0 to 1. A generic word
-    /// is not the subject. Another seat then needs a high similarity. A short list
-    /// is not padded with a weaker cross-seat hit. When those were the only
-    /// rows, the line is `Nothing relevant was found.` No match-mode line is
-    /// printed on that empty page. A tracker ticket whose
-    /// title matches is included, and then one whose body or notes match. An exact or
-    /// near-exact title is the first row, while the encoder is loading and
-    /// after. A ticket this seat filed, claimed, or noted, whose title, body
-    /// or notes cover two query terms, is placed with this seat's rows. The
-    /// newest note weighs more than an older one. A ticket in a project this
-    /// seat works in comes before another project's ticket that only shares a
-    /// generic word such as docs, release, or video. A ticket with no seat
-    /// tag is not this seat's, unless the tracker roster names only this seat.
-    /// The row names the ticket id and the title, so `ljos recall ID`
-    /// opens it. The page names the place and the checks. It does not print
-    /// the ranker score.
-    /// `--explain` says how the rows are ordered. `--json` keeps the score.
-    /// A search that found
-    /// nothing prints no match-mode line. The line is `Nothing matched "QUERY"`.
-    /// When a content word is shorter than QUERY, it adds
-    /// `Try a shorter query, such as: ljos search WORD`. Stop words are
-    /// skipped. The longest content word is the one named, and the earlier
-    /// word wins a tie. The command is plain text, on its own line when the
-    /// sentence would split it. A query that is already that word does not
-    /// add the command. When nothing is stored, a shorter search would miss
-    /// too, and the line names `ljos remember` with the query in quotes.
-    /// `--json` adds `suggestion`
-    /// with the command the line names, and leaves the other fields as they
-    /// are. A row that does not name a subject word is left out when its
-    /// score is under `--min-score`. A score runs from 0 to 100. A row that only
-    /// shares a stopword or a common weak word is left out. `--min-score 0`
-    /// prints every row. When that floor removes every row, the line is
-    /// `No relevant matches for "QUERY".` and it names `--min-score 0`.
-    /// A meaning row from another seat that only shares a generic word is
-    /// left out unless the encoder's similarity is high.
-    /// A busy memory store is asked again for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset, `0` does not wait).
-    /// The wait follows `Retry-After` or a JSON `retry_ms`.
-    /// When it answers, the rows are ranked by meaning. When it stays
-    /// busy, the rows are ranked by words and a hit that names the subject
-    /// stays. Search fell back, and the one line is
-    /// `Used word search because memory search was busy`.
-    /// While the encoder is
-    /// still loading, a remaining time that fits in `LJOS_SEARCH_WARMUP_WAIT`
-    /// seconds (5 when unset, `0` does not wait) is waited out, inside
-    /// `LJOS_CALL_TIMEOUT`, and the search then ranks by meaning. The pack
-    /// is starting when `/health` is `not-ready` or `not ready`, or the JSON
-    /// says `ready` is false or `code` is `starting`. Words in the query are
-    /// not that signal. That same budget is waited out. When it runs out,
-    /// search ranks by words and the one line is `Used word search because
-    /// memory is still starting.` A dated search has no word fallback, so
-    /// the line is `Memory is starting, so try again in a few seconds.` and
-    /// the command exits non-zero. A remaining
-    /// time that is absent or longer than that budget keeps `LJOS_SEARCH_WAIT`
-    /// (3 when unset). If it is still loading and rows
-    /// are shown, the line is `These are word matches, and meaning search
-    /// will be ready shortly.` When nothing is shown, one line names the command
-    /// to rerun and, when a remaining time is reported, about how many
-    /// seconds are left. A failed or missing encoder
-    /// names the command that fixes it. `--json` puts
-    /// `semantic` or `lexical` in `ranking`. `--porcelain` prints one
-    /// row per hit, the id, the kind and the text, separated by tabs, and
-    /// leaves this page off. A receipt, a mail row and another seat's
-    /// bookkeeping stay off the page, the JSON and the porcelain rows.
-    /// A pack that is down
-    /// ranks by words from what is stored locally, prints one line that
-    /// names `packset ensure`, and exits 0. A pack that stays busy ranks
-    /// by words. Search fell back, and the one line is
-    /// `Used word search because memory search was busy`.
-    /// The pack is this seat's memory store.
+    /// Example: `ljos search kiln --json -n 3`
+    ///
+    /// Example: `ljos search "lexical default" --min-score 50`
     Search {
         /// Words to look for.
         query: Vec<String>,
