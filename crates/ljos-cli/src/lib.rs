@@ -12555,7 +12555,11 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
         // the command that fixes the token.
         let (body, _) = match search_relevant(&client, cue, limit, false, timeout) {
             Ok(pair) => pair,
-            Err(err) if writer_refusal(&err) || is_memory_starting(&err) => return Err(err),
+            Err(err)
+                if writer_refusal(&err) || is_memory_starting(&err) || is_reported_busy(&err) =>
+            {
+                return Err(err);
+            }
             Err(_) => return Ok(None),
         };
         let found: Option<Vec<(Hit, DenseSignal)>> = body["hits"].as_array().and_then(|hits| {
@@ -14667,9 +14671,25 @@ pub struct Ranking {
     pub reason: &'static str,
 }
 
+thread_local! {
+    static FORCED_RANKING: std::cell::Cell<Option<Ranking>> = const { std::cell::Cell::new(None) };
+}
+
+fn note_forced_ranking(ranking: Ranking) {
+    FORCED_RANKING.with(|cell| cell.set(Some(ranking)));
+}
+
+fn clear_forced_ranking() {
+    FORCED_RANKING.with(|cell| cell.set(None));
+}
+
 /// The ranking the pack will use now. `None` when the writer did not answer.
+/// A word fallback this command already took is that ranking.
 #[must_use]
 pub fn ranking_now() -> Option<Ranking> {
+    if let Some(ranking) = FORCED_RANKING.with(|cell| cell.get()) {
+        return Some(ranking);
+    }
     let status = read_encoder_status()?;
     Some(if encoder_failed(&status) {
         lexical_ranking(ENCODER_FAILED_REASON)
@@ -15105,6 +15125,7 @@ fn search_can_fall_back(err: &anyhow::Error) -> bool {
     !pack_unreachable(err)
         && (is_deadline_miss(err)
             || is_read_shed(err)
+            || is_reported_busy(err)
             || is_pack_busy(err)
             || writer_busy(err)
             || pack_memory_down(err))
@@ -15153,6 +15174,101 @@ pub fn is_memory_starting(err: &anyhow::Error) -> bool {
                 })
         });
         io.is_some_and(|io| io.get_ref().is_some_and(|inner| inner.is::<PackStarting>()))
+    })
+}
+
+/// Whether this answer is a busy pack.
+///
+/// A 2xx body is an answer. Hit text is not read. `429` and `503` are
+/// busy. Any other status is busy only when the JSON says `busy` is true,
+/// or `code` or `status` or `error.code` is `busy`, `queue_full`,
+/// `locked`, `lock_timeout`, or `overloaded`. The `error` string is not
+/// read. packsetd 0.18.1 sends `503`, `Retry-After`, and
+/// `{"error":"packsetd is busy: ..."}`. It does not send `retry_ms` or a
+/// `code`. Those fields are honored when a pack sends them.
+pub(crate) fn response_is_busy(status: u16, body: &str) -> bool {
+    if (200..300).contains(&status) {
+        return false;
+    }
+    if status == 429 || status == 503 {
+        return true;
+    }
+    structured_busy(body)
+}
+
+fn structured_busy(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    if value.get("busy").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    busy_code(busy_token(&value))
+}
+
+fn busy_token(value: &Value) -> &str {
+    value
+        .get("code")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("status").and_then(Value::as_str))
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(Value::as_object)
+                .and_then(|obj| obj.get("code"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("")
+}
+
+fn busy_code(code: &str) -> bool {
+    matches!(
+        code.to_ascii_lowercase().as_str(),
+        "busy" | "queue_full" | "locked" | "lock_timeout" | "overloaded"
+    )
+}
+
+/// A pack that answered busy. The type is the signal.
+/// Words in a body are not this.
+#[derive(Debug)]
+pub(crate) struct PackReportedBusy;
+
+impl std::fmt::Display for PackReportedBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("pack reported busy")
+    }
+}
+
+impl std::error::Error for PackReportedBusy {}
+
+pub(crate) fn reported_busy_error() -> packset_client::Error {
+    packset_client::Error::Io(std::io::Error::other(PackReportedBusy))
+}
+
+/// Whether `err` is a pack that reported busy.
+///
+/// Set from a status or a JSON field. A sentence that uses the same
+/// words, including the query, is not this. The marker rides on the I/O
+/// error `std` does not put in [`std::error::Error::source`], so that
+/// payload is read here.
+#[must_use]
+pub fn is_reported_busy(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        if cause.downcast_ref::<PackReportedBusy>().is_some() {
+            return true;
+        }
+        let io = cause.downcast_ref::<std::io::Error>().or_else(|| {
+            cause
+                .downcast_ref::<packset_client::Error>()
+                .and_then(|err| match err {
+                    packset_client::Error::Io(io) => Some(io),
+                    _ => None,
+                })
+        });
+        io.is_some_and(|io| {
+            io.get_ref()
+                .is_some_and(|inner| inner.is::<PackReportedBusy>())
+        })
     })
 }
 
@@ -19632,6 +19748,27 @@ pub fn search_warmup_wait() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Seconds a search, a recall, or a remember keeps asking a pack that
+/// reports busy, when [`LJOS_SEARCH_BUSY_WAIT`](search_busy_wait) is unset.
+pub const DEFAULT_SEARCH_BUSY_WAIT_SECS: u64 = 2;
+
+/// How long search, recall, and remember keep asking a pack that reports
+/// busy.
+///
+/// `LJOS_SEARCH_BUSY_WAIT` is a whole number of seconds. Unset, and a
+/// value that is not a whole number, use [`DEFAULT_SEARCH_BUSY_WAIT_SECS`].
+/// `0` does not wait. A `Retry-After` or a JSON `retry_ms` sets one pause
+/// when it is longer than the growing pause. The sum of the pauses stops
+/// at this bound, and at [`call_deadline::timeout`].
+#[must_use]
+pub fn search_busy_wait() -> std::time::Duration {
+    let secs = std::env::var("LJOS_SEARCH_BUSY_WAIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SEARCH_BUSY_WAIT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 /// The budget for this search. A cold encoder gets [`search_wait`] plus
 /// the warm budget, so the wait and one more search both fit. A reported
 /// remaining time inside [`search_warmup_wait`] widens that to the poll
@@ -22247,6 +22384,11 @@ fn store_agent_atom(client: &PacksetClient, atom: Value, prefix: &str) -> Result
 /// Queue a lesson the writer did not take. A refusal is not queued. The
 /// error keeps the words that say the copy is waiting.
 fn queue_waiting_lesson(atom: &Value, err: anyhow::Error, prefix: &str) -> anyhow::Error {
+    // A busy pack did not take the lesson. Remember says so and exits.
+    // Queueing it would store a copy the command says was not stored.
+    if is_reported_busy(&err) {
+        return err;
+    }
     let err = if format!("{err:#}").contains(prefix) {
         err
     } else {
@@ -23267,9 +23409,13 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
 /// How long one remember post may wait. The tries still to come, and a
 /// pause before each of them, have to fit in `left`.
 /// The one line `ljos remember` prints when the lesson is queued because
-/// the pack is busy or not answering. The command exits 0.
+/// the pack is not answering. The command exits 0.
 pub const REMEMBER_QUEUED_LINE: &str =
     "Memory busy: queued 1 write, it will be saved on a later call.";
+
+/// The one line `ljos remember` prints when the pack stayed busy.
+/// Nothing was stored. The command exits 1.
+pub const REMEMBER_NOT_STORED_LINE: &str = "Nothing was stored. Run `ljos remember` again.";
 
 /// The sentence a command prints when `n` memory writes are waiting.
 /// One write uses [`REMEMBER_QUEUED_LINE`].
@@ -23313,18 +23459,21 @@ fn remember_should_queue(err: &anyhow::Error) -> bool {
 }
 
 /// Post one lesson. The client waits out one `Retry-After` on a 503.
-/// A pack that is busy, shed, or not answering queues the lesson and the
-/// command still succeeds. Packs turned off, and a refusal of the text,
-/// stay errors.
+/// A pack that reports busy is asked again inside [`search_busy_wait`].
+/// When it stays busy, nothing is stored and the error is
+/// [`REMEMBER_NOT_STORED_LINE`]. A pack that is not answering queues the
+/// lesson and the command still succeeds. Packs turned off, and a refusal
+/// of the text, stay errors.
 ///
 /// # Errors
 ///
-/// The pack refused the text, or packs are turned off.
+/// The pack stayed busy, refused the text, or packs are turned off.
 pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) -> Result<Value> {
     // A pack that has not opened yet is waited out on the search warm-up
     // budget. The short post budget starts only after that, so a pack that
-    // is already open and busy still queues inside it.
+    // is already open and busy is asked again inside the busy bound.
     answer_after_start(|| {
+        let _retry = pack_link::RememberRetry::enter();
         let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
         let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
         let _quiet = pack_link::QuietPack::enter();
@@ -23343,6 +23492,7 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
                     "duplicate": true,
                 }))
             }
+            Err(err) if is_reported_busy(&err) => Err(anyhow::Error::msg(REMEMBER_NOT_STORED_LINE)),
             Err(err) if is_memory_starting(&err) => Err(err),
             Err(err) if pack_turned_off(&err) => Err(err),
             Err(err) if remember_should_queue(&err) => {
@@ -41109,10 +41259,13 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     if read_encoder_status().as_ref().is_some_and(encoder_failed) {
         restart_dead_encoder();
     }
+    clear_forced_ranking();
+    let _busy = pack_link::BusyRetry::enter();
     let mut woke = false;
+    let mut word_fallback = false;
     let mut ask = |what: &dyn Fn() -> Result<Vec<Hit>>| -> Result<Vec<Hit>> {
         match what() {
-            Err(err) if is_memory_starting(&err) => Err(err),
+            Err(err) if is_memory_starting(&err) || is_reported_busy(&err) => Err(err),
             Err(err) if is_deadline_miss(&err) || is_read_shed(&err) => Err(err),
             // A timeout before the start is a busy pack. A timeout after
             // the start left the writer down, and the line names the command.
@@ -41139,16 +41292,21 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     let own = match ask(&|| issue_memories(issue)) {
         Ok(hits) => hits,
         // A pack that has not opened sheds the listing. Word search below
-        // is the page. A busy pack that is already open stays an error.
+        // is the page. A busy pack that stayed busy does the same, and the
+        // page says word search was used.
         Err(err) if is_memory_starting(&err) => Vec::new(),
         Err(err) if pack_settled(&err) && health_still_starting() == Some(true) => Vec::new(),
+        Err(err) if is_reported_busy(&err) => {
+            word_fallback = true;
+            Vec::new()
+        }
         Err(err) if pack_settled(&err) => return Err(err),
         Err(_) => Vec::new(),
     };
     let cues = recall_cues(issue);
     let pool = u32::try_from(RELATED_MEMORY_CAP * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let mut related = Vec::new();
-    let mut word_fallback = false;
+    let mut starting_fallback = false;
     for cue in &cues {
         match ask(&|| search_ranked(cue, pool)) {
             Ok(hits) => related.extend(hits),
@@ -41158,13 +41316,23 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
                     return Err(memory_starting_err());
                 }
                 related.extend(words);
+                starting_fallback = true;
+                break;
+            }
+            Err(err) if is_reported_busy(&err) => {
+                related.extend(search_by_words(cue, pool));
                 word_fallback = true;
                 break;
             }
             Err(err) if pack_settled(&err) => return Err(err),
-            Err(e) if own.is_empty() && related.is_empty() => return Ok(recall_down(&e)),
+            Err(e) if own.is_empty() && related.is_empty() && !word_fallback => {
+                return Ok(recall_down(&e));
+            }
             Err(_) => break,
         }
+    }
+    if word_fallback {
+        note_forced_ranking(lexical_ranking(MEMORY_SEARCH_BUSY_REASON));
     }
     let _ = word_rank::apply_relevance_floor(
         &mut related,
@@ -41179,7 +41347,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
         include_notes,
         false,
     );
-    if word_fallback {
+    if starting_fallback {
         text.insert_str(0, &format!("{MEMORY_STARTING_FALLBACK_LINE}\n"));
     }
     Ok(text)

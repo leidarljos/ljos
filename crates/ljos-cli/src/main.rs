@@ -593,12 +593,14 @@ enum Cmd {
     /// sentence to change and the reading score. A short lesson prints no hint.
     ///
     /// An empty text exits 2. A text past 1000 characters exits 2.
-    /// When the pack is busy or not answering, the lesson is queued and the command exits 0.
+    /// When the pack is not answering, the lesson is queued and the command exits 0.
+    /// A busy pack is asked again for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset, `0` does not wait).
+    /// The wait follows `Retry-After` or a JSON `retry_ms`.
+    /// When the pack stays busy, nothing was stored. The line says to run `ljos remember` again, and the command exits 1.
     /// Starting is waited out on `LJOS_SEARCH_WARMUP_WAIT` (5 seconds when unset, `0` does not wait), and not past `LJOS_CALL_TIMEOUT`.
     /// The pack is starting when `/health` is `not-ready` or `not ready`, or the JSON says `ready` is false or `code` is `starting`.
     /// Words in the lesson are not that signal.
     /// When that budget runs out the line is `Memory is starting, so try again in a few seconds.` and the command exits non-zero.
-    /// An open store that is only busy still queues the lesson and the command exits 0.
     /// The pack is this seat's memory store.
     /// Turned off on purpose, the command exits 1.
     Remember {
@@ -819,7 +821,8 @@ enum Cmd {
     /// `No relevant matches for "QUERY".` and it names `--min-score 0`.
     /// A meaning row from another seat that only shares a generic word is
     /// left out unless the encoder's similarity is high.
-    /// A busy memory store is asked again for about two seconds.
+    /// A busy memory store is asked again for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset, `0` does not wait).
+    /// The wait follows `Retry-After` or a JSON `retry_ms`.
     /// When it answers, the rows are ranked by meaning. When it stays
     /// busy, the rows are ranked by words and a hit that names the subject
     /// stays. Search fell back, and the one line is
@@ -1480,6 +1483,9 @@ enum Cmd {
     /// Example: `ljos recall proj-1a2b`
     ///
     /// When no lesson is stored on the issue, the line names `ljos remember`.
+    /// A busy memory store is asked again for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset, `0` does not wait).
+    /// The wait follows `Retry-After` or a JSON `retry_ms`.
+    /// When it stays busy, the rows are ranked by words and one line says memory search was busy.
     /// When nothing is storing memories, the command exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
     Recall {
         /// The ticket id.
@@ -5195,13 +5201,18 @@ fn run_command() -> Result<()> {
                 // The writer reported busy until the short wait ran out.
                 // One line says word search was used. It does not also
                 // print `pack busy, try again`.
-                Err(err) if !dated && ljos_cli::is_read_shed(&err) => (
-                    ljos_cli::search_by_words(&asked, fetch),
-                    ljos_cli::Ranking {
-                        mode: "lexical",
-                        reason: ljos_cli::MEMORY_SEARCH_BUSY_REASON,
-                    },
-                ),
+                Err(err)
+                    if !dated
+                        && (ljos_cli::is_read_shed(&err) || ljos_cli::is_reported_busy(&err)) =>
+                {
+                    (
+                        ljos_cli::search_by_words(&asked, fetch),
+                        ljos_cli::Ranking {
+                            mode: "lexical",
+                            reason: ljos_cli::MEMORY_SEARCH_BUSY_REASON,
+                        },
+                    )
+                }
                 Err(err)
                     if !dated
                         && (ljos_cli::pack_unreachable(&err)

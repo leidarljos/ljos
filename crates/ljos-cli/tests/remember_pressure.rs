@@ -1,5 +1,5 @@
-//! A pack that answers 503 under memory pressure queues the lesson.
-//! A local prose refusal is not a reason to drop it. A duplicate names
+//! A pack that answers 503 under memory pressure does not store the lesson.
+//! A local prose refusal is not what the line says. A duplicate names
 //! the atom the pack already holds.
 
 ljos_test_boot::harness!();
@@ -84,7 +84,7 @@ fn remember(port: u16, text: &str) -> std::process::Output {
 }
 
 #[test]
-fn a_pressure_503_queues_a_lesson_the_gate_would_refuse() {
+fn a_pressure_503_stores_nothing_and_does_not_call_it_a_refusal() {
     let port = serve(
         503,
         r#"{"error":"packsetd is busy: memory pressure; try again"}"#,
@@ -100,22 +100,22 @@ fn a_pressure_503_queues_a_lesson_the_gate_would_refuse() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let queued = LAST_QUEUE.with(|slot| slot.borrow().clone());
-    assert!(
-        stdout.contains("Memory busy: queued 1 write") || stderr.contains("lesson is queued"),
+    assert_eq!(
+        out.status.code(),
+        Some(1),
         "stderr:\n{stderr}\nstdout:\n{stdout}"
     );
-    assert!(out.status.success(), "stderr:\n{stderr}\nstdout:\n{stdout}");
     assert!(
-        !stderr.contains("was not queued"),
-        "the lesson was dropped:\n{stderr}"
+        stderr.contains("Nothing was stored. Run `ljos remember` again."),
+        "stderr:\n{stderr}\nstdout:\n{stdout}"
     );
     assert!(
         !stderr.contains("would refuse this copy"),
         "load was reported as a content refusal:\n{stderr}"
     );
     assert!(
-        queued.contains(&text),
-        "the queue does not hold the lesson:\n{queued}"
+        !queued.contains(&text),
+        "a busy pack stored a copy the command said was not stored:\n{queued}"
     );
 }
 

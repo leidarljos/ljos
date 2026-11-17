@@ -1,9 +1,10 @@
 //! A packsetd that reports busy is asked again for a short time.
 //!
-//! The first searches answer 503 with the daemon's busy line and
-//! `Retry-After: 1`. A writer that then answers is ranked by meaning.
-//! A writer that stays busy past that wait is one line, and the page is
-//! the word search.
+//! The first searches answer 503 with the daemon's busy line. A writer
+//! that then answers is ranked by meaning. A writer that stays busy past
+//! that wait is one line, and the page is the word search. Words in a
+//! hit are not a busy signal. `ljos remember` asks again, and when the
+//! pack stays busy it stores nothing.
 
 ljos_test_boot::harness!();
 
@@ -78,7 +79,7 @@ fn serve(busy: usize) -> (String, Arc<AtomicUsize>) {
                 if path == "/v1/search" {
                     let n = count.fetch_add(1, Ordering::SeqCst);
                     if n < busy {
-                        write_http(&mut sock, 503, BUSY_BODY, true);
+                        write_http(&mut sock, 503, BUSY_BODY, false);
                     } else {
                         let body = format!(
                             r#"{{"hits":[{{"id":"seam","kind":"lesson","text":"{HIT}","score":0.91,"cosine":0.8,"entities":["seat:ada"]}}],"rank":"relevance"}}"#
@@ -219,4 +220,224 @@ fn a_writer_that_stays_busy_uses_one_word_line() {
         json_took < Duration::from_secs(4),
         "json search waited {json_took:?}"
     );
+}
+
+#[test]
+fn words_in_a_hit_are_not_a_busy_pack() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    std::fs::create_dir_all(home.join(".local/state")).unwrap();
+    std::fs::create_dir_all(home.join("run")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let searches = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&searches);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let count = Arc::clone(&count);
+            thread::spawn(move || {
+                let Ok(mut sock) = stream else { return };
+                let head = read_head(&mut sock);
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                let path = path.split('?').next().unwrap_or(path);
+                let body = if path == "/v1/search" {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    r#"{"hits":[{"id":"seam","kind":"lesson","text":"packsetd is busy: every worker is answering and the queue is full; try again","score":0.91,"cosine":0.8,"entities":["seat:ada"]}],"rank":"relevance"}"#
+                        .to_string()
+                } else if path == "/v1/status" {
+                    r#"{"embedder":{"available":true,"answering":true,"enabled":true},"search":{"ranks":["relevance"]}}"#
+                        .to_string()
+                } else {
+                    "ok".to_string()
+                };
+                write_http(&mut sock, 200, &body, false);
+            });
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}");
+    let (out, took) = search(&url, &home, &["search", "queue"]);
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("matched by meaning"),
+        "{text}"
+    );
+    assert!(text.contains("queue is full"), "{text}");
+    assert!(!text.contains(BUSY), "{text}");
+    assert!(!text.contains("Nothing was stored"), "{text}");
+    assert_eq!(searches.load(Ordering::SeqCst), 1, "{text}");
+    assert!(took < Duration::from_secs(3), "{took:?}\n{text}");
+}
+
+/// `busy` is how many `POST /v1/atoms` answers are 503 before a store.
+fn serve_posts(busy: usize) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&posts);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let count = Arc::clone(&count);
+            thread::spawn(move || {
+                let Ok(mut sock) = stream else { return };
+                let head = read_head(&mut sock);
+                let line = head.lines().next().unwrap_or("");
+                let path = line.split_whitespace().nth(1).unwrap_or("/");
+                let path = path.split('?').next().unwrap_or(path);
+                if line.starts_with("POST") && path == "/v1/atoms" {
+                    let n = count.fetch_add(1, Ordering::SeqCst);
+                    if n < busy {
+                        let body = r#"{"code":"busy","retry_ms":30,"error":"packsetd is busy: the write queue is full"}"#;
+                        write_http(&mut sock, 503, body, false);
+                    } else {
+                        write_http(
+                            &mut sock,
+                            200,
+                            r#"{"id":"atom-kiln","kind":"lesson","text":"The kiln dries slowly."}"#,
+                            false,
+                        );
+                    }
+                } else if path == "/v1/status" {
+                    write_http(
+                        &mut sock,
+                        200,
+                        r#"{"embedder":{"available":true,"answering":true}}"#,
+                        false,
+                    );
+                } else {
+                    write_http(&mut sock, 200, "ok", false);
+                }
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), posts)
+}
+
+fn seat_home() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    std::fs::create_dir_all(home.join(".local/state")).unwrap();
+    std::fs::create_dir_all(home.join("run")).unwrap();
+    root
+}
+
+#[test]
+fn a_remember_that_was_busy_stores_the_lesson() {
+    let root = seat_home();
+    let home = root.path().join("home");
+    let (url, posts) = serve_posts(2);
+    let (out, took) = search(&url, &home, &["remember", "The kiln dries slowly."]);
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("The kiln dries slowly."),
+        "{text}"
+    );
+    assert!(!text.contains("Nothing was stored"), "{text}");
+    assert!(!text.contains("queued"), "{text}");
+    assert!(posts.load(Ordering::SeqCst) >= 3, "{text}");
+    assert!(took < Duration::from_secs(4), "{took:?}\n{text}");
+}
+
+#[test]
+fn a_remember_that_stays_busy_stores_nothing() {
+    let root = seat_home();
+    let home = root.path().join("home");
+    let (url, posts) = serve_posts(usize::MAX);
+    let (out, took) = search(&url, &home, &["remember", "The kiln dries slowly."]);
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = err.lines().filter(|line| !line.trim().is_empty()).collect();
+    assert_eq!(
+        lines,
+        ["Nothing was stored. Run `ljos remember` again."],
+        "{text}"
+    );
+    assert!(!text.contains("queued"), "{text}");
+    let queue = home.join(".local/state/ljos/note-queue.jsonl");
+    let queued = std::fs::read_to_string(&queue).unwrap_or_default();
+    assert!(!queued.contains("kiln"), "{queued}");
+    assert!(posts.load(Ordering::SeqCst) > 1, "{text}");
+    assert!(
+        took < Duration::from_secs(4),
+        "remember waited {took:?}\n{text}"
+    );
+    assert!(
+        took >= Duration::from_millis(400),
+        "remember did not retry: {took:?}\n{text}"
+    );
+}
+
+fn stub_vissue(bin: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(bin).unwrap();
+    let path = bin.join("vissue");
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn recall(url: &str, home: &Path, issue: &str) -> (std::process::Output, Duration) {
+    stub_vissue(&home.join("bin"));
+    let started = Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["recall", issue])
+        .env_clear()
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", home.join("bin").display()),
+        )
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env("LJOS_SEAT", "ada")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("PACKSET_AUTH", "off")
+        .env(
+            "PACKSET_TOKEN",
+            "0e1d2c3b4a59687706f5e4d3c2b1a0900e1d2c3b4a59687706f5e4d3c2b1a090",
+        )
+        .env("PACKSET_URL", url)
+        .env("PACKSET_WORKSPACE", "seat")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    (out, started.elapsed())
+}
+
+#[test]
+fn a_recall_that_was_busy_still_matches_by_meaning() {
+    let root = seat_home();
+    let home = root.path().join("home");
+    let (url, searches) = serve(2);
+    let (out, took) = recall(&url, &home, "d-SEAMS");
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains(HIT), "{text}");
+    assert!(text.contains("matched by meaning"), "{text}");
+    assert!(!text.contains(BUSY), "{text}");
+    assert!(searches.load(Ordering::SeqCst) >= 3, "{text}");
+    assert!(took < Duration::from_secs(4), "{took:?}\n{text}");
+}
+
+#[test]
+fn a_recall_that_stays_busy_uses_one_word_line() {
+    let root = seat_home();
+    let home = root.path().join("home");
+    let (url, searches) = serve(usize::MAX);
+    let (out, took) = recall(&url, &home, "catalog");
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains(BUSY), "{text}");
+    assert!(!text.contains("pack busy, try again"), "{text}");
+    assert!(text.contains("video catalog"), "{text}");
+    assert!(searches.load(Ordering::SeqCst) > 1, "{text}");
+    assert!(took < Duration::from_secs(4), "{took:?}\n{text}");
 }

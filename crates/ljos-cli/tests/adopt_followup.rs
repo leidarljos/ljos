@@ -413,9 +413,9 @@ fn busy_then_ready() -> (u16, u16, std::sync::Arc<std::sync::atomic::AtomicUsize
 }
 
 #[test]
-fn a_busy_remember_retries_queues_and_the_next_call_sends_it() {
+fn a_busy_remember_retries_then_says_nothing_was_stored() {
     let world = World::new();
-    let (busy_port, ready_port, posts) = busy_then_ready();
+    let (busy_port, _ready_port, posts) = busy_then_ready();
     let lesson = "The kiln dries slowly. Fire it at dusk.";
     let busy_url = format!("http://127.0.0.1:{busy_port}");
     let started = std::time::Instant::now();
@@ -429,37 +429,23 @@ fn a_busy_remember_retries_queues_and_the_next_call_sends_it() {
     );
     let took = started.elapsed();
     let said = text(&out);
-    assert!(out.status.success(), "{said}");
-    assert!(took < std::time::Duration::from_secs(3), "{took:?} {said}");
-    let tries = posts.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(!out.status.success(), "{said}");
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(took < std::time::Duration::from_secs(4), "{took:?} {said}");
     assert!(
-        (1..=4).contains(&tries),
-        "remember tried {tries} times\n{said}"
+        took >= std::time::Duration::from_millis(400),
+        "remember did not retry: {took:?} {said}"
     );
-    let out_text = String::from_utf8_lossy(&out.stdout);
+    let tries = posts.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(tries > 2, "remember tried {tries} times\n{said}");
     assert!(
-        out_text.contains("Memory busy: queued 1 write, it will be saved on a later call."),
+        said.contains("Nothing was stored. Run `ljos remember` again."),
         "{said}"
     );
+    assert!(!said.contains("queued"), "{said}");
     let queue = world.home.join(".state/ljos/note-queue.jsonl");
     let queued = std::fs::read_to_string(&queue).unwrap_or_default();
-    assert!(queued.contains("kiln dries slowly"), "{queued}");
-
-    let ready_url = format!("http://127.0.0.1:{ready_port}");
-    let next = world.ljos(
-        &["seat"],
-        &[
-            ("LJOS_SEAT", "ada"),
-            ("PACKSET_URL", &ready_url),
-            ("PACKSET_AUTH", "off"),
-        ],
-    );
-    let said = text(&next);
-    assert!(next.status.success(), "{said}");
-    let err = String::from_utf8_lossy(&next.stderr);
-    assert!(err.contains("sent") && err.contains("queued"), "{said}");
-    let left = std::fs::read_to_string(&queue).unwrap_or_default();
-    assert!(!left.contains("kiln dries slowly"), "{left}");
+    assert!(!queued.contains("kiln dries slowly"), "{queued}");
 }
 
 #[test]

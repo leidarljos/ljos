@@ -24,6 +24,7 @@ Variable                                                    Read by
 ``LJOS_HUD_SOCKET``                                         summon socket; else ``$XDG_RUNTIME_DIR/ljos/hud.sock``
 ``LJOS_TRACKER_GIT``                                        ``commit`` commits the ticket's ``issues.org``, and the sitting's and finish's sealed sync log, without pushing; ``off`` skips the commit and push, and the sync in passing; unset, commit and push. A landed commit or push is not printed. A refusal is one sentence. ``--verbose`` prints the lines. ``ljos sync`` by hand always pushes
 ``LJOS_TRACKER_PUSH_WAIT``                                  seconds the tracker push after a claim or finish waits; 5 when unset
+``LJOS_SEARCH_BUSY_WAIT``                                   seconds ``ljos search``, ``ljos recall``, and ``ljos remember`` keep asking a pack that reports busy; 2 when unset, ``0`` does not wait. A ``Retry-After`` or a JSON ``retry_ms`` sets one pause when it is longer
 ``LJOS_SEARCH_WAIT``                                        seconds ``ljos search`` waits for an encoder that is still loading; 3 when unset, ``0`` does not wait. Rows shown while it loads are word matches, and the line says meaning search will be ready shortly. When nothing is shown, the line names how long to wait before running the search again
 ``LJOS_SEARCH_WARMUP_WAIT``                                 seconds ``ljos search`` waits when the encoder is loading and the reported remaining time fits; 5 when unset, ``0`` does not wait. The wait stays inside ``LJOS_CALL_TIMEOUT``. A longer or unknown load keeps ``LJOS_SEARCH_WAIT``
 ``LJOS_INBOX_SYNC_WAIT``                                    seconds ``ljos inbox --sync COMMIT`` keeps fetching until the remote has the commit; 30 when unset, ``0`` fetches once
@@ -165,6 +166,7 @@ LJOS variables
 - ``LJOS_PROGRAMS`` default unset
 - ``LJOS_PROJECT`` default unset
 - ``LJOS_RELEASE_DIR`` default unset
+- ``LJOS_SEARCH_BUSY_WAIT`` default 2 seconds
 - ``LJOS_SEARCH_WAIT`` default 3 seconds
 - ``LJOS_SEARCH_WARMUP_WAIT`` default 5 seconds
 - ``LJOS_SEAT`` default unset

@@ -672,6 +672,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_SEARCH_BUSY_WAIT",
+        default: "2 seconds",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_SEARCH_WAIT",
         default: "3 seconds",
         group: "ljos",

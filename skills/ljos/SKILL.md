@@ -762,7 +762,9 @@ seconds once and sends the same request with the same deadline. A second
 503, or a deadline that has passed, stops. The command prints the JSON
 `error` field on one line and does not retry for the rest of the timeout.
 A search or a recall keeps asking a writer that reports busy, with a
-short pause that grows, for about two seconds, and then stops.
+short pause that grows, for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset,
+`0` does not wait). A `Retry-After` or a JSON `retry_ms` sets one pause
+when it is longer, and then the asking stops.
 A call that stays silent until its budget runs out is not tried again.
 An interactive command prints `pack busy, try again` and exits 75.
 When search still has no meaning rank it uses word search and prints
