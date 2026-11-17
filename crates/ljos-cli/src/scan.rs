@@ -648,15 +648,15 @@ pub fn empty_store_page(query: &str) -> String {
     plain_command_page(&prose, Some(&cmd))
 }
 
-/// `ljos remember "WORD"` when the query is one word, otherwise
-/// `ljos remember "TEXT"`.
+/// `ljos remember` with the query in quotes. A query that cannot be
+/// quoted names the sample lesson from the getting started page.
 #[must_use]
 pub fn store_lesson_command(query: &str) -> String {
     let query = query.trim();
-    if one_word(query) {
-        remember_command(query)
+    if query.is_empty() || query.chars().any(char::is_control) {
+        "ljos remember \"The lexical default is BM25+.\"".to_string()
     } else {
-        "ljos remember \"TEXT\"".to_string()
+        remember_quoted(query)
     }
 }
 
@@ -688,18 +688,9 @@ fn ended(text: &str) -> String {
     out
 }
 
-fn one_word(query: &str) -> bool {
-    let word = query.trim();
-    !word.is_empty() && !word.chars().any(char::is_whitespace)
-}
-
-fn remember_command(query: &str) -> String {
-    let word = query.trim();
-    if !one_word(word) || word.chars().any(char::is_control) {
-        return "ljos remember \"TEXT\"".to_string();
-    }
+fn remember_quoted(text: &str) -> String {
     let mut quoted = String::from("\"");
-    for ch in word.chars() {
+    for ch in text.chars() {
         if matches!(ch, '"' | '\\' | '$' | '`') {
             quoted.push('\\');
         }
