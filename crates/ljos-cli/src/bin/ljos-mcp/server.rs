@@ -1705,15 +1705,18 @@ impl LjosServer {
     async fn ljos_remember(
         &self,
         Parameters(args): Parameters<ClaimArgs>,
-    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
-        ljos_cli::packset_write_mcp(
+    ) -> Result<Json<Said>, McpError> {
+        let body = ljos_cli::packset_write_mcp(
             "Remember",
             &args.text,
             args.as_persona.as_deref(),
             args.transient,
         )
-        .map(object)
-        .map_err(refused)
+        .map_err(refused)?;
+        Ok(Json(Said {
+            text: ljos_cli::remember_mcp_text(&body),
+            aside: None,
+        }))
     }
 
     #[tool(

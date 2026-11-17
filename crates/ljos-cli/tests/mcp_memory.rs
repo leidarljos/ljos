@@ -215,6 +215,17 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
         answer.get("error").is_none() && answer["result"]["isError"] != true,
         "{answer}\n{stderr}"
     );
+    let said = answer["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        said.contains("remembered (lesson)") && said.contains("standing:"),
+        "ljos_remember did not print the command line:\n{said}"
+    );
+    assert!(
+        !said.contains("inside.atom") && !said.contains("\"schema\""),
+        "ljos_remember still returned the stored row:\n{said}"
+    );
 
     let list = || {
         let got = Command::new(env!("CARGO_BIN_EXE_ljos"))

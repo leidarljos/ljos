@@ -22496,7 +22496,7 @@ impl Basis {
 /// The atom an MCP `ljos_remember` or `ljos_prefer` posts, with its basis.
 /// The person's words carry origin `user-declared` and [`SAID_ENTITY`], and
 /// a lesson in them stands unless the caller said transient. An agent's
-/// claim carries origin `agent-derived` and the horizon the caller gave.
+/// claim carries origin `agent-derived`. An omitted horizon stands.
 ///
 /// # Errors
 ///
@@ -22519,10 +22519,9 @@ pub fn mcp_claim_atom(
     }
     let kind = atom_kind(label)?;
     let mut atom = atom_body(kind, trimmed, workspace);
-    let horizon = match basis {
-        Basis::Person => transient.or(Some(false)),
-        Basis::Agent => transient,
-    };
+    // An omitted horizon stands, the same as `ljos remember` without
+    // `--transient`. Passing transient true stores an episode.
+    let horizon = transient.or(Some(false));
     stamp_horizon(&mut atom, kind, trimmed, horizon);
     if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
         add_entities(&mut atom, [persona_entity(name)]);
@@ -23710,6 +23709,26 @@ pub fn prompt_hook_wired() -> bool {
         }
     }
     false
+}
+
+/// The lines `ljos remember` prints, for `ljos_remember` to return.
+/// A queued write is the one busy line. Anything stored is the plain
+/// acknowledgement and [`remember_note`].
+#[must_use]
+pub fn remember_mcp_text(body: &Value) -> String {
+    if body["queued"].as_bool() == Some(true) {
+        return REMEMBER_QUEUED_LINE.to_string();
+    }
+    let mut text = format!(
+        "{}\n{}",
+        format_write_ack_plain(body, &local_when),
+        remember_note(body)
+    );
+    if let Some(line) = memories::reinforced_line(body) {
+        text.push('\n');
+        text.push_str(&line);
+    }
+    text
 }
 
 /// The most characters `ljos remember` stores. A longer paste is not a
@@ -80665,7 +80684,24 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(atom["source"]["basis"], "agent");
         assert_eq!(atom["source"]["via"], "ljos");
         let tags = atom["entities"].to_string();
-        assert!(tags.contains("horizon:transient"), "{tags}");
+        assert!(tags.contains("horizon:standing"), "{tags}");
+        assert!(!tags.contains("horizon:transient"), "{tags}");
+        let episode = mcp_claim_atom(
+            "Remember",
+            "pin the review set before a release",
+            "ws",
+            None,
+            Some(true),
+            Basis::Agent,
+        )
+        .unwrap();
+        let episode_tags = episode["entities"].to_string();
+        assert!(episode_tags.contains("horizon:transient"), "{episode_tags}");
+        let said = remember_mcp_text(&atom);
+        assert!(said.contains("remembered (lesson)"), "{said}");
+        assert!(said.contains("standing:"), "{said}");
+        assert!(!said.contains("inside.atom"), "{said}");
+        assert!(!said.contains("schema"), "{said}");
         assert!(tags.contains(&persona_entity("reviewer")), "{tags}");
         assert!(!tags.contains(SAID_ENTITY), "{tags}");
         assert_eq!(atom["set"], persona_set("reviewer"));
