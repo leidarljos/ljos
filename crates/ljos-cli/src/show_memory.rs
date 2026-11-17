@@ -10,11 +10,14 @@ use serde_json::Value;
 
 /// Open `id` as a ticket or a memory.
 ///
+/// A ticket page prints the body and the newest notes. `all` prints every
+/// note. `--json` prints the body and every note either way.
+///
 /// # Errors
 ///
 /// The id is empty, it matches more than one ticket or memory, it is
 /// neither, or the tracker cannot be read.
-pub fn show_any(id: &str, json: bool) -> Result<String> {
+pub fn show_any(id: &str, json: bool, all: bool) -> Result<String> {
     let id = id.trim();
     if id.is_empty() {
         bail!("The issue id is empty. `ljos ready` lists the open tickets.");
@@ -34,7 +37,7 @@ pub fn show_any(id: &str, json: bool) -> Result<String> {
             _ => {}
         }
     }
-    show_ticket_or_neither(id, json)
+    show_ticket_or_neither(id, json, all)
 }
 
 /// Whether `err` is a show lookup the CLI prints as one line and exits 1.
@@ -46,22 +49,22 @@ pub fn is_show_fault(err: &anyhow::Error) -> bool {
         || text.starts_with("The issue id is empty.")
 }
 
-fn show_ticket(id: &str, json: bool) -> Result<String> {
+fn show_ticket(id: &str, json: bool, all: bool) -> Result<String> {
     if json {
         crate::show_json(id)
     } else {
-        crate::show_issue(id)
+        crate::show_issue(id, all)
     }
 }
 
-fn show_ticket_or_neither(id: &str, json: bool) -> Result<String> {
+fn show_ticket_or_neither(id: &str, json: bool, all: bool) -> Result<String> {
     if let Some(line) = crate::ticket_refusal(id) {
         if plain_miss(&line) {
             bail!("{}", neither(id));
         }
         bail!("{line}");
     }
-    match show_ticket(id, json) {
+    match show_ticket(id, json, all) {
         Ok(text) => Ok(text),
         Err(err) if plain_miss(&err.to_string()) => bail!("{}", neither(id)),
         Err(err) => Err(err),
