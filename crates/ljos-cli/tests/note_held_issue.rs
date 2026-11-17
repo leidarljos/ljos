@@ -273,8 +273,12 @@ fn a_note_with_no_issue_is_stored_unattached() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "ljos-mcp failed: {stdout}{stderr}");
     assert!(
-        stdout.contains("unattached-note"),
-        "the note was not stored unattached:\n{stdout}\n{stderr}"
+        stdout.contains("label unattached-note: no open sitting. Start one with `ljos sitting`."),
+        "the note did not say to start a sitting:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("next: start a sitting with ljos_sitting"),
+        "the next line still said only to finish:\n{stdout}"
     );
     assert!(
         !stdout.contains("pass an issue id"),

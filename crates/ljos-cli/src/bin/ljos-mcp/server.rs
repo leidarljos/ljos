@@ -188,6 +188,18 @@ fn attach_next(name: &str, response: CallToolResponse) -> CallToolResponse {
                     .collect::<Vec<_>>()
                     .join("\n");
                 finish_next_from(&body)
+            } else if name == "ljos_note" {
+                let body = result
+                    .content
+                    .iter()
+                    .filter_map(|block| block.as_text().map(|text| text.text.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if body.contains("unattached-note") {
+                    "next: start a sitting with ljos_sitting, then call ljos_note again"
+                } else {
+                    next_step(name)
+                }
             } else {
                 next_step(name)
             };
@@ -2186,7 +2198,7 @@ impl LjosServer {
         match issue {
             Some(issue) => habitat("ljos", &["note", &issue, &note]),
             None => Ok(Json(Said {
-                text: "stored with label unattached-note\n".into(),
+                text: format!("label unattached-note: {}\n", ljos_cli::NOTE_WITHOUT_TICKET),
                 aside: None,
             })),
         }
