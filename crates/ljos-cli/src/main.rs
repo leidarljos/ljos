@@ -5731,6 +5731,9 @@ fn run_command() -> Result<()> {
             quiet,
         } => {
             let (issue, text, inferred) = note_target(&words)?;
+            // A product checkout is not a tracker. `vissue note` would
+            // create one there when the id is missing.
+            ljos_cli::refuse_product_init(&issue)?;
             // The note is the tracker write. Reconciling a claim the
             // graph did not take waits until that write has landed, and
             // only for a short bound. The tracker prints `{id}: noted`

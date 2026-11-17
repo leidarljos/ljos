@@ -288,10 +288,8 @@ fn names_the_id_and_leaves_the_tree(out: &Output, before: &[String], probe: &Pro
         "the error did not name {MISSING}:\n{text}"
     );
     assert!(
-        text.contains("`ljos ready`")
-            || text.contains("`ljos search")
-            || text.contains("`ljos file"),
-        "the error did not name a next command:\n{text}"
+        text.contains("`ljos search`"),
+        "the error did not name `ljos search`:\n{text}"
     );
     assert!(
         !text.contains('\n') || text.lines().filter(|line| !line.is_empty()).count() == 1,
@@ -334,6 +332,13 @@ fn note_finish_file_and_claim_on_a_missing_issue_write_nothing() {
             !probe.product.join("vissue.toml").exists(),
             "ljos {args:?} wrote vissue.toml:\n{text}"
         );
+        if args[0] == "note" {
+            assert!(!out.status.success(), "{text}");
+            assert!(
+                text.contains(MISSING) && text.contains("`ljos search`"),
+                "ljos note did not name {MISSING} and `ljos search`:\n{text}"
+            );
+        }
     }
 }
 
@@ -420,10 +425,8 @@ fn mcp_write_verbs_on_a_missing_issue_name_it_and_write_nothing() {
         "the error did not name {MISSING}:\n{text}"
     );
     assert!(
-        text.contains("`ljos ready`")
-            || text.contains("`ljos search")
-            || text.contains("`ljos file"),
-        "the error did not name a next command:\n{text}"
+        text.contains("`ljos search`"),
+        "the error did not name `ljos search`:\n{text}"
     );
     assert_eq!(
         probe.tree(),

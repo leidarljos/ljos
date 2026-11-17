@@ -250,7 +250,11 @@ fn the_vissue_children_ljos_runs_are_not_refused() {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    // The cargo cwd is the ljos checkout. A note there, with no tracker
+    // named, stops before `vissue` can create one. This test is about the
+    // child `ljos` runs, so it notes from a directory that is not a product.
     let out = as_agent(home.path(), &["note", "ljos-ab12", "halfway", "there"])
+        .current_dir(home.path())
         .env("PATH", path)
         .env("LJOS_SEAT", "rohit")
         .env("LJOS_TRACKER_GIT", "off")

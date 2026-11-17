@@ -41809,6 +41809,36 @@ fn unknown_ticket(issue: &str) -> anyhow::Error {
     anyhow::anyhow!("issue {issue} not found. `ljos ready` lists the open tickets.")
 }
 
+/// A missing ticket, with the command that finds one.
+fn search_ticket(issue: &str) -> anyhow::Error {
+    anyhow::anyhow!("issue {issue} not found. `ljos search` finds a ticket.")
+}
+
+/// Refuse `issue` before `vissue` can create a tracker in a product checkout.
+///
+/// Nothing names a tracker, so `vissue` would take the working directory
+/// and write `vissue.toml` there. An id the library can already read is
+/// left for the caller. Any other id stops here.
+///
+/// # Errors
+///
+/// `issue` is not a ticket in that checkout. The line names `ljos search`.
+pub fn refuse_product_init(issue: &str) -> Result<()> {
+    if !tracker_place::vissue_would_init_cwd() {
+        return Ok(());
+    }
+    let Ok(here) = std::env::current_dir() else {
+        return Ok(());
+    };
+    if tracker_place::product_checkout(&here).is_none() {
+        return Ok(());
+    }
+    if issue_title(issue).is_ok() {
+        return Ok(());
+    }
+    Err(search_ticket(issue))
+}
+
 /// Whether `err` is a ticket lookup sentence ([`unknown_ticket`] or
 /// [`ticket_refusal`]). The CLI prints it and exits 1.
 #[must_use]
@@ -43938,7 +43968,7 @@ pub fn sitting_stream_started(
     // must not be what creates the tracker.
     if let Err(err) = issue_title(issue) {
         if tracker_misses(&err, issue) || tracker_place::vissue_would_init_cwd() {
-            return Err(unknown_ticket(issue));
+            return Err(search_ticket(issue));
         }
     }
     let mut out = String::new();
@@ -43957,7 +43987,7 @@ pub fn sitting_stream_started(
     }
     let title = match issue_title(issue) {
         Ok(title) => title,
-        Err(err) if tracker_misses(&err, issue) => return Err(unknown_ticket(issue)),
+        Err(err) if tracker_misses(&err, issue) => return Err(search_ticket(issue)),
         Err(_) => issue.to_string(),
     };
     let blockers = open_blockers(issue);

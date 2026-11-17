@@ -201,14 +201,14 @@ fn a_missing_claim_program_names_the_install_and_exits_1() {
 }
 
 #[test]
-fn an_unknown_ticket_on_a_sitting_names_ready_and_exits_1() {
+fn an_unknown_ticket_on_a_sitting_names_search_and_exits_1() {
     let home = Home::new();
     let out = home.run(&["sitting", "demo-gone"], &[("LJOS_SEAT", "alice")]);
     let said = text(&out);
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "issue demo-gone not found. `ljos ready` lists the open tickets."
+        "issue demo-gone not found. `ljos search` finds a ticket."
     );
 }
 
