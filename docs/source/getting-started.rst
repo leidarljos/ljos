@@ -80,7 +80,7 @@ No seat, no ``PACKSET_HOME``, and no ``packsetd`` are required for that list.
 A search then says to install ``packset`` or to run ``packset ensure``, as a tool error the model can read.
 The installer checks each download against its published SHA-256 sum.
 It builds from source with ``cargo`` where a platform has no release.
-``--no-embed`` leaves out the encoder. Search then matches words, and a search prints ``matched by words (encoder not installed)`` and names ``cargo binstall --locked packset-embed``.
+``--no-embed`` leaves out the encoder. Search then matches words, and a search prints ``matched by words (encoder not installed)`` and names the same install command as ``ljos doctor``.
 
 Read the script before you run it. It is ``scripts/install.sh`` in this repository.
 It runs ``ljos onboard`` for each coding runner it finds. With none found, it still sets up
@@ -143,7 +143,7 @@ A lesson and a search
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    saved as a standing lesson; run `ljos search` to read it
    $ ljos search "lexical default"
-   matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
+   matched by words (encoder not installed), so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
    shown 1 of 1.
    The first row is the closest match.
 
@@ -174,7 +174,7 @@ A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, 
    remembered (preference): CombMNZ over RRF for fusing two ballots.
      id f8b725a9, next review 2026-11-12 21:40 +00:00
    $ ljos search fusing
-   matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
+   matched by words (encoder not installed), so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
    shown 1 of 1.
    The first row is the closest match.
 

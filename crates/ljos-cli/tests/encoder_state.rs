@@ -161,7 +161,7 @@ fn assert_search_line(stderr: &str, want: &str, state: &str) {
 
 #[test]
 fn each_encoder_state_names_itself_on_doctor_and_on_search() {
-    let install = ljos_cli::ENCODER_INSTALL_COMMAND;
+    let install = ljos_cli::encoder_install_command();
     let doctor_install = "cargo install --locked packset-embed";
     let restart = ljos_cli::ENCODER_RESTART_COMMAND;
     let cases: &[(&str, &str)] = &[
