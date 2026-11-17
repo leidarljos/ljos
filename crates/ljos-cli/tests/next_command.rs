@@ -217,7 +217,7 @@ fn a_search_with_no_shared_word_prints_only_the_no_hits_line() {
         "{said}"
     );
     assert!(
-        !stderr.contains("matched by meaning") && !stderr.contains("matched by words"),
+        !stderr.contains(ljos_cli::FUSED_RANK_LINE) && !stderr.contains("matched by words"),
         "an empty page prints no match-mode line:\n{said}"
     );
     assert!(

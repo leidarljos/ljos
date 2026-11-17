@@ -159,7 +159,7 @@ fn a_busy_writer_still_answers_by_meaning() {
     assert!(out.status.success(), "{text}");
     assert!(String::from_utf8_lossy(&out.stdout).contains(HIT), "{text}");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("matched by meaning"),
+        String::from_utf8_lossy(&out.stderr).contains(ljos_cli::FUSED_RANK_LINE),
         "{text}"
     );
     assert!(!text.contains(BUSY), "{text}");
@@ -260,7 +260,7 @@ fn words_in_a_hit_are_not_a_busy_pack() {
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("matched by meaning"),
+        String::from_utf8_lossy(&out.stderr).contains(ljos_cli::FUSED_RANK_LINE),
         "{text}"
     );
     assert!(text.contains("queue is full"), "{text}");
@@ -421,7 +421,7 @@ fn a_recall_that_was_busy_still_matches_by_meaning() {
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(text.contains(HIT), "{text}");
-    assert!(text.contains("matched by meaning"), "{text}");
+    assert!(text.contains(ljos_cli::FUSED_RANK_LINE), "{text}");
     assert!(!text.contains(BUSY), "{text}");
     assert!(searches.load(Ordering::SeqCst) >= 3, "{text}");
     assert!(took < Duration::from_secs(4), "{took:?}\n{text}");

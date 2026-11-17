@@ -212,7 +212,7 @@ One session holds a ticket. The other session's claim is refused and names the h
 
    Memory  shown 0 of 0, best match first, on this issue
      (none filed on this issue)
-   Related  shown 1 of 1, best match first, not filed on this issue
+   Related  shown 1 of 1, fused order, not filed on this issue
      lesson, from an agent, today
        Measure the files before picking a codec.
        id …

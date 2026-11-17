@@ -296,7 +296,7 @@ fn default_search_keeps_this_seats_topic_and_drops_routine_logs() {
         .collect();
     assert!(lines.len() >= 2, "{said}");
     assert!(
-        lines[0].contains("seat:ada") || lines[0].contains("schedule"),
+        lines[0].contains("fires") || lines[0].contains("schedule"),
         "{said}"
     );
     assert!(

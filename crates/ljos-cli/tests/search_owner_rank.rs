@@ -258,7 +258,7 @@ fn a_filed_unclaimed_ticket_with_a_fresh_note_outranks_untagged_generic_rows() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("matched by meaning"),
+        stderr.contains(ljos_cli::FUSED_RANK_LINE),
         "the page was not ranked by meaning:\n{said}"
     );
     assert!(
@@ -340,7 +340,7 @@ fn a_project_this_seat_works_in_outranks_generic_docs_tickets() {
     assert!(out.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("matched by meaning"), "{said}");
+    assert!(stderr.contains(ljos_cli::FUSED_RANK_LINE), "{said}");
     assert!(
         stdout.contains("This seat's rows come before another seat's."),
         "{said}"

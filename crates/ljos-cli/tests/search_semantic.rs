@@ -185,7 +185,7 @@ fn a_healthy_writer_ranks_by_meaning() {
     assert!(search.status.success(), "{said}");
     let stderr = String::from_utf8_lossy(&search.stderr);
     let first = stderr.lines().find(|line| !line.trim().is_empty());
-    assert_eq!(first, Some("matched by meaning"), "{said}");
+    assert_eq!(first, Some(ljos_cli::FUSED_RANK_LINE), "{said}");
     assert!(
         String::from_utf8_lossy(&search.stdout).contains(LESSON),
         "the pack lesson was dropped for the local snapshot:\n{said}"

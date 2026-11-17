@@ -1,6 +1,6 @@
 status 0
 stderr:
-matched by meaning
+Matched by the fused rank, CombMNZ then MMR then FSRS.
 stdout:
 shown 1 of 1.
 Place 1 is the first row. This seat's rows come before another seat's.

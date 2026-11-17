@@ -11208,6 +11208,7 @@ fn said_tag(tag: &str) -> bool {
 /// Where a recalled claim sits in a memory list: preferences first, then
 /// the person's own words, then the rest, and working notes last.
 /// Another seat is ranked apart from this, in [`foreign_memory`].
+#[cfg_attr(not(test), allow(dead_code))]
 fn recall_rank(hit: &Hit) -> u8 {
     if preference_handed(hit) {
         0
@@ -11221,32 +11222,16 @@ fn recall_rank(hit: &Hit) -> u8 {
 }
 
 /// Put recalled claims in the order the prompt note reads them.
-/// This seat's memories and the person's rules stay ahead of another
-/// seat's. Preferences keep the order they came in, the score's. Behind
-/// them come the person's words, then the other claims, then the working
-/// notes, each group oldest to newest by `when`, so what was learnt last
-/// is read last and nearest the action, and a later lesson that revises
-/// an earlier one reads as a revision. Another seat's claims follow, in
-/// that same order, and stay in the list.
+/// The pack's fused order stands. This seat's rows come before another
+/// seat's, and that is the only move. `when` is unused: age is already
+/// in the fused score.
 fn order_recalled<H, K>(rows: &mut [H], when: impl Fn(&Hit) -> K)
 where
     H: std::borrow::Borrow<Hit>,
     K: Ord,
 {
-    fn hit<H: std::borrow::Borrow<Hit>>(h: &H) -> &Hit {
-        <H as std::borrow::Borrow<Hit>>::borrow(h)
-    }
-    let mine = seat_name();
-    let band = |h: &Hit| {
-        let foreign = u8::from(foreign_memory(h, &mine));
-        (foreign, recall_rank(h))
-    };
-    rows.sort_by_key(|h| band(hit(h)) != (0, 0));
-    let split = rows.iter().filter(|h| band(hit(*h)) == (0, 0)).count();
-    rows[split..].sort_by_key(|h| {
-        let h = hit(h);
-        (band(h), when(h))
-    });
+    let _ = when;
+    prefer_seat(rows);
 }
 
 /// Whether the prompt hook may hand a claim over.
@@ -11744,9 +11729,21 @@ fn semantic_pin(hit: &Hit) -> bool {
     hit.entities.iter().any(|tag| tag == "semantic:1")
 }
 
-/// How many alias groups `text` and `cue` both name. A task that says
-/// `dependency` names the `pnpm` lesson, and that match outranks a row
-/// that only shares an ordinary word.
+/// Indices of `rows` in the pack's fused order. This seat's rows come
+/// before another seat's. `dense_rank`, cosine, and the lexical score do
+/// not move a row: the pack already fused CombMNZ, MMR and FSRS.
+fn seat_order<H: std::borrow::Borrow<Hit>>(rows: &[H]) -> Vec<usize> {
+    let mine = seat_name();
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        u8::from(foreign_memory(rows[a].borrow(), &mine))
+            .cmp(&u8::from(foreign_memory(rows[b].borrow(), &mine)))
+            .then(a.cmp(&b))
+    });
+    order
+}
+
+/// How many alias groups `text` and `cue` both name.
 fn alias_overlap(text: &str, cue: &str) -> u8 {
     let have = cue_terms(text, true);
     cue_terms(cue, false)
@@ -11756,8 +11753,6 @@ fn alias_overlap(text: &str, cue: &str) -> u8 {
 }
 
 /// Alias groups where the cue and the lesson name different members.
-/// "this query" against a Postgres lesson is that bridge. A lesson that
-/// repeats the cue's own word is not.
 fn alias_bridge(text: &str, cue: &str) -> u8 {
     let cue_words = pack_words(cue);
     let text_words = pack_words(text);
@@ -11790,12 +11785,9 @@ fn alias_bridge(text: &str, cue: &str) -> u8 {
     bridged
 }
 
-/// Indices of `rows`, most relevant to `cue` first. This seat's memories
-/// and the person's rules come before another seat's. A hit the encoder
-/// ranked alone comes next, then a lesson that names more of the cue's
-/// concepts, then the lexical match, then BM25, then the fused score,
-/// which carries age, only to break an exact tie. Another seat's row
-/// stays in the list.
+/// Indices of the rows [`most_relevant`] may keep, best match first.
+/// The printed page does not use this order. It keeps the pack's fused
+/// order and only moves this seat ahead of another seat.
 fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<usize> {
     let texts: Vec<&str> = rows.iter().map(|h| h.borrow().text.as_str()).collect();
     let docs: Vec<Tokens> = texts.iter().map(|text| match_token_stream(text)).collect();
@@ -11828,9 +11820,10 @@ fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<us
     order
 }
 
-/// `rows` in [`relevance_order`].
+/// `rows` in the pack's fused order, with this seat ahead of another seat.
 fn sort_by_relevance<H: std::borrow::Borrow<Hit>>(rows: &mut Vec<H>, cue: &str) {
-    let order = relevance_order(rows, cue);
+    let _ = cue;
+    let order = seat_order(rows);
     let mut taken: Vec<Option<H>> = rows.drain(..).map(Some).collect();
     rows.extend(order.into_iter().filter_map(|i| taken[i].take()));
 }
@@ -12047,21 +12040,15 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
                 .iter()
                 .filter_map(|(_, s)| s.cosine)
                 .fold(0.0_f64, f64::max);
-            let mut admitted: Vec<(Hit, f64)> = pool
+            let mut admitted: Vec<Hit> = pool
                 .iter()
                 .filter(|(h, s)| admits_local(h, *s, cue, best))
                 .filter(|(h, _)| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
-                .map(|(h, s)| (h.clone(), s.cosine.unwrap_or(0.0)))
+                .map(|(h, _)| h.clone())
                 .collect();
-            admitted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            // The cosine ranks what the encoder judged.
-            hits = admitted
-                .into_iter()
-                .map(|(mut h, c)| {
-                    h.score = c;
-                    h
-                })
-                .collect();
+            // Cosine admits a row. It does not reorder the fused list.
+            prefer_calling_seat(&mut admitted);
+            hits = admitted;
             hits.iter().collect()
         } else {
             let pool: Option<Vec<Hit>> = pool.map(|p| p.into_iter().map(|(h, _)| h).collect());
@@ -12114,15 +12101,16 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             } else {
                 Err(anyhow::anyhow!("search: rerank off"))
             };
-            let (found, cross_encoded) = match (reranked, pool) {
-                (Ok(found), _) => found,
-                (Err(_), Some(pool)) => (pool, false),
-                (Err(_), None) => return (nudge, pending),
+            // The cross-encoder may reorder the pool. The page keeps the
+            // fused order the pool already has.
+            let (found, cross_encoded) = match (pool, reranked) {
+                (Some(pool), _) => (pool, false),
+                (None, Ok((found, _))) => (found, false),
+                (None, Err(_)) => return (nudge, pending),
             };
             hits = found;
-            // Age is in the fused score twice, so the floor is the lexical
-            // match, and so is the order unless the cross-encoder ran: it
-            // read the prompt and each claim together, and its order stands.
+            // Age is in the fused score. The lexical floor decides which
+            // rows stay. It does not reorder them.
             let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
             let lexical = lexical_match_scores(&texts, cue);
             let prompt_ok = lexical_prompt_mask(&texts, cue);
@@ -12149,18 +12137,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             rows
         }
     };
-    // Jev's probability ranks what it judged; the cosine or the lexical
-    // match ordered the rest above.
-    if let Some((c, j)) = &judged {
-        let weight = |h: &Hit| -> f64 {
-            c.iter()
-                .position(|x| x.id == h.id && x.text == h.text)
-                .and_then(|i| j.bears.get(i).copied())
-                .unwrap_or(0.0)
-        };
-        rows.sort_by(|a, b| weight(b).total_cmp(&weight(a)));
-    }
-    // The cap keeps the strongest, whatever their kind: a weak preference
+    // The cap keeps the fused order, whatever the kind: a weak preference
     // that shares one word with the prompt does not push out the lesson
     // the prompt repeats. This seat and the person's rules fill the cap
     // before another seat does. Preferences are then read first.
@@ -14712,7 +14689,7 @@ const ENCODER_FAILED_REASON: &str = "encoder failed";
 /// The stderr line for the rows about to be printed.
 ///
 /// An empty page prints no match-mode line. Nothing was matched, so
-/// "matched by meaning" or "matched by words" is not true. A page that
+/// [`FUSED_RANK_LINE`] or "matched by words" is not true. A page that
 /// shows rows keeps the install line when the encoder is absent. Rows
 /// shown while the encoder is loading say they are word matches. An empty
 /// page while the encoder is loading or has failed still names that,
@@ -14738,7 +14715,14 @@ pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
     ranking_sentence(ranking, true)
 }
 
-/// One line for stderr: a word match, or a meaning match.
+/// The stderr line when the rows are in the pack's fused order.
+///
+/// CombMNZ fuses the ballots, MMR diversifies them, and FSRS scales by
+/// retrievability. That is the order the page prints. The encoder's
+/// `dense_rank` is not this order.
+pub const FUSED_RANK_LINE: &str = "Matched by the fused rank, CombMNZ then MMR then FSRS.";
+
+/// One line for stderr: a word match, or the fused rank.
 /// `--json` keeps `mode` as `lexical` or `semantic`.
 ///
 /// A load is read as an empty page here. Search uses [`search_rank_line`],
@@ -14750,7 +14734,7 @@ pub fn ranking_line(ranking: &Ranking) -> String {
 
 fn ranking_sentence(ranking: &Ranking, shown: bool) -> String {
     if ranking.mode != "lexical" {
-        return "matched by meaning\n".to_string();
+        return format!("{FUSED_RANK_LINE}\n");
     }
     if matches!(
         ranking.reason,
@@ -15187,7 +15171,7 @@ pub fn is_memory_starting(err: &anyhow::Error) -> bool {
 /// `{"error":"packsetd is busy: ..."}`. It does not send `retry_ms` or a
 /// `code`. Those fields are honored when a pack sends them.
 pub(crate) fn response_is_busy(status: u16, body: &str) -> bool {
-    if (200..300).contains(&status) {
+    if pack_warming(body) || (200..300).contains(&status) {
         return false;
     }
     if status == 429 || status == 503 {
@@ -15272,6 +15256,39 @@ pub fn is_reported_busy(err: &anyhow::Error) -> bool {
     })
 }
 
+/// Whether `/health` says the daemon is up and the encoder or the index
+/// is still loading.
+///
+/// The body is `packsetd warming`, then a `loading` line, and `eta_s`
+/// when a previous load timed it. Search
+/// already answers from words and BM25 in that state. The daemon is up.
+#[must_use]
+pub fn pack_warming(body: &str) -> bool {
+    body.lines()
+        .any(|line| line.trim().eq_ignore_ascii_case("packsetd warming"))
+}
+
+/// Seconds `body` names on `eta_s`, when [`pack_warming`] is true.
+#[must_use]
+pub fn pack_warming_eta_s(body: &str) -> Option<f64> {
+    if !pack_warming(body) {
+        return None;
+    }
+    body.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("eta_s")?;
+        rest.trim_start_matches([':', '=']).trim().parse().ok()
+    })
+}
+
+/// The doctor state for a warming daemon. The ETA is the `eta_s` line.
+#[must_use]
+pub fn warming_doctor_state(body: &str, where_: &str) -> String {
+    match pack_warming_eta_s(body) {
+        Some(secs) => format!("warming, about {secs} s; {where_}"),
+        None => format!("warming; {where_}"),
+    }
+}
+
 fn memory_starting_err() -> anyhow::Error {
     anyhow::Error::new(PackStarting)
 }
@@ -15287,7 +15304,7 @@ fn memory_starting_err() -> anyhow::Error {
 /// `the pack is busy while loading`. `packsetd ok` and `packsetd ok, busy`
 /// are open.
 fn response_is_starting(status: Option<u16>, body: &str) -> bool {
-    if status.is_some_and(|code| (200..300).contains(&code)) {
+    if pack_warming(body) || status.is_some_and(|code| (200..300).contains(&code)) {
         return false;
     }
     let body = body.trim();
@@ -15347,7 +15364,10 @@ fn health_still_starting() -> Option<bool> {
         Ok(body) => Some(response_is_starting(None, &body)),
         Err(err) => {
             let err = anyhow::Error::from(err);
-            if pack_unreachable(&err) {
+            let text = format!("{err:#}");
+            if pack_warming(&text) {
+                Some(false)
+            } else if pack_unreachable(&err) {
                 None
             } else {
                 Some(is_memory_starting(&err))
@@ -15695,26 +15715,19 @@ fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
     let workspace = client.workspace();
     let limit_s = limit.to_string();
     let q = recall_query(query);
-    let mut pairs = vec![
+    // The fused order is the writer's default. `rank=relevance` drops the
+    // retrievability scale and is a different list. The page does not ask
+    // for it. `dense_rank` on a hit is the encoder's order, not this one.
+    let _ = ranks_by_relevance(&client, timeout, search_asks_with_token(&client));
+    let pairs = vec![
         ("workspace", workspace.as_str()),
         ("q", q.as_str()),
         ("limit", limit_s.as_str()),
     ];
-    let ranked = ranks_by_relevance(&client, timeout, search_asks_with_token(&client));
-    if ranked {
-        pairs.push(("rank", "relevance"));
-    }
-    let mut answer = client
+    let answer = client
         .roundtrip("GET", "/v1/search", &pairs, None, true, timeout)
         .map_err(opening_search_err)
         .context("search: GET /v1/search failed")?;
-    if ranked && answer.status == 400 && names_the_rank(&answer.body) {
-        pairs.pop();
-        answer = client
-            .roundtrip("GET", "/v1/search", &pairs, None, true, timeout)
-            .map_err(opening_search_err)
-            .context("search: GET /v1/search failed")?;
-    }
     if response_is_starting(Some(answer.status), &answer.body) {
         return Err(memory_starting_err());
     }
@@ -16352,13 +16365,12 @@ fn redact_hit_provenance(body: &mut Value) {
     }
 }
 
-/// What `/v1/search` answers for `cue`, with at most `limit` hits chosen
-/// by relevance alone, and how many of them the writer chose. A writer
-/// that lists `rank=relevance` ([`ranks_by_relevance`]) is asked for it,
-/// picks them by lexical, BM25 and cosine with no half-life, and echoes
-/// the rank; an answer without the echo is read as fused. One that lists
-/// it and answers it 400 with a body that names `rank` refuses it, and
-/// is asked again as an older writer. Any other 4xx, a 401, a 429 or a
+/// What `/v1/search` answers for `cue`, with at most `limit` hits in the
+/// writer's fused order, and how many of them the writer chose. The page
+/// does not send `rank=relevance`. That cut drops retrievability and is
+/// not the fused list. [`ranks_by_relevance`] still reads whether the
+/// writer lists the cut. An answer without a `rank` echo is the fused
+/// order. A 4xx, a 401, a 429 or a
 /// 400 about something else, refuses nothing: that search has no hits
 /// of the writer's, and the stored atoms that best match answer alone.
 /// A 401 or 403 is said, at most once a minute, and `ljos doctor`
@@ -16404,6 +16416,7 @@ fn search_relevant(
     }
     // A listener that already failed the proof is read bare. Asking for
     // the token's cache would miss, re-read status, and wipe a refusal.
+    // The fused order is the default. The page does not send `rank`.
     let ranked = ranks_by_relevance(client, timeout, search_asks_with_token(client));
     // The writer's answer, or the status and body of a 4xx it gave.
     // The token rides only when this connection's proof held.
@@ -16413,9 +16426,9 @@ fn search_relevant(
             ("q", recall_query(cue)),
             ("limit", limit.to_string()),
         ];
-        if rank {
-            query.push(("rank", "relevance".to_string()));
-        }
+        // `rank` stays off. The argument is kept so a refusal path can
+        // ask again the same way, which is also with no rank.
+        let _ = rank;
         if rerank {
             query.push(("rerank", "1".to_string()));
         }
@@ -17152,22 +17165,6 @@ fn hit_has_topic(hit: &Hit, topics: &[String]) -> bool {
     topics.iter().any(|word| words.contains(word))
 }
 
-/// Lesson and preference before any other kind that survived the filter.
-fn preferred_search_kind(hit: &Hit) -> bool {
-    let kind = hit.kind.to_ascii_lowercase();
-    kind == "lesson"
-        || kind.starts_with("lesson")
-        || kind == "preference"
-        || kind.starts_with("preference")
-}
-
-/// Default search order. The caller's seat comes first, then a lesson or
-/// a preference, then the score the ranker gave. A foreign status note
-/// must not outrank this seat's own lesson.
-fn default_search_key(hit: &Hit, mine: &str) -> (bool, bool) {
-    (foreign_memory(hit, mine), !preferred_search_kind(hit))
-}
-
 /// Whether `hit` is about `query`. A shared topic word, a concept the
 /// alias groups treat as the same thing, or the encoder's first hit.
 fn hit_bears_on(hit: &Hit, topics: &[String], query: &str) -> bool {
@@ -17175,36 +17172,15 @@ fn hit_bears_on(hit: &Hit, topics: &[String], query: &str) -> bool {
 }
 
 /// Drop notes, attempts, logs and routine status lines, and keep a hit
-/// that bears on `query`. This seat's lessons and preferences come first,
-/// then a concept match, then how much of the cue the row covers. The
-/// fused score, which carries age, only breaks a tie. No bearing means
-/// no hits: an unrelated row is not an answer. `attempts` keeps a stored
-/// failed command when the caller asked for one and it still bears on
-/// the topic.
+/// that bears on `query`. The pack's fused order stands. This seat's
+/// rows come before another seat's, and that is the only move.
+/// `dense_rank` does not pull a row forward. No bearing means no hits:
+/// an unrelated row is not an answer. `attempts` keeps a stored failed
+/// command when the caller asked for one and it still bears on the topic.
 pub fn refine_default_hits(hits: &mut Vec<Hit>, query: &str, attempts: bool) {
     let topics = search_topics(query);
     hits.retain(|hit| !search_skip_kind(hit, attempts) && hit_bears_on(hit, &topics, query));
-    let texts: Vec<&str> = hits.iter().map(|hit| hit.text.as_str()).collect();
-    let lexical = lexical_match_scores(&texts, query);
-    let alias: Vec<u8> = texts
-        .iter()
-        .map(|text| alias_overlap(text, query))
-        .collect();
-    let bridge: Vec<u8> = texts.iter().map(|text| alias_bridge(text, query)).collect();
-    let mine = seat_name();
-    let mut order: Vec<usize> = (0..hits.len()).collect();
-    order.sort_by(|&a, &b| {
-        default_search_key(&hits[a], &mine)
-            .cmp(&default_search_key(&hits[b], &mine))
-            .then(u8::from(!semantic_pin(&hits[a])).cmp(&u8::from(!semantic_pin(&hits[b]))))
-            .then(bridge[b].cmp(&bridge[a]))
-            .then(alias[b].cmp(&alias[a]))
-            .then(lexical[b].total_cmp(&lexical[a]))
-            .then(hits[b].score.total_cmp(&hits[a].score))
-            .then(a.cmp(&b))
-    });
-    let mut taken: Vec<Option<Hit>> = hits.drain(..).map(Some).collect();
-    hits.extend(order.into_iter().filter_map(|i| taken[i].take()));
+    prefer_calling_seat(hits);
 }
 
 /// Whether `err` is a pack that refused the connection. The line search
@@ -17243,7 +17219,12 @@ fn packset_search_relevant(query: &str, limit: u32) -> Result<Vec<Hit>> {
 /// match against `cue`: an extra goes ahead of the first judged hit it
 /// beats, so neither list's order is changed.
 fn merge_by_lexical(judged: Vec<Hit>, mut extra: Vec<Hit>, cue: &str) -> Vec<Hit> {
-    sort_by_relevance(&mut extra, cue);
+    let texts: Vec<&str> = extra.iter().map(|hit| hit.text.as_str()).collect();
+    let lexical = lexical_match_scores(&texts, cue);
+    let mut order: Vec<usize> = (0..extra.len()).collect();
+    order.sort_by(|&a, &b| lexical[b].total_cmp(&lexical[a]).then(a.cmp(&b)));
+    let mut taken: Vec<Option<Hit>> = extra.drain(..).map(Some).collect();
+    extra.extend(order.into_iter().filter_map(|i| taken[i].take()));
     let texts: Vec<&str> = judged
         .iter()
         .chain(&extra)
@@ -19470,7 +19451,7 @@ pub const POLICY_TCB: &str =
 
 /// The line above the memories a prompt or a command recalls. The hook, the
 /// runners and `ljos policy` all print it.
-pub const RECALL_HEADER: &str = "Remembered, shown 1 of 1, oldest first, so run `ljos search`.";
+pub const RECALL_HEADER: &str = "Remembered, shown 1 of 1, fused order, so run `ljos search`.";
 
 /// The line above the memories a failed tool call recalls.
 pub const FAILURE_RECALL_HEADER: &str =
@@ -19685,12 +19666,15 @@ fn wake_writer() {
     };
     let started = std::time::Instant::now();
     match client.health().map_err(anyhow::Error::from) {
-        Ok(_) => {
-            // A slow answer is still an answer. Restarting the writer
-            // under memory pressure only makes the box worse.
-            if started.elapsed() < PACK_SLOW_HEALTH {
+        Ok(body) => {
+            // A slow answer is still an answer. A warming daemon is up
+            // and already serves search. Restarting it drops that work.
+            if started.elapsed() < PACK_SLOW_HEALTH || pack_warming(&body) {
                 clear_health_fails();
             }
+        }
+        Err(err) if pack_warming(&format!("{err:#}")) => {
+            clear_health_fails();
         }
         Err(err) if writer_slow(&err) => {}
         Err(err) if writer_port_down(&err) => {
@@ -34710,6 +34694,11 @@ pub fn doctor_seat() -> Vec<Habitat> {
                         where_.push_str(&line);
                     }
                     match health {
+                        Ok(body) if pack_warming(&body) => Habitat {
+                            name: "pack",
+                            state: warming_doctor_state(&body, &where_),
+                            ok: true,
+                        },
                         Ok(_) if slow => Habitat {
                             name: "pack",
                             state: format!("{}; {}", pack_busy_sentence(), where_),
@@ -35947,6 +35936,11 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     {
         return "warn";
     }
+    // The daemon is up and the encoder or the index is still loading.
+    // Search answers. The row names warming and the ETA.
+    if row.name == "pack" && row.state.starts_with("warming") {
+        return "warming";
+    }
     // Search answered 401 or 403. Recall still runs on stored memories,
     // and doctor stays green so a working seat is not failed by the row.
     if row.name == "search" && !row.ok {
@@ -36120,7 +36114,7 @@ fn working_parts(words: &[(&str, &str)]) -> Vec<&'static str> {
         .iter()
         .filter(|(_, names)| {
             let mut mine = words.iter().filter(|(_, name)| names.contains(name));
-            mine.clone().next().is_some() && mine.all(|(word, _)| *word == "ok")
+            mine.clone().next().is_some() && mine.all(|(word, _)| matches!(*word, "ok" | "warming"))
         })
         .map(|(part, _)| *part)
         .collect()
@@ -36256,7 +36250,7 @@ fn plain_encoder_row(row: &Habitat) -> bool {
 /// the name came from, including a login user, a recent write, every seat,
 /// or `unknown-<host>`.
 fn shown_short(word: &str, name: &str) -> bool {
-    matches!(word, "no" | "warn")
+    matches!(word, "no" | "warn" | "warming")
         || name == "sitting gate"
         || name == "seat source"
         || name == "config"
@@ -41652,7 +41646,7 @@ fn recall_lines(
             "Related",
             related_facts.len(),
             related_matched.saturating_sub(related_notes.len()),
-            "best match first, not filed on this issue",
+            "fused order, not filed on this issue",
         ));
         out.push('\n');
         for h in &related_facts {
@@ -54046,7 +54040,7 @@ mod tests {
         );
         assert!(
             text.contains(
-                "Related  shown 1 of 1, best match first, not filed on this issue\n  lesson, from an agent\n    a related lesson\n    id near\n"
+                "Related  shown 1 of 1, fused order, not filed on this issue\n  lesson, from an agent\n    a related lesson\n    id near\n"
             ),
             "{text}"
         );
@@ -54090,7 +54084,7 @@ mod tests {
         );
         assert_eq!(
             alone,
-            "\nMemory  shown 0 of 0, best match first, on this issue\n  (none filed on this issue)\nRelated  shown 1 of 1, best match first, not filed on this issue\n  lesson, from an agent\n    a related lesson\n    id near\n"
+            "\nMemory  shown 0 of 0, best match first, on this issue\n  (none filed on this issue)\nRelated  shown 1 of 1, fused order, not filed on this issue\n  lesson, from an agent\n    a related lesson\n    id near\n"
         );
     }
 
@@ -59607,8 +59601,8 @@ mod tests {
     }
 
     /// A plain-language task does not have to repeat the lesson's words.
-    /// The package-manager lesson leads "add the lodash dependency", and
-    /// the Postgres lesson is kept for a query that never says Postgres.
+    /// The package-manager lesson stays in the fused order, and the
+    /// Postgres lesson is kept for a query that never says Postgres.
     #[test]
     fn a_plain_task_ranks_the_lesson_that_names_the_concept() {
         let pnpm = "Use pnpm instead of npm for every JavaScript package install in this repo";
@@ -59620,9 +59614,15 @@ mod tests {
             task_hit(pnpm, 0.1),
         ];
         refine_default_hits(&mut hits, "add the lodash dependency to the web app", false);
+        let pnpm_at = hits.iter().position(|hit| hit.text.contains("pnpm"));
+        let slow_at = hits.iter().position(|hit| hit.text.contains("slow"));
         assert!(
-            hits.first().is_some_and(|hit| hit.text.contains("pnpm")),
-            "the package lesson was not first: {hits:?}"
+            pnpm_at.is_some(),
+            "the package lesson was dropped: {hits:?}"
+        );
+        assert!(
+            slow_at.is_some_and(|at| at < pnpm_at.unwrap()),
+            "the fused order moved the package lesson ahead of an earlier row: {hits:?}"
         );
         assert!(
             hits.iter().all(|hit| !hit.text.contains("kiln")),
@@ -59656,8 +59656,8 @@ mod tests {
         let planner_at = hits.iter().position(|hit| hit.text.contains("planner"));
         if let Some(planner_at) = planner_at {
             assert!(
-                pg_at <= planner_at,
-                "the database lesson ranked behind a word overlap: {hits:?}"
+                planner_at < pg_at,
+                "the fused order moved the database lesson ahead of an earlier row: {hits:?}"
             );
         }
     }
@@ -60070,10 +60070,9 @@ mod tests {
         url
     }
 
-    /// Ten fresh lessons that name the subject lead the pack's fused list.
-    /// An old one that names it and the words no other hit has sits
-    /// eleventh. A pool cut at ten never saw it; a wider pool ordered by
-    /// relevance puts it first.
+    /// Ten fresh lessons lead the pack's fused list. An older lesson sits
+    /// eleventh. The prompt reads that fused prefix and does not pull the
+    /// older lesson ahead of it.
     #[test]
     fn the_hook_asks_past_the_fused_cut_and_orders_by_relevance() {
         let _env = env_guard();
@@ -60114,7 +60113,10 @@ mod tests {
             shape: HookShape::default(),
         };
         let (note, _) = hook_note(&prompt, 5);
-        assert!(note.contains("acme scope needs"), "{note}");
+        assert!(
+            note.contains("on host 0"),
+            "the fused prefix is what the prompt reads: {note}"
+        );
         let failed = HookCall {
             event: "PostToolUseFailure".into(),
             cue: "npm publish --scope acme".into(),
@@ -60126,7 +60128,7 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("    "))
             .unwrap_or("");
-        assert!(first.contains("acme scope needs"), "{note}");
+        assert!(first.contains("on host 0"), "{note}");
     }
 
     /// An atom the cross-encoder did not read goes in ahead of the first
@@ -60238,7 +60240,11 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|r| r.lines().next().unwrap_or("").contains("rank=relevance"));
-            assert_eq!(asked, ranks, "{:?}", seen.lock().unwrap());
+            assert!(
+                !asked,
+                "fused order does not send rank=relevance (listed {ranks}): {:?}",
+                seen.lock().unwrap()
+            );
         }
     }
 
@@ -60283,7 +60289,7 @@ mod tests {
         let mut reranked = others.clone();
         reranked.push(full);
         let cue = "the registry rejected my token";
-        for (stage, shows_full) in [("cross-encoder", false), ("absent", true)] {
+        for stage in ["cross-encoder", "absent"] {
             let url = serve_reranking_pack(fused.clone(), reranked.clone(), stage);
             let _url = PackUrl::set(&url);
             let prompt = HookCall {
@@ -60293,26 +60299,26 @@ mod tests {
                 shape: HookShape::default(),
             };
             let (note, _) = hook_note(&prompt, 5);
-            assert_eq!(
+            assert!(
                 note.contains("CI secret expired"),
-                shows_full,
-                "{stage}: {note}"
+                "{stage}: the fused leader stays on the page: {note}"
             );
-            assert_eq!(note.contains("host13"), !shows_full, "{stage}: {note}");
+            assert!(
+                !note.contains("host13"),
+                "{stage}: a later fused row stays behind the cap: {note}"
+            );
         }
     }
 
-    /// The relevance cut kept the old lesson on one ballot of two: where
-    /// lessons tie on every word the pack scores, which of them a ballot
-    /// keeps at its cut is arbitrary. It names the prompt's subject and
-    /// covers the most of it, so the prompt gets it. A one-ballot lesson
+    /// The fused list is what the prompt reads. A later lesson is not
+    /// pulled ahead of the rows the pack already placed. A one-ballot lesson
     /// sets the lexical floor too: one that carries all thirteen words of
     /// a prompt with no small words in it puts the floor at 0.6, which a
     /// line on both ballots that shares only `kebab` and `case` (0.58)
     /// does not reach. Without that lesson the floor would be 0.6 of the
     /// line that shares four words, and the kebab stand would get in.
     #[test]
-    fn a_lesson_one_ballot_kept_still_reaches_the_prompt() {
+    fn the_fused_prefix_is_what_the_prompt_reads() {
         let _env = env_guard();
         let runtime = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
@@ -60383,7 +60389,10 @@ mod tests {
             &prompt("one-ballot", "npm: the registry rejected my token"),
             5,
         );
-        assert!(note.contains("CI secret expired"), "{note}");
+        assert!(
+            note.contains("Operator Figma"),
+            "the fused prefix is what the prompt reads: {note}"
+        );
     }
 
     /// A full relevance cut kept the old lesson on one ballot of two, and
@@ -60517,13 +60526,20 @@ mod tests {
             shape: HookShape::default(),
         };
         let (note, _) = hook_note(&prompt, 5);
-        assert!(note.contains("CI secret expired"), "{note}");
+        assert!(
+            note.contains("Operator op0"),
+            "the fused list is not reordered: {note}"
+        );
         let asked = seen
             .lock()
             .unwrap()
             .iter()
             .any(|r| r.lines().next().unwrap_or("").contains("rank=relevance"));
-        assert!(asked, "{:?}", seen.lock().unwrap());
+        assert!(
+            !asked,
+            "fused order does not send rank=relevance: {:?}",
+            seen.lock().unwrap()
+        );
         let (failing, _) = serve_http(|req| {
             if req.lines().next().unwrap_or("").contains("/v1/status") {
                 return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
@@ -60680,14 +60696,13 @@ mod tests {
                 .filter_map(|h| h.id)
                 .collect()
         };
-        for asked in 1..=3 {
-            assert_eq!(search(), ["old"], "{:?}", seen.lock().unwrap());
-            assert_eq!(ranked(), asked, "{:?}", seen.lock().unwrap());
-        }
-        assert_eq!(search(), ["fused", "old"]);
-        assert_eq!(ranked(), 4);
-        assert_eq!(search(), ["fused", "old"]);
-        assert_eq!(ranked(), 4, "{:?}", seen.lock().unwrap());
+        let ids = search();
+        assert_eq!(
+            ids.first().map(String::as_str),
+            Some("fused"),
+            "the page follows the fused body, not a relevance cut: {ids:?}"
+        );
+        assert_eq!(ranked(), 0, "{:?}", seen.lock().unwrap());
     }
 
     /// A 400 names `rank` when the body has that field or names the
@@ -60733,7 +60748,7 @@ mod tests {
         let search = || packset_search_relevant("the registry rejected my token", 20).unwrap();
         search();
         search();
-        assert_eq!(ranked(), 2, "{:?}", seen.lock().unwrap());
+        assert_eq!(ranked(), 0, "{:?}", seen.lock().unwrap());
     }
 
     /// A refused rank holds for the workspace whose search was refused,
@@ -60772,9 +60787,9 @@ mod tests {
         };
         search("refused");
         search("refused");
-        assert_eq!(ranked("refused"), 1, "{:?}", seen.lock().unwrap());
+        assert_eq!(ranked("refused"), 0, "{:?}", seen.lock().unwrap());
         search("other");
-        assert_eq!(ranked("other"), 1, "{:?}", seen.lock().unwrap());
+        assert_eq!(ranked("other"), 0, "{:?}", seen.lock().unwrap());
         for row in RANKS_KNOWN.lock().unwrap().iter_mut() {
             if row.base == url.trim_end_matches('/') && row.workspace == "refused" {
                 row.at = row
@@ -60784,7 +60799,7 @@ mod tests {
             }
         }
         search("refused");
-        assert_eq!(ranked("refused"), 2, "{:?}", seen.lock().unwrap());
+        assert_eq!(ranked("refused"), 0, "{:?}", seen.lock().unwrap());
         let seen = seen.lock().unwrap();
         let reads = seen.iter().filter(|r| r.contains("/v1/status")).count();
         assert_eq!(reads, 3, "{seen:?}");
@@ -61045,11 +61060,10 @@ mod tests {
         );
     }
 
-    /// The hits the writer chose are read by their `rerank_score`, highest
-    /// first. One it did not score, null on the wire, goes in ahead of the
-    /// first scored hit its lexical match beats, so a lesson the writer put
-    /// last unscored behind three scored lookalikes still reaches the
-    /// prompt.
+    /// `packset_search_reranked` reads `rerank_score`, highest first. A
+    /// null score is merged by the lexical match. The prompt keeps the
+    /// fused list the writer returned, so that later row stays behind the
+    /// cap.
     #[test]
     fn the_rerank_score_orders_the_hits_and_a_null_one_merges_by_match() {
         let _env = env_guard();
@@ -61115,10 +61129,13 @@ mod tests {
                 shape: HookShape::default(),
             };
             let (note, _) = hook_note(&prompt, 5);
-            assert_eq!(
-                note.contains("CI secret expired"),
-                want[0] == "old",
-                "{note}"
+            assert!(
+                note.contains("Operator Figma"),
+                "the prompt keeps the fused list: {note}"
+            );
+            assert!(
+                !note.contains("CI secret expired"),
+                "a later fused row stays behind the cap: {note}"
             );
         }
     }
@@ -68031,6 +68048,37 @@ mod tests {
             !doctor_shows_in_short(&loaded),
             "a loaded encoder stays off the short doctor"
         );
+    }
+
+    #[test]
+    fn a_warming_health_body_is_up_and_names_the_eta() {
+        let body = "packsetd warming\nloading embedder\neta_s 4.5\n";
+        assert!(super::pack_warming(body));
+        assert_eq!(super::pack_warming_eta_s(body), Some(4.5));
+        assert!(!super::response_is_starting(Some(503), body));
+        assert!(!super::response_is_busy(503, body));
+        assert!(super::response_is_starting(None, "not-ready"));
+        assert!(super::response_is_starting(
+            Some(503),
+            r#"{"error":"the pack is busy while loading"}"#
+        ));
+        let state = super::warming_doctor_state(body, "http://127.0.0.1:9 workspace seat");
+        assert_eq!(
+            state,
+            "warming, about 4.5 s; http://127.0.0.1:9 workspace seat"
+        );
+        let row = Habitat {
+            name: "pack",
+            state,
+            ok: true,
+        };
+        assert_eq!(doctor_word(&row), "warming");
+        assert!(doctor_shows_in_short(&row));
+        let quiet = super::warming_doctor_state(
+            "packsetd warming\nloading: index\n",
+            "http://127.0.0.1:9 workspace seat",
+        );
+        assert_eq!(quiet, "warming; http://127.0.0.1:9 workspace seat");
     }
 
     #[test]
@@ -79200,11 +79248,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(mcp_claim_atom("Rule", "x y z w", "ws", None, None, Basis::Agent).is_err());
     }
 
-    /// Recalled rows read preferences first by score, then the person's
-    /// words, then the rest, and an agent note last, each group oldest
-    /// first. A note says it is unverified and names its provenance.
+    /// Recalled rows keep the order they arrived in. This seat's rows
+    /// come before another seat's, and that is the only move. A note
+    /// says it is unverified and names its provenance.
     #[test]
-    fn recall_reads_the_persons_words_before_an_agents_notes() {
+    fn recall_keeps_fused_order_and_names_a_note() {
         let hit = |id: &str, kind: &str, ts: &str, said: bool| {
             let origin = if said || kind == "preference" {
                 admit::ORIGIN_USER
@@ -79251,33 +79299,38 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(
             ids,
             [
-                "pref-strong",
-                "pref-weak",
-                "person-old",
-                "person-new",
+                "note-old",
                 "agent-old",
+                "pref-strong",
+                "person-new",
                 "agent-new",
-                "note-old"
+                "pref-weak",
+                "person-old"
             ]
         );
         let mut refs: Vec<&Hit> = rows.iter().rev().collect();
         order_recalled(&mut refs, |h| {
             days_of_stamp(h.ts.as_deref()).unwrap_or(i64::MAX)
         });
-        assert_eq!(refs[2].id.as_deref(), Some("person-old"));
+        assert_eq!(refs[0].id.as_deref(), Some("person-old"));
         assert_eq!(refs[6].id.as_deref(), Some("note-old"));
 
         let now = "2026-10-01T00:00:00.000Z";
+        let row = |id: &str| {
+            rows.iter()
+                .find(|hit| hit.id.as_deref() == Some(id))
+                .unwrap()
+        };
         assert_eq!(
-            hit_line(&rows[6], now),
+            hit_line(row("note-old"), now),
             "- [note, from an agent, not checked, today] note-old"
         );
         assert_eq!(
-            hit_line(&rows[2], "2026-10-03T00:00:00.000Z"),
+            hit_line(row("person-old"), "2026-10-03T00:00:00.000Z"),
             "- [lesson, the person's words, today] person-old"
         );
         assert_eq!(
-            hit_line(&rows[4], "2026-10-02T00:00:00.000Z"),
+            hit_line(row("agent-old"), "2026-10-02T00:00:00.000Z"),
             "- [lesson, from an agent, today] agent-old"
         );
     }
@@ -79343,8 +79396,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let mut recalled = hits.clone();
         order_recalled(&mut recalled, |h| h.ts.clone().unwrap_or_default());
         let recalled_ids: Vec<&str> = recalled.iter().filter_map(|h| h.id.as_deref()).collect();
-        assert_eq!(recalled_ids[0], "person-rule", "{recalled_ids:?}");
-        assert_eq!(recalled_ids[1], "own-lesson", "{recalled_ids:?}");
+        assert_eq!(recalled_ids[0], "own-lesson", "{recalled_ids:?}");
+        assert_eq!(recalled_ids[1], "person-rule", "{recalled_ids:?}");
         assert_eq!(recalled_ids.len(), 5, "{recalled_ids:?}");
         prefer_calling_seat(&mut hits);
         let ids: Vec<&str> = hits.iter().filter_map(|h| h.id.as_deref()).collect();
@@ -79496,7 +79549,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 mode: "semantic",
                 reason: "",
             }),
-            "matched by meaning\n"
+            format!("{FUSED_RANK_LINE}\n")
         );
         let semantic = Ranking {
             mode: "semantic",
@@ -79505,7 +79558,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(
             search_rank_line(&semantic, &[]),
             "",
-            "an empty page does not say the rows were matched by meaning"
+            "an empty page does not say the rows were matched by the fused rank"
         );
     }
 

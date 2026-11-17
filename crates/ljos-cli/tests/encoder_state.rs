@@ -132,20 +132,18 @@ fn encoder_row(text: &str) -> Option<(&str, &str)> {
     })
 }
 
-/// `want` is the whole stderr sentence, or the ready line `matched by meaning`.
+/// `want` is the whole stderr sentence.
 fn assert_search_line(stderr: &str, want: &str, state: &str) {
     let line = stderr
         .lines()
         .find(|line| line.contains(want))
         .unwrap_or_else(|| panic!("{state}: search stderr lacked {want:?}\n{stderr}"));
-    if want != "matched by meaning" {
-        assert_eq!(line, want, "{state}: search stderr line");
-        assert_eq!(
-            line.matches('.').count(),
-            1,
-            "{state}: the search line is not one sentence: {line}"
-        );
-    }
+    assert_eq!(line, want, "{state}: search stderr line");
+    assert_eq!(
+        line.matches('.').count(),
+        1,
+        "{state}: the search line is not one sentence: {line}"
+    );
     assert!(
         !line.contains("encoder is still loading"),
         "{state}: the old loading token was printed: {line}"
@@ -202,7 +200,7 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
             _ => unreachable!(),
         };
         let search_line = match *name {
-            "ready" => "matched by meaning".to_string(),
+            "ready" => ljos_cli::FUSED_RANK_LINE.to_string(),
             "loading with remaining_ms" | "loading without remaining_ms" => {
                 "These are word matches, and meaning search will be ready shortly.".to_string()
             }

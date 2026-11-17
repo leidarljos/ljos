@@ -145,7 +145,7 @@ fn a_cold_encoder_is_asked_again_and_the_line_says_semantic() {
         pack.searches.load(Ordering::SeqCst) >= 2,
         "the cold search was not retried: {said}"
     );
-    assert!(stderr.contains("matched by meaning"), "{said}");
+    assert!(stderr.contains(ljos_cli::FUSED_RANK_LINE), "{said}");
     assert!(
         stdout.contains("Oak Tree on Nov 23 is the morning plan."),
         "{said}"
@@ -303,7 +303,7 @@ fn a_search_that_stays_cold_says_the_rows_were_ranked_by_words() {
         "{said}"
     );
     assert!(!stdout.contains('`'), "{stdout}");
-    assert!(!stderr.contains("matched by meaning"), "{said}");
+    assert!(!stderr.contains(ljos_cli::FUSED_RANK_LINE), "{said}");
 }
 
 /// A cold encoder that stays cold, or becomes warm `delay` after the first
@@ -447,7 +447,7 @@ fn a_slow_encoder_is_waited_for_and_the_search_is_semantic() {
         pack.searches.load(Ordering::SeqCst) >= 2,
         "the search did not ask again after the encoder answered: {said}"
     );
-    assert!(stderr.contains("matched by meaning"), "{said}");
+    assert!(stderr.contains(ljos_cli::FUSED_RANK_LINE), "{said}");
     assert!(
         stdout.contains("Oak Tree on Nov 23 is the morning plan."),
         "{said}"
@@ -646,7 +646,7 @@ fn unrelated_cross_seat_hits_are_not_a_search_answer() {
     assert!(stdout.contains(OWN_RINGS), "{said}");
     assert!(!stdout.contains("disk fill"), "{said}");
     assert!(!stdout.contains("morning train"), "{said}");
-    assert!(stderr.contains("matched by meaning"), "{said}");
+    assert!(stderr.contains(ljos_cli::FUSED_RANK_LINE), "{said}");
 }
 
 #[test]

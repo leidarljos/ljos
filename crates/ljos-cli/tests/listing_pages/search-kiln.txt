@@ -1,6 +1,6 @@
 status 0
 stderr:
-matched by meaning
+Matched by the fused rank, CombMNZ then MMR then FSRS.
 stdout:
 shown 10 of 19, and the next page lists the rest, so run `ljos search kiln -n
 19`.

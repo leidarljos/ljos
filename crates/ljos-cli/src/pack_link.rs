@@ -1585,12 +1585,14 @@ impl PacksetClient {
         let answer = self.exchange(addr, &call, allow, budget)?;
         let answer = match answer.status {
             408 => return Err(degrade(&answer.body, method, true)),
+            503 if crate::pack_warming(&answer.body) => answer,
             503 if crate::response_is_starting(Some(503), &answer.body) => {
                 return Err(crate::starting_transport_error());
             }
             status
                 if memory_busy_retry(method, path)
                     && !crate::response_is_starting(Some(status), &answer.body)
+                    && !crate::pack_warming(&answer.body)
                     && crate::response_is_busy(status, &answer.body) =>
             {
                 if crate::search_busy_wait().is_zero() {
@@ -1617,7 +1619,7 @@ impl PacksetClient {
         if answer.status == 408 {
             return Err(degrade(&answer.body, method, true));
         }
-        if answer.status == 503 {
+        if answer.status == 503 && !crate::pack_warming(&answer.body) {
             return Err(degrade(&answer.body, method, false));
         }
         if deadline_passed() && !(200..300).contains(&answer.status) {
@@ -1663,7 +1665,8 @@ impl PacksetClient {
             if crate::response_is_starting(Some(next.status), &next.body) {
                 return Err(crate::starting_transport_error());
             }
-            if !crate::response_is_busy(next.status, &next.body) {
+            if crate::pack_warming(&next.body) || !crate::response_is_busy(next.status, &next.body)
+            {
                 return Ok(next);
             }
             latest = next;
@@ -1939,7 +1942,7 @@ impl PacksetClient {
 
     pub fn health(&self) -> Result<String, Error> {
         let answer = self.tried("GET", "/health", &[], None, HEALTH_BUDGET)?;
-        if !(200..300).contains(&answer.status) {
+        if !(200..300).contains(&answer.status) && !crate::pack_warming(&answer.body) {
             return Err(refused(
                 &format!("{}/health", self.base),
                 answer.status,
@@ -2850,6 +2853,22 @@ mod tests {
         assert_eq!(got.len(), 2, "a 503 is resent once");
         assert_eq!(deadline_of(&got[0]), deadline_of(&got[1]));
         assert!(took < std::time::Duration::from_millis(500), "{took:?}");
+    }
+
+    #[test]
+    fn a_warming_503_is_an_up_health_answer() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let (client, seen) = serve(|_, _| {
+            (
+                503,
+                "packsetd warming\nloading embedder\neta_s 4.5\n".into(),
+                None,
+            )
+        });
+        let body = client.health().unwrap();
+        assert!(crate::pack_warming(&body), "{body}");
+        assert_eq!(seen.lock().unwrap().len(), 1, "warming was retried");
     }
 
     #[test]
