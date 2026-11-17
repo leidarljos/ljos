@@ -40329,6 +40329,17 @@ fn policy_reading_known(
         }
     });
     let judged = !static_clear && fast.is_some();
+    // Resolve the command before memory reads can consume its deadline.
+    // Person-owned allows and local decisions retain their precedence.
+    let person_allowed = user_rules::allows(&line).is_some();
+    if person_allowed {
+        bookkeep::log_line(&format!("person allow: policyd not asked for `{line}`"));
+    }
+    let checked = if judged || off || person_allowed {
+        None
+    } else {
+        hook_timed("tcb", tcb)
+    };
     // The same bound as a hook: one short read, then the rules kept on
     // disk. An unbounded listing is what made a commit check sit on a
     // quiet pack until the runner killed it.
@@ -40364,18 +40375,12 @@ fn policy_reading_known(
         Some(rule) if !deny => Some(rule),
         _ => gated,
     };
-    // The person's own allow for this line is the verdict: the law is not
-    // asked, and the choice is written to the book so it can be read back.
-    let person_allowed = user_rules::allows(&line).is_some();
-    if person_allowed {
-        bookkeep::log_line(&format!("person allow: policyd not asked for `{line}`"));
-    }
     // A TCB `allow` is not the verdict once this seat asks or denies. The
     // line the person reads is the ask.
     let tcb = if judged || off || person_allowed {
         None
     } else {
-        match hook_timed("tcb", tcb) {
+        match checked {
             // A labelled rule's line is said once, below.
             Some(tcb) if relabelled(&tcb, &line).is_some() => None,
             Some(tcb) if !(tcb.is_empty() || tcb_is_allow(&tcb) && gated.is_some()) => Some(tcb),
@@ -40461,6 +40466,17 @@ fn advisory_policy_reading_known(
         }
     });
     let judged = !static_clear && fast.is_some() && gates::policyd_config().is_none();
+    // Resolve the command before memory reads can consume its deadline.
+    // Person-owned allows and local decisions retain their precedence.
+    let person_allowed = user_rules::allows(&line).is_some();
+    if person_allowed {
+        bookkeep::log_line(&format!("person allow: policyd not asked for `{line}`"));
+    }
+    let checked = if judged || off || person_allowed {
+        None
+    } else {
+        hook_timed("tcb", tcb)
+    };
     // The same bound as a hook: one short read, then the rules kept on
     // disk. An unbounded listing is what made a commit check sit on a
     // quiet pack until the runner killed it.
@@ -40492,19 +40508,13 @@ fn advisory_policy_reading_known(
         })
     };
     let gated = fast.or(gated);
-    // The person's own allow for this line is the verdict: the law is not
-    // asked, and the choice is written to the book so it can be read back.
-    let person_allowed = user_rules::allows(&line).is_some();
-    if person_allowed {
-        bookkeep::log_line(&format!("person allow: policyd not asked for `{line}`"));
-    }
     // A seat rule's warning is the one line; the TCB's allow beside it
     // says nothing more. A policyd warning reads as the seat's do, and
     // its block is policyd's own deny line.
     let tcb = if judged || off || person_allowed {
         None
     } else {
-        match hook_timed("tcb", tcb) {
+        match checked {
             // A labelled rule's line is said once, below.
             Some(tcb) if relabelled(&tcb, &line).is_some() => None,
             Some(tcb) if tcb.is_empty() || tcb_is_allow(&tcb) && gated.is_some() => None,

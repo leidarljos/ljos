@@ -93,15 +93,30 @@ fn assert_verdict(output: Output, mode: &str, took: Duration) {
         stdout.contains("fixture-policy-verdict"),
         "the checker verdict was lost in {mode} mode: {stdout}\n{stderr}"
     );
-    if mode == "strict" {
-        assert!(
-            stdout.contains("deny"),
-            "the checker denial changed: {stdout}\n{stderr}"
-        );
+    let warning = "warning: fixture-policy-verdict (ljos rule `ljos-policyd`)";
+    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&stdout) {
+        let verdict = &payload["hookSpecificOutput"];
+        assert_eq!(verdict["hookEventName"], "PreToolUse");
+        if mode == "strict" {
+            assert_eq!(verdict["permissionDecision"], "deny", "{stdout}\n{stderr}");
+            assert_eq!(
+                verdict["permissionDecisionReason"],
+                "fixture-policy-verdict (ljos rule `ljos-policyd`)",
+                "{stdout}\n{stderr}"
+            );
+        } else {
+            assert!(verdict.get("permissionDecision").is_none(), "{stdout}");
+            assert_eq!(verdict["additionalContext"], warning, "{stdout}\n{stderr}");
+        }
     } else {
+        let expected = if mode == "strict" {
+            "deny\tfixture-policy-verdict"
+        } else {
+            warning
+        };
         assert!(
-            stdout.contains("allow"),
-            "the advisory verdict changed: {stdout}\n{stderr}"
+            stdout.lines().any(|line| line == expected),
+            "the checker verdict changed: {stdout}\n{stderr}"
         );
     }
     assert!(

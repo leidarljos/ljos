@@ -3153,11 +3153,7 @@ fn run_command() -> Result<()> {
                     .flatten()
                     .or(posted)
             };
-            let (rules, preferences) = if on_tool && fast.is_none() && !suspended {
-                ljos_cli::gate_read()
-            } else {
-                (Vec::new(), Vec::new())
-            };
+            let read_rules = on_tool && fast.is_none() && !suspended;
             let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
             // A tool call with no command line (a file read, a search) has
             // no argv for the law to judge; the TCB sees only shell lines.
@@ -3190,6 +3186,11 @@ fn run_command() -> Result<()> {
                 ljos_cli::seat_guard(&call.cue)
             } else {
                 None
+            };
+            let (rules, preferences) = if read_rules {
+                ljos_cli::gate_read()
+            } else {
+                (Vec::new(), Vec::new())
             };
             // An ordinary branch or tag push is allowed. Force, a
             // +refspec, a remote-branch delete and a mirror push run with
