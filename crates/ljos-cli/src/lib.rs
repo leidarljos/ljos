@@ -44828,10 +44828,10 @@ pub fn not_assignee_message(
 }
 
 /// The line `ljos finish` prints when the sitting had no lesson. The
-/// command names this issue, so it can be run as written.
+/// sitting has ended, so `ljos remember` records a lesson directly.
 fn missing_lesson_line(issue: &str) -> String {
     format!(
-        "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, so run `ljos finish {issue} --lesson \"...\"`"
+        "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, or run `ljos remember \"...\"` now (the sitting on {issue} has ended)"
     )
 }
 
@@ -82089,6 +82089,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let none = r#"{"atoms":[]}"#;
         let said = run_finish_lesson(none, None, true).unwrap();
         assert!(said.contains("finished probe-lsn1 as done"), "{said}");
+        assert!(
+            said.contains("`ljos remember \"...\"`")
+                && !said.contains("`ljos finish probe-lsn1 --lesson"),
+            "missing-lesson hint pointed at a closed sitting:\n{said}"
+        );
         assert!(
             !said.contains("island") && !said.contains("seed"),
             "the memory links stay behind --verbose: {said}"
