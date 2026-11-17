@@ -562,14 +562,18 @@ static void leave_foreign_cgroup(void) {
     }
 }
 
-/* 8761 is 0x2239. packsetd on that port is the default writer. A test
- * that detaches one leaves it for the next run. Pids already listening
- * when this process starts are left alone. */
+/* 8761 is 0x2239. A test may detach a packsetd there. At exit this
+ * process stops only a writer it started: the start time is later than
+ * this process, the path names this pid, or the parent chain reaches
+ * this process, and the writer is not serving another HOME. A writer
+ * that was already listening is left alone. SIGTERM, then SIGKILL
+ * after two seconds. */
 #define PACK_PORT_MARK ":2239"
 #define KEPT_MAX 128
 
 static pid_t kept_pid[KEPT_MAX];
 static int kept_count;
+static unsigned long long self_start;
 
 static int already_kept(pid_t pid) {
     int i;
@@ -724,6 +728,258 @@ static void remember_default_writers(void) {
     closedir(proc);
 }
 
+static unsigned long long start_ticks(pid_t pid) {
+    char path[64];
+    FILE *file;
+    char buf[1024];
+    char *end;
+    int field;
+    snprintf(path, sizeof path, "/proc/%d/stat", (int)pid);
+    file = fopen(path, "r");
+    if (!file) {
+        return 0;
+    }
+    if (!fgets(buf, sizeof buf, file)) {
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+    end = strrchr(buf, ')');
+    if (!end) {
+        return 0;
+    }
+    end++;
+    /* state is field 3. starttime is field 22, so skip 3 through 21. */
+    for (field = 3; field < 22; field++) {
+        while (*end == ' ') {
+            end++;
+        }
+        if (!*end) {
+            return 0;
+        }
+        while (*end && *end != ' ') {
+            end++;
+        }
+    }
+    while (*end == ' ') {
+        end++;
+    }
+    return strtoull(end, 0, 10);
+}
+
+static pid_t parent_of(pid_t pid) {
+    char path[64];
+    FILE *file;
+    char line[256];
+    snprintf(path, sizeof path, "/proc/%d/status", (int)pid);
+    file = fopen(path, "r");
+    if (!file) {
+        return 0;
+    }
+    while (fgets(line, sizeof line, file)) {
+        if (strncmp(line, "PPid:", 5) == 0) {
+            fclose(file);
+            return (pid_t)atoi(line + 5);
+        }
+    }
+    fclose(file);
+    return 0;
+}
+
+static int read_link_path(const char *path, char *out, size_t cap) {
+    ssize_t n = readlink(path, out, cap - 1);
+    if (n < 0) {
+        return 0;
+    }
+    out[n] = 0;
+    return 1;
+}
+
+static int read_proc_home(pid_t pid, char *out, size_t cap) {
+    char path[64];
+    FILE *file;
+    char buf[8192];
+    size_t n;
+    size_t i = 0;
+    snprintf(path, sizeof path, "/proc/%d/environ", (int)pid);
+    file = fopen(path, "r");
+    if (!file) {
+        return 0;
+    }
+    n = fread(buf, 1, sizeof buf, file);
+    fclose(file);
+    while (i < n) {
+        if (strncmp(buf + i, "HOME=", 5) == 0) {
+            size_t len = 0;
+            const char *value = buf + i + 5;
+            while (i + 5 + len < n && value[len] != 0 && len + 1 < cap) {
+                out[len] = value[len];
+                len++;
+            }
+            out[len] = 0;
+            while (len > 1 && out[len - 1] == '/') {
+                out[--len] = 0;
+            }
+            return 1;
+        }
+        while (i < n && buf[i] != 0) {
+            i++;
+        }
+        if (i < n) {
+            i++;
+        }
+    }
+    return 0;
+}
+
+static int read_proc_text(const char *path, char *out, size_t cap) {
+    FILE *file = fopen(path, "r");
+    size_t n;
+    size_t i;
+    if (!file) {
+        return 0;
+    }
+    n = fread(out, 1, cap - 1, file);
+    fclose(file);
+    for (i = 0; i < n; i++) {
+        if (out[i] == 0) {
+            out[i] = ' ';
+        }
+    }
+    out[n] = 0;
+    return n > 0;
+}
+
+static int path_has_our_pid(const char *text) {
+    char dash[32];
+    char slash[32];
+    if (!text || !text[0]) {
+        return 0;
+    }
+    snprintf(dash, sizeof dash, "-%d-", (int)getpid());
+    snprintf(slash, sizeof slash, "-%d/", (int)getpid());
+    return strstr(text, dash) != 0 || strstr(text, slash) != 0;
+}
+
+static int ancestor_is_us(pid_t pid) {
+    int step;
+    for (step = 0; step < 16; step++) {
+        pid_t parent = parent_of(pid);
+        if (parent <= 1) {
+            return 0;
+        }
+        if (parent == getpid()) {
+            return 1;
+        }
+        pid = parent;
+    }
+    return 0;
+}
+
+/* A HOME that is not this process, and not a directory whose name carries
+ * this pid, is another seat's writer. */
+static int serves_another_home(pid_t pid) {
+    char home[4096];
+    char ours[4096];
+    const char *env = getenv("HOME");
+    size_t n;
+    if (!read_proc_home(pid, home, sizeof home) || home[0] == 0) {
+        return 0;
+    }
+    if (!env) {
+        env = "";
+    }
+    n = strlen(env);
+    while (n > 1 && env[n - 1] == '/') {
+        n--;
+    }
+    if (n >= sizeof ours) {
+        n = sizeof ours - 1;
+    }
+    memcpy(ours, env, n);
+    ours[n] = 0;
+    if (strcmp(home, ours) == 0) {
+        return 0;
+    }
+    if (path_has_our_pid(home)) {
+        return 0;
+    }
+    return 1;
+}
+
+static int started_by_us(pid_t pid) {
+    char cwd_path[64];
+    char cmd_path[64];
+    char cwd[4096];
+    char cmd[8192];
+    char home[4096];
+    if (ancestor_is_us(pid)) {
+        return 1;
+    }
+    snprintf(cwd_path, sizeof cwd_path, "/proc/%d/cwd", (int)pid);
+    if (read_link_path(cwd_path, cwd, sizeof cwd) && path_has_our_pid(cwd)) {
+        return 1;
+    }
+    snprintf(cmd_path, sizeof cmd_path, "/proc/%d/cmdline", (int)pid);
+    if (read_proc_text(cmd_path, cmd, sizeof cmd) && path_has_our_pid(cmd)) {
+        return 1;
+    }
+    if (read_proc_home(pid, home, sizeof home) && path_has_our_pid(home)) {
+        return 1;
+    }
+    return 0;
+}
+
+static int ours_to_stop(pid_t pid) {
+    unsigned long long began;
+    if (self_start == 0) {
+        return 0;
+    }
+    began = start_ticks(pid);
+    if (began == 0 || began <= self_start) {
+        return 0;
+    }
+    if (serves_another_home(pid)) {
+        return 0;
+    }
+    return started_by_us(pid);
+}
+
+static int alive_pid(pid_t pid) {
+    char path[64];
+    FILE *file;
+    char buf[1024];
+    char *end;
+    snprintf(path, sizeof path, "/proc/%d/stat", (int)pid);
+    file = fopen(path, "r");
+    if (file) {
+        if (fgets(buf, sizeof buf, file)) {
+            end = strrchr(buf, ')');
+            if (end && end[1] == ' ' && end[2] == 'Z') {
+                fclose(file);
+                return 0;
+            }
+        }
+        fclose(file);
+    }
+    if (kill(pid, 0) == 0) {
+        return 1;
+    }
+    return errno != ESRCH;
+}
+
+static void stop_politely(pid_t pid) {
+    int i;
+    kill(pid, SIGTERM);
+    for (i = 0; i < 40; i++) {
+        if (!alive_pid(pid)) {
+            return;
+        }
+        usleep(50000);
+    }
+    kill(pid, SIGKILL);
+}
+
 static void reap_default_writers(void) {
     DIR *proc = opendir("/proc");
     struct dirent *ent;
@@ -742,17 +998,17 @@ static void reap_default_writers(void) {
         if (!packsetd_on_default((pid_t)pid)) {
             continue;
         }
-        /* The writer is its own session after packset ensure. The group
-         * kill stops an encoder child. The pid kill covers a writer that
-         * is not a group leader. */
-        kill(-(pid_t)pid, SIGKILL);
-        kill((pid_t)pid, SIGKILL);
+        if (!ours_to_stop((pid_t)pid)) {
+            continue;
+        }
+        stop_politely((pid_t)pid);
     }
     closedir(proc);
 }
 
 __attribute__((constructor(65535))) void ljos_test_session_cgroup(void) {
     leave_foreign_cgroup();
+    self_start = start_ticks(getpid());
     remember_default_writers();
     atexit(reap_default_writers);
 }

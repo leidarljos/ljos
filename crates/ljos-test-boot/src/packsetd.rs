@@ -50,11 +50,11 @@ const HEALTH_IO: Duration = Duration::from_secs(1);
 /// POSIX signal numbers. Linux and macOS use the same values.
 const SIGKILL: i32 = 9;
 const SIGINT: i32 = 2;
+const SIGTERM: i32 = 15;
 const SIG_DFL: usize = 0;
 
 /// `kill(pid, 0)` is the existence check. `ESRCH` (3) means the pid is gone.
-/// Tests are the only callers; the library build has no use for it.
-#[cfg(test)]
+#[cfg(unix)]
 const ESRCH: i32 = 3;
 
 struct Live {
@@ -784,11 +784,11 @@ fn alive(pid: u32) -> bool {
     }
 }
 
-/// Stop `packsetd` if it is listening on `port`.
+/// Stop `packsetd` on `port` when this test started it.
 ///
-/// `packset ensure` detaches the writer, so the `Child` a test spawned has
-/// already exited. Drop still has to reap that listener, including when the
-/// test panics.
+/// A writer for another `HOME` is left running, including one that began
+/// after this process. `SIGTERM` is sent first. `SIGKILL` follows only
+/// when the process is still there after two seconds.
 pub fn reap_listener(port: u16) {
     if port == 0 {
         return;
@@ -815,14 +815,174 @@ pub fn reap_listener(port: u16) {
             if comm.trim() != "packsetd" {
                 continue;
             }
-            if proc_listen_port(pid) == Some(port) {
-                stop_pid(pid);
+            if proc_listen_port(pid) == Some(port) && writer_we_started(pid) {
+                stop_politely(pid);
             }
         }
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = port;
+    }
+}
+
+/// Whether `pid` is a writer this process started after it began, and not
+/// a writer serving another home.
+#[cfg(target_os = "linux")]
+fn writer_we_started(pid: u32) -> bool {
+    let Some(ours) = start_ticks(std::process::id()) else {
+        return false;
+    };
+    let Some(theirs) = start_ticks(pid) else {
+        return false;
+    };
+    if theirs <= ours {
+        return false;
+    }
+    if serves_another_home(pid) {
+        return false;
+    }
+    ancestor_is_us(pid)
+        || path_names_us(&proc_cwd(pid))
+        || path_names_us(&proc_cmdline(pid))
+        || path_names_us(&proc_home(pid))
+}
+
+#[cfg(target_os = "linux")]
+fn start_ticks(pid: u32) -> Option<u64> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = text.rfind(')')?;
+    let mut fields = text[rest + 1..].split_whitespace();
+    // state is field 3. starttime is field 22, nineteen tokens later.
+    for _ in 0..19 {
+        fields.next()?;
+    }
+    fields.next()?.parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn serves_another_home(pid: u32) -> bool {
+    let home = proc_home(pid);
+    if home.is_empty() {
+        return false;
+    }
+    let ours = std::env::var("HOME").unwrap_or_default();
+    let ours = ours.trim_end_matches('/');
+    let home = home.trim_end_matches('/');
+    home != ours && !path_names_us(home)
+}
+
+#[cfg(target_os = "linux")]
+fn path_names_us(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let pid = std::process::id().to_string();
+    text.contains(&format!("-{pid}-")) || text.contains(&format!("-{pid}/"))
+}
+
+#[cfg(target_os = "linux")]
+fn ancestor_is_us(pid: u32) -> bool {
+    let me = std::process::id();
+    let mut cur = pid;
+    for _ in 0..16 {
+        let Some(parent) = proc_ppid(cur) else {
+            return false;
+        };
+        if parent <= 1 {
+            return false;
+        }
+        if parent == me {
+            return true;
+        }
+        cur = parent;
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn proc_ppid(pid: u32) -> Option<u32> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    text.lines().find_map(|line| {
+        let rest = line.strip_prefix("PPid:")?;
+        rest.split_whitespace().next()?.parse().ok()
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn proc_home(pid: u32) -> String {
+    proc_env(pid, "HOME")
+}
+
+#[cfg(target_os = "linux")]
+fn proc_env(pid: u32, key: &str) -> String {
+    let Ok(bytes) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return String::new();
+    };
+    let prefix = format!("{key}=");
+    bytes
+        .split(|byte| *byte == 0)
+        .find_map(|item| {
+            item.strip_prefix(prefix.as_bytes())
+                .map(|value| String::from_utf8_lossy(value).into_owned())
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn proc_cwd(pid: u32) -> String {
+    std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .map(|path| path.display().to_string())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn proc_cmdline(pid: u32) -> String {
+    let Ok(bytes) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return String::new();
+    };
+    String::from_utf8_lossy(&bytes).replace('\0', " ")
+}
+
+#[cfg(target_os = "linux")]
+fn pid_alive(pid: u32) -> bool {
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if let Some(end) = stat.rfind(')') {
+            if stat[end + 1..].split_whitespace().next() == Some("Z") {
+                return false;
+            }
+        }
+    }
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 delivers nothing. It reports whether `pid` exists.
+    let rc = unsafe { kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(ESRCH)
+}
+
+#[cfg(target_os = "linux")]
+fn stop_politely(pid: u32) {
+    let Ok(raw) = i32::try_from(pid) else {
+        return;
+    };
+    // SAFETY: `raw` is the writer pid. SIGTERM asks it to exit. SIGKILL
+    // follows only after the two second wait.
+    unsafe {
+        kill(raw, SIGTERM);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if !pid_alive(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    unsafe {
+        kill(raw, SIGKILL);
     }
 }
 
@@ -1272,5 +1432,233 @@ int main(void) {
         assert_ne!(daemon.port(), 8761);
         assert!(alive(daemon.id()), "packsetd was not alive");
         panic!("after start");
+    }
+
+    /// A packsetd for another home, started after this process, listening
+    /// on the default port. Exit must leave it running.
+    #[test]
+    fn a_foreign_packsetd_survives_the_test_process_exit() {
+        if std::env::var_os("LJOS_FOREIGN_PACKSETD_CHILD").is_some() {
+            foreign_child();
+            return;
+        }
+        foreign_parent();
+    }
+
+    const FOREIGN_C: &str = r#"
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+int main(int argc, char **argv) {
+    int port;
+    int fd;
+    struct sockaddr_in addr;
+    if (argc < 2) return 2;
+    port = atoi(argv[1]);
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return 1;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons((unsigned short)port);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0) return 2;
+    if (listen(fd, 16) != 0) return 1;
+    for (;;) pause();
+}
+"#;
+
+    fn foreign_bin(dir: &std::path::Path) -> PathBuf {
+        let src = dir.join("foreign.c");
+        let bin = dir.join("packsetd");
+        std::fs::write(&src, FOREIGN_C).unwrap();
+        let out = Command::new("cc")
+            .args(["-O2", "-o"])
+            .arg(&bin)
+            .arg(&src)
+            .output()
+            .expect("cc");
+        assert!(
+            out.status.success(),
+            "cc foreign: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        bin
+    }
+
+    fn foreign_parent() {
+        let dir = unique_dir();
+        let bin = foreign_bin(&dir);
+        let pidfile = dir.join("pid");
+        let home = std::env::temp_dir().join(format!(
+            "ljos-other-home-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let mut child = Command::new(exe)
+            .arg("packsetd::tests::a_foreign_packsetd_survives_the_test_process_exit")
+            .arg("--exact")
+            .env("LJOS_FOREIGN_PACKSETD_CHILD", "1")
+            .env("LJOS_FOREIGN_BIN", &bin)
+            .env("LJOS_FOREIGN_HOME", &home)
+            .env("LJOS_FOREIGN_PIDFILE", &pidfile)
+            .env("LJOS_FOREIGN_PORT", "8761")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + READY;
+        while !pidfile.is_file() {
+            if let Some(status) = child.try_wait().unwrap() {
+                let err = read_stderr(&mut child);
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&home);
+                panic!("child exited {status} before the foreign writer was up: {err}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child did not start the foreign writer: {}",
+                read_stderr(&mut child)
+            );
+            std::thread::sleep(POLL);
+        }
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let signal_deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= signal_deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                stop_pid(pid);
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&home);
+                panic!("child did not exit");
+            }
+            std::thread::sleep(POLL);
+        };
+        let err = read_stderr(&mut child);
+        let still = alive(pid);
+        if still {
+            stop_pid(pid);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(status.success(), "child failed: {err}");
+        assert!(
+            still,
+            "foreign packsetd pid {pid} was stopped when the test process exited"
+        );
+    }
+
+    // The stand-in has to outlive this process, so it is not waited on.
+    #[allow(clippy::zombie_processes)]
+    fn foreign_child() {
+        let home = std::env::var("LJOS_FOREIGN_HOME").unwrap();
+        let bin = std::env::var("LJOS_FOREIGN_BIN").unwrap();
+        let pidfile = std::env::var("LJOS_FOREIGN_PIDFILE").unwrap();
+        let port: u16 = std::env::var("LJOS_FOREIGN_PORT").unwrap().parse().unwrap();
+        let mut writer = Command::new(&bin)
+            .arg(port.to_string())
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("foreign packsetd");
+        let pid = writer.id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while super::proc_listen_port(pid) != Some(port) {
+            if let Some(status) = writer.try_wait().unwrap() {
+                panic!("foreign writer exited {status} before it listened");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "foreign writer did not listen on {port}"
+            );
+            std::thread::sleep(POLL);
+        }
+        let recorded = super::proc_home(pid);
+        assert_eq!(recorded.trim_end_matches('/'), home.trim_end_matches('/'));
+        assert_ne!(
+            recorded.trim_end_matches('/'),
+            std::env::var("HOME")
+                .unwrap_or_default()
+                .trim_end_matches('/')
+        );
+        std::fs::write(&pidfile, pid.to_string()).unwrap();
+        reap_listener(port);
+        assert!(
+            alive(pid),
+            "reap_listener stopped a packsetd for another home"
+        );
+        // Leave the writer running. Dropping the Child does not signal it.
+        // Process exit runs the atexit reap, which must leave it too.
+    }
+
+    /// A writer whose home path names this process is stopped.
+    /// SIGTERM is enough for the stand-in, so the kill signal is not required.
+    #[test]
+    fn reap_listener_stops_a_writer_this_process_started() {
+        let dir = unique_dir();
+        let bin = foreign_bin(&dir);
+        let home = dir.join(format!("home-{}-writer", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let mut writer = Command::new(&bin)
+            .arg(port.to_string())
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = writer.id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while super::proc_listen_port(pid) != Some(port) {
+            if let Some(status) = writer.try_wait().unwrap() {
+                panic!("writer exited {status}");
+            }
+            assert!(Instant::now() < deadline, "writer did not listen");
+            std::thread::sleep(POLL);
+        }
+        reap_listener(port);
+        let stop_deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = writer.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= stop_deadline {
+                break None;
+            }
+            std::thread::sleep(POLL);
+        };
+        if status.is_none() {
+            stop_pid(pid);
+            let _ = writer.wait();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            status.is_some(),
+            "reap_listener left writer pid {pid} running"
+        );
     }
 }
