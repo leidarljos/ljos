@@ -179,7 +179,7 @@ the seat from the client that connected. A read with none of those set looks at 
 A write uses the login name, or a short stable name when that login is missing, and the first such write says to set ``LJOS_SEAT``.
 An MCP write on a shared server needs the ``seat`` argument when that session has no stamped seat of its own.
 The call is refused in one line, and the write is not stored under a guessed seat. A read still runs.
-``ljos seat`` prints the seat, the holder, and where each name came from.
+``ljos seat`` prints the seat, the holder, and where each name came from. When that source is the most recent write on this machine, it names ``export LJOS_SEAT=NAME``.
 
 With ``LJOS_SEAT`` unset, a session of Claude Code, Codex or Cursor sits as the runner's name plus a short id of the session id in this process. An id that exists only on a parent does not count.
 Mail, claims and notes use that name, so two sessions can tell each other apart.

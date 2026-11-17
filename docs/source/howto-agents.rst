@@ -233,6 +233,7 @@ A process with no session id, whose seat would be the bare runner name, shares t
    seat    claude
    holder  claude
    source  most recent write from this machine; this session has no id, so it shares the seat claude
+   pick    Run `export LJOS_SEAT=NAME` to choose a seat. This name is the last write on this machine.
 
    $ export LJOS_SEAT=ada
    $ ljos seat

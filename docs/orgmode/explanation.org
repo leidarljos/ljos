@@ -166,7 +166,7 @@ name from the runner, and a derived name is a seat. =ljos-mcp= does not take the
 client that connected. An MCP write on a shared server needs the =seat= argument when that
 session has no stamped seat of its own. The call is refused in one line, and the write is not
 stored under a guessed seat. A read still runs. =ljos seat= prints the seat, the holder, and
-where each name came from.
+where each name came from. When that source is the most recent write on this machine, it names =export LJOS_SEAT=NAME=.
 
 With =LJOS_SEAT= unset, a session of Claude Code, Codex or Cursor sits as the runner's name plus a short id of the session id in this process. An id that exists only on a parent does not count.
 Mail, claims and notes use that name, so two sessions can tell each other apart.

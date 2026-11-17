@@ -6474,6 +6474,11 @@ pub fn format_seat(seat: &Seat) -> String {
             "shared\tevery conversation of this runner holds under this name; export LJOS_SESSION_ID per conversation to split them\n",
         );
     }
+    if seat.source.contains("most recent write from this machine") {
+        out.push_str(
+            "pick\tRun `export LJOS_SEAT=NAME` to choose a seat. This name is the last write on this machine.\n",
+        );
+    }
     out
 }
 
@@ -58142,6 +58147,16 @@ mod tests {
         assert_eq!(
             format_seat(&seat),
             "seat\tacme-cli\nholder\tacme-cli@39u\nsource\ttest\n"
+        );
+        let recent = Seat {
+            seat: "alice".to_string(),
+            holder: "alice".to_string(),
+            source: "most recent write from this machine".to_string(),
+        };
+        let shown = format_seat(&recent);
+        assert!(
+            shown.contains("pick\tRun `export LJOS_SEAT=NAME` to choose a seat."),
+            "{shown}"
         );
         assert!(same_holder("acme-cli", &seat.holder));
         let _ = std::fs::remove_dir_all(&dir);
