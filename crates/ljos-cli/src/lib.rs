@@ -15965,6 +15965,16 @@ fn restart_dead_encoder() {
         || bookkeep::ljos_is_off()
         || bookkeep::temp_home().is_some()
         || !on_path("packset")
+        || !seat_binary()
+    {
+        return;
+    }
+    // `packset stop` and `packset ensure` follow `PACKSET_PORT`, not
+    // `PACKSET_URL`. A named URL is a writer this seat already chose.
+    // Ensuring the default port would leave a second packsetd on 8761.
+    if std::env::var("PACKSET_URL")
+        .ok()
+        .is_some_and(|url| !url.trim().is_empty())
     {
         return;
     }
@@ -16677,10 +16687,46 @@ fn writer_host(base: &str) -> &str {
 
 /// One sentence when the writer at `base` answered `code` for this home.
 pub(crate) fn writer_refused_line(base: &str, code: u16) -> String {
+    if let Some(line) = other_home_writer_line(base) {
+        return line;
+    }
     format!(
         "the writer on {} answered {code} for this home, so {WRITER_PORT_FIX}.",
         writer_host(base)
     )
+}
+
+/// One line when the writer on the port this seat asked is for another home.
+fn other_home_writer_line(base: &str) -> Option<String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = base;
+        None
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let host = writer_host(base);
+        let port = host.rsplit_once(':')?.1.parse::<u16>().ok()?;
+        let our_home = std::env::var("HOME").unwrap_or_default();
+        let our_pack = std::env::var("PACKSET_HOME")
+            .ok()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| pack_home_under(&our_home));
+        let writers = seen_writers(Some(port), &our_home, &our_pack);
+        let facts = DownFacts {
+            url_off: false,
+            url_set: false,
+            asked: host.to_string(),
+            asked_port: Some(port),
+            packset: true,
+            writers,
+            our_home,
+            our_pack,
+            temp: None,
+        };
+        home_on_asked_port(&facts)
+    }
 }
 
 /// This seat cannot put its token on a request: there is none, the token
@@ -18630,6 +18676,23 @@ fn pack_step(dry: bool) -> Step {
             ok: false,
         };
     }
+    // A named address is not the default port. `packset ensure` would
+    // start a writer on 8761 and leave the one this seat named alone.
+    if std::env::var("PACKSET_URL")
+        .ok()
+        .is_some_and(|url| !url.trim().is_empty())
+    {
+        let where_ = pack()
+            .map(|client| client.base().to_string())
+            .unwrap_or_else(|_| "the named address".to_string());
+        return Step {
+            what,
+            detail: format!(
+                "the pack writer at {where_} is not answering, so run `packset ensure`."
+            ),
+            ok: false,
+        };
+    }
     if dry {
         return Step {
             what,
@@ -18650,6 +18713,13 @@ fn pack_step(dry: bool) -> Step {
     }
     #[cfg(not(test))]
     {
+        if !seat_binary() {
+            return Step {
+                what,
+                detail: "a test does not detach a writer".into(),
+                ok: true,
+            };
+        }
         match run_captured("packset", &["ensure"]) {
             Ok(said) => Step {
                 what,
@@ -20222,7 +20292,23 @@ fn render_down(facts: &DownFacts) -> String {
     )
 }
 
+fn home_on_asked_port(facts: &DownFacts) -> Option<String> {
+    let port = facts.asked_port?;
+    let writer = facts.writers.iter().find(|writer| {
+        writer.ports.contains(&port)
+            && !writer.home.is_empty()
+            && !home_paths_match(&writer.home, &facts.our_home)
+    })?;
+    Some(format!(
+        "a pack writer on {} is for home {}, not {}, so set PACKSET_PORT to a free port and run `packset ensure`.",
+        facts.asked, writer.home, facts.our_home
+    ))
+}
+
 fn foreign_home(facts: &DownFacts) -> Option<String> {
+    if let Some(line) = home_on_asked_port(facts) {
+        return Some(line);
+    }
     let writer = facts.writers.iter().find(|writer| {
         (!writer.home.is_empty() && !home_paths_match(&writer.home, &facts.our_home))
             || (!writer.pack_home.is_empty()
@@ -20544,6 +20630,21 @@ fn seen_writers(_asked_port: Option<u16>, _our_home: &str, _our_pack: &str) -> V
     Vec::new()
 }
 
+/// Whether this process is the `ljos` or `ljos-mcp` binary.
+///
+/// A test binary links this crate and is not either of those. `packset
+/// ensure` detaches `packsetd`, and that test cannot stop the writer when
+/// the test returns. The seat binaries are the ones that may detach one.
+pub(crate) fn seat_binary() -> bool {
+    let Ok(path) = std::env::current_exe() else {
+        return true;
+    };
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("ljos" | "ljos-mcp")
+    )
+}
+
 /// Start the default writer when a memory verb could not connect.
 /// `PACKSET_URL=off` is left alone. A URL pointed somewhere else is not
 /// replaced with the default writer. `LJOS_OFF` gets no daemon and no
@@ -20577,6 +20678,9 @@ fn ensure_writer() -> Result<()> {
     bail!("the memory writer does not start from a test");
     #[cfg(not(test))]
     {
+        if !seat_binary() {
+            bail!("the memory writer does not start from a test");
+        }
         run_captured("packset", &["ensure"]).context("packset ensure")?;
         // packsetd loads the encoder on the first encode, not when the
         // process starts. Ask now, in the background, so the person's
@@ -69300,6 +69404,35 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(super::counts_for_this_seat(false, true, false, false));
         assert!(super::counts_for_this_seat(false, false, true, false));
         assert!(super::counts_for_this_seat(false, false, false, true));
+    }
+
+    /// A writer for another home on the port this seat asked is one line.
+    /// The line names both homes and one command.
+    #[test]
+    fn a_writer_for_another_home_on_the_asked_port_is_one_line() {
+        let mut base = super::DownFacts {
+            url_off: false,
+            url_set: false,
+            asked: "127.0.0.1:8761".into(),
+            asked_port: Some(8761),
+            packset: true,
+            our_home: "/home/ada".into(),
+            our_pack: "/home/ada/.local/share/packset".into(),
+            writers: Vec::new(),
+            temp: None,
+        };
+        base.writers.push(super::SeenWriter {
+            ports: vec![8761],
+            home: "/home/other".into(),
+            pack_home: "/home/other/.local/share/packset".into(),
+        });
+        let line = super::render_down(&base);
+        assert_eq!(
+            line,
+            "a pack writer on 127.0.0.1:8761 is for home /home/other, not /home/ada, so set PACKSET_PORT to a free port and run `packset ensure`."
+        );
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(!line.contains('\n'));
     }
 
     /// A duplicate is the atom the pack already holds, not an error and

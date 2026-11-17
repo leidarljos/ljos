@@ -237,6 +237,11 @@ fn repair_pack() -> Option<String> {
             "left pack: packset is not on PATH, so run `cargo install --locked packset`".into(),
         );
     }
+    // A test binary must not detach a writer. The `ljos` binary a test runs
+    // is still the seat binary, and that path still runs `packset ensure`.
+    if !crate::seat_binary() {
+        return Some("a test does not detach a writer".into());
+    }
     // The automatic start refuses a temporary home. `--fix` is the person
     // asking, so this runs the same `packset ensure` that start uses.
     match crate::run_captured("packset", &["ensure"]) {

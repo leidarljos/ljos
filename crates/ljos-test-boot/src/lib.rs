@@ -6,7 +6,7 @@
 
 mod packsetd;
 
-pub use packsetd::{Builder, Packsetd};
+pub use packsetd::{reap_listener, Builder, Packsetd};
 
 use std::ffi::c_char;
 

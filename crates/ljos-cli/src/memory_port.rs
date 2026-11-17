@@ -3727,6 +3727,20 @@ mod tests {
         (dir, place)
     }
 
+    /// Point this test away from the default pack port.
+    ///
+    /// Integrate asks the pack when one is configured. A writer left on
+    /// `127.0.0.1:8761` belongs to another home, and its rows would change
+    /// this result. `PACKSET_URL=off` is no pack.
+    fn pack_aside() -> crate::EnvLock {
+        let lock = crate::test_env_lock();
+        // SAFETY: the lock restores the process environment.
+        unsafe {
+            std::env::set_var("PACKSET_URL", "off");
+        }
+        lock
+    }
+
     fn atom(id: &str, seat: &str, text: &str) -> Value {
         json!({
             "id": id,
@@ -3926,9 +3940,7 @@ mod tests {
 
     #[test]
     fn integrate_names_the_text_it_maps() {
-        // Another test may point PACKSET_URL at its own writer. The env
-        // lock puts that back before this integrate reads the pack.
-        let _env = crate::test_env_lock();
+        let _env = pack_aside();
         let (_dir, target) = place("text");
         let bytes = header_and_row(
             "host-a",
@@ -3982,9 +3994,7 @@ mod tests {
 
     #[test]
     fn search_finds_a_row_before_integrate_and_after_a_restart() {
-        // Another test may point PACKSET_URL at its own writer. The env
-        // lock puts that back before this integrate reads the pack.
-        let _env = crate::test_env_lock();
+        let _env = pack_aside();
         let (dir, target) = place("read");
         let bytes = header_and_row(
             "host-a",
@@ -4017,9 +4027,7 @@ mod tests {
 
     #[test]
     fn exact_union_near_conflict_and_version_keep_both_texts() {
-        // Another test may point PACKSET_URL at its own writer. The env
-        // lock puts that back before this integrate reads the pack.
-        let _env = crate::test_env_lock();
+        let _env = pack_aside();
         let (_dir, target) = place("map");
         let first = header_with_id(
             "host-a",
@@ -4133,9 +4141,7 @@ mod tests {
 
     #[test]
     fn dry_run_changes_no_file() {
-        // Another test may point PACKSET_URL at its own writer. The env
-        // lock puts that back before this integrate reads the pack.
-        let _env = crate::test_env_lock();
+        let _env = pack_aside();
         let (_dir, target) = place("dry");
         let bytes = header_and_row("host-a", "seat-a", "dry firing", "2026-02-02T00:00:00Z");
         let done = import_bytes(&target, &bytes, None, None, None, None).unwrap();
@@ -4693,9 +4699,7 @@ mod tests {
 
     #[test]
     fn a_second_lane_export_is_unchanged_and_integrate_makes_it_searchable() {
-        // Another test may point PACKSET_URL at its own writer. The env
-        // lock puts that back before this integrate reads the pack.
-        let _env = crate::test_env_lock();
+        let _env = pack_aside();
         let (dir, target) = place("paper");
         let text = "the brine lane keeps the zircon shelf";
         let lane = dir.path().join("handoff");
@@ -4762,9 +4766,7 @@ mod tests {
 
     #[test]
     fn an_empty_import_names_the_list() {
-        // Another test may point PACKSET_URL at its own writer. The env
-        // lock puts that back before this integrate reads the pack.
-        let _env = crate::test_env_lock();
+        let _env = pack_aside();
         let (_dir, place) = place("empty-slot");
         let id = "only";
         let slot = place
@@ -4787,9 +4789,7 @@ mod tests {
     /// and a second integrate do after the first has stored every row.
     #[test]
     fn a_reimport_of_two_hundred_eighty_one_rows_counts_work() {
-        // Another test may point PACKSET_URL at its own writer. The env
-        // lock puts that back before this integrate reads the pack.
-        let _env = crate::test_env_lock();
+        let _env = pack_aside();
         let (dir, target) = place("reimport");
         let handoff = dir.path().join("handoff");
         std::fs::create_dir(&handoff).unwrap();
@@ -4904,10 +4904,9 @@ mod tests {
     /// the seed. Counts are writer locks and packset calls on that pass.
     #[test]
     fn an_unchanged_round_trip_skips_the_pack_and_the_file() {
-        let _env = crate::test_env_lock();
+        let _env = pack_aside();
         // SAFETY: the lock above restores the process environment.
         unsafe {
-            std::env::set_var("PACKSET_URL", "off");
             std::env::set_var("LJOS_SEARCH_WAIT", "30");
         }
         let (dir, target) = place("round");
@@ -5053,5 +5052,65 @@ mod tests {
         assert_ne!(next, bytes);
         let text = String::from_utf8(next).unwrap();
         assert!(text.contains(fresh), "{text}");
+    }
+
+    /// A listener on the default port that already claims the sentences
+    /// these tests integrate. The tests still pass.
+    #[test]
+    fn a_listener_on_the_default_port_leaves_integrate_tests_green() {
+        let _held = hold_default_port();
+        integrate_names_the_text_it_maps();
+        search_finds_a_row_before_integrate_and_after_a_restart();
+        exact_union_near_conflict_and_version_keep_both_texts();
+        dry_run_changes_no_file();
+    }
+
+    struct DefaultPort {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for DefaultPort {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+
+    fn hold_default_port() -> DefaultPort {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:8761")
+            .unwrap_or_else(|err| panic!("could not listen on 127.0.0.1:8761: {err}"));
+        let _ = listener.set_nonblocking(true);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&stop);
+        let join = std::thread::spawn(move || {
+            let body = r#"{"atoms":[{"id":"atom-held","kind":"lesson","text":"remember the zircon shelf","origin":"agent-derived"},{"id":"atom-alpha","kind":"lesson","text":"alpha beta gamma delta","origin":"agent-derived"},{"id":"atom-dry","kind":"lesson","text":"dry firing","origin":"agent-derived"}]}"#;
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut sock, _)) => {
+                        let _ = sock.set_nonblocking(false);
+                        let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+                        let mut buf = [0u8; 2048];
+                        let _ = sock.read(&mut buf);
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = sock.write_all(resp.as_bytes());
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        DefaultPort {
+            stop,
+            join: Some(join),
+        }
     }
 }
