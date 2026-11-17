@@ -100,7 +100,7 @@ Codex: `ljos onboard --harness codex`. It writes `~/.codex/config.toml`, the hoo
 `ljos onboard --dry-run` prints the steps and writes nothing.
 `ljos offboard` removes the registration.
 `ljos uninstall` removes the programs.
-A pipe with no `--harness` prints the MCP entry as JSON on stdout, and the setup lines on stderr. It sets up the ticket tracker, the memory writer, and the deed store.
+With no `--harness`, `ljos onboard` onboards every runner it finds and sets up the ticket tracker, the memory writer, and the deed store. `--harness json` prints the MCP entry as JSON on stdout.
 A script that should register runners passes `--harness all`.
 
 If install stops, the script names the cause and the command that fixes it.

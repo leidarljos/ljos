@@ -1,8 +1,9 @@
-//! `ljos onboard` with no runner prints the MCP entry to paste, and that
-//! output has to parse as JSON as it stands.
+//! `ljos onboard` with non-TTY stdout prints the setup steps on stdout
+//! without raw `ljos mcp` JSON. `--harness json` prints the MCP entry to
+//! paste, parsed as JSON as it stands.
 //!
-//! A pipe sets up the tracker, the memory writer and the deed store.
-//! The setup lines go to stderr. `ljos file` then files a ticket.
+//! A non-TTY `ljos onboard` still sets up the tracker, the memory writer
+//! and the deed store, so `ljos file` then files a ticket.
 
 ljos_test_boot::harness!();
 
@@ -100,9 +101,38 @@ impl Seat {
 }
 
 #[test]
-fn the_bare_onboard_prints_json_alone() {
+fn non_tty_onboard_prints_ok_lines_without_json() {
     let seat = Seat::open();
     let out = seat.ljos(&["onboard"]);
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stdout.contains("The tracker, the memory writer and the deed store are set up."),
+        "{text}"
+    );
+    assert!(
+        !stdout.contains("\"mcpServers\"")
+            && !stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with('{')),
+        "raw MCP JSON leaked onto non-TTY stdout:\n{text}"
+    );
+    assert!(
+        !stderr.contains("The tracker"),
+        "setup lines leaked onto stderr:\n{text}"
+    );
+    assert!(
+        !stderr.contains("mcpServers"),
+        "raw MCP JSON leaked onto stderr:\n{text}"
+    );
+}
+
+#[test]
+fn onboard_with_harness_json_prints_json_alone() {
+    let seat = Seat::open();
+    let out = seat.ljos(&["onboard", "--harness", "json"]);
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     let stdout = String::from_utf8(out.stdout).unwrap();
@@ -113,13 +143,30 @@ fn the_bare_onboard_prints_json_alone() {
         .unwrap_or_default();
     assert!(command.ends_with("ljos-mcp"), "{text}");
     let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.is_empty(), "{text}");
+}
+
+#[test]
+fn non_tty_onboard_with_detected_runner_prints_ok_lines_without_json() {
+    let seat = Seat::open();
+    let bin = seat.root.path().join("bin");
+    script(&bin, "claude", "#!/bin/sh\nexit 0\n");
+    let out = seat.ljos(&["onboard"]);
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stdout.contains("ok\trunners\tfound claude"), "{text}");
     assert!(
-        stderr.contains("The tracker, the memory writer and the deed store are set up."),
-        "{text}"
+        !stdout.contains("\"mcpServers\"")
+            && !stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with('{')),
+        "raw MCP JSON leaked onto non-TTY stdout:\n{text}"
     );
     assert!(
-        !stdout.contains("The tracker"),
-        "setup lines leaked onto stdout:\n{text}"
+        !stderr.contains("ok\t") && !stderr.contains("mcpServers"),
+        "unexpected stderr:\n{text}"
     );
 }
 

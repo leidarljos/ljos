@@ -63,7 +63,7 @@ The script names the cause and the command that fixes it.
 - A running =ljos-mcp= keeps the previous binary. Restart the assistant, or =kill= the pid the script prints, then run =ljos doctor=.
 
 =ljos onboard= with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store, and the line names those three and =ljos doctor= as the next command. The deed store keeps signed records of the work. Install an agent, then run =ljos onboard=. =ljos onboard --example= lists the tools.
-A pipe sets up the same three, with the Model Context Protocol (MCP) entry as the only text on stdout and the setup lines on stderr.
+=--harness json= prints the Model Context Protocol (MCP) entry on stdout and sets nothing up.
 
 =ljos offboard= after a hand edit that it cannot undo names the file and leaves the ljos entry. Edit that file, delete the ljos entry, and run =ljos offboard= again.
 
