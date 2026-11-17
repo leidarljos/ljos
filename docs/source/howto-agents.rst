@@ -180,7 +180,7 @@ One session holds a ticket. The other session's claim is refused and names the h
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos finish demo-2
    finished demo-2 as done
-   no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, so run `ljos finish demo-2 --lesson "..."`
+   no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, or run `ljos remember "..."` now (the sitting on demo-2 has ended)
    sitting ended; ticket demo-2 open for review
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos sitting demo-1

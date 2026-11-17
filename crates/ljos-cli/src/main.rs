@@ -3149,6 +3149,20 @@ fn ticket_error(err: anyhow::Error) -> anyhow::Error {
     err
 }
 
+fn strip_plan_next_line(has_plan: bool, text: &str) -> String {
+    if !has_plan {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for line in text.split_inclusive('\n') {
+        if line.starts_with("next:") {
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// Where a `ljos note` line goes, and whether the issue was inferred.
 ///
 /// A default mint is the issue. Any other vissue id is the issue when
@@ -7102,6 +7116,7 @@ fn run_command() -> Result<()> {
             let mut full = String::new();
             let mut shown = String::new();
             let detail = git_detail(verbose);
+            let has_plan = plan.is_some();
             let issue = if let Some(title) = plan {
                 let opened = ljos_cli::plan::open_plan(project.as_deref(), &title, &items)?;
                 let quiet_plan = ljos_cli::without_routine_git(&opened.text);
@@ -7138,12 +7153,14 @@ fn run_command() -> Result<()> {
                     if json {
                         full.push_str(piece);
                         if !detail {
-                            shown.push_str(&compact_sitting_block(piece, &mut memories));
+                            let compact = compact_sitting_block(piece, &mut memories);
+                            shown.push_str(&strip_plan_next_line(has_plan, &compact));
                         }
                     } else if detail {
                         print!("{piece}");
                     } else {
-                        print!("{}", compact_sitting_block(piece, &mut memories));
+                        let compact = compact_sitting_block(piece, &mut memories);
+                        print!("{}", strip_plan_next_line(has_plan, &compact));
                     }
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 },

@@ -852,7 +852,7 @@ fn expect_documented(command: &str, output: &str) {
         );
     }
     if command.contains("sitting") && command.contains("--plan") {
-        assert!(output.contains("next:"), "{command}\n{output}");
+        assert_eq!(output.matches("next:").count(), 1, "{command}\n{output}");
         if !ljos_cli::tool_installed("packset-embed") {
             assert!(
                 output.contains("memory degraded: ranked by words"),
