@@ -74,7 +74,8 @@ fn writes(cmd: &str, args: &[String]) -> bool {
 
 /// The runtime ljos directories a tool call could write into, resolved:
 /// the one this process uses, `/run/user/UID/ljos`, and the fallback a
-/// shell without `XDG_RUNTIME_DIR` uses.
+/// shell without `XDG_RUNTIME_DIR` uses, for this home and for every other
+/// home under the same `ljos-UID`.
 fn dirs() -> Vec<PathBuf> {
     let uid = crate::euid();
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -82,6 +83,7 @@ fn dirs() -> Vec<PathBuf> {
         crate::runtime_dir_path(),
         PathBuf::from(format!("/run/user/{uid}/ljos")),
         crate::runtime_fallback(&std::env::temp_dir(), home.as_deref(), uid),
+        crate::runtime_fallback(&std::env::temp_dir(), None, uid),
     ]
     .iter()
     .map(|d| resolve(d))

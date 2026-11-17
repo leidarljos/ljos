@@ -211,9 +211,10 @@ On Linux the pack client reads who owns the socket on its port from
 refused. With nothing set and 8761 another user's, the seat uses port
 18761 plus its user id modulo 10000 and exports it as =PACKSET_PORT=, so
 =packset ensure= starts its writer there. =PACKSET_URL= is used as given.
-Without =XDG_RUNTIME_DIR=, the hud socket and seat records go in
-=ljos-UID= under the temporary directory, mode 0700, or in
-=~/.cache/ljos/run= when that name is another user's or a symlink.
+Without =XDG_RUNTIME_DIR=, the hud socket, the hold records and the seat records go in
+a directory named for =HOME=, such as =ljos-UID/home-1a2b3c4d5e6f=, under the
+temporary directory, mode 0700, so two homes of one user do not share a hold.
+They go in =~/.cache/ljos/run= when =ljos-UID= is another user's or a symlink.
 
 This flag list is copied from command help.
 A test fails when this list and the binary differ.

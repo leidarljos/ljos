@@ -1683,6 +1683,28 @@ fn record_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// [`record_dirs`], and for a reader that is in the default runtime flow or
+/// has no usable home, the directory of every other home under the same
+/// fallback. A tool-call record names processes, not a tracker, so what
+/// another home's hook wrote is still a tool call.
+fn read_dirs() -> Vec<PathBuf> {
+    let mut dirs = record_dirs();
+    let xdg_set = std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|v| !v.is_empty());
+    let home_exists = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .is_some_and(|home| Path::new(&home).is_dir());
+    if !xdg_set || !home_exists {
+        // SAFETY: geteuid only reads the process identity.
+        let uid = unsafe { libc::geteuid() };
+        for dir in crate::runtime_fallback_homes(&std::env::temp_dir(), uid) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
 fn looked_in(dirs: &[PathBuf]) -> String {
     dirs.iter()
         .map(|dir| dir.join("tool-calls").display().to_string())
@@ -1781,7 +1803,7 @@ fn append_record(dir: &Path, name: &str, line: &str) -> bool {
 }
 
 fn tool_marks() -> Result<Vec<ToolMark>, String> {
-    let dirs = record_dirs();
+    let dirs = read_dirs();
     let mut broken = false;
     let mut texts = Vec::new();
     for dir in &dirs {

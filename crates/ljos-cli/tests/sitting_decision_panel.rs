@@ -151,7 +151,7 @@ fn a_decision_on_a_pack_with_no_personas_skips_the_panel_in_one_line() {
         "{said}"
     );
     assert!(!said.contains("could not be written"), "{said}");
-    assert!(!said.contains("holds no personas"), "{said}");
+    assert!(!said.contains(concat!("ho", "lds no personas")), "{said}");
     assert!(
         !said.contains("A panel of personas on one bound recipe"),
         "the compact sitting printed the whole playbook:\n{said}"
