@@ -3695,6 +3695,26 @@ fn mcp_serve_args() -> Option<Vec<std::ffi::OsString>> {
     Some(rest.to_vec())
 }
 
+fn mcp_unexpected_arg_line(args: &[std::ffi::OsString]) -> Option<String> {
+    let first = args.first()?;
+    if args.len() == 1 && (first == "--version" || first == "-V") {
+        return None;
+    }
+    let word = first.to_string_lossy();
+    Some(
+        if matches!(
+            word.as_ref(),
+            "setup" | "init" | "install" | "onboard" | "config" | "configure"
+        ) {
+            "ljos mcp takes no subcommand (it serves the tool server over stdio); run `ljos onboard` to set up runners or `ljos onboard --harness json` for the JSON entry.".to_string()
+        } else {
+            format!(
+                "ljos mcp takes no argument `{word}` (it serves the tool server over stdio); run `ljos onboard` to set up runners, or `ljos mcp --help`."
+            )
+        },
+    )
+}
+
 /// Pull `--seat NAME` off the command line. It names this process, and
 /// it wins over `LJOS_SEAT`. `log`, `memories` and `proposals` keep a
 /// `--seat` that comes after the command, because there it filters.
@@ -4503,6 +4523,10 @@ fn run_command() -> Result<()> {
     // read. Those can exit, block or write, and `initialize` needs none of
     // them. `--help` stays here so the command page is this binary's.
     if let Some(args) = mcp_serve_args() {
+        if let Some(line) = mcp_unexpected_arg_line(&args) {
+            eprintln!("{line}");
+            std::process::exit(USAGE_STATUS);
+        }
         let err = ljos_cli::exec_server(&args);
         eprintln!("ljos: {err:#}");
         std::process::exit(1);

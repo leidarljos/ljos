@@ -12,23 +12,41 @@
 mod lifetime;
 mod server;
 
+use std::io::IsTerminal as _;
+
 use rmcp::{transport::stdio, ServiceExt};
 
-/// Print `--version` or `--help` and report that a flag was handled.
-fn flag_line() -> bool {
+/// Handle `--version`, `--help`, or an unexpected argument, returning the
+/// process exit code when the server should not start.
+fn parse_cli_args() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
         println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
-        return true;
+        return Some(0);
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
         println!("Serve one seat over the Model Context Protocol on standard input.");
         println!("--version  print the version and exit");
         println!("--help     print this help and exit");
-        return true;
+        return Some(0);
     }
-    false
+    if let Some(first) = args.first() {
+        if matches!(
+            first.as_str(),
+            "setup" | "init" | "install" | "onboard" | "config" | "configure"
+        ) {
+            eprintln!(
+                "ljos-mcp takes no subcommand (it serves the tool server over stdio); run `ljos onboard` to set up runners or `ljos onboard --harness json` for the JSON entry."
+            );
+        } else {
+            eprintln!(
+                "ljos-mcp takes no argument `{first}` (it serves the tool server over stdio); run `ljos onboard` to set up runners, or `ljos-mcp --help`."
+            );
+        }
+        return Some(2);
+    }
+    None
 }
 
 /// Clients keep one server per thread for days, so an idle one must be
@@ -36,10 +54,12 @@ fn flag_line() -> bool {
 /// one call, so two workers keep the stdin reader moving; the pool is
 /// capped and its threads leave after a short idle.
 fn main() -> anyhow::Result<()> {
-    // `--version` and `--help` leave before the runtime, the seat env, a
-    // pack connection or a read of stdin. A doctor probe and a wrapper
-    // that execs this binary both stop here.
-    if flag_line() {
+    // `--version`, `--help`, and unexpected arguments leave before the
+    // runtime, the seat env, a pack connection or a read of stdin.
+    if let Some(code) = parse_cli_args() {
+        if code != 0 {
+            std::process::exit(code);
+        }
         return Ok(());
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -81,6 +101,11 @@ async fn serve() -> anyhow::Result<()> {
     // Dropped when the process returns, including after the client closes.
     // A name, not `let _`, so the finish runs at the end of main.
     let _book_finish = ljos_cli::bookkeep::ShutdownFinish;
+    if std::io::stdin().is_terminal() {
+        eprintln!(
+            "ljos-mcp: waiting for JSON-RPC on stdin; run `ljos onboard` to register with a runner, or Ctrl-D to exit."
+        );
+    }
     // The order is the order the lines are read. rmcp then runs each call on
     // its own task, which the runtime may poll newest first.
     let (read, write) = stdio();
