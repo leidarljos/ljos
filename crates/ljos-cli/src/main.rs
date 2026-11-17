@@ -2727,7 +2727,7 @@ fn bad_value(err: &clap::Error, args: &[String]) -> Option<String> {
     } else {
         format!("--{flag}")
     };
-    let cmd = command_head(args);
+    let cmd = command_path_head(args);
     let help = help_of(&cmd);
     Some(format!(
         "{cmd}: {flag} does not accept {value}. The values it takes are in `{help}`."
@@ -2743,7 +2743,7 @@ fn missing_argument(err: &clap::Error, args: &[String]) -> Option<String> {
                 .next()
         })
         .unwrap_or_else(|| "an argument".to_string());
-    let cmd = command_head(args);
+    let cmd = command_path_head(args);
     let help = help_of(&cmd);
     if cmd == "usage" {
         return Some(
@@ -2755,11 +2755,13 @@ fn missing_argument(err: &clap::Error, args: &[String]) -> Option<String> {
     ))
 }
 
-fn command_head(args: &[String]) -> String {
-    command_words_rest(args)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| "ljos".to_string())
+fn command_path_head(args: &[String]) -> String {
+    let path = words_at(&command_words_rest(args)).at;
+    if path.is_empty() {
+        "ljos".to_string()
+    } else {
+        path.join(" ")
+    }
 }
 
 fn help_of(cmd: &str) -> String {
@@ -4949,7 +4951,14 @@ fn run_command() -> Result<()> {
                     }
                     ljos_cli::user_rules::promote_lesson(&id, why, &mention, &reply)?
                 } else {
-                    ljos_cli::user_rules::write_preference(&join(&text), why, &mention, &reply)?
+                    let words = join(&text);
+                    if words.trim().is_empty() {
+                        eprintln!(
+                            "prefer: the text is empty, so run `ljos prefer --user --why REASON \"TEXT\"`."
+                        );
+                        std::process::exit(USAGE_STATUS);
+                    }
+                    ljos_cli::user_rules::write_preference(&words, why, &mention, &reply)?
                 };
                 println!("{}", ljos_cli::user_rules::ack(&rule));
                 return Ok(());
@@ -4968,6 +4977,10 @@ fn run_command() -> Result<()> {
                 );
             }
             let text = join(&text);
+            if text.trim().is_empty() {
+                eprintln!("prefer: the text is empty, so run `ljos prefer \"TEXT\"`.");
+                std::process::exit(USAGE_STATUS);
+            }
             let rules = ljos_cli::preference_rules(&text, &deny, &ask)?;
             // A preference that forbids a command it can name carries an
             // ask over it. The person typing it gets the rule with the
@@ -6626,6 +6639,12 @@ fn run_command() -> Result<()> {
             }
         }
         Cmd::Policy { argv, fail_on_deny } => {
+            if argv.is_empty() {
+                eprintln!(
+                    "policy: pass the command to check, so run `ljos policy -- git push --force`."
+                );
+                std::process::exit(USAGE_STATUS);
+            }
             let text = policy_with_memory(&argv)?;
             print!("{text}");
             if ljos_cli::shell_exit(fail_on_deny, &text) != 0 {

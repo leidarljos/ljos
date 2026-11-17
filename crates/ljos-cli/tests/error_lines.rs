@@ -267,6 +267,64 @@ fn an_unknown_ticket_on_tracker_verbs_names_ready_and_exits_1() {
 }
 
 #[test]
+fn missing_arguments_on_nested_commands_and_empty_prefer_or_policy_name_their_help() {
+    let home = Home::new();
+    let cases: [(&[&str], &str); 11] = [
+        (
+            &["seat", "add"],
+            "seat add needs <NAME>. `ljos seat add --help` lists what to pass.",
+        ),
+        (
+            &["seat", "grant"],
+            "seat grant needs --quote <QUOTE>, --at <AT>, --via <VIA>, <SEAT>, <SPEC>. `ljos seat grant --help` lists what to pass.",
+        ),
+        (
+            &["memory", "export"],
+            "memory export needs --out <OUT>. `ljos memory export --help` lists what to pass.",
+        ),
+        (
+            &["memory", "import"],
+            "memory import needs <PATH>. `ljos memory import --help` lists what to pass.",
+        ),
+        (
+            &["proposals", "amend"],
+            "proposals amend needs --text <TEXT>, <ID>. `ljos proposals amend --help` lists what to pass.",
+        ),
+        (
+            &["record", "check"],
+            "record check needs <DIR>. `ljos record check --help` lists what to pass.",
+        ),
+        (
+            &["mesh", "pull"],
+            "mesh pull needs --seat <SEAT>, --from <DIR>. `ljos mesh pull --help` lists what to pass.",
+        ),
+        (
+            &["mesh", "push"],
+            "mesh push needs --seat <SEAT>, --to <DIR>. `ljos mesh push --help` lists what to pass.",
+        ),
+        (
+            &["prefer"],
+            "prefer: the text is empty, so run `ljos prefer \"TEXT\"`.",
+        ),
+        (
+            &["prefer", "--user"],
+            "prefer: the text is empty, so run `ljos prefer --user --why REASON \"TEXT\"`.",
+        ),
+        (
+            &["policy"],
+            "policy: pass the command to check, so run `ljos policy -- git push --force`.",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
+    }
+}
+
+#[test]
 fn a_note_with_no_sitting_names_sit() {
     let home = Home::new();
     let out = home.run(&["note", "the glaze crawled"], &[("LJOS_SEAT", "alice")]);
