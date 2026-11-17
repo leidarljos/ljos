@@ -40486,28 +40486,40 @@ fn tracker_claimed_by(node: &str) -> Option<String> {
     })
 }
 
+/// A running record blocks a takeover unless it is this conversation written
+/// under the same name (the bare seat and `SEAT@TAG` for this process).
+/// Another pid stays. Another tag stays, even when the recorded pid is this
+/// process.
+fn live_hold_blocks_takeover(hold: &Hold, assignee: &str) -> bool {
+    if !hold_alive(hold) {
+        return false;
+    }
+    let ours = hold_is_this_conversation(hold)
+        && same_holder(
+            split_claim_scope(&hold.assignee).0,
+            split_claim_scope(assignee).0,
+        );
+    !ours
+}
+
 fn live_other_hold_for_actor(
     holder_actor: &str,
     hold: Option<&Hold>,
     _node: &str,
-    _assignee: &str,
+    assignee: &str,
 ) -> Option<Hold> {
     let hold = hold?;
     let graph = hold_line(holder_actor, 6);
     if graph.is_some_and(|g| g != claim_graph_scope()) {
         return None;
     }
-    if hold_alive(hold) && !hold_is_this_conversation(hold) {
-        Some(hold.clone())
-    } else {
-        None
-    }
+    live_hold_blocks_takeover(hold, assignee).then(|| hold.clone())
 }
 
 pub(crate) fn live_other_hold_on_ticket(
     node: &str,
     actor: &str,
-    _assignee: &str,
+    assignee: &str,
 ) -> Option<(String, Hold)> {
     let node = node.trim();
     if node.is_empty() {
@@ -40537,7 +40549,7 @@ pub(crate) fn live_other_hold_on_ticket(
         let Some(hold) = read_hold(hold_actor) else {
             continue;
         };
-        if hold_alive(&hold) && !hold_is_this_conversation(&hold) {
+        if live_hold_blocks_takeover(&hold, assignee) {
             return Some((hold_actor.to_string(), hold));
         }
     }
@@ -40545,18 +40557,19 @@ pub(crate) fn live_other_hold_on_ticket(
 }
 
 /// The holder `ljos claim` would take over: this seat's record, and either
-/// that conversation is gone or the record is this conversation. A live
-/// process with another pid stays. The claim-graph scope is not required.
-/// Two conversations of one seat share a checkout, and a record written
-/// for another spelling of the same graph still names this seat's claim.
-fn gone_same_seat_hold(id: &str, _assignee: &str) -> Option<(String, Hold)> {
+/// that conversation is gone or the record is this process under the same
+/// name. A live process with another pid stays, and so does another tag.
+/// The claim-graph scope is not required. Two conversations of one seat
+/// share a checkout, and a record written for another spelling of the same
+/// graph still names this seat's claim.
+fn gone_same_seat_hold(id: &str, assignee: &str) -> Option<(String, Hold)> {
     let holder = run_captured("claimdag", &["get", id])
         .ok()
         .and_then(|g| holder_of(&g.stdout))?;
     let hold = read_hold(&holder)?;
     let seat = seat_name();
     let mine = !seat.is_empty() && canonical_seat_name(&hold.seat) == canonical_seat_name(&seat);
-    let take = !hold_alive(&hold) || hold_is_this_conversation(&hold);
+    let take = !live_hold_blocks_takeover(&hold, assignee);
     (mine && take).then_some((holder, hold))
 }
 
@@ -40567,7 +40580,7 @@ fn gone_same_seat_hold(id: &str, _assignee: &str) -> Option<(String, Hold)> {
 /// conversation is still running on this host, when no record on this host
 /// names the holder, or when the record names another seat or another
 /// claim graph.
-fn same_seat_hold(id: &str, actor: &str, _assignee: &str) -> Option<(String, Hold)> {
+fn same_seat_hold(id: &str, actor: &str, assignee: &str) -> Option<(String, Hold)> {
     let holder = run_captured("claimdag", &["get", id])
         .ok()
         .and_then(|g| holder_of(&g.stdout))?;
@@ -40578,7 +40591,7 @@ fn same_seat_hold(id: &str, actor: &str, _assignee: &str) -> Option<(String, Hol
     let graph = hold_line(&holder, 6);
     let seat = seat_name();
     let mine = !seat.is_empty() && canonical_seat_name(&hold.seat) == canonical_seat_name(&seat);
-    let gone = !hold_alive(&hold) || hold_is_this_conversation(&hold);
+    let gone = !live_hold_blocks_takeover(&hold, assignee);
     (mine && gone && graph.is_none_or(|g| g == claim_graph_scope())).then_some((holder, hold))
 }
 
