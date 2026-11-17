@@ -379,3 +379,38 @@ fn a_score_below_zero_is_refused() {
         "{stdout}{stderr}"
     );
 }
+
+#[test]
+fn a_search_with_no_query_exits_2_and_names_an_example_and_the_listing() {
+    let seat = Seat::open();
+    for args in [
+        vec!["search"],
+        vec!["search", ""],
+        vec!["search", "  ", "\t"],
+        vec!["search", "--json"],
+        vec!["search", "--porcelain"],
+        vec!["search", "--min-score", "50"],
+    ] {
+        let out = seat.run(&args);
+        let (stdout, stderr) = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{stdout}{stderr}");
+        assert!(stdout.is_empty(), "{args:?} printed a page:\n{stdout}");
+        assert!(
+            !stderr.contains("Nothing matched"),
+            "{args:?} ran an empty search:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("ljos search \"lexical default\""),
+            "{args:?} names no example query:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("ljos memories list"),
+            "{args:?} names no listing:\n{stderr}"
+        );
+        assert_eq!(stderr.lines().count(), 1, "{args:?}\n{stderr}");
+    }
+    let named = seat.run(&["search", "kiln"]);
+    let (stdout, stderr) = text(&named);
+    assert!(named.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("damper"), "{stdout}{stderr}");
+}

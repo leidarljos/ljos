@@ -3221,6 +3221,23 @@ fn block_usage_line(cmd: &Cmd) -> Option<String> {
     ))
 }
 
+/// A `search` with no query.
+///
+/// It reads nothing, so the line comes before the seat is resolved and
+/// nothing is searched.
+fn search_usage_line(cmd: &Cmd) -> Option<String> {
+    let Cmd::Search { query, .. } = cmd else {
+        return None;
+    };
+    if query.iter().all(|word| word.trim().is_empty()) {
+        return Some(
+            "search: the query is empty, so run `ljos search \"lexical default\"`. To browse memories instead, run `ljos memories list`."
+                .to_string(),
+        );
+    }
+    None
+}
+
 /// An empty or whitespace id on `note` or `finish`.
 ///
 /// This is the id a script captured from `ljos file` when filing timed
@@ -4558,6 +4575,10 @@ fn run_command() -> Result<()> {
     // A following id on `block` is `--on`. A mix with `--on` or `--off`,
     // or a word that is not an id, is a usage error. Refuse before the seat.
     if let Some(line) = block_usage_line(&cmd) {
+        eprintln!("{line}");
+        std::process::exit(USAGE_STATUS);
+    }
+    if let Some(line) = search_usage_line(&cmd) {
         eprintln!("{line}");
         std::process::exit(USAGE_STATUS);
     }
