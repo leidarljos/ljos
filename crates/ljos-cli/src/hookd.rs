@@ -366,19 +366,53 @@ fn start_server(dir: &Path) -> Option<std::fs::File> {
     Some(lock)
 }
 
-/// The seat this hook runs as, safe as one file name. Seats that differ
-/// here do not share a flight lock.
+/// The seat this hook runs as, safe as one file name. A short ordinary
+/// seat keeps its spelling. A name that needs folding carries a digest,
+/// so two long or punctuated names do not collapse onto one flight lock.
 fn seat_token() -> String {
     let raw = std::env::var("LJOS_SEAT").unwrap_or_default();
-    let token: String = raw
+    if !raw.is_empty()
+        && raw.len() <= 64
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return raw;
+    }
+    if raw.is_empty() {
+        return "default".to_string();
+    }
+    let mut prefix: String = raw
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(32)
         .collect();
-    if token.is_empty() {
+    if prefix.is_empty() {
+        prefix.push_str("seat");
+    }
+    use sha2::Digest as _;
+    let digest = hex::encode(sha2::Sha256::digest(raw.as_bytes()));
+    format!("{prefix}-{}", &digest[..16])
+}
+
+/// The seat name for a one-line diagnostic, with controls kept out.
+fn seat_label() -> String {
+    let raw = std::env::var("LJOS_SEAT").unwrap_or_default();
+    let label: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(80)
+        .collect();
+    if label.trim().is_empty() {
         "default".to_string()
     } else {
-        token
+        label
     }
 }
 
@@ -433,10 +467,19 @@ fn flight(dir: &Path, deadline: Instant) -> Result<(Held, u64), String> {
             return Ok((Held::Flight(file), waited));
         }
         if Instant::now() >= deadline {
+            let holder = match recorded_pid(&path) {
+                Some(pid) => format!(
+                    "process {pid}; wait for it to finish, or run `ljos doctor --fix` after it exits"
+                ),
+                None => {
+                    "an unknown process; run `ljos doctor --fix` to move a stale lock aside"
+                        .to_string()
+                }
+            };
             return Err(format!(
-                "no hook server, and the flight lock for seat {} stayed taken for {} ms",
-                seat_token(),
-                admit_budget().as_millis()
+                "no hook server, and the flight lock for seat {} stayed taken for {} ms by {holder}",
+                seat_label(),
+                admit_budget().as_millis(),
             ));
         }
         std::thread::sleep(Duration::from_millis(5));
