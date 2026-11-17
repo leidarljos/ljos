@@ -828,6 +828,7 @@ fn from_dir_in_a_checkout_does_not_say_it_fetches_the_release() {
 /// The force-push sample keeps its bypass log out of the seat's data
 /// directory, and still reads the pack home onboard made. A sample that
 /// loses that home prints a token warning the seat does not have.
+/// `--no-onboard` skips the sample.
 #[test]
 fn the_policy_sample_keeps_the_pack_home() {
     let dir = tempfile::tempdir().unwrap();
@@ -845,12 +846,27 @@ fn the_policy_sample_keeps_the_pack_home() {
            policy)\n\
              printf '%s\\n' \"PACKSET_HOME=${PACKSET_HOME-unset}\"\n\
              printf '%s\\n' \"XDG_DATA_HOME=${XDG_DATA_HOME-unset}\"\n\
+             printf '%s\\n' \"policy -- git push --force origin topic\"\n\
              exit 0 ;;\n\
          esac\n\
          exit 0\n",
     );
     let home = dir.path().join("home");
-    let text = install(&home, &progs, "/usr/bin:/bin", &[]);
+    std::fs::create_dir_all(&home).unwrap();
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(home.join(".local/bin"))
+        .args(["--no-embed"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
     let pack = home.join(".local/share/packset");
     assert!(
         text.contains(&format!("PACKSET_HOME={}", pack.display())),
@@ -862,8 +878,40 @@ fn the_policy_sample_keeps_the_pack_home() {
     );
     assert!(text.contains("/policy-demo"), "{text}");
     assert!(
+        text.contains("policy -- git push --force origin topic"),
+        "{text}"
+    );
+    assert!(
         !text.contains("no token"),
         "the sample said the search had no token:\n{text}"
+    );
+
+    let skipped = dir.path().join("skipped");
+    let quiet = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(skipped.join(".local/bin"))
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &skipped)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let quiet_text = said(&quiet);
+    assert!(quiet.status.success(), "{quiet_text}");
+    assert!(
+        !quiet_text.contains("policy -- git push --force origin topic"),
+        "{quiet_text}"
+    );
+    assert!(
+        !quiet_text.contains("The guard lets a force push run"),
+        "{quiet_text}"
+    );
+    assert!(
+        quiet_text.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        "{quiet_text}"
     );
 }
 
