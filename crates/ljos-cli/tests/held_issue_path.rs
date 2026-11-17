@@ -52,6 +52,10 @@ impl Seat {
         Self { dir }
     }
 
+    fn tracker_root(&self) -> std::path::PathBuf {
+        self.dir.path().join("tracker")
+    }
+
     fn hold(&self, issue: &str) {
         let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
         let runtime = self.dir.path().join("home/run/ljos");
@@ -65,6 +69,14 @@ impl Seat {
             ),
         )
         .unwrap();
+    }
+
+    fn hold_tracker(&self, issue: &str, root: &std::path::Path) {
+        self.hold(issue);
+        let path = self.hold_path();
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(&format!("{}\tSoftware\n", root.display()));
+        std::fs::write(&path, text).unwrap();
     }
 
     fn nested(&self) {
@@ -190,6 +202,43 @@ fn a_missing_hold_is_cleared_and_the_ticket_is_filed_at_the_top() {
     assert!(!creates[0].contains("--parent"), "{creates:?}");
     assert!(!seat.hold_path().exists(), "the hold file stayed");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "stub-id\n");
+}
+
+#[test]
+fn a_hold_from_another_tracker_is_not_the_parent() {
+    let seat = Seat::new("0");
+    let elsewhere = seat.tracker_root().join("elsewhere");
+    seat.hold_tracker("demo-bist", &elsewhere);
+    let out = seat.file(&["Pick a codec", "-p", "demo"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("held issue demo-bist is on another tracker; filed at the top of demo"),
+        "{said}"
+    );
+    let creates = seat.creates();
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert!(!creates[0].contains("--parent"), "{creates:?}");
+    assert!(
+        seat.hold_path().exists(),
+        "the other tracker's sitting was removed"
+    );
+}
+
+#[test]
+fn a_hold_on_this_tracker_is_still_the_parent() {
+    let seat = Seat::new("0");
+    seat.hold_tracker("demo-aaaa", &seat.tracker_root());
+    let out = seat.file(&["a ticket", "-p", "demo"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(!said.contains("another tracker"), "{said}");
+    let creates = seat.creates();
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert!(
+        creates[0].contains("--parent") && creates[0].contains("demo-aaaa"),
+        "{creates:?}\n{said}"
+    );
 }
 
 #[test]

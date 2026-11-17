@@ -40059,6 +40059,27 @@ fn held_tracker_in(dir: &Path, node: &str) -> Option<vissue_core::Layout> {
     None
 }
 
+/// Whether a hold record for `node` names a tracker other than the one
+/// this process resolves. A record with no tracker line is left as it is,
+/// so an older sitting on this tracker is still the parent.
+#[must_use]
+pub fn hold_names_other_tracker(node: &str) -> bool {
+    let Some(recorded) = held_tracker_in(&runtime_dir(), node) else {
+        return false;
+    };
+    let Ok(current) = vissue_core::Layout::resolve(None, None) else {
+        return false;
+    };
+    !same_tracker_root(recorded.root(), current.root())
+}
+
+fn same_tracker_root(recorded: &Path, current: &Path) -> bool {
+    fn key(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+    key(recorded) == key(current)
+}
+
 /// [`issue_record`] for an issue a hold record names: read from the tracker
 /// the record names when it has the issue, so a commit gate does not walk
 /// every tracker root on the host.

@@ -5530,6 +5530,15 @@ fn run_command() -> Result<()> {
             } else {
                 ljos_cli::held_issue()
             };
+            // A sitting recorded for another tracker is not this ticket's
+            // parent. The record stays, so that tracker still has it.
+            let mut other_tracker = None;
+            if let Some(id) = held.clone() {
+                if ljos_cli::hold_names_other_tracker(&id) {
+                    held = None;
+                    other_tracker = Some(id);
+                }
+            }
             // Resolve before any line that says the ticket was filed. A
             // hold the tracker does not have is cleared and the ticket
             // goes to the top of the project. An alias becomes the id
@@ -5614,6 +5623,10 @@ fn run_command() -> Result<()> {
             if !id.is_empty() {
                 if let Some(gone) = &dropped {
                     eprintln!("held issue {gone} is gone; filed at the top of {project}");
+                } else if let Some(id) = &other_tracker {
+                    eprintln!(
+                        "held issue {id} is on another tracker; filed at the top of {project}"
+                    );
                 } else {
                     if let Some(line) = &passed_over {
                         eprint!("{line}");
