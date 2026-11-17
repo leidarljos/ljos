@@ -10,7 +10,7 @@ use ljos_cli::{
     cli_assignee, compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook,
     due_report, finish, forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
     format_findings, format_hubs, format_island, format_playbooks, format_readings,
-    format_remembered, format_seat_command, format_steps, format_write_ack, graded, habit, habits,
+    format_remembered, format_seat_command, format_steps, graded, habit, habits,
     handover_scoped, healthy, hook_note, island_entities, join, learn_anchors, learn_and_write,
     learn_reading, learn_shared, mark_seen, now_utc, on_path, onboard_to, packset_consolidate,
     packset_forget, packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel,
@@ -3353,11 +3353,8 @@ fn write_ack(body: &serde_json::Value, verbose: bool) -> String {
     if let Some(note) = ljos_cli::prose_warning_shown(body, verbose) {
         eprintln!("{note}");
     }
-    if std::io::stdout().is_terminal() {
-        ljos_cli::format_write_ack_plain(body, &ljos_cli::local_when)
-    } else {
-        format_write_ack(body)
-    }
+    // A pipe prints the same lines as a terminal. `--json` is the stored row.
+    ljos_cli::format_write_ack_plain(body, &ljos_cli::local_when)
 }
 
 /// Print a relay fault in the runner's field names, an allow with a

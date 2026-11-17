@@ -386,6 +386,15 @@ fn a_write_with_no_seat_names_the_export() {
         !String::from_utf8_lossy(&out.stderr).contains("unknown-"),
         "{said}"
     );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("remembered ("),
+        "a pipe did not print the terminal line:\n{said}"
+    );
+    assert!(
+        !stdout.contains('\t'),
+        "a pipe printed a tab separated row:\n{said}"
+    );
     let preferred = home.run(
         &["prefer", "CombMNZ over RRF for fusing two ballots."],
         &[
