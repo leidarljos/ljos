@@ -80,25 +80,25 @@ Search and recall treat every session of one runner as one family. The second se
 $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos remember "Measure the files before picking a codec."
 remembered (lesson): Measure the files before picking a codec.
   id …, next review …
-standing: the hook shows it from the next prompt it bears on
+saved as a standing lesson; run `ljos search` to read it
 
 $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos search "measure the files"
 matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
 shown 1 of 1.
-Place 1 is the first row.
+The first row is the closest match.
 
 lesson, from an agent, today
   Measure the files before picking a codec.
-  place 1, checks 2/2, id …
+  place 1, 2 of 2 checks, id …
 
 $ CURSOR_CONVERSATION_ID=0199c0de-cursor-conversation-one ljos search "measure the files"
 matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
 shown 1 of 1.
-Place 1 is the first row.
+The first row is the closest match.
 
 lesson, from an agent, today, from claude-f2pu9d56g0
   Measure the files before picking a codec.
-  place 1, checks 2/2, id …
+  place 1, 2 of 2 checks, id …
 #+end_src
 # END ljos-sample agents-memory
 
@@ -113,7 +113,7 @@ Session two stores a lesson, so the pack has heard from it. =ljos send= prints =
 $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos remember "Session two waits for the build to go green."
 remembered (lesson): Session two waits for the build to go green.
   id …, next review …
-standing: the hook shows it from the next prompt it bears on
+saved as a standing lesson; run `ljos search` to read it
 
 $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos send claude-dxw6sq4j7l "the build is red"
 sent … from claude-f2pu9d56g0 to claude-dxw6sq4j7l

@@ -504,9 +504,9 @@ pub fn search_page(page: &SearchPage<'_>) -> String {
             out.push('\n');
         }
     } else if page.seat_ahead {
-        out.push_str("Place 1 is the first row. This seat's rows come before another seat's.\n");
+        out.push_str("The first row is the closest match. This seat's rows come first.\n");
     } else {
-        out.push_str("Place 1 is the first row.\n");
+        out.push_str("The first row is the closest match.\n");
     }
     out.push('\n');
     let page_ids: Vec<&str> = page.rows.iter().filter_map(|row| row.id).collect();
@@ -745,7 +745,7 @@ fn search_row(row: &SearchRow<'_>, id_label: &str) -> String {
     if row.local {
         foot.push_str(", local, not in the pack");
     } else if let Some((hit, of)) = row.ballots {
-        foot.push_str(&format!(", checks {hit}/{of}"));
+        foot.push_str(&format!(", {hit} of {of} checks"));
     }
     if !id_label.is_empty() {
         foot.push_str(", id ");
@@ -1055,7 +1055,7 @@ mod tests {
             local: false,
         };
         let rows = [row(1, 68.0, "idkiln01"), row(2, 101.0, "idkiln02")];
-        let reading = "Place 1 is the first row, and this seat's rows come before another seat's. A score runs from 0 to 100.";
+        let reading = "The first row is the closest match, and this seat's rows come first. A score from 0 to 100 is how well the sentence matched.";
         let page = |explain: bool, seat_ahead: bool| SearchPage {
             rows: &rows,
             shown: 2,
@@ -1070,16 +1070,19 @@ mod tests {
         let meaning = search_page(&page(false, true));
         assert_eq!(
             meaning.lines().nth(1),
-            Some("Place 1 is the first row. This seat's rows come before another seat's.")
+            Some("The first row is the closest match. This seat's rows come first.")
         );
         assert!(
             !meaning.contains("68.00") && !meaning.contains("101.00"),
             "{meaning}"
         );
-        assert!(meaning.contains("place 1, checks 2/3"), "{meaning}");
-        assert!(meaning.contains("place 2, checks 2/3"), "{meaning}");
+        assert!(meaning.contains("place 1, 2 of 3 checks"), "{meaning}");
+        assert!(meaning.contains("place 2, 2 of 3 checks"), "{meaning}");
         let words = search_page(&page(false, false));
-        assert_eq!(words.lines().nth(1), Some("Place 1 is the first row."));
+        assert_eq!(
+            words.lines().nth(1),
+            Some("The first row is the closest match.")
+        );
         assert!(
             !words.contains("68.00") && !words.contains("101.00"),
             "{words}"

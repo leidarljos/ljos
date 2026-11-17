@@ -910,7 +910,7 @@ _EPISODE = (
     "episode: the hook shows it when a prompt bears on it, "
     "and ljos graded promotes it to standing, so run `ljos due`."
 )
-_STANDING = "standing: the hook shows it from the next prompt it bears on"
+_STANDING = "saved as a standing lesson; run `ljos search` to read it"
 
 
 def as_terminal(text: str) -> str:
@@ -1281,7 +1281,7 @@ def sitting_plan_sample(ljos: Path) -> str:
         "day-ef56  pick a default",
         "next: day-cd34  measure the files",
         "These are word matches; the pack did not answer.",
-        "memory degraded: ranked by words",
+        "matched by words (encoder not installed)",
         'day-ab12 is yours. `ljos finish day-ab12 --lesson "..."`',
         "ticked day-cd34",
         "next: day-ef56  pick a default",

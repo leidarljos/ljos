@@ -632,8 +632,9 @@ fn a_remember_with_no_sitting_is_a_standing_lesson() {
         "a runner's lesson was the person's: {kept}"
     );
     assert_eq!(kept["source"]["basis"], "agent", "{kept}");
+    let note = String::from_utf8_lossy(&out.stderr);
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("standing:"),
+        note.contains("standing:") || note.contains("saved as a standing lesson"),
         "{}",
         text_of(&out)
     );

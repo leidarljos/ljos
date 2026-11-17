@@ -17,7 +17,7 @@ next: day-cd34  measure the files
 tracker: day-ab12 STARTED under ada
 These are word matches; the pack did not answer.
 warn	crates.io	did not answer, so the version check was skipped
-memory degraded: ranked by words
+matched by words (encoder not installed)
 next: day-cd34  measure the files
 day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
 $ ljos finish day-cd34
@@ -38,7 +38,7 @@ See more with `--limit` or `--all`. Narrow with `-p` or `--mine`.
 
 Plain =ljos ready= prints 20 tickets and ends a short page with the =--limit= and =--all= hint shown above.
 
-=ljos note "TEXT"= writes on the open ticket. =ljos finish --lesson "..."= ends it. With no ticket open, each exits 1 and names =ljos sitting ISSUE=. =ljos ready --mine= names the next unfinished item. =ljos finish ITEM= ticks that item off. A sitting without =--verbose= prints the claim, one line when claims were handed back or are still held, what the seat remembers, and the close. A degraded pack is one line, =memory degraded: ranked by words=. A pack that answers 503, or does not answer, is one line, =These are word matches; the pack did not answer.=, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold, and about a second otherwise. Quiet claims are that one line, =N quiet claims are still yours (ljos release --stale)=. A hand-back is the same line, =handed back N quiet claims=. Each claim is on =--verbose=. A claim untouched for longer than =LJOS_STALE_DAYS= (7) is left out of that count. The line is =N claims untouched for 7+ days: ljos claims --stale=. =ljos claims --stale= lists them, oldest first. =ljos release --stale= releases this seat's claims that have been quiet longer than the hand-back window and whose conversation is not running. =--dry-run= prints the count and changes nothing. =--days= with =--yes= hands back claims untouched for that many days. The ticket stays open.
+=ljos note "TEXT"= writes on the open ticket. =ljos finish --lesson "..."= ends it. With no ticket open, each exits 1 and names =ljos sitting ISSUE=. =ljos ready --mine= names the next unfinished item. =ljos finish ITEM= ticks that item off. A sitting without =--verbose= prints the claim, one line when claims were handed back or are still held, what the seat remembers, and the close. A degraded pack is one line, =matched by words (encoder not installed)=. A pack that answers 503, or does not answer, is one line, =These are word matches; the pack did not answer.=, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold, and about a second otherwise. Quiet claims are that one line, =N quiet claims are still yours (ljos release --stale)=. A hand-back is the same line, =handed back N quiet claims=. Each claim is on =--verbose=. A claim untouched for longer than =LJOS_STALE_DAYS= (7) is left out of that count. The line is =N claims untouched for 7+ days: ljos claims --stale=. =ljos claims --stale= lists them, oldest first. =ljos release --stale= releases this seat's claims that have been quiet longer than the hand-back window and whose conversation is not running. =--dry-run= prints the count and changes nothing. =--days= with =--yes= hands back claims untouched for that many days. The ticket stays open.
 
 * Start a sitting, and end one
 
@@ -101,10 +101,10 @@ lesson, and the lists are not the same.
 #+begin_src console
 $ ljos remember --as release-engineer "Cut a release only after the changelog names the search index."
 21e499e4b8487a3abc7ff7479e9da102	lesson	due 2026-11-02T14:29:43.738Z	Cut a release only after the changelog names the search index.
-standing: the hook shows it from the next prompt it bears on
+saved as a standing lesson; run `ljos search` to read it
 $ ljos remember --as docs-reader "A newcomer looks for the search index in the notes."
 bac3e6e51514703c76672d163cc38cde	lesson	due 2026-11-02T14:29:43.770Z	A newcomer looks for the search index in the notes.
-standing: the hook shows it from the next prompt it bears on
+saved as a standing lesson; run `ljos search` to read it
 $ ljos brief release-engineer demo-0gmm
 What you remembered yourself:
 - [lesson, from an agent, today] Cut a release only after the changelog names the search index.

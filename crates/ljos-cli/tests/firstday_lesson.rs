@@ -141,7 +141,9 @@ fn a_long_lesson_the_pack_keeps_is_shown_by_the_hook() {
         "{stderr}"
     );
     assert!(
-        said.contains("the hook shows it from the next prompt"),
+        said.contains("the hook shows it from the next prompt")
+            || said.contains("the prompt hook will show this lesson")
+            || said.contains("saved as a standing lesson"),
         "{said}"
     );
     assert!(!said.contains("kept locally"), "{said}");

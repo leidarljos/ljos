@@ -131,15 +131,15 @@ $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on tur
 ljos: no seat was named and this write uses ada, so run `export LJOS_SEAT=NAME`.
 remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
   id a6ae2751, next review 2026-11-12 21:40 +00:00
-standing: the hook shows it from the next prompt it bears on
+saved as a standing lesson; run `ljos search` to read it
 $ ljos search "lexical default"
 matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
 shown 1 of 1.
-Place 1 is the first row.
+The first row is the closest match.
 
 lesson, today
   The lexical default is BM25+. It beat BM25 by two points on turns.
-  place 1, checks 2/2, id a6ae2751
+  place 1, 2 of 2 checks, id a6ae2751
 #+end_src
 # END ljos-sample tutorial-search
 
@@ -164,11 +164,11 @@ remembered (preference): CombMNZ over RRF for fusing two ballots.
 $ ljos search fusing
 matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.
 shown 1 of 1.
-Place 1 is the first row.
+The first row is the closest match.
 
 preference, today
   CombMNZ over RRF for fusing two ballots.
-  place 1, checks 2/2, id f8b725a9
+  place 1, 2 of 2 checks, id f8b725a9
 #+end_src
 # END ljos-sample tutorial-prefer
 
@@ -209,7 +209,7 @@ day-ab12  Ship the codec
   day-gh78  write the note
 next: day-cd34  measure the files
 tracker: day-ab12 STARTED under alice
-memory degraded: ranked by words
+matched by words (encoder not installed)
 next: day-cd34  measure the files
 day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
 $ LJOS_SEAT=alice ljos finish day-cd34
@@ -222,7 +222,7 @@ next: day-ef56  pick a default
 
 =ljos ready= without =--mine= prints the first 20 open tickets, headed =ready  shown X of Y=, and ends a short page with a hint naming =--limit=, =--all=, =-p= and =--mine=. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. =--all= prints every ticket, and =--limit N= prints N.
 
-The ids are the ones that run printed. The parent is claimed. Each item stays open until =ljos finish= ticks it. A sitting with no =--verbose= prints the claim, one line for claims still held, what the seat remembers, and the close. With =--no-embed= the pack has no encoder, so the sitting prints =memory degraded: ranked by words=. Quiet claims are =N quiet claims are still yours (ljos release --stale)=. Claims untouched for longer than =LJOS_STALE_DAYS= (7) are one line, =ljos claims --stale=. =ljos sitting ISSUE --verbose= prints every section.
+The ids are the ones that run printed. The parent is claimed. Each item stays open until =ljos finish= ticks it. A sitting with no =--verbose= prints the claim, one line for claims still held, what the seat remembers, and the close. With =--no-embed= the pack has no encoder, so the sitting prints =matched by words (encoder not installed)=. Quiet claims are =N quiet claims are still yours (ljos release --stale)=. Claims untouched for longer than =LJOS_STALE_DAYS= (7) are one line, =ljos claims --stale=. =ljos sitting ISSUE --verbose= prints every section.
 Under a runner the holder on the =STARTED= line can be =alice= plus =@= and a session tag. The claim command below prints the seat name.
 
 * A second seat

@@ -4,16 +4,16 @@ Matched by the fused rank, CombMNZ then MMR then FSRS.
 stdout:
 shown 3 of 13, and the next page lists the rest, so run `ljos search glaze -n
 13`.
-Place 1 is the first row. This seat's rows come before another seat's.
+The first row is the closest match. This seat's rows come first.
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 1 waits until the kiln is cool enough to open.
-  place 1, checks 2/2, id idglaze01eeeee
+  place 1, 2 of 2 checks, id idglaze01eeeee
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 2 waits until the kiln is cool enough to open.
-  place 2, checks 2/2, id idglaze02eeeee
+  place 2, 2 of 2 checks, id idglaze02eeeee
 
 lesson, from an agent, today, ticket demo-tile
   Glaze batch 3 waits until the kiln is cool enough to open.
-  place 3, checks 2/2, id idglaze03eeeee
+  place 3, 2 of 2 checks, id idglaze03eeeee

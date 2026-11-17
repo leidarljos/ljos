@@ -262,7 +262,7 @@ fn a_filed_unclaimed_ticket_with_a_fresh_note_outranks_untagged_generic_rows() {
         "the page was not ranked by meaning:\n{said}"
     );
     assert!(
-        stdout.contains("This seat's rows come before another seat's."),
+        stdout.contains("This seat's rows come first."),
         "the header does not say what the order does:\n{said}"
     );
     before(&stdout, "HaoZeke-0ex1", "readcon-6zv0");
@@ -341,10 +341,7 @@ fn a_project_this_seat_works_in_outranks_generic_docs_tickets() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains(ljos_cli::FUSED_RANK_LINE), "{said}");
-    assert!(
-        stdout.contains("This seat's rows come before another seat's."),
-        "{said}"
-    );
+    assert!(stdout.contains("This seat's rows come first."), "{said}");
     before(&stdout, "d-SEAMS-vid1", "d-SEAMS-vid2");
     before(&stdout, "d-SEAMS-vid2", "cpmdc-u6t1");
     before(&stdout, "d-SEAMS-vid2", "rgmin-js40");

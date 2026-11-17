@@ -3,10 +3,10 @@ stderr:
 Matched by the fused rank, CombMNZ then MMR then FSRS.
 stdout:
 shown 1 of 1.
-Place 1 is the first row. This seat's rows come before another seat's.
+The first row is the closest match. This seat's rows come first.
 
 lesson, from an agent, yesterday, ticket demo-kiln
   The damper sticks.
   Open the flue before the kiln reaches temperature.
   Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
-  place 1, checks 3/3, id idkiln02bbbbbb
+  place 1, 3 of 3 checks, id idkiln02bbbbbb

@@ -212,7 +212,7 @@ fn a_claimed_ticket_with_matching_notes_outranks_generic_sign_in_titles() {
         "the page was not ranked by meaning:\n{said}"
     );
     assert!(
-        stdout.contains("This seat's rows come before another seat's."),
+        stdout.contains("This seat's rows come first."),
         "the header does not say what the order does:\n{said}"
     );
     let ours = stdout

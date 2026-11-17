@@ -23518,10 +23518,35 @@ pub fn remember_note(body: &Value) -> &'static str {
         return "unreviewed note: the prompt does not treat it as a fact";
     }
     if has("horizon:standing") {
-        "standing: the hook shows it from the next prompt it bears on"
+        if prompt_hook_wired() {
+            "standing: the prompt hook will show this lesson on the next question it fits"
+        } else {
+            "saved as a standing lesson; run `ljos search` to read it"
+        }
     } else {
-        "episode: the hook shows it when a prompt bears on it, and ljos graded promotes it to standing, so run `ljos due`."
+        "episode: the prompt hook shows this when a question fits; `ljos due` can promote it to standing"
     }
+}
+
+/// Whether a runner has wired `ljos hook --prompt` on `UserPromptSubmit`.
+#[must_use]
+pub fn prompt_hook_wired() -> bool {
+    let events = vec!["UserPromptSubmit".to_string()];
+    for path in [
+        "~/.claude/settings.json",
+        "~/.cursor/hooks.json",
+        "~/.codex/hooks.json",
+        "~/.gemini/config/hooks.json",
+        "~/.factory/hooks.json",
+        "~/.openhands/hooks.json",
+        "~/.agents/plugins/ljos/hooks/hooks.json",
+    ] {
+        let path = expand(path);
+        if path.is_file() && hook_installed(&path, &events) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The most characters `ljos remember` stores. A longer paste is not a
@@ -43874,7 +43899,7 @@ pub const MEMORY_WORD_LINE: &str = "These are word matches; the pack did not ans
 
 /// The one line a quiet sitting prints when the pack or the encoder did
 /// not answer. `--verbose` keeps the section that failed.
-pub const MEMORY_DEGRADED_LINE: &str = "memory degraded: ranked by words\n";
+pub const MEMORY_DEGRADED_LINE: &str = "matched by words (encoder not installed)\n";
 
 /// The atoms one sitting read, shared by due, recall, the playbook and
 /// the timeline. `ok` is false when that read did not answer; later
@@ -48312,9 +48337,9 @@ pub fn search_reading(n: usize, seat_ahead: bool) -> &'static str {
     if n == 0 {
         "Nothing matched."
     } else if seat_ahead {
-        "Place 1 is the first row, and this seat's rows come before another seat's. A score runs from 0 to 100. The fraction is how many checks named the row. Neither is whether the sentence is true. A later line on the same matter replaces an earlier one."
+        "The first row is the closest match, and this seat's rows come first. A score from 0 to 100 is how well the sentence matched. The fraction is how many stored checks picked this row. Neither says whether the text is true. A later line on the same matter replaces an earlier one."
     } else {
-        "Place 1 is the first row. A score runs from 0 to 100. The fraction is how many checks named the row. Neither is whether the sentence is true."
+        "The first row is the closest match. A score from 0 to 100 is how well the sentence matched. The fraction is how many stored checks picked this row. Neither says whether the text is true."
     }
 }
 
@@ -68507,7 +68532,7 @@ mod tests {
         let short = compact_sitting(full, "Software-x");
         assert_eq!(
             short,
-            "memory degraded: ranked by words\n\
+            "matched by words (encoder not installed)\n\
 claimed Software-x for ljos-bot@ux-fix\n\
 What the seat remembers for this task:\n\
 - Prefer plain words in denials.\n\
@@ -68542,7 +68567,9 @@ next: day-2  measure the files
 ";
         let short = compact_sitting(full, "day-1");
         assert_eq!(
-            short.matches("memory degraded: ranked by words").count(),
+            short
+                .matches("matched by words (encoder not installed)")
+                .count(),
             1,
             "{short}"
         );
@@ -69488,7 +69515,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "",
             remember_horizon(true, false, true),
         );
-        assert!(remember_note(&person).starts_with("standing"));
+        let person_note = remember_note(&person);
+        assert!(
+            person_note.starts_with("standing") || person_note.starts_with("saved as a standing"),
+            "{person_note}"
+        );
         assert!(remember_note(&agent).starts_with("episode"));
         let mut local = person.clone();
         local["kept"] = serde_json::json!("local");
@@ -82240,11 +82271,14 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let plain = format_hits(&hits, false);
         assert_eq!(
             plain,
-            "shown 1 of 1.\nPlace 1 is the first row. This seat's rows come before another seat's.\n\npreference\n  Use pnpm instead of npm.\n  place 1, checks 2/3, id id-24\n"
+            "shown 1 of 1.\nThe first row is the closest match. This seat's rows come first.\n\npreference\n  Use pnpm instead of npm.\n  place 1, 2 of 3 checks, id id-24\n"
         );
-        assert!(plain.contains("Place 1 is the first row"), "{plain}");
+        assert!(
+            plain.contains("The first row is the closest match"),
+            "{plain}"
+        );
         assert!(!plain.contains("score"), "{plain}");
-        assert!(plain.contains("checks 2/3"), "{plain}");
+        assert!(plain.contains("2 of 3 checks"), "{plain}");
         assert!(plain.contains("Use pnpm instead of npm."), "{plain}");
         assert!(!plain.contains('\t'), "{plain}");
         assert!(

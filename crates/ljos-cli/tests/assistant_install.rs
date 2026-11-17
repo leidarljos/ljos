@@ -502,7 +502,9 @@ fn a_lesson_comes_back_without_a_seat_sitting_or_ticket() {
         "{remembered_text}"
     );
     assert!(
-        remembered_text.contains("standing:") || remembered_text.contains("episode:"),
+        remembered_text.contains("standing:")
+            || remembered_text.contains("saved as a standing lesson")
+            || remembered_text.contains("episode:"),
         "{remembered_text}"
     );
 
