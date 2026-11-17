@@ -831,7 +831,7 @@ install_one() {
   if [ -n "$ver" ]; then
     tag=v$ver
   else
-    printf '%s\n' "  downloading $label"
+    printf '%s\n' "  finding the latest $label release"
     tag=$(latest_tag "$repo")
   fi
   case $style in

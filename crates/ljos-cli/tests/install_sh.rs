@@ -662,6 +662,8 @@ exit 0
     assert!(!out.status.success(), "{text}");
     assert!(text.contains("could not download"), "{text}");
     assert!(text.contains("500"), "{text}");
+    assert!(text.contains("finding the latest ljos release"), "{text}");
+    assert!(!text.contains("\n  downloading ljos\n"), "{text}");
     assert!(text.contains("sh install.sh"), "{text}");
     assert!(text.contains("--asset-dir DIR"), "{text}");
     assert!(
