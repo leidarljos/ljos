@@ -38,7 +38,7 @@ Features
   tickets, memories and deeds, signed when the sender has a key.
   ``ljos receive`` checks it before import.
 - **One command, one Model Context Protocol (MCP) server.** ``ljos`` and
-  ``ljos-mcp`` serve the same verbs. The server lists 21 core tools by default.
+  ``ljos-mcp`` serve the same verbs. The server lists 22 core tools by default.
 - **Many runners.** ``ljos onboard --example`` lists them, among them Claude Code, Codex and Cursor.
 
 Measured
@@ -51,7 +51,7 @@ the commands that reproduce it.
 ========================================================================== ======================================================================================================================================= ==============================================================================================================
 What                                                                       Result                                                                                                                                  Source
 ========================================================================== ======================================================================================================================================= ==============================================================================================================
-MCP tool list, tokens a session pays (o200k\ :sub:`base`)                  8,543 for the 21 core tools; 18,465 for all 53                                                                                          `mcp-size.txt <https://github.com/leidarljos/ljos/blob/develop/measurements/mcp-size.txt>`__
+MCP tool list, tokens a session pays (o200k\ :sub:`base`)                  8,871 for the 22 core tools; 18,793 for all 54                                                                                          `mcp-size.txt <https://github.com/leidarljos/ljos/blob/develop/measurements/mcp-size.txt>`__
 Prompt hook, 10,000 live lessons, warm median                              196.3 ms before, 139.1 ms after, with the same output (``prompt-hook.rows-10000.after``)                                                `hook-latency.txt <https://github.com/leidarljos/ljos/blob/develop/measurements/hook-latency.txt>`__
 Prompt hook, 10,000 live lessons, cold median                              958.4 ms before, 456.4 ms after (``prompt-hook.scale-10000``)                                                                           `hook-latency.txt <https://github.com/leidarljos/ljos/blob/develop/measurements/hook-latency.txt>`__
 Prompt hook, 1,000 live lessons, warm median                               89.2 ms before, 36.9 ms after (``prompt-hook.scale-1000``)                                                                              `hook-latency.txt <https://github.com/leidarljos/ljos/blob/develop/measurements/hook-latency.txt>`__

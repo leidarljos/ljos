@@ -9,7 +9,7 @@
 # token does not merge across the boundary.
 #
 # Writes measurements/mcp-size.txt. With --check, refuses a file or a
-# README count that disagrees with a fresh run.
+# documented count that disagrees with a fresh run.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
@@ -184,6 +184,35 @@ for name in core["names"]:
     if f"`{short}`" not in mcp:
         missing.append(f"`{short}`")
 
+numeric = (
+    f"{comma(core['tokens'])} tokens for the {core['tools']} core "
+    f"Model Context Protocol (MCP) tools, against {comma(full['tokens'])} "
+    f"for all {full['tools']}"
+)
+intro = (
+    f"{comma(core['tokens'])} for the {core['tools']} core tools; "
+    f"{comma(full['tokens'])} for all {full['tools']}"
+)
+count_surfaces = [
+    ("README achievements", root / "README.md", numeric),
+    ("Sphinx index", root / "docs/source/index.rst", numeric),
+    (
+        "Org index",
+        root / "docs/orgmode/index.org",
+        numeric.replace(" tokens for", " tokens | for"),
+    ),
+    ("Sphinx introduction", root / "docs/source/introduction.rst", intro),
+    ("Org introduction", root / "docs/orgmode/introduction.org", intro),
+    (
+        "Sphinx comparison",
+        root / "docs/source/compare.rst",
+        f"yes, {core['tools']} core tools",
+    ),
+]
+for label, path, clause in count_surfaces:
+    if clause not in norm(path.read_text()):
+        missing.append(f"{label}: {clause}")
+
 if check:
     have = out_path.read_text() if out_path.is_file() else ""
     if have != report:
@@ -191,7 +220,7 @@ if check:
         sys.stderr.write(report)
         sys.exit(1)
     if missing:
-        sys.stderr.write("README counts drift from the tools/list count:\n")
+        sys.stderr.write("documented counts drift from the tools/list count:\n")
         sys.stderr.write("\n".join(missing) + "\n")
         sys.exit(1)
 else:
@@ -199,6 +228,6 @@ else:
     out_path.write_text(report)
     print(report, end="")
     if missing:
-        print("README is missing:", file=sys.stderr)
+        print("Documented counts are missing:", file=sys.stderr)
         print("\n".join(missing), file=sys.stderr)
 PY

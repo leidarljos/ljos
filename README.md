@@ -16,7 +16,7 @@ It stores the sentence as written. Search uses a local encoder when one is insta
 `ljos onboard --example` lists the runners, among them Claude Code, Codex and Cursor.
 
 
-- 8,543 tokens for the 21 core Model Context Protocol (MCP) tools, against 18,465 for all 53 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
+- 8,871 tokens for the 22 core Model Context Protocol (MCP) tools, against 18,793 for all 54 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
 - 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
 - The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
 - packset, the memory writer, publishes a LongMemEval_S session retrieval run ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). That page records the figures. This tree does not. The run scores retrieval, not answer accuracy.
