@@ -6691,7 +6691,8 @@ fn run_command() -> Result<()> {
                 print!("{line}");
             }
             // The page a person reads is the tracker's weighted settle.
-            // One ask. The model crate's shares and influence stay on `--json`.
+            // One ask, whether or not the model crate is installed.
+            // The model crate's shares and influence stay on `--json`.
             // A stub or a refusal leaves that model reading.
             let tracker_in_steps = steps.iter().any(|step| step.bin == "vissue");
             let mut printed_tracker = false;
