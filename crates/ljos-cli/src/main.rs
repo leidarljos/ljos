@@ -5361,7 +5361,8 @@ fn run_command() -> Result<()> {
             // Rank before the cut so another seat's higher score does not
             // push this seat's rows out of the printed limit. The slot
             // merge keeps those pack rows in front and appends its own.
-            ljos_cli::prefer_calling_seat(&mut hits);
+            let sitting = ljos_cli::recorded_sitting();
+            ljos_cli::prefer_search_context(&mut hits, &asked, sitting.as_deref());
             let filter = ljos_cli::memory_port::SourceFilter {
                 machine: source_machine,
                 seat: source_seat,
@@ -5390,10 +5391,15 @@ fn run_command() -> Result<()> {
             } else {
                 ljos_cli::refine_default_hits(&mut hits, &asked, attempts);
                 ljos_cli::drop_word_floor(&mut hits, &asked, false);
-                let unrelated = ljos_cli::drop_weak_cross_seat(&mut hits, &asked, false);
-                ljos_cli::prefer_calling_seat(&mut hits);
+                let unrelated = ljos_cli::drop_weak_cross_seat_for(
+                    &mut hits,
+                    &asked,
+                    false,
+                    sitting.as_deref(),
+                );
                 (None, unrelated)
             };
+            ljos_cli::prefer_search_context(&mut hits, &asked, sitting.as_deref());
             // A dated search is the pack as it stood. A source filter asked
             // for slot rows only. Tickets are the live tracker, so neither
             // of those pages grows one. The merge runs after both rankers,

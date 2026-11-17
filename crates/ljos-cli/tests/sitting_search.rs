@@ -237,7 +237,7 @@ fn search_pack(lines: Arc<Mutex<Vec<String>>>) -> u16 {
                 let line = req.lines().next().unwrap_or("").to_string();
                 lines.lock().unwrap().push(line.clone());
                 let body = if line.contains("/v1/search") {
-                    r#"{"hits":[{"id":"oak","kind":"lesson","text":"Oak Tree on Nov 23 is the morning plan.","score":0.91,"ts":"2026-11-01T08:00:00Z","entities":["seat:ada"]}]}"#
+                    r#"{"hits":[{"id":"hle-old","kind":"lesson","text":"HLE timing notes from another ticket.","score":0.97,"cosine":0.31,"entities":["seat:hlebot","issue:hle-old"]},{"id":"probe-old","kind":"lesson","text":"The probe project keeps its rollout checklist.","score":0.89,"cosine":0.72,"entities":["seat:bob","issue:probe-old"]},{"id":"oak","kind":"lesson","text":"Oak Tree on Nov 23 is the morning plan.","score":0.84,"cosine":0.82,"ts":"2026-11-01T08:00:00Z","entities":["seat:ada"]},{"id":"maple","kind":"lesson","text":"Oak Tree timing follows the maple calendar.","score":0.96,"cosine":0.93,"entities":["seat:carol","issue:garden-maple"]}]}"#
                 } else if line.contains("/v1/atoms") {
                     r#"{"atoms":[{"id":"should-not-list","kind":"lesson","text":"the whole pack was listed"}]}"#
                 } else {
@@ -347,6 +347,11 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
         searches[0]
     );
     assert!(
+        searches[0].contains("probe"),
+        "the query does not name the ticket's project: {}\n{said}",
+        searches[0]
+    );
+    assert!(
         asked.iter().all(|line| !line.contains("/v1/atoms")),
         "the sitting did not list the pack: {asked:?}\n{said}"
     );
@@ -354,6 +359,27 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
         stdout.contains("Oak Tree on Nov 23 is the morning plan."),
         "{said}"
     );
+    assert!(
+        stdout.contains("probe project keeps its rollout checklist"),
+        "a lesson on the ticket's project is missing:\n{said}"
+    );
+    assert!(
+        stdout.contains("Oak Tree timing follows the maple calendar"),
+        "a strong cross-seat match is missing:\n{said}"
+    );
+    assert!(
+        stdout.contains("from bob") && stdout.contains("from carol"),
+        "cross-seat lessons are not labelled:\n{said}"
+    );
+    assert!(
+        !stdout.contains("HLE timing notes"),
+        "a weak lesson from another ticket crowded the sitting:\n{said}"
+    );
+    let island = stdout.split("== island").nth(1).unwrap_or(&stdout);
+    let own = island.find("Oak Tree on Nov 23").unwrap();
+    let project = island.find("probe project keeps").unwrap();
+    let strong = island.find("Oak Tree timing follows").unwrap();
+    assert!(own < project && project < strong, "{said}");
     assert!(!said.contains("memory degraded"), "{said}");
     assert!(!stdout.contains("the whole pack was listed"), "{said}");
 }

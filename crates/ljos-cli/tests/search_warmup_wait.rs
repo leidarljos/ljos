@@ -41,6 +41,10 @@ fn content_length(head: &str) -> usize {
 /// `remaining_ms` is what a cold status reports. `ready_after` is when
 /// status flips to answered, measured from bind. `None` stays cold.
 fn serve(remaining_ms: u64, ready_after: Option<Duration>) -> Seat {
+    serve_as(remaining_ms, ready_after, false)
+}
+
+fn serve_as(remaining_ms: u64, ready_after: Option<Duration>, older_status: bool) -> Seat {
     let home = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -69,9 +73,13 @@ fn serve(remaining_ms: u64, ready_after: Option<Duration>) -> Seat {
                         Ok(n) => buf.extend_from_slice(&tmp[..n]),
                     }
                 }
-                let ready = ready_after.is_some_and(|delay| started.elapsed() >= delay);
+                let ready =
+                    older_status || ready_after.is_some_and(|delay| started.elapsed() >= delay);
                 let body = if path == "/v1/status" {
-                    if ready {
+                    if older_status {
+                        r#"{"embedder":{"available":true,"enabled":true},"search":{"ranks":["fused","relevance"]}}"#
+                            .to_string()
+                    } else if ready {
                         r#"{"embedder":{"available":true,"answering":true,"enabled":true},"search":{"ranks":["fused","relevance"]}}"#
                             .to_string()
                     } else {
@@ -106,6 +114,23 @@ fn serve(remaining_ms: u64, ready_after: Option<Duration>) -> Seat {
         url: format!("http://127.0.0.1:{port}"),
         home,
     }
+}
+
+#[test]
+fn a_normal_search_without_an_answering_field_does_not_say_it_is_warming() {
+    let seat = serve_as(0, None, true);
+    let (out, elapsed) = search(&seat, &["search", "kiln"], &[("LJOS_SEARCH_WAIT", "0")]);
+    let (stdout, stderr, said) = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}\n{said}");
+    assert!(stdout.contains(MEANING), "{said}");
+    assert!(stderr.contains("fused rank"), "{said}");
+    assert!(
+        !stderr.contains(WORD_LINE)
+            && !stderr.contains("ready shortly")
+            && !stderr.contains("loading"),
+        "{said}"
+    );
 }
 
 fn search(seat: &Seat, args: &[&str], env: &[(&str, &str)]) -> (Output, Duration) {
