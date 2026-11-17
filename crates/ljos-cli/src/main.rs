@@ -6668,6 +6668,7 @@ fn run_command() -> Result<()> {
             }
             // The page a person reads is the tracker's weighted settle.
             // One ask. The model crate's shares and influence stay on `--json`.
+            // A stub or a refusal leaves that model reading.
             let tracker_in_steps = steps.iter().any(|step| step.bin == "vissue");
             let mut printed_tracker = false;
             for step in steps {
@@ -6717,7 +6718,9 @@ fn run_command() -> Result<()> {
                                 }
                             }
                         }
-                        if answered && !page.is_empty() {
+                        // The tracker's own settle is the page a person reads.
+                        // A stub or a refusal leaves the model crate's reading.
+                        if answered && page.contains("social power") {
                             print!("{page}");
                             printed_tracker = true;
                             continue;
