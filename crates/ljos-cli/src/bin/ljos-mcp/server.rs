@@ -1412,12 +1412,13 @@ fn command_token(text: &str) -> bool {
             .any(|ch| ch.is_control() || matches!(ch, '"' | '`' | '\\' | '$'))
 }
 
-/// `ljos help` plus the tool the client sent, when that name is one word.
+/// `ljos help` plus the command for a tool name, when that name is one word.
 /// Otherwise plain `ljos help`.
 fn help_command(name: &str) -> String {
     let name = name.trim();
-    if command_token(name) && !name.chars().any(char::is_whitespace) {
-        format!("ljos help {name}")
+    let command = name.strip_prefix("ljos_").unwrap_or(name);
+    if command_token(command) && !command.chars().any(char::is_whitespace) {
+        format!("ljos help {command}")
     } else {
         "ljos help".to_string()
     }
@@ -4496,9 +4497,8 @@ impl ServerHandler for LjosServer {
         }
         if Self::tool_router().get(&request.name).is_none() {
             let missing = request.name.to_string();
-            let help = help_command(&missing);
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "{missing} is not a tool, so run `{help}`."
+                "{missing} is not a tool, so run `ljos help`."
             ))])
             .into());
         }
