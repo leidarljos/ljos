@@ -227,15 +227,25 @@ fn a_bad_line_names_the_command_and_the_server_stays_up() {
         if value["id"] == 10 {
             let line = first_line(&value);
             assert!(value["result"]["isError"] == true, "{value}");
-            assert!(line.contains("ljos help ljos_nope"), "{line}");
+            assert!(line.contains("run `ljos help`"), "{line}");
             assert!(!line.contains('\n'), "{line}");
             saw_tool = true;
         }
         if value["id"] == 11 {
             let line = first_line(&value);
             assert!(value["result"]["isError"] == true, "{value}");
-            assert!(line.contains("ljos help ljos_search"), "{line}");
+            assert!(line.contains("ljos help search"), "{line}");
             assert!(!line.contains('\n'), "{line}");
+            let help = Command::new(env!("CARGO_BIN_EXE_ljos"))
+                .args(["help", "search"])
+                .output()
+                .unwrap();
+            assert!(
+                help.status.success(),
+                "hinted command failed: {}{}",
+                String::from_utf8_lossy(&help.stdout),
+                String::from_utf8_lossy(&help.stderr)
+            );
             saw_args = true;
         }
     }
