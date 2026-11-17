@@ -89,7 +89,7 @@ fn short_title(title: &str) -> String {
 
 fn line(id: &str, title: &str, age: &str) -> String {
     format!(
-        "{id}  {}  {age}  ljos finish {id} / ljos note {id} \"...\"",
+        "{id}  {}  {age}  ljos finish {id} --lesson \"...\" / ljos note {id} \"...\"",
         short_title(title)
     )
 }
@@ -573,7 +573,7 @@ fn claims_stale_lists_the_oldest_first_and_json_matches() {
     assert_eq!(rows[0]["title"], "oldest", "{json}");
     assert_eq!(
         rows[0]["finish"],
-        format!("ljos finish {}", ids[1]),
+        format!("ljos finish {} --lesson \"...\"", ids[1]),
         "{json}"
     );
     assert_eq!(

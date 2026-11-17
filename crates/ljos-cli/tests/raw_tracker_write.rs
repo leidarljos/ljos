@@ -58,7 +58,10 @@ fn a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
             r#"ljos file "TITLE" --parent ljos-gkq2"#,
         ),
         (r#"vissue q -p ljos "a ticket""#, "ljos file"),
-        ("vissue close ljos-ab12", "ljos finish ljos-ab12"),
+        (
+            "vissue close ljos-ab12",
+            "ljos finish ljos-ab12 --lesson \"...\"",
+        ),
         (
             "vissue cancel ljos-ab12",
             "ljos finish ljos-ab12 --status cancelled",
@@ -74,7 +77,7 @@ fn a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
         ("/usr/local/bin/vissue refile ljos-ab12 tools", "ljos file"),
         (
             "VISSUE_AGENT=saddle vissue update ljos-ab12 -s done",
-            "ljos finish ljos-ab12",
+            "ljos finish ljos-ab12 --lesson \"...\"",
         ),
         (
             "vissue update ljos-ab12 -s STARTED",
@@ -147,7 +150,10 @@ fn the_runner_hook_warns_on_a_raw_tracker_write() {
     assert!(out.status.success(), "{said}");
     assert!(!said.contains("permissionDecision"), "{said}");
     assert!(said.contains("\"additionalContext\":\"warning: "), "{said}");
-    assert!(said.contains("so run `ljos finish ljos-ab12`."), "{said}");
+    assert!(
+        said.contains("so run `ljos finish ljos-ab12 --lesson \\\"...\\\"`."),
+        "{said}"
+    );
     assert!(!said.contains("--close"), "{said}");
 }
 
@@ -316,12 +322,12 @@ fn a_vissue_mcp_write_under_a_runner_warns() {
         (
             serde_json::json!({"id": "ljos-ab12", "state": "DONE"}),
             "mcp__vissue__vissue_update",
-            "ljos finish ljos-ab12",
+            "ljos finish ljos-ab12 --lesson \\\"...\\\"",
         ),
         (
             serde_json::json!({"id": "ljos-ab12"}),
             "mcp__plugin_vissue_vissue__vissue_close",
-            "ljos finish ljos-ab12",
+            "ljos finish ljos-ab12 --lesson \\\"...\\\"",
         ),
         (
             serde_json::json!({"id": "ljos-ab12"}),
@@ -389,7 +395,10 @@ fn a_vissue_mcp_write_under_a_runner_warns() {
         said.contains("warning: "),
         "cursor update had no warning:\n{said}"
     );
-    assert!(said.contains("ljos finish ljos-ab12"), "{said}");
+    assert!(
+        said.contains("ljos finish ljos-ab12 --lesson \\\"...\\\""),
+        "{said}"
+    );
     assert!(!said.contains("--close"), "{said}");
 }
 

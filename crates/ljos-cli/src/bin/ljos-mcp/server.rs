@@ -2443,7 +2443,7 @@ impl LjosServer {
         if !args.items.is_empty() {
             let opened = match args.issue.as_deref() {
                 Some(issue) => ljos_cli::plan::add_items(issue, &args.items),
-                None => ljos_cli::plan::open_plan(None, &args.task, &args.items),
+                None => ljos_cli::plan::open_plan(None, &args.task, &args.items, false),
             }
             .map_err(|e| refused(anyhow::anyhow!(e)))?;
             ljos_cli::bookkeep::remember_issue(&opened.parent);
@@ -2542,7 +2542,7 @@ impl LjosServer {
         } else {
             let opened = match (args.plan.as_deref(), args.issue.as_deref()) {
                 (_, Some(issue)) => ljos_cli::plan::add_items(issue, &args.items),
-                (Some(title), None) => ljos_cli::plan::open_plan(None, title, &args.items),
+                (Some(title), None) => ljos_cli::plan::open_plan(None, title, &args.items, false),
                 (None, None) => {
                     return Err(refused(anyhow::anyhow!(
                         "ljos_sitting: pass plan and items, or an issue"

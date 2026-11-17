@@ -233,7 +233,7 @@ fn render(recs: &[IssueRec], seat: &str, limit: Option<usize>) -> String {
 
 fn quiet_line(row: &Quiet) -> String {
     format!(
-        "{}  {}  {}  ljos finish {} / ljos note {} \"...\"\n",
+        "{}  {}  {}  ljos finish {} --lesson \"...\" / ljos note {} \"...\"\n",
         row.id,
         short_title(&row.title),
         row.age,
@@ -294,7 +294,7 @@ fn stale_json(row: &Quiet, today: NaiveDate) -> serde_json::Value {
 
 fn action_commands(id: &str) -> (String, String, String) {
     (
-        format!("ljos finish {id}"),
+        format!("ljos finish {id} --lesson \"...\""),
         format!("ljos release {id}"),
         format!("ljos note {id} \"...\""),
     )
