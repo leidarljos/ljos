@@ -4663,7 +4663,7 @@ fn seat_disagreement_line() -> Option<String> {
         other
     };
     Some(format!(
-        "ljos: LJOS_SEAT is {kept} and this conversation's seat is {other}, writing as {kept}, so run `export LJOS_SEAT=NAME`.\n"
+        "ljos: LJOS_SEAT is {kept} and this conversation's seat is {other}, writing as {kept}.\n"
     ))
 }
 
@@ -77379,6 +77379,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(line.contains(id), "{line}");
         assert!(!line.contains("this conversation's seat is seat"), "{line}");
         assert!(line.contains("writing as papers"), "{line}");
+        assert!(
+            !line.contains("export LJOS_SEAT"),
+            "an exported seat was told to export a seat again: {line}"
+        );
         assert!(!line.contains("acme-cli"), "{line}");
     }
 
