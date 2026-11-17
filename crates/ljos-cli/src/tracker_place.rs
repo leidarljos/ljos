@@ -111,6 +111,15 @@ fn serves_named_remote(dir: &Path) -> bool {
 /// What git prints for `args` run in `dir` alone, when it succeeds. A hook
 /// exports the repository it runs for, and that would answer instead.
 fn git_in(dir: &Path, args: &[&str]) -> Option<String> {
+    if crate::cwd_probe::skip_walk(dir) {
+        return None;
+    }
+    // Git discovery from the working directory is the probe a slow mount
+    // or a `.git` that does not open used to hold. Elsewhere the longer
+    // budget still applies.
+    if std::env::current_dir().ok().as_deref() == Some(dir) {
+        return crate::cwd_probe::git_line(Some(dir), args);
+    }
     let mut cmd = crate::git_cmd();
     cmd.arg("-C")
         .arg(dir)
@@ -132,6 +141,11 @@ fn git_in(dir: &Path, args: &[&str]) -> Option<String> {
 pub fn work_tree(dir: &Path) -> Option<PathBuf> {
     let mut at = Some(dir);
     while let Some(here) = at {
+        // The directory the process left is not stated. A `.git` above it
+        // is that mount, and a `.git` below it is a different checkout.
+        if crate::cwd_probe::skip_walk(here) {
+            return None;
+        }
         if here.join(".git").exists() {
             return Some(here.to_path_buf());
         }
