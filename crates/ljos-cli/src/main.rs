@@ -2601,6 +2601,12 @@ fn root_synonym(typed: &str) -> Option<&'static str> {
         "find" | "query" | "lookup" => Some("search"),
         "add" | "save" | "store" => Some("remember"),
         "note-add" | "add-note" => Some("note"),
+        "close" => Some("finish"),
+        "create" | "new" => Some("file"),
+        "delete" | "rm" | "remove" => Some("forget"),
+        "status" => Some("doctor"),
+        "stats" => Some("digest"),
+        "edit" => Some("memories"),
         _ => None,
     }
 }

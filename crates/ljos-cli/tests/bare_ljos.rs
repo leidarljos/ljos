@@ -297,3 +297,53 @@ fn help_for_a_mistyped_command_names_the_real_one() {
         "ljos: no command find, and the closest is search, so run `ljos help search`.\n"
     );
 }
+
+#[test]
+fn close_create_delete_rm_status_and_stats_point_at_real_verbs() {
+    let dir = tempfile::tempdir().unwrap();
+    let cases: [(&[&str], &str); 9] = [
+        (
+            &["close", "demo-4b1s"],
+            "ljos: no command close, and the closest is finish, so run `ljos finish demo-4b1s`.\n",
+        ),
+        (
+            &["create", "Pick a codec"],
+            "ljos: no command create, and the closest is file, so run `ljos file \"Pick a codec\"`.\n",
+        ),
+        (
+            &["new", "Pick a codec"],
+            "ljos: no command new, and the closest is file, so run `ljos file \"Pick a codec\"`.\n",
+        ),
+        (
+            &["delete", "a6ae2751"],
+            "ljos: no command delete, and the closest is forget, so run `ljos forget a6ae2751`.\n",
+        ),
+        (
+            &["rm", "a6ae2751"],
+            "ljos: no command rm, and the closest is forget, so run `ljos forget a6ae2751`.\n",
+        ),
+        (
+            &["status"],
+            "ljos: no command status, and the closest is doctor, so run `ljos doctor`.\n",
+        ),
+        (
+            &["stats"],
+            "ljos: no command stats, and the closest is digest, so run `ljos digest`.\n",
+        ),
+        (
+            &["edit"],
+            "ljos: no command edit, and the closest is memories, so run `ljos memories`.\n",
+        ),
+        (
+            &["help", "close"],
+            "ljos: no command close, and the closest is finish, so run `ljos help finish`.\n",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = run(dir.path(), args, &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), want, "{args:?}");
+    }
+}

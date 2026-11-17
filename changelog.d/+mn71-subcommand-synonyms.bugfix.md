@@ -1,0 +1,1 @@
+Root command aliases `close`, `create`, `new`, `delete`, `rm`, `remove`, `status`, `stats`, and `edit` now suggest `finish`, `file`, `forget`, `doctor`, `digest`, and `memories` instead of `cloud`, `seat`, or `help`.
