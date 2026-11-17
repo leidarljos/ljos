@@ -141,3 +141,16 @@ fn a_responsive_audit_still_blocks_a_false_green_claim() {
         .unwrap()
         .contains("last test run shown is red"));
 }
+
+#[test]
+fn a_short_audit_timeout_is_not_rounded_up_to_a_second() {
+    let fixture = Fixture::new();
+    let judge = fixture.script("judge", "cat >/dev/null\nexec sleep 30");
+    fixture.configure(&format!(
+        "enabled = true\nbackend = 'command'\ncommand = [{judge:?}]\nbudget_ms = 100\ncache_days = 0\n"
+    ));
+    let (took, output) = fixture.run();
+    bounded(took, &output);
+    assert!(took < Duration::from_millis(750), "{took:?}: {output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
