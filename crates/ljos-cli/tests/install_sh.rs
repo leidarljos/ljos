@@ -227,9 +227,10 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     assert!(note.contains("not on PATH"), "{note}");
     assert!(note.contains(PATH_LINE), "{note}");
     assert!(
-        note.contains("Next: ") && note.contains("ljos doctor"),
+        note.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
         "{note}"
     );
+    assert!(!note.contains("&& ljos doctor"), "{note}");
     for rc in [".profile", ".bashrc"] {
         assert!(!opted_out.join(rc).exists(), "--no-modify-path wrote {rc}");
     }
@@ -908,7 +909,11 @@ fn an_older_ljos_earlier_on_path_is_named() {
     );
     assert!(text.contains("Put the new install first"), "{text}");
     assert!(text.contains(PATH_LINE), "{text}");
-    assert!(text.contains("ljos doctor"), "{text}");
+    assert!(
+        text.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        "{text}"
+    );
+    assert!(!text.contains("&& ljos doctor"), "{text}");
     assert!(
         !text.contains("old-ljos"),
         "the policy sample ran the older ljos:\n{text}"
@@ -949,7 +954,70 @@ fn a_second_install_says_it_replaced_the_programs() {
         "{text}"
     );
     assert!(text.contains("Reinstalled the same version."), "{text}");
+    assert!(text.contains("Next: `ljos onboard`."), "{text}");
+    assert!(!text.contains("Next: `ljos doctor`."), "{text}");
+}
+
+/// An install that runs onboard names `ljos doctor` next. `--no-onboard`
+/// names `ljos onboard`, including the PATH line when this shell does not
+/// have the bin dir yet.
+#[test]
+fn the_next_line_names_onboard_until_install_runs_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(
+            &progs,
+            name,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo ljos-test 0; fi\nexit 0\n",
+        );
+    }
+    let home = dir.path().join("home");
+    let bare = install(&home, &progs, "/usr/bin:/bin", &["--no-modify-path"]);
+    assert!(
+        bare.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        "{bare}"
+    );
+    assert!(!bare.contains("&& ljos doctor"), "{bare}");
+
+    let bin = home.join(".local/bin");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let again = run_install(
+        &home,
+        &path,
+        &[
+            "--from-dir",
+            progs.to_str().unwrap(),
+            "--no-embed",
+            "--no-onboard",
+        ],
+    );
+    let again_text = said(&again);
+    assert!(again.status.success(), "{again_text}");
+    assert!(
+        again_text.contains("Next: `ljos onboard`."),
+        "{again_text}"
+    );
+
+    let with = dir.path().join("with-onboard");
+    let with_bin = with.join(".local/bin");
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&with_bin)
+        .args(["--no-embed", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &with)
+        .env("PATH", format!("{}:/usr/bin:/bin", with_bin.display()))
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
     assert!(text.contains("Next: `ljos doctor`."), "{text}");
+    assert!(!text.contains("&& ljos onboard"), "{text}");
 }
 
 /// Replacing ljos-mcp while a process still has the old file mapped.
@@ -1924,7 +1992,11 @@ exit 0
         "{text}"
     );
     assert!(text.contains(PATH_LINE), "{text}");
-    assert!(text.contains("ljos doctor"), "{text}");
+    assert!(
+        text.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        "{text}"
+    );
+    assert!(!text.contains("&& ljos doctor"), "{text}");
 }
 
 /// A signed-in `gh attestation verify` that answers HTTP 404 means the

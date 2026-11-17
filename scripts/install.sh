@@ -1352,11 +1352,18 @@ if [ -n "$CHECKOUT_VER" ] && [ "$FROM_CHECKOUT" != 1 ] && [ -x "$BIN_DIR/ljos" ]
   fi
 fi
 secs=$(( $(date +%s) - START ))
+# `--no-onboard` left registration for a second command. The Next line
+# names that command. An install that already ran onboard names doctor.
+if [ "$ONBOARD" = 1 ]; then
+  next_cmd="ljos doctor"
+else
+  next_cmd="ljos onboard"
+fi
 if [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; then
   say "Done in $secs s. This shell does not run the ljos just installed until PATH is set."
-  say "Next: $PATH_LINE && ljos doctor"
+  say "Next: $PATH_LINE && $next_cmd"
 else
-  say "Done in $secs s. Next: \`ljos doctor\`."
+  say "Done in $secs s. Next: \`$next_cmd\`."
 fi
 say "Shell completion is one line in the shell's startup file. This script does not write that file."
 say "  bash: source <(ljos completions bash)"
