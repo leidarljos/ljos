@@ -1685,74 +1685,86 @@ impl PacksetClient {
         let _budget = PackClock::enter(timeout);
         let slot = slot_for(addr);
         let mut live = slot.lock().unwrap_or_else(|p| p.into_inner());
-        let tag = token_tag(call.token);
-        if live.token_tag != tag {
-            live.stream = None;
-            live.proven = false;
-            live.token_tag = tag;
-        }
-        let carried = if allow {
-            match self.gate(&mut live, addr, timeout)? {
-                Gate::Bare => None,
-                Gate::Send => call.token,
-                Gate::Busy(raw) => {
-                    live.carried = false;
-                    live.proven = false;
-                    return Ok(Answer {
-                        status: raw.status,
-                        body: raw.body,
-                        trusted: false,
-                        retry_after: raw.retry_after,
-                    });
-                }
-            }
-        } else {
-            None
-        };
-        if live.stream.is_none() {
-            match connect(addr, timeout) {
-                Ok(stream) => live.stream = Some(stream),
-                Err(err) => {
-                    live.proven = false;
-                    live.carried = false;
-                    return Err(Error::Io(err));
-                }
-            }
-            // The probes ran on sockets the writer closed. This socket is
-            // the one the token rides, the third step of the same proof,
-            // not a later call.
-            live.proven = false;
-        }
-        let raw = match send(
-            &mut live,
-            &self.origin,
-            &Wire {
-                token: carried,
-                ..*call
-            },
-            timeout,
-        ) {
-            Ok(raw) => raw,
-            Err(err) => {
+        // One dead socket is not a down writer. packsetd restarts on the
+        // same port, and the next bytes on the old socket fail. Open a new
+        // one and send the call again, inside the same budget.
+        let mut revived = false;
+        loop {
+            let tag = token_tag(call.token);
+            if live.token_tag != tag {
                 live.stream = None;
                 live.proven = false;
-                live.carried = false;
-                return Err(Error::Io(err));
+                live.token_tag = tag;
             }
-        };
-        let trusted = carried.is_some();
-        live.carried = trusted;
-        if trusted && live.stream.is_some() {
-            live.proven = true;
-        } else if live.stream.is_none() {
-            live.proven = false;
+            let carried = if allow {
+                match self.gate(&mut live, addr, timeout)? {
+                    Gate::Bare => None,
+                    Gate::Send => call.token,
+                    Gate::Busy(raw) => {
+                        live.carried = false;
+                        live.proven = false;
+                        return Ok(Answer {
+                            status: raw.status,
+                            body: raw.body,
+                            trusted: false,
+                            retry_after: raw.retry_after,
+                        });
+                    }
+                }
+            } else {
+                None
+            };
+            if live.stream.is_none() {
+                match connect(addr, timeout) {
+                    Ok(stream) => live.stream = Some(stream),
+                    Err(err) => {
+                        live.proven = false;
+                        live.carried = false;
+                        return Err(Error::Io(err));
+                    }
+                }
+                // The probes ran on sockets the writer closed. This socket is
+                // the one the token rides, the third step of the same proof,
+                // not a later call.
+                live.proven = false;
+            }
+            let had = live.stream.is_some();
+            let raw = match send(
+                &mut live,
+                &self.origin,
+                &Wire {
+                    token: carried,
+                    ..*call
+                },
+                timeout,
+            ) {
+                Ok(raw) => raw,
+                Err(err) => {
+                    let stale = had && !revived && !io_is_quiet(&err);
+                    live.stream = None;
+                    live.proven = false;
+                    live.carried = false;
+                    if stale {
+                        revived = true;
+                        continue;
+                    }
+                    return Err(Error::Io(err));
+                }
+            };
+            let trusted = carried.is_some();
+            live.carried = trusted;
+            if trusted && live.stream.is_some() {
+                live.proven = true;
+            } else if live.stream.is_none() {
+                live.proven = false;
+            }
+            return Ok(Answer {
+                status: raw.status,
+                body: raw.body,
+                trusted,
+                retry_after: raw.retry_after,
+            });
         }
-        Ok(Answer {
-            status: raw.status,
-            body: raw.body,
-            trusted,
-            retry_after: raw.retry_after,
-        })
     }
 
     /// Two refusals on this socket, then the call may carry the token.

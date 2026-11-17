@@ -493,7 +493,11 @@ fn watch(client: Option<Watched>, orphan: Option<Duration>) {
     let mut held = false;
     loop {
         let gone = client.as_ref().is_some_and(|c| !still_there(c));
-        if gone || orphaned(orphan, &mut looked, &mut held) || tick(&queue) {
+        // A client that is still there keeps the server, however quiet the
+        // session is. The orphan window is for a stdin a launcher still
+        // holds after that client has gone, or when no client was recorded.
+        let client_here = client.as_ref().is_some_and(still_there);
+        if gone || (!client_here && orphaned(orphan, &mut looked, &mut held)) || tick(&queue) {
             close();
             return;
         }

@@ -19,7 +19,7 @@ when to call it.
 
 By default the server lists the core set, in this order: ``ljos_rule``,
 ``ljos_prefer``, ``ljos_remember``, ``ljos_search``,
-``ljos_start``, ``ljos_guard_check``, ``ljos_file``, ``ljos_options``, ``ljos_note``, ``ljos_recall``,
+``ljos_start``, ``ljos_guard_check``, ``ljos_file``, ``ljos_options``, ``ljos_note``, ``ljos_recall``, ``ljos_show``,
 ``ljos_sitting``, ``ljos_finish``, ``ljos_claim``, ``ljos_release``, ``ljos_send``,
 ``ljos_inbox``, ``ljos_reply``, ``ljos_vote``, ``ljos_consensus`` and ``ljos_doctor``.
 ``LJOS_MCP_TOOLS=all`` lists every tool above: the core set first, then the rest
@@ -34,6 +34,16 @@ as text, so the model reads it as a tool result.
 A search or another pack tool with no writer, or a writer that answers 401,
 is that tool error and names ``cargo install --locked packset`` or
 ``packset ensure``. It is not a protocol error, and it does not drop the list.
+
+The server stays up when ``packsetd`` restarts, when a line is not JSON, and while the client is quiet.
+A dead socket is opened again on the same call.
+A failure is one line and names the command.
+A missing tracker names ``ljos onboard``.
+A write with no seat names ``ljos seat``.
+A busy pack names ``ljos search`` or ``ljos remember``.
+An unknown tool names ``ljos help``.
+An unknown method, or a line that is not JSON, names ``ljos mcp --help``.
+``ljos_show`` prints the ticket ``ljos show`` prints: the header, the body, and the latest notes.
 
 ``ljos_recall`` adds a Code context section when ``graphify-out/graph.json`` is in the working directory's repository.
 The section is the same one ``ljos recall`` prints.

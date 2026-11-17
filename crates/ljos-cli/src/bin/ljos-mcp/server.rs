@@ -56,6 +56,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "ljos_options",
     "ljos_note",
     "ljos_recall",
+    "ljos_show",
     "ljos_sitting",
     "ljos_finish",
     "ljos_claim",
@@ -252,6 +253,7 @@ const SEAT_FREE_TOOLS: &[&str] = &[
     "ljos_guard_check",
     "ljos_policy",
     "ljos_recall",
+    "ljos_show",
     "ljos_search",
     "ljos_conflicts",
     "ljos_evidence",
@@ -359,7 +361,7 @@ const SEAT_PROPERTY: &str =
 
 /// One line for a write that named no seat and has no stamped seat of its own.
 fn missing_seat_line(tool: &str) -> String {
-    format!("{tool}: pass the seat argument. A write on a shared server needs seat.")
+    format!("{tool}: pass seat. `ljos seat` prints the name.")
 }
 
 /// Whether this call writes under a seat. A read still runs with none.
@@ -699,6 +701,16 @@ pub struct OptionsArgs {
 pub struct IssueArgs {
     /// The issue id.
     pub issue: String,
+}
+
+/// One ticket, the same page `ljos show` prints.
+#[derive(Deserialize, JsonSchema)]
+pub struct ShowArgs {
+    /// The issue id.
+    pub issue: String,
+    /// Print every note. Absent, the page keeps the latest eight.
+    #[serde(default)]
+    pub all: Option<bool>,
 }
 
 /// What every seat did since a time.
@@ -1332,6 +1344,89 @@ fn said(out: ljos_cli::Said) -> Json<Said> {
     })
 }
 
+/// One line when the writer answered busy. A down writer is not this:
+/// that line names `packset ensure`.
+fn busy_line(err: &anyhow::Error) -> Option<String> {
+    let busy = ljos_cli::is_read_shed(err)
+        || ljos_cli::is_write_shed(err)
+        || ljos_cli::is_pack_busy(err)
+        || format!("{err:#}").to_ascii_lowercase().contains("busy");
+    if !busy {
+        return None;
+    }
+    let full = format!("{err:#}");
+    if full.contains("queued") {
+        return Some("The pack is busy, so the write is queued. Run `ljos remember`.".to_string());
+    }
+    Some("The pack is busy, so run `ljos doctor`.".to_string())
+}
+
+/// A busy or slow pack, not a writer that is down. The down line already
+/// names `packset ensure`.
+fn search_can_wait(err: &anyhow::Error) -> bool {
+    ljos_cli::pack_down_message(err).is_none()
+        && (ljos_cli::is_read_shed(err)
+            || ljos_cli::is_pack_busy(err)
+            || ljos_cli::is_deadline_miss(err))
+}
+
+/// `ljos search` plus the query, short enough for one line.
+fn search_command(query: &str) -> String {
+    let flat: String = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = flat.replace('`', "");
+    let flat: String = flat.chars().take(80).collect();
+    if flat.is_empty() {
+        "ljos search".to_string()
+    } else if flat.contains(' ') {
+        format!("ljos search \"{flat}\"")
+    } else {
+        format!("ljos search {flat}")
+    }
+}
+
+fn busy_search_line(command: &str) -> String {
+    format!("The pack is busy, so run `{command}`.")
+}
+
+/// How much of one row a tool result keeps. The rest is `ljos search`.
+const ROW_CAP: usize = 4_000;
+
+fn capped_row(text: &str, cut: &mut bool) -> String {
+    if text.chars().count() <= ROW_CAP {
+        return text.to_string();
+    }
+    *cut = true;
+    let mut out: String = text.chars().take(ROW_CAP).collect();
+    out.push_str("...");
+    out
+}
+
+/// A tool whose arguments did not parse, as one line that names `ljos help`.
+fn plain_arguments(name: &str, response: CallToolResponse) -> CallToolResponse {
+    let CallToolResponse::Complete(result) = &response else {
+        return response;
+    };
+    if result.is_error != Some(true) {
+        return response;
+    }
+    let Some(text) = result
+        .content
+        .first()
+        .and_then(|block| block.as_text())
+        .map(|text| text.text.as_str())
+    else {
+        return response;
+    };
+    if !text.starts_with("failed to deserialize parameters") {
+        return response;
+    }
+    let verb = name.trim_start_matches("ljos_");
+    CallToolResult::error(vec![ContentBlock::text(format!(
+        "{name}: the arguments do not match the tool, so run `ljos help {verb}`."
+    ))])
+    .into()
+}
+
 /// A refusal. `call_tool` hands it to the model as a tool result with
 /// `isError`, so the model reads the reason.
 fn refused(e: anyhow::Error) -> McpError {
@@ -1352,6 +1447,9 @@ fn refused(e: anyhow::Error) -> McpError {
     // A down writer is one sentence that names the next step. The chain
     // under it is `Connection refused (os error 111)`, which does not.
     if let Some(line) = ljos_cli::pack_down_message(&e) {
+        return McpError::internal_error(line, None);
+    }
+    if let Some(line) = busy_line(&e) {
         return McpError::internal_error(line, None);
     }
     let text = format!("{e:#}");
@@ -1387,7 +1485,7 @@ fn tracker_refusal(
             .filter(|value| !value.is_empty())
     };
     let needs = match name {
-        "ljos_file" | "ljos_options" | "ljos_start" | "ljos_deed" => true,
+        "ljos_file" | "ljos_options" | "ljos_start" | "ljos_deed" | "ljos_show" => true,
         "ljos_note" | "ljos_finish" => text("issue").is_some(),
         "ljos_claim" | "ljos_release" | "ljos_complete" => text("node").is_some(),
         // A sitting on an unknown id names that id. The tracker sentence
@@ -1683,7 +1781,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A single generic word is not that subject, and then the similarity has to be high. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. The pack is starting when health is not-ready, or the JSON says ready is false or code is starting. Words in the query are not that signal. If the pack stays starting, the tool ranks by words and the reading starts with: Used word search because memory is still starting. A dated search has no word fallback and returns: Memory is starting, so try again in a few seconds. A pack that reports busy is asked again for a short time. If it stays busy, the tool ranks by words and the reading starts with: Used word search because memory search was busy. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Pass min_score to drop a row under that score when it does not name a subject word; 0 returns every row, and the default is 34. Follow with ljos_island for the cluster the task touches.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A single generic word is not that subject, and then the similarity has to be high. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. The pack is starting when health is not-ready, or the JSON says ready is false or code is starting. Words in the query are not that signal. If the pack stays starting, the tool ranks by words and the reading starts with: Used word search because memory is still starting. A dated search has no word fallback and returns: Memory is starting, so try again in a few seconds. A pack that reports busy is asked again for a short time. If it stays busy, the tool ranks by words and the reading is one line that names `ljos search` and the quoted query. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Pass min_score to drop a row under that score when it does not name a subject word; 0 returns every row, and the default is 34. Follow with ljos_island for the cluster the task touches.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -1706,25 +1804,34 @@ impl LjosServer {
         // The same line `ljos search` appends, under the seat this call
         // already resolved.
         ljos_cli::log_recall("search", &args.query);
-        let mut starting = false;
-        let mut busy_words = false;
-        let mut hits = if args
+        // The busy wait already ran inside the search. A pack that stays
+        // busy falls back to words, and the reading is one line that names
+        // this query. A pack that is still starting keeps its own line.
+        let again = search_command(&args.query);
+        let (mut hits, fault) = if args
             .as_of
             .as_deref()
             .is_some_and(|at| !at.trim().is_empty())
         {
-            packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false).map_err(refused)?
+            match packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false) {
+                Ok(hits) => (hits, None),
+                Err(err) if ljos_cli::is_memory_starting(&err) => return Err(refused(err)),
+                Err(err) if ljos_cli::is_reported_busy(&err) || search_can_wait(&err) => {
+                    (Vec::new(), Some(busy_search_line(&again)))
+                }
+                Err(err) => return Err(refused(err)),
+            }
         } else {
             match search_ranked(&args.query, 10) {
-                Ok(hits) => hits,
-                Err(err) if ljos_cli::is_memory_starting(&err) => {
-                    starting = true;
-                    ljos_cli::search_by_words(&args.query, 10)
-                }
-                Err(err) if ljos_cli::is_reported_busy(&err) => {
-                    busy_words = true;
-                    ljos_cli::search_by_words(&args.query, 10)
-                }
+                Ok(hits) => (hits, None),
+                Err(err) if ljos_cli::is_memory_starting(&err) => (
+                    ljos_cli::search_by_words(&args.query, 10),
+                    Some(ljos_cli::MEMORY_STARTING_FALLBACK_LINE.to_string()),
+                ),
+                Err(err) if ljos_cli::is_reported_busy(&err) || search_can_wait(&err) => (
+                    ljos_cli::search_by_words(&args.query, 10),
+                    Some(busy_search_line(&again)),
+                ),
                 Err(err) => return Err(refused(err)),
             }
         };
@@ -1752,7 +1859,10 @@ impl LjosServer {
         let id_refs: Vec<&str> = id_space.iter().map(String::as_str).collect();
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
-        let mut reading = if emptied {
+        let waiting = fault.is_some();
+        let mut reading = if let Some(line) = fault {
+            line
+        } else if emptied {
             ljos_cli::word_rank::no_relevant_line(&args.query)
         } else if let Some(suggest) = close_miss.as_ref() {
             ljos_cli::word_rank::no_close_line_with(&args.query, suggest.as_deref())
@@ -1765,31 +1875,33 @@ impl LjosServer {
         } else {
             search_reading(hits.len(), !lexical).to_string()
         };
-        if starting {
-            reading = format!("{}\n{reading}", ljos_cli::MEMORY_STARTING_FALLBACK_LINE);
-        } else if busy_words {
-            reading = format!("{}\n{reading}", ljos_cli::MEMORY_SEARCH_BUSY_LINE);
+        if !waiting {
+            if let Some(note) = ljos_cli::search_token_note() {
+                reading.push('\n');
+                reading.push_str(note);
+            }
         }
-        if let Some(note) = ljos_cli::search_token_note() {
-            reading.push('\n');
-            reading.push_str(note);
+        let mut cut = false;
+        let rows: Vec<HitRow> = hits
+            .into_iter()
+            .map(|h| HitRow {
+                label: kind_label(&h),
+                id: ljos_cli::search_hit_id(&h.kind, h.id.as_deref(), &id_refs),
+                kind: h.kind,
+                text: capped_row(&h.text, &mut cut),
+                score: ljos_cli::word_rank::printed_score(h.score),
+                age: age_of(h.ts.as_deref(), &now),
+                from: other_seat(&h.entities, &mine),
+                ts: h.ts,
+            })
+            .collect();
+        if cut && !waiting {
+            if !reading.is_empty() {
+                reading.push(' ');
+            }
+            reading.push_str(&format!("A row was cut, so run `{again}`."));
         }
-        Ok(Json(SearchPage {
-            reading,
-            rows: hits
-                .into_iter()
-                .map(|h| HitRow {
-                    label: kind_label(&h),
-                    id: ljos_cli::search_hit_id(&h.kind, h.id.as_deref(), &id_refs),
-                    kind: h.kind,
-                    text: h.text,
-                    score: ljos_cli::word_rank::printed_score(h.score),
-                    age: age_of(h.ts.as_deref(), &now),
-                    from: other_seat(&h.entities, &mine),
-                    ts: h.ts,
-                })
-                .collect(),
-        }))
+        Ok(Json(SearchPage { reading, rows }))
     }
 
     #[tool(
@@ -2048,6 +2160,22 @@ impl LjosServer {
             .text
             .push_str(&ljos_cli::graphify::recall_section(&args.issue));
         Ok(said)
+    }
+
+    #[tool(
+        description = "Call this to read one ticket: the header, the body, and the latest notes, newest last. The same page `ljos show` prints. Pass all to print every note. The issue id is the tracker id (proj-1a2b).",
+        annotations(
+            title = "Show a ticket",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_show(
+        &self,
+        Parameters(args): Parameters<ShowArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let text = ljos_cli::show_issue(&args.issue, args.all.unwrap_or(false)).map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
     }
 
     #[tool(
@@ -3747,6 +3875,50 @@ fn note_ordered_response(id: &RequestId) {
     }
 }
 
+/// A protocol error the model cannot act on, rewritten as one line that
+/// names the command. A message that already names a command stays.
+fn clarify_outbound(body: &[u8]) -> Vec<u8> {
+    let mut owned = body.to_vec();
+    if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(error) = value.get_mut("error").and_then(|item| item.as_object_mut()) {
+            let message = error
+                .get("message")
+                .and_then(|item| item.as_str())
+                .unwrap_or("");
+            if !message.contains('`') {
+                let code = error.get("code").and_then(|item| item.as_i64());
+                let next = match code {
+                    Some(-32700) => Some(
+                        "this line is not JSON, so send one JSON-RPC object per line. Run `ljos mcp --help`."
+                            .to_string(),
+                    ),
+                    Some(-32600) => Some(
+                        "this request is not a JSON-RPC call, so send a method and an id. Run `ljos mcp --help`."
+                            .to_string(),
+                    ),
+                    Some(-32601) => Some(format!(
+                        "{message} is not a method this server serves, so run `ljos mcp --help`."
+                    )),
+                    Some(-32602) if message == "tool not found" => {
+                        Some("that tool is not served, so run `ljos help`.".to_string())
+                    }
+                    _ => None,
+                };
+                if let Some(next) = next {
+                    error.insert("message".to_string(), serde_json::Value::String(next));
+                    if let Ok(rewritten) = serde_json::to_vec(&value) {
+                        owned = rewritten;
+                    }
+                }
+            }
+        }
+    }
+    if !owned.ends_with(b"\n") {
+        owned.push(b'\n');
+    }
+    owned
+}
+
 fn response_id(line: &[u8]) -> Option<RequestId> {
     let value = serde_json::from_slice::<serde_json::Value>(line).ok()?;
     match value.get("id")? {
@@ -3771,7 +3943,8 @@ impl OutState {
             if body.last() == Some(&b'\r') {
                 body.pop();
             }
-            if let Some(id) = response_id(&body) {
+            let line = clarify_outbound(&body);
+            if let Some(id) = response_id(&line[..line.len().saturating_sub(1)]) {
                 let queued = response_order().iter().any(|queued| queued == &id);
                 if queued {
                     self.held.push((id, line));
@@ -3916,6 +4089,11 @@ pub struct InboundOrder<R> {
     pending: Vec<u8>,
     ended: bool,
     settle: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    /// Bytes read and not yet a full line.
+    raw: Vec<u8>,
+    /// Lines to hand to rmcp, after a bad line has been replaced.
+    deliver: std::collections::VecDeque<u8>,
+    plain_n: u64,
 }
 
 impl<R> InboundOrder<R> {
@@ -3925,6 +4103,38 @@ impl<R> InboundOrder<R> {
             pending: Vec::new(),
             ended: false,
             settle: None,
+            raw: Vec::new(),
+            deliver: std::collections::VecDeque::new(),
+            plain_n: 0,
+        }
+    }
+
+    /// Take one line for rmcp. A line that is not JSON becomes a request
+    /// this server answers with the command to send a real one.
+    fn take_line(&mut self, mut line: Vec<u8>) {
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        if line.is_empty() || serde_json::from_slice::<serde_json::Value>(&line).is_ok() {
+            line.push(b'\n');
+            self.push_bytes(&line);
+            self.deliver.extend(line);
+            return;
+        }
+        self.plain_n = self.plain_n.saturating_add(1);
+        let synthetic = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":\"ljos-plain-{}\",\"method\":\"ljos/plain\",\"params\":{{}}}}\n",
+            self.plain_n
+        );
+        self.push_bytes(synthetic.as_bytes());
+        self.deliver.extend(synthetic.into_bytes());
+    }
+
+    fn take_ready_lines(&mut self) {
+        while let Some(i) = self.raw.iter().position(|byte| *byte == b'\n') {
+            let mut line: Vec<u8> = self.raw.drain(..=i).collect();
+            line.pop();
+            self.take_line(line);
         }
     }
 
@@ -3953,21 +4163,39 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for InboundOrder<R> {
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
         crate::lifetime::park_reader(cx.waker());
-        if !this.ended {
-            let before = buf.filled().len();
-            let room = buf.remaining();
+        if buf.remaining() == 0 {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        loop {
+            if !this.deliver.is_empty() {
+                let n = buf.remaining().min(this.deliver.len());
+                let chunk: Vec<u8> = this.deliver.drain(..n).collect();
+                buf.put_slice(&chunk);
+                return std::task::Poll::Ready(Ok(()));
+            }
+            if this.ended {
+                break;
+            }
+            let mut tmp = vec![0u8; buf.remaining().max(1)];
+            let mut read = tokio::io::ReadBuf::new(&mut tmp);
             // A client that has already exited must not discard a read that
             // has completed. Tokio's stdin thread can hold those bytes after
             // the fd itself looks empty. A read that is still blocked, with
             // the write end held open by a launcher, will not finish; that
             // one is the end of input.
-            match std::pin::Pin::new(&mut this.inner).poll_read(cx, buf) {
+            match std::pin::Pin::new(&mut this.inner).poll_read(cx, &mut read) {
                 std::task::Poll::Ready(Ok(())) => {
-                    if buf.filled().len() > before || room == 0 {
-                        this.push_bytes(&buf.filled()[before..]);
-                        return std::task::Poll::Ready(Ok(()));
+                    let got = read.filled();
+                    if got.is_empty() {
+                        this.ended = true;
+                        if !this.raw.is_empty() {
+                            let rest = std::mem::take(&mut this.raw);
+                            this.take_line(rest);
+                        }
+                    } else {
+                        this.raw.extend_from_slice(got);
+                        this.take_ready_lines();
                     }
-                    this.ended = true;
                 }
                 std::task::Poll::Ready(Err(err)) => return std::task::Poll::Ready(Err(err)),
                 std::task::Poll::Pending => {
@@ -3975,6 +4203,10 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for InboundOrder<R> {
                         return std::task::Poll::Pending;
                     }
                     this.ended = true;
+                    if !this.raw.is_empty() {
+                        let rest = std::mem::take(&mut this.raw);
+                        this.take_line(rest);
+                    }
                 }
             }
         }
@@ -4181,6 +4413,13 @@ impl ServerHandler for LjosServer {
                 .into(),
             ));
         }
+        if Self::tool_router().get(&request.name).is_none() {
+            let missing = request.name.to_string();
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "{missing} is not a tool, so run `ljos help`."
+            ))])
+            .into());
+        }
         // The seat file can name the tracker. Read it before deciding the
         // tracker is missing. A fifo is not opened.
         ljos_cli::load_seat_env();
@@ -4338,6 +4577,7 @@ impl ServerHandler for LjosServer {
         )
         .await
         .or_else(as_tool_error)?;
+        let response = plain_arguments(&name, response);
         if let Some(line) = ljos_cli::tool_bound::failure() {
             return Ok(attach_next(
                 &name,
@@ -4384,6 +4624,26 @@ impl ServerHandler for LjosServer {
             .cloned()?;
         publish_tool(&mut tool);
         Some(tool)
+    }
+
+    /// A method this server does not serve. One line names `ljos mcp --help`.
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CustomResult, McpError> {
+        let method = request.method;
+        if method == "ljos/plain" {
+            return Err(McpError::parse_error(
+                "this line is not JSON, so send one JSON-RPC object per line. Run `ljos mcp --help`.",
+                None,
+            ));
+        }
+        Err(McpError::new(
+            ErrorCode::METHOD_NOT_FOUND,
+            format!("{method} is not a method this server serves, so run `ljos mcp --help`."),
+            None,
+        ))
     }
 
     /// The client has said who it is. That name is not the seat. Record
@@ -5127,7 +5387,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            52,
+            53,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );

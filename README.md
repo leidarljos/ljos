@@ -16,7 +16,7 @@ It stores the sentence as written. Search uses a local encoder when one is insta
 `ljos onboard --example` lists the runners, among them Claude Code, Codex and Cursor.
 
 
-- 8,316 tokens for the 20 core Model Context Protocol (MCP) tools, against 18,238 for all 52 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
+- 8,543 tokens for the 21 core Model Context Protocol (MCP) tools, against 18,465 for all 53 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
 - 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
 - The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
 - packset, the memory writer, publishes a LongMemEval_S session retrieval run ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). That page records the figures. This tree does not. The run scores retrieval, not answer accuracy.
@@ -214,12 +214,12 @@ A push onto `main` or `develop` warns under `sitting-gate` until the ticket of t
 
 ## The MCP server
 
-`ljos-mcp` serves the same verbs over stdio. By default it lists twenty core
+`ljos-mcp` serves the same verbs over stdio. By default it lists twenty-one core
 tools, guard and memory first: `rule`, `prefer`, `remember`,
-`search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
+`search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `show`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. `measurements/mcp-size.txt` records
-8,316 tokens for the core set against 18,238 for all fifty-two.
+8,543 tokens for the core set against 18,465 for all fifty-three.
 `LJOS_MCP_TOOLS=all` lists every tool.
 
 ```json

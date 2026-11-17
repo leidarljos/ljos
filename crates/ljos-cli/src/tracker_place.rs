@@ -594,7 +594,7 @@ pub fn pinned(value: &str) -> bool {
 /// A root named in the environment or in the seat's vissue configuration
 /// is that tracker, and so is a `vissue.toml` in the working directory.
 /// A bare `Software/` directory is not.
-pub const MISSING_TRACKER: &str = "No tracker found: set VISSUE_ROOT to the tracker checkout.";
+pub const MISSING_TRACKER: &str = "No tracker found, so run `ljos onboard`.";
 
 /// [`MISSING_TRACKER`] when nothing names a tracker. `None` when a later
 /// call can use the one that is named.

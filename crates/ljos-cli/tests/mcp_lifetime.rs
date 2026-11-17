@@ -514,8 +514,9 @@ fn the_clients_death_ends_the_server_with_stdin_still_open() {
     assert!(ended, "the server outlived its client by 10 s\n{stderr}");
 }
 
-/// No request for the orphan window. An editor still above the server
-/// keeps it; otherwise it exits. Stdin stays open either way.
+/// No request for the orphan window. The client that started the server
+/// is still there, so the server stays up and still answers. Stdin stays
+/// open.
 #[test]
 #[cfg(unix)]
 fn an_orphan_exits_only_when_no_editor_holds_it() {
@@ -539,23 +540,23 @@ fn an_orphan_exits_only_when_no_editor_holds_it() {
         writeln!(stdin, "{line}").unwrap();
     }
     await_initialize(&mut stdout);
-    let held = ljos_cli::proc_tree::editor_above();
-    if held {
-        std::thread::sleep(Duration::from_secs(6));
-        let alive = !process_ended(pid);
-        let _ = child.kill();
-        let _ = child.wait();
-        drop(stdin);
-        assert!(alive, "an editor above the server and it still exited");
-    } else {
-        let ended = ended_within(pid, Duration::from_secs(12));
-        if !ended {
-            let _ = child.kill();
-        }
-        let _ = child.wait();
-        drop(stdin);
-        assert!(ended, "no editor above the server and it stayed up");
-    }
+    // The process that started the server is the client, and it is still
+    // here. A quiet stretch does not end the server. It still answers.
+    std::thread::sleep(Duration::from_secs(6));
+    let alive = !process_ended(pid);
+    assert!(alive, "the client was still there and the server exited");
+    let ping = serde_json::json!({"jsonrpc": "2.0", "id": 9, "method": "tools/list"});
+    writeln!(stdin, "{ping}").unwrap();
+    let mut line = String::new();
+    let got = std::io::BufRead::read_line(&mut stdout, &mut line).unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(stdin);
+    assert!(got > 0, "no answer after the quiet stretch");
+    assert!(
+        line.contains("\"id\":9") || line.contains("\"id\": 9"),
+        "{line}"
+    );
 }
 
 /// A shell between the client and the server stays up. The server still

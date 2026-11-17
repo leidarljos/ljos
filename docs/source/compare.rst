@@ -31,7 +31,7 @@ Where the data lives                Org files, JSON lines and a content-addresse
 Review or forgetting                a Free Spaced Repetition Scheduler (FSRS) review clock the model updates or deletes                                "dreaming" in MemFS                                fact invalidation with a time
 Record of what work produced        deeds with inclusion receipts                          not documented                                              not documented                                     provenance to source episodes
 Agents vote and settle              yes: ``ljos vote``, ``ljos consensus``                 not documented                                              not documented                                     not documented
-Model Context Protocol (MCP) server yes, 20 core tools                                     guides per coding agent                                     not documented                                     not documented
+Model Context Protocol (MCP) server yes, 21 core tools                                     guides per coding agent                                     not documented                                     not documented
 Licence                             MIT                                                    Apache-2.0                                                  Apache-2.0                                         Apache-2.0
 =================================== ====================================================== =========================================================== ================================================== =======================================================
 
@@ -50,7 +50,7 @@ Sync between machines               a git remote                                
 Agents vote and settle              yes: ``ljos vote``, ``ljos consensus``              not documented                                                      not documented                                  not documented
 Mail between agents                 yes: ``ljos send``                                  not documented                                                      yes: message issues with threads                not documented
 Checked handover between machines   a BagIt bag, signed when the sender has a key       not documented                                                      not documented                                  not documented
-Model Context Protocol (MCP) server yes, 20 core tools                                  yes                                                                 yes: ``beads-mcp``                              not documented
+Model Context Protocol (MCP) server yes, 21 core tools                                  yes                                                                 yes: ``beads-mcp``                              not documented
 Licence                             MIT                                                 AGPL-3.0                                                            MIT                                             GPL-3.0
 =================================== =================================================== =================================================================== =============================================== ================================================
 

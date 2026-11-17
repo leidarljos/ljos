@@ -86,7 +86,13 @@ over stdio:
 
 ``ljos onboard`` with no ``--harness`` onboards every runner it finds, at a terminal or in a pipe, and a pipe prints that JSON on stdout with the setup lines on stderr after the tracker, the memory writer and the deed store are set up.
 ``ljos onboard --harness json`` prints the JSON alone and leaves those stores unchanged.
-Paste it where the runner keeps its MCP servers. The ``env`` is empty on
+Paste it where the runner keeps its MCP servers.
+
+The server stays up when ``packsetd`` restarts and while the client is quiet.
+A line that is not JSON, an unknown method, a missing tracker, a missing seat, or a busy pack is one line and names the command that fixes it.
+``ljos_show`` reads a ticket the way ``ljos show`` does.
+
+The ``env`` is empty on
 purpose. The server does not take the seat from the client that connects.
 Set ``LJOS_SEAT`` in that entry's ``env``, or a ``seat=`` line in
 ``~/.config/ljos/env``, or a row in ``~/.config/ljos/seats.toml``.

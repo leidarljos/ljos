@@ -22,6 +22,7 @@ const CORE: &[&str] = &[
     "ljos_options",
     "ljos_note",
     "ljos_recall",
+    "ljos_show",
     "ljos_sitting",
     "ljos_finish",
     "ljos_claim",
@@ -34,7 +35,7 @@ const CORE: &[&str] = &[
     "ljos_doctor",
 ];
 
-const MISSING_TRACKER: &str = "No tracker found: set VISSUE_ROOT to the tracker checkout.";
+const MISSING_TRACKER: &str = "No tracker found, so run `ljos onboard`.";
 
 fn script(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
