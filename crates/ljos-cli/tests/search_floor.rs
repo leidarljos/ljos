@@ -380,6 +380,24 @@ fn a_score_below_zero_is_refused() {
     );
 }
 
+const GLAZE: &str = "Glaze crawls when the bisque is still damp.";
+const GLAZE_HIT: &str = r#"{"hits":[{"id":"own-glaze","kind":"lesson","text":"Glaze crawls when the bisque is still damp.","score":55.0,"ballots":2,"of":3,"cosine":0.9,"entities":["seat:ada"]}],"rank":"relevance"}"#;
+const GLAZE_QUERY: &str = "glaze crawls bisque";
+
+fn json_doc(out: &std::process::Output) -> serde_json::Value {
+    let (stdout, stderr) = text(out);
+    serde_json::from_str(&stdout).unwrap_or_else(|err| panic!("json: {err}\n{stdout}{stderr}"))
+}
+
+fn shown_scores(doc: &serde_json::Value) -> Vec<f64> {
+    doc["hits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{doc}"))
+        .iter()
+        .map(|row| row["score"].as_f64().unwrap_or(-1.0))
+        .collect()
+}
+
 #[test]
 fn a_search_with_no_query_exits_2_and_names_an_example_and_the_listing() {
     let seat = Seat::open();
@@ -413,4 +431,125 @@ fn a_search_with_no_query_exits_2_and_names_an_example_and_the_listing() {
     let (stdout, stderr) = text(&named);
     assert!(named.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains("damper"), "{stdout}{stderr}");
+}
+
+#[test]
+fn min_score_floors_a_meaning_row_that_names_the_subject() {
+    let seat = Seat::at(pack(GLAZE_HIT));
+    let shown = seat.run(&["search", "--json", GLAZE_QUERY]);
+    let (stdout, stderr) = text(&shown);
+    assert!(shown.status.success(), "{stdout}{stderr}");
+    assert_eq!(shown_scores(&json_doc(&shown)), vec![55.0], "{stdout}");
+
+    for floor in ["0", "34", "55", "54.9"] {
+        let out = seat.run(&["search", "--json", "--min-score", floor, GLAZE_QUERY]);
+        let (stdout, stderr) = text(&out);
+        assert!(out.status.success(), "{floor}\n{stdout}{stderr}");
+        let doc = json_doc(&out);
+        assert_eq!(shown_scores(&doc), vec![55.0], "floor {floor}: {doc}");
+        assert_eq!(doc["hits"][0]["text"].as_str(), Some(GLAZE), "{doc}");
+    }
+
+    for floor in ["55.1", "56", "90", "100"] {
+        let out = seat.run(&["search", "--json", "--min-score", floor, GLAZE_QUERY]);
+        let (stdout, stderr) = text(&out);
+        assert!(out.status.success(), "{floor}\n{stdout}{stderr}");
+        let doc = json_doc(&out);
+        assert!(
+            shown_scores(&doc).is_empty(),
+            "a row under {floor} is still printed: {doc}"
+        );
+        assert!(
+            doc["reading"]
+                .as_str()
+                .unwrap_or("")
+                .contains("No relevant matches for"),
+            "{doc}"
+        );
+        assert!(
+            doc["suggestion"]
+                .as_str()
+                .unwrap_or("")
+                .contains("--min-score 0"),
+            "{doc}"
+        );
+        let page = seat.run(&["search", "--min-score", floor, GLAZE_QUERY]);
+        let (stdout, stderr) = text(&page);
+        assert!(page.status.success(), "{floor}\n{stdout}{stderr}");
+        assert!(stdout.contains("No relevant matches for"), "{stdout}");
+        assert!(!stdout.contains("Glaze crawls"), "{stdout}");
+        let porcelain = seat.run(&["search", "--porcelain", "--min-score", floor, GLAZE_QUERY]);
+        let (stdout, _) = text(&porcelain);
+        assert!(stdout.trim().is_empty(), "{floor}: {stdout}");
+    }
+}
+
+#[test]
+fn min_score_floors_a_word_row_that_names_the_subject() {
+    let seat = Seat::open();
+    let query = "kiln damper schedule";
+    let default = seat.run(&["search", "--json", query]);
+    let (stdout, stderr) = text(&default);
+    assert!(default.status.success(), "{stdout}{stderr}");
+    let doc = json_doc(&default);
+    let scores = shown_scores(&doc);
+    assert_eq!(scores.len(), 1, "{doc}");
+    let score = scores[0];
+    assert!(
+        (score - 66.667).abs() < 1.0,
+        "two of three words print near 67, got {score}"
+    );
+    assert!(doc["hits"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .contains("damper"));
+
+    let kept = seat.run(&["search", "--json", "--min-score", "66", query]);
+    assert_eq!(shown_scores(&json_doc(&kept)), vec![score]);
+    for floor in ["67", "90", "100"] {
+        let out = seat.run(&["search", "--json", "--min-score", floor, query]);
+        let (stdout, stderr) = text(&out);
+        assert!(out.status.success(), "{floor}\n{stdout}{stderr}");
+        let doc = json_doc(&out);
+        assert!(
+            shown_scores(&doc).is_empty(),
+            "a word row under {floor} is still printed: {doc}"
+        );
+        assert!(
+            doc["reading"]
+                .as_str()
+                .unwrap_or("")
+                .contains("No relevant matches for"),
+            "{doc}"
+        );
+    }
+    let full = seat.run(&["search", "--json", "--min-score", "100", "kiln damper"]);
+    assert_eq!(shown_scores(&json_doc(&full)), vec![100.0]);
+}
+
+#[test]
+fn a_min_score_outside_0_to_100_exits_2() {
+    let seat = Seat::at(pack(GLAZE_HIT));
+    for floor in ["101", "100.01", "1000", "-1", "-0.5", "nan", "inf", "-inf"] {
+        let flag = format!("--min-score={floor}");
+        let out = seat.run(&["search", &flag, GLAZE_QUERY]);
+        let (stdout, stderr) = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{floor}\n{stdout}{stderr}");
+        assert!(stdout.is_empty(), "{floor} printed rows:\n{stdout}");
+        assert!(
+            stderr.contains("--min-score takes a number from 0 to 100"),
+            "{floor}\n{stderr}"
+        );
+        assert!(stderr.contains("--min-score 50"), "{floor}\n{stderr}");
+        assert_eq!(stderr.lines().count(), 1, "{floor}\n{stderr}");
+    }
+    let json = seat.run(&["search", "--json", "--min-score", "101", GLAZE_QUERY]);
+    let (stdout, stderr) = text(&json);
+    assert_eq!(json.status.code(), Some(2), "{stdout}{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    for floor in ["0", "0.5", "100"] {
+        let out = seat.run(&["search", "--min-score", floor, GLAZE_QUERY]);
+        let (stdout, stderr) = text(&out);
+        assert_ne!(out.status.code(), Some(2), "{floor}\n{stdout}{stderr}");
+    }
 }

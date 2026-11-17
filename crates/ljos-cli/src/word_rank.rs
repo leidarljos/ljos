@@ -208,12 +208,27 @@ pub fn min_score_off_command(query: &str) -> String {
 /// refused a single common word.
 #[must_use]
 pub fn apply_relevance_floor(hits: &mut Vec<Hit>, query: &str, min_score: f64) -> bool {
+    floor(hits, query, min_score, false)
+}
+
+/// [`apply_relevance_floor`] for a floor the person named with `--min-score`.
+///
+/// Every row has to reach `min_score` on the 0 to 100 scale that `--json`
+/// prints, including a row that names a subject word and a ticket. The
+/// other checks still apply. A value of 0 keeps every row.
+#[must_use]
+pub fn apply_strict_floor(hits: &mut Vec<Hit>, query: &str, min_score: f64) -> bool {
+    floor(hits, query, min_score, true)
+}
+
+fn floor(hits: &mut Vec<Hit>, query: &str, min_score: f64, strict: bool) -> bool {
     if min_score <= 0.0 || hits.is_empty() {
         return false;
     }
-    let before = hits.len();
-    hits.retain(|hit| keeps_row(hit, query, min_score));
-    before > 0 && hits.is_empty()
+    hits.retain(|hit| {
+        (!strict || printed_score(hit.score) >= min_score) && keeps_row(hit, query, min_score)
+    });
+    hits.is_empty()
 }
 
 /// Whether `hit` is worth printing for `query` at `min_score`.
@@ -1960,6 +1975,40 @@ mod tests {
         let mut hits = vec![lesson(JOSS, overlap_score(JOSS, RIDLEY))];
         assert!(!apply_relevance_floor(&mut hits, RIDLEY, 0.0));
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn a_named_floor_applies_to_a_row_that_names_the_subject() {
+        let stemmed = || vec![lesson(NARRATED, 0.21)];
+        let query = "GPRidge video narration";
+        let mut hits = stemmed();
+        assert!(!apply_relevance_floor(&mut hits, query, 20.0));
+        assert_eq!(hits.len(), 1, "the default floor keeps a subject word");
+
+        let mut hits = stemmed();
+        assert!(!apply_strict_floor(&mut hits, query, 21.0));
+        assert_eq!(hits.len(), 1, "a score at the floor stays");
+        let mut hits = stemmed();
+        assert!(apply_strict_floor(&mut hits, query, 22.0));
+        assert!(hits.is_empty(), "a score under the floor goes");
+
+        let mut hits = stemmed();
+        assert!(!apply_strict_floor(&mut hits, query, 0.0));
+        assert_eq!(hits.len(), 1, "0 keeps every row");
+
+        let mut meaning = vec![lesson(NARRATED, 71.0)];
+        assert!(!apply_strict_floor(&mut meaning, "narrated video", 71.0));
+        assert!(apply_strict_floor(&mut meaning, "narrated video", 72.0));
+
+        let mut ticket = lesson("Fire the kiln", 0.45);
+        ticket.kind = "ticket".into();
+        ticket.entities = vec!["issue:demo-kiln".into()];
+        let mut hits = vec![ticket.clone()];
+        assert!(!apply_relevance_floor(&mut hits, "kiln", 90.0));
+        assert_eq!(hits.len(), 1, "a ticket stays under the default floor");
+        let mut hits = vec![ticket];
+        assert!(apply_strict_floor(&mut hits, "kiln", 90.0));
+        assert!(hits.is_empty(), "a named floor holds a ticket to its score");
     }
 
     #[test]

@@ -891,9 +891,9 @@ enum Cmd {
         /// Include failed commands. They are stored as attempts and left out of the default list.
         #[arg(long)]
         attempts: bool,
-        /// Lowest score to keep. 34 when omitted. 0 prints every row, including a weak word match.
-        #[arg(long, value_name = "SCORE", default_value = "34")]
-        min_score: f64,
+        /// Lowest score to keep, from 0 to 100. Without it a row that does not name a subject word is dropped under 34. With it every row under SCORE is dropped. 0 prints every row, including a weak word match.
+        #[arg(long, value_name = "SCORE")]
+        min_score: Option<f64>,
     },
     /// List memories that contradict each other.
     ///
@@ -3221,12 +3221,15 @@ fn block_usage_line(cmd: &Cmd) -> Option<String> {
     ))
 }
 
-/// A `search` with no query.
+/// A `search` with no query, or a `--min-score` outside 0 to 100.
 ///
-/// It reads nothing, so the line comes before the seat is resolved and
-/// nothing is searched.
+/// Neither reads the memory store, so the line comes before the seat is
+/// resolved and nothing is searched.
 fn search_usage_line(cmd: &Cmd) -> Option<String> {
-    let Cmd::Search { query, .. } = cmd else {
+    let Cmd::Search {
+        query, min_score, ..
+    } = cmd
+    else {
         return None;
     };
     if query.iter().all(|word| word.trim().is_empty()) {
@@ -3235,7 +3238,13 @@ fn search_usage_line(cmd: &Cmd) -> Option<String> {
                 .to_string(),
         );
     }
-    None
+    let score = (*min_score)?;
+    if (0.0..=100.0).contains(&score) {
+        return None;
+    }
+    Some(format!(
+        "search: --min-score takes a number from 0 to 100, not {score}, so run `ljos search \"lexical default\" --min-score 50`."
+    ))
 }
 
 /// An empty or whitespace id on `note` or `finish`.
@@ -5137,9 +5146,6 @@ fn run_command() -> Result<()> {
             attempts,
             min_score,
         } => {
-            if !min_score.is_finite() || min_score < 0.0 {
-                bail!("search: --min-score takes a number from 0 up, not {min_score}.");
-            }
             ljos_cli::log_recall("search", &query.join(" "));
             // A cold encoder gets long enough to load and be asked again.
             // A warm pack keeps the short budget. Past it the word ranking
@@ -5340,8 +5346,14 @@ fn run_command() -> Result<()> {
             // receipt, a mail row and the other bookkeeping kinds are not
             // part of the page, in any of those paths.
             ljos_cli::conceal_search_noise(&mut hits, attempts);
-            let floor_emptied =
-                ljos_cli::word_rank::apply_relevance_floor(&mut hits, &asked, min_score);
+            let floor_emptied = match min_score {
+                Some(score) => ljos_cli::word_rank::apply_strict_floor(&mut hits, &asked, score),
+                None => ljos_cli::word_rank::apply_relevance_floor(
+                    &mut hits,
+                    &asked,
+                    ljos_cli::word_rank::DEFAULT_MIN_SCORE,
+                ),
+            };
             if !hits.is_empty() {
                 close_miss = None;
             }
