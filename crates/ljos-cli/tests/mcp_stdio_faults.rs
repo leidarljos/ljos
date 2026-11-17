@@ -338,7 +338,17 @@ fn a_restarted_writer_is_reached_on_the_next_call() {
     let port = probe.local_addr().unwrap().port();
     drop(probe);
     let serve = |stop: Arc<std::sync::atomic::AtomicBool>| {
-        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let mut waited = 0;
+        let listener = loop {
+            match TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => break listener,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && waited < 100 => {
+                    waited += 1;
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => panic!("bind 127.0.0.1:{port}: {e}"),
+            }
+        };
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
