@@ -40364,19 +40364,6 @@ fn policy_reading_known(
         Some(rule) if !deny => Some(rule),
         _ => gated,
     };
-    // Leave a little of the budget for the verdict text after this wait.
-    let wait = wall_left()
-        .unwrap_or_else(policy_recall_wait)
-        .min(policy_recall_wait().saturating_sub(started.elapsed()))
-        .saturating_sub(std::time::Duration::from_millis(40));
-    let context = recall.recv_timeout(wait).unwrap_or_else(|_| {
-        eprintln!(
-            "ljos policy: the memory recall had not answered after {} ms, so this verdict carries none",
-            wait.as_millis()
-        );
-        String::new()
-    });
-    let ruled = hook_output_ruled(&call, &context, gated.as_ref());
     // The person's own allow for this line is the verdict: the law is not
     // asked, and the choice is written to the book so it can be read back.
     let person_allowed = user_rules::allows(&line).is_some();
@@ -40400,6 +40387,19 @@ fn policy_reading_known(
             _ => None,
         }
     };
+    // Recall uses the time left after the command verdict.
+    let wait = wall_left()
+        .unwrap_or_else(policy_recall_wait)
+        .min(policy_recall_wait().saturating_sub(started.elapsed()))
+        .saturating_sub(std::time::Duration::from_millis(40));
+    let context = recall.recv_timeout(wait).unwrap_or_else(|_| {
+        eprintln!(
+            "ljos policy: the memory recall had not answered after {} ms, so this verdict carries none",
+            wait.as_millis()
+        );
+        String::new()
+    });
+    let ruled = hook_output_ruled(&call, &context, gated.as_ref());
     let refused = gated.as_ref().is_some_and(|rule| rule.verdict != "allow")
         || tcb.as_deref().is_some_and(|t| !tcb_is_allow(t));
     if refused {
@@ -40492,19 +40492,6 @@ fn advisory_policy_reading_known(
         })
     };
     let gated = fast.or(gated);
-    // Leave a little of the budget for the verdict text after this wait.
-    let wait = wall_left()
-        .unwrap_or_else(policy_recall_wait)
-        .min(policy_recall_wait().saturating_sub(started.elapsed()))
-        .saturating_sub(std::time::Duration::from_millis(40));
-    let context = recall.recv_timeout(wait).unwrap_or_else(|_| {
-        eprintln!(
-            "ljos policy: the memory recall had not answered after {} ms, so this verdict carries none",
-            wait.as_millis()
-        );
-        String::new()
-    });
-    let ruled = hook_output_ruled(&call, &context, gated.as_ref());
     // The person's own allow for this line is the verdict: the law is not
     // asked, and the choice is written to the book so it can be read back.
     let person_allowed = user_rules::allows(&line).is_some();
@@ -40528,6 +40515,19 @@ fn advisory_policy_reading_known(
             _ => None,
         }
     };
+    // Recall uses the time left after the command verdict.
+    let wait = wall_left()
+        .unwrap_or_else(policy_recall_wait)
+        .min(policy_recall_wait().saturating_sub(started.elapsed()))
+        .saturating_sub(std::time::Duration::from_millis(40));
+    let context = recall.recv_timeout(wait).unwrap_or_else(|_| {
+        eprintln!(
+            "ljos policy: the memory recall had not answered after {} ms, so this verdict carries none",
+            wait.as_millis()
+        );
+        String::new()
+    });
+    let ruled = hook_output_ruled(&call, &context, gated.as_ref());
     let refused = gated.as_ref().is_some_and(|rule| rule.verdict != "allow")
         || tcb.as_deref().is_some_and(|t| !tcb_is_allow(t));
     if refused {

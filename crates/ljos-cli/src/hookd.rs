@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// The longest a call waits for a slot. The runner's gate deadline counts
-/// from the call's start, so the wait and the work share that budget.
+/// The requested admission cap. The hook reserves part of its wall
+/// budget for judging the call after admission.
 pub const ADMIT_MS: u64 = 3_000;
 /// Calls waiting at once before the next one is judged here instead.
 pub const QUEUE_CAP: usize = 64;
@@ -205,12 +205,10 @@ fn env_num(key: &str) -> Option<u64> {
 }
 
 fn admit_budget() -> Duration {
-    if let Some(ms) = env_num("LJOS_HOOK_ADMIT_MS") {
-        return Duration::from_millis(ms);
-    }
-    // The queue and the work share the hook's wall budget. A slot that
-    // never comes is judged in this process once that budget is spent.
-    Duration::from_millis(ADMIT_MS.min(crate::HOOK_WALL_BUDGET_MS))
+    let requested = env_num("LJOS_HOOK_ADMIT_MS").unwrap_or(ADMIT_MS);
+    // A full queue still leaves half the wall budget for the verdict.
+    let cap = crate::HOOK_WALL_BUDGET_MS / 2;
+    Duration::from_millis(requested.min(cap))
 }
 
 enum Ask {
