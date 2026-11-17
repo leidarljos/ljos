@@ -7,7 +7,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 /// The tools `tools/list` returns when `LJOS_MCP_TOOLS` is unset.
-/// `measurements/mcp-size.txt` records this set at 7,901 tokens.
+/// `measurements/mcp-size.txt` records this set at 8,825 tokens.
 const CORE: &[&str] = &[
     "ljos_rule",
     "ljos_prefer",
@@ -20,6 +20,7 @@ const CORE: &[&str] = &[
     "ljos_note",
     "ljos_recall",
     "ljos_show",
+    "ljos_ready",
     "ljos_sitting",
     "ljos_finish",
     "ljos_claim",

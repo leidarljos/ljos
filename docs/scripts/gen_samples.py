@@ -1242,8 +1242,27 @@ def sitting_plan_sample(ljos: Path) -> str:
         code, ready = _pty_run(["ljos", "ready", "--mine"], env, cwd, 60)
         if code != 0:
             raise SystemExit(f"gen_samples: ready exited {code}:\n{ready}")
+        for number in range(19):
+            code, filed = _pty_run(
+                ["ljos", "file", f"queued work {number + 1:02}", "-p", "day", "--top"],
+                env,
+                cwd,
+                60,
+            )
+            if code != 0:
+                raise SystemExit(f"gen_samples: queued file exited {code}:\n{filed}")
+        code, ready_page = _pty_run(["ljos", "ready"], env, cwd, 60)
+        if code != 0:
+            raise SystemExit(f"gen_samples: ready page exited {code}:\n{ready_page}")
     finally:
         _drop_home(home)
+    page_lines = ready_page.strip().splitlines()
+    if len(page_lines) < 5 or page_lines[0] != "ready  shown 20 of 21":
+        raise SystemExit(f"gen_samples: ready page count changed:\n{ready_page}")
+    hint = "See more with `--limit` or `--all`. Narrow with `-p` or `--mine`."
+    if page_lines[-1] != hint:
+        raise SystemExit(f"gen_samples: ready page hint changed:\n{ready_page}")
+    page_excerpt = "\n".join([*page_lines[:4], "...", page_lines[-1]])
     block = (
         '$ ljos sitting --plan "Ship the codec" -p day -- "measure the files" "pick a default"\n'
         f"{planned.strip()}\n"
@@ -1251,6 +1270,8 @@ def sitting_plan_sample(ljos: Path) -> str:
         f"{ticked.strip()}\n"
         "$ ljos ready --mine\n"
         f"{ready.strip()}\n"
+        "$ ljos ready\n"
+        f"{page_excerpt}\n"
     )
     block = block.replace(str(home), "/home/ada")
     block = _stand_in_ids(block)
@@ -1264,6 +1285,8 @@ def sitting_plan_sample(ljos: Path) -> str:
         'day-ab12 is yours. `ljos finish day-ab12 --lesson "..."`',
         "ticked day-cd34",
         "next: day-ef56  pick a default",
+        "ready  shown 20 of 21",
+        hint,
     ):
         if needle not in block:
             raise SystemExit(f"gen_samples: sitting sample missing {needle!r}:\n{block}")

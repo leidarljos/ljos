@@ -25,6 +25,7 @@ const EVERY_TOOL: &[&str] = &[
     "ljos_note",
     "ljos_recall",
     "ljos_show",
+    "ljos_ready",
     "ljos_sitting",
     "ljos_finish",
     "ljos_claim",

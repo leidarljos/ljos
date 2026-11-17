@@ -214,12 +214,12 @@ A push onto `main` or `develop` warns under `sitting-gate` until the ticket of t
 
 ## The MCP server
 
-`ljos-mcp` serves the same verbs over stdio. By default it lists twenty-one core
+`ljos-mcp` serves the same verbs over stdio. By default it lists twenty-two core
 tools, guard and memory first: `rule`, `prefer`, `remember`,
-`search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `show`, `sitting`,
+`search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `show`, `ready`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. `measurements/mcp-size.txt` records
-8,543 tokens for the core set against 18,465 for all fifty-three.
+8,825 tokens for the core set against 18,747 for all fifty-four.
 `LJOS_MCP_TOOLS=all` lists every tool.
 
 ```json

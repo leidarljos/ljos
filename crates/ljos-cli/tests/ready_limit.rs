@@ -10,7 +10,8 @@
 
 ljos_test_boot::harness!();
 
-use std::process::{Command, Output};
+use std::io::Write as _;
+use std::process::{Command, Output, Stdio};
 
 struct Board {
     dir: tempfile::TempDir,
@@ -53,9 +54,9 @@ impl Board {
         }
     }
 
-    fn ljos(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
-            .args(args)
+    fn command(&self, program: &str) -> Command {
+        let mut command = Command::new(program);
+        command
             .current_dir(self.dir.path())
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -70,7 +71,13 @@ impl Board {
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
             .env("LJOS_ASK_PACK", "off")
-            .env("LJOS_USER_RULES_SYNC", "off")
+            .env("LJOS_USER_RULES_SYNC", "off");
+        command
+    }
+
+    fn ljos(&self, args: &[&str]) -> Output {
+        self.command(env!("CARGO_BIN_EXE_ljos"))
+            .args(args)
             .output()
             .unwrap()
     }
@@ -84,6 +91,51 @@ impl Board {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn mcp_ready(&self, arguments: serde_json::Value) -> String {
+        let mut child = self
+            .command(env!("CARGO_BIN_EXE_ljos-mcp"))
+            .env("LJOS_MCP_TOOLS", "ready")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let lines = [
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "ready-test", "version": "0"}
+            }}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "ljos_ready", "arguments": arguments
+            }}),
+        ];
+        let mut stdin = child.stdin.take().unwrap();
+        for line in lines {
+            writeln!(stdin, "{line}").unwrap();
+        }
+        drop(stdin);
+        let out = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        let answer: serde_json::Value = stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .find(|answer: &serde_json::Value| answer["id"] == 2)
+            .unwrap_or_else(|| panic!("no ready answer\nstdout:\n{stdout}\nstderr:\n{stderr}"));
+        assert_ne!(answer["result"]["isError"], true, "{answer}");
+        let content = answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("ready text missing: {answer}"));
+        let said: serde_json::Value = serde_json::from_str(content)
+            .unwrap_or_else(|err| panic!("ready result is not Said: {err}: {content}"));
+        said["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("ready Said has no text: {said}"))
+            .to_string()
     }
 }
 
@@ -127,14 +179,11 @@ fn assert_short_page(page: &str, shown: usize, total: usize) {
     let header = format!("ready  shown {shown} of {total}");
     assert_eq!(lines.next(), Some(header.as_str()), "{page}");
     if shown < total {
-        let hint = lines.next().unwrap_or("");
+        let hint = lines.last().unwrap_or("");
         assert_eq!(hint, HINT, "{page}");
         assert!(hint.chars().count() <= 80, "{hint}");
         assert_eq!(page.matches(HINT).count(), 1, "{page}");
-        assert!(
-            !page.trim_end().ends_with(HINT),
-            "the hint belongs under the header:\n{page}"
-        );
+        assert!(page.trim_end().ends_with(HINT), "{page}");
     } else {
         assert!(!page.contains(HINT), "{page}");
     }
@@ -188,6 +237,16 @@ fn the_default_page_is_short_and_names_how_to_see_more() {
     let every_json = board.ok(&["ready", "--json", "--all"]);
     assert_eq!(json_counts(&every_json), (23, 23, 23), "{every_json}");
     assert_eq!(json_ids(&every_json), every);
+
+    let mcp = board.mcp_ready(serde_json::json!({}));
+    assert_short_page(&mcp, 20, 23);
+    assert_eq!(ticket_ids(&mcp), every[..20], "{mcp}");
+    let mcp_five = board.mcp_ready(serde_json::json!({"limit": 5}));
+    assert_short_page(&mcp_five, 5, 23);
+    assert_eq!(ticket_ids(&mcp_five), every[..5], "{mcp_five}");
+    let mcp_all = board.mcp_ready(serde_json::json!({"all": true}));
+    assert_short_page(&mcp_all, 23, 23);
+    assert_eq!(ticket_ids(&mcp_all), every, "{mcp_all}");
 
     let narrowed = board.ok(&["ready", "-p", "probe"]);
     assert_short_page(&narrowed, 20, 23);
@@ -255,6 +314,14 @@ fn own_claims_come_first_then_priority_then_recent_activity() {
 :CLAIMED_AT: [2026-03-01 Sun 08:00]
 :END:
 
+* STARTED [#C] Theirs fresh low priority
+:PROPERTIES:
+:ID:         probe-t2
+:CREATED:    [2099-01-01 Thu]
+:CLAIMED_BY: other
+:CLAIMED_AT: [2099-01-01 Thu 08:00]
+:END:
+
 * TODO [#A] New high
 :PROPERTIES:
 :ID:         probe-a1
@@ -303,15 +370,47 @@ fn own_claims_come_first_then_priority_then_recent_activity() {
 ",
     )
     .unwrap();
-    // This seat, then free tickets, then another seat. Priority, then the
-    // newest note, claim or filing, then the id. probe-t1's claim is newer
-    // than its filing and newer than probe-t0, and it still follows the
-    // free tickets. probe-a2's note is newer than probe-a1's filing.
+    let mut org = std::fs::OpenOptions::new().append(true).open(&org).unwrap();
+    for n in 0..10 {
+        writeln!(
+            org,
+            "\n* TODO [#C] Filler {n:02}\n:PROPERTIES:\n:ID:         probe-z{n:02}\n:CREATED:    [2020-01-01 Wed]\n:END:"
+        )
+        .unwrap();
+    }
+    // This seat, then free tickets, then another seat. A long-stale claim
+    // is last even when its priority is higher than a fresh claim.
+    // Priority, then the newest note, claim or filing, then the id apply
+    // inside a band. probe-t1's claim is newer than its filing and newer
+    // than probe-t0. probe-a2's note is newer than probe-a1's filing.
     // probe-b2 is written above probe-b1 and the id still comes first.
     let want = [
-        "probe-m3", "probe-m2", "probe-m1", "probe-a2", "probe-a1", "probe-a3", "probe-b1",
-        "probe-b2", "probe-c1", "probe-t1", "probe-t0",
+        "probe-m3",
+        "probe-m2",
+        "probe-m1",
+        "probe-a2",
+        "probe-a1",
+        "probe-a3",
+        "probe-b1",
+        "probe-b2",
+        "probe-c1",
+        "probe-z00",
+        "probe-z01",
+        "probe-z02",
+        "probe-z03",
+        "probe-z04",
+        "probe-z05",
+        "probe-z06",
+        "probe-z07",
+        "probe-z08",
+        "probe-z09",
+        "probe-t2",
+        "probe-t1",
+        "probe-t0",
     ];
+    let page = board.ok(&["ready"]);
+    assert_short_page(&page, 20, want.len());
+    assert_eq!(ticket_ids(&page), want[..20], "{page}");
     let all = board.ok(&["ready", "--all"]);
     assert_short_page(&all, want.len(), want.len());
     assert_eq!(ticket_ids(&all), want, "{all}");
@@ -327,6 +426,11 @@ fn own_claims_come_first_then_priority_then_recent_activity() {
         other > free,
         "another seat's claim sat above free work:\n{all}"
     );
+    let fresh = ids.iter().position(|id| id == "probe-t2").unwrap();
+    assert!(
+        fresh < other,
+        "a long-stale claim hid fresh claimed work:\n{all}"
+    );
 
     let two = board.ok(&["ready", "-n", "2"]);
     assert_short_page(&two, 2, want.len());
@@ -334,13 +438,25 @@ fn own_claims_come_first_then_priority_then_recent_activity() {
     let json = board.ok(&["ready", "--json", "-n", "3"]);
     assert_eq!(json_counts(&json), (3, want.len() as u64, 3), "{json}");
     assert_eq!(json_ids(&json), want[..3]);
-    let every = board.ok(&["ready", "--json"]);
+    let json_page = board.ok(&["ready", "--json"]);
+    assert_eq!(
+        json_counts(&json_page),
+        (20, want.len() as u64, 20),
+        "{json_page}"
+    );
+    assert_eq!(json_ids(&json_page), want[..20]);
+    let every = board.ok(&["ready", "--json", "--all"]);
     assert_eq!(
         json_counts(&every),
         (want.len() as u64, want.len() as u64, want.len()),
         "{every}"
     );
     assert_eq!(json_ids(&every), want);
+    let mcp_page = board.mcp_ready(serde_json::json!({}));
+    assert_short_page(&mcp_page, 20, want.len());
+    assert_eq!(ticket_ids(&mcp_page), want[..20], "{mcp_page}");
+    let mcp = board.mcp_ready(serde_json::json!({"all": true}));
+    assert_eq!(ticket_ids(&mcp), want, "{mcp}");
 }
 
 #[test]

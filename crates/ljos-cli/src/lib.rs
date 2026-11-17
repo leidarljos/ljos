@@ -43031,8 +43031,10 @@ const READY_PAGE: usize = 20;
 /// This is the same frontier as `vissue ready`, read through the list
 /// query. A blocker that is done or cancelled does not keep its ticket
 /// off the list. Rows are this seat's claims, then free tickets, then
-/// another seat's claims. Inside that, higher priority, then newer
-/// activity, then the id. Activity is the newest note, claim or filing.
+/// another seat's recent claims, then another seat's long-stale claims.
+/// Inside that, higher priority, then newer activity, then the id.
+/// Activity is the newest note, claim or filing. Long-stale means no
+/// activity for `LJOS_STALE_DAYS` (7 when unset).
 /// The text page prints the first 20 unless `all` is set or `limit`
 /// names another count. JSON prints that same page: `shown`, `total`
 /// and `rows`. A claim is still aged from its stamp.
@@ -43083,15 +43085,27 @@ pub fn ready_view(
 /// waits on an open ticket. This only orders what it kept.
 fn order_ready(rows: &mut [vissue_core::views::IssueRow], recs: &[vissue_core::views::IssueRec]) {
     let seat = ready_seat();
+    let today = days_of_stamp(Some(&chrono::Local::now().format("%Y-%m-%d").to_string()))
+        .unwrap_or(i64::MAX);
+    let stale_days = quiet_claims::stale_days_from_env();
     let by_id: std::collections::HashMap<&str, &vissue_core::views::IssueRec> = recs
         .iter()
         .map(|rec| (rec.heading.id.as_str(), rec))
         .collect();
     rows.sort_by(|a, b| {
-        ready_rank(a, by_id.get(a.id.as_str()).copied(), &seat).cmp(&ready_rank(
+        ready_rank(
+            a,
+            by_id.get(a.id.as_str()).copied(),
+            &seat,
+            today,
+            stale_days,
+        )
+        .cmp(&ready_rank(
             b,
             by_id.get(b.id.as_str()).copied(),
             &seat,
+            today,
+            stale_days,
         ))
     });
 }
@@ -43103,12 +43117,19 @@ fn ready_seat() -> String {
     canonical_seat_name(&raw)
 }
 
-/// `0` is this seat, `1` is nobody, `2` is another seat.
+/// `0` is this seat, `1` is nobody, `2` is another seat with recent
+/// activity, and `3` is another seat whose claim is long-stale.
 ///
 /// A claim this seat holds is a `CLAIMED_BY` that names the seat, whether
 /// the state is STARTED or still TODO. Another seat's claim stays after
-/// tickets nobody holds, so it does not sit at the top of the page.
-fn hold_band(row: &vissue_core::views::IssueRow, seat: &str) -> u8 {
+/// tickets nobody holds. A long-stale claim stays at the end.
+fn hold_band(
+    row: &vissue_core::views::IssueRow,
+    seat: &str,
+    activity_day: i64,
+    today: i64,
+    stale_days: i64,
+) -> u8 {
     let Some(who) = row
         .claimed_by
         .as_deref()
@@ -43119,6 +43140,8 @@ fn hold_band(row: &vissue_core::views::IssueRow, seat: &str) -> u8 {
     };
     if !seat.is_empty() && canonical_seat_name(who) == seat {
         0
+    } else if today.saturating_sub(activity_day) >= stale_days {
+        3
     } else {
         2
     }
@@ -43128,6 +43151,8 @@ fn ready_rank(
     row: &vissue_core::views::IssueRow,
     rec: Option<&vissue_core::views::IssueRec>,
     seat: &str,
+    today: i64,
+    stale_days: i64,
 ) -> (
     u8,
     u8,
@@ -43141,7 +43166,7 @@ fn ready_rank(
         .map(|rec| activity_key(&rec.heading))
         .unwrap_or((i64::MIN, String::new()));
     (
-        hold_band(row, seat),
+        hold_band(row, seat, day, today, stale_days),
         band,
         priority,
         std::cmp::Reverse(day),

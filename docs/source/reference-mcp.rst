@@ -11,7 +11,7 @@ The seat serves these over the Model Context Protocol (MCP).
 Writers: ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
 ``ljos_learn``, ``ljos_graded``, ``ljos_island``, ``ljos_deed``, ``ljos_vote``, ``ljos_predict``, ``ljos_rule``, ``ljos_claim``,
 ``ljos_release``, ``ljos_complete``, ``ljos_consolidate``, ``ljos_findings`` (a reader without ``remember``), ``ljos_bump_plan`` (a reader with ``dry_run``), ``ljos_handover``, ``ljos_receive``, ``ljos_send``, ``ljos_read``, ``ljos_reply``, ``ljos_group``. Readers: ``ljos_search`` (with ``query`` and optional ``as_of``), ``ljos_conflicts``, ``ljos_inbox``,
-``ljos_timeline``, ``ljos_digest``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_recall`` (with ``issue``),
+``ljos_timeline``, ``ljos_digest``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_recall`` (with ``issue``), ``ljos_ready``,
 ``ljos_consensus``, ``ljos_brief``, ``ljos_personas``, ``ljos_playbooks``, ``ljos_cards``, ``ljos_policy``, ``ljos_doctor``, ``ljos_mail_search``, ``ljos_mail_show``. Resources:
 ``ljos://protocol``, ``ljos://cards/USER.md``, ``ljos://cards/MEMORY.md``. Prompts:
 ``start_a_sitting``, ``run_a_panel``, ``check_a_handover``. Every tool description opens with
@@ -19,7 +19,7 @@ when to call it.
 
 By default the server lists the core set, in this order: ``ljos_rule``,
 ``ljos_prefer``, ``ljos_remember``, ``ljos_search``,
-``ljos_start``, ``ljos_guard_check``, ``ljos_file``, ``ljos_options``, ``ljos_note``, ``ljos_recall``, ``ljos_show``,
+``ljos_start``, ``ljos_guard_check``, ``ljos_file``, ``ljos_options``, ``ljos_note``, ``ljos_recall``, ``ljos_show``, ``ljos_ready``,
 ``ljos_sitting``, ``ljos_finish``, ``ljos_claim``, ``ljos_release``, ``ljos_send``,
 ``ljos_inbox``, ``ljos_reply``, ``ljos_vote``, ``ljos_consensus`` and ``ljos_doctor``.
 ``LJOS_MCP_TOOLS=all`` lists every tool above: the core set first, then the rest
@@ -44,6 +44,8 @@ A busy pack names ``ljos search`` or ``ljos remember``.
 An unknown tool names ``ljos help``.
 An unknown method, or a line that is not JSON, names ``ljos mcp --help``.
 ``ljos_show`` prints the ticket ``ljos show`` prints: the header, the body, and the latest notes.
+
+``ljos_ready`` prints the same first page as ``ljos ready``. The default is 20 tickets. ``limit`` changes that count and ``all`` prints every ticket. The last line of a short page names ``--limit`` and ``--all``. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. The id breaks the final tie.
 
 ``ljos_recall`` adds a Code context section when ``graphify-out/graph.json`` is in the working directory's repository.
 The section is the same one ``ljos recall`` prints.

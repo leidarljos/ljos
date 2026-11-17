@@ -2,7 +2,7 @@
 //!
 //! Each line fits [`COLS`]. The pages name the place and say shown N of M.
 //! A search page names the command that lists the rest. A ready page that
-//! leaves tickets off names `--limit`, `--all`, `-p` and `--mine`.
+//! leaves tickets off ends with `--limit`, `--all`, `-p` and `--mine`.
 //! The ranker score stays off the page. `--json` and the MCP rows do not
 //! use this module. A pipe, and `NO_COLOR`, carry no ANSI.
 
@@ -766,13 +766,13 @@ enum ReadyPiece {
     Loose(String),
 }
 
-/// One line under a short ready header. It names the flags that show more
+/// The last line of a short ready page. It names the flags that show more
 /// tickets or narrow the page.
 const READY_HINT: &str = "See more with `--limit` or `--all`. Narrow with `-p` or `--mine`.";
 
 /// The ready page. `limit` is how many tickets to print. `None` prints
 /// every row. The header is `ready  shown X of Y`. A page that leaves
-/// tickets off adds [`READY_HINT`] on the next line.
+/// tickets off ends with [`READY_HINT`].
 #[must_use]
 pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
     let raw = strip_ansi(raw);
@@ -791,10 +791,6 @@ pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
     let take = limit.unwrap_or(total).min(total);
     let mut out = count_line("ready", take, total, "");
     out.push('\n');
-    if take < total {
-        out.push_str(&wrap(READY_HINT, COLS));
-        out.push('\n');
-    }
     if total == 0 {
         out.push_str("no open ticket is free of an open blocker, so run `ljos file TITLE`.\n");
         return out;
@@ -812,6 +808,10 @@ pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
                 out.push('\n');
             }
         }
+    }
+    if take < total {
+        out.push_str(&wrap(READY_HINT, COLS));
+        out.push('\n');
     }
     out
 }
@@ -941,7 +941,7 @@ mod tests {
         assert!(!text.contains("demo-0002"), "{text}");
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some("ready  shown 2 of 3"));
-        let hint = lines.next().unwrap_or("");
+        let hint = lines.last().unwrap_or("");
         assert_eq!(hint, READY_HINT, "{text}");
         assert!(hint.chars().count() <= COLS, "{hint}");
         assert!(hint.contains("`--limit`"), "{hint}");
@@ -949,6 +949,7 @@ mod tests {
         assert!(hint.contains("`-p`"), "{hint}");
         assert!(hint.contains("`--mine`"), "{hint}");
         assert_eq!(text.matches(READY_HINT).count(), 1, "{text}");
+        assert!(text.trim_end().ends_with(READY_HINT), "{text}");
         let all = ready_page(&raw, None);
         assert!(all.starts_with("ready  shown 3 of 3\n"), "{all}");
         assert!(!all.contains(READY_HINT), "{all}");

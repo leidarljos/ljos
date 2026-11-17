@@ -57,6 +57,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "ljos_note",
     "ljos_recall",
     "ljos_show",
+    "ljos_ready",
     "ljos_sitting",
     "ljos_finish",
     "ljos_claim",
@@ -254,6 +255,7 @@ const SEAT_FREE_TOOLS: &[&str] = &[
     "ljos_policy",
     "ljos_recall",
     "ljos_show",
+    "ljos_ready",
     "ljos_search",
     "ljos_conflicts",
     "ljos_evidence",
@@ -709,6 +711,20 @@ pub struct ShowArgs {
     /// The issue id.
     pub issue: String,
     /// Print every note. Absent, the page keeps the latest eight.
+    #[serde(default)]
+    pub all: Option<bool>,
+}
+
+/// A page of tickets ready to take.
+#[derive(Deserialize, JsonSchema)]
+pub struct ReadyArgs {
+    /// Only this project.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Most tickets to return. Absent, the first 20.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Return every ticket. Absent or false, use `limit` or the first 20.
     #[serde(default)]
     pub all: Option<bool>,
 }
@@ -2213,6 +2229,29 @@ impl LjosServer {
         Parameters(args): Parameters<ShowArgs>,
     ) -> Result<Json<Said>, McpError> {
         let text = ljos_cli::show_issue(&args.issue, args.all.unwrap_or(false)).map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
+    }
+
+    #[tool(
+        description = "Call this to choose tracker work. It returns the first 20 tickets unless limit is set or all is true. This seat's claims come first, then unclaimed tickets by priority and newest activity, then other seats' claims, with long-stale claims last. The id breaks a tie. A short page ends with the flags that show more or narrow the list.",
+        annotations(
+            title = "List ready tickets",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_ready(
+        &self,
+        Parameters(args): Parameters<ReadyArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let all = args.all.unwrap_or(false);
+        if all && args.limit.is_some() {
+            return Err(refused(anyhow::anyhow!(
+                "ready: pass limit or all, not both"
+            )));
+        }
+        let text = ljos_cli::ready_view(args.project.as_deref(), false, args.limit, all)
+            .map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -3727,7 +3766,7 @@ const ORDERED_WRITES: &[&str] = &[
 ];
 
 /// Reads that show what [`ORDERED_WRITES`] wrote.
-const ORDERED_READS: &[&str] = &["ljos_recall", "ljos_search", "ljos_timeline"];
+const ORDERED_READS: &[&str] = &["ljos_ready", "ljos_recall", "ljos_search", "ljos_timeline"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Order {
@@ -5426,7 +5465,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            53,
+            54,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );

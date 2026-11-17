@@ -232,7 +232,7 @@ A plan files one parent and its checklist in a single tracker commit, claims the
    $ LJOS_SEAT=alice ljos ready --mine
    next: day-ef56  pick a default
 
-``ljos ready`` without ``--mine`` prints the first 20 open tickets, headed ``ready  shown X of Y``. A ticket this seat holds comes first. ``--all`` prints every ticket, and ``--limit N`` prints N.
+``ljos ready`` without ``--mine`` prints the first 20 open tickets, headed ``ready  shown X of Y``, and ends a short page with a hint naming ``--limit``, ``--all``, ``-p`` and ``--mine``. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. ``--all`` prints every ticket, and ``--limit N`` prints N.
 
 The ids are the ones that run printed. The parent is claimed. Each item stays open until ``ljos finish`` ticks it. A sitting with no ``--verbose`` prints the claim, one line for claims still held, what the seat remembers, and the close. With ``--no-embed`` the pack has no encoder, so the sitting prints ``memory degraded: ranked by words``. Quiet claims are ``N quiet claims are still yours (ljos release --stale)``. Claims untouched for longer than ``LJOS_STALE_DAYS`` (7) are one line, ``ljos claims --stale``. ``ljos sitting ISSUE --verbose`` prints every section.
 Under a runner the holder on the ``STARTED`` line can be ``alice`` plus ``@`` and a session tag. The claim command below prints the seat name.

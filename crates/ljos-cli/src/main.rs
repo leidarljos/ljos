@@ -1415,12 +1415,14 @@ enum Cmd {
     /// List tickets that are open and not waiting on another open ticket.
     ///
     /// A ticket this seat holds comes first.
-    /// Higher priority comes next, then the newest note, claim or filing.
+    /// Unclaimed tickets follow, ordered by higher priority and then the
+    /// newest note, claim or filing.
+    /// Another seat's claims follow, with claims untouched for
+    /// `LJOS_STALE_DAYS` (7 when unset) last.
     /// The id breaks the last tie.
-    /// A ticket another seat holds comes after a ticket nobody holds.
     /// The page prints the first 20, headed `ready  shown X of Y`.
     /// `-n N` prints N tickets. `--limit N` is the same flag. `--all` prints every ticket.
-    /// A page that leaves tickets off adds one line naming `--limit`, `--all`, `-p` and `--mine`.
+    /// A page that leaves tickets off ends with one line naming `--limit`, `--all`, `-p` and `--mine`.
     /// `--json` prints `shown`, `total` and `rows` for that same page and that same order.
     /// `--mine` names the next unfinished item of each plan this seat holds.
     ///
