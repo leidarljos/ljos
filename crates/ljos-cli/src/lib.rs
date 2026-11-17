@@ -15481,7 +15481,14 @@ fn search_after_warmup(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
     if let Some(bound) = warmup_bound(status.as_ref()) {
         return search_after_bounded_wait(query, limit, bound);
     }
-    let first = search_direct(query, limit);
+    // A pack that accepted and did not answer has already spent its
+    // request. Waiting out the encoder on top of that is a second timeout.
+    let first = match search_direct(query, limit) {
+        Err(err) if is_pack_busy(&err) || is_deadline_miss(&err) || is_reported_busy(&err) => {
+            return Err(err);
+        }
+        other => other,
+    };
     let reserve = std::time::Duration::from_secs(2);
     let left = pack_link::clock_left().unwrap_or(search_wait().saturating_add(reserve));
     let wait = search_wait().min(left.saturating_sub(reserve));
@@ -15679,8 +15686,11 @@ fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
             }
         }
     }
+    // One request stays inside the short search budget even when the
+    // command clock is longer. A silent accept does not hold the whole clock.
     let timeout = pack_link::clock_left()
         .unwrap_or(SEARCH_PACK_BUDGET)
+        .min(SEARCH_PACK_BUDGET)
         .max(std::time::Duration::from_millis(50));
     let workspace = client.workspace();
     let limit_s = limit.to_string();

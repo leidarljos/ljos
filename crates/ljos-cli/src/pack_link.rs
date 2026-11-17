@@ -2214,12 +2214,12 @@ fn send(live: &mut Slot, origin: &Url, call: &Wire<'_>, timeout: Duration) -> st
     }
     let started = Instant::now();
     let result = send_once(live, origin, call, timeout);
-    // An answer is not charged. A read that ends without one is a quiet
-    // socket and spends the budget, so the next read does not open another.
-    // Outside a hook the side budget is not armed. The quiet flag is that
-    // same stop for a command, which asks the pack more than once.
+    // An answer is not charged. A read that ends without one means the
+    // pack accepted and stayed silent. This command asks health, status
+    // and search. The first silent read spends its request timeout, and
+    // the later ones return at once instead of waiting that timeout again.
     if let Err(err) = &result {
-        if io_is_quiet(err) && clock_is_spent() {
+        if io_is_quiet(err) {
             mark_pack_quiet();
         }
         super::charge_side_wait(started.elapsed());

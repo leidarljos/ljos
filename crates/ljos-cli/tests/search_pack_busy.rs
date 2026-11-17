@@ -441,3 +441,50 @@ fn a_recall_that_stays_busy_uses_one_word_line() {
     assert!(searches.load(Ordering::SeqCst) > 1, "{text}");
     assert!(took < Duration::from_secs(4), "{took:?}\n{text}");
 }
+
+/// Accepts the connection, reads the request, and never writes an answer.
+fn serve_silent() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            thread::spawn(move || {
+                let Ok(mut sock) = stream else { return };
+                let _ = read_head(&mut sock);
+                thread::sleep(Duration::from_secs(30));
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[test]
+fn a_pack_that_accepts_and_stays_silent_uses_one_word_line() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    std::fs::create_dir_all(home.join(".local/state")).unwrap();
+    std::fs::create_dir_all(home.join("run")).unwrap();
+    let url = serve_silent();
+    let (out, took) = search(&url, &home, &["search", WORD_QUERY]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let text = format!("{stdout}{stderr}");
+    assert!(out.status.success(), "{text}");
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(lines, [BUSY], "{text}");
+    assert!(!text.contains("pack busy, try again"), "{text}");
+    assert!(
+        !text.contains("the pack search did not answer in time"),
+        "{text}"
+    );
+    assert!(!text.contains("The memory writer is busy"), "{text}");
+    // LJOS_SEARCH_BUSY_WAIT (2s) plus one short request (3s).
+    assert!(
+        took < Duration::from_secs(5),
+        "a silent pack waited {took:?}, past the busy bound plus one request\n{text}"
+    );
+}

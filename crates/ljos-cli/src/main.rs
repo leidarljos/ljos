@@ -5123,6 +5123,10 @@ fn run_command() -> Result<()> {
             // prints. Rows say they are word matches and that meaning search
             // will be ready shortly. An empty page names the command to run
             // again.
+            // Held across the status probe that sizes the budget, so a pack
+            // that accepts and stays silent spends one request, not one per
+            // later read.
+            let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
             let dated_ahead = as_of.is_some();
             let budget = if !dated_ahead && !rerank {
                 ljos_cli::search_budget()
@@ -5131,7 +5135,6 @@ fn run_command() -> Result<()> {
             };
             let _deadline = ljos_cli::pack_link::CommandDeadline::enter(budget);
             let _pack_clock = ljos_cli::pack_link::PackClock::enter(budget);
-            let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
             let day = match valid_at.as_deref().map(str::trim) {
                 Some("any") => None,
                 Some(d) => {
@@ -5198,12 +5201,16 @@ fn run_command() -> Result<()> {
                         },
                     )
                 }
-                // The writer reported busy until the short wait ran out.
+                // The writer reported busy, or it accepted and did not answer.
                 // One line says word search was used. It does not also
-                // print `pack busy, try again`.
+                // print `pack busy, try again` or that the search did not
+                // answer in time.
                 Err(err)
                     if !dated
-                        && (ljos_cli::is_read_shed(&err) || ljos_cli::is_reported_busy(&err)) =>
+                        && (ljos_cli::is_read_shed(&err)
+                            || ljos_cli::is_reported_busy(&err)
+                            || ljos_cli::is_pack_busy(&err)
+                            || ljos_cli::is_deadline_miss(&err)) =>
                 {
                     (
                         ljos_cli::search_by_words(&asked, fetch),
@@ -5216,8 +5223,6 @@ fn run_command() -> Result<()> {
                 Err(err)
                     if !dated
                         && (ljos_cli::pack_unreachable(&err)
-                            || ljos_cli::is_deadline_miss(&err)
-                            || ljos_cli::is_pack_busy(&err)
                             || ljos_cli::pack_memory_down(&err)
                             || format!("{err:#}")
                                 .to_ascii_lowercase()
