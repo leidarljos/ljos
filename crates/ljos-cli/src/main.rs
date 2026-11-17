@@ -572,6 +572,26 @@ enum HookFastCmd {
     Hook(HookArgs),
 }
 
+/// The flags `ljos ready` and `ljos list` take.
+#[derive(Args, Debug)]
+struct ReadyArgs {
+    /// Only this project.
+    #[arg(short = 'p', long)]
+    project: Option<String>,
+    /// Print `shown`, `total` and `rows`. The same page and order as the text.
+    #[arg(long, conflicts_with = "mine")]
+    json: bool,
+    /// The next unfinished item of each plan this seat holds.
+    #[arg(long, conflicts_with = "json")]
+    mine: bool,
+    /// How many tickets to print. `-n` is this flag. The default page prints 20.
+    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["all", "mine"])]
+    limit: Option<usize>,
+    /// Print every ticket on the page.
+    #[arg(long, conflicts_with_all = ["limit", "mine"])]
+    all: bool,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Remember one lesson, stored as written.
@@ -1439,25 +1459,24 @@ enum Cmd {
     /// A page that leaves tickets off ends with one line naming `--limit`, `--all`, `-p` and `--mine`.
     /// `--json` prints `shown`, `total` and `rows` for that same page and that same order.
     /// `--mine` names the next unfinished item of each plan this seat holds.
+    /// `ljos list` and `ljos ls` are the same command.
     ///
     /// Example: `ljos ready`
-    Ready {
-        /// Only this project.
-        #[arg(short = 'p', long)]
-        project: Option<String>,
-        /// Print `shown`, `total` and `rows`. The same page and order as the text.
-        #[arg(long, conflicts_with = "mine")]
-        json: bool,
-        /// The next unfinished item of each plan this seat holds.
-        #[arg(long, conflicts_with = "json")]
-        mine: bool,
-        /// How many tickets to print. `-n` is this flag. The default page prints 20.
-        #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["all", "mine"])]
-        limit: Option<usize>,
-        /// Print every ticket on the page.
-        #[arg(long, conflicts_with_all = ["limit", "mine"])]
-        all: bool,
-    },
+    Ready(ReadyArgs),
+    /// List the open tickets. The same command as `ljos ready`.
+    ///
+    /// `list` takes the flags `ready` takes and prints the page `ready` prints.
+    /// A ticket this seat holds comes first, then higher priority, then the newest note, claim or filing.
+    /// The page prints the first 20, headed `ready  shown X of Y`.
+    /// `-n N` prints N tickets. `--limit N` is the same flag. `--all` prints every ticket.
+    /// `-p PROJECT` keeps one project.
+    /// `--json` prints `shown`, `total` and `rows` for that same page and that same order.
+    /// `--mine` names the next unfinished item of each plan this seat holds.
+    /// `ls` is the short spelling.
+    ///
+    /// Example: `ljos list -p proj`
+    #[command(visible_alias = "ls")]
+    List(ReadyArgs),
     /// Show who holds which ticket.
     ///
     /// This is `vissue claims`, with its flags. `--mine` lists this seat's
@@ -2593,6 +2612,29 @@ fn usage_sentence(err: &clap::Error) -> Option<String> {
     }
 }
 
+/// The page `ljos ready` and `ljos list` print.
+fn print_ready(args: ReadyArgs) -> Result<()> {
+    let ReadyArgs {
+        project,
+        json,
+        mine,
+        limit,
+        all,
+    } = args;
+    if mine {
+        print!("{}", ljos_cli::plan::ready_mine(project.as_deref())?);
+    } else {
+        print!(
+            "{}",
+            ljos_cli::scan::for_reader(
+                &ljos_cli::ready_view(project.as_deref(), json, limit, all)?,
+                human_color()
+            )
+        );
+    }
+    Ok(())
+}
+
 /// A word a person types at the root instead of the command.
 ///
 /// The command is not run. `find` is the verb beside `ljos search` on the
@@ -2614,13 +2656,14 @@ fn root_synonym(typed: &str) -> Option<&'static str> {
     }
 }
 
-/// `list`, `ls`, `issues`, `tickets` and `todo` are not commands.
+/// `issues`, `tickets` and `todo` are not commands.
 ///
 /// A person reaching for a board means the ready list. Claims is where a
-/// ticket already in hand shows up. The word is not run.
+/// ticket already in hand shows up. The word is not run. `list` and `ls`
+/// are commands, and run.
 fn listing_sentence(typed: &str) -> Option<String> {
     match typed.to_ascii_lowercase().as_str() {
-        "list" | "ls" | "issues" | "tickets" | "todo" => Some(format!(
+        "issues" | "tickets" | "todo" => Some(format!(
             "ljos: no command {typed}, and the closest is ready, so run `ljos ready`. `ljos claims` lists what is held."
         )),
         _ => None,
@@ -5996,25 +6039,7 @@ fn run_command() -> Result<()> {
                 print!("{}", ljos_cli::scan::for_reader(&said, human_color()));
             }
         }
-        Cmd::Ready {
-            project,
-            json,
-            mine,
-            limit,
-            all,
-        } => {
-            if mine {
-                print!("{}", ljos_cli::plan::ready_mine(project.as_deref())?);
-            } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(
-                        &ljos_cli::ready_view(project.as_deref(), json, limit, all)?,
-                        human_color()
-                    )
-                );
-            }
-        }
+        Cmd::Ready(args) | Cmd::List(args) => print_ready(args)?,
         Cmd::Claims {
             mine,
             stale,

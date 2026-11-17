@@ -30,8 +30,8 @@ const GROUPS: &[(&str, &[&str])] = &[
     (
         "Daily",
         &[
-            "note", "file", "show", "ready", "claims", "inbox", "digest", "rule", "rules", "sync",
-            "hud", "seat", "cards",
+            "note", "file", "show", "ready", "list", "claims", "inbox", "digest", "rule", "rules",
+            "sync", "hud", "seat", "cards",
         ],
     ),
     (

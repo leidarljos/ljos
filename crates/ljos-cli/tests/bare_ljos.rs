@@ -253,23 +253,18 @@ fn listing_words_point_at_ready_and_claims() {
             "ljos: no command {word}, and the closest is ready, so run `ljos ready`. `ljos claims` lists what is held.\n"
         )
     };
-    for word in ["list", "ls", "issues", "tickets", "todo", "LIST"] {
+    for word in ["issues", "tickets", "todo", "ISSUES"] {
         let out = run(dir.path(), &[word], &[]);
         let said = text(&out);
         assert_eq!(out.status.code(), Some(2), "{word}\n{said}");
         assert!(out.stdout.is_empty(), "{word}\n{said}");
         assert_eq!(String::from_utf8_lossy(&out.stderr), line(word), "{word}");
     }
-    let extra = run(dir.path(), &["list", "kiln"], &[]);
-    let said = text(&extra);
-    assert_eq!(extra.status.code(), Some(2), "{said}");
-    assert!(extra.stdout.is_empty(), "{said}");
-    assert_eq!(String::from_utf8_lossy(&extra.stderr), line("list"));
-    let help = run(dir.path(), &["help", "list"], &[]);
+    let help = run(dir.path(), &["help", "issues"], &[]);
     let said = text(&help);
     assert_eq!(help.status.code(), Some(2), "{said}");
     assert!(help.stdout.is_empty(), "{said}");
-    assert_eq!(String::from_utf8_lossy(&help.stderr), line("list"));
+    assert_eq!(String::from_utf8_lossy(&help.stderr), line("issues"));
     let memories = run(dir.path(), &["memories", "list", "--help"], &[]);
     let said = text(&memories);
     assert!(memories.status.success(), "{said}");
@@ -277,6 +272,31 @@ fn listing_words_point_at_ready_and_claims() {
         !String::from_utf8_lossy(&memories.stderr).contains("no command list"),
         "{said}"
     );
+}
+
+#[test]
+fn list_and_ls_are_commands_and_a_capital_names_them() {
+    let dir = tempfile::tempdir().unwrap();
+    for (typed, real) in [("LIST", "list"), ("List", "list"), ("LS", "ls")] {
+        let out = run(dir.path(), &[typed], &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{typed}\n{said}");
+        assert!(out.stdout.is_empty(), "{typed}\n{said}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("ljos: no command {typed}, and the closest is {real}, so run `ljos {real}`.\n"),
+            "{typed}"
+        );
+    }
+    for word in ["list", "ls"] {
+        let out = run(dir.path(), &["help", word], &[]);
+        let said = text(&out);
+        assert!(out.status.success(), "{word}\n{said}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("Usage: ljos list"),
+            "{word}\n{said}"
+        );
+    }
 }
 
 #[test]
