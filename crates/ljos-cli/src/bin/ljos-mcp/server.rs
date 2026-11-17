@@ -13,16 +13,17 @@ use anyhow::Context as _;
 
 use ljos_cli::{
     age_of, announce_seat, atom_label, brief, bump_plan, calibrate, cards, claim, complete,
-    conflicts, consensus_steps_for, copy_playbook, doctor, due_page, finish, forecasts_from_json,
-    format_change, format_consolidation, graded, habit, habits, handover_scoped, island_entities,
-    kind_label, learn_and_write, learn_reading, note_lookups, now_utc, on_path, other_seat, pack,
-    packset_consolidate, packset_forget, packset_island_as, packset_search_as_of, panel_steps,
-    parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory, predictions_of,
-    protocol_text, read_campaign, receive, refine_default_hits, release, remember_findings,
-    resolve_assignee, rows_about, run_captured, runner_pid, search_ranked, search_reading,
-    seat_name, settle_discount, sitting_gated, timeline, topic_words, tracker_show_json,
-    trust_from_pack, with_discount, write_persona, write_prediction, write_rule, write_trust,
-    Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
+    conflicts, consensus_steps_for, copy_playbook, doctor, doctor_word, due_page, finish,
+    forecasts_from_json, format_change, format_consolidation, graded, habit, habits,
+    handover_scoped, island_entities, kind_label, learn_and_write, learn_reading, note_lookups,
+    now_utc, on_path, other_seat, pack, packset_consolidate, packset_forget, packset_island_as,
+    packset_search_as_of, panel_steps, parse_every, personas_from_pack, playbooks_from_pack,
+    policy_with_memory, predictions_of, protocol_text, read_campaign, receive, refine_default_hits,
+    release, remember_findings, resolve_assignee, rows_about, run_captured, runner_pid,
+    search_ranked, search_reading, seat_name, settle_discount, sitting_gated, timeline,
+    topic_words, tracker_show_json, trust_from_pack, with_discount, write_persona,
+    write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA,
+    POLICY_TCB,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -1199,6 +1200,8 @@ pub struct HabitatRow {
     pub name: String,
     pub state: String,
     pub ok: bool,
+    /// An extra the seat runs without. `ok` false on it is not a failure.
+    pub optional: bool,
 }
 
 /// One atom due for review.
@@ -3007,7 +3010,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this first in a sitting, and again whenever another tool fails: which habitats answer (binaries, pack, host key, deed store, tracker, claim graph) and whether this harness is onboarded. A tool failing is a habitat down or refusing, never an empty answer.",
+        description = "Call this first in a sitting, and again whenever another tool fails: which habitats answer (binaries, pack, host key, deed store, tracker, claim graph) and whether this harness is onboarded. A row with optional true is an extra, so ok false there is no failure. A tool failing is a habitat down or refusing, never an empty answer.",
         annotations(title = "Doctor", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_doctor(&self) -> Result<Json<Rows<HabitatRow>>, McpError> {
@@ -3016,6 +3019,7 @@ impl LjosServer {
                 .into_iter()
                 .map(|h| HabitatRow {
                     name: h.name.to_string(),
+                    optional: doctor_word(&h) == "info",
                     state: h.state,
                     ok: h.ok,
                 })

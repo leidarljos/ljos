@@ -408,7 +408,8 @@ fn packset_embed_line(path: &str, cwd: &std::path::Path) -> String {
 
 /// `ljos doctor` names an encoder install command whose program is on this
 /// machine. `cargo binstall` is that command only when cargo-binstall is
-/// installed.
+/// installed. A `scripts/install.sh` in the working directory is not read,
+/// so the hint is the same wherever `ljos mcp` started.
 #[test]
 fn doctor_names_an_encoder_install_command_that_runs_here() {
     let root = tempfile::tempdir().unwrap();
@@ -448,8 +449,8 @@ fn doctor_names_an_encoder_install_command_that_runs_here() {
     assert!(!cargo.contains("cargo binstall"), "{cargo}");
     let from_checkout = packset_embed_line(&curl_only.display().to_string(), &script_home);
     assert!(
-        from_checkout.contains("so run `sh scripts/install.sh`."),
-        "{from_checkout}"
+        from_checkout.contains("so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."),
+        "a checkout in the working directory changes nothing: {from_checkout}"
     );
     let release = packset_embed_line(&curl_only.display().to_string(), &bare);
     assert!(
