@@ -5759,7 +5759,8 @@ fn run_command() -> Result<()> {
                 "vissue",
                 &["note", &issue, &text],
                 ljos_cli::tracker_verb_wait(),
-            )?;
+            )
+            .map_err(ljos_cli::plain_tracker_error)?;
             eprint!("{}", captured.stderr);
             warn_other_sitting(&issue, quiet, inferred, false);
             let mut said = format!("{issue}: noted\n");
