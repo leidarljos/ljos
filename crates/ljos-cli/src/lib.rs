@@ -12759,9 +12759,9 @@ pub const HOOK_DEADLINE_MS: u64 = 8000;
 /// this budget. The shortest session-end cap onboard writes is 5 s.
 pub const HOOK_WALL_BUDGET_MS: u64 = 2_000;
 
-/// A responsive checker gets this much time even after slow local reads.
-/// Every checker call in one wall budget shares the same reserve.
-const CHECK_RESERVE_MS: u64 = 250;
+/// A command's expanded interpreter and fetch checks share this reserve
+/// after slow local reads. It is one deadline for the batch, not per child.
+const CHECK_RESERVE_MS: u64 = 1_000;
 
 thread_local! {
     /// When this call must be done. Set by [`arm_wall_budget`] or
