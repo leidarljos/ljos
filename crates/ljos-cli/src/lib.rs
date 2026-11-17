@@ -45949,22 +45949,58 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
 
 /// Name the seat on a note when the tracker commit did not.
 ///
-/// [`persist_tracker`] writes `- Noted by SEAT` when it commits. Tracker
-/// git off leaves the note with no seat, and `ljos show` would have
-/// nothing to name. A line already at the top of the logbook is left
-/// as it is.
+/// [`persist_tracker`] writes `- Noted by SEAT` when it commits. Another
+/// writer can commit the note body first, so this seat's line is not in
+/// that commit. The line is committed here, under the same checkout lock
+/// as the other writer. A line already in the logbook is left alone: a
+/// later line at the top is not a missing stamp, and writing one after
+/// the commit leaves `issues.org` modified. Tracker git off still writes
+/// the line, with no commit, so `ljos show` can name the seat.
 pub fn stamp_note_seat(issue: &str) {
     let Ok(path) = tracker_issue_path(issue) else {
         return;
     };
     let seat = tracker_seat();
-    if logbook_opens_with_note_seat(&path, issue, &seat) {
+    if note_seat_recorded(&path, issue, &seat) {
         return;
     }
-    stamp_seat_logbook(&path, issue, "noted", &seat);
+    let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
+    if matches!(mode.as_str(), "off" | "0" | "false") {
+        stamp_seat_logbook(&path, issue, "noted", &seat);
+        return;
+    }
+    let Some(dir) = path.parent() else {
+        stamp_seat_logbook(&path, issue, "noted", &seat);
+        return;
+    };
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    // Same order as [`persist_tracker`]: the checkout lock, then the
+    // issues lock inside [`stamp_seat_logbook`]. The other order deadlocks
+    // a sitting that waits on the issues lock first.
+    let Some(_held) = tracker_commit_lock_by(dir, std::time::Instant::now() + tracker_lock_wait())
+    else {
+        if stamp_seat_logbook(&path, issue, "noted", &seat) {
+            note_deferred_paths(dir, &[name]);
+        }
+        return;
+    };
+    if note_seat_recorded(&path, issue, &seat) {
+        return;
+    }
+    if !stamp_seat_logbook(&path, issue, "noted", &seat) {
+        return;
+    }
+    let message = format!("chore(issues): {issue} noted by {seat}");
+    let _ = commit_paths(dir, &[name], &message);
 }
 
-fn logbook_opens_with_note_seat(path: &Path, issue: &str, seat: &str) -> bool {
+/// Whether `issue`'s logbook already names this seat on a note.
+///
+/// A later ballot can sit above the seat line. That is not a missing
+/// stamp, and a new line written for it stays uncommitted.
+fn note_seat_recorded(path: &Path, issue: &str, seat: &str) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
         return false;
     };
@@ -45972,16 +46008,24 @@ fn logbook_opens_with_note_seat(path: &Path, issue: &str, seat: &str) -> bool {
     let Some(id_at) = lines.iter().position(|line| line_is_issue_id(line, issue)) else {
         return false;
     };
-    let Some(book) = lines[id_at..]
+    let start = (0..=id_at)
+        .rev()
+        .find(|i| heading_line(&lines[*i]))
+        .unwrap_or(0);
+    let end = ((id_at + 1)..lines.len())
+        .find(|i| heading_line(&lines[*i]))
+        .unwrap_or(lines.len());
+    let Some(rel) = lines[start..end]
         .iter()
         .position(|line| line.trim() == ":LOGBOOK:")
     else {
         return false;
     };
     let want = format!("- Noted by {seat} ");
-    lines
-        .get(id_at + book + 1)
-        .is_some_and(|line| line.trim().starts_with(&want))
+    lines[start + rel + 1..end]
+        .iter()
+        .take_while(|line| line.trim() != ":END:")
+        .any(|line| line.trim().starts_with(&want))
 }
 
 /// Use vissue's blocking write lock normally, but honor an armed wall
@@ -54539,6 +54583,117 @@ mod tests {
         ] {
             std::env::remove_var(var);
         }
+    }
+
+    /// Another writer committed the note body before this seat's line
+    /// existed. The line used to be written after that commit and left
+    /// `issues.org` modified. It is committed with the note.
+    #[test]
+    fn a_missing_note_seat_line_is_committed_with_the_note() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let o = git_cmd().arg("-C").arg(root).args(args).output().unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        let board = "\
+* TODO [#C] Probe
+:PROPERTIES:
+:ID:         probe-a1b2
+:END:
+:LOGBOOK:
+- Ballot cast by finance [2026-11-17 Tue 04:21]
+- Note: \"saddle read the rail costs\" [2026-11-17 Tue 04:21]
+:END:
+";
+        std::fs::write(&issues, board).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "seed"]);
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        super::stamp_note_seat("probe-a1b2");
+        let dirty = run(&["status", "--porcelain", "--untracked-files=no"]);
+        assert!(
+            dirty.trim().is_empty(),
+            "uncommitted tracker writes:\n{dirty}"
+        );
+        let head = run(&["show", "HEAD:Software/probe/issues.org"]);
+        assert!(head.contains("- Noted by saddle ["), "{head}");
+        assert!(head.contains("saddle read the rail costs"), "{head}");
+        assert_eq!(
+            run(&["log", "-1", "--format=%s"]).trim(),
+            "chore(issues): probe-a1b2 noted by saddle"
+        );
+    }
+
+    /// A later ballot sits above this seat's line. That is not a missing
+    /// stamp, and writing another one leaves the board uncommitted.
+    #[test]
+    fn a_note_seat_line_under_a_later_line_is_left_committed() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let o = git_cmd().arg("-C").arg(root).args(args).output().unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        let board = "\
+* TODO [#C] Probe
+:PROPERTIES:
+:ID:         probe-a1b2
+:END:
+:LOGBOOK:
+- Ballot cast by finance [2026-11-17 Tue 04:21]
+- Noted by saddle [2026-11-17 Tue 04:20]
+- Note: \"saddle read the rail costs\" [2026-11-17 Tue 04:20]
+:END:
+";
+        std::fs::write(&issues, board).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "seed"]);
+        let before = run(&["rev-parse", "HEAD"]);
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        super::stamp_note_seat("probe-a1b2");
+        let dirty = run(&["status", "--porcelain", "--untracked-files=no"]);
+        assert!(
+            dirty.trim().is_empty(),
+            "uncommitted tracker writes:\n{dirty}"
+        );
+        assert_eq!(run(&["rev-parse", "HEAD"]), before);
+        let filed = std::fs::read_to_string(&issues).unwrap();
+        assert_eq!(filed.matches("- Noted by saddle ").count(), 1, "{filed}");
     }
 
     /// A seat's tracker commit waits for the checkout's lock before it
