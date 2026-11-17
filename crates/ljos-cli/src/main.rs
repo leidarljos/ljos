@@ -595,6 +595,8 @@ enum Cmd {
     /// An empty text exits 2. A text past 1000 characters exits 2.
     /// When the pack is busy or not answering, the lesson is queued and the command exits 0.
     /// Starting is waited out on `LJOS_SEARCH_WARMUP_WAIT` (5 seconds when unset, `0` does not wait), and not past `LJOS_CALL_TIMEOUT`.
+    /// The pack is starting when `/health` is `not-ready` or `not ready`, or the JSON says `ready` is false or `code` is `starting`.
+    /// Words in the lesson are not that signal.
     /// When that budget runs out the line is `Memory is starting, so try again in a few seconds.` and the command exits non-zero.
     /// An open store that is only busy still queues the lesson and the command exits 0.
     /// The pack is this seat's memory store.
@@ -824,12 +826,14 @@ enum Cmd {
     /// While the encoder is
     /// still loading, a remaining time that fits in `LJOS_SEARCH_WARMUP_WAIT`
     /// seconds (5 when unset, `0` does not wait) is waited out, inside
-    /// `LJOS_CALL_TIMEOUT`, and the search then ranks by meaning. When
-    /// `/health` says not-ready, or a search says the pack is busy while
-    /// loading, that same budget is waited out before an empty page is
-    /// printed. An empty page is printed only after the pack has answered.
-    /// When the budget runs out the line is `Memory is starting, so try
-    /// again in a few seconds.` and the command exits non-zero. A remaining
+    /// `LJOS_CALL_TIMEOUT`, and the search then ranks by meaning. The pack
+    /// is starting when `/health` is `not-ready` or `not ready`, or the JSON
+    /// says `ready` is false or `code` is `starting`. Words in the query are
+    /// not that signal. That same budget is waited out. When it runs out,
+    /// search ranks by words and the one line is `Used word search because
+    /// memory is still starting.` A dated search has no word fallback, so
+    /// the line is `Memory is starting, so try again in a few seconds.` and
+    /// the command exits non-zero. A remaining
     /// time that is absent or longer than that budget keeps `LJOS_SEARCH_WAIT`
     /// (3 when unset). If it is still loading and rows
     /// are shown, the line is `These are word matches, and meaning search
@@ -5160,6 +5164,21 @@ fn run_command() -> Result<()> {
                 // and this refusal is not a down pack: the writer answered.
                 Err(err) if err.to_string().contains(ljos_cli::WRITER_PORT_FIX) => {
                     return Err(err);
+                }
+                // The pack has not opened. A search of now ranks by words.
+                // A dated search has no live snapshot to rank, so it exits
+                // with the starting line.
+                Err(err) if ljos_cli::is_memory_starting(&err) => {
+                    if dated {
+                        return Err(err);
+                    }
+                    (
+                        ljos_cli::search_by_words(&asked, fetch),
+                        ljos_cli::Ranking {
+                            mode: "lexical",
+                            reason: ljos_cli::MEMORY_STARTING_REASON,
+                        },
+                    )
                 }
                 // The writer reported busy until the short wait ran out.
                 // One line says word search was used. It does not also

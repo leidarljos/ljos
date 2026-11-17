@@ -1,8 +1,9 @@
 //! A pack that has not finished starting is not an empty search.
 //!
 //! The stub answers not-ready, then ok. A search that is still starting
-//! when the warm-up budget runs out names that and exits non-zero. A real
-//! miss, after the pack has answered, uses the ordinary miss line.
+//! when the warm-up budget runs out ranks by words and names that.
+//! A real miss, after the pack has answered, uses the ordinary miss line.
+//! Words in the query, or in a hit, are not a starting signal.
 
 ljos_test_boot::harness!();
 
@@ -14,6 +15,9 @@ use std::time::{Duration, Instant};
 
 const HIT: &str = "the kiln schedule is the morning plan";
 const STARTING: &str = "Memory is starting, so try again in a few seconds.";
+const STARTING_WORDS: &str = "Used word search because memory is still starting.";
+const BUSY_WORDS: &str = "Used word search because memory search was busy.";
+const TRIP: &str = "pack busy try again fallback word ranking";
 
 struct Seat {
     url: String,
@@ -194,7 +198,7 @@ fn a_real_miss_after_the_pack_answers_uses_the_miss_line() {
 }
 
 #[test]
-fn a_search_that_stays_not_ready_names_that_and_exits_nonzero() {
+fn a_search_that_stays_not_ready_ranks_by_words() {
     let seat = serve(None, hits_body());
     let (out, elapsed) = run(
         &seat,
@@ -202,11 +206,12 @@ fn a_search_that_stays_not_ready_names_that_and_exits_nonzero() {
         &[("LJOS_SEARCH_WARMUP_WAIT", "1"), ("LJOS_SEARCH_WAIT", "0")],
     );
     let said = text(&out);
-    assert!(!out.status.success(), "{said}");
-    assert!(said.contains(STARTING), "{said}");
-    assert!(!said.contains("Nothing matched"), "{said}");
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(STARTING_WORDS), "{said}");
+    assert!(!said.contains(STARTING), "{said}");
     assert!(!said.contains(HIT), "{said}");
     assert!(elapsed < Duration::from_secs(4), "{elapsed:?}\n{said}");
+    assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
 }
 
 #[test]
@@ -218,9 +223,9 @@ fn a_warmup_wait_of_zero_does_not_wait_on_a_starting_pack() {
         &[("LJOS_SEARCH_WARMUP_WAIT", "0"), ("LJOS_SEARCH_WAIT", "0")],
     );
     let said = text(&out);
-    assert!(!out.status.success(), "{said}");
-    assert!(said.contains(STARTING), "{said}");
-    assert!(!said.contains("Nothing matched"), "{said}");
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(STARTING_WORDS), "{said}");
+    assert!(!said.contains(STARTING), "{said}");
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}\n{said}");
 }
 
@@ -269,4 +274,223 @@ fn the_mcp_search_returns_the_starting_sentence() {
     let said = format!("{err:#}");
     assert!(said.contains(STARTING), "{said}");
     assert!(!said.contains("Nothing matched"), "{said}");
+}
+
+fn form_decode(raw: &str) -> String {
+    let mut out = Vec::new();
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < bytes.len() => {
+                let hex = &raw[i + 1..i + 3];
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
+                out.push(bytes[i]);
+            }
+            byte => out.push(byte),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn asked_query(head: &str) -> String {
+    let target = head.split_whitespace().nth(1).unwrap_or("");
+    let query = target.split_once('?').map(|(_, rest)| rest).unwrap_or("");
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key == "q" {
+            return form_decode(value);
+        }
+    }
+    String::new()
+}
+
+/// `echo` puts the query, and the old trigger words, in a 200 hit.
+/// `phrase` answers 503 whose error string is those words.
+/// `code` answers 503 with a JSON `code` of `starting`.
+#[derive(Clone, Copy)]
+enum Open {
+    Echo,
+    Phrase,
+    Code,
+}
+
+fn open_pack(kind: Open) -> Seat {
+    let home = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            let kind = kind;
+            thread::spawn(move || {
+                let mut sock = conn;
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 8192];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                let path = path.split('?').next().unwrap_or("/");
+                let cl = content_length(&head);
+                while buf.len() < head_end + cl {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let (status, body) = if path == "/health" {
+                    (200, "packsetd ok".to_string())
+                } else if path == "/v1/status" {
+                    (
+                        200,
+                        r#"{"embedder":{"available":true,"answering":true,"enabled":true},"search":{"ranks":["fused","relevance"]}}"#
+                            .to_string(),
+                    )
+                } else if path == "/v1/search" {
+                    match kind {
+                        Open::Echo => {
+                            let q = asked_query(&head);
+                            let text =
+                                format!("{q} not ready not-ready busy loading try again starting");
+                            let body = serde_json::json!({
+                                "hits": [{
+                                    "id": "echo",
+                                    "kind": "lesson",
+                                    "text": text,
+                                    "score": 0.91,
+                                    "entities": ["seat:travel"],
+                                    "dense_rank": 1,
+                                    "cosine": 0.9
+                                }],
+                                "rank": "relevance"
+                            })
+                            .to_string();
+                            (200, body)
+                        }
+                        Open::Phrase => (
+                            503,
+                            format!(
+                                r#"{{"error":"{TRIP} not ready not-ready busy loading try again starting"}}"#
+                            ),
+                        ),
+                        Open::Code => (
+                            503,
+                            r#"{"code":"starting","ready":false,"error":"the writer is opening"}"#
+                                .to_string(),
+                        ),
+                    }
+                } else if path == "/v1/atoms" && head.starts_with("POST") {
+                    (
+                        200,
+                        r#"{"id":"atom-kept","kind":"lesson","text":"kept"}"#.to_string(),
+                    )
+                } else {
+                    (200, r#"{"ok":true,"atoms":[]}"#.to_string())
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            });
+        }
+    });
+    Seat {
+        url: format!("http://127.0.0.1:{port}"),
+        home,
+    }
+}
+
+#[test]
+fn a_query_that_names_the_busy_words_is_not_a_starting_pack() {
+    let seat = open_pack(Open::Echo);
+    let (out, elapsed) = run(
+        &seat,
+        &["search", TRIP],
+        &[("LJOS_SEARCH_WARMUP_WAIT", "5"), ("LJOS_SEARCH_WAIT", "0")],
+    );
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(TRIP), "{said}");
+    assert!(!said.contains(STARTING), "{said}");
+    assert!(!said.contains(STARTING_WORDS), "{said}");
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}\n{said}");
+}
+
+#[test]
+fn a_query_that_says_starting_is_not_a_starting_pack() {
+    let seat = open_pack(Open::Echo);
+    let (out, elapsed) = run(
+        &seat,
+        &["search", "memory is starting"],
+        &[("LJOS_SEARCH_WARMUP_WAIT", "5"), ("LJOS_SEARCH_WAIT", "0")],
+    );
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("memory is starting"), "{said}");
+    assert!(!said.contains(STARTING), "{said}");
+    assert!(!said.contains(STARTING_WORDS), "{said}");
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}\n{said}");
+}
+
+#[test]
+fn an_error_string_that_quotes_the_query_is_busy_not_starting() {
+    let seat = open_pack(Open::Phrase);
+    let (out, elapsed) = run(
+        &seat,
+        &["search", TRIP],
+        &[("LJOS_SEARCH_WARMUP_WAIT", "8"), ("LJOS_SEARCH_WAIT", "0")],
+    );
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(BUSY_WORDS), "{said}");
+    assert!(!said.contains(STARTING), "{said}");
+    assert!(!said.contains(STARTING_WORDS), "{said}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}\n{said}");
+}
+
+#[test]
+fn a_starting_code_ranks_by_words() {
+    let seat = open_pack(Open::Code);
+    let (out, elapsed) = run(
+        &seat,
+        &["search", "kiln schedule"],
+        &[("LJOS_SEARCH_WARMUP_WAIT", "1"), ("LJOS_SEARCH_WAIT", "0")],
+    );
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(STARTING_WORDS), "{said}");
+    assert!(!said.contains(STARTING), "{said}");
+    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}\n{said}");
+    assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
+}
+
+#[test]
+fn remember_keeps_a_lesson_that_names_the_busy_words() {
+    let seat = open_pack(Open::Echo);
+    let lesson = format!("{TRIP} not ready busy loading starting");
+    let (out, elapsed) = run(
+        &seat,
+        &["remember", lesson.as_str()],
+        &[("LJOS_SEARCH_WARMUP_WAIT", "5")],
+    );
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(!said.contains(STARTING), "{said}");
+    assert!(!said.contains("queued"), "{said}");
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}\n{said}");
 }

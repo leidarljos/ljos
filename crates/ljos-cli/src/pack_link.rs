@@ -1431,7 +1431,8 @@ impl PacksetClient {
     /// deadline that has passed, is the JSON `error` field and stops.
     /// A search or a recall, while [`BusyRetry`] is held, asks `GET /v1/search`
     /// again with a short growing pause until [`SEARCH_BUSY_BUDGET`] runs
-    /// out. A 503 that says the pack is still loading keeps the one wait.
+    /// out. A 503 whose JSON code says the pack is starting is returned
+    /// as that state, and is not read as a busy queue.
     pub(crate) fn roundtrip(
         &self,
         method: &str,
@@ -1491,10 +1492,10 @@ impl PacksetClient {
         let answer = self.exchange(addr, &call, allow, budget)?;
         let answer = match answer.status {
             408 => return Err(degrade(&answer.body, method, true)),
-            503 if busy_retry_held()
-                && search_read(method, path)
-                && !crate::pack_still_starting(&answer.body) =>
-            {
+            503 if crate::response_is_starting(Some(503), &answer.body) => {
+                return Err(crate::starting_transport_error());
+            }
+            503 if busy_retry_held() && search_read(method, path) => {
                 self.ask_until_free(addr, &call, allow, budget, answer)?
             }
             503 => match answer
@@ -1553,7 +1554,10 @@ impl PacksetClient {
                 return Err(degrade(&latest.body, "GET", false));
             }
             let next = self.exchange(addr, call, allow, timeout)?;
-            if next.status != 503 || crate::pack_still_starting(&next.body) {
+            if crate::response_is_starting(Some(next.status), &next.body) {
+                return Err(crate::starting_transport_error());
+            }
+            if next.status != 503 {
                 return Ok(next);
             }
             latest = next;

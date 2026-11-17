@@ -12535,7 +12535,7 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
         // the command that fixes the token.
         let (body, _) = match search_relevant(&client, cue, limit, false, timeout) {
             Ok(pair) => pair,
-            Err(err) if writer_refusal(&err) => return Err(err),
+            Err(err) if writer_refusal(&err) || is_memory_starting(&err) => return Err(err),
             Err(_) => return Ok(None),
         };
         let found: Option<Vec<(Hit, DenseSignal)>> = body["hits"].as_array().and_then(|hits| {
@@ -14688,6 +14688,7 @@ pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
                     | WRITER_DOWN_REASON
                     | WRITER_BUSY_REASON
                     | MEMORY_SEARCH_BUSY_REASON
+                    | MEMORY_STARTING_REASON
             )
         {
             return ranking_sentence(ranking, false);
@@ -14719,6 +14720,7 @@ fn ranking_sentence(ranking: &Ranking, shown: bool) -> String {
             | WRITER_DOWN_REASON
             | WRITER_BUSY_REASON
             | MEMORY_SEARCH_BUSY_REASON
+            | MEMORY_STARTING_REASON
     ) {
         return format!("{}\n", lexical_reason(ranking, shown));
     }
@@ -14765,6 +14767,9 @@ fn lexical_reason(ranking: &Ranking, shown: bool) -> String {
     if ranking.reason == MEMORY_SEARCH_BUSY_REASON {
         return MEMORY_SEARCH_BUSY_LINE.to_string();
     }
+    if ranking.reason == MEMORY_STARTING_REASON {
+        return MEMORY_STARTING_FALLBACK_LINE.to_string();
+    }
     ranking.reason.to_string()
 }
 
@@ -14780,6 +14785,14 @@ pub const MEMORY_SEARCH_BUSY_REASON: &str = "memory search was busy";
 
 /// The one line when search used words because the writer stayed busy.
 pub const MEMORY_SEARCH_BUSY_LINE: &str = "Used word search because memory search was busy.";
+
+/// The ranking reason when the pack has not opened and the warm-up budget
+/// ran out. The line is [`MEMORY_STARTING_FALLBACK_LINE`].
+pub const MEMORY_STARTING_REASON: &str = "memory is still starting";
+
+/// The one line when search used words because the pack has not opened.
+pub const MEMORY_STARTING_FALLBACK_LINE: &str =
+    "Used word search because memory is still starting.";
 
 thread_local! {
     static WRITER_FALLBACK: std::cell::RefCell<Option<(u64, String)>> =
@@ -15078,21 +15091,116 @@ fn search_can_fall_back(err: &anyhow::Error) -> bool {
 }
 
 /// What a search, a remember, or a finish lesson prints when the pack has
-/// not finished starting inside [`search_warmup_wait`].
+/// not finished starting inside [`search_warmup_wait`] and word search
+/// cannot stand in. A search of now uses [`MEMORY_STARTING_FALLBACK_LINE`].
 pub const MEMORY_STARTING_LINE: &str = "Memory is starting, so try again in a few seconds.";
 
-/// The pack answered that it is still starting: `/health` said not-ready,
-/// or a search said the pack is busy while loading. A pack that is already
-/// open and only busy does not match.
-fn pack_still_starting(text: &str) -> bool {
-    let text = text.to_ascii_lowercase();
-    text.contains("not-ready")
-        || text.contains("not ready")
-        || (text.contains("busy") && text.contains("loading"))
+/// A pack that has not opened. The type is the signal.
+/// The display text is [`MEMORY_STARTING_LINE`]. Words in a query are not this.
+#[derive(Debug)]
+struct PackStarting;
+
+impl std::fmt::Display for PackStarting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(MEMORY_STARTING_LINE)
+    }
+}
+
+impl std::error::Error for PackStarting {}
+
+pub(crate) fn starting_transport_error() -> packset_client::Error {
+    packset_client::Error::Io(std::io::Error::other(PackStarting))
+}
+
+/// Whether `err` is a pack that has not opened.
+///
+/// Set from `/health` or a JSON code. A sentence that uses the same words,
+/// including the query, is not this. The marker rides on the I/O error
+/// `std` does not put in [`std::error::Error::source`], so that payload is
+/// read here.
+#[must_use]
+pub fn is_memory_starting(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        if cause.downcast_ref::<PackStarting>().is_some() {
+            return true;
+        }
+        let io = cause.downcast_ref::<std::io::Error>().or_else(|| {
+            cause
+                .downcast_ref::<packset_client::Error>()
+                .and_then(|err| match err {
+                    packset_client::Error::Io(io) => Some(io),
+                    _ => None,
+                })
+        });
+        io.is_some_and(|io| io.get_ref().is_some_and(|inner| inner.is::<PackStarting>()))
+    })
 }
 
 fn memory_starting_err() -> anyhow::Error {
-    anyhow::anyhow!(MEMORY_STARTING_LINE)
+    anyhow::Error::new(PackStarting)
+}
+
+/// Whether this answer says the pack has not opened.
+///
+/// A 2xx body is an answer. Hit text and an `error` string are not read,
+/// because both can carry the query. `/health` (`status` is `None`) is
+/// starting only when the whole body is `not-ready` or `not ready`, or
+/// the JSON below says so. Any other status is starting only when that
+/// JSON says `ready` is false, `code` or `status` is `starting` or
+/// `not_ready`, or `error` is exactly `not-ready` or
+/// `the pack is busy while loading`. `packsetd ok` and `packsetd ok, busy`
+/// are open.
+fn response_is_starting(status: Option<u16>, body: &str) -> bool {
+    if status.is_some_and(|code| (200..300).contains(&code)) {
+        return false;
+    }
+    let body = body.trim();
+    if status.is_none()
+        && (body.eq_ignore_ascii_case("not-ready") || body.eq_ignore_ascii_case("not ready"))
+    {
+        return true;
+    }
+    json_says_starting(body)
+}
+
+fn json_says_starting(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    if value.get("ready").and_then(Value::as_bool) == Some(false) {
+        return true;
+    }
+    // The whole `error` string, not a substring. A query quoted inside a
+    // longer sentence does not match.
+    if error_token_is_starting(value.get("error").and_then(Value::as_str)) {
+        return true;
+    }
+    let code = value
+        .get("code")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("status").and_then(Value::as_str))
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(Value::as_object)
+                .and_then(|obj| obj.get("code"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("");
+    let code = code.to_ascii_lowercase();
+    matches!(code.as_str(), "starting" | "not_ready" | "not-ready")
+}
+
+/// A known starting token, and nothing else.
+fn error_token_is_starting(text: Option<&str>) -> bool {
+    let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
+        return false;
+    };
+    let text = text.to_ascii_lowercase();
+    matches!(
+        text.as_str(),
+        "not-ready" | "not ready" | "the pack is busy while loading"
+    )
 }
 
 /// `Some(true)` when `/health` says the pack has not opened.
@@ -15100,13 +15208,13 @@ fn memory_starting_err() -> anyhow::Error {
 fn health_still_starting() -> Option<bool> {
     let client = pack().ok()?;
     match client.health() {
-        Ok(body) => Some(pack_still_starting(&body)),
+        Ok(body) => Some(response_is_starting(None, &body)),
         Err(err) => {
             let err = anyhow::Error::from(err);
             if pack_unreachable(&err) {
                 None
             } else {
-                Some(pack_still_starting(&format!("{err:#}")))
+                Some(is_memory_starting(&err))
             }
         }
     }
@@ -15158,7 +15266,7 @@ fn wait_until_health_open() -> Result<()> {
     }
 }
 
-/// Retry `op` while it says the pack is busy loading.
+/// Retry `op` while the pack has not opened.
 /// The wait shares [`search_warmup_wait`] with [`wait_until_health_open`].
 fn answer_after_start<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
     let _ = search_call_left();
@@ -15167,7 +15275,7 @@ fn answer_after_start<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
     loop {
         match op() {
             Ok(value) => return Ok(value),
-            Err(err) if pack_still_starting(&format!("{err:#}")) => {
+            Err(err) if is_memory_starting(&err) => {
                 if search_warmup_wait().is_zero() || !sleep_start(started, &mut pause) {
                     return Err(memory_starting_err());
                 }
@@ -15418,8 +15526,8 @@ fn search_after_bounded_wait(
 /// cold encoder needs.
 fn opening_search_err(err: packset_client::Error) -> anyhow::Error {
     let err = anyhow::Error::from(err);
-    if pack_still_starting(&format!("{err:#}")) {
-        anyhow::anyhow!("the pack is busy while loading")
+    if is_memory_starting(&err) {
+        memory_starting_err()
     } else {
         err
     }
@@ -15461,8 +15569,8 @@ fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
             .map_err(opening_search_err)
             .context("search: GET /v1/search failed")?;
     }
-    if pack_still_starting(&answer.body) {
-        bail!("the pack is busy while loading");
+    if response_is_starting(Some(answer.status), &answer.body) {
+        return Err(memory_starting_err());
     }
     if !(200..300).contains(&answer.status) {
         if matches!(answer.status, 401 | 403) {
@@ -23215,7 +23323,7 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
                     "duplicate": true,
                 }))
             }
-            Err(err) if pack_still_starting(&format!("{err:#}")) => Err(err),
+            Err(err) if is_memory_starting(&err) => Err(err),
             Err(err) if pack_turned_off(&err) => Err(err),
             Err(err) if remember_should_queue(&err) => {
                 // Load has not judged the words. Keep the sentence as given,
@@ -40963,6 +41071,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     let mut woke = false;
     let mut ask = |what: &dyn Fn() -> Result<Vec<Hit>>| -> Result<Vec<Hit>> {
         match what() {
+            Err(err) if is_memory_starting(&err) => Err(err),
             Err(err) if is_deadline_miss(&err) || is_read_shed(&err) => Err(err),
             // A timeout before the start is a busy pack. A timeout after
             // the start left the writer down, and the line names the command.
@@ -40988,15 +41097,29 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     // the call is not started again.
     let own = match ask(&|| issue_memories(issue)) {
         Ok(hits) => hits,
+        // A pack that has not opened sheds the listing. Word search below
+        // is the page. A busy pack that is already open stays an error.
+        Err(err) if is_memory_starting(&err) => Vec::new(),
+        Err(err) if pack_settled(&err) && health_still_starting() == Some(true) => Vec::new(),
         Err(err) if pack_settled(&err) => return Err(err),
         Err(_) => Vec::new(),
     };
     let cues = recall_cues(issue);
     let pool = u32::try_from(RELATED_MEMORY_CAP * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let mut related = Vec::new();
+    let mut word_fallback = false;
     for cue in &cues {
         match ask(&|| search_ranked(cue, pool)) {
             Ok(hits) => related.extend(hits),
+            Err(err) if is_memory_starting(&err) => {
+                let words = search_by_words(cue, pool);
+                if words.is_empty() && own.is_empty() && related.is_empty() {
+                    return Err(memory_starting_err());
+                }
+                related.extend(words);
+                word_fallback = true;
+                break;
+            }
             Err(err) if pack_settled(&err) => return Err(err),
             Err(e) if own.is_empty() && related.is_empty() => return Ok(recall_down(&e)),
             Err(_) => break,
@@ -41007,14 +41130,18 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
         &cues.join(" "),
         word_rank::DEFAULT_MIN_SCORE,
     );
-    Ok(recall_lines(
+    let mut text = recall_lines(
         &own,
         related,
         &cues.join(" "),
         &now_utc(),
         include_notes,
         false,
-    ))
+    );
+    if word_fallback {
+        text.insert_str(0, &format!("{MEMORY_STARTING_FALLBACK_LINE}\n"));
+    }
+    Ok(text)
 }
 
 /// Search hits already ranked by the writer, minus the issue's own rows.
@@ -44415,10 +44542,9 @@ fn finish_lesson(issue: &str, text: &str) -> String {
     let filed = answer_after_start(|| finish_lesson_post(issue, text));
     match filed {
         Ok(line) => line,
-        Err(e) if e.to_string().contains(MEMORY_STARTING_LINE) => {
-            format!("{MEMORY_STARTING_LINE}\n")
-        }
-        Err(e) if !pack_turned_off(&e) && remember_should_queue(&e) => {
+        // The ticket is already closed. Queue the lesson, as a busy pack
+        // does, so the sentence is not dropped.
+        Err(e) if is_memory_starting(&e) || (!pack_turned_off(&e) && remember_should_queue(&e)) => {
             // A busy writer has not judged the words. Queue the sentence
             // as given. A second finish of the same lesson is the row
             // already waiting, and the line still says it will be saved.
