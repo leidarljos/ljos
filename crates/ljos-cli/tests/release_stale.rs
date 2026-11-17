@@ -438,3 +438,182 @@ fn a_silent_claim_graph_is_one_line_inside_the_deadline() {
         .unwrap();
     assert!(!alive.success(), "grandchild {} still running", pid.trim());
 }
+
+#[test]
+fn release_stale_drops_older_holders_of_same_seat_and_keeps_live_and_other() {
+    let root = tempfile::tempdir().unwrap();
+    let tracker = root.path().join("tracker");
+    let home = root.path().join("home");
+    let bin = root.path().join("bin");
+    let run = root.path().join("run");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    let layout = vissue_core::Layout::new(&tracker, "Software");
+    std::fs::create_dir_all(layout.projects_dir()).unwrap();
+    let titles = [
+        "dead hold older holder",
+        "gone hold older holder",
+        "tracker only older holder",
+        "still running older holder",
+        "other seat",
+    ];
+    let holders = [
+        "dseams-paper@dorx1f91mq",
+        "dseams-paper@dorx1f91mq",
+        "dseams-paper@dorx1f91mq",
+        "dseams-paper@live111111",
+        "other-seat@dorx1f91mq",
+    ];
+    let mut ids = Vec::new();
+    for (title, holder) in titles.iter().zip(holders) {
+        let made = vissue_core::ops::create(
+            &layout,
+            "work",
+            title,
+            vissue_core::CreateOpts {
+                quiet: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let id = made.trim().to_string();
+        vissue_core::ops::claim_as(&layout, &id, false, holder).unwrap();
+        ids.push(id);
+    }
+    let org = layout.project_issues_path("work");
+    let mut doc = vissue_core::IssueDoc::parse_file("work", &org).unwrap();
+    let old_when = (chrono::Local::now().date_naive() - chrono::Duration::days(3))
+        .format("[%Y-%m-%d %a 09:00]")
+        .to_string();
+    for (id, holder) in ids.iter().zip(holders) {
+        let heading = doc.headings.iter_mut().find(|h| h.id == *id).unwrap();
+        heading.state = "STARTED".to_string();
+        heading
+            .properties
+            .insert("CLAIMED_BY".into(), holder.to_string());
+        heading
+            .properties
+            .insert("CLAIMED_AT".into(), old_when.clone());
+    }
+    doc.write().unwrap();
+
+    let now = now_unix();
+    let rows = vec![
+        serde_json::json!({
+            "id": actor('1'),
+            "status": "claimed",
+            "assignee": actor('a'),
+            "updated_unix": now.saturating_sub(80_000),
+            "summary": &ids[0],
+        }),
+        serde_json::json!({
+            "id": actor('2'),
+            "status": "claimed",
+            "assignee": actor('b'),
+            "updated_unix": now.saturating_sub(70_000),
+            "summary": &ids[1],
+        }),
+        serde_json::json!({
+            "id": actor('3'),
+            "status": "claimed",
+            "assignee": actor('c'),
+            "updated_unix": now.saturating_sub(60_000),
+            "summary": &ids[3],
+        }),
+        serde_json::json!({
+            "id": actor('4'),
+            "status": "claimed",
+            "assignee": actor('d'),
+            "updated_unix": now.saturating_sub(80_000),
+            "summary": &ids[4],
+        }),
+    ];
+    let graph = root.path().join("graph.json");
+    std::fs::write(&graph, serde_json::to_string(&rows).unwrap()).unwrap();
+    script(
+        &bin,
+        "claimdag",
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  list) cat '{}' ;;\n  release) echo gen=3 ;;\nesac\nexit 0\n",
+            graph.display(),
+        ),
+    );
+    script(&bin, "vissue", "#!/bin/sh\nexit 0\n");
+
+    write_hold(
+        &run,
+        &actor('a'),
+        "dseams-paper",
+        4_194_303,
+        "no-such-runner",
+        &ids[0],
+    );
+    // ids[1] and ids[2] deliberately have no hold file (old session is gone).
+    write_hold(
+        &run,
+        &actor('c'),
+        "dseams-paper",
+        std::process::id(),
+        &self_comm(),
+        &ids[3],
+    );
+    write_hold(
+        &run,
+        &actor('d'),
+        "other-seat",
+        4_194_303,
+        "no-such-runner",
+        &ids[4],
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["release", "--stale"])
+        .current_dir(root.path())
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("HOME", &home)
+        .env("TMPDIR", root.path())
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", &run)
+        .env("VISSUE_ROOT", &tracker)
+        .env("VISSUE_NO_ROUTE", "1")
+        .env("LJOS_SEAT", "dseams-paper")
+        .env("CURSOR_CONVERSATION_ID", "li41adshxv-current-session")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("LJOS_ASK_PACK", "off")
+        .env("PACKSET_URL", "off")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{said}");
+    for id in [&ids[0], &ids[1], &ids[2]] {
+        assert!(
+            said.contains(&format!("took over {id} from dseams-paper@dorx1f91mq")),
+            "missing takeover line for {id}:\n{said}"
+        );
+        let (st, who) = state(&org, id);
+        assert_eq!(st, "TODO", "{id} {st}");
+        assert!(who.is_none(), "{id} still claimed by {who:?}");
+    }
+    assert!(
+        said.contains("released 3 quiet claims; kept 1 held by a running conversation"),
+        "{said}"
+    );
+    let (st, who) = state(&org, &ids[3]);
+    assert_eq!(st, "STARTED");
+    assert_eq!(who.as_deref(), Some("dseams-paper@live111111"));
+    let (st, who) = state(&org, &ids[4]);
+    assert_eq!(st, "STARTED");
+    assert_eq!(who.as_deref(), Some("other-seat@dorx1f91mq"));
+}

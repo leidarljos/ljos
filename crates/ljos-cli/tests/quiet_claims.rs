@@ -654,3 +654,123 @@ fn quiet_stale_lines(text: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
+
+#[cfg(target_os = "linux")]
+fn self_comm_quiet() -> String {
+    let pid = std::process::id();
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let open = stat.find('(').unwrap();
+    let close = stat.rfind(')').unwrap();
+    stat[open + 1..close].to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn self_comm_quiet() -> String {
+    let pid = std::process::id();
+    let out = Command::new("/bin/ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let comm = text.trim();
+    std::path::Path::new(comm)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(comm)
+        .to_string()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn self_comm_quiet() -> String {
+    String::from("test")
+}
+
+#[test]
+fn release_stale_days_takes_over_older_holder_and_keeps_running_conversation() {
+    let (world, ids) = World::new(&[
+        claim(
+            "old session gone",
+            "ada@dorx1f91mq",
+            10,
+            None,
+            None,
+            None,
+            "STARTED",
+        ),
+        claim(
+            "still running",
+            "ada@live111111",
+            10,
+            None,
+            None,
+            None,
+            "STARTED",
+        ),
+        claim(
+            "other seat",
+            "bea@dorx1f91mq",
+            10,
+            None,
+            None,
+            None,
+            "STARTED",
+        ),
+    ]);
+    let bin = PathBuf::from(world.path.split(':').next().unwrap());
+    let live_actor = ljos_cli::work_id(&format!("ada@live111111:{}", ids[1]));
+    let old_actor = ljos_cli::work_id(&format!("ada@dorx1f91mq:{}", ids[0]));
+    let id0_node = ljos_cli::work_id(&ids[0]);
+    script(
+        &bin,
+        "claimdag",
+        &format!(
+            "#!/bin/sh\n\
+case \"$1\" in\n\
+  get)\n\
+    if [ \"$2\" = '{id0_node}' ]; then\n\
+      echo \"$2 claimed task gen=2 assignee={old_actor}\"\n\
+    else\n\
+      echo \"$2 claimed task gen=2 assignee={live_actor}\"\n\
+    fi ;;\n\
+  release)\n\
+    if [ \"$4\" != '{old_actor}' ] && [ \"$4\" != '{live_actor}' ]; then\n\
+      echo 'release: not assignee' >&2; exit 1\n\
+    fi\n\
+    echo gen=3 ;;\nesac\nexit 0\n"
+        ),
+    );
+    let run_dir = world.root.path().join("run/ljos");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(
+        run_dir.join(format!("hold-{live_actor}")),
+        format!(
+            "ada@live111111:{}\nada\n{}\n{}\n2026-01-01T00:00:00Z\n{}\n-\n",
+            ids[1],
+            std::process::id(),
+            self_comm_quiet(),
+            ids[1]
+        ),
+    )
+    .unwrap();
+
+    let yes = world.ok_env(
+        "ada",
+        &["release", "--stale", "--days", "7", "--yes"],
+        &[("CURSOR_CONVERSATION_ID", "li41adshxv-current-session")],
+    );
+    assert!(yes.contains("took over from ada@dorx1f91mq"), "{yes}");
+    assert!(yes.contains("stayed claimed"), "{yes}");
+    assert!(yes.contains("released 1 of 2 claims"), "{yes}");
+
+    let org = std::fs::read_to_string(&world.org).unwrap();
+    let doc = vissue_core::IssueDoc::parse_file("work", &world.org).unwrap();
+    let h0 = doc.headings.iter().find(|h| h.id == ids[0]).unwrap();
+    let h1 = doc.headings.iter().find(|h| h.id == ids[1]).unwrap();
+    let h2 = doc.headings.iter().find(|h| h.id == ids[2]).unwrap();
+    assert_eq!(h0.state, "TODO", "{org}");
+    assert!(h0.claimed_by().is_none(), "{org}");
+    assert_eq!(h1.state, "STARTED", "{org}");
+    assert_eq!(h1.claimed_by(), Some("ada@live111111"), "{org}");
+    assert_eq!(h2.state, "STARTED", "{org}");
+    assert_eq!(h2.claimed_by(), Some("bea@dorx1f91mq"), "{org}");
+}

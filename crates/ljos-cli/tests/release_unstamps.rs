@@ -428,3 +428,184 @@ fn release_hands_the_tracker_back_when_the_claim_graph_holds_nothing() {
         "another name's claim went:\n{org}"
     );
 }
+
+struct LiveSleeper(std::process::Child);
+
+impl LiveSleeper {
+    fn spawn() -> Self {
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        Self(child)
+    }
+
+    fn pid(&self) -> u32 {
+        self.0.id()
+    }
+}
+
+impl Drop for LiveSleeper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn finish_takes_over_older_holders_of_same_seat_and_respects_live_and_other_seats() {
+    const TAKEOVER_ORG: &str = "#+TITLE: Software issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
+* STARTED [#C] graph already reclaimed\n:PROPERTIES:\n:ID:         Software-oc9m\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: dseams-paper@dorx1f91mq\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
+* STARTED [#C] graph held, hold file gone\n:PROPERTIES:\n:ID:         Software-oc9n\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: dseams-paper@dorx1f91mq\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
+* STARTED [#C] dead session hold file\n:PROPERTIES:\n:ID:         Software-oc9o\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: dseams-paper@dorx1f91mq\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
+* STARTED [#C] live conversation on this host\n:PROPERTIES:\n:ID:         Software-oc9p\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: dseams-paper@live111111\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
+* STARTED [#C] other seat\n:PROPERTIES:\n:ID:         Software-oc9q\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: other-seat@dorx1f91mq\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n";
+
+    let dir = tempfile::tempdir().unwrap();
+    let oc9m = ljos_cli::work_id("Software-oc9m");
+    let oc9n = ljos_cli::work_id("Software-oc9n");
+    let oc9o = ljos_cli::work_id("Software-oc9o");
+    let oc9p = ljos_cli::work_id("Software-oc9p");
+    let oc9q = ljos_cli::work_id("Software-oc9q");
+    let actor_oc9n = ljos_cli::work_id("dseams-paper@dorx1f91mq:Software-oc9n");
+    let actor_oc9o = ljos_cli::work_id("dseams-paper@dorx1f91mq:Software-oc9o");
+    let actor_oc9p = ljos_cli::work_id("dseams-paper@live111111:Software-oc9p");
+    let actor_oc9q = ljos_cli::work_id("other-seat@dorx1f91mq:Software-oc9q");
+
+    script(
+        dir.path(),
+        "claimdag",
+        &format!(
+            "#!/bin/sh\n\
+case \"$1\" in\n\
+  get)\n\
+    case \"$2\" in\n\
+      {oc9m}) echo \"$2  ready  task  unset  gen=2  assignee=00000000000000000000000000000000  Software-oc9m\" ;;\n\
+      {oc9n}) echo \"$2  claimed  task  unset  gen=2  assignee={actor_oc9n}  Software-oc9n\" ;;\n\
+      {oc9o}) echo \"$2  claimed  task  unset  gen=2  assignee={actor_oc9o}  Software-oc9o\" ;;\n\
+      {oc9p}) echo \"$2  claimed  task  unset  gen=2  assignee={actor_oc9p}  Software-oc9p\" ;;\n\
+      {oc9q}) echo \"$2  claimed  task  unset  gen=2  assignee={actor_oc9q}  Software-oc9q\" ;;\n\
+    esac ;;\n\
+  complete)\n\
+    actor=$4\n\
+    case \"$2\" in\n\
+      {oc9m}) echo \"$2 done\" ;;\n\
+      {oc9n}) [ \"$actor\" = '{actor_oc9n}' ] || {{ echo 'complete: not assignee' >&2; exit 1; }}; echo \"$2 done\" ;;\n\
+      {oc9o}) [ \"$actor\" = '{actor_oc9o}' ] || {{ echo 'complete: not assignee' >&2; exit 1; }}; echo \"$2 done\" ;;\n\
+      {oc9p}) [ \"$actor\" = '{actor_oc9p}' ] || {{ echo 'complete: not assignee' >&2; exit 1; }}; echo \"$2 done\" ;;\n\
+      {oc9q}) [ \"$actor\" = '{actor_oc9q}' ] || {{ echo 'complete: not assignee' >&2; exit 1; }}; echo \"$2 done\" ;;\n\
+    esac ;;\n\
+esac\nexit 0\n"
+        ),
+    );
+    script(
+        dir.path(),
+        "vissue",
+        "#!/bin/sh\necho '{\"state\":\"STARTED\"}' ; exit 0\n",
+    );
+
+    let tracker = dir.path().join("tracker");
+    let file = tracker.join("Software/Software/issues.org");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, TAKEOVER_ORG).unwrap();
+    let home = dir.path().join("home");
+    let runtime = dir.path().join("run");
+    let ljos_run = runtime.join("ljos");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&ljos_run).unwrap();
+    std::fs::write(
+        ljos_run.join(format!("hold-{actor_oc9o}")),
+        "dseams-paper@dorx1f91mq:Software-oc9o\ndseams-paper\n4194303\nno-such-runner\n2026-10-11T05:00:00Z\nSoftware-oc9o\n-\n",
+    )
+    .unwrap();
+    let sleeper = LiveSleeper::spawn();
+    let live_hold = ljos_run.join(format!("hold-{actor_oc9p}"));
+    std::fs::write(
+        &live_hold,
+        format!(
+            "dseams-paper@live111111:Software-oc9p\ndseams-paper\n{}\nsleep\n2026-10-11T05:00:00Z\nSoftware-oc9p\n-\n",
+            sleeper.pid(),
+        ),
+    )
+    .unwrap();
+
+    let path = format!("{}:/usr/bin:/bin", dir.path().display());
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ljos"))
+            .args(args)
+            .env_clear()
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_STATE_HOME", home.join(".state"))
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("VISSUE_ROOT", &tracker)
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("LJOS_SEAT", "dseams-paper")
+            .env("CURSOR_CONVERSATION_ID", "li41adshxv-current-session")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", "off")
+            .output()
+            .unwrap()
+    };
+
+    for id in ["Software-oc9m", "Software-oc9n", "Software-oc9o"] {
+        let out = run(&["finish", id]);
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "finish {id}: {said}");
+        assert!(
+            !said.contains("stays claimed"),
+            "finish {id} stayed claimed: {said}"
+        );
+        let takeover_lines: Vec<_> = said
+            .lines()
+            .filter(|l| l.contains("dseams-paper@dorx1f91mq"))
+            .collect();
+        assert_eq!(
+            takeover_lines.len(),
+            1,
+            "finish {id} should print one line naming the old holder:\n{said}"
+        );
+    }
+
+    for id in ["Software-oc9p", "Software-oc9q"] {
+        let out = run(&["finish", id]);
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.status.success(), "finish {id} should refuse: {said}");
+    }
+
+    let org = std::fs::read_to_string(&file).unwrap();
+    for id in ["Software-oc9m", "Software-oc9n", "Software-oc9o"] {
+        let h = heading(&org, id);
+        assert!(h.starts_with("\n* TODO"), "{id} not TODO:\n{org}");
+        assert!(!h.contains(":CLAIMED_BY:"), "{id} still claimed:\n{org}");
+    }
+    assert!(
+        heading(&org, "Software-oc9p").contains(":CLAIMED_BY: dseams-paper@live111111"),
+        "live conversation claim was dropped:\n{org}"
+    );
+    assert!(
+        live_hold.is_file(),
+        "live conversation hold record was dropped"
+    );
+    assert!(
+        heading(&org, "Software-oc9q").contains(":CLAIMED_BY: other-seat@dorx1f91mq"),
+        "other seat claim was dropped:\n{org}"
+    );
+}

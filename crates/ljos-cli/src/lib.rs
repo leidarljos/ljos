@@ -40028,21 +40028,25 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
     let said = match run_captured("claimdag", &["release", &id, "--actor", &actor]) {
         Ok(said) => said,
         Err(e) if e.to_string().contains("not assignee") => {
-            if let Some((holder, hold)) = same_seat_hold(&id, &actor) {
+            if let Some((holder, hold)) = same_seat_hold(&id, &actor, assignee) {
                 let said = run_captured("claimdag", &["release", &id, "--actor", &holder])?;
                 drop_hold(&holder);
                 drop_playbook(node);
-                return Ok(with_unstamp(
+                return Ok(with_unstamp_for(
                     format!("{}{}", same_seat_note(node, "released", &hold), said.stdout),
                     node,
                     &id,
                     &hold.assignee,
+                    assignee,
                     true,
+                    false,
                 ));
             }
             // The tracker or a hold record names this seat under its other
             // form (a git hook recorded the bare seat, `ljos claim` the
-            // `SEAT@TAG`): hand it back under the name that holds it.
+            // `SEAT@TAG`), or an older holder of this seat: hand it back
+            // under the name that holds it when no live conversation on
+            // this host still owns it.
             let Some(holder) = run_captured("claimdag", &["get", id.as_str()])
                 .ok()
                 .and_then(|g| holder_of(&g.stdout))
@@ -40050,20 +40054,19 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
                 return Err(e);
             };
             let hold = read_hold(&holder);
-            let tracker = tracker_show_json(node).ok().and_then(|v| {
-                v["claimed_by"]
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            });
+            if let Some(live) = live_other_hold_for_actor(&holder, hold.as_ref(), node, assignee)
+                .or_else(|| live_other_hold_on_ticket(node, &actor, assignee).map(|(_, live)| live))
+            {
+                bail!("{}", held_by_another_message(node, assignee, &live, true));
+            }
+            let tracker = tracker_claimed_by(node);
             let named: Vec<String> = hold
                 .as_ref()
                 .map(|h| h.assignee.clone())
                 .into_iter()
                 .chain(tracker.clone())
                 .collect();
-            if !named.iter().any(|n| same_holder(n, assignee)) {
+            if !named.iter().any(|n| same_claimed_seat(n, assignee, node)) {
                 bail!(
                     "{}",
                     not_assignee_message(node, assignee, hold.as_ref(), tracker.as_deref())
@@ -40072,8 +40075,29 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
             let said = run_captured("claimdag", &["release", &id, "--actor", &holder])?;
             drop_hold(&holder);
             drop_playbook(node);
+            let old = hold
+                .as_ref()
+                .map(|h| unscoped_holder(&h.assignee, node).to_string())
+                .or_else(|| {
+                    tracker
+                        .as_deref()
+                        .map(|t| unscoped_holder(t, node).to_string())
+                });
+            let prefix = old
+                .as_deref()
+                .and_then(|o| took_over_from(o, assignee, node))
+                .map(|o| format!("took over from {o}\n"))
+                .unwrap_or_default();
             let stamped = tracker.as_deref().unwrap_or(assignee);
-            return Ok(with_unstamp(said.stdout, node, &id, stamped, true));
+            return Ok(with_unstamp_for(
+                format!("{prefix}{}", said.stdout),
+                node,
+                &id,
+                stamped,
+                assignee,
+                true,
+                prefix.is_empty(),
+            ));
         }
         Err(e) => {
             let text = e.to_string();
@@ -40082,15 +40106,24 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
                 drop_playbook(node);
                 return Ok(String::new());
             }
-            let Some(why) = unheld_refusal(&text) else {
-                return Err(e);
+            let why = match unheld_refusal(&text) {
+                Some(why) => why,
+                None if claim_graph_absent(&text).is_some() => "no work graph",
+                None => return Err(e),
             };
+            if let Some((_, live)) = live_other_hold_on_ticket(node, &actor, assignee) {
+                bail!("{}", held_by_another_message(node, assignee, &live, true));
+            }
             return match unstamp_tracker(node, assignee, true) {
                 Ok(Some(line)) if !line.contains(" stays claimed by ") => {
                     drop_hold(&actor);
                     drop_playbook(node);
+                    let prefix = unstamped_old_holder(&line)
+                        .and_then(|who| took_over_from(who, assignee, node))
+                        .map(|old| format!("took over from {old}\n"))
+                        .unwrap_or_default();
                     Ok(format!(
-                        "claim graph: {node} held by nobody ({why})\n{line}\n"
+                        "{prefix}claim graph: {node} held by nobody ({why})\n{line}\n"
                     ))
                 }
                 _ => Err(e),
@@ -40099,7 +40132,15 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
     };
     drop_hold(&actor);
     drop_playbook(node);
-    Ok(with_unstamp(said.stdout, node, &id, assignee, true))
+    Ok(with_unstamp_for(
+        said.stdout,
+        node,
+        &id,
+        assignee,
+        assignee,
+        true,
+        true,
+    ))
 }
 
 /// A release of a session that already reached a terminal state.
@@ -40285,7 +40326,7 @@ pub fn unstamp_tracker(issue: &str, holder: &str, reopen: bool) -> Result<Option
                 )))
             }
             (None, None) => Ok(None),
-            (Some(who), _) if !same_holder(&who, holder) => Ok(Some(format!(
+            (Some(who), _) if !same_claimed_seat(&who, holder, issue) => Ok(Some(format!(
                 "tracker: {issue} stays claimed by {who}, not {holder}"
             ))),
             (Some(who), back) => {
@@ -40327,7 +40368,15 @@ fn state_before_claim(h: &vissue_core::IssueHeading) -> Option<String> {
 /// issue the holder had stamped. A tracker that does not write is a line,
 /// not a failure: the claim graph already moved. `reopen` is a release:
 /// see [`unstamp_tracker`].
-fn with_unstamp(said: String, node: &str, id: &str, holder: &str, reopen: bool) -> String {
+fn with_unstamp_for(
+    said: String,
+    node: &str,
+    id: &str,
+    holder: &str,
+    current: &str,
+    reopen: bool,
+    emit_takeover: bool,
+) -> String {
     let mut out = said;
     // `node_for` returns `node` unchanged when the issue id is already 32
     // hex. Skipping the tracker then left the issue STARTED with nobody
@@ -40341,12 +40390,137 @@ fn with_unstamp(said: String, node: &str, id: &str, holder: &str, reopen: bool) 
             "tracker: could not drop {holder}'s claim on {node} ({e:#}); the person's `vissue update {node} -s TODO` drops it"
         ),
     };
+    if emit_takeover {
+        if let Some(old) =
+            unstamped_old_holder(&line).and_then(|who| took_over_from(who, current, node))
+        {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!("took over from {old}\n"));
+        }
+    }
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
     out.push_str(&line);
     out.push('\n');
     out
+}
+
+pub(crate) fn unscoped_holder<'a>(name: &'a str, node: &str) -> &'a str {
+    let name = name.trim();
+    let node = node.trim();
+    if !node.is_empty() {
+        if let Some(head) = name.strip_suffix(node).and_then(|s| s.strip_suffix(':')) {
+            return head.trim();
+        }
+    }
+    name
+}
+
+fn same_claimed_seat(held: &str, holder: &str, node: &str) -> bool {
+    let held = unscoped_holder(held, node);
+    let holder = unscoped_holder(holder, node);
+    if held.is_empty() || holder.is_empty() {
+        return false;
+    }
+    same_holder(held, holder) || same_seat_here(held, holder) || adopts_holder(node, holder, [held])
+}
+
+pub(crate) fn took_over_from(old: &str, current: &str, node: &str) -> Option<String> {
+    let old = unscoped_holder(old, node);
+    let current = unscoped_holder(current, node);
+    if old.is_empty() || old == current {
+        return None;
+    }
+    Some(old.to_string())
+}
+
+fn unstamped_old_holder(line: &str) -> Option<&str> {
+    let rest = line.trim().strip_prefix("tracker: ")?;
+    let (_, after) = rest.split_once(" no longer claimed by ")?;
+    let (who, _) = after.split_once(';')?;
+    let who = who.trim();
+    (!who.is_empty()).then_some(who)
+}
+
+fn tracker_claimed_by(node: &str) -> Option<String> {
+    tracker_show_json(node).ok().and_then(|v| {
+        v["claimed_by"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn live_other_hold_for_actor(
+    holder_actor: &str,
+    hold: Option<&Hold>,
+    node: &str,
+    assignee: &str,
+) -> Option<Hold> {
+    let hold = hold?;
+    let graph = hold_line(holder_actor, 6);
+    if !graph.is_none_or(|g| g == claim_graph_scope()) {
+        return None;
+    }
+    if hold_alive(hold)
+        && !same_holder(
+            unscoped_holder(&hold.assignee, node),
+            unscoped_holder(assignee, node),
+        )
+    {
+        Some(hold.clone())
+    } else {
+        None
+    }
+}
+
+pub(crate) fn live_other_hold_on_ticket(
+    node: &str,
+    actor: &str,
+    assignee: &str,
+) -> Option<(String, Hold)> {
+    let node = node.trim();
+    if node.is_empty() {
+        return None;
+    }
+    let graph = claim_graph_scope();
+    let entries = std::fs::read_dir(runtime_dir()).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(hold_actor) = name.strip_prefix("hold-") else {
+            continue;
+        };
+        if hold_actor == actor {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        if lines.get(5).copied() != Some(node) {
+            continue;
+        }
+        if lines.get(6).is_some_and(|g| !g.is_empty() && *g != graph) {
+            continue;
+        }
+        let Some(hold) = read_hold(hold_actor) else {
+            continue;
+        };
+        if hold_alive(&hold)
+            && !same_holder(
+                unscoped_holder(&hold.assignee, node),
+                unscoped_holder(assignee, node),
+            )
+        {
+            return Some((hold_actor.to_string(), hold));
+        }
+    }
+    None
 }
 
 /// The holder `ljos claim` would take over: this seat's record, and either
@@ -40359,18 +40533,24 @@ fn gone_same_seat_hold(id: &str, assignee: &str) -> Option<(String, Hold)> {
         .ok()
         .and_then(|g| holder_of(&g.stdout))?;
     let hold = read_hold(&holder)?;
-    let mine = hold.seat == seat_name();
-    let take = !hold_alive(&hold) || same_holder(&hold.assignee, assignee);
+    let seat = seat_name();
+    let mine = !seat.is_empty() && canonical_seat_name(&hold.seat) == canonical_seat_name(&seat);
+    let take = !hold_alive(&hold)
+        || same_holder(
+            split_claim_scope(&hold.assignee).0,
+            split_claim_scope(assignee).0,
+        );
     (mine && take).then_some((holder, hold))
 }
 
 /// The holder and hold record of node `id` when another conversation of
-/// this seat holds it: a background worker the seat started, or the
-/// conversation that started this worker. The seat owns its
-/// conversations, so it may finish or hand back what any of them holds.
-/// `None` when `actor` holds it, when no record on this host names the
-/// holder, or when the record names another seat or another claim graph.
-fn same_seat_hold(id: &str, actor: &str) -> Option<(String, Hold)> {
+/// this seat holds it and that conversation is gone on this host. The seat
+/// owns its conversations, so it may finish or hand back what an exited
+/// conversation or worker left. `None` when `actor` holds it, when the
+/// conversation is still running on this host, when no record on this host
+/// names the holder, or when the record names another seat or another
+/// claim graph.
+fn same_seat_hold(id: &str, actor: &str, assignee: &str) -> Option<(String, Hold)> {
     let holder = run_captured("claimdag", &["get", id])
         .ok()
         .and_then(|g| holder_of(&g.stdout))?;
@@ -40379,8 +40559,14 @@ fn same_seat_hold(id: &str, actor: &str) -> Option<(String, Hold)> {
     }
     let hold = read_hold(&holder)?;
     let graph = hold_line(&holder, 6);
-    (hold.seat == seat_name() && graph.is_none_or(|g| g == claim_graph_scope()))
-        .then_some((holder, hold))
+    let seat = seat_name();
+    let mine = !seat.is_empty() && canonical_seat_name(&hold.seat) == canonical_seat_name(&seat);
+    let gone = !hold_alive(&hold)
+        || same_holder(
+            split_claim_scope(&hold.assignee).0,
+            split_claim_scope(assignee).0,
+        );
+    (mine && gone && graph.is_none_or(|g| g == claim_graph_scope())).then_some((holder, hold))
 }
 
 /// Line `n`, counted from zero, of the hold record `actor` left; `None`
@@ -40585,7 +40771,7 @@ pub fn held_issue_record(issue: &str) -> Result<Value> {
 /// The claim graph a hold record belongs to: `CLAIMDAG_DIR`, or `-` for
 /// claimdag's runtime default. Two graphs on one host (a demo, a test
 /// seat) write their holds to the same runtime directory.
-fn claim_graph_scope() -> String {
+pub(crate) fn claim_graph_scope() -> String {
     graph_scope_of(std::env::var("CLAIMDAG_DIR").ok().as_deref())
 }
 
@@ -44966,7 +45152,61 @@ pub fn complete_as(
 ) -> Result<String> {
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
-    let gen_s = live_gen(&id, gen)?.to_string();
+    let gen_s = match live_gen(&id, gen) {
+        Ok(g) => g.to_string(),
+        Err(e) => {
+            let text = e.to_string();
+            let missing = gen.is_none()
+                && (text.contains("not found") || claim_graph_absent(&text).is_some());
+            if !missing {
+                return Err(e);
+            }
+            if let Some((_, live)) = live_other_hold_on_ticket(node, &actor, assignee) {
+                bail!(
+                    "{}",
+                    not_assignee_message(
+                        node,
+                        assignee,
+                        Some(&live),
+                        tracker_claimed_by(node).as_deref()
+                    )
+                );
+            }
+            let Some(who) = tracker_claimed_by(node) else {
+                return Err(e);
+            };
+            if !same_claimed_seat(&who, assignee, node) {
+                bail!("{}", not_assignee_message(node, assignee, None, Some(&who)));
+            }
+            drop_hold(&actor);
+            drop_playbook(node);
+            return Ok(with_unstamp_for(
+                String::new(),
+                node,
+                &id,
+                &who,
+                assignee,
+                reopen,
+                true,
+            ));
+        }
+    };
+    let current_holder = run_captured("claimdag", &["get", id.as_str()])
+        .ok()
+        .and_then(|g| holder_of(&g.stdout));
+    if current_holder.is_none() {
+        if let Some((_, live)) = live_other_hold_on_ticket(node, &actor, assignee) {
+            bail!(
+                "{}",
+                not_assignee_message(
+                    node,
+                    assignee,
+                    Some(&live),
+                    tracker_claimed_by(node).as_deref()
+                )
+            );
+        }
+    }
     let run = |actor: &str| {
         let mut args = vec![
             "complete",
@@ -44985,13 +45225,13 @@ pub fn complete_as(
     let said = match run(&actor) {
         Ok(said) => said,
         Err(e) if e.to_string().contains("not assignee") => {
-            // A worker this seat started, or the conversation that started
-            // this worker, holds it: the seat finishes its own work.
-            if let Some((holder, hold)) = same_seat_hold(&id, &actor) {
+            // A worker or older conversation of this seat holds it, and is gone:
+            // the seat finishes its own work.
+            if let Some((holder, hold)) = same_seat_hold(&id, &actor, assignee) {
                 let said = run(&holder)?;
                 drop_hold(&holder);
                 drop_playbook(node);
-                return Ok(with_unstamp(
+                return Ok(with_unstamp_for(
                     format!(
                         "{}{}",
                         same_seat_note(node, "completed", &hold),
@@ -45000,7 +45240,9 @@ pub fn complete_as(
                     node,
                     &id,
                     &hold.assignee,
+                    assignee,
                     reopen,
+                    false,
                 ));
             }
             // Another conversation of this seat holds the node, and `ljos
@@ -45008,8 +45250,8 @@ pub fn complete_as(
             // holder is this seat under its other name. Finish does that
             // takeover, then completes. `--assignee <seat>` does not, because
             // the claim graph names the conversation.
-            if gone_same_seat_hold(&id, assignee).is_some() {
-                claim(node, assignee)?;
+            if let Some((_, hold)) = gone_same_seat_hold(&id, assignee) {
+                let _ = claim(node, assignee)?;
                 let gen_now = live_gen(&id, None)?.to_string();
                 let mut args = vec![
                     "complete",
@@ -45026,34 +45268,75 @@ pub fn complete_as(
                 let said = run_captured("claimdag", &args)?;
                 drop_hold(&actor);
                 drop_playbook(node);
-                return Ok(with_unstamp(said.stdout, node, &id, assignee, reopen));
+                let prefix = took_over_from(&hold.assignee, assignee, node)
+                    .map(|old| format!("took over from {old}\n"))
+                    .unwrap_or_default();
+                return Ok(with_unstamp_for(
+                    format!("{prefix}{}", said.stdout),
+                    node,
+                    &id,
+                    assignee,
+                    assignee,
+                    reopen,
+                    prefix.is_empty(),
+                ));
             }
-            let holder = run_captured("claimdag", &["get", id.as_str()])
-                .ok()
-                .and_then(|g| holder_of(&g.stdout));
-            let hold = holder.as_deref().and_then(read_hold);
-            let tracker = tracker_show_json(node).ok().and_then(|v| {
-                v["claimed_by"]
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
+            let holder = current_holder.or_else(|| {
+                run_captured("claimdag", &["get", id.as_str()])
+                    .ok()
+                    .and_then(|g| holder_of(&g.stdout))
             });
-            // The name the tracker or the hold record gives is the seat this
-            // shell asked for: the claim was taken under a conversation or
-            // host-suffixed holder of the same seat, so finish under it.
+            let hold = holder.as_deref().and_then(read_hold);
+            let tracker = tracker_claimed_by(node);
             if let Some(holder) = holder.as_deref() {
-                let named = hold
+                if let Some(live) = live_other_hold_for_actor(holder, hold.as_ref(), node, assignee)
+                    .or_else(|| {
+                        live_other_hold_on_ticket(node, &actor, assignee).map(|(_, live)| live)
+                    })
+                {
+                    bail!(
+                        "{}",
+                        not_assignee_message(node, assignee, Some(&live), tracker.as_deref())
+                    );
+                }
+                // The name the tracker or the hold record gives is the seat this
+                // shell asked for: the claim was taken under a conversation or
+                // host-suffixed holder of the same seat, so finish under it.
+                let named: Vec<&str> = hold
                     .as_ref()
                     .map(|h| h.assignee.as_str())
                     .into_iter()
-                    .chain(tracker.as_deref());
-                if adopts_holder(node, assignee, named) {
+                    .chain(tracker.as_deref())
+                    .collect();
+                if adopts_holder(node, assignee, named.iter().copied())
+                    || named.iter().any(|n| same_claimed_seat(n, assignee, node))
+                {
                     let said = run(holder)?;
                     drop_hold(holder);
                     drop_playbook(node);
+                    let old = hold
+                        .as_ref()
+                        .map(|h| unscoped_holder(&h.assignee, node).to_string())
+                        .or_else(|| {
+                            tracker
+                                .as_deref()
+                                .map(|t| unscoped_holder(t, node).to_string())
+                        });
+                    let prefix = old
+                        .as_deref()
+                        .and_then(|o| took_over_from(o, assignee, node))
+                        .map(|o| format!("took over from {o}\n"))
+                        .unwrap_or_default();
                     let stamped = tracker.as_deref().unwrap_or(assignee);
-                    return Ok(with_unstamp(said.stdout, node, &id, stamped, reopen));
+                    return Ok(with_unstamp_for(
+                        format!("{prefix}{}", said.stdout),
+                        node,
+                        &id,
+                        stamped,
+                        assignee,
+                        reopen,
+                        prefix.is_empty(),
+                    ));
                 }
             }
             bail!(
@@ -45065,7 +45348,15 @@ pub fn complete_as(
     };
     drop_hold(&actor);
     drop_playbook(node);
-    Ok(with_unstamp(said.stdout, node, &id, assignee, reopen))
+    Ok(with_unstamp_for(
+        said.stdout,
+        node,
+        &id,
+        assignee,
+        assignee,
+        reopen,
+        true,
+    ))
 }
 
 /// The bare seat a holder name stands for: no `:node` scope, no `@host`
@@ -45984,12 +46275,21 @@ pub fn finish(
     let (ended, graph_quiet) = match ended {
         Ok(done) => (done, false),
         Err(e) if graph_timed_out(&e) => {
-            let _ = unstamp_tracker(issue, assignee, !closing);
-            (String::new(), true)
+            let mut timed = String::new();
+            if let Ok(Some(line)) = unstamp_tracker(issue, assignee, !closing) {
+                if let Some(old) =
+                    unstamped_old_holder(&line).and_then(|who| took_over_from(who, assignee, issue))
+                {
+                    timed.push_str(&format!("took over from {old}\n"));
+                }
+            }
+            (timed, true)
         }
         Err(e) => {
             let text = e.to_string();
-            if text.contains("so run `ljos send ") {
+            if text.contains("so run `ljos send ")
+                || text.contains("another conversation of this seat")
+            {
                 bail!("{text}");
             }
             bail!(
@@ -46006,7 +46306,18 @@ pub fn finish(
     // had before the claim. The work was not undone: the sitting ended and
     // the ticket stays open for a person to review.
     let mut handed_back = true;
-    for line in ended.lines().filter(|l| l.starts_with("tracker: ")) {
+    for line in ended.lines() {
+        if line.starts_with("took over from ")
+            || ((line.starts_with("completed ") || line.starts_with("released "))
+                && line.contains(" another conversation of seat "))
+        {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if !line.starts_with("tracker: ") {
+            continue;
+        }
         if line.contains("stays claimed") {
             handed_back = false;
             out.push_str(line);

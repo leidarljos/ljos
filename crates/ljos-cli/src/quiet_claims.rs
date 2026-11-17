@@ -488,6 +488,8 @@ struct QuietHeld {
     actor: String,
     /// Name [`crate::unstamp_tracker`] matches against `CLAIMED_BY`.
     holder: String,
+    /// Older holder of this seat that the current session took over from, if different.
+    old_holder: Option<String>,
     quiet: u64,
 }
 
@@ -553,7 +555,7 @@ pub fn release_quiet(
     let mut done = Vec::new();
     for item in &release {
         match hand_back(item) {
-            Ok(()) => done.push(item.label.clone()),
+            Ok(()) => done.push(item),
             Err(err) => {
                 failed.push_str(&format!(
                     "release: {} stayed claimed ({err:#})\n",
@@ -568,15 +570,34 @@ pub fn release_quiet(
 }
 
 fn render_quiet(release: &[QuietHeld], kept: &[QuietHeld], verbose: bool) -> String {
-    let released: Vec<String> = release.iter().map(|item| item.label.clone()).collect();
-    render_quiet_done(&released, kept, verbose).replace("released ", "would release ")
-}
-
-fn render_quiet_done(released: &[String], kept: &[QuietHeld], verbose: bool) -> String {
     if verbose {
         let mut out = String::new();
-        for id in released {
-            out.push_str(&format!("released {id}\n"));
+        for item in release {
+            out.push_str(&format!("would release {}\n", item.label));
+        }
+        for item in kept {
+            out.push_str(&format!(
+                "kept {}: held by a running conversation\n",
+                item.label
+            ));
+        }
+        if out.is_empty() {
+            out.push_str("would release 0 quiet claims\n");
+        }
+        return out;
+    }
+    summary_line(release.len(), kept.len(), true)
+}
+
+fn render_quiet_done(released: &[&QuietHeld], kept: &[QuietHeld], verbose: bool) -> String {
+    if verbose {
+        let mut out = String::new();
+        for item in released {
+            if let Some(old) = &item.old_holder {
+                out.push_str(&format!("released {} (took over from {old})\n", item.label));
+            } else {
+                out.push_str(&format!("released {}\n", item.label));
+            }
         }
         for item in kept {
             out.push_str(&format!(
@@ -589,7 +610,14 @@ fn render_quiet_done(released: &[String], kept: &[QuietHeld], verbose: bool) -> 
         }
         return out;
     }
-    summary_line(released.len(), kept.len(), false)
+    let mut out = String::new();
+    for item in released {
+        if let Some(old) = &item.old_holder {
+            out.push_str(&format!("took over {} from {old}\n", item.label));
+        }
+    }
+    out.push_str(&summary_line(released.len(), kept.len(), false));
+    out
 }
 
 fn summary_line(released: usize, kept: usize, dry_run: bool) -> String {
@@ -627,6 +655,7 @@ fn classify(
     let mut release = Vec::new();
     let mut kept = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let current = crate::holder_name();
     for row in rows {
         let Some(node) = graph_node(row) else {
             continue;
@@ -645,19 +674,33 @@ fn classify(
         if quiet < threshold {
             continue;
         }
+        let holder = claimed
+            .map(str::to_string)
+            .or_else(|| {
+                hold.as_ref()
+                    .map(|h| crate::unscoped_holder(&h.assignee, &node.ticket).to_string())
+            })
+            .unwrap_or_else(|| seat.to_string());
+        let old_holder = crate::took_over_from(&holder, &current, &node.ticket);
+        let label = if node.ticket.is_empty() {
+            node.id.clone()
+        } else {
+            node.ticket.clone()
+        };
+        let alive = hold.as_ref().is_some_and(crate::hold_alive)
+            || (hold.is_none()
+                && !node.ticket.is_empty()
+                && hold_on_ticket(&node.ticket).is_some_and(|(_, h)| crate::hold_alive(&h)));
         let item = QuietHeld {
-            label: if node.ticket.is_empty() {
-                node.id.clone()
-            } else {
-                node.ticket.clone()
-            },
+            label,
             ticket: node.ticket,
             graph_id: node.id,
             actor: node.actor,
-            holder: claimed.unwrap_or(seat).to_string(),
+            holder,
+            old_holder,
             quiet,
         };
-        if hold.as_ref().is_some_and(crate::hold_alive) {
+        if alive {
             kept.push(item);
         } else {
             release.push(item);
@@ -678,6 +721,8 @@ fn classify(
                 continue;
             }
         }
+        let holder = rec.heading.claimed_by().unwrap_or(seat).to_string();
+        let old_holder = crate::took_over_from(&holder, &current, &rec.heading.id);
         let item = QuietHeld {
             label: rec.heading.id.clone(),
             ticket: rec.heading.id.clone(),
@@ -686,7 +731,8 @@ fn classify(
                 .as_ref()
                 .map(|(actor, _)| actor.clone())
                 .unwrap_or_default(),
-            holder: rec.heading.claimed_by().unwrap_or(seat).to_string(),
+            holder,
+            old_holder,
             quiet,
         };
         if named
@@ -773,6 +819,7 @@ fn claimed_quiet(rec: &IssueRec, now: u64) -> u64 {
 /// one live conversation keeps the claim.
 fn hold_on_ticket(ticket: &str) -> Option<(String, crate::Hold)> {
     let entries = std::fs::read_dir(crate::runtime_dir()).ok()?;
+    let graph = crate::claim_graph_scope();
     let mut dead = None;
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -783,8 +830,11 @@ fn hold_on_ticket(ticket: &str) -> Option<(String, crate::Hold)> {
         let Ok(text) = std::fs::read_to_string(entry.path()) else {
             continue;
         };
-        let named = text.lines().nth(5).map(str::trim);
-        if named != Some(ticket) {
+        let mut lines = text.lines().map(str::trim);
+        if lines.nth(5) != Some(ticket) {
+            continue;
+        }
+        if lines.next().is_some_and(|g| !g.is_empty() && g != graph) {
             continue;
         }
         let Some(hold) = crate::read_hold(actor) else {
