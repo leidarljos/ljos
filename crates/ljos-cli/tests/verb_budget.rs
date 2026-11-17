@@ -148,11 +148,15 @@ fn a_silent_pack_does_not_hold_a_search() {
         );
         assert!(out.status.success(), "{said}");
         assert!(
-            said.contains("The memory writer is busy")
-                && said.contains("rerun `")
-                && said.contains("seconds"),
+            said.contains("Used word search because memory search was busy."),
             "{said}"
         );
+        assert!(!said.contains("pack busy, try again"), "{said}");
+        assert!(
+            !said.contains("the pack search did not answer in time"),
+            "{said}"
+        );
+        assert!(!said.contains("The memory writer is busy"), "{said}");
     }
 }
 
