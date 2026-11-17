@@ -837,7 +837,11 @@ enum Cmd {
     /// to rerun and, when a remaining time is reported, about how many
     /// seconds are left. A failed or missing encoder
     /// names the command that fixes it. `--json` puts
-    /// `semantic` or `lexical` in `ranking`. A pack that is down
+    /// `semantic` or `lexical` in `ranking`. `--porcelain` prints one
+    /// row per hit, the id, the kind and the text, separated by tabs, and
+    /// leaves this page off. A receipt, a mail row and another seat's
+    /// bookkeeping stay off the page, the JSON and the porcelain rows.
+    /// A pack that is down
     /// ranks by words from what is stored locally, prints one line that
     /// names `packset ensure`, and exits 0. A pack that stays busy ranks
     /// by words. Search fell back, and the one line is
@@ -873,6 +877,9 @@ enum Cmd {
         /// Print JSON. The ranking is a field, and the mode line is left off stderr. An empty page may add `suggestion`.
         #[arg(long)]
         json: bool,
+        /// Print one row per hit: id, kind and text, separated by tabs. The formatted page is left off.
+        #[arg(long, conflicts_with = "json")]
+        porcelain: bool,
         /// Include failed commands. They are stored as attempts and left out of the default list.
         #[arg(long)]
         attempts: bool,
@@ -4327,6 +4334,9 @@ fn run_hook(hook: HookArgs) -> Result<()> {
             prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)
         }
     };
+    // A receipt line or a tab separated dump from a search merge stays
+    // out of the note. The formatted sentences stay.
+    context = ljos_cli::without_raw_rows(&context);
     // The book is kept here, after the answer is decided, so a
     // tracker that does not answer cannot hold the call. A call a
     // rule warned on runs, so it is booked too; a blocked call does
@@ -5059,6 +5069,7 @@ fn run_command() -> Result<()> {
             source_seat,
             import_id,
             json,
+            porcelain,
             attempts,
             min_score,
         } => {
@@ -5234,6 +5245,10 @@ fn run_command() -> Result<()> {
             if !dated && !filter.active() {
                 ljos_cli::ticket_search::merge(&mut hits, &asked);
             }
+            // After the pack, the slot merge and the ticket merge. A
+            // receipt, a mail row and the other bookkeeping kinds are not
+            // part of the page, in any of those paths.
+            ljos_cli::conceal_search_noise(&mut hits, attempts);
             let floor_emptied =
                 ljos_cli::word_rank::apply_relevance_floor(&mut hits, &asked, min_score);
             if !hits.is_empty() {
@@ -5252,7 +5267,9 @@ fn run_command() -> Result<()> {
             // names a shorter query instead.
             let empty_store =
                 hits.is_empty() && close_line.is_none() && !unrelated && ljos_cli::nothing_stored();
-            if json {
+            if porcelain {
+                print!("{}", ljos_cli::search_porcelain(&hits, &id_space));
+            } else if json {
                 let relevant = floor_emptied.then(|| ljos_cli::word_rank::no_relevant_line(&asked));
                 let empty = relevant
                     .as_deref()
@@ -5280,7 +5297,8 @@ fn run_command() -> Result<()> {
                     )
                 );
             } else {
-                let rank = ljos_cli::search_rank_line(&ranking, &hits);
+                let rank =
+                    ljos_cli::search_rank_for_person(&ljos_cli::search_rank_line(&ranking, &hits));
                 if !rank.is_empty() {
                     eprint!("{rank}");
                 }
@@ -5311,7 +5329,7 @@ fn run_command() -> Result<()> {
                 } else {
                     print!(
                         "{}",
-                        ljos_cli::scan::for_reader(
+                        ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(
                             &ljos_cli::format_search_stored(
                                 &hits,
                                 matched,
@@ -5322,7 +5340,7 @@ fn run_command() -> Result<()> {
                                 &id_space,
                             ),
                             human_color()
-                        )
+                        ))
                     );
                 }
             }
@@ -5886,7 +5904,7 @@ fn run_command() -> Result<()> {
             ljos_cli::config_diag::emit();
             ljos_cli::log_recall("recall", &issue);
             let said = ljos_cli::tracker_recall(&issue).map_err(ticket_error)?;
-            eprint!("{}", said.stderr);
+            eprint!("{}", ljos_cli::without_raw_rows(&said.stderr));
             let memories = ljos_cli::recall_for_command(&issue)?;
             let code = if no_graph {
                 String::new()
@@ -5901,10 +5919,16 @@ fn run_command() -> Result<()> {
                 );
             } else {
                 if let Some(ranking) = ranking.as_ref() {
-                    eprint!("{}", ljos_cli::ranking_line(ranking));
+                    eprint!(
+                        "{}",
+                        ljos_cli::search_rank_for_person(&ljos_cli::ranking_line(ranking))
+                    );
                 }
                 let page = format!("{}{memories}{code}", said.stdout);
-                print!("{}", ljos_cli::scan::for_reader(&page, human_color()));
+                print!(
+                    "{}",
+                    ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(&page, human_color()))
+                );
             }
         }
         Cmd::Reap { idle, apply } => {

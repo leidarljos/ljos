@@ -1732,6 +1732,7 @@ impl LjosServer {
         } else {
             ljos_cli::drop_weak_cross_seat(&mut hits, &args.query, false)
         };
+        ljos_cli::conceal_search_noise(&mut hits, false);
         let emptied = ljos_cli::word_rank::apply_relevance_floor(&mut hits, &args.query, min_score);
         note_lookups(&hits);
         let id_space = ljos_cli::search_id_space(&hits);

@@ -12556,7 +12556,10 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
         Ok(Some(found))
     })();
     match raw {
-        Ok(Some(found)) => Ok(found),
+        Ok(Some(mut found)) => {
+            found.retain(|(hit, _)| !bookkeeping_kind(hit));
+            Ok(found)
+        }
         Err(err) => Err(err),
         Ok(None) => Ok(packset_search_opts(cue, limit, false)?
             .into_iter()
@@ -12612,7 +12615,9 @@ fn search_ranked_now(query: &str, limit: u32) -> Result<Vec<Hit>> {
         note_cosine(&mut hit, signal.cosine);
         hits.push(hit);
     }
-    Ok(fold_verbatim(q, hits))
+    let mut hits = fold_verbatim(q, hits);
+    conceal_bookkeeping(&mut hits);
+    Ok(hits)
 }
 
 /// The local path reranks when the judge did not answer.
@@ -15492,7 +15497,9 @@ fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
         hits.push(hit);
     }
     keep_search_origins(&client, &hits);
-    Ok(fold_verbatim(query, hits))
+    let mut hits = fold_verbatim(query, hits);
+    conceal_bookkeeping(&mut hits);
+    Ok(hits)
 }
 
 /// Search hits as JSON, with the ranking the pack used.
@@ -16722,6 +16729,7 @@ pub fn search_by_words(query: &str, limit: u32) -> Vec<Hit> {
     };
     prefer_calling_seat(&mut hits);
     memory_port::append_recall(&mut hits, query, limit as usize);
+    conceal_bookkeeping(&mut hits);
     hits
 }
 
@@ -16779,9 +16787,23 @@ fn topical_tag_text(entities: Option<&Value>) -> String {
 }
 
 /// Kinds a default search does not return. A note, an attempt and a log
-/// are the seat's own bookkeeping. They crowded out lessons when the pack
+/// are the seat's own bookkeeping. Mail, a trust row and a persona are
+/// not a lesson about the query. A receipt from another seat used to
+/// land on the page as a raw row. They crowded out lessons when the pack
 /// ranked by words.
-const SEARCH_SKIP_KINDS: &[&str] = &["note", "attempt", "log"];
+const SEARCH_SKIP_KINDS: &[&str] = &[
+    "note",
+    "attempt",
+    "log",
+    "message",
+    "receipt",
+    "group",
+    "trust",
+    "persona",
+    "playbook",
+    "prediction",
+    "outcome",
+];
 
 /// A routine status line, not a lesson. These are the notes that filled
 /// default search: a hourly keep-moving nudge, a poke log, and a record
@@ -16911,7 +16933,8 @@ fn packset_search_relevant(query: &str, limit: u32) -> Result<Vec<Hit>> {
         keep_search_origins(&client, &hits);
         Ok(hits)
     })?;
-    let hits = fold_verbatim(q, hits);
+    let mut hits = fold_verbatim(q, hits);
+    conceal_bookkeeping(&mut hits);
     Ok(hits)
 }
 
@@ -37429,7 +37452,9 @@ fn sitting_due_and_atoms(issue: &str, title: &str) -> Result<(String, Vec<Value>
         .take(SITTING_DUE)
         .collect();
     record_due_shown(&kept);
-    let cards = format_due(&kept);
+    // The tab row stays in [`format_due`] for the tests that pin the
+    // columns. A person reads the same cards as `ljos due`.
+    let cards = format_due_cards(&kept);
     let count = review_summary(&atoms, &now);
     Ok((format!("{cards}{count}\n"), atoms))
 }
@@ -38009,6 +38034,26 @@ pub fn format_readings(rows: &[Reading], now: &str) -> String {
             )
         })
         .collect()
+}
+
+/// The due cards a sitting shows. Same facts as [`format_due`], as a
+/// person reads `ljos due`, with no tab row.
+fn format_due_cards(atoms: &[Value]) -> String {
+    if atoms.is_empty() {
+        return String::new();
+    }
+    let ids: Vec<&str> = atoms
+        .iter()
+        .map(|atom| atom["id"].as_str().unwrap_or(""))
+        .collect();
+    let labels = scan::unique_prefixes(ids.iter().copied());
+    let now = now_utc();
+    let mut out = String::new();
+    for (atom, label) in atoms.iter().zip(labels) {
+        out.push_str(&due_block(atom, &label, &now));
+        out.push('\n');
+    }
+    out
 }
 
 pub fn format_due(atoms: &[Value]) -> String {
@@ -38701,6 +38746,7 @@ fn finish_search(query: &str, mut hits: Vec<Hit>, historical: bool) -> Vec<Hit> 
         fold_verbatim(query, hits)
     };
     prefer_calling_seat(&mut hits);
+    conceal_bookkeeping(&mut hits);
     hits
 }
 
@@ -47618,6 +47664,117 @@ pub fn format_search_stored(
         seat_ahead,
         store: &refs,
     })
+}
+
+/// One raw search row: `id`, `kind`, then the text, separated by tabs.
+///
+/// This is `ljos search --porcelain`. A tab or a line break in the text
+/// becomes a space, so one hit stays one line. The formatted page is a
+/// different command.
+#[must_use]
+pub fn search_porcelain(hits: &[Hit], store: &[String]) -> String {
+    let refs: Vec<&str> = if store.is_empty() {
+        hits.iter().filter_map(|hit| hit.id.as_deref()).collect()
+    } else {
+        store.iter().map(String::as_str).collect()
+    };
+    let mut out = String::new();
+    for hit in hits {
+        let id = search_hit_id(&hit.kind, hit.id.as_deref(), &refs).unwrap_or_default();
+        let kind = if hit.kind.is_empty() {
+            "claim"
+        } else {
+            hit.kind.as_str()
+        };
+        let text = hit.text.replace(['\t', '\n', '\r'], " ");
+        out.push_str(&format!("{id}\t{kind}\t{text}\n"));
+    }
+    out
+}
+
+/// A ranking sentence with no raw row in it. A pack fault can carry a
+/// tab separated dump. The line a person reads is one sentence.
+#[must_use]
+pub fn search_rank_for_person(line: &str) -> String {
+    let parts: Vec<String> = line
+        .split('\n')
+        .map(str::trim)
+        .filter(|row| !row.is_empty() && !row_is_raw_tab(row))
+        .map(|row| row.replace(['\t', '\r'], " "))
+        .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("{}\n", parts.join(" "))
+}
+
+/// Mail and the other bookkeeping kinds. A note and a stored failure stay,
+/// so a recall can still file a note under Notes and `--attempts` can
+/// still ask for the failure. The search page drops those through
+/// [`search_skip_kind`].
+fn bookkeeping_kind(hit: &Hit) -> bool {
+    let kind = hit.kind.to_ascii_lowercase();
+    matches!(
+        kind.as_str(),
+        "message"
+            | "receipt"
+            | "group"
+            | "trust"
+            | "persona"
+            | "playbook"
+            | "prediction"
+            | "outcome"
+    )
+}
+
+/// Drop mail and bookkeeping from a fetch, before a recall or a word
+/// fallback turns the rows into a page.
+fn conceal_bookkeeping(hits: &mut Vec<Hit>) {
+    hits.retain(|hit| !bookkeeping_kind(hit));
+}
+
+/// Drop kinds a search page does not show. Mail, a receipt, a trust row
+/// and the other bookkeeping kinds stay out of the page, the JSON and
+/// the porcelain rows. `attempts` keeps a stored failed command.
+pub fn conceal_search_noise(hits: &mut Vec<Hit>, attempts: bool) {
+    hits.retain(|hit| !bookkeeping_kind(hit) && !search_skip_kind(hit, attempts));
+}
+
+/// `text` with raw tab separated records removed. Other lines stay,
+/// including a ranking sentence.
+#[must_use]
+pub fn without_raw_rows(text: &str) -> String {
+    let mut out = String::new();
+    for line in text.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        if row_is_raw_tab(bare) {
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// Whether `line` is a raw tab separated record, not a sentence.
+///
+/// A receipt row, or three or more fields that are not a guard verdict
+/// or a doctor row. The formatted page has no tab. A guard line is
+/// `allow`, `deny` or `prompt` in the first field. A doctor row is
+/// `ok`, `warn` or `info`.
+#[must_use]
+pub fn row_is_raw_tab(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || !line.contains('\t') {
+        return false;
+    }
+    if line.starts_with("receipt\t") || line.starts_with("receipt ") {
+        return line.contains('\t');
+    }
+    let first = line.split('\t').next().unwrap_or("");
+    if matches!(first, "allow" | "deny" | "prompt" | "ok" | "warn" | "info") {
+        return false;
+    }
+    line.matches('\t').count() >= 2
 }
 
 /// Pack atom ids and imported row ids. The same list `ljos forget` matches.
