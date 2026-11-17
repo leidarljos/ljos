@@ -40494,7 +40494,7 @@ fn live_other_hold_for_actor(
 ) -> Option<Hold> {
     let hold = hold?;
     let graph = hold_line(holder_actor, 6);
-    if !graph.is_none_or(|g| g == claim_graph_scope()) {
+    if graph.is_some_and(|g| g != claim_graph_scope()) {
         return None;
     }
     if hold_alive(hold) && !hold_is_this_conversation(hold) {
