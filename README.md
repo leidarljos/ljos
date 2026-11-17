@@ -6,6 +6,79 @@ ljos stores a lesson. A later prompt shows it when the prompt bears on that less
 These notes describe ljos 0.44.0.
 [//]: # ([[[end]]])
 
+## Achievements
+
+ljos gives coding agents a shared memory and a shared tracker on one person's machines.
+A person writes what the agents should remember, and the prompt hook hands it back when a prompt bears on it.
+Agents file and claim tickets in one git repository, and a held ticket refuses a second claim.
+When agents disagree, they vote, and ljos settles the vote.
+It stores the sentence as written. Search uses a local encoder when one is installed, and a judge sends text out only when a person configures one.
+`ljos onboard --example` lists the runners, among them Claude Code, Codex and Cursor.
+
+
+- 8,224 tokens for the 20 core Model Context Protocol (MCP) tools, against 18,146 for all 52 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
+- 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
+- The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
+- packset, the memory writer, publishes a LongMemEval_S session retrieval run ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). That page records the figures. This tree does not. The run scores retrieval, not answer accuracy.
+- The ljos BM25+ CPU run on that file is repeated with `sh bench/hf/run.sh`. The summary and the per-question rows are the dataset [ljos LongMemEval_S retrieval](https://huggingface.co/datasets/rgoswami/ljos-longmemeval-s).
+- 2,293 tests passed, 0 failed, 2 ignored on the 0.40.0 release commit ([CI run 42801686714](https://github.com/leidarljos/ljos/actions/runs/42801686714)).
+
+[What ljos does](https://leidarljos.github.io/ljos/introduction.html) lists every measured number with its method.
+No row compares ljos with another memory tool on a shared benchmark. `hook-latency.txt` says so on its `third-party` line.
+
+## Comparison
+
+Mem0 and Zep run a model over what they ingest. ljos stores the sentence as written.
+beads lets an agent claim a ticket and keeps the queue in Dolt. ljos keeps tickets as Org headings in git, and one seat owns a ticket.
+git-bug keeps issues in the project's own git objects. ljos keeps a separate tracker repository.
+Basic Memory is a shared notebook of Markdown. ljos's memory is short claims with a review clock.
+Letta gives the agent tools to edit its own memory. ljos has no model in that loop.
+Of these, the ljos docs are the ones that describe a ballot per agent, a settle, and a handover the receiver checks before import.
+
+[How ljos compares](https://leidarljos.github.io/ljos/compare.html) has the full table, the licences, and a link to each tool's own docs, read on 2026-11-10.
+
+## Thirty seconds
+
+`kiln.sh` in an empty directory:
+
+```
+#!/bin/sh
+if [ "${KILN_DOOR:-}" != cold ]; then
+  echo "kiln.sh: KILN_DOOR is unset. The door seats only when it is cold." >&2
+  exit 1
+fi
+echo "kiln door seated"
+```
+
+`packset ensure` had already started the memory writer.
+The shell prompt is `dev@laptop`, and `LJOS_SEAT` is `demo`.
+No sitting and no ticket.
+The `prompt-origin` label names the process that ran the hook.
+The lesson is the indented text under `Remembered`.
+
+![Recall of the kiln lesson, then the door seated](docs/demo/recall.svg)
+
+```
+dev@laptop:~$ ./kiln.sh
+kiln.sh: KILN_DOOR is unset. The door seats only when it is cold.
+
+dev@laptop:~$ ljos remember 'Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.'
+remembered (lesson): Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.
+  id fcd167c8, next review 2026-11-14 15:08 +00:00
+standing: the hook shows it from the next prompt it bears on
+
+dev@laptop:~$ printf '%s\n' 'seat the kiln door' | ljos hook --prompt --text
+label prompt-origin: not stored as the person's words (parent process is `ljos`,
+not a known runner)
+Remembered, shown 1 of 1, oldest first, so run `ljos search`.
+  lesson, from an agent, today
+    Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config
+    gap.
+
+dev@laptop:~$ KILN_DOOR=cold ./kiln.sh
+kiln door seated
+```
+
 ljos is installed with two commands. The first fetches install.sh. The second is ljos onboard.
 
 ```
@@ -52,79 +125,6 @@ If install stops, the script names the cause and the command that fixes it.
 After that registration, a first recall does not need a seat, a sitting or a ticket.
 One person and one repository are enough.
 With no seat named, a write uses the login name, or a short stable name when that login is missing. The first such write says to set `LJOS_SEAT`. A session id in this process names the seat instead: the runner plus a short id, such as `claude-k3j9x0a1b2`. An id that exists only on a parent does not.
-
-## Thirty seconds
-
-`kiln.sh` in an empty directory:
-
-```
-#!/bin/sh
-if [ "${KILN_DOOR:-}" != cold ]; then
-  echo "kiln.sh: KILN_DOOR is unset. The door seats only when it is cold." >&2
-  exit 1
-fi
-echo "kiln door seated"
-```
-
-`packset ensure` had already started the memory writer.
-The shell prompt is `dev@laptop`, and `LJOS_SEAT` is `demo`.
-No sitting and no ticket.
-The `prompt-origin` label names the process that ran the hook.
-The lesson is the indented text under `Remembered`.
-
-![Recall of the kiln lesson, then the door seated](docs/demo/recall.svg)
-
-```
-dev@laptop:~$ ./kiln.sh
-kiln.sh: KILN_DOOR is unset. The door seats only when it is cold.
-
-dev@laptop:~$ ljos remember 'Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.'
-remembered (lesson): Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.
-  id fcd167c8, next review 2026-11-14 15:08 +00:00
-standing: the hook shows it from the next prompt it bears on
-
-dev@laptop:~$ printf '%s\n' 'seat the kiln door' | ljos hook --prompt --text
-label prompt-origin: not stored as the person's words (parent process is `ljos`,
-not a known runner)
-Remembered, shown 1 of 1, oldest first, so run `ljos search`.
-  lesson, from an agent, today
-    Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config
-    gap.
-
-dev@laptop:~$ KILN_DOOR=cold ./kiln.sh
-kiln door seated
-```
-
-## Achievements
-
-ljos gives coding agents a shared memory and a shared tracker on one person's machines.
-A person writes what the agents should remember, and the prompt hook hands it back when a prompt bears on it.
-Agents file and claim tickets in one git repository, and a held ticket refuses a second claim.
-When agents disagree, they vote, and ljos settles the vote.
-It stores the sentence as written. Search uses a local encoder when one is installed, and a judge sends text out only when a person configures one.
-`ljos onboard --example` lists the runners, among them Claude Code, Codex and Cursor.
-
-
-- 8,224 tokens for the 20 core Model Context Protocol (MCP) tools, against 18,146 for all 52 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
-- 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
-- The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
-- packset, the memory writer, publishes a LongMemEval_S session retrieval run ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). That page records the figures. This tree does not. The run scores retrieval, not answer accuracy.
-- The ljos BM25+ CPU run on that file is repeated with `sh bench/hf/run.sh`. The summary and the per-question rows are the dataset [ljos LongMemEval_S retrieval](https://huggingface.co/datasets/rgoswami/ljos-longmemeval-s).
-- 2,293 tests passed, 0 failed, 2 ignored on the 0.40.0 release commit ([CI run 42801686714](https://github.com/leidarljos/ljos/actions/runs/42801686714)).
-
-[What ljos does](https://leidarljos.github.io/ljos/introduction.html) lists every measured number with its method.
-No row compares ljos with another memory tool on a shared benchmark. `hook-latency.txt` says so on its `third-party` line.
-
-## Comparison
-
-Mem0 and Zep run a model over what they ingest. ljos stores the sentence as written.
-beads lets an agent claim a ticket and keeps the queue in Dolt. ljos keeps tickets as Org headings in git, and one seat holds a ticket.
-git-bug keeps issues in the project's own git objects. ljos keeps a separate tracker repository.
-Basic Memory is a shared notebook of Markdown. ljos's memory is short claims with a review clock.
-Letta gives the agent tools to edit its own memory. ljos has no model in that loop.
-Of these, the ljos docs are the ones that describe a ballot per agent, a settle, and a handover the receiver checks before import.
-
-[How ljos compares](https://leidarljos.github.io/ljos/compare.html) has the full table, the licences, and a link to each tool's own docs, read on 2026-11-10.
 
 ## Tutorial
 

@@ -80,9 +80,9 @@ stubborn voter pulls the rest toward it (Acemoglu, Como, Fagnani and
 Ozdaglar, doi:10.1287/moor.1120.0570). A persona at 0 would count as two
 seats and tie a 2-to-1 vote on its own. Trust rows still weigh voters as
 they say. Before the default, the seat sat at 1, so any anchored persona
-took the whole settle. The settle prints in words: the shares, who leads
-and by how much, polarization, each voter's influence, the share of its
-own ballot each voter keeps. Above the settle, ``consensus`` prints what the
+took the whole settle. The page prints the tracker's weighted settle:
+the count, each seat's social power, and the option with its share of
+the group's weight. Above that settle, ``consensus`` prints what the
 seat ballots decide: the option every seat ballot names and the
 seat ballots it counted, or why it decides nothing, with the persona and
 judge ballots it left out. This is what the push check reads. With one active seat in ``vissue.toml``, that
