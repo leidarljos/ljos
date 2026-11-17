@@ -63,6 +63,19 @@ fn text(out: &Output) -> String {
 }
 
 #[test]
+fn a_cargo_build_names_install_and_an_installed_copy_does_not() {
+    assert!(ljos_cli::exe_from_cargo_target(std::path::Path::new(
+        "/work/ljos/target/debug/ljos"
+    )));
+    assert!(ljos_cli::exe_from_cargo_target(std::path::Path::new(
+        "/work/ljos/target/release/deps/ljos-abc"
+    )));
+    assert!(!ljos_cli::exe_from_cargo_target(std::path::Path::new(
+        "/home/ada/.local/bin/ljos"
+    )));
+}
+
+#[test]
 fn bare_ljos_names_the_seat_and_the_first_commands() {
     let dir = tempfile::tempdir().unwrap();
     let out = run(dir.path(), &[], &[]);

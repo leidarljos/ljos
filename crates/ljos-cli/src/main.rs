@@ -3471,6 +3471,14 @@ const FIRST_COMMANDS: &[(&str, &str)] = &[
     ("ljos search QUERY", "find what is stored"),
 ];
 
+fn installed_ljos() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let path = std::fs::canonicalize(&exe).unwrap_or(exe);
+    !ljos_cli::exe_from_cargo_target(&path)
+}
+
 /// What `ljos` with no arguments prints.
 ///
 /// One line for what ljos is, the seat a read would use and where that
@@ -3480,13 +3488,18 @@ const FIRST_COMMANDS: &[(&str, &str)] = &[
 /// seat says that in plain words, not the doctor's rule phrase.
 fn opening_screen() -> String {
     let seat = seat_screen_line(&ljos_cli::doctor_seat_source().state);
-    let width = FIRST_COMMANDS
+    let commands_src: Vec<(&str, &str)> = FIRST_COMMANDS
+        .iter()
+        .copied()
+        .filter(|(cmd, _)| *cmd != "sh install.sh --no-embed" || !installed_ljos())
+        .collect();
+    let width = commands_src
         .iter()
         .map(|(cmd, _)| cmd.len())
         .max()
         .unwrap_or(0);
     let mut commands = String::new();
-    for (cmd, about) in FIRST_COMMANDS {
+    for (cmd, about) in commands_src {
         let pad = width + 2 - cmd.len();
         commands.push_str("  ");
         commands.push_str(cmd);

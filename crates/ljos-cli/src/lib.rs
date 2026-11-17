@@ -6447,6 +6447,21 @@ pub fn format_seat_command() -> String {
     format_seat(&resolve_seat())
 }
 
+/// True when `path` is a binary cargo just built, under `target/debug` or
+/// `target/release`. An installed copy, such as `~/.local/bin/ljos`, is not.
+#[must_use]
+pub fn exe_from_cargo_target(path: &Path) -> bool {
+    let mut saw_target = false;
+    for part in path.components() {
+        let name = part.as_os_str();
+        if saw_target && (name == "debug" || name == "release") {
+            return true;
+        }
+        saw_target = name == "target";
+    }
+    false
+}
+
 /// `ljos seat`: who is sitting, one field a line.
 #[must_use]
 pub fn format_seat(seat: &Seat) -> String {
