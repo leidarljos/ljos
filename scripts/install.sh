@@ -1023,7 +1023,8 @@ build_checkout() {
       cargo install --locked --force --path crates/ljos-cli --root "$TMP/cout" >"$fifo" 2>&1 &
     cpid=$!
     while IFS= read -r line; do
-      case $line in
+      trim=${line#"${line%%[![:space:]]*}"}
+      case $trim in
         *"be sure to add "*|Installing\ *|Installed\ package\ *) ;;
         *) printf '%s\n' "$line" ;;
       esac

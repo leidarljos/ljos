@@ -1814,6 +1814,7 @@ fn from_checkout_installs_ljos_and_the_sibling_tools() {
         &[
             "sh",
             "mktemp",
+            "mkfifo",
             "date",
             "cp",
             "chmod",
@@ -1855,6 +1856,9 @@ for a in "$@"; do
   prev=$a
 done
 mkdir -p "$root/bin"
+printf '%s\n' "  Installing $root/bin/ljos" >&2
+printf '%s\n' '   Installed package `ljos v9.9.9` (executables `ljos`, `ljos-mcp`)' >&2
+printf '%s\n' '   Compiling visible v1.0.0' >&2
 printf '%s\n' '#!/bin/sh' 'if [ "$1" = --version ]; then echo "ljos 9.9.9"; exit 0; fi' 'echo from-checkout' 'exit 0' > "$root/bin/ljos"
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/ljos-mcp"
 chmod 755 "$root/bin/ljos" "$root/bin/ljos-mcp"
@@ -1901,6 +1905,9 @@ exit 0
         !text.contains("cargo build --locked --release -p ljos"),
         "{text}"
     );
+    assert!(!text.contains("Installing /"), "{text}");
+    assert!(!text.contains("Installed package"), "{text}");
+    assert!(text.contains("Compiling visible v1.0.0"), "{text}");
     assert!(!text.contains("not this checkout"), "{text}");
     for name in PROGRAMS {
         assert!(
