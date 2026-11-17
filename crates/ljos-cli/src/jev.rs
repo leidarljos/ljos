@@ -945,10 +945,27 @@ fn request_budget(configured_ms: u64) -> Option<Duration> {
     (!remaining.is_zero()).then_some(remaining)
 }
 
+fn http_agent(budget: Duration) -> ureq::Agent {
+    use std::net::ToSocketAddrs;
+    http_agent_with_resolver(budget, |address: &str| {
+        address.to_socket_addrs().map(Iterator::collect)
+    })
+}
+
+fn http_agent_with_resolver(
+    budget: Duration,
+    resolver: impl ureq::Resolver + 'static,
+) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(budget)
+        .resolver(resolver)
+        .build()
+}
+
 /// The request as Jev takes it: the body as is, the key as a bearer.
 fn jev_post(cfg: &Judge, key: &str, body: Value) -> Option<Value> {
-    ureq::post(&cfg.endpoint)
-        .timeout(request_budget(cfg.budget_ms)?)
+    http_agent(request_budget(cfg.budget_ms)?)
+        .post(&cfg.endpoint)
         .set("Authorization", &format!("Bearer {key}"))
         .set("Content-Type", "application/json")
         .send_json(body)
@@ -1078,8 +1095,8 @@ pub fn concentration(probs: &serde_json::Map<String, Value>) -> Option<f64> {
 /// Jev's shape with the prompt tokens as the usage.
 fn chat_post(cfg: &Judge, key: &str, body: &Value) -> Option<Value> {
     let url = format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/'));
-    let mut req = ureq::post(&url)
-        .timeout(request_budget(cfg.budget_ms)?)
+    let mut req = http_agent(request_budget(cfg.budget_ms)?)
+        .post(&url)
         .set("Content-Type", "application/json");
     if !key.is_empty() {
         req = req.set("Authorization", &format!("Bearer {key}"));
@@ -1866,6 +1883,20 @@ mod tests {
         );
         let partial = serde_json::json!({"answers": {"bears_0": {"noul": 0.9}}});
         assert!(parse(&partial, 2).is_none());
+    }
+
+    #[test]
+    fn http_resolution_cannot_outrun_the_request_deadline() {
+        let agent = http_agent_with_resolver(
+            Duration::from_millis(100),
+            |_: &str| -> std::io::Result<Vec<std::net::SocketAddr>> {
+                std::thread::sleep(Duration::from_secs(3));
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "fixture DNS"))
+            },
+        );
+        let started = std::time::Instant::now();
+        assert!(agent.get("http://deadline.invalid/").call().is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
