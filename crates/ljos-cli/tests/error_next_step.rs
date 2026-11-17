@@ -16,15 +16,15 @@ fn a_miss_names_a_shorter_query_in_plain_text() {
     );
     assert_eq!(
         ljos_cli::scan::nothing_matched_line("fusing"),
-        "Nothing matched fusing."
+        "Nothing matched fusing. Try browsing memories, such as: ljos memories list"
     );
     assert_eq!(
         ljos_cli::scan::nothing_matched_line("zircon-missing"),
-        "Nothing matched zircon-missing."
+        "Nothing matched zircon-missing. Try browsing memories, such as: ljos memories list"
     );
     assert_eq!(
         ljos_cli::scan::nothing_matched_line("a\"b"),
-        "Nothing matched this query."
+        "Nothing matched this query. Try browsing memories, such as: ljos memories list"
     );
     let page = ljos_cli::scan::nothing_matched_page("usability friction confusing error");
     assert!(

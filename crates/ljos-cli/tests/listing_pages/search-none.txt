@@ -1,4 +1,4 @@
 status 0
 stderr:
 stdout:
-Nothing matched zzzznotaword.
+Nothing matched zzzznotaword. Try browsing memories, such as: ljos memories list

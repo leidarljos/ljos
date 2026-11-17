@@ -553,3 +553,51 @@ fn a_min_score_outside_0_to_100_exits_2() {
         assert_ne!(out.status.code(), Some(2), "{floor}\n{stdout}{stderr}");
     }
 }
+
+#[test]
+fn a_one_word_miss_in_a_stored_set_names_the_next_command() {
+    let seat = Seat::open();
+    let out = seat.run(&["search", "xyzzy"]);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert_eq!(
+        stdout, "Nothing matched xyzzy. Try browsing memories, such as: ljos memories list\n",
+        "{stderr}"
+    );
+    assert!(
+        !stdout.contains("ljos remember"),
+        "a store is not empty here: {stdout}"
+    );
+
+    let json = seat.run(&["search", "--json", "xyzzy"]);
+    let (stdout, stderr) = text(&json);
+    assert!(json.status.success(), "{stdout}{stderr}");
+    let doc: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    assert_eq!(
+        doc["suggestion"].as_str(),
+        Some("ljos memories list"),
+        "{doc}"
+    );
+    assert!(
+        doc["hits"].as_array().is_some_and(|rows| rows.is_empty()),
+        "{doc}"
+    );
+
+    let long = "x".repeat(90);
+    let wide = seat.run(&["search", &long]);
+    let (stdout, stderr) = text(&wide);
+    assert!(wide.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.lines().any(|line| line == "ljos memories list"),
+        "the command stays whole on its own line:\n{stdout}"
+    );
+
+    let two = seat.run(&["search", "xyzzy plugh"]);
+    let (stdout, stderr) = text(&two);
+    assert!(two.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("Try a shorter query, such as: ljos search xyzzy"),
+        "a miss with a shorter word to try still names it:\n{stdout}"
+    );
+    assert!(!stdout.contains("ljos memories list"), "{stdout}");
+}

@@ -82062,8 +82062,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             !explained.contains("Checks: how many of them named this row"),
             "{explained}"
         );
-        assert_eq!(format_hits(&[], false), "Nothing matched this query.\n");
-        assert_eq!(format_hits(&[], true), "Nothing matched this query.\n");
+        let missed =
+            "Nothing matched this query. Try browsing memories, such as: ljos memories list\n";
+        assert_eq!(format_hits(&[], false), missed);
+        assert_eq!(format_hits(&[], true), missed);
         let empty_json = search_json_empty(
             &[],
             Some(&Ranking {

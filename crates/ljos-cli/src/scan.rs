@@ -566,16 +566,23 @@ fn next_limit(matched: usize, capped: bool) -> usize {
     }
 }
 
+/// The command a miss names when no shorter query is left to try.
+pub const BROWSE_COMMAND: &str = "ljos memories list";
+
+/// The prose before [`BROWSE_COMMAND`] on a miss.
+const BROWSE_PROSE: &str = "Try browsing memories, such as:";
+
 /// One sentence when a search matched nothing and the store already holds
 /// something. A shorter query is named when [`crate::word_rank::shorter_search`]
-/// has one. The command is plain text, not a code span.
+/// has one, and [`BROWSE_COMMAND`] when it has none. The command is plain
+/// text, not a code span.
 #[must_use]
 pub fn nothing_matched_line(query: &str) -> String {
     let query = query.trim();
     let shown = crate::word_rank::quote_query(query);
     match crate::word_rank::shorter_search(query) {
         Some(cmd) => format!("Nothing matched {shown}. Try a shorter query, such as: {cmd}"),
-        None => format!("Nothing matched {shown}."),
+        None => format!("Nothing matched {shown}. {BROWSE_PROSE} {BROWSE_COMMAND}"),
     }
 }
 
@@ -590,9 +597,12 @@ pub fn nothing_matched_page(query: &str) -> String {
     match crate::word_rank::shorter_search(query) {
         Some(cmd) => {
             let prose = format!("{head} Try a shorter query, such as:");
-            plain_command_page(&prose, Some(&cmd))
+            plain_command_page(&prose, &cmd)
         }
-        None => plain_command_page(&head, None),
+        None => {
+            let prose = format!("{head} {BROWSE_PROSE}");
+            plain_command_page(&prose, BROWSE_COMMAND)
+        }
     }
 }
 
@@ -639,7 +649,7 @@ pub fn empty_store_page(query: &str) -> String {
     let prose = format!(
         "Nothing matched {shown}. A shorter search would miss too. Try storing a lesson, such as:"
     );
-    plain_command_page(&prose, Some(&cmd))
+    plain_command_page(&prose, &cmd)
 }
 
 /// `ljos remember` with the query in quotes. A query that cannot be
@@ -654,13 +664,10 @@ pub fn store_lesson_command(query: &str) -> String {
     }
 }
 
-/// Prose stays within [`COLS`]. `cmd`, when set, is not wrapped. It stays
-/// on the prose line when the whole sentence fits, and is the next line
-/// when it does not.
-fn plain_command_page(prose: &str, cmd: Option<&str>) -> String {
-    let Some(cmd) = cmd else {
-        return ended(&wrap(prose, COLS));
-    };
+/// Prose stays within [`COLS`]. `cmd` is not wrapped. It stays on the
+/// prose line when the whole sentence fits, and is the next line when it
+/// does not.
+fn plain_command_page(prose: &str, cmd: &str) -> String {
     let one = format!("{prose} {cmd}");
     if one.chars().count() <= COLS && !one.contains('\n') {
         return ended(&one);
@@ -1171,10 +1178,38 @@ mod tests {
 
         assert_eq!(
             nothing_matched_line("usability"),
-            "Nothing matched usability."
+            "Nothing matched usability. Try browsing memories, such as: ljos memories list"
         );
-        assert_eq!(nothing_matched_line("the"), "Nothing matched the.");
-        assert_eq!(nothing_matched_line("a\"b"), "Nothing matched this query.");
+        assert_eq!(
+            nothing_matched_line("the"),
+            "Nothing matched the. Try browsing memories, such as: ljos memories list"
+        );
+        assert_eq!(
+            nothing_matched_line("a\"b"),
+            "Nothing matched this query. Try browsing memories, such as: ljos memories list"
+        );
+    }
+
+    #[test]
+    fn a_one_word_miss_names_the_listing_without_splitting_the_command() {
+        let page = nothing_matched_page("xyzzy");
+        assert_eq!(
+            page,
+            "Nothing matched xyzzy. Try browsing memories, such as: ljos memories list\n"
+        );
+        let wide = "x".repeat(90);
+        let page = nothing_matched_page(&wide);
+        assert!(
+            page.lines().any(|line| line == "ljos memories list"),
+            "{page}"
+        );
+        assert!(!page.contains('`'), "{page}");
+        assert!(
+            page.lines()
+                .filter(|line| *line != "ljos memories list")
+                .all(|line| line.chars().count() <= COLS || !line.contains(' ')),
+            "{page}"
+        );
     }
 
     #[test]

@@ -5383,9 +5383,11 @@ fn run_command() -> Result<()> {
                 } else if floor_emptied {
                     Some(ljos_cli::word_rank::min_score_off_command(&asked))
                 } else if hits.is_empty() {
-                    close_miss
-                        .clone()
-                        .unwrap_or_else(|| ljos_cli::word_rank::shorter_search(&asked))
+                    close_miss.clone().unwrap_or_else(|| {
+                        ljos_cli::word_rank::shorter_search(&asked).or_else(|| {
+                            (!unrelated).then(|| ljos_cli::scan::BROWSE_COMMAND.to_string())
+                        })
+                    })
                 } else {
                     None
                 };
