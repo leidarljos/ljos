@@ -154,3 +154,43 @@ fn a_short_audit_timeout_is_not_rounded_up_to_a_second() {
     assert!(took < Duration::from_millis(750), "{took:?}: {output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
 }
+
+#[test]
+fn stop_survives_killing_a_helper_with_blocked_input() {
+    let mut fixture = Fixture::new();
+    let judge = fixture.script("judge", "exec sleep 30");
+    fixture.configure(&format!(
+        "enabled = true\nbackend = 'command'\ncommand = [{judge:?}]\ncache_days = 0\n"
+    ));
+    // JSON escaping makes the bounded audit state exceed a pipe buffer.
+    let pad = "\u{1}";
+    let final_message = format!(
+        "The parser update is implemented and all component tests pass. {}",
+        pad.repeat(3000)
+    );
+    let mut entries = vec![
+        serde_json::json!({"type":"user","message":{"content":pad.repeat(1500)}}),
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"seat","name":"Bash","input":{"command":"ljos recall fixture"}}]}}),
+    ];
+    for index in 0..30 {
+        entries.push(serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":index.to_string(),"name":"Bash","input":{"command":format!("cargo test {}", pad.repeat(180))}}]}}));
+        if index >= 28 {
+            entries.push(serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":index.to_string(),"content":pad.repeat(1500)}]}}));
+        }
+    }
+    entries.push(serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":final_message}]}}));
+    std::fs::write(
+        fixture.home.path().join("transcript.jsonl"),
+        entries
+            .iter()
+            .map(|entry| format!("{entry}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let mut payload: serde_json::Value = serde_json::from_str(&fixture.payload).unwrap();
+    payload["last_assistant_message"] = final_message.into();
+    fixture.payload = payload.to_string();
+    let (took, output) = fixture.run();
+    bounded(took, &output);
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
