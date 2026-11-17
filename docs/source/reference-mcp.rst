@@ -44,7 +44,7 @@ A write with no seat names ``ljos seat`` and explains that ``LJOS_SEAT`` applies
 A busy pack names ``ljos search`` or ``ljos remember``.
 An unknown tool names ``ljos help``.
 An unknown method, or a line that is not JSON, names ``ljos mcp --help``.
-``ljos_show`` prints the ticket ``ljos show`` prints: the header, the body, and the latest notes.
+``ljos_show`` prints the full ticket page ``ljos show`` prints: the header with the wrapped title, the claim if any, parent and children, blockers, the full body, and the latest notes.
 
 ``ljos_ready`` prints the same first page as ``ljos ready``. The default is 20 tickets. ``limit`` changes that count and ``all`` prints every ticket. The last line of a short page names ``--limit`` and ``--all``. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. The id breaks the final tie.
 

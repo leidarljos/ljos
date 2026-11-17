@@ -189,12 +189,141 @@ fn a_filed_body_and_two_notes_show_on_the_page() {
 
 /// The body is wrapped, so the page may split it. The words stay in order.
 fn body_words_in_order(shown: &str) -> bool {
+    words_in_order(shown, BODY)
+}
+
+fn words_in_order(shown: &str, expected: &str) -> bool {
     let mut rest = shown;
-    for word in BODY.split_whitespace() {
+    for word in expected.split_whitespace() {
         let Some(at) = rest.find(word) else {
             return false;
         };
         rest = &rest[at + word.len()..];
     }
     true
+}
+
+#[test]
+fn a_full_ticket_shows_long_title_claim_family_body_and_notes() {
+    let board = Board::new();
+    let long_title = "Calibrate the north kiln damper sensor across cold winter mornings before firing the next stoneware glaze batch in workshop two";
+    assert!(
+        long_title.chars().count() >= 120,
+        "title len {}",
+        long_title.chars().count()
+    );
+    let multi_body = "First paragraph describes the cold damper sticking at sunrise when moisture condenses on the cast iron frame.\n\nSecond paragraph asks the holder to record three thermocouple readings before opening the main flue.";
+
+    let parent_id = board
+        .ok(&["file", "Kiln winter readiness", "--top", "-p", "demo"])
+        .lines()
+        .next()
+        .unwrap()
+        .trim()
+        .to_string();
+    let blocker_id = board
+        .ok(&["file", "Replace worn flue gasket", "--top", "-p", "demo"])
+        .lines()
+        .next()
+        .unwrap()
+        .trim()
+        .to_string();
+    let id = board
+        .ok(&[
+            "file", long_title, "--parent", &parent_id, "--body", multi_body,
+        ])
+        .lines()
+        .next()
+        .unwrap()
+        .trim()
+        .to_string();
+    let child_id = board
+        .ok(&["file", "Log morning flue temperatures", "--parent", &id])
+        .lines()
+        .next()
+        .unwrap()
+        .trim()
+        .to_string();
+    board.ok(&["block", &id, "--on", &blocker_id]);
+    board.ok(&["claim", &id, "--assignee", "saddle"]);
+
+    let n1 = "checked the cast iron hinge pin for frost";
+    let n2 = "measured three cold damper clearances";
+    let n3 = "ready to fire once the flue gasket arrives";
+    board.ok(&["note", &id, n1]);
+    board.ok(&["note", &id, n2]);
+    board.ok(&["note", &id, n3]);
+
+    let shown = board.ok(&["show", &id]);
+    assert!(
+        shown.lines().all(|line| line.chars().count() <= 80),
+        "a line is wider than 80 columns:\n{shown}"
+    );
+    assert!(shown.contains(&id), "{shown}");
+    assert!(shown.contains("STARTED"), "{shown}");
+    assert!(shown.contains("[#"), "{shown}");
+    assert!(!shown.contains("..."), "title or text was cut:\n{shown}");
+    assert!(
+        words_in_order(&shown, long_title),
+        "full title missing or cut:\n{shown}"
+    );
+    assert!(
+        shown.contains("claimed ") && shown.contains(" by saddle"),
+        "claim missing:\n{shown}"
+    );
+    assert!(
+        shown.contains(&format!("parent: {parent_id}")) && shown.contains("Kiln winter readiness"),
+        "parent missing:\n{shown}"
+    );
+    assert!(
+        shown.contains("children:")
+            && shown.contains(&child_id)
+            && shown.contains("Log morning flue temperatures"),
+        "children missing:\n{shown}"
+    );
+    assert!(
+        shown.contains("blockers:") && shown.contains(&blocker_id) && shown.contains("open"),
+        "blockers missing:\n{shown}"
+    );
+    assert!(
+        words_in_order(&shown, multi_body),
+        "multi-paragraph body missing:\n{shown}"
+    );
+    assert!(
+        shown.contains("\n\nSecond paragraph"),
+        "paragraph break was lost:\n{shown}"
+    );
+    let p1 = shown.find(n1).expect("note 1");
+    let p2 = shown.find(n2).expect("note 2");
+    let p3 = shown.find(n3).expect("note 3");
+    assert!(p1 < p2 && p2 < p3, "notes out of order:\n{shown}");
+    assert!(
+        shown.contains("today, saddle") || shown.contains("yesterday, saddle"),
+        "note age and seat missing:\n{shown}"
+    );
+
+    let doc: serde_json::Value =
+        serde_json::from_str(board.ok(&["show", &id, "--json"]).trim()).unwrap();
+    assert_eq!(doc["id"].as_str(), Some(id.as_str()));
+    assert_eq!(doc["state"].as_str(), Some("STARTED"));
+    assert_eq!(doc["title"].as_str(), Some(long_title));
+    assert_eq!(doc["claim"]["seat"].as_str(), Some("saddle"));
+    assert!(!doc["claim"]["age"].as_str().unwrap_or("").is_empty());
+    assert_eq!(doc["parent"]["id"].as_str(), Some(parent_id.as_str()));
+    assert_eq!(doc["children"][0]["id"].as_str(), Some(child_id.as_str()));
+    assert_eq!(
+        doc["blocked_by"][0]["id"].as_str(),
+        Some(blocker_id.as_str())
+    );
+    assert_eq!(doc["body"].as_str(), Some(multi_body));
+    let notes = doc["notes"].as_array().expect("notes");
+    assert_eq!(notes.len(), 3, "{notes:?}");
+    assert_eq!(notes[0]["text"].as_str(), Some(n1));
+    assert_eq!(notes[1]["text"].as_str(), Some(n2));
+    assert_eq!(notes[2]["text"].as_str(), Some(n3));
+    for note in notes {
+        assert_eq!(note["seat"].as_str(), Some("saddle"));
+        assert!(!note["age"].as_str().unwrap_or("").is_empty());
+        assert!(!note["time"].as_str().unwrap_or("").is_empty());
+    }
 }

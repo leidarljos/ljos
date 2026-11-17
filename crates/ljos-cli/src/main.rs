@@ -1418,13 +1418,13 @@ enum Cmd {
     },
     /// Show one ticket, or one memory.
     ///
-    /// A ticket id prints that ticket: its body, its notes, and the tickets
-    /// it waits on. The body is printed under the header. The title and the
-    /// body wrap to the terminal. The page prints the eight most recent
-    /// notes, newest last. Each note carries its age and the seat that wrote
-    /// it. A longer log names how many notes are earlier and the command that
-    /// prints the rest. `--all` prints every note. `--verbose` is the same
-    /// flag.
+    /// A ticket id prints the full ticket page: its id, status, priority
+    /// and full title wrapped to 80 columns, its claim seat and age when
+    /// claimed, its parent and children, the tickets it waits on, the full
+    /// body, and the eight most recent notes, newest last. Each note carries
+    /// its time, age and the seat that wrote it. A longer log names how many
+    /// notes are earlier and the command that prints the rest. `--all`
+    /// prints every note. `--verbose` is the same flag.
     /// A memory id prints that memory. The id may be the full atom id, the
     /// short prefix `ljos search` and `ljos remember` print, or the `local:`
     /// form. The page wraps the text to 80 columns and names the kind, the
@@ -1439,7 +1439,7 @@ enum Cmd {
     Show {
         /// A ticket id, or a memory id.
         issue: String,
-        /// Print one JSON object with the body and every note. The human page is left off.
+        /// Print one JSON object with claim, parent, children, blockers, body and every note. The human page is left off.
         #[arg(long)]
         json: bool,
         /// Print every note. `--verbose` is the same flag.

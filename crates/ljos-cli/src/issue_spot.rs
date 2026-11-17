@@ -482,6 +482,21 @@ pub fn ballots_in(layout: &Layout, id: &str) -> Option<Vec<vissue_core::ops::Bal
     in_layout(layout, id.trim()).map(|spot| heading_ballots(&spot.rec().heading))
 }
 
+/// Direct children of `id` in the layout `find(id)` reaches, sorted the
+/// same way `vissue children` sorts them. Falls back to the issue's own
+/// project when a sibling project file fails to parse.
+#[must_use]
+pub fn children(id: &str) -> Option<Vec<vissue_core::views::WalkHit>> {
+    let spot = find(id)?;
+    let real = spot.rec().heading.id.clone();
+    if let Ok(recs) = vissue_core::catalog::load_recs(&spot.layout) {
+        if let Ok(rows) = vissue_core::catalog::children_from(&recs, &real) {
+            return Some(rows);
+        }
+    }
+    vissue_core::catalog::children_from(&spot.recs, &real).ok()
+}
+
 /// Whole trackers this process parsed, by layout, with the signature of the
 /// project whose issue asked. A child may live in another project of the
 /// same tracker, so `children` reads them all; one parse answers every

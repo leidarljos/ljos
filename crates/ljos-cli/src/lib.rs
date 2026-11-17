@@ -43679,10 +43679,11 @@ fn parent_chain_contains(start: &str, needle: &str) -> Result<bool> {
     }
 }
 
-/// One ticket, with each blocker and whether that blocker is still open.
+/// One ticket: id, status, priority, full wrapped title, claim if any,
+/// parent and children, blockers, full body, and notes oldest first.
 ///
 /// The body follows the header. The most recent notes follow the body,
-/// newest last, each with its age and the seat that wrote it. `all`
+/// newest last, each with its time, age and the seat that wrote it. `all`
 /// prints every note. Otherwise the page keeps [`SHOW_NOTES`] and names
 /// the command that prints the rest.
 ///
@@ -43694,14 +43695,19 @@ pub fn show_issue(issue: &str, all: bool) -> Result<String> {
     Ok(format_show(&card, all))
 }
 
-/// One ticket as JSON: id, project, state, priority, title, each blocker,
-/// the body, and every note (newest last, with its age and seat).
+/// One ticket as JSON: id, project, state, priority, title, claim, parent,
+/// children, each blocker, the body, and every note (newest last, with its
+/// time, age and seat).
 ///
 /// # Errors
 ///
 /// The tracker cannot be read, or `issue` is not in it.
 pub fn show_json(issue: &str) -> Result<String> {
     let card = show_card(issue)?;
+    let id = card["id"].as_str().unwrap_or(issue);
+    let claim = claim_row(&card);
+    let parent = parent_row(&card);
+    let children = children_rows(id);
     let blockers = blocker_rows(&card);
     let notes: Vec<Value> = show_notes(&card, true)
         .into_iter()
@@ -43709,16 +43715,20 @@ pub fn show_json(issue: &str) -> Result<String> {
             serde_json::json!({
                 "text": note.text,
                 "age": note.age,
+                "time": note.time,
                 "seat": note.seat,
             })
         })
         .collect();
     let doc = serde_json::json!({
-        "id": card["id"].as_str().unwrap_or(issue),
+        "id": id,
         "project": card["project"].as_str().unwrap_or(""),
         "state": card["state"].as_str().unwrap_or(""),
         "priority": card["priority"].as_str().unwrap_or(""),
         "title": card["title"].as_str().unwrap_or(""),
+        "claim": claim,
+        "parent": parent,
+        "children": children,
         "blocked_by": blockers,
         "body": show_body(&card),
         "notes": notes,
@@ -43741,28 +43751,82 @@ const SHOW_NOTES: usize = 8;
 struct ShowNote {
     text: String,
     age: String,
+    time: String,
     seat: String,
+}
+
+fn flat_title_or_none(raw: &str) -> String {
+    let flat = raw.replace(['\n', '\r', '\t'], " ");
+    let flat = flat.trim();
+    if flat.is_empty() {
+        scan::NO_TITLE.to_string()
+    } else {
+        flat.to_string()
+    }
 }
 
 fn format_show(card: &Value, all: bool) -> String {
     let id = card["id"].as_str().unwrap_or("");
     let state = card["state"].as_str().unwrap_or("");
-    let title = card["title"].as_str().unwrap_or("");
+    let title = flat_title_or_none(card["title"].as_str().unwrap_or(""));
     let priority = card["priority"].as_str().unwrap_or("");
     let mut head = format!("{id}  {state}");
     if !priority.is_empty() {
         head.push_str(&format!("  [#{priority}]"));
     }
-    let mut out = scan::line_with_title(&format!("{head}  "), title, scan::COLS);
+    let one = format!("{head}  {title}");
+    let mut out = if one.chars().count() <= scan::COLS {
+        one
+    } else {
+        let mut wrapped = scan::wrap(&head, scan::COLS);
+        wrapped.push('\n');
+        wrapped.push_str(&scan::wrap_hang(&title, scan::COLS, "  ", "  "));
+        wrapped
+    };
     out.push('\n');
-    if let Some(who) = card["claimed_by"]
-        .as_str()
-        .map(str::trim)
-        .filter(|who| !who.is_empty())
-    {
-        let line = claim_age::phrase(who, card["claimed_at"].as_str(), claim_age::now_here());
+    if let Some(claim) = claim_row(card) {
+        let seat = claim["seat"].as_str().unwrap_or("");
+        let age = claim["age"].as_str().unwrap_or("");
+        let line = if age.is_empty() {
+            format!("claimed by {seat}")
+        } else {
+            format!("claimed {age} by {seat}")
+        };
         out.push_str(&scan::wrap_hang(&line, scan::COLS, "  ", "  "));
         out.push('\n');
+    }
+    let parent = parent_row(card);
+    if parent.is_null() {
+        out.push_str("parent: none\n");
+    } else {
+        let pid = parent["id"].as_str().unwrap_or("");
+        let pstate = parent["state"].as_str().unwrap_or("?");
+        let ptitle = parent["title"]
+            .as_str()
+            .unwrap_or("")
+            .replace(['\n', '\r', '\t'], " ");
+        let ptitle = ptitle.trim();
+        let line = if ptitle.is_empty() {
+            format!("{pid}  {pstate}")
+        } else {
+            format!("{pid}  {pstate}  {ptitle}")
+        };
+        out.push_str(&scan::wrap_hang(&line, scan::COLS, "parent: ", "  "));
+        out.push('\n');
+    }
+    let children = children_rows(id);
+    if children.is_empty() {
+        out.push_str("children: none\n");
+    } else {
+        out.push_str("children:\n");
+        for child in children {
+            let cid = child["id"].as_str().unwrap_or("");
+            let cstate = child["state"].as_str().unwrap_or("?");
+            let ctitle = flat_title_or_none(child["title"].as_str().unwrap_or(""));
+            let line = format!("{cid}  {cstate}  {ctitle}");
+            out.push_str(&scan::wrap_hang(&line, scan::COLS, "  ", "  "));
+            out.push('\n');
+        }
     }
     let blockers = blocker_rows(card);
     if blockers.is_empty() {
@@ -43770,14 +43834,23 @@ fn format_show(card: &Value, all: bool) -> String {
     } else {
         out.push_str("blockers:\n");
         for blocker in blockers {
-            let id = blocker["id"].as_str().unwrap_or("");
-            let state = blocker["state"].as_str().unwrap_or("?");
+            let bid = blocker["id"].as_str().unwrap_or("");
+            let bstate = blocker["state"].as_str().unwrap_or("?");
             let kind = if blocker["open"].as_bool().unwrap_or(true) {
                 "open"
             } else {
                 "closed"
             };
-            let line = format!("{id}  {state}  {kind}");
+            let btitle = blocker["title"]
+                .as_str()
+                .unwrap_or("")
+                .replace(['\n', '\r', '\t'], " ");
+            let btitle = btitle.trim();
+            let line = if btitle.is_empty() {
+                format!("{bid}  {bstate}  {kind}")
+            } else {
+                format!("{bid}  {bstate}  {kind}  {btitle}")
+            };
             out.push_str(&scan::wrap_hang(&line, scan::COLS, "  ", "  "));
             out.push('\n');
         }
@@ -43827,16 +43900,26 @@ fn append_show_prose(out: &mut String, card: &Value, all: bool) {
 }
 
 fn show_body(card: &Value) -> String {
-    card["body"].as_str().unwrap_or("").trim().to_string()
+    card["body"]
+        .as_str()
+        .unwrap_or("")
+        .replace("\r\n", "\n")
+        .trim()
+        .to_string()
 }
 
 fn note_head(note: &ShowNote) -> String {
-    match (note.age.is_empty(), note.seat.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => note.age.clone(),
-        (true, false) => note.seat.clone(),
-        (false, false) => format!("{}, {}", note.age, note.seat),
+    let mut parts = Vec::new();
+    if !note.time.is_empty() {
+        parts.push(note.time.as_str());
     }
+    if !note.age.is_empty() {
+        parts.push(note.age.as_str());
+    }
+    if !note.seat.is_empty() {
+        parts.push(note.seat.as_str());
+    }
+    parts.join(", ")
 }
 
 /// Notes a person wrote, oldest first. A `Noted by` line names the seat of
@@ -43848,6 +43931,7 @@ fn show_notes(card: &Value, keep_machinery: bool) -> Vec<ShowNote> {
     let mut newest_first = Vec::new();
     for entry in card["logbook"].as_array().into_iter().flatten() {
         if let Some(note) = entry["note"].as_str() {
+            let note = note.replace("\r\n", "\n");
             let note = note.trim();
             if note.is_empty()
                 || note.starts_with(vissue_core::model::CLAIM_RELEASED_NOTE)
@@ -43860,6 +43944,7 @@ fn show_notes(card: &Value, keep_machinery: bool) -> Vec<ShowNote> {
             newest_first.push(ShowNote {
                 text: note.to_string(),
                 age: note_age(at),
+                time: note_time(at),
                 seat: pending.take().unwrap_or_default(),
             });
             continue;
@@ -43890,6 +43975,106 @@ fn note_age(stamp: &str) -> String {
     age_of(date, &now_local())
 }
 
+/// `YYYY-MM-DD HH:MM` (or `YYYY-MM-DD`) from an org stamp, empty when absent.
+fn note_time(stamp: &str) -> String {
+    let text = stamp
+        .trim()
+        .trim_start_matches(['[', '<'])
+        .trim_end_matches([']', '>']);
+    let mut parts = text.split_whitespace();
+    let Some(date) = parts.next().filter(|date| {
+        let bytes = date.as_bytes();
+        bytes.len() == 10 && bytes[4] == b'-' && bytes[7] == b'-'
+    }) else {
+        return String::new();
+    };
+    if let Some(clock) = parts.find(|part| part.contains(':')) {
+        let clock = clock.get(..5).unwrap_or(clock);
+        format!("{date} {clock}")
+    } else {
+        date.to_string()
+    }
+}
+
+fn claim_row(card: &Value) -> Option<Value> {
+    let who = card["claimed_by"]
+        .as_str()
+        .map(str::trim)
+        .filter(|who| !who.is_empty())?;
+    let at = card["claimed_at"]
+        .as_str()
+        .map(str::trim)
+        .filter(|at| !at.is_empty());
+    let age = at.and_then(|stamp| claim_age::at(stamp, claim_age::now_here()));
+    Some(serde_json::json!({
+        "seat": who,
+        "age": age.unwrap_or_default(),
+        "at": at.unwrap_or_default(),
+    }))
+}
+
+fn parent_row(card: &Value) -> Value {
+    let Some(parent) = card["parent"]
+        .as_str()
+        .map(str::trim)
+        .filter(|parent| !parent.is_empty())
+    else {
+        return Value::Null;
+    };
+    let (state, open, title) = match tracker_show_json(parent) {
+        Ok(shown) => {
+            let state = shown["state"].as_str().unwrap_or("?").to_string();
+            let open = !matches!(state.as_str(), "DONE" | "CANCELLED");
+            let title = shown["title"].as_str().unwrap_or("").to_string();
+            (state, open, title)
+        }
+        Err(_) => ("missing".to_string(), true, String::new()),
+    };
+    serde_json::json!({
+        "id": parent,
+        "state": state,
+        "open": open,
+        "title": title,
+    })
+}
+
+fn tracker_children_hits(id: &str) -> Vec<vissue_core::views::WalkHit> {
+    if id.trim().is_empty() {
+        return Vec::new();
+    }
+    if let Some(hits) = issue_spot::children(id) {
+        return hits;
+    }
+    let Ok(layout) = vissue_core::Layout::resolve(None, None) else {
+        return Vec::new();
+    };
+    let Ok(router) = vissue_core::Router::load(layout) else {
+        return Vec::new();
+    };
+    let Ok(found) = router.find_by_id(id) else {
+        return Vec::new();
+    };
+    let Ok(recs) = vissue_core::catalog::load_recs(&found.layout) else {
+        return Vec::new();
+    };
+    vissue_core::catalog::children_from(&recs, &found.heading.id).unwrap_or_default()
+}
+
+fn children_rows(id: &str) -> Vec<Value> {
+    tracker_children_hits(id)
+        .into_iter()
+        .map(|hit| {
+            let open = !matches!(hit.state.as_str(), "DONE" | "CANCELLED");
+            serde_json::json!({
+                "id": hit.id,
+                "state": hit.state,
+                "open": open,
+                "title": hit.title,
+            })
+        })
+        .collect()
+}
+
 fn blocker_rows(card: &Value) -> Vec<Value> {
     card["blocked_by"]
         .as_array()
@@ -43897,15 +44082,16 @@ fn blocker_rows(card: &Value) -> Vec<Value> {
         .flatten()
         .filter_map(Value::as_str)
         .map(|blocker| {
-            let (state, open) = match tracker_show_json(blocker) {
+            let (state, open, title) = match tracker_show_json(blocker) {
                 Ok(shown) => {
                     let state = shown["state"].as_str().unwrap_or("?").to_string();
                     let open = !matches!(state.as_str(), "DONE" | "CANCELLED");
-                    (state, open)
+                    let title = shown["title"].as_str().unwrap_or("").to_string();
+                    (state, open, title)
                 }
-                Err(_) => ("missing".to_string(), true),
+                Err(_) => ("missing".to_string(), true, String::new()),
             };
-            serde_json::json!({"id": blocker, "state": state, "open": open})
+            serde_json::json!({"id": blocker, "state": state, "open": open, "title": title})
         })
         .collect()
 }
@@ -86302,8 +86488,9 @@ mod claim_chunks_tests {
         assert_eq!(chunks.join(" "), text);
     }
 
-    /// The same headings `ljos ready` keeps on one line, on show, the
-    /// timeline, a sitting heading and a workflow line.
+    /// `ljos show` wraps the full title at 80 columns and never cuts it.
+    /// The timeline, sitting heading and workflow lines keep their one-line
+    /// headings.
     #[test]
     fn a_long_ticket_title_stays_on_the_show_line() {
         let title = "guard: tmux by full path, renamed binary, -L or -S bypasses send-keys checks";
@@ -86315,11 +86502,16 @@ mod claim_chunks_tests {
             "blocked_by": [],
         });
         let shown = super::format_show(&card, false);
-        let line = shown.lines().next().unwrap();
-        assert!(line.chars().count() <= super::scan::COLS, "{line}");
-        assert!(line.starts_with("ljos-633g  TODO  [#A]  guard:"), "{line}");
-        assert!(line.ends_with("..."), "{line}");
-        assert!(!shown.contains(&format!("\n  {title}")), "{shown}");
+        assert!(
+            shown
+                .lines()
+                .all(|l| l.chars().count() <= super::scan::COLS),
+            "{shown}"
+        );
+        let head = shown.lines().next().unwrap();
+        assert_eq!(head, "ljos-633g  TODO  [#A]");
+        assert!(shown.contains(&format!("\n  {title}")), "{shown}");
+        assert!(!shown.contains("..."), "{shown}");
         let blank = super::format_show(
             &serde_json::json!({
                 "id": "ljos-blank",

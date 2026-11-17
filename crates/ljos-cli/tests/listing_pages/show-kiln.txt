@@ -2,7 +2,9 @@ status 0
 stderr:
 stdout:
 demo-kiln  TODO  [#B]  Fire the kiln
+parent: none
+children: none
 blockers: none
 
-<age>
+<date> 09:14, <age>
   The damper sticks when the morning is cold. Þéttingin er gömul.

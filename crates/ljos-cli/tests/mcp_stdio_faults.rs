@@ -532,15 +532,16 @@ fn show_over_mcp_prints_the_ticket() {
     let root = home.path().join("tracker");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    let long_title = "Pick a kiln damper codec that handles cold winter condensation and keeps every reading under eighty columns cleanly";
     let filed = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args([
             "file",
-            "Pick a codec",
+            long_title,
             "--top",
             "-p",
             "demo",
             "--body",
-            "The door needs a codec.",
+            "The door needs a codec.\n\nSecond paragraph on condensation.",
         ])
         .env_clear()
         .env("PATH", &path)
@@ -563,6 +564,38 @@ fn show_over_mcp_prints_the_ticket() {
         .unwrap()
         .trim()
         .to_string();
+    let noted = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["note", &id, "measured cold damper clearance"])
+        .env_clear()
+        .env("PATH", &path)
+        .env("HOME", home.path())
+        .env("VISSUE_ROOT", &root)
+        .env("LJOS_SEAT", "ada")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("PACKSET_URL", "off")
+        .env("VISSUE_NO_ROUTE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        noted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&noted.stderr)
+    );
+    let cli_out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["show", &id])
+        .env_clear()
+        .env("PATH", &path)
+        .env("HOME", home.path())
+        .env("VISSUE_ROOT", &root)
+        .env("LJOS_SEAT", "ada")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("PACKSET_URL", "off")
+        .env("VISSUE_NO_ROUTE", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(cli_out.status.success());
+    let cli_page = String::from_utf8_lossy(&cli_out.stdout).into_owned();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", &path)
@@ -591,8 +624,7 @@ fn show_over_mcp_prints_the_ticket() {
     });
     for line in [
         serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-            "protocolVersion":"2025-06-18","capabilities":{},
-            "clientInfo":{"name":"probe","version":"0"}
+            "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}
         }}),
         serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
         serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
@@ -614,7 +646,17 @@ fn show_over_mcp_prints_the_ticket() {
     let _ = child.kill();
     let _ = child.wait();
     let shown = shown.expect("ljos_show did not answer");
-    assert!(shown.contains(&id), "{shown}");
-    assert!(shown.contains("The door needs a codec"), "{shown}");
     assert!(!shown.contains("\"isError\":true"), "{shown}");
+    let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    let mcp_text = doc["result"]["structuredContent"]["text"]
+        .as_str()
+        .or_else(|| doc["result"]["content"][0]["text"].as_str())
+        .unwrap_or_else(|| panic!("no text in {doc}"));
+    assert_eq!(mcp_text, cli_page);
+    assert!(mcp_text.contains(&id), "{mcp_text}");
+    assert!(mcp_text.contains("condensation"), "{mcp_text}");
+    assert!(
+        mcp_text.contains("measured cold damper clearance"),
+        "{mcp_text}"
+    );
 }
