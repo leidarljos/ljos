@@ -21,6 +21,7 @@ use std::process::{Command, Stdio};
 const QUERY: &str = "anneal cov-floor review gate silently passes";
 const LESSON: &str = "The anneal cov-floor review gate silently passes when the floor is met.";
 const PAPER_ID: &str = "3fe074ed0123456789abcdef01234567";
+const RECEIPT_ROW: &str = "receipt\tmsg-anneal\tpapers\t2026-11-16T00:00:00Z";
 
 struct World {
     root: PathBuf,
@@ -298,6 +299,10 @@ fn search_on_a_pipe_prints_the_page_and_no_raw_rows() {
 }
 
 fn mcp_search(world: &World) -> (String, String) {
+    mcp_search_query(world, QUERY)
+}
+
+fn mcp_search_query(world: &World, query: &str) -> (String, String) {
     let home = world.root.join("home");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
@@ -327,7 +332,7 @@ fn mcp_search(world: &World) -> (String, String) {
     let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#;
     let noted = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
     let call = format!(
-        "{init}\n{noted}\n{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"ljos_search\",\"arguments\":{{\"query\":\"{QUERY}\",\"seat\":\"anneal-paper\"}}}}}}\n"
+        "{init}\n{noted}\n{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"ljos_search\",\"arguments\":{{\"query\":\"{query}\",\"seat\":\"anneal-paper\"}}}}}}\n"
     );
     stdin.write_all(call.as_bytes()).unwrap();
     drop(stdin);
@@ -336,6 +341,59 @@ fn mcp_search(world: &World) -> (String, String) {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+#[test]
+fn backend_receipt_rows_stay_off_page_and_mcp_but_json_keeps_them() {
+    let Some(world) = world() else { return };
+    seed(&world);
+    let receipt_text = serde_json::to_string(RECEIPT_ROW).expect("receipt text");
+    post_atom(
+        world.port,
+        &format!(
+            r#"{{"schema":"inside.atom/v1","id":"cc11bb22cc33dd44ee55ff6677889900","kind":"lesson","level":"explicit","text":{receipt_text},"workspace":"seat","entities":["seat:papers","from:papers","to:anneal-paper"]}}"#
+        ),
+    );
+
+    let page = world.ljos("anneal-paper", &["search", "anneal"]);
+    let page_out = String::from_utf8_lossy(&page.stdout).into_owned();
+    let page_err = String::from_utf8_lossy(&page.stderr).into_owned();
+    assert!(page.status.success(), "{}", text(&page));
+    assert_clean("page", &page_out, &page_err);
+    assert!(
+        !page_out.contains(RECEIPT_ROW) && !page_err.contains(RECEIPT_ROW),
+        "search page leaked a backend receipt row:\n{page_out}\n{page_err}"
+    );
+
+    let json = world.ljos("anneal-paper", &["search", "--json", "anneal"]);
+    let body = String::from_utf8_lossy(&json.stdout).into_owned();
+    assert!(json.status.success(), "{}", text(&json));
+    let parsed: serde_json::Value = serde_json::from_str(body.trim()).expect(&body);
+    let rows = parsed["receipt_rows"].as_array().expect(&body);
+    assert!(
+        rows.iter().any(|line| line.as_str() == Some(RECEIPT_ROW)),
+        "{body}"
+    );
+    let hits = parsed["hits"].as_array().expect(&body);
+    assert!(
+        hits.iter()
+            .all(|hit| hit["text"].as_str() != Some(RECEIPT_ROW)),
+        "{body}"
+    );
+    assert_clean(
+        "json with receipt rows",
+        &body,
+        &String::from_utf8_lossy(&json.stderr),
+    );
+
+    let mcp = mcp_search_query(&world, "anneal");
+    assert_clean("mcp with receipt rows", &mcp.0, &mcp.1);
+    assert!(
+        !mcp.0.contains(RECEIPT_ROW) && !mcp.1.contains(RECEIPT_ROW),
+        "mcp search leaked a backend receipt row:\n{}\n{}",
+        mcp.0,
+        mcp.1
+    );
 }
 
 #[test]

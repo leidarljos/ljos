@@ -15797,6 +15797,22 @@ pub fn search_json_stored(
     suggestion: Option<&str>,
     store: &[String],
 ) -> String {
+    search_json_receipts_stored(hits, ranking, empty, suggestion, store, &[])
+}
+
+/// [`search_json_stored`] with any raw receipt rows the backend emitted.
+///
+/// These rows never appear on the formatted page or MCP search rows.
+/// `--json` keeps them for debugging under `receipt_rows`.
+#[must_use]
+pub fn search_json_receipts_stored(
+    hits: &[Hit],
+    ranking: Option<&Ranking>,
+    empty: Option<&str>,
+    suggestion: Option<&str>,
+    store: &[String],
+    receipt_rows: &[String],
+) -> String {
     let mine = seat_name();
     let refs: Vec<&str> = if store.is_empty() {
         hits.iter().filter_map(|hit| hit.id.as_deref()).collect()
@@ -15841,6 +15857,14 @@ pub fn search_json_stored(
         if let Some(cmd) = suggestion.map(str::trim).filter(|cmd| !cmd.is_empty()) {
             doc["suggestion"] = Value::String(cmd.to_string());
         }
+    }
+    if !receipt_rows.is_empty() {
+        doc["receipt_rows"] = Value::Array(
+            receipt_rows
+                .iter()
+                .map(|line| Value::String(line.to_string()))
+                .collect(),
+        );
     }
     ranking_doc(ranking, doc)
 }
@@ -48229,7 +48253,34 @@ fn conceal_bookkeeping(hits: &mut Vec<Hit>) {
 /// and the other bookkeeping kinds stay out of the page, the JSON and
 /// the porcelain rows. `attempts` keeps a stored failed command.
 pub fn conceal_search_noise(hits: &mut Vec<Hit>, attempts: bool) {
-    hits.retain(|hit| !bookkeeping_kind(hit) && !search_skip_kind(hit, attempts));
+    hits.retain(|hit| {
+        !bookkeeping_kind(hit) && !search_skip_kind(hit, attempts) && !hit_is_raw_tab_row(hit)
+    });
+}
+
+fn hit_is_raw_tab_row(hit: &Hit) -> bool {
+    let line = hit.text.trim();
+    if line.is_empty() {
+        return false;
+    }
+    row_is_raw_tab(line)
+}
+
+/// Raw receipt rows the backend returned in a search listing.
+///
+/// The page and MCP rows do not print these lines.
+#[must_use]
+pub fn search_receipt_rows(hits: &[Hit]) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in hits.iter().map(|hit| hit.text.trim()) {
+        if line.starts_with("receipt\t")
+            && row_is_raw_tab(line)
+            && !rows.iter().any(|it| it == line)
+        {
+            rows.push(line.to_string());
+        }
+    }
+    rows
 }
 
 /// `text` with raw tab separated records removed. Other lines stay,

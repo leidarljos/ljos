@@ -5314,6 +5314,7 @@ fn run_command() -> Result<()> {
             if !dated && !filter.active() {
                 ljos_cli::ticket_search::merge(&mut hits, &asked);
             }
+            let receipt_rows = ljos_cli::search_receipt_rows(&hits);
             // After the pack, the slot merge and the ticket merge. A
             // receipt, a mail row and the other bookkeeping kinds are not
             // part of the page, in any of those paths.
@@ -5357,12 +5358,13 @@ fn run_command() -> Result<()> {
                 };
                 print!(
                     "{}",
-                    ljos_cli::search_json_stored(
+                    ljos_cli::search_json_receipts_stored(
                         &hits,
                         Some(&ranking),
                         empty,
                         suggestion.as_deref(),
                         &id_space,
+                        &receipt_rows,
                     )
                 );
             } else {
