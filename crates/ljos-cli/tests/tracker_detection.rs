@@ -295,3 +295,46 @@ fn a_tracker_under_vissue_prefix_is_the_tracker() {
     let log = seat.git(&root, &["log", "--format=%s"]);
     assert!(log.contains("filed by saddle"), "{log}");
 }
+
+#[test]
+fn file_and_plan_before_onboard_write_nothing_and_name_onboard() {
+    let Some(seat) = Seat::new() else {
+        return;
+    };
+    let scratch = seat.dir.path().join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let mut before = Vec::new();
+    files(&scratch, &scratch, &mut before);
+
+    let filed = seat.ljos(&scratch, &["file", "Pick a codec", "-p", "demo"]);
+    let filed_text = said(&filed);
+    assert!(!filed.status.success(), "{filed_text}");
+    assert!(filed_text.contains("ljos onboard"), "{filed_text}");
+    assert!(!filed_text.contains("--root"), "{filed_text}");
+    let mut after_file = Vec::new();
+    files(&scratch, &scratch, &mut after_file);
+    assert_eq!(after_file, before, "{filed_text}");
+
+    let planned = seat.ljos(
+        &scratch,
+        &[
+            "sitting",
+            "--plan",
+            "Ship the codec",
+            "-p",
+            "day",
+            "--",
+            "measure the files",
+        ],
+    );
+    let planned_text = said(&planned);
+    assert!(!planned.status.success(), "{planned_text}");
+    assert!(planned_text.contains("ljos onboard"), "{planned_text}");
+    assert!(
+        !planned_text.contains("deed store does not answer"),
+        "{planned_text}"
+    );
+    let mut after_plan = Vec::new();
+    files(&scratch, &scratch, &mut after_plan);
+    assert_eq!(after_plan, before, "{planned_text}");
+}

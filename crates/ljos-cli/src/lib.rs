@@ -39307,7 +39307,7 @@ pub fn file_issue(
         {
             return Err(unknown_ticket(parent.unwrap_or("")));
         }
-        Err(err) => return Err(err),
+        Err(err) => return Err(plain_tracker_error(err)),
     };
     let text = said.stdout;
     let id = created_issue_id(&text);
@@ -41845,6 +41845,30 @@ pub fn refuse_product_init(issue: &str) -> Result<()> {
 pub fn is_ticket_fault(err: &anyhow::Error) -> bool {
     let text = err.to_string();
     text.starts_with("issue ") && (text.contains("`ljos ready`") || text.contains("`ljos show "))
+}
+
+/// Replace raw `vissue` missing-tracker jargon (`Name one with --root`)
+/// with a plain message naming `ljos onboard` while keeping any named path.
+#[must_use]
+pub fn plain_tracker_error(err: anyhow::Error) -> anyhow::Error {
+    let text = format!("{err:#}");
+    let is_missing = text.contains("is not a tracker")
+        || text.contains("not inside a tracker")
+        || text.contains("neither vissue.toml");
+    if !is_missing {
+        return err;
+    }
+    if let Some((before, _)) = text.split_once(" is not a tracker") {
+        let path = before
+            .rsplit_once(": ")
+            .map_or_else(|| before.trim(), |(_, path)| path.trim());
+        if !path.is_empty() {
+            return anyhow::anyhow!(
+                "no ticket tracker at {path}; run `ljos onboard` (or set VISSUE_ROOT=DIR)."
+            );
+        }
+    }
+    anyhow::anyhow!("no ticket tracker found; run `ljos onboard` (or set VISSUE_ROOT=DIR).")
 }
 
 /// The sentence for an id the tracker does not hold as one ticket.

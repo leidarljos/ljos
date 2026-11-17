@@ -14,6 +14,19 @@ pub struct Opened {
     pub text: String,
 }
 
+fn require_tracker_layout(layout: &vissue_core::Layout) -> Result<()> {
+    if let Err(err) = layout.require_tracker_to_create() {
+        let root = layout.root().display();
+        if crate::tracker_place::missing_tracker_line().is_some() {
+            bail!("no ticket tracker at {root}; run `ljos onboard` (or set VISSUE_ROOT=DIR).");
+        }
+        return Err(err).with_context(|| {
+            format!("no ticket tracker at {root}; run `ljos onboard` (or set VISSUE_ROOT=DIR)")
+        });
+    }
+    Ok(())
+}
+
 /// File `title` and `items` in one tracker commit.
 ///
 /// The parent carries the `plan` tag and `:ORDERED: t`. Each item is a
@@ -30,8 +43,9 @@ pub fn open_plan(project: Option<&str>, title: &str, items: &[String]) -> Result
     }
     let items = clean_items(items)?;
     let project = crate::project_name(&named_project(project)).map_err(anyhow::Error::msg)?;
-    let _held = Batch::enter();
     let layout = vissue_core::Layout::resolve(None, None)?;
+    require_tracker_layout(&layout)?;
+    let _held = Batch::enter();
     let parent = create(&layout, &project, title, None, "plan")?;
     mark_ordered(&parent)?;
     let mut children = Vec::with_capacity(items.len());
@@ -66,6 +80,7 @@ pub fn add_items(parent: &str, items: &[String]) -> Result<Opened> {
     }
     let items = clean_items(items)?;
     let layout = vissue_core::Layout::resolve(None, None)?;
+    require_tracker_layout(&layout)?;
     let hit = vissue_core::Router::load(layout.clone())
         .context("plan: the tracker could not be read")?
         .find_by_id(parent)
