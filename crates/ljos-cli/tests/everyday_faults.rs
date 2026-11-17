@@ -212,7 +212,7 @@ fn a_sitting_title_says_how_to_start_a_plan() {
     assert_eq!(missing.status.code(), Some(1), "{said}");
     let line = one_line(&missing.stderr);
     assert!(line.starts_with("issue demo-none not found"), "{line}");
-    assert!(line.contains("`ljos ready`"), "{line}");
+    assert!(line.contains("`ljos search`"), "{line}");
     assert!(!line.contains("--plan"), "{line}");
 }
 
