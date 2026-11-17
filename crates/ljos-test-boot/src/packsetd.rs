@@ -1447,6 +1447,7 @@ int main(void) {
         foreign_parent();
     }
 
+    #[cfg(target_os = "linux")]
     const FOREIGN_C: &str = r#"
 #include <netinet/in.h>
 #include <stdio.h>
@@ -1472,6 +1473,7 @@ int main(int argc, char **argv) {
 }
 "#;
 
+    #[cfg(target_os = "linux")]
     fn foreign_bin(dir: &std::path::Path) -> PathBuf {
         let src = dir.join("foreign.c");
         let bin = dir.join("packsetd");
@@ -1616,6 +1618,7 @@ int main(int argc, char **argv) {
 
     /// A writer whose home path names this process is stopped.
     /// SIGTERM is enough for the stand-in, so the kill signal is not required.
+    #[cfg(target_os = "linux")]
     #[test]
     fn reap_listener_stops_a_writer_this_process_started() {
         let dir = unique_dir();
