@@ -23117,6 +23117,11 @@ fn missing_tool_line(text: &str) -> String {
             return format!("{bin} is not on PATH. Install it with `{cmd}`.");
         }
     }
+    // `ljos conflicts` names this optional program. The generic line did
+    // not, so a missing habitat read as an unnamed required program.
+    if lower.contains("landscape") {
+        return "landscape is not on PATH. `ljos conflicts` reads the pack's geometry with it, and `ljos doctor --all` lists it.".to_string();
+    }
     "A required program is not on PATH. `ljos doctor` names the install.".to_string()
 }
 
@@ -34604,6 +34609,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         }
         out
     });
+    doctor_push(&mut out, landscape_row());
     if let Some(row) = registry_skipped_row() {
         doctor_push(&mut out, row);
     }
@@ -35828,6 +35834,7 @@ const OPTIONAL_ROWS: &[&str] = &[
     "tracker",
     "encoder",
     "cloud guard",
+    "landscape",
 ];
 
 /// Rows about the machine the seat runs on. They fail neither `ljos doctor`
@@ -38693,6 +38700,29 @@ fn record_fire(cue: &str, lens: Option<&str>, body: &Value) -> Result<String> {
         .to_string())
 }
 
+/// The optional `landscape` program `ljos conflicts` reads.
+///
+/// Absent, the row is `info` and the short doctor leaves it off.
+/// `ljos doctor --all` lists it.
+fn landscape_row() -> Habitat {
+    match which::which("landscape") {
+        Ok(path) => {
+            let probed = probe_version("landscape");
+            let ver = probed.version.as_deref().unwrap_or("?");
+            Habitat {
+                name: "landscape",
+                state: format!("{}  {ver}", path.display()),
+                ok: true,
+            }
+        }
+        Err(_) => Habitat {
+            name: "landscape",
+            state: "not on PATH; `ljos conflicts` reads the pack's geometry with it (leidarljos/landscape)".into(),
+            ok: false,
+        },
+    }
+}
+
 /// The claims the pack's link graph turns on, highest first: what matters
 /// in this seat's memory by its own connections, before any query.
 pub fn packset_hubs(limit: usize) -> Result<Value> {
@@ -39578,7 +39608,7 @@ fn with_tracker(said: String, node: &str, assignee: &str) -> Result<String> {
 
 /// What `claim` says to a blank id.
 pub const EMPTY_CLAIM_ID: &str =
-    "claim: the id is empty; pass a tracker id, or omit it to claim the next ready node";
+    "claim: the id is empty. Pass a tracker id, or run `ljos claim --next`.";
 
 /// Take a session node, and when the claim graph refuses because the
 /// assignee still holds another node, say which tracker id that is and the
@@ -41873,8 +41903,10 @@ pub fn is_ticket_fault(err: &anyhow::Error) -> bool {
 
 /// The sentence for an id the tracker does not hold as one ticket.
 ///
-/// `None` when `id` is one ticket in one tracker, or when the tracker
-/// cannot be listed and the caller should ask it itself.
+/// A prefix of one ticket names it. A near miss by a few edits does too,
+/// and `ljos show`, `ljos finish`, `ljos recall` and `ljos file --parent`
+/// print that same line. `None` when `id` is one ticket in one tracker,
+/// or when the tracker cannot be listed and the caller should ask it itself.
 #[must_use]
 pub fn ticket_refusal(id: &str) -> Option<String> {
     let id = id.trim();
@@ -41893,6 +41925,10 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
         .unwrap_or_else(|_| vec![layout]);
     let mut exact = Vec::new();
     let mut prefixes = Vec::new();
+    let mut near = Vec::new();
+    let mut near_at = usize::MAX;
+    let folded = id.to_ascii_lowercase();
+    let limit = id_edit_limit(&folded);
     let mut saw_file = false;
     for layout in &layouts {
         let Ok(projects) = vissue_core::store::list_projects(layout) else {
@@ -41911,7 +41947,18 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
                         exact.push(root);
                     }
                 } else if heading.id.starts_with(id) && !prefixes.contains(&heading.id) {
-                    prefixes.push(heading.id);
+                    prefixes.push(heading.id.clone());
+                } else if limit > 0 {
+                    let distance = id_edits(&folded, &heading.id.to_ascii_lowercase());
+                    if distance > 0 && distance <= limit && distance <= near_at {
+                        if distance < near_at {
+                            near_at = distance;
+                            near.clear();
+                        }
+                        if !near.contains(&heading.id) {
+                            near.push(heading.id.clone());
+                        }
+                    }
                 }
             }
         }
@@ -41935,13 +41982,52 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
         return None;
     }
     prefixes.sort();
-    match prefixes.as_slice() {
-        [] => Some(format!(
-            "issue {id} not found. `ljos ready` lists the open tickets."
-        )),
-        [one] => Some(format!(
-            "issue {id} not found, and the closest is {one}, so run `ljos show {one}`."
-        )),
+    near.sort();
+    let hits = if prefixes.is_empty() {
+        near.as_slice()
+    } else {
+        prefixes.as_slice()
+    };
+    Some(ticket_miss_line(id, hits))
+}
+
+/// How many edits still count as one mistyped ticket id.
+///
+/// One letter is every other short id, so a one-letter id is not guessed.
+/// Two or three letters can miss one. A longer id can be off by two.
+/// Three edits on a long id is another ticket, so that guess is not made.
+fn id_edit_limit(typed: &str) -> usize {
+    match typed.chars().count() {
+        0 | 1 => 0,
+        2 | 3 => 1,
+        _ => 2,
+    }
+}
+
+/// Levenshtein distance, in characters. `left` and `right` are already folded.
+fn id_edits(left: &str, right: &str) -> usize {
+    let a: Vec<char> = left.chars().collect();
+    let b: Vec<char> = right.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut next = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        next[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            next[j + 1] = (prev[j + 1] + 1).min(next[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut next);
+    }
+    prev[b.len()]
+}
+
+/// The not-found line for `hits`: none, the one closest id, or several.
+fn ticket_miss_line(id: &str, hits: &[String]) -> String {
+    match hits {
+        [] => format!("issue {id} not found. `ljos ready` lists the open tickets."),
+        [one] => {
+            format!("issue {id} not found, and the closest is {one}, so run `ljos show {one}`.")
+        }
         many => {
             let shown = if many.len() <= 3 {
                 match many {
@@ -41960,10 +42046,10 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
             } else {
                 format!("{}, {} and {} more", many[0], many[1], many.len() - 2)
             };
-            Some(format!(
+            format!(
                 "issue {id} matches {shown}, so run `ljos show {}`.",
                 many[0]
-            ))
+            )
         }
     }
 }
@@ -42875,7 +42961,8 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
 /// The body follows the header. The most recent notes follow the body,
 /// newest last, each with its age and the seat that wrote it. `all`
 /// prints every note. Otherwise the page keeps [`SHOW_NOTES`] and names
-/// the command that prints the rest.
+/// the command that prints the rest. An open ticket ends with
+/// `ljos sitting ISSUE`.
 ///
 /// # Errors
 ///
@@ -42974,6 +43061,11 @@ fn format_show(card: &Value, all: bool) -> String {
         }
     }
     append_show_prose(&mut out, card, all);
+    if !id.is_empty() && !undo::is_closed(state) {
+        let line = format!("next: `ljos sitting {id}`");
+        out.push_str(&scan::wrap(&line, scan::COLS));
+        out.push('\n');
+    }
     out
 }
 
@@ -45163,6 +45255,13 @@ pub fn reopen(issue: &str) -> Result<String> {
             "reopen: an issue id is required; nothing was written",
         ));
     }
+    // A missing ticket is a lookup failure. The person warning comes
+    // after the ticket is known to exist, so a typo in a non-TTY shell
+    // does not read as a refusal to reopen.
+    if let Some(line) = ticket_refusal(issue) {
+        bail!("{line}");
+    }
+    let v = issue_record(issue)?;
     if !person_present() {
         return Err(policy_label::labelled(
             "reopen-warning",
@@ -45170,7 +45269,6 @@ pub fn reopen(issue: &str) -> Result<String> {
         ));
     }
     let caller = reopen_caller()?;
-    let v = issue_record(issue)?;
     let state = v["state"].as_str().unwrap_or("");
     if !undo::is_closed(state) {
         return Err(policy_label::labelled(

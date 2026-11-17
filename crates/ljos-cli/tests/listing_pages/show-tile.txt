@@ -3,3 +3,4 @@ stderr:
 stdout:
 demo-tile  STARTED  [#A]  Glaze the tile after reading https://kiln.example/l...
 blockers: none
+next: `ljos sitting demo-tile`

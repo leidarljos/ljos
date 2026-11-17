@@ -5,7 +5,7 @@ ljos_test_boot::harness!();
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::process::Command;
+use std::process::{Command, Output};
 
 const KEPT: &str = "Pin the north fuse before the dusk firing.";
 const ALSO: &str = "Name the relay key before publishing the pack.";
@@ -49,9 +49,9 @@ impl Seat {
         Self { root, pack }
     }
 
-    fn ljos(&self, args: &[&str]) -> String {
+    fn run(&self, args: &[&str]) -> Output {
         let home = self.root.path().join("home");
-        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -67,7 +67,11 @@ impl Seat {
             .env("PACKSET_TIMEOUT_MS", "4000")
             .env("LJOS_TRACKER_GIT", "off")
             .output()
-            .unwrap();
+            .unwrap()
+    }
+
+    fn ljos(&self, args: &[&str]) -> String {
+        let out = self.run(args);
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -144,14 +148,23 @@ fn several_ids_are_accepted_once_and_the_rerun_matches() {
     assert!(!only.contains(ALSO), "{only}");
     assert!(only.contains("seat ada"), "{only}");
 
-    let first = seat.ljos(&["accept", "aaaa1111", "cccc3333", "eeee5555", "deadbeef"]);
+    let first_out = seat.run(&["accept", "aaaa1111", "cccc3333", "eeee5555", "deadbeef"]);
+    let first = format!(
+        "{}{}",
+        String::from_utf8_lossy(&first_out.stdout),
+        String::from_utf8_lossy(&first_out.stderr)
+    );
+    assert_eq!(first_out.status.code(), Some(1), "{first}");
     assert!(first.contains("accepted aaaa1111bbbb2222"), "{first}");
     assert!(first.contains("accepted cccc3333dddd4444"), "{first}");
     assert!(
         first.contains("refused eeee5555ffff6666:") && first.contains("3") && first.contains("2"),
         "{first}"
     );
-    assert!(first.contains("not found deadbeef"), "{first}");
+    assert!(
+        first.contains("not found deadbeef, so run `ljos proposals`."),
+        "{first}"
+    );
 
     let rows = seat.latest();
     let kept = rows.iter().find(|r| r["id"] == "aaaa1111bbbb2222").unwrap();
@@ -169,7 +182,13 @@ fn several_ids_are_accepted_once_and_the_rerun_matches() {
         .unwrap();
     assert_eq!(filed_row["seat"], "ada", "{filed_row}");
 
-    let again = seat.ljos(&["accept", "aaaa1111", "cccc3333", "eeee5555", "deadbeef"]);
+    let again_out = seat.run(&["accept", "aaaa1111", "cccc3333", "eeee5555", "deadbeef"]);
+    let again = format!(
+        "{}{}",
+        String::from_utf8_lossy(&again_out.stdout),
+        String::from_utf8_lossy(&again_out.stderr)
+    );
+    assert_eq!(again_out.status.code(), Some(1), "{again}");
     assert!(
         again.contains("already in pack aaaa1111bbbb2222"),
         "{again}"
@@ -179,7 +198,10 @@ fn several_ids_are_accepted_once_and_the_rerun_matches() {
         "{again}"
     );
     assert!(again.contains("refused eeee5555ffff6666:"), "{again}");
-    assert!(again.contains("not found deadbeef"), "{again}");
+    assert!(
+        again.contains("not found deadbeef, so run `ljos proposals`."),
+        "{again}"
+    );
     let rows_again = seat.latest();
     assert_eq!(
         rows_again

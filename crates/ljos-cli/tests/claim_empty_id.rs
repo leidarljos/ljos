@@ -1,6 +1,7 @@
 //! `ljos claim ""` fails at once. It used to read as `ljos claim --next`
 //! and wait on `claimdag ready`, which on a seat's graph ran past a
-//! minute. Only an omitted id claims the next ready node.
+//! minute. Only `ljos claim --next` claims the next ready node. An
+//! omitted id exits 2 and names an example.
 
 ljos_test_boot::harness!();
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -124,9 +125,27 @@ fn a_blank_id_fails_at_once_and_never_asks_the_claim_graph() {
 }
 
 #[test]
-fn an_omitted_id_still_claims_the_next_ready_node() {
+fn an_omitted_id_exits_2_and_never_asks_the_claim_graph() {
+    let hab = Hab::new(STALL, "[]");
+    let (out, took) = hab.claim(&[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        took < PROMPT,
+        "ljos claim with no id took {took:?}: {stderr}"
+    );
+    assert!(
+        stderr.contains("`ljos claim demo-2f5j`") && stderr.contains("`--next`"),
+        "{stderr}"
+    );
+    assert!(out.stdout.is_empty(), "{stderr}");
+    assert_eq!(hab.calls(), "", "the claim graph was asked");
+}
+
+#[test]
+fn claim_next_still_asks_the_claim_graph() {
     let hab = Hab::new("0", "[]");
-    let (out, _) = hab.claim(&[]);
+    let (out, _) = hab.claim(&["--next"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let said = format!("{stdout}{stderr}");

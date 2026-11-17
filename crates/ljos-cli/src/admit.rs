@@ -1527,6 +1527,16 @@ fn number_after(text: &str, marker: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
+/// One line for an id that is neither a memory nor a proposal.
+fn not_found_line(id: &str) -> String {
+    format!("not found {id}, so run `ljos proposals`.\n")
+}
+
+/// One line. A short-id error can carry a newline from the cause chain.
+fn flatten_fault(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// [`accept`], recording the person's words the acceptance rests on.
 ///
 /// `id` names a live memory, or a proposal row: an open one is stored
@@ -1541,7 +1551,8 @@ fn number_after(text: &str, marker: &str) -> Option<usize> {
 /// # Errors
 ///
 /// No proposal or memory has that id, a short id starts several, or the
-/// pack or the state directory refuses the write.
+/// pack or the state directory refuses the write. A missing id is
+/// `not found ID, so run \`ljos proposals\`.` and the caller exits 1.
 pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<String> {
     let _g = gate();
     let id = id.trim();
@@ -1552,13 +1563,18 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
     let known: Vec<String> = rows.keys().cloned().collect();
     let id = match crate::resolve_short_id("accept", id, &known) {
         Ok(id) => id,
-        Err(err) => return Ok(format!("not found {id}: {err:#}\n")),
+        Err(err) => {
+            let detail = flatten_fault(&format!("{err:#}"));
+            return Ok(format!(
+                "not found {id}: {detail}, so run `ljos proposals`.\n"
+            ));
+        }
     };
     let id = id.as_str();
     let Some(mut rec) = rows.get(id).cloned() else {
         return match accept_memory(id, None, yes) {
             Ok(line) => Ok(line),
-            Err(err) if err.to_string().contains("no memory") => Ok(format!("not found {id}\n")),
+            Err(err) if err.to_string().contains("no memory") => Ok(not_found_line(id)),
             Err(err) => Err(err),
         };
     };
@@ -1595,7 +1611,7 @@ pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<Strin
                 }
             }
         }
-        _ => return Ok(format!("not found {id}\n")),
+        _ => return Ok(not_found_line(id)),
     }
     let text = proposal_text(&rec);
     if let Some(why) = crate::pack_copy::gate_refusal(&text) {

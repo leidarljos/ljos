@@ -129,6 +129,8 @@ enum MemCmd {
     /// Review unreviewed memories: interactive on a terminal; with --keep/--drop/--edit/--merge, for scripts.
     ///
     /// Example: `ljos memories review`
+    ///
+    /// `--keep` with a prefix no memory starts with exits 1.
     Review {
         #[command(flatten)]
         f: MemFilter,
@@ -740,7 +742,7 @@ enum Cmd {
     },
     /// Accept a stored memory or a waiting proposal, so a later search treats it as kept.
     ///
-    /// One id or prefix, or several. One result line each: accepted, already stored, not found, or refused. A readability refusal quotes the sentence, after the value and the limit.
+    /// One id or prefix, or several. One result line each: accepted, already stored, not found, or refused. A readability refusal quotes the sentence, after the value and the limit. An id that is neither a memory nor a proposal exits 1 and names `ljos proposals`.
     ///
     /// Example: `ljos accept a6ae2751`
     Accept {
@@ -899,7 +901,8 @@ enum Cmd {
     ///
     /// The pairs are the closest memories that still disagree, read by the
     /// optional `landscape` program. That program is not part of this
-    /// repository. When it is not on `PATH` the command says so and writes nothing.
+    /// repository. When it is not on `PATH` the command names `landscape`
+    /// and writes nothing. `ljos doctor --all` lists it.
     ///
     /// Example: `ljos conflicts`
     Conflicts {
@@ -1400,6 +1403,8 @@ enum Cmd {
     /// An unknown id exits 1 and says it is neither a ticket nor a memory.
     /// An id that matches more than one memory lists those ids.
     /// An id that matches more than one ticket exits 1 and names one `ljos show` command.
+    /// A near miss names the closest ticket, the same line the other ticket verbs print.
+    /// An open ticket names `ljos sitting ISSUE` as the next step.
     ///
     /// Example: `ljos show proj-1a2b`
     Show {
@@ -1751,7 +1756,7 @@ enum Cmd {
     Playbooks,
     /// Show where a parent ticket's workflow stands, and the next step.
     ///
-    /// `--start` puts the parent under a workflow and files its design child. `--round` files the next panel round or a blocking fix. A round count does not close the parent.
+    /// `--start` puts the parent under a workflow and files its design child. `--round` files the next panel round or a blocking fix. A round count does not close the parent. A ticket with no workflow prints the `--start` line and exits 0.
     ///
     /// Example: `ljos workflow proj-1a2b`
     Workflow {
@@ -1768,10 +1773,12 @@ enum Cmd {
     ///
     /// One live claim per name. The tracker stores that claim as a session
     /// node, which is its record of who holds the ticket.
+    /// An id or `--next` is required. With neither, the command exits 2
+    /// and prints an example.
     ///
     /// Example: `LJOS_SEAT=alice ljos claim demo-2f5j`
     Claim {
-        /// A tracker id, or a 32-hex claim-graph id. Omit when claiming next.
+        /// A tracker id, or a 32-hex claim-graph id. Leave it off only with `--next`.
         #[arg(value_parser = named_node)]
         node: Option<String>,
         /// Your name; mapped to one actor id. Absent: this conversation's holder (`ljos seat`).
@@ -1907,7 +1914,9 @@ enum Cmd {
     /// Show what the command guard says about a command. It runs nothing.
     ///
     /// Put `--` before the command when that command has its own flags.
-    /// The line after the command is what ljos remembers about it.
+    /// Without it, a flag of the command exits 2 and the line says to put
+    /// `--` before the command. The line after the command is what ljos
+    /// remembers about it.
     ///
     /// Example: `ljos policy -- git push --force`.
     Policy {
@@ -2435,7 +2444,7 @@ enum Cmd {
     },
     /// Put a finished or cancelled issue back to the state it had before it was closed.
     ///
-    /// A person has to be present. The close stays on the logbook, with the reopen under it. The caller does not take the claim.
+    /// A person has to be present. The close stays on the logbook, with the reopen under it. The caller does not take the claim. A missing ticket is named before that person check.
     ///
     /// Example: `ljos reopen proj-1a2b`
     Reopen {
@@ -2645,6 +2654,12 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
     } else {
         here.at.join(" ")
     };
+    if where_ == "policy" && policy_needs_separator(args, typed) {
+        let rewritten = policy_with_separator(args);
+        return format!(
+            "ljos: policy has no flag {typed}. Put `--` before the command, so run `{rewritten}`."
+        );
+    }
     match closest(bare, &names) {
         Some(name) => {
             let flag = flag_text(typed, name, &here.flags);
@@ -3106,6 +3121,57 @@ fn rewrite_arg(args: &[String], from: &str, to: &str) -> String {
     words.join(" ")
 }
 
+/// True when `policy` already has a command word before the unknown flag.
+///
+/// That flag belongs to the command. The line tells the person to put
+/// `--` in front of the command. A flag before any command word is a
+/// policy flag, and the closest policy flag is named instead.
+fn policy_needs_separator(args: &[String], typed: &str) -> bool {
+    let mut past = false;
+    for arg in args {
+        if !past {
+            if arg == "policy" {
+                past = true;
+            }
+            continue;
+        }
+        if arg == typed || arg == "--" {
+            return false;
+        }
+        if !arg.starts_with('-') {
+            return true;
+        }
+    }
+    false
+}
+
+/// `ljos policy -- git push --force` from `ljos policy git push --force`.
+///
+/// Policy's own flags stay in front of `--`. The command and its flags follow.
+fn policy_with_separator(args: &[String]) -> String {
+    let mut words = vec!["ljos".to_string()];
+    let mut past = false;
+    let mut inserted = false;
+    for arg in args {
+        if !past {
+            words.push(shell_word(arg));
+            if arg == "policy" {
+                past = true;
+            }
+            continue;
+        }
+        if !inserted && !arg.starts_with('-') {
+            words.push("--".to_string());
+            inserted = true;
+        }
+        words.push(shell_word(arg));
+    }
+    if !inserted {
+        words.push("--".to_string());
+    }
+    words.join(" ")
+}
+
 fn shell_word(word: &str) -> String {
     if word.is_empty()
         || word
@@ -3283,8 +3349,8 @@ fn vissue_id_parts(word: &str) -> Option<(&str, &str)> {
     .then_some((project, suffix))
 }
 
-/// A node named on the command line. A blank one is an error at once,
-/// not the next ready node: only an omitted id claims next.
+/// A node named on the command line. A blank one is an error at once.
+/// Only `--next` claims the next ready node.
 fn named_node(raw: &str) -> Result<String, String> {
     let node = raw.trim();
     if node.is_empty() {
@@ -3404,6 +3470,11 @@ fn main() {
                     && label.detail.contains("name different seats"))
             {
                 std::process::exit(USAGE_STATUS);
+            }
+            // An unknown memory prefix is a failed lookup. The label is
+            // still stored. The exit is 1, the same as a missing ticket.
+            if label.label == "review-input-warning" {
+                std::process::exit(1);
             }
             return;
         }
@@ -4972,7 +5043,11 @@ fn run_command() -> Result<()> {
             via,
         } => {
             let yes = ljos_cli::quoted_yes::read(quote.as_deref(), at.as_deref(), via.as_deref())?;
-            print!("{}", ljos_cli::admit::accept_ids(&ids, yes.as_ref()));
+            let said = ljos_cli::admit::accept_ids(&ids, yes.as_ref());
+            print!("{said}");
+            if said.lines().any(|line| line.starts_with("not found ")) {
+                std::process::exit(1);
+            }
         }
         Cmd::Export { out, machine, json } => export_memories(&out, machine.as_deref(), json)?,
         Cmd::Memory { cmd } => memory_cmd(cmd)?,
@@ -6349,7 +6424,9 @@ fn run_command() -> Result<()> {
             } else {
                 match ljos_cli::workflow_status(&issue)? {
                     Some(s) => print!("{}", ljos_cli::format_workflow_status(&s)),
-                    None => bail!(
+                    // An empty listing, the same exit as `ljos memories list`
+                    // with nothing to show. `--start` is the next step.
+                    None => println!(
                         "workflow: {issue} carries no workflow; `ljos workflow {issue} --start feature` starts one"
                     ),
                 }
@@ -6362,6 +6439,10 @@ fn run_command() -> Result<()> {
             role,
             slack,
         } => {
+            if !next && node.is_none() {
+                eprintln!("claim: pass an id or `--next`. Example: `ljos claim demo-2f5j`.");
+                std::process::exit(USAGE_STATUS);
+            }
             let assignee = assignee_for("claim", assignee.as_deref(), false)?;
             match node.filter(|_| !next) {
                 Some(node) => {

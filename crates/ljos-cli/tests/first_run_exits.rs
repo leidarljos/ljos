@@ -298,21 +298,28 @@ fn an_empty_remember_exits_with_one_line() {
     }
 }
 
-/// An id no memory starts with is one line. It is a label, not a failed exit.
+/// An id no memory starts with is one line and exit 1. It names `ljos proposals`.
 #[test]
 fn an_unknown_accept_id_exits_with_one_line() {
     let seat = Seat::open(Graph::Answers);
     let out = seat.run(&["accept", "deadbeef"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert!(stderr.is_empty(), "stderr:\n{stderr}");
     assert_eq!(
         stdout.lines().filter(|line| !line.is_empty()).count(),
         1,
         "not one line:\n{stdout}"
     );
-    assert_eq!(stdout.trim(), "not found deadbeef");
+    assert_eq!(
+        stdout.trim(),
+        "not found deadbeef, so run `ljos proposals`."
+    );
 }
 
 /// `ljos note "did a thing"` notes on the held issue. The words are not

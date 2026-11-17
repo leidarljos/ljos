@@ -6,3 +6,4 @@ blockers: none
 
 <age>
   The damper sticks when the morning is cold. Þéttingin er gömul.
+next: `ljos sitting demo-kiln`
