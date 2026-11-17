@@ -30,9 +30,8 @@ use std::path::PathBuf;
     name = "ljos",
     version,
     about = "Memory, a work tracker and a command guard for coding runners",
-    after_help = "A seat is the name in `LJOS_SEAT`: the person or agent this process acts as. \
-                  Start with `ljos doctor`, `ljos prefer \"...\"`, `ljos policy -- COMMAND` and \
-                  `ljos onboard`. `ljos protocol` explains the rest. \
+    after_help = "A seat is the name in `LJOS_SEAT`: the person or agent this process acts as.\n\
+                  Start with `ljos doctor` and `ljos onboard`; `ljos protocol` explains the rest.\n\
                   `ljos help --all` lists every command.",
     disable_help_subcommand = true
 )]
@@ -7461,6 +7460,18 @@ mod help_list {
         help_groups::groups_match(&cmd).unwrap_or_else(|err| panic!("{err}"));
         let short = help_groups::render(&cmd, false);
         let all = help_groups::render(&cmd, true);
+        assert!(
+            short.lines().count() < 24,
+            "short help is {} lines:\n{short}",
+            short.lines().count()
+        );
+        assert_eq!(
+            command_lines(&short),
+            [
+                "search", "remember", "file", "sitting", "note", "finish", "ready", "show",
+                "doctor",
+            ]
+        );
         for heading in [
             "Start:",
             "Daily:",
@@ -7469,12 +7480,12 @@ mod help_list {
             "Coordination:",
             "Admin:",
         ] {
-            assert!(short.contains(heading), "{heading} missing\n{short}");
+            assert!(all.contains(heading), "{heading} missing\n{all}");
         }
-        let start = short.find("Start:").expect("Start");
-        let daily = short.find("Daily:").expect("Daily");
+        let start = all.find("Start:").expect("Start");
+        let daily = all.find("Daily:").expect("Daily");
         assert!(start < daily);
-        let first = command_lines(&short[start..daily]);
+        let first = command_lines(&all[start..daily]);
         assert_eq!(
             first,
             [
@@ -7482,9 +7493,9 @@ mod help_list {
                 "finish", "due", "help",
             ]
         );
-        let admin = short.find("Admin:").expect("Admin");
+        let admin = all.find("Admin:").expect("Admin");
         assert_eq!(
-            command_lines(&short[admin..]).first().copied(),
+            command_lines(&all[admin..]).first().copied(),
             Some("policy")
         );
         for name in ["merge-org", "hook", "bump-plan", "retire-notes", "slot"] {
@@ -7497,7 +7508,10 @@ mod help_list {
                 "{name} is missing from help --all"
             );
         }
-        assert!(short.contains("`ljos help --all` lists every command."));
+        assert_eq!(
+            short.lines().last(),
+            Some("`ljos help --all` lists every command.")
+        );
         assert_eq!(
             cmd.get_about().map(|text| text.to_string()).as_deref(),
             Some(ABOUT_LINE)

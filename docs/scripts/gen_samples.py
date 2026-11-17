@@ -228,42 +228,19 @@ def command_column(line: str) -> int | None:
 
 
 def help_excerpt(text: str) -> str:
-    """Usage, the heading over doctor, that command, and the options."""
+    """The short daily help screen, checked for Usage, Daily, doctor and Options."""
     lines = text.splitlines()
-    try:
-        options_at = lines.index("Options:")
-    except ValueError as exc:
-        raise SystemExit("ljos --help has no Options section") from exc
-    try:
-        usage_at = next(i for i, line in enumerate(lines) if line.startswith("Usage:"))
-    except StopIteration as exc:
-        raise SystemExit("ljos --help has no Usage line") from exc
-    head = lines[: usage_at + 1]
-    doctor: list[str] = []
-    heading: list[str] = []
-    i = usage_at + 1
-    while i < options_at:
-        if lines[i].strip().startswith("doctor"):
-            column = command_column(lines[i])
-            if (
-                i > 0
-                and lines[i - 1].rstrip().endswith(":")
-                and command_column(lines[i - 1]) is None
-            ):
-                heading = [lines[i - 1]]
-            doctor.append(lines[i])
-            i += 1
-            while i < options_at:
-                if lines[i].strip() == "" or command_column(lines[i]) == column:
-                    break
-                doctor.append(lines[i])
-                i += 1
-            break
-        i += 1
-    if not doctor:
+    if len(lines) >= 24:
+        raise SystemExit(f"ljos --help is {len(lines)} lines, expected under 24")
+    if "Options:" not in lines:
+        raise SystemExit("ljos --help has no Options section")
+    if not any(line.startswith("Usage:") for line in lines):
+        raise SystemExit("ljos --help has no Usage line")
+    if "Daily:" not in lines:
+        raise SystemExit("ljos --help has no Daily section")
+    if not any(line.strip().startswith("doctor") for line in lines):
         raise SystemExit("ljos --help has no doctor line")
-    body = head + [""] + heading + doctor + [""] + lines[options_at:]
-    return "\n".join(body).rstrip()
+    return text.strip()
 
 
 def org_src(body: str, lang: str = "text") -> str:

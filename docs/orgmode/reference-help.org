@@ -2,13 +2,11 @@
 #+description: What the ljos help command prints, taken from this version.
 #+options: toc:nil num:nil
 
-=ljos --help= groups commands under Start, Daily, Tracker, Memory,
+=ljos --help= prints the daily set (=search=, =remember=, =file=,
+=sitting=, =note=, =finish=, =ready=, =show=, =doctor=) in under 24 lines.
+Every other command still runs.
+=ljos help --all= lists every command across Start, Daily, Tracker, Memory,
 Coordination and Admin.
-The first group is what a new seat needs.
-A command a runner or git calls, and other rarely typed commands, stay
-off that list.
-They still run.
-=ljos help --all= lists every command.
 
 # BEGIN ljos-sample help
 #+begin_src text
@@ -19,14 +17,24 @@ Memory, a work tracker and a command guard for coding runners
 
 Usage: ljos <COMMAND>
 
-Start:
-  doctor       Check that ljos is ready, and print the rows that need action
+Daily:
+  search    Show what ljos remembers about a topic, best match first
+  remember  Remember one lesson, stored as written
+  file      File a ticket. The new id is the only line on stdout
+  sitting   Start work on a ticket, or file a plan and sit it
+  note      Note progress on an issue, dated, and commit the tracker
+  finish    Finish work on a ticket: remember the lesson, strengthen the memories it used, hand the claim back
+  ready     List tickets that are open and not waiting on another open ticket
+  show      Show one ticket, or one memory
+  doctor    Check that ljos is ready, and print the rows that need action
 
 Options:
   -h, --help     Print help
   -V, --version  Print version
 
-A seat is the name in `LJOS_SEAT`: the person or agent this process acts as. Start with `ljos doctor`, `ljos prefer "..."`, `ljos policy -- COMMAND` and `ljos onboard`. `ljos protocol` explains the rest. `ljos help --all` lists every command.
+A seat is the name in `LJOS_SEAT`: the person or agent this process acts as.
+Start with `ljos doctor` and `ljos onboard`; `ljos protocol` explains the rest.
+`ljos help --all` lists every command.
 $ ljos doctor --help
 Check that ljos is ready, and print the rows that need action.
 

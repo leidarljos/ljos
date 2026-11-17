@@ -34,9 +34,53 @@ fn command_names(help: &str) -> Vec<&str> {
 
 #[test]
 fn help_groups_the_short_list_and_all_lists_the_rest() {
-    let out = run(&["--help"]);
+    for args in [&["--help"][..], &["help"][..]] {
+        let out = run(args);
+        assert!(out.status.success(), "{}: {}", args.join(" "), text(&out));
+        let help = String::from_utf8(out.stdout).unwrap();
+        let line_count = help.lines().count();
+        assert!(
+            line_count < 24,
+            "{}: expected under 24 lines, got {line_count}\n{help}",
+            args.join(" ")
+        );
+        assert!(help.contains("Daily:"), "{help}");
+        for folded in ["Start:", "Tracker:", "Memory:", "Coordination:", "Admin:"] {
+            assert!(
+                !help.contains(folded),
+                "{}: folded group {folded} leaked into short help\n{help}",
+                args.join(" ")
+            );
+        }
+        let names = command_names(&help);
+        assert_eq!(
+            names,
+            [
+                "search", "remember", "file", "sitting", "note", "finish", "ready", "show",
+                "doctor",
+            ],
+            "{args:?}\n{help}"
+        );
+        for folded in [
+            "onboard",
+            "protocol",
+            "prefer",
+            "claims",
+            "merge-org",
+            "hook",
+        ] {
+            assert!(!names.contains(&folded), "{folded} is on the short list");
+        }
+        assert_eq!(
+            help.lines().last(),
+            Some("`ljos help --all` lists every command."),
+            "{help}"
+        );
+    }
+
+    let out = run(&["help", "--all"]);
     assert!(out.status.success(), "{}", text(&out));
-    let help = String::from_utf8(out.stdout).unwrap();
+    let all = String::from_utf8(out.stdout).unwrap();
     let mut at = 0;
     for heading in [
         "Start:",
@@ -46,37 +90,27 @@ fn help_groups_the_short_list_and_all_lists_the_rest() {
         "Coordination:",
         "Admin:",
     ] {
-        let found = help
+        let found = all
             .find(heading)
-            .unwrap_or_else(|| panic!("missing {heading}\n{help}"));
+            .unwrap_or_else(|| panic!("missing {heading}\n{all}"));
         assert!(found >= at, "{heading} is out of order");
         at = found;
     }
-    let names = command_names(&help);
-    assert_eq!(names.first().copied(), Some("doctor"), "{names:?}");
-    let start = help.find("Start:").expect("Start");
-    let daily = help.find("Daily:").expect("Daily");
-    let admin = help.find("Admin:").expect("Admin");
+    let all_names = command_names(&all);
+    let start = all.find("Start:").expect("Start");
+    let daily = all.find("Daily:").expect("Daily");
+    let admin = all.find("Admin:").expect("Admin");
     assert_eq!(
-        command_names(&help[start..daily]),
+        command_names(&all[start..daily]),
         [
             "doctor", "onboard", "protocol", "prefer", "remember", "search", "sitting", "finish",
             "due", "help",
         ]
     );
     assert_eq!(
-        command_names(&help[admin..]).first().copied(),
+        command_names(&all[admin..]).first().copied(),
         Some("policy")
     );
-    for hidden in ["merge-org", "hook", "bump-plan", "retire-notes", "slot"] {
-        assert!(!names.contains(&hidden), "{hidden} is on the short list");
-    }
-    assert!(help.contains("`ljos help --all` lists every command."));
-
-    let out = run(&["help", "--all"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let all = String::from_utf8(out.stdout).unwrap();
-    let all_names = command_names(&all);
     for hidden in ["merge-org", "hook", "bump-plan", "retire-notes", "slot"] {
         assert!(
             all_names.contains(&hidden),

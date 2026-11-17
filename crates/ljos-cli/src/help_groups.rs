@@ -1,8 +1,8 @@
 //! How `ljos --help` groups commands.
 //!
-//! The short list leads with the commands a new seat needs.
-//! A command a runner or git calls, or one that is rarely typed, is
-//! hidden. It still runs. `ljos help --all` lists it in the same group.
+//! `ljos --help` and `ljos help` show only the daily set in under 24 lines.
+//! Every other command still runs, and `ljos help --all` lists every
+//! command across six groups.
 
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -15,10 +15,14 @@ const INDENT: &str = "  ";
 /// Spaces clap leaves between the longest name and its description.
 const GAP: usize = 2;
 
-/// `(heading, command names in the order they are printed)`.
+/// The daily set shown by `ljos --help` and `ljos help`.
+const DAILY: &[&str] = &[
+    "search", "remember", "file", "sitting", "note", "finish", "ready", "show", "doctor",
+];
+
+/// `(heading, command names in the order they are printed)` for `ljos help --all`.
 ///
-/// Hidden names sit at the end of their group, so the short list stays
-/// the commands a person types and `--all` keeps the same headings.
+/// Hidden names sit at the end of their group, so `--all` keeps the same headings.
 const GROUPS: &[(&str, &[&str])] = &[
     (
         "Start",
@@ -134,21 +138,26 @@ pub fn names() -> impl Iterator<Item = &'static str> {
     GROUPS.iter().flat_map(|(_, names)| names.iter().copied())
 }
 
-/// `ljos --help` and `ljos help`, in clap's plain layout, with one heading
-/// per group. `all` includes commands clap has marked hidden.
+/// `ljos --help` and `ljos help`, in clap's plain layout.
+///
+/// With `all` false, only [`DAILY`] is shown under `Daily:`.
+/// With `all` true, every command is listed under its group heading.
 pub fn render(cmd: &Command, all: bool) -> String {
-    let shown: Vec<(&str, &Command)> = GROUPS
-        .iter()
-        .flat_map(|(heading, names)| {
-            names.iter().filter_map(move |name| {
-                let sub = cmd.find_subcommand(name)?;
-                if !all && sub.is_hide_set() {
-                    return None;
-                }
-                Some((*heading, sub))
+    let shown: Vec<(&str, &Command)> = if all {
+        GROUPS
+            .iter()
+            .flat_map(|(heading, names)| {
+                names
+                    .iter()
+                    .filter_map(move |name| Some((*heading, cmd.find_subcommand(name)?)))
             })
-        })
-        .collect();
+            .collect()
+    } else {
+        DAILY
+            .iter()
+            .filter_map(|name| Some(("Daily", cmd.find_subcommand(name)?)))
+            .collect()
+    };
     let longest = shown
         .iter()
         .map(|(_, sub)| sub.get_name().len())
