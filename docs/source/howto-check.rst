@@ -54,6 +54,7 @@ seats pushing to two remotes each read only their own writes. A sitting's own tr
 every remote that carries the branch. A missing
 claim graph is reported and is not a failure: the first claim creates it.
 A seat nobody named is a warning. The ``seat source`` row says to set one with ``--seat NAME`` or ``export LJOS_SEAT=NAME``. It does not by itself exit 1.
+Git with no author name or email is a warning too. The ``git identity`` row names ``git config --global user.name "Your Name"`` and ``git config --global user.email "you@example.com"``, because the tracker commit is refused until git has both. The row is asked in the tracker checkout, so a name set only there counts.
 A damaged note queue is a ``no`` row and fails: it holds lessons the pack has not taken.
 An empty or missing log of either is whole.
 The rows for a missing writer, seat, tracker, binary, Model Context Protocol entry and a registry that did not answer are on :doc:`Troubleshoot doctor <howto-troubleshoot>`.
