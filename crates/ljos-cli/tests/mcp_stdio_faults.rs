@@ -338,7 +338,19 @@ fn a_restarted_writer_is_reached_on_the_next_call() {
     let port = probe.local_addr().unwrap().port();
     drop(probe);
     let serve = |stop: Arc<std::sync::atomic::AtomicBool>| {
-        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let started = std::time::Instant::now();
+        let listener = loop {
+            match TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => break listener,
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::AddrInUse
+                        && started.elapsed() < Duration::from_secs(2) =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("could not restart test writer on {port}: {err}"),
+            }
+        };
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
