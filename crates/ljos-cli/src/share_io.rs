@@ -35,15 +35,19 @@ enum Op {
 /// A test seam. `Code` fails the call. `Slow` sits past the wait and does
 /// not touch the file. `Rename` fails only the rename, after the temporary
 /// file is written. `Entry` fails a file's stat inside a directory listing.
-/// A normal build never constructs those variants, and the warning would
+/// Those variants exist only for tests and `test-hooks`, so a reader's
+/// `cargo install` does not warn that they are unused. That warning would
 /// land in the middle of `scripts/install.sh --from-checkout`.
-#[cfg_attr(not(any(test, feature = "test-hooks")), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fault {
     None,
+    #[cfg(any(test, feature = "test-hooks"))]
     Code(i32),
+    #[cfg(any(test, feature = "test-hooks"))]
     Slow,
+    #[cfg(any(test, feature = "test-hooks"))]
     Rename(i32),
+    #[cfg(any(test, feature = "test-hooks"))]
     Entry(i32),
 }
 
@@ -354,11 +358,17 @@ fn env_fault() -> Fault {
 }
 
 fn immediate(fault: Fault, op: Op) -> Option<IoError> {
+    let _ = op;
     match fault {
+        #[cfg(any(test, feature = "test-hooks"))]
         Fault::Code(code) => Some(IoError::from_raw_os_error(code)),
+        #[cfg(any(test, feature = "test-hooks"))]
         Fault::Rename(code) if op == Op::Rename => Some(IoError::from_raw_os_error(code)),
+        #[cfg(any(test, feature = "test-hooks"))]
         Fault::Entry(code) if op == Op::Entry => Some(IoError::from_raw_os_error(code)),
-        Fault::None | Fault::Slow | Fault::Rename(_) | Fault::Entry(_) => None,
+        Fault::None => None,
+        #[cfg(any(test, feature = "test-hooks"))]
+        Fault::Slow | Fault::Rename(_) | Fault::Entry(_) => None,
     }
 }
 
@@ -375,7 +385,17 @@ fn io<T: Send + 'static>(
     std::thread::Builder::new()
         .name("ljos-share".to_string())
         .spawn(move || {
-            let result = if matches!(fault, Fault::Slow) {
+            let result = if {
+                #[cfg(any(test, feature = "test-hooks"))]
+                {
+                    matches!(fault, Fault::Slow)
+                }
+                #[cfg(not(any(test, feature = "test-hooks")))]
+                {
+                    let _ = &fault;
+                    false
+                }
+            } {
                 // The caller stops at `bound`. This thread must not write
                 // the file after that, or a reported failure would still land.
                 std::thread::sleep(bound + Duration::from_millis(250));
