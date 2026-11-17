@@ -645,12 +645,12 @@ fn a_server_killed_mid_wait_falls_back_and_fails_closed() {
     assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
 }
 
-/// Many seats wake at once and no hook server is listening. One seat's
-/// flight lock, and a lock left by a process that has already exited, do
-/// not hold the others. Each call answers inside a slice of the admit
-/// budget instead of waiting it out on a lock it does not share.
+/// Many seats wake at once and no hook server is listening. Different
+/// seats proceed independently, calls for one seat queue briefly, and a
+/// lock left by a process that has already exited is reclaimed. Every
+/// call answers instead of treating the burst as a refusal.
 #[test]
-fn seats_do_not_block_one_another_when_they_wake_together() {
+fn different_and_same_seat_calls_get_through_a_wake_burst() {
     let hab = hab("seats");
     let _starting = lock_file(&hab.run.join("ljos/hookd.start"));
     // The lock every seat used to share. Holding it must not slow another seat.
@@ -668,15 +668,16 @@ fn seats_do_not_block_one_another_when_they_wake_together() {
     let gone = hab.run.join("ljos/hookd.flight-gone");
     std::fs::write(&gone, format!("{dead}\n")).unwrap();
     let leaked = lock_file(&gone);
-    let n = 6;
+    let mut seats = vec![
+        "gone".to_string(),
+        // This used to collapse onto the live `stuck` seat's lock.
+        "s/t/u/c/k".to_string(),
+    ];
+    seats.extend((1..6).map(|i| format!("seat-{i}")));
+    seats.extend((0..6).map(|_| "same-seat".to_string()));
     let started = Instant::now();
     let mut calls = Vec::new();
-    for i in 0..n {
-        let seat = if i == 0 {
-            "gone".to_string()
-        } else {
-            format!("seat-{i}")
-        };
+    for (i, seat) in seats.into_iter().enumerate() {
         let mut cmd = ljos(&hab, &["hook"]);
         cmd.env("LJOS_SEAT", &seat);
         cmd.env("LJOS_HOOK_ADMIT_MS", "4000");
@@ -711,6 +712,60 @@ fn seats_do_not_block_one_another_when_they_wake_together() {
     drop(stuck);
     drop(leaked);
     drop(shared);
+}
+
+/// When a live process keeps one seat's fallback lock past the admission
+/// budget, the diagnostic identifies it and gives both the immediate and
+/// stale-lock recovery actions.
+#[test]
+fn a_live_flight_lock_refusal_names_its_holder_and_recovery() {
+    use std::io::BufRead;
+
+    let hab = hab("holder");
+    let _starting = lock_file(&hab.run.join("ljos/hookd.start"));
+    let path = hab.run.join("ljos/hookd.flight-held-seat");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let script = r#"
+import fcntl, os, sys, time
+with open(sys.argv[1], "a+") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    lock.seek(0)
+    lock.truncate()
+    lock.write(str(os.getpid()) + "\n")
+    lock.flush()
+    print(os.getpid(), flush=True)
+    time.sleep(30)
+"#;
+    let mut holder = Command::new("python3")
+        .args(["-c", script])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(holder.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let pid = line.trim().parse::<u32>().unwrap();
+
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_SEAT", "held-seat")
+        .env("LJOS_HOOK_ADMIT_MS", "300");
+    let out = within(
+        feed(cmd, &cursor_shell(&hab, "held", "true")),
+        Duration::from_secs(3),
+        "a call behind a live holder",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
+    assert!(stderr.contains(&format!("process {pid}")), "{stderr}");
+    assert!(stderr.contains("wait for it to finish"), "{stderr}");
+    assert!(stderr.contains("`ljos doctor --fix`"), "{stderr}");
+    let _ = holder.kill();
+    let _ = holder.wait();
 }
 
 /// `ljos doctor` says how long gate calls took and how long they waited.
