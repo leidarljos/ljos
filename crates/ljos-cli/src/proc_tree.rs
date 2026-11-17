@@ -1660,14 +1660,34 @@ fn record_dirs() -> Vec<PathBuf> {
         }
     };
     push(crate::runtime_dir());
-    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
-        push(PathBuf::from(home).join(".cache/ljos/run"));
-    } else {
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from);
+    if let Some(home) = home.as_ref() {
+        push(home.join(".cache/ljos/run"));
+    }
+    let xdg_set = std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|v| !v.is_empty());
+    let home_exists = home.as_ref().is_some_and(|path| path.is_dir());
+    // Keep checking the default fallback directory when this process is in
+    // that default runtime flow, or when HOME is not usable and a writer may
+    // have had nowhere else to mirror records.
+    if !xdg_set || !home_exists {
         // SAFETY: geteuid only reads the process identity.
         let uid = unsafe { libc::geteuid() };
-        push(crate::runtime_fallback(&std::env::temp_dir(), None, uid));
+        push(crate::runtime_fallback(
+            &std::env::temp_dir(),
+            home.as_deref(),
+            uid,
+        ));
     }
     dirs
+}
+
+fn looked_in(dirs: &[PathBuf]) -> String {
+    dirs.iter()
+        .map(|dir| dir.join("tool-calls").display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn mkdir_private(dir: &Path) -> bool {
@@ -1773,8 +1793,10 @@ fn tool_marks() -> Result<Vec<ToolMark>, String> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => {
                 return Err(
-                    "the tool-call record cannot be read, so nothing is kept as the person's"
-                        .into(),
+                    format!(
+                        "the tool-call record cannot be read, so nothing is kept as the person's (looked in: {})",
+                        looked_in(&dirs)
+                    ),
                 );
             }
         }
@@ -1782,8 +1804,10 @@ fn tool_marks() -> Result<Vec<ToolMark>, String> {
     if texts.is_empty() {
         if broken {
             return Err(
-                "a tool-call record could not be written, so nothing is kept as the person's"
-                    .into(),
+                format!(
+                    "a tool-call record could not be written, so nothing is kept as the person's (looked in: {})",
+                    looked_in(&dirs)
+                ),
             );
         }
         return Ok(Vec::new());
@@ -2680,11 +2704,15 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let writer = tempfile::tempdir().unwrap();
         let reader = tempfile::tempdir().unwrap();
+        // SAFETY: geteuid has no arguments and only reads process identity.
+        let uid = unsafe { libc::geteuid() };
+        let fallback = crate::runtime_fallback(&writer.path().join("tmp"), Some(home.path()), uid);
         // SAFETY: this test holds `test_env_lock`, which puts the variables
         // back when it drops. Nothing else on this thread reads them.
         unsafe {
             std::env::set_var("HOME", home.path());
-            std::env::set_var("XDG_RUNTIME_DIR", writer.path());
+            std::env::set_var("TMPDIR", writer.path().join("tmp"));
+            std::env::remove_var("XDG_RUNTIME_DIR");
         }
         let opener = Proc {
             pid: 1,
@@ -2698,14 +2726,17 @@ mod tests {
         };
         note_tool_call(&opener).unwrap();
         assert!(
-            writer.path().join("ljos/tool-calls").is_file(),
-            "the hook did not write the record under its runtime directory"
+            fallback.join("tool-calls").is_file(),
+            "the hook did not write the record under its default runtime directory"
         );
         assert!(
             home.path().join(".cache/ljos/run/tool-calls").is_file(),
             "the hook did not keep a copy outside XDG_RUNTIME_DIR"
         );
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", reader.path()) };
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", reader.path());
+            std::env::set_var("HOME", writer.path().join("other-home"));
+        }
         assert!(
             !reader.path().join("ljos/tool-calls").exists(),
             "the reader's runtime directory already held a record"
@@ -2714,6 +2745,40 @@ mod tests {
         assert!(
             why.contains("tool call"),
             "a different XDG_RUNTIME_DIR hid the record: {why}"
+        );
+    }
+
+    #[test]
+    fn a_missing_tool_call_record_names_where_it_was_looked_up() {
+        let _guard = crate::test_env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_RUNTIME_DIR", run.path());
+        }
+        // A broken sentinel means a record should exist; with no records, the
+        // error names every location that was checked.
+        std::fs::create_dir_all(home.path().join(".cache/ljos/run")).unwrap();
+        std::fs::write(home.path().join(".cache/ljos/run/tool-calls.broken"), "").unwrap();
+        let why = match tool_marks() {
+            Ok(_) => panic!("tool marks unexpectedly found"),
+            Err(why) => why,
+        };
+        assert!(why.contains("looked in:"), "{why}");
+        assert!(
+            why.contains(&run.path().join("ljos/tool-calls").display().to_string()),
+            "{why}"
+        );
+        assert!(
+            why.contains(
+                &home
+                    .path()
+                    .join(".cache/ljos/run/tool-calls")
+                    .display()
+                    .to_string()
+            ),
+            "{why}"
         );
     }
 
