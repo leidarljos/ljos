@@ -181,6 +181,33 @@ fn a_mistyped_flag_names_the_closest_and_exits_2() {
 }
 
 #[test]
+fn a_sitting_title_says_how_to_start_a_plan() {
+    let home = Home::new();
+    let work = home.root.join("work");
+    let title = home.run(&["sitting", "Title"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&title);
+    assert_eq!(title.status.code(), Some(2), "{said}");
+    assert_eq!(
+        one_line(&title.stderr),
+        "ljos: Title is not a ticket id, so run `ljos sitting --plan \"Title\" -- \"measure the files\"`."
+    );
+    assert!(title.stdout.is_empty(), "{said}");
+    assert!(
+        !work.join("vissue.toml").exists(),
+        "a title started a tracker in the working directory"
+    );
+
+    let spaced = home.run(&["sitting", "Ship the codec"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&spaced);
+    assert_eq!(spaced.status.code(), Some(2), "{said}");
+    assert_eq!(
+        one_line(&spaced.stderr),
+        "ljos: Ship the codec is not a ticket id, so run `ljos sitting --plan \"Ship the codec\" -- \"measure the files\"`."
+    );
+    assert!(spaced.stdout.is_empty(), "{said}");
+}
+
+#[test]
 fn an_unknown_ticket_names_ready_and_exits_1() {
     let home = Home::new();
     issues(&home, ORG);

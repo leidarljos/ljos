@@ -1043,10 +1043,7 @@ fn the_next_line_names_onboard_until_install_runs_it() {
     );
     let again_text = said(&again);
     assert!(again.status.success(), "{again_text}");
-    assert!(
-        again_text.contains("Next: `ljos onboard`."),
-        "{again_text}"
-    );
+    assert!(again_text.contains("Next: `ljos onboard`."), "{again_text}");
 
     let with = dir.path().join("with-onboard");
     let with_bin = with.join(".local/bin");

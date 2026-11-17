@@ -427,7 +427,11 @@ fn doctor_names_an_encoder_install_command_that_runs_here() {
     exe(&curl_only, "curl");
     let script_home = root.path().join("checkout");
     std::fs::create_dir_all(script_home.join("scripts")).unwrap();
-    std::fs::write(script_home.join("scripts/install.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(
+        script_home.join("scripts/install.sh"),
+        "#!/bin/sh\nexit 0\n",
+    )
+    .unwrap();
     let bare = root.path().join("bare");
     std::fs::create_dir_all(&bare).unwrap();
 

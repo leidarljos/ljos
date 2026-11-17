@@ -3225,6 +3225,31 @@ fn block_usage_line(cmd: &Cmd) -> Option<String> {
 ///
 /// This is the id a script captured from `ljos file` when filing timed
 /// out. It is not "no id", which means the open sitting.
+/// `ljos sitting TITLE` without `--plan`, when TITLE is not a ticket id.
+///
+/// The line names `--plan` and a command that files the title. An id
+/// vissue will keep is left for the tracker, including an id it does not
+/// have.
+fn sitting_plan_line(cmd: &Cmd) -> Option<String> {
+    let Cmd::Sitting {
+        issue: Some(issue),
+        plan: None,
+        ..
+    } = cmd
+    else {
+        return None;
+    };
+    let issue = issue.trim();
+    if issue.is_empty() || vissue_id(issue) {
+        return None;
+    }
+    let shown = issue.replace('`', "'");
+    let quoted = format!("\"{}\"", shown.replace('\\', "\\\\").replace('"', "\\\""));
+    Some(format!(
+        "ljos: {shown} is not a ticket id, so run `ljos sitting --plan {quoted} -- \"measure the files\"`."
+    ))
+}
+
 fn blank_ticket_line(cmd: &Cmd) -> Option<&'static str> {
     let blank = match cmd {
         Cmd::Note { words, .. } => words.first().is_some_and(|word| word.trim().is_empty()),
@@ -4554,6 +4579,12 @@ fn run_command() -> Result<()> {
     if let Some(line) = blank_ticket_line(&cmd) {
         eprintln!("{line}");
         std::process::exit(1);
+    }
+    // A title is not a ticket id. Say how to file it as a plan before the
+    // tracker is asked, so a product checkout is not initialised.
+    if let Some(line) = sitting_plan_line(&cmd) {
+        eprintln!("{line}");
+        std::process::exit(USAGE_STATUS);
     }
     // A following id on `block` is `--on`. A mix with `--on` or `--off`,
     // or a word that is not an id, is a usage error. Refuse before the seat.
