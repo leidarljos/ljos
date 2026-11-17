@@ -34413,25 +34413,68 @@ fn policy_probe(bin: &str, args: &[&str]) -> Result<Said> {
 
 /// Whether the `ljos` the hooks run is this binary. A runner that swaps
 /// it for a script answers every hook with what the script says, and the
-/// law is gone without a word, so the doctor compares the bytes.
+/// law is gone without a word, so the doctor compares the bytes. When
+/// `ljos-mcp` runs doctor, the hooked binary is the `ljos` beside it and
+/// its `--version` must match this build.
 fn seat_binary_row() -> Habitat {
     let state = match (ljos_path(), std::env::current_exe()) {
         (Ok(hooked), Ok(me)) => {
             let a = std::fs::read(&hooked).unwrap_or_default();
-            let b = std::fs::read(&me).unwrap_or_default();
             if !a.starts_with(b"\x7fELF") {
                 Err(format!(
                     "{} is not a binary: something replaced the seat; restore it with `ljos onboard` after reinstalling",
                     hooked.display()
                 ))
-            } else if a != b {
-                Err(format!(
-                    "{} is not the ljos running this doctor ({}); the hooks run another program",
-                    hooked.display(),
-                    me.display()
-                ))
+            } else if me.file_stem().and_then(|s| s.to_str()) == Some("ljos-mcp") {
+                let expected = me.with_file_name(format!("ljos{}", std::env::consts::EXE_SUFFIX));
+                let b = std::fs::read(&expected).unwrap_or_default();
+                if b.is_empty() {
+                    Err(format!(
+                        "no ljos binary beside {}; restore it with `ljos onboard` after reinstalling",
+                        me.display()
+                    ))
+                } else if a != b {
+                    Err(format!(
+                        "{} is not the ljos beside {}; the hooks run another program",
+                        hooked.display(),
+                        me.display()
+                    ))
+                } else {
+                    let want = format!("ljos {}", env!("CARGO_PKG_VERSION"));
+                    let got = run_captured_within(
+                        &hooked.to_string_lossy(),
+                        &["--version"],
+                        None,
+                        guard_timeout(),
+                    )
+                    .ok()
+                    .map(|s| s.stdout.lines().next().unwrap_or("").trim().to_string())
+                    .unwrap_or_default();
+                    if got == want {
+                        Ok(format!("{} is this ljos", hooked.display()))
+                    } else {
+                        Err(format!(
+                            "{} is {} instead of {want}; the hooks run another program",
+                            hooked.display(),
+                            if got.is_empty() {
+                                "not responding to `--version`".to_string()
+                            } else {
+                                got
+                            }
+                        ))
+                    }
+                }
             } else {
-                Ok(format!("{} is this ljos", hooked.display()))
+                let b = std::fs::read(&me).unwrap_or_default();
+                if a != b {
+                    Err(format!(
+                        "{} is not the ljos running this doctor ({}); the hooks run another program",
+                        hooked.display(),
+                        me.display()
+                    ))
+                } else {
+                    Ok(format!("{} is this ljos", hooked.display()))
+                }
             }
         }
         (Err(e), _) => Err(format!("{e:#}")),
