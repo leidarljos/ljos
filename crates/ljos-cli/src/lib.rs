@@ -65303,6 +65303,20 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     #[test]
+    fn a_child_that_does_not_read_stdin_cannot_hold_its_deadline() {
+        use std::time::{Duration, Instant};
+
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exec sleep 3"]);
+        let input = vec![b'x'; 4 * 1024 * 1024];
+        let started = Instant::now();
+        let error = output_within(command, Some(&input), Duration::from_millis(100))
+            .expect_err("a child that does not read its input must time out");
+        assert!(started.elapsed() < Duration::from_secs(1), "{error}");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
     fn checker_reserve_is_shared_and_respects_shorter_timeouts() {
         use std::time::Duration;
 
