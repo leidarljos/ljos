@@ -287,3 +287,45 @@ fn strict_hook_keeps_checker_time_after_slow_git() {
 fn advisory_hook_keeps_checker_time_after_slow_git() {
     slow_git_keeps_checker_budget("advisory");
 }
+
+fn expanded_checks_share_a_reserve(mode: &str) {
+    let home = tempfile::tempdir().unwrap();
+    let mut command = command(home.path(), mode);
+    let git = home.path().join("git");
+    std::fs::write(&git, "#!/bin/sh\ncase \"$*\" in\n  *'rev-parse --show-toplevel'*) sleep 1.85; printf '%s\\n' \"$PWD\" ;;\n  *) exit 1 ;;\nesac\n").unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let checker = home.path().join("ljos-policyd");
+    std::fs::write(&checker, "#!/bin/sh\nsleep 0.15\ncase \"$3:$*\" in\n python3:*fixture-final*) printf 'deny\\tfixture-policy-verdict\\n'; exit 2 ;;\n *) printf 'allow\\n' ;;\nesac\n").unwrap();
+    let line = "git push origin HEAD:refs/heads/topic\npython3 - <<'FIRST'\nprint('first')\nFIRST\npython3 - <<'SECOND'\nprint('second')\nSECOND\npython3 - <<'THIRD'\nprint('fixture-final')\nTHIRD";
+    let payload = serde_json::json!({
+        "hook_event_name":"PreToolUse", "session_id":"expanded-budget-fixture",
+        "cwd":home.path(), "tool_name":"Bash", "tool_input":{"command":line}
+    });
+    let start = Instant::now();
+    let mut child = command
+        .arg("hook")
+        .env("PACKSET_URL", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("CURSOR_AGENT", "1")
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_verdict(output, mode, start.elapsed());
+}
+
+#[test]
+fn strict_hook_keeps_the_verdict_from_expanded_checks() {
+    expanded_checks_share_a_reserve("strict");
+}
+
+#[test]
+fn advisory_hook_keeps_the_verdict_from_expanded_checks() {
+    expanded_checks_share_a_reserve("advisory");
+}
