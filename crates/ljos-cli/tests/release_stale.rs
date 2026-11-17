@@ -314,7 +314,10 @@ fn release_stale_drops_quiet_claims_and_leaves_the_rest() {
     std::fs::write(&seat.log, "").unwrap();
     let said = seat.ok(&["release", "--stale"]);
     assert_eq!(
-        said, "released 2 quiet claims; kept 1 held by a running conversation\n",
+        said,
+        format!(
+            "released {old}\nreleased {new}\nreleased 2 quiet claims; kept 1 held by a running conversation\n"
+        ),
         "{said}"
     );
     let calls = std::fs::read_to_string(&seat.log).unwrap();

@@ -36478,6 +36478,20 @@ fn quiet_claim_extra(line: &str) -> Option<usize> {
     n.trim().parse().ok()
 }
 
+/// The exact seat-wide count produced by the release query.
+fn quiet_release_count(line: &str) -> Option<usize> {
+    let line = line.trim();
+    let (n, rest) = line.split_once(' ')?;
+    if !matches!(
+        rest,
+        "quiet claim is still yours (ljos release --stale)"
+            | "quiet claims are still yours (ljos release --stale)"
+    ) {
+        return None;
+    }
+    n.parse().ok()
+}
+
 /// One section of a sitting's report, cut for [`compact_sitting`].
 fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut Vec<String>) {
     match name {
@@ -36618,10 +36632,15 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
         }
         "claim" => {
             let mut quiet = 0usize;
+            let mut release_count = None;
             for l in lines {
                 if l.starts_with("next:") || l.starts_with("plan complete") {
                     out.push_str(l);
                     out.push('\n');
+                    continue;
+                }
+                if let Some(n) = quiet_release_count(l) {
+                    release_count = Some(n);
                     continue;
                 }
                 if let Some(n) = quiet_claim_extra(l) {
@@ -36645,7 +36664,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     out.push_str(&compact_tracker_line(l));
                 }
             }
-            FOLD_QUIET.with(|n| n.set(n.get() + quiet));
+            FOLD_QUIET.with(|n| n.set(n.get() + release_count.unwrap_or(quiet)));
             out.push_str(&claims_fold_line());
         }
         "sync" => {

@@ -43,4 +43,4 @@ Pass an id to name a different ticket. With no ticket open, both exit 1 and name
 A pile of quiet claims is one command, ``ljos release --stale``.
 It releases every claim this seat holds that has been quiet longer than the hand-back window (``LJOS_LEASE_SECS``, 900 seconds) and whose conversation is not running on this host.
 Another seat's claim stays. The ticket stays open.
-``--older-than 2h`` sets the window. ``--dry-run`` prints the count and changes nothing. ``--verbose`` prints one line per ticket.
+``--older-than 2h`` sets the window. ``--dry-run`` prints the count and changes nothing. A release prints up to three ticket ids and a count, while ``--verbose`` prints every ticket.

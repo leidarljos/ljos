@@ -22,6 +22,9 @@ use anyhow::{bail, Context, Result};
 /// does not grow with the tracker.
 const QUIET_SHOWN: usize = 3;
 
+/// Released ids printed before the remainder is folded into one count.
+const RELEASE_SHOWN: usize = 3;
+
 /// Whole local days since the last note, deed or finish before a claim is named.
 ///
 /// The tracker's hygiene census uses `stale_claim_days`, seven by default,
@@ -45,19 +48,23 @@ const DEFAULT_STALE_DAYS: i64 = 7;
 /// the last three of those characters are `...` when the title is longer.
 const TITLE_SHOWN: usize = 48;
 
-/// The lines `ljos sitting` prints, from the project parse that opened `issue`.
+/// The lines `ljos sitting` prints for this seat's quiet claims.
 ///
-/// [`crate::issue_spot::find`] already parsed that project to name the
-/// ticket. The scan walks those headings and does not open another project
-/// or start `vissue`. An unoptimized walk of 500 headings took 5.8–6.2 ms
-/// over five runs. Empty when the seat holds nothing quiet, or the ticket
-/// is not in the tracker.
+/// The release notice comes from the same seat-wide query as
+/// [`release_quiet`]. Tracker detail is likewise seat-wide, rather than
+/// being limited to the project containing the sitting's ticket.
 #[must_use]
-pub fn beside_sitting(issue: &str, seat: &str) -> String {
-    let Some(spot) = crate::issue_spot::find(issue) else {
-        return String::new();
-    };
-    render(spot.recs.as_slice(), seat, Some(QUIET_SHOWN))
+pub fn beside_sitting(_issue: &str, seat: &str) -> String {
+    match quiet_query(seat, crate::lease_secs()) {
+        Ok(query) => {
+            let mut out = render(&query.recs, seat, Some(QUIET_SHOWN));
+            out.push_str(&release_notice(query.release.len()));
+            out
+        }
+        Err(_) => load_tracker()
+            .map(|recs| render(&recs, seat, Some(QUIET_SHOWN)))
+            .unwrap_or_default(),
+    }
 }
 
 /// The lines `ljos inbox` prints: every quiet claim on this tracker, capped.
@@ -491,6 +498,64 @@ struct QuietHeld {
     quiet: u64,
 }
 
+struct QuietQuery {
+    recs: Vec<IssueRec>,
+    release: Vec<QuietHeld>,
+    kept: Vec<QuietHeld>,
+}
+
+fn quiet_query(seat: &str, threshold: u64) -> Result<QuietQuery> {
+    let recs = load_tracker().context("release --stale: the tracker could not be read")?;
+    if threshold == 0 {
+        return Ok(QuietQuery {
+            recs,
+            release: Vec::new(),
+            kept: Vec::new(),
+        });
+    }
+    let listed = match crate::run_captured("claimdag", &["list", "--json"]) {
+        Ok(said) => said.stdout,
+        Err(err) => {
+            let text = format!("{err:#}");
+            if crate::call_deadline::stalled(&text) {
+                bail!(
+                    "{}",
+                    crate::call_deadline::stall_line(
+                        "claimdag",
+                        &["list", "--json"],
+                        crate::call_deadline::timeout(),
+                    )
+                );
+            }
+            bail!("release: the claim graph did not answer");
+        }
+    };
+    let rows: Vec<serde_json::Value> = serde_json::from_str(listed.trim())
+        .map_err(|_| anyhow::anyhow!("release: the claim graph did not answer"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let (mut release, mut kept) = classify(&recs, &rows, seat, now, threshold);
+    release.sort_by(|a, b| b.quiet.cmp(&a.quiet).then(a.label.cmp(&b.label)));
+    kept.sort_by(|a, b| b.quiet.cmp(&a.quiet).then(a.label.cmp(&b.label)));
+    Ok(QuietQuery {
+        recs,
+        release,
+        kept,
+    })
+}
+
+fn release_notice(released: usize) -> String {
+    if released == 0 {
+        return String::new();
+    }
+    let verb = if released == 1 { "is" } else { "are" };
+    format!(
+        "{} {verb} still yours (ljos release --stale)\n",
+        count_claims(released, "quiet claim", "quiet claims")
+    )
+}
+
 /// Release every claim this seat holds that has been quiet for at least
 /// `older_than` seconds and whose conversation is not running on this host.
 ///
@@ -517,35 +582,7 @@ pub fn release_quiet(
     verbose: bool,
 ) -> Result<String> {
     let threshold = older_than.unwrap_or_else(crate::lease_secs);
-    if older_than.is_none() && threshold == 0 {
-        return Ok(summary_line(0, 0, dry_run));
-    }
-    let recs = load_tracker().context("release --stale: the tracker could not be read")?;
-    let listed = match crate::run_captured("claimdag", &["list", "--json"]) {
-        Ok(said) => said.stdout,
-        Err(err) => {
-            let text = format!("{err:#}");
-            if crate::call_deadline::stalled(&text) {
-                bail!(
-                    "{}",
-                    crate::call_deadline::stall_line(
-                        "claimdag",
-                        &["list", "--json"],
-                        crate::call_deadline::timeout(),
-                    )
-                );
-            }
-            bail!("release: the claim graph did not answer");
-        }
-    };
-    let rows: Vec<serde_json::Value> = serde_json::from_str(listed.trim())
-        .map_err(|_| anyhow::anyhow!("release: the claim graph did not answer"))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let (mut release, mut kept) = classify(&recs, &rows, seat, now, threshold);
-    release.sort_by(|a, b| b.quiet.cmp(&a.quiet).then(a.label.cmp(&b.label)));
-    kept.sort_by(|a, b| b.quiet.cmp(&a.quiet).then(a.label.cmp(&b.label)));
+    let QuietQuery { release, kept, .. } = quiet_query(seat, threshold)?;
     if dry_run {
         return Ok(render_quiet(&release, &kept, verbose));
     }
@@ -569,7 +606,10 @@ pub fn release_quiet(
 
 fn render_quiet(release: &[QuietHeld], kept: &[QuietHeld], verbose: bool) -> String {
     let released: Vec<String> = release.iter().map(|item| item.label.clone()).collect();
-    render_quiet_done(&released, kept, verbose).replace("released ", "would release ")
+    if verbose {
+        return render_quiet_done(&released, kept, true).replace("released ", "would release ");
+    }
+    summary_line(released.len(), kept.len(), true)
 }
 
 fn render_quiet_done(released: &[String], kept: &[QuietHeld], verbose: bool) -> String {
@@ -589,7 +629,16 @@ fn render_quiet_done(released: &[String], kept: &[QuietHeld], verbose: bool) -> 
         }
         return out;
     }
-    summary_line(released.len(), kept.len(), false)
+    let mut out = String::new();
+    for id in released.iter().take(RELEASE_SHOWN) {
+        out.push_str(&format!("released {id}\n"));
+    }
+    let hidden = released.len().saturating_sub(RELEASE_SHOWN);
+    if hidden > 0 {
+        out.push_str(&format!("+{hidden} more released\n"));
+    }
+    out.push_str(&summary_line(released.len(), kept.len(), false));
+    out
 }
 
 fn summary_line(released: usize, kept: usize, dry_run: bool) -> String {

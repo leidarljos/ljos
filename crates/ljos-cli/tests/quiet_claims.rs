@@ -256,7 +256,7 @@ impl World {
             .env("LJOS_HOOKD", "off")
             .env("LJOS_ASK_PACK", "off")
             .env("LJOS_USER_RULES_SYNC", "off")
-            .env("LJOS_LEASE_SECS", "0")
+            .env("LJOS_LEASE_SECS", "900")
             .env("PACKSET_URL", &self.pack)
             .env("PACKSET_AUTH", "off");
         for (key, value) in extra {
@@ -366,7 +366,7 @@ fn a_seat_sees_its_two_stale_claims_and_not_another_seats() {
 
     let sat = world.ok("ada", &["sitting", sitting]);
     assert!(
-        sat.contains("2 quiet claims are still yours (ljos release --stale)"),
+        sat.contains("6 quiet claims are still yours (ljos release --stale)"),
         "{sat}"
     );
     assert!(quiet_lines(&sat).is_empty(), "{sat}");
@@ -389,6 +389,97 @@ fn a_seat_sees_its_two_stale_claims_and_not_another_seats() {
     assert!(!theirs.contains(stale_deed), "{theirs}");
     assert!(!theirs.contains(stale_long), "{theirs}");
     assert_eq!(std::fs::read(&world.org).unwrap(), before);
+}
+
+#[test]
+fn the_sitting_notice_matches_the_seat_wide_release() {
+    let (world, ids) = World::new(&[
+        claim("old work", "ada", 3, None, None, None, "STARTED"),
+        claim("old blocked work", "ada", 4, None, None, None, "BLOCKED"),
+        claim("stale work", "ada", 10, None, None, None, "STARTED"),
+        claim("noted today", "ada", 6, Some(0), None, None, "STARTED"),
+        claim("deed today", "ada", 5, None, Some(0), None, "STARTED"),
+        claim("fresh work", "ada", 0, None, None, None, "STARTED"),
+        claim("another seat", "bea", 8, None, None, None, "STARTED"),
+        claim("already done", "ada", 8, None, None, None, "DONE"),
+        Claim {
+            title: "the sitting",
+            holder: "",
+            claim_days: None,
+            state: "TODO",
+            note_days: None,
+            deed_days: None,
+            finished_days: None,
+        },
+    ]);
+    let layout = vissue_core::Layout::new(&world.tracker, "Software");
+    let other_project = vissue_core::ops::create(
+        &layout,
+        "elsewhere",
+        "old work in another project",
+        vissue_core::CreateOpts {
+            quiet: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    vissue_core::ops::claim_as(&layout, &other_project, false, "ada").unwrap();
+    let other_path = layout.project_issues_path("elsewhere");
+    let mut other_doc = vissue_core::IssueDoc::parse_file("elsewhere", &other_path).unwrap();
+    let other_heading = other_doc
+        .headings
+        .iter_mut()
+        .find(|heading| heading.id == other_project)
+        .unwrap();
+    other_heading.state = "STARTED".to_string();
+    other_heading
+        .properties
+        .insert("CLAIMED_BY".into(), "ada".into());
+    other_heading
+        .properties
+        .insert("CLAIMED_AT".into(), stamp(world.today - Days::days(12)));
+    other_doc.write().unwrap();
+
+    let sitting = world.ok("ada", &["sitting", &ids[8]]);
+    let notice = sitting
+        .lines()
+        .find(|line| line.ends_with("quiet claims are still yours (ljos release --stale)"))
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let released = world.ok("ada", &["release", "--stale"]);
+    let released_count = released
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("released ")
+                .and_then(|rest| rest.strip_suffix(" quiet claims"))
+                .and_then(|n| n.parse::<usize>().ok())
+        })
+        .unwrap_or(0);
+    assert_eq!(notice, 7, "{sitting}");
+    assert_eq!(notice, released_count, "{sitting}\n{released}");
+    assert_eq!(
+        released
+            .lines()
+            .filter(|line| {
+                line.strip_prefix("released ")
+                    .is_some_and(|rest| !rest.ends_with(" quiet claims"))
+            })
+            .count(),
+        3,
+        "{released}"
+    );
+    assert!(
+        released.contains(&format!("released {other_project}")),
+        "{released}"
+    );
+    assert!(released.contains("+4 more released"), "{released}");
+    assert!(!released.contains(&ids[5]), "{released}");
+    assert!(!released.contains(&ids[6]), "{released}");
+    assert!(!released.contains(&ids[7]), "{released}");
 }
 
 #[test]
@@ -505,7 +596,7 @@ fn the_banner_keeps_fresh_claims_and_folds_stale_ones() {
 
     let short = world.ok("ada", &["sitting", sitting]);
     assert!(
-        short.contains("1 quiet claim is still yours (ljos release --stale)"),
+        short.contains("3 quiet claims are still yours (ljos release --stale)"),
         "{short}"
     );
     assert!(
