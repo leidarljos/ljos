@@ -177,3 +177,31 @@ fn server_json_and_the_readme_name_the_same_server() {
     assert_eq!(package["packageArguments"][0]["value"], "mcp");
     assert_eq!(package["transport"]["type"], "stdio");
 }
+
+#[test]
+fn measured_tool_counts_are_the_documented_counts() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Ok(measured) = std::fs::read_to_string(root.join("measurements/mcp-size.txt")) else {
+        return;
+    };
+    let value = |key: &str| {
+        measured
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}: ")))
+            .unwrap_or_else(|| panic!("measurement lacks {key}"))
+    };
+    let clause = format!(
+        "{} tokens for the {} core Model Context Protocol (MCP) tools, against {} for all {}",
+        value("core.tokens"),
+        value("core.tools"),
+        value("all.tokens"),
+        value("all.tools")
+    )
+    .replace(',', "");
+    for path in ["README.md", "docs/source/index.rst"] {
+        let text = std::fs::read_to_string(root.join(path))
+            .unwrap()
+            .replace(',', "");
+        assert!(text.contains(&clause), "{path} lacks {clause:?}");
+    }
+}
