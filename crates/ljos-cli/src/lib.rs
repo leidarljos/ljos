@@ -43520,8 +43520,9 @@ fn capture_timed_out(err: &anyhow::Error) -> bool {
 }
 
 /// Run `cmd` and stop it if it is still going after `deadline`.
-/// `stdin` is written and closed first, so a child that reads until
-/// end of file can finish. Stdout and stderr are drained while it runs.
+/// Stdin is written and closed while stdout and stderr are drained, so
+/// a child that reads until end of file can finish. The deadline covers
+/// input delivery as well as the process wait.
 /// The `timeout` program is not used: macOS does not ship it.
 ///
 /// The child leads its own process group. A grandchild left on a pipe,
@@ -43541,6 +43542,7 @@ fn output_within(
             "hook budget spent",
         ));
     }
+    let started = std::time::Instant::now();
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -43554,14 +43556,6 @@ fn output_within(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
-    if let Some(bytes) = stdin {
-        let mut input = child
-            .stdin
-            .take()
-            .ok_or_else(|| std::io::Error::other("the child has no stdin"))?;
-        input.write_all(bytes)?;
-        drop(input);
-    }
     let mut out_pipe = child
         .stdout
         .take()
@@ -43580,12 +43574,24 @@ fn output_within(
         let _ = err_pipe.read_to_end(&mut buf);
         buf
     });
-    let started = std::time::Instant::now();
+    let input_task = if let Some(bytes) = stdin {
+        let mut input = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("the child has no stdin"))?;
+        let bytes = bytes.to_vec();
+        Some(std::thread::spawn(move || input.write_all(&bytes)))
+    } else {
+        None
+    };
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= deadline => {
                 stop_output_group(&mut child);
+                if let Some(task) = input_task {
+                    let _ = join_soon(task);
+                }
                 let _ = join_soon(out_task);
                 let _ = join_soon(err_task);
                 return Err(std::io::Error::new(
@@ -43596,6 +43602,9 @@ fn output_within(
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
             Err(err) => {
                 stop_output_group(&mut child);
+                if let Some(task) = input_task {
+                    let _ = join_soon(task);
+                }
                 let _ = join_soon(out_task);
                 let _ = join_soon(err_task);
                 return Err(err);
@@ -43604,6 +43613,18 @@ fn output_within(
     };
     let stdout = take_output(out_task, &mut child);
     let stderr = take_output(err_task, &mut child);
+    if let Some(task) = input_task {
+        match join_soon(task) {
+            Some(result) => result?,
+            None => {
+                stop_output_group(&mut child);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the command did not consume its input",
+                ));
+            }
+        }
+    }
     Ok(std::process::Output {
         status,
         stdout,
