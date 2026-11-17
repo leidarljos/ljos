@@ -956,9 +956,37 @@ fn http_agent_with_resolver(
     budget: Duration,
     resolver: impl ureq::Resolver + 'static,
 ) -> ureq::Agent {
+    let deadline = std::time::Instant::now() + budget;
+    let resolver = std::sync::Arc::new(resolver);
     ureq::AgentBuilder::new()
         .timeout(budget)
-        .resolver(resolver)
+        // The client's request timeout excludes DNS. A resolver worker
+        // lets this request stop waiting at the same absolute deadline.
+        .resolver(move |address: &str| {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "DNS lookup exceeded the request deadline",
+                ));
+            }
+            let resolver = resolver.clone();
+            let address = address.to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _worker = std::thread::Builder::new().spawn(move || {
+                let _ = tx.send(resolver.resolve(&address));
+            })?;
+            match rx.recv_timeout(left) {
+                Ok(result) => result,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "DNS lookup exceeded the request deadline",
+                )),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::other(
+                    "DNS resolver stopped without a reply",
+                )),
+            }
+        })
         .build()
 }
 
