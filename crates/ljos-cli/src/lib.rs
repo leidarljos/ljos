@@ -14700,9 +14700,9 @@ pub const ENCODER_INSTALL_COMMAND: &str = "cargo binstall --locked packset-embed
 /// The command that installs `packset-embed` with a program this machine has.
 ///
 /// `cargo binstall` when `cargo-binstall` is on `PATH`. `cargo install` when
-/// `cargo` is. `sh scripts/install.sh` or `sh install.sh` when that file is
-/// in the working directory. Otherwise the release download, which installs
-/// the encoder.
+/// `cargo` is. Otherwise the release download, which installs the encoder.
+/// The working directory does not change the answer, so `ljos mcp` names the
+/// same command wherever a client started it.
 #[must_use]
 pub fn encoder_install_command() -> String {
     if on_path("cargo-binstall") {
@@ -14710,12 +14710,6 @@ pub fn encoder_install_command() -> String {
     }
     if on_path("cargo") {
         return "cargo install --locked packset-embed".to_string();
-    }
-    if std::path::Path::new("scripts/install.sh").is_file() {
-        return "sh scripts/install.sh".to_string();
-    }
-    if std::path::Path::new("install.sh").is_file() {
-        return "sh install.sh".to_string();
     }
     if on_path("curl") {
         return "curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh"

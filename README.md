@@ -219,7 +219,7 @@ tools, guard and memory first: `rule`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `show`, `ready`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. `measurements/mcp-size.txt` records
-8,825 tokens for the core set against 18,747 for all fifty-four.
+8,871 tokens for the core set against 18,793 for all fifty-four.
 `LJOS_MCP_TOOLS=all` lists every tool.
 
 ```json
