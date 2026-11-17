@@ -230,7 +230,7 @@ fn a_search_with_no_shared_word_prints_only_the_no_hits_line() {
     assert_eq!(code, 0, "{said}");
     assert!(
         stderr.contains(
-            "matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`."
+            "matched by words (encoder not installed), so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."
         ),
         "a page that shows rows keeps the install line:\n{said}"
     );

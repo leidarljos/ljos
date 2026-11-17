@@ -255,9 +255,10 @@ fn a_missing_encoder_is_unavailable_not_still_loading() {
     let doc: serde_json::Value = serde_json::from_str(json_out.trim())
         .unwrap_or_else(|err| panic!("search json did not parse ({err}): {json_out}"));
     assert_eq!(doc["ranking"], "lexical", "{doc}");
-    assert_eq!(
-        doc["reason"],
-        "matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.",
+    let reason = doc["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.starts_with("matched by words (encoder not installed), so run `")
+            && !reason.contains("cargo binstall"),
         "{doc}"
     );
     assert!(

@@ -14730,12 +14730,6 @@ fn encoder_has_answered(status: &Value) -> bool {
 /// that writer is what kept the dead child.
 pub const ENCODER_RESTART_COMMAND: &str = "packset stop && packset ensure";
 
-/// The command search names for a missing encoder.
-///
-/// Doctor names [`encoder_install_command`] instead, which is a command
-/// this machine can run.
-pub const ENCODER_INSTALL_COMMAND: &str = "cargo binstall --locked packset-embed";
-
 /// The command that installs `packset-embed` with a program this machine has.
 ///
 /// `cargo binstall` when `cargo-binstall` is on `PATH`. `cargo install` when
@@ -15235,7 +15229,10 @@ fn encoder_failed_search_line(reason: &str) -> String {
 }
 
 fn encoder_missing_search_line() -> String {
-    format!("matched by words (encoder not installed), so run `{ENCODER_INSTALL_COMMAND}`.")
+    format!(
+        "matched by words (encoder not installed), so run `{}`.",
+        encoder_install_command()
+    )
 }
 
 /// A failure the search can answer with the word ranking. A pack that
@@ -80781,6 +80778,28 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// A 0.20 row that does not name the subject is padding. A semantic
     /// score at the same number stays, and so does a row that names the subject.
     #[test]
+    fn a_missing_encoder_names_an_installer_on_path() {
+        let _env = env_guard();
+        let bin = tempfile::tempdir().unwrap();
+        let cargo = bin.path().join("cargo");
+        std::fs::write(&cargo, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        unsafe { std::env::set_var("PATH", bin.path()) };
+        assert_eq!(
+            encoder_install_command(),
+            "cargo install --locked packset-embed"
+        );
+        assert_eq!(
+            encoder_missing_search_line(),
+            "matched by words (encoder not installed), so run `cargo install --locked packset-embed`."
+        );
+    }
+
+    #[test]
     fn a_no_subject_floor_is_not_a_search_hit() {
         let query = "Carrollton Nov 23 morning timing";
         let hit = |id: &str, text: &str, score: f64| Hit {
@@ -80832,7 +80851,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         };
         assert_eq!(
             ranking_line(&missing),
-            "matched by words (encoder not installed), so run `cargo binstall --locked packset-embed`.\n"
+            format!(
+                "matched by words (encoder not installed), so run `{}`.\n",
+                encoder_install_command()
+            )
         );
         assert_eq!(
             search_rank_line(&missing, &[]),
