@@ -35,6 +35,9 @@ enum Op {
 /// A test seam. `Code` fails the call. `Slow` sits past the wait and does
 /// not touch the file. `Rename` fails only the rename, after the temporary
 /// file is written. `Entry` fails a file's stat inside a directory listing.
+/// A normal build never constructs those variants, and the warning would
+/// land in the middle of `scripts/install.sh --from-checkout`.
+#[cfg_attr(not(any(test, feature = "test-hooks")), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fault {
     None,

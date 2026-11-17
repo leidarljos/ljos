@@ -1001,9 +1001,27 @@ build_checkout() {
   command -v cargo >/dev/null 2>&1 ||
     die "no cargo to build this checkout. Install Rust $MIN_RUST or newer from https://rustup.rs and run \`sh $0 --from-checkout\` again."
   say "  building ljos from this checkout"
+  say "  Cargo prints each crate as it compiles. The first build is the long step."
   (
     cd "$CHECKOUT_DIR" || exit 1
-    cargo install --locked --force --quiet --path crates/ljos-cli --root "$TMP/cout"
+    # One LLVM unit is most of the wait before the first search. Sixteen
+    # units use the cores. opt-level 1 keeps the trial binary small and
+    # still checks the same code. The published release is not built here.
+    # cargo install names its temporary root. That directory is not where
+    # the programs stay, so the line is not shown.
+    fifo=$TMP/cargo.fifo
+    mkfifo "$fifo"
+    CARGO_PROFILE_RELEASE_OPT_LEVEL=1 \
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+      cargo install --locked --force --path crates/ljos-cli --root "$TMP/cout" >"$fifo" 2>&1 &
+    cpid=$!
+    while IFS= read -r line; do
+      case $line in
+        *"be sure to add "*|Installing\ *|Installed\ package\ *) ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done <"$fifo"
+    wait "$cpid"
   ) || die "could not build ljos from this checkout. Install Rust $MIN_RUST or newer from https://rustup.rs and run \`sh $0 --from-checkout\` again."
   for p in ljos ljos-mcp; do
     [ -x "$TMP/cout/bin/$p" ] || die "the checkout build produced no $p"
