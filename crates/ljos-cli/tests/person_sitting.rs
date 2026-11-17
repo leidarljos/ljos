@@ -116,6 +116,13 @@ fn a_terminal_sitting_names_the_seat_and_a_runner_sitting_keeps_the_tag() {
         !started.contains('@'),
         "a terminal sitting tagged a runner session:\n{started}\n{said}"
     );
+    assert_eq!(
+        said.lines()
+            .filter(|line| line.starts_with("next:"))
+            .count(),
+        1,
+        "a planned sitting printed its next item more than once:\n{said}"
+    );
 
     let runner = sit("runner");
     let said = text_of(&runner);
