@@ -25,7 +25,6 @@ Set ``LJOS_SEAT`` to the seat that files it. Once ``vissue.toml`` lists seats, t
    These are word matches; the pack did not answer.
    warn    crates.io   did not answer, so the version check was skipped
    matched by words (encoder not installed)
-   next: day-cd34  measure the files
    day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
    $ ljos finish day-cd34
    finished day-cd34; your open sitting is day-ab12

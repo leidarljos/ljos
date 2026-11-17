@@ -7197,10 +7197,15 @@ fn run_command() -> Result<()> {
             let mut memories = Vec::new();
             let mut full = String::new();
             let mut shown = String::new();
+            let mut opened_next = None;
             let detail = git_detail(verbose);
             let issue = if let Some(title) = plan {
                 let opened = ljos_cli::plan::open_plan(project.as_deref(), &title, &items, top)?;
                 let quiet_plan = ljos_cli::without_routine_git(&opened.text);
+                opened_next = quiet_plan
+                    .lines()
+                    .find(|line| line.starts_with("next:"))
+                    .map(str::to_string);
                 if json {
                     full.push_str(&opened.text);
                     if !detail {
@@ -7231,15 +7236,23 @@ fn run_command() -> Result<()> {
                     .take()
                     .expect("a sitting starts its claim budget before setup"),
                 |piece| {
+                    let piece = if let Some(next) = opened_next.as_deref() {
+                        piece
+                            .split_inclusive('\n')
+                            .filter(|line| line.trim_end_matches('\n') != next)
+                            .collect::<String>()
+                    } else {
+                        piece.to_string()
+                    };
                     if json {
-                        full.push_str(piece);
+                        full.push_str(&piece);
                         if !detail {
-                            shown.push_str(&compact_sitting_block(piece, &mut memories));
+                            shown.push_str(&compact_sitting_block(&piece, &mut memories));
                         }
                     } else if detail {
                         print!("{piece}");
                     } else {
-                        print!("{}", compact_sitting_block(piece, &mut memories));
+                        print!("{}", compact_sitting_block(&piece, &mut memories));
                     }
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 },
