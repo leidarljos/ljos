@@ -411,13 +411,7 @@ pub fn count_line(title: &str, shown: usize, total: usize, note: &str) -> String
 /// The hook's pack header. One line at [`COLS`] for the counts a prompt shows.
 #[must_use]
 pub fn remembered_head(shown: usize, matched: usize) -> String {
-    head(
-        "Remembered",
-        shown,
-        matched,
-        "oldest first",
-        shown < matched,
-    )
+    head("Remembered", shown, matched, "fused order", shown < matched)
 }
 
 /// The hook's header for memories about a failed command.

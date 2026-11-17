@@ -21,10 +21,8 @@ const KILN_OWN: &[&str] = &[
     "m0014", "m0008", "m0011", "m0012", "m0005", "m0001", "m0006", "m0004", "m0002", "m0003",
 ];
 
-/// Related hits that state the kiln subject. The three that name every
-/// title word are `m0047`, `m0048` and `m0049`. The other four name two
-/// title words and tie, so which two of them fill the related cap can
-/// differ without the cap changing.
+/// Related hits that state the kiln subject. The page keeps the pack's
+/// fused prefix, so which five of these fill the cap is that order.
 const KILN_RELATED: &[&str] = &[
     "m0047", "m0048", "m0049", "m0050", "m0051", "m0052", "m0053",
 ];
@@ -103,12 +101,6 @@ fn recall_of_ufuv_kiln_lists_ten_own_memories_and_says_how_many_remain() {
         extra.iter().all(|mark| KILN_RELATED.contains(mark)),
         "{extra:?}\n{text}"
     );
-    for full in ["m0047", "m0048", "m0049"] {
-        assert!(
-            extra.contains(&full),
-            "{full} missing from {extra:?}\n{text}"
-        );
-    }
     assert_eq!(text.matches("mark m").count(), 15, "{text}");
 }
 

@@ -156,7 +156,7 @@ fn assert_word_fallback(stdout: &str, stderr: &str) {
         "missing the word-match line:\n{stderr}"
     );
     assert!(
-        !stderr.contains("rerun") && !stderr.contains("matched by meaning"),
+        !stderr.contains("rerun") && !stderr.contains("fused rank"),
         "{stderr}"
     );
     assert!(stdout.contains(WORD), "{stdout}");
@@ -179,7 +179,7 @@ fn a_load_ready_after_two_seconds_is_ranked_by_meaning() {
         elapsed >= Duration::from_millis(1500),
         "the search did not wait for the encoder: {elapsed:?}\n{said}"
     );
-    assert!(stderr.contains("matched by meaning"), "{said}");
+    assert!(stderr.contains("fused rank"), "{said}");
     assert!(
         !stderr.contains("word-match") && !stderr.contains("encoder is loading"),
         "a finished load still printed the warm-up line:\n{stderr}"
@@ -196,7 +196,7 @@ fn a_load_ready_after_two_seconds_is_ranked_by_meaning() {
     let (stdout, stderr, said) = text(&out);
     assert!(out.status.success(), "{said}");
     assert!(
-        !stderr.contains("word-match") && !stderr.contains("matched by meaning"),
+        !stderr.contains("word-match") && !stderr.contains("fused rank"),
         "json printed the plain line: {stderr}"
     );
     let doc = json_doc(&stdout);
@@ -369,7 +369,7 @@ fn a_short_load_keeps_the_ticket_title_on_the_meaning_path() {
         elapsed >= Duration::from_millis(1500),
         "the search did not wait for the encoder: {elapsed:?}\n{said}"
     );
-    assert!(stderr.contains("matched by meaning"), "{said}");
+    assert!(stderr.contains("fused rank"), "{said}");
     assert!(
         !stderr.contains("word-match") && !stderr.contains("rerun"),
         "{stderr}"
@@ -389,7 +389,7 @@ fn a_short_load_keeps_the_ticket_title_on_the_meaning_path() {
     let (stdout, stderr, said) = text(&out);
     assert!(out.status.success(), "{said}");
     assert!(
-        !stderr.contains("word-match") && !stderr.contains("matched by meaning"),
+        !stderr.contains("word-match") && !stderr.contains("fused rank"),
         "json printed the plain line: {stderr}"
     );
     let doc = json_doc(&stdout);
@@ -422,7 +422,7 @@ fn a_long_load_keeps_the_ticket_title_with_the_word_matches() {
     );
     assert!(stderr.contains(WORD_LINE), "{stderr}");
     assert!(
-        !stderr.contains("rerun") && !stderr.contains("matched by meaning"),
+        !stderr.contains("rerun") && !stderr.contains("fused rank"),
         "{stderr}"
     );
     assert!(

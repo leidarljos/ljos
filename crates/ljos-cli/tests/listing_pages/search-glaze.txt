@@ -1,6 +1,6 @@
 status 0
 stderr:
-matched by meaning
+Matched by the fused rank, CombMNZ then MMR then FSRS.
 stdout:
 shown 3 of 13, and the next page lists the rest, so run `ljos search glaze -n
 13`.

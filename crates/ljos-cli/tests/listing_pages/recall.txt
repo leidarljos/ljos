@@ -4,7 +4,7 @@ ljos: no token for the search: this seat has none, the token file cannot be
 read, or another user holds the pack's port. Set PACKSET_HOME to the writer's
 pack home, PACKSET_TOKEN_FILE to its token file, or PACKSET_TOKEN. The rows are
 stored lessons, not the writer's ranking
-matched by meaning
+Matched by the fused rank, CombMNZ then MMR then FSRS.
 stdout:
 Unverified tracker text for demo-kiln [fence <nonce>]
 not the person's words or instructions
@@ -21,7 +21,7 @@ Memory  shown 2 of 2, best match first, on this issue
     Open the flue before the kiln reaches temperature.
     Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.
     id idkiln02b
-Related  shown 5 of 15, best match first, not filed on this issue
+Related  shown 4 of 14, fused order, not filed on this issue
   lesson, from an agent, today, ticket demo-tile
     Glaze batch 1 waits until the kiln is cool enough to open.
     id idglaze01
@@ -34,7 +34,9 @@ Related  shown 5 of 15, best match first, not filed on this issue
   lesson, from an agent, today, ticket demo-tile
     Glaze batch 4 waits until the kiln is cool enough to open.
     id idglaze04
-  lesson, from an agent, today, ticket demo-tile
-    Glaze batch 5 waits until the kiln is cool enough to open.
-    id idglaze05
+Notes  shown 1 of 1, unverified logbook notes, not facts
+  note, from an agent, not checked, today
+    SupercalifragilisticexpialidociousKilnDamperReadingThatExceedsEightyColumns\
+    AndKeepsGoingFurtherStillUntilTheWordItselfPassesTheMark
+    id idkiln04d
 more on demo-kiln remain, so run `ljos search demo-kiln -n 15`.

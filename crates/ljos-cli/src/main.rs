@@ -5283,8 +5283,9 @@ fn run_command() -> Result<()> {
                     attempts,
                 );
             }
-            // A word ranking re-scores the rows it was given. The encoder
-            // path keeps the seat wall and the cosine floor.
+            // A word ranking re-scores the rows it was given. The fused
+            // path keeps the pack's order, and this seat's rows come
+            // before another seat's.
             let (mut close_miss, unrelated) = if ranking.mode == "lexical" {
                 let missed = match ljos_cli::word_rank::order_hits(&mut hits, &asked, attempts) {
                     ljos_cli::word_rank::WordList::NoClose { suggest } => Some(suggest),

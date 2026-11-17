@@ -48,7 +48,7 @@
     {
       "name": "covers-the-prompt",
       "prompt": "the registry rejected my token",
-      "shows": ["ci-secret", "look-00", "look-01"],
+      "shows": ["look-00", "look-01", "look-02"],
       "why": [
         "No word of the prompt is in an encoder group, so the hook ranks by words.",
         "ci-secret, pnpm and every lookalike say registry, rejected and token, and BM25 puts ci-secret, the shortest, first.",
@@ -59,7 +59,7 @@
     {
       "name": "alias-in-a-full-window",
       "prompt": "yarn: the registry rejected my token",
-      "shows": ["ci-secret", "pnpm", "look-00"],
+      "shows": ["look-00", "look-01", "look-02"],
       "why": [
         "yarn and pnpm are one alias group in the hook's subject test, so pnpm covers the most of the prompt.",
         "pnpm is the longest lesson, so only the pack's lexical ballot keeps it, last of the twenty the hook asks for, as the tied lesson whose id sorts first.",
@@ -70,7 +70,7 @@
     {
       "name": "failure-note",
       "failure": {"command": "yarn publish", "error": "E401: the registry rejected the token"},
-      "shows": ["pnpm", "ci-secret", "look-00"],
+      "shows": ["look-00", "look-01", "look-02"],
       "why": [
         "The note searches on the command and its error, so it reads the window alias-in-a-full-window reads.",
         "It prints the most relevant first and does not sort by age: pnpm by its alias, ci-secret by BM25, look-00 by id."

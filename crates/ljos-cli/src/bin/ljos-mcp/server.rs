@@ -1878,17 +1878,11 @@ impl LjosServer {
             }
         };
         let lexical = !ljos_cli::carries_cosine(&hits);
-        let close_miss = if args.as_of.as_deref().is_none_or(|at| at.trim().is_empty()) && lexical {
-            match ljos_cli::word_rank::order_hits(&mut hits, &args.query, false) {
-                ljos_cli::word_rank::WordList::NoClose { suggest } => Some(suggest),
-                ljos_cli::word_rank::WordList::Kept | ljos_cli::word_rank::WordList::None => None,
-            }
-        } else {
-            if args.as_of.as_deref().is_none_or(|at| at.trim().is_empty()) {
-                refine_default_hits(&mut hits, &args.query, false);
-            }
-            None
-        };
+        // The pack's fused order stands, with or without a cosine. A
+        // dated read is the pack as it stood and is not filtered again.
+        if args.as_of.as_deref().is_none_or(|at| at.trim().is_empty()) {
+            refine_default_hits(&mut hits, &args.query, false);
+        }
         let unrelated = if lexical {
             false
         } else {
@@ -1906,8 +1900,6 @@ impl LjosServer {
             line
         } else if emptied {
             ljos_cli::word_rank::no_relevant_line(&args.query)
-        } else if let Some(suggest) = close_miss.as_ref() {
-            ljos_cli::word_rank::no_close_line_with(&args.query, suggest.as_deref())
         } else if hits.is_empty() && unrelated {
             ljos_cli::NOTHING_RELEVANT.trim().to_string()
         } else if hits.is_empty() && ljos_cli::nothing_stored() {
@@ -1915,7 +1907,11 @@ impl LjosServer {
         } else if hits.is_empty() {
             ljos_cli::scan::nothing_matched_line(&args.query)
         } else {
-            search_reading(hits.len(), !lexical).to_string()
+            search_reading(
+                hits.len(),
+                args.as_of.as_deref().is_none_or(|at| at.trim().is_empty()),
+            )
+            .to_string()
         };
         if !waiting {
             if let Some(note) = ljos_cli::search_token_note() {

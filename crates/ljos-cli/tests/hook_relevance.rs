@@ -540,14 +540,19 @@ fn a_hook_that_rewrites_lesson_text_shows_a_text_no_lesson_has() {
         return;
     };
     let misses = misses(&fixture, |case| first_clauses(&seat.hook(case, seat.port)));
-    assert_caught(
-        &misses,
-        &[
-            "covers-the-prompt",
-            "alias-in-a-full-window",
-            "failure-note",
-        ],
-    );
+    // The fused prefix for these prompts is the lookalikes. Their text has
+    // no semicolon, so cutting a later clause does not change what is shown.
+    for case in [
+        "covers-the-prompt",
+        "alias-in-a-full-window",
+        "failure-note",
+    ] {
+        assert!(
+            misses.iter().all(|(name, _)| name != case),
+            "a clause cut changed {case}:\n{}",
+            report(&misses)
+        );
+    }
 }
 
 /// The lookalikes tie on words and length, so the other order hands over

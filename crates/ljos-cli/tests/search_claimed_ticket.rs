@@ -208,7 +208,7 @@ fn a_claimed_ticket_with_matching_notes_outranks_generic_sign_in_titles() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("matched by meaning"),
+        stderr.contains(ljos_cli::FUSED_RANK_LINE),
         "the page was not ranked by meaning:\n{said}"
     );
     assert!(
