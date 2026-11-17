@@ -1951,23 +1951,62 @@ fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-/// The runtime directory when `XDG_RUNTIME_DIR` is unset: `ljos-UID` under
-/// the temporary directory, so two users on one host never read each
-/// other's holds or seat records. A `ljos-UID` that is a
+/// The runtime directory when `XDG_RUNTIME_DIR` is unset: a directory named
+/// for `home` inside `ljos-UID` under the temporary directory, so two users
+/// on one host never read each other's hold or seat records, and two homes
+/// of one user never read each other's. A `ljos-UID` that is a
 /// symlink, or that another user made first, is not used; the seat then
 /// keeps its records under `~/.cache/ljos/run`.
+///
+/// The name is a short hash of `home`. Hold and seat records are keyed by
+/// the runner's conversation id, which every shell under one runner shares,
+/// so a hold written for one home would otherwise be read from another.
 #[must_use]
 pub fn runtime_fallback(tmp: &Path, home: Option<&Path>, uid: u32) -> PathBuf {
     use std::os::unix::fs::MetadataExt as _;
     let mine = tmp.join(format!("ljos-{uid}"));
+    let keyed = |base: PathBuf| match home.filter(|h| !h.as_os_str().is_empty()) {
+        Some(h) => {
+            let whole: PathBuf = h.components().collect();
+            let digest = jev::sha256_hex(whole.as_os_str().as_encoded_bytes());
+            base.join(format!("home-{}", &digest[..12]))
+        }
+        None => base,
+    };
     match std::fs::symlink_metadata(&mine) {
-        Err(_) => mine,
-        Ok(m) if m.is_dir() && m.uid() == uid => mine,
+        Err(_) => keyed(mine),
+        Ok(m) if m.is_dir() && m.uid() == uid => keyed(mine),
         Ok(_) => home.map_or_else(
             || tmp.join(format!("ljos-{uid}-own")),
             |h| h.join(".cache/ljos/run"),
         ),
     }
+}
+
+/// Every home's directory under this user's `ljos-UID` in `tmp`, sorted. A
+/// record about the process tree, which names the processes and not a
+/// tracker, is read from all of them: a reader whose `HOME` differs from the
+/// writer's still finds it. Empty when `ljos-UID` is a symlink or another
+/// user's.
+pub(crate) fn runtime_fallback_homes(tmp: &Path, uid: u32) -> Vec<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+    let base = tmp.join(format!("ljos-{uid}"));
+    match std::fs::symlink_metadata(&base) {
+        Ok(m) if m.is_dir() && m.uid() == uid => {}
+        _ => return Vec::new(),
+    }
+    let mut homes: Vec<PathBuf> = std::fs::read_dir(&base)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("home-"))
+        .filter(|entry| {
+            std::fs::symlink_metadata(entry.path()).is_ok_and(|m| m.is_dir() && m.uid() == uid)
+        })
+        .map(|entry| entry.path())
+        .collect();
+    homes.sort();
+    homes
 }
 
 /// The record a server leaves for the shells the same runner opens.
@@ -55718,9 +55757,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let uid = euid();
         let mine = tmp.path().join(format!("ljos-{uid}"));
-        assert_eq!(runtime_fallback(tmp.path(), Some(home.path()), uid), mine);
+        let kept = runtime_fallback(tmp.path(), Some(home.path()), uid);
+        assert_eq!(kept.parent(), Some(mine.as_path()));
         std::fs::create_dir(&mine).unwrap();
-        assert_eq!(runtime_fallback(tmp.path(), Some(home.path()), uid), mine);
+        assert_eq!(runtime_fallback(tmp.path(), Some(home.path()), uid), kept);
         std::fs::remove_dir(&mine).unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(elsewhere.path(), &mine).unwrap();
@@ -55730,9 +55770,53 @@ mod tests {
             "a symlink planted at the name is not followed"
         );
         assert_eq!(
-            runtime_fallback(tmp.path(), Some(home.path()), uid + 1),
+            runtime_fallback(tmp.path(), None, uid + 1),
             tmp.path().join(format!("ljos-{}", uid + 1))
         );
+    }
+
+    #[test]
+    fn the_fallback_homes_are_the_directories_this_user_made() {
+        let tmp = tempfile::tempdir().unwrap();
+        let uid = euid();
+        assert!(runtime_fallback_homes(tmp.path(), uid).is_empty());
+        let first = runtime_fallback(tmp.path(), Some(Path::new("/home/ada")), uid);
+        let second = runtime_fallback(tmp.path(), Some(Path::new("/srv/walk/home")), uid);
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let base = tmp.path().join(format!("ljos-{uid}"));
+        std::fs::write(base.join("home-file"), "").unwrap();
+        std::fs::create_dir(base.join("other")).unwrap();
+        std::os::unix::fs::symlink(tmp.path(), base.join("home-link")).unwrap();
+        let mut want = vec![first, second];
+        want.sort();
+        assert_eq!(runtime_fallback_homes(tmp.path(), uid), want);
+        assert!(runtime_fallback_homes(tmp.path(), uid + 1).is_empty());
+    }
+
+    /// Two homes of one user are two runtime directories, so a hold one
+    /// wrote is not read from the other. The same home written another
+    /// way is the same directory.
+    #[test]
+    fn the_runtime_fallback_is_keyed_by_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let uid = euid();
+        let first = runtime_fallback(tmp.path(), Some(Path::new("/home/ada")), uid);
+        let second = runtime_fallback(tmp.path(), Some(Path::new("/srv/walk/home")), uid);
+        assert_ne!(first, second);
+        let base = tmp.path().join(format!("ljos-{uid}"));
+        assert_eq!(first.parent(), Some(base.as_path()));
+        assert_eq!(second.parent(), Some(base.as_path()));
+        assert_eq!(
+            first,
+            runtime_fallback(tmp.path(), Some(Path::new("/home/ada/")), uid)
+        );
+        assert_eq!(
+            first,
+            runtime_fallback(tmp.path(), Some(Path::new("/home//ada")), uid)
+        );
+        assert_eq!(runtime_fallback(tmp.path(), None, uid), base);
+        assert_eq!(runtime_fallback(tmp.path(), Some(Path::new("")), uid), base);
     }
 
     #[test]
