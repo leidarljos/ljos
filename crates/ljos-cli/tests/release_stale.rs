@@ -617,3 +617,128 @@ fn release_stale_drops_older_holders_of_same_seat_and_keeps_live_and_other() {
     assert_eq!(st, "STARTED");
     assert_eq!(who.as_deref(), Some("other-seat@dorx1f91mq"));
 }
+
+/// A dead hold for the graph actor must not hide a live hold on the same ticket.
+#[test]
+fn release_stale_keeps_a_ticket_when_a_live_hold_sits_beside_a_dead_one() {
+    let root = tempfile::tempdir().unwrap();
+    let tracker = root.path().join("tracker");
+    let home = root.path().join("home");
+    let bin = root.path().join("bin");
+    let run = root.path().join("run");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    let layout = vissue_core::Layout::new(&tracker, "Software");
+    std::fs::create_dir_all(layout.projects_dir()).unwrap();
+    let made = vissue_core::ops::create(
+        &layout,
+        "work",
+        "dead hold beside a live one",
+        vissue_core::CreateOpts {
+            quiet: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let id = made.trim().to_string();
+    vissue_core::ops::claim_as(&layout, &id, false, "dseams-paper@dorx1f91mq").unwrap();
+    let org = layout.project_issues_path("work");
+    let mut doc = vissue_core::IssueDoc::parse_file("work", &org).unwrap();
+    let old_when = (chrono::Local::now().date_naive() - chrono::Duration::days(3))
+        .format("[%Y-%m-%d %a 09:00]")
+        .to_string();
+    let heading = doc.headings.iter_mut().find(|h| h.id == id).unwrap();
+    heading.state = "STARTED".to_string();
+    heading
+        .properties
+        .insert("CLAIMED_BY".into(), "dseams-paper@dorx1f91mq".into());
+    heading.properties.insert("CLAIMED_AT".into(), old_when);
+    doc.write().unwrap();
+
+    let now = now_unix();
+    let dead = actor('a');
+    let live = actor('b');
+    let graph = root.path().join("graph.json");
+    std::fs::write(
+        &graph,
+        serde_json::to_string(&vec![serde_json::json!({
+            "id": actor('1'),
+            "status": "claimed",
+            "assignee": &dead,
+            "updated_unix": now.saturating_sub(80_000),
+            "summary": &id,
+        })])
+        .unwrap(),
+    )
+    .unwrap();
+    script(
+        &bin,
+        "claimdag",
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  list) cat '{}' ;;\n  release) echo gen=3 ;;\nesac\nexit 0\n",
+            graph.display()
+        ),
+    );
+    script(&bin, "vissue", "#!/bin/sh\nexit 0\n");
+    write_hold(
+        &run,
+        &dead,
+        "dseams-paper",
+        4_194_303,
+        "no-such-runner",
+        &id,
+    );
+    let sleeper = Command::new("sleep")
+        .arg("30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    write_hold(&run, &live, "dseams-paper", sleeper.id(), "sleep", &id);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["release", "--stale"])
+        .current_dir(root.path())
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("HOME", &home)
+        .env("TMPDIR", root.path())
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", &run)
+        .env("VISSUE_ROOT", &tracker)
+        .env("VISSUE_NO_ROUTE", "1")
+        .env("LJOS_SEAT", "dseams-paper")
+        .env("CURSOR_CONVERSATION_ID", "li41adshxv-current-session")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("LJOS_ASK_PACK", "off")
+        .env("PACKSET_URL", "off")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let _ = Command::new("kill")
+        .arg(sleeper.id().to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("kept 1 held by a running conversation"),
+        "{said}"
+    );
+    assert!(!said.contains(&format!("took over {id}")), "{said}");
+    let (st, who) = state(&org, &id);
+    assert_eq!(st, "STARTED", "{said}");
+    assert_eq!(who.as_deref(), Some("dseams-paper@dorx1f91mq"), "{said}");
+}

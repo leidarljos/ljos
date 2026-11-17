@@ -40489,20 +40489,15 @@ fn tracker_claimed_by(node: &str) -> Option<String> {
 fn live_other_hold_for_actor(
     holder_actor: &str,
     hold: Option<&Hold>,
-    node: &str,
-    assignee: &str,
+    _node: &str,
+    _assignee: &str,
 ) -> Option<Hold> {
     let hold = hold?;
     let graph = hold_line(holder_actor, 6);
     if !graph.is_none_or(|g| g == claim_graph_scope()) {
         return None;
     }
-    if hold_alive(hold)
-        && !same_holder(
-            unscoped_holder(&hold.assignee, node),
-            unscoped_holder(assignee, node),
-        )
-    {
+    if hold_alive(hold) && !hold_is_this_conversation(hold) {
         Some(hold.clone())
     } else {
         None
@@ -40512,7 +40507,7 @@ fn live_other_hold_for_actor(
 pub(crate) fn live_other_hold_on_ticket(
     node: &str,
     actor: &str,
-    assignee: &str,
+    _assignee: &str,
 ) -> Option<(String, Hold)> {
     let node = node.trim();
     if node.is_empty() {
@@ -40542,12 +40537,7 @@ pub(crate) fn live_other_hold_on_ticket(
         let Some(hold) = read_hold(hold_actor) else {
             continue;
         };
-        if hold_alive(&hold)
-            && !same_holder(
-                unscoped_holder(&hold.assignee, node),
-                unscoped_holder(assignee, node),
-            )
-        {
+        if hold_alive(&hold) && !hold_is_this_conversation(&hold) {
             return Some((hold_actor.to_string(), hold));
         }
     }
@@ -40555,22 +40545,18 @@ pub(crate) fn live_other_hold_on_ticket(
 }
 
 /// The holder `ljos claim` would take over: this seat's record, and either
-/// that conversation is gone or the name is this seat under its other form.
-/// The claim-graph scope is not required. Two conversations of one seat
-/// share a checkout, and a record written for another spelling of the same
-/// graph still names this seat's claim.
-fn gone_same_seat_hold(id: &str, assignee: &str) -> Option<(String, Hold)> {
+/// that conversation is gone or the record is this conversation. A live
+/// process with another pid stays. The claim-graph scope is not required.
+/// Two conversations of one seat share a checkout, and a record written
+/// for another spelling of the same graph still names this seat's claim.
+fn gone_same_seat_hold(id: &str, _assignee: &str) -> Option<(String, Hold)> {
     let holder = run_captured("claimdag", &["get", id])
         .ok()
         .and_then(|g| holder_of(&g.stdout))?;
     let hold = read_hold(&holder)?;
     let seat = seat_name();
     let mine = !seat.is_empty() && canonical_seat_name(&hold.seat) == canonical_seat_name(&seat);
-    let take = !hold_alive(&hold)
-        || same_holder(
-            split_claim_scope(&hold.assignee).0,
-            split_claim_scope(assignee).0,
-        );
+    let take = !hold_alive(&hold) || hold_is_this_conversation(&hold);
     (mine && take).then_some((holder, hold))
 }
 
@@ -40581,7 +40567,7 @@ fn gone_same_seat_hold(id: &str, assignee: &str) -> Option<(String, Hold)> {
 /// conversation is still running on this host, when no record on this host
 /// names the holder, or when the record names another seat or another
 /// claim graph.
-fn same_seat_hold(id: &str, actor: &str, assignee: &str) -> Option<(String, Hold)> {
+fn same_seat_hold(id: &str, actor: &str, _assignee: &str) -> Option<(String, Hold)> {
     let holder = run_captured("claimdag", &["get", id])
         .ok()
         .and_then(|g| holder_of(&g.stdout))?;
@@ -40592,11 +40578,7 @@ fn same_seat_hold(id: &str, actor: &str, assignee: &str) -> Option<(String, Hold
     let graph = hold_line(&holder, 6);
     let seat = seat_name();
     let mine = !seat.is_empty() && canonical_seat_name(&hold.seat) == canonical_seat_name(&seat);
-    let gone = !hold_alive(&hold)
-        || same_holder(
-            split_claim_scope(&hold.assignee).0,
-            split_claim_scope(assignee).0,
-        );
+    let gone = !hold_alive(&hold) || hold_is_this_conversation(&hold);
     (mine && gone && graph.is_none_or(|g| g == claim_graph_scope())).then_some((holder, hold))
 }
 
@@ -41245,6 +41227,13 @@ fn hold_alive_on_macos(hold: &Hold, ps: &Path) -> bool {
         Ok(None) => false,
         Err(()) => true,
     }
+}
+
+/// Whether `hold` was written by this conversation. A live process with
+/// another pid is another conversation, even when both names are this seat.
+fn hold_is_this_conversation(hold: &Hold) -> bool {
+    let (pid, comm) = conversation_process();
+    hold.pid == pid && (comm.is_empty() || hold.comm == comm)
 }
 
 /// Whether the conversation that wrote a hold is still running: its

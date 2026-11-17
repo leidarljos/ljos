@@ -687,10 +687,9 @@ fn classify(
         } else {
             node.ticket.clone()
         };
-        let alive = hold.as_ref().is_some_and(crate::hold_alive)
-            || (hold.is_none()
-                && !node.ticket.is_empty()
-                && hold_on_ticket(&node.ticket).is_some_and(|(_, h)| crate::hold_alive(&h)));
+        let ticket_live = !node.ticket.is_empty()
+            && hold_on_ticket(&node.ticket).is_some_and(|(_, h)| crate::hold_alive(&h));
+        let alive = hold.as_ref().is_some_and(crate::hold_alive) || ticket_live;
         let item = QuietHeld {
             label,
             ticket: node.ticket,

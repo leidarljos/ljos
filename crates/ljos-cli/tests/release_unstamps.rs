@@ -494,7 +494,7 @@ case \"$1\" in\n\
       {oc9p}) echo \"$2  claimed  task  unset  gen=2  assignee={actor_oc9p}  Software-oc9p\" ;;\n\
       {oc9q}) echo \"$2  claimed  task  unset  gen=2  assignee={actor_oc9q}  Software-oc9q\" ;;\n\
     esac ;;\n\
-  complete)\n\
+  release|complete)\n\
     actor=$4\n\
     case \"$2\" in\n\
       {oc9m}) echo \"$2 done\" ;;\n\
@@ -608,4 +608,117 @@ esac\nexit 0\n"
         heading(&org, "Software-oc9q").contains(":CLAIMED_BY: other-seat@dorx1f91mq"),
         "other seat claim was dropped:\n{org}"
     );
+}
+
+/// A live process recorded under the bare seat is another conversation.
+/// The tagged name of this seat must not finish or release that claim.
+#[test]
+fn finish_and_release_refuse_a_live_bare_seat_claim() {
+    const ORG: &str = "#+TITLE: Software issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
+* STARTED [#C] live bare seat finish\n:PROPERTIES:\n:ID:         Software-bare\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: dseams-paper\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
+* STARTED [#C] live bare seat release\n:PROPERTIES:\n:ID:         Software-bar2\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: dseams-paper\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n";
+
+    let dir = tempfile::tempdir().unwrap();
+    let bare = ljos_cli::work_id("Software-bare");
+    let bar2 = ljos_cli::work_id("Software-bar2");
+    let actor_bare = ljos_cli::work_id("dseams-paper:Software-bare");
+    let actor_bar2 = ljos_cli::work_id("dseams-paper:Software-bar2");
+    script(
+        dir.path(),
+        "claimdag",
+        &format!(
+            "#!/bin/sh\n\
+case \"$1\" in\n\
+  get)\n\
+    case \"$2\" in\n\
+      {bare}) echo \"$2  claimed  task  unset  gen=2  assignee={actor_bare}  Software-bare\" ;;\n\
+      {bar2}) echo \"$2  claimed  task  unset  gen=2  assignee={actor_bar2}  Software-bar2\" ;;\n\
+    esac ;;\n\
+  release|complete)\n\
+    actor=$4\n\
+    case \"$2\" in\n\
+      {bare}) [ \"$actor\" = '{actor_bare}' ] || {{ echo \"$1: not assignee\" >&2; exit 1; }}; echo \"$2 done\" ;;\n\
+      {bar2}) [ \"$actor\" = '{actor_bar2}' ] || {{ echo \"$1: not assignee\" >&2; exit 1; }}; echo \"$2 done\" ;;\n\
+    esac ;;\n\
+esac\nexit 0\n"
+        ),
+    );
+    script(
+        dir.path(),
+        "vissue",
+        "#!/bin/sh\necho '{{\"state\":\"STARTED\"}}' ; exit 0\n",
+    );
+    let tracker = dir.path().join("tracker");
+    let file = tracker.join("Software/Software/issues.org");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, ORG).unwrap();
+    let home = dir.path().join("home");
+    let runtime = dir.path().join("run");
+    let ljos_run = runtime.join("ljos");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&ljos_run).unwrap();
+    let sleeper = LiveSleeper::spawn();
+    for (actor, id) in [
+        (actor_bare.as_str(), "Software-bare"),
+        (actor_bar2.as_str(), "Software-bar2"),
+    ] {
+        std::fs::write(
+            ljos_run.join(format!("hold-{actor}")),
+            format!(
+                "dseams-paper:{id}\ndseams-paper\n{}\nsleep\n2026-10-11T05:00:00Z\n{id}\n-\n",
+                sleeper.pid()
+            ),
+        )
+        .unwrap();
+    }
+    let path = format!("{}:/usr/bin:/bin", dir.path().display());
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ljos"))
+            .args(args)
+            .env_clear()
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_STATE_HOME", home.join(".state"))
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("VISSUE_ROOT", &tracker)
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("LJOS_SEAT", "dseams-paper")
+            .env("CURSOR_CONVERSATION_ID", "li41adshxv-current-session")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", "off")
+            .output()
+            .unwrap()
+    };
+    for (cmd, id) in [("finish", "Software-bare"), ("release", "Software-bar2")] {
+        let out = run(&[cmd, id]);
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.status.success(),
+            "{cmd} {id} stole a live claim:\n{said}"
+        );
+        assert!(
+            said.contains("still running")
+                || said.contains("another conversation")
+                || said.contains("stays claimed"),
+            "{cmd} {id} did not name the live claim:\n{said}"
+        );
+    }
+    let org = std::fs::read_to_string(&file).unwrap();
+    for id in ["Software-bare", "Software-bar2"] {
+        assert!(
+            heading(&org, id).contains(":CLAIMED_BY: dseams-paper"),
+            "{id} claim was cleared:\n{org}"
+        );
+        assert!(
+            heading(&org, id).starts_with("\n* STARTED"),
+            "{id} left STARTED:\n{org}"
+        );
+    }
 }
