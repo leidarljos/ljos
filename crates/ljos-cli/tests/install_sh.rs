@@ -1917,6 +1917,159 @@ exit 0
     assert!(text.contains("ljos doctor"), "{text}");
 }
 
+/// A signed-in `gh attestation verify` that answers HTTP 404 means the
+/// release published no attestation. That is not a signature that failed.
+#[test]
+fn a_missing_attestation_is_not_a_failed_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let assets = dir.path().join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    let target = "x86_64-unknown-linux-gnu";
+    let packs = [
+        ("ljos-v0.42.1", &["ljos", "ljos-mcp"][..]),
+        (
+            "packset-v0.17.10",
+            &["packset", "packsetd", "packset-mcp"][..],
+        ),
+        ("vissue-v0.24.0", &["vissue", "vissue-mcp"][..]),
+        ("deedar-v0.4.0", &["deedar"][..]),
+        ("claimdag-v0.8.0", &["claimdag"][..]),
+        ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
+        ("consensus-v0.10.1", &["ljos-consensus"][..]),
+    ];
+    for (stem, bins) in packs {
+        let top = assets.join(stem);
+        std::fs::create_dir_all(&top).unwrap();
+        for bin in bins {
+            script(&top, bin, "#!/bin/sh\nexit 0\n");
+        }
+        let archive = assets.join(format!("{stem}-{target}.tar.gz"));
+        let packed = Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&assets)
+            .arg(stem)
+            .status()
+            .unwrap();
+        assert!(packed.success(), "tar {stem}");
+        std::fs::write(format!("{}.sha256", archive.display()), sha256_of(&archive)).unwrap();
+    }
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script(
+        &bin,
+        "curl",
+        r#"#!/bin/sh
+out=
+url=
+prev=
+for a in "$@"; do
+  case $prev in
+    -o) out=$a ;;
+  esac
+  case $a in
+    http://*|https://*) url=$a ;;
+  esac
+  prev=$a
+done
+repo=
+case $url in
+  *github.com/leidarljos/*/releases/*)
+    repo=${url#*github.com/leidarljos/}
+    repo=${repo%%/*}
+    ;;
+esac
+case $url in
+  */releases/latest)
+    ver=0.42.1
+    case $repo in
+      packset) ver=0.17.10 ;;
+      vissue) ver=0.24.0 ;;
+      deedar) ver=0.4.0 ;;
+      claimdag) ver=0.8.0 ;;
+      ljos-policyd) ver=0.7.0 ;;
+      consensus) ver=0.10.1 ;;
+    esac
+    printf '%s' "https://github.com/leidarljos/$repo/releases/tag/v$ver"
+    exit 0
+    ;;
+  */releases/tag/*)
+    printf '%s' 200
+    exit 0
+    ;;
+esac
+case $url in
+  *.sha256)
+    base=$(basename "$url" .sha256)
+    cp "$LJOS_FAKE_ASSETS/$base.sha256" "$out"
+    printf '%s' 200
+    exit 0
+    ;;
+esac
+base=$(basename "$url")
+cp "$LJOS_FAKE_ASSETS/$base" "$out"
+printf '%s' 200
+exit 0
+"#,
+    );
+    script(
+        &bin,
+        "gh",
+        r#"#!/bin/sh
+if [ "$1" = attestation ] && [ "$2" = --help ]; then
+  exit 0
+fi
+if [ "$1" = auth ]; then
+  exit 0
+fi
+if [ "$1" = attestation ]; then
+  echo 'Error: HTTP 404: Not Found (https://api.github.com/repos/leidarljos/deedar/attestations/sha256:abc)' >&2
+  exit 1
+fi
+exit 1
+"#,
+    );
+    let home = dir.path().join("home");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .args([
+            "--no-embed",
+            "--no-onboard",
+            "--no-modify-path",
+            "--target",
+            target,
+            "--bin-dir",
+        ])
+        .arg(home.join(".local/bin"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .env("LJOS_FAKE_ASSETS", &assets)
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("not published"),
+        "a 404 was not counted as unpublished:\n{text}"
+    );
+    assert!(
+        text.contains("No build attestation was published for"),
+        "{text}"
+    );
+    assert!(
+        text.contains("deedar-v0.4.0-x86_64-unknown-linux-gnu.tar.gz"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("does not verify"),
+        "a missing attestation was called a failed check:\n{text}"
+    );
+    assert!(!text.contains("failed (see the warnings"), "{text}");
+}
+
 #[test]
 fn install_sh_passes_shellcheck() {
     let out = Command::new("shellcheck")

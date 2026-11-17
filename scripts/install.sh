@@ -678,6 +678,13 @@ for a in json.load(open(sys.argv[1]))["attestations"]:
   esac
 }
 
+# True when the verifier found no attestation, rather than a signature
+# that does not match. gh 2.49 says "no attestations found". A later gh
+# says "HTTP 404" for the same empty publication.
+attest_absent() {
+  grep -Eqi 'no attestations found|HTTP 404' "$1"
+}
+
 # Check FILE (whose SHA-256 is DIGEST) against the build attestations of
 # REPO's workflows. Prints one word: verified, missing (the release has
 # none), unchecked (nothing here can check one) or failed (found, and it
@@ -693,7 +700,7 @@ attest() {
     gh)
       if gh attestation verify "$file" --repo "$OWNER/$repo" >/dev/null 2>"$err"; then
         printf 'verified'
-      elif grep -qi 'no attestations found' "$err"; then
+      elif attest_absent "$err"; then
         [ "$ATTEST" = 0 ] || die "$name: $OWNER/$repo published no build attestation for it"
         printf 'missing'
       else
@@ -1066,6 +1073,8 @@ if [ -f "$TMP/attest.rows" ]; then
     if [ "$result" = failed ]; then
       detail=$(head -n 1 "$TMP/warn-$id" 2>/dev/null || true)
       warn "$asset: its build attestation does not verify${detail:+: $detail}"
+    elif [ "$result" = missing ]; then
+      printf '%s\n' "$asset" >> "$TMP/attest.missing-names"
     fi
   done < "$TMP/attest.rows"
 fi
@@ -1098,6 +1107,10 @@ if [ -f "$TMP/attested" ]; then
     line="$line."
   fi
   say "$line"
+  if [ -s "$TMP/attest.missing-names" ]; then
+    names=$(sort -u "$TMP/attest.missing-names" | paste -sd ',' - | sed 's/,/, /g')
+    say "  No build attestation was published for $names. The checksum matched."
+  fi
 fi
 
 # `--cloud` leaves the encoder to `ljos cloud up`.
