@@ -605,7 +605,9 @@ fn project_flag_errors_cover_upper_p_long_project_and_start_alias() {
         assert_eq!(out.status.code(), Some(2), "{args:?}\n{dump}");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            stderr.contains(&format!("ljos: {verb} has no flag -P, and the closest is -p")),
+            stderr.contains(&format!(
+                "ljos: {verb} has no flag -P, and the closest is -p"
+            )),
             "expected -p suggestion for {verb}:\n{dump}"
         );
     }

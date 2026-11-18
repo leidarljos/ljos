@@ -2741,8 +2741,7 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
         here.at.join(" ")
     };
     if project_flag_typed(typed) {
-        if matches!(where_.as_str(), "sitting" | "start")
-            && !args.iter().any(|arg| arg == "--plan")
+        if matches!(where_.as_str(), "sitting" | "start") && !args.iter().any(|arg| arg == "--plan")
         {
             return sitting_project_line();
         }

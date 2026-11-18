@@ -482,7 +482,9 @@ fn takeover_of_own_claim_and_missing_ticket_through_cli_and_mcp() {
     );
     assert_eq!(mcp_missing["result"]["isError"], true, "{mcp_missing}");
     assert!(
-        mcp_missing.to_string().contains("issue demo-nope not found"),
+        mcp_missing
+            .to_string()
+            .contains("issue demo-nope not found"),
         "{mcp_missing}"
     );
 }
