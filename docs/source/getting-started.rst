@@ -164,7 +164,7 @@ Search matches words when the encoder is absent. ``ljos search fusing`` finds a 
 When the encoder ranked the page, this seat's hits come first. A word ranking gives this seat a small boost instead, and a closer row from another seat stays ahead. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.
 That floor is the one the prompt hook uses for a hit the encoder lists at the top.
 A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is ``Nothing relevant was found.`` A match-mode line is not printed on that empty page.
-A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, ``0`` does not wait), following ``Retry-After`` or a JSON ``retry_ms``, and a writer that becomes free still ranks by meaning. When that wait runs out, search ranks by words, keeps a hit that names the subject, and the one line is ``Used word search because memory search was busy.`` A writer that is not running names ``packset ensure``.
+A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, ``0`` does not wait), following ``Retry-After`` or a JSON ``retry_ms``, and a writer that becomes free still ranks by meaning. When that wait runs out, search ranks by words, keeps a hit that names the subject, and the one line is ``The memory pack was busy, so these rows are word matches; run the search again for ranked results.`` When no words match, the line is ``The memory pack was busy and no words matched.`` and the command exits 1. A writer that is not running names ``packset ensure``.
 
 .. BEGIN ljos-sample tutorial-prefer
 

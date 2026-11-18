@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 const HIT: &str = "the kiln schedule is the morning plan";
 const STARTING: &str = "Memory is starting, so try again in a few seconds.";
 const STARTING_WORDS: &str = "Used word search because memory is still starting.";
-const BUSY_WORDS: &str = "Used word search because memory search was busy.";
+const BUSY_WORDS: &str = "The memory pack was busy, so these rows are word matches; run the search again for ranked results.";
 const TRIP: &str = "pack busy try again fallback word ranking";
 
 struct Seat {
@@ -456,8 +456,12 @@ fn an_error_string_that_quotes_the_query_is_busy_not_starting() {
         &[("LJOS_SEARCH_WARMUP_WAIT", "8"), ("LJOS_SEARCH_WAIT", "0")],
     );
     let said = text(&out);
-    assert!(out.status.success(), "{said}");
-    assert!(said.contains(BUSY_WORDS), "{said}");
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(
+        said.contains("The memory pack was busy and no words matched."),
+        "{said}"
+    );
+    assert!(!said.contains(BUSY_WORDS), "{said}");
     assert!(!said.contains(STARTING), "{said}");
     assert!(!said.contains(STARTING_WORDS), "{said}");
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}\n{said}");

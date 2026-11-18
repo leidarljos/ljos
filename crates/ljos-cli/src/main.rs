@@ -856,7 +856,7 @@ enum Cmd {
     /// When it answers, the rows are ranked by meaning. When it stays
     /// busy, the rows are ranked by words and a hit that names the subject
     /// stays. Search fell back, and the one line is
-    /// `Used word search because memory search was busy`.
+    /// `The memory pack was busy, so these rows are word matches; run the search again for ranked results.`
     /// While the encoder is
     /// still loading, a remaining time that fits in `LJOS_SEARCH_WARMUP_WAIT`
     /// seconds (5 when unset, `0` does not wait) is waited out, inside
@@ -883,7 +883,8 @@ enum Cmd {
     /// ranks by words from what is stored locally, prints one line that
     /// names `packset ensure`, and exits 0. A pack that stays busy ranks
     /// by words. Search fell back, and the one line is
-    /// `Used word search because memory search was busy`.
+    /// `The memory pack was busy, so these rows are word matches; run the search again for ranked results.`
+    /// When no words match, the line is `The memory pack was busy and no words matched.` and the command exits 1.
     /// The pack is this seat's memory store.
     Search {
         /// Words to look for.
@@ -1535,7 +1536,8 @@ enum Cmd {
     /// When no lesson is stored on the issue, the line names `ljos remember`.
     /// A busy memory store is asked again for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset, `0` does not wait).
     /// The wait follows `Retry-After` or a JSON `retry_ms`.
-    /// When it stays busy, the rows are ranked by words and one line says memory search was busy.
+    /// When it stays busy, the rows are ranked by words and one line says the memory pack was busy.
+    /// The pack is this seat's memory store.
     /// When nothing is storing memories, the command exits 75 when the line names `packset ensure`, and exits 1 when packset is not on PATH.
     Recall {
         /// The ticket id.
@@ -5587,23 +5589,42 @@ fn run_command() -> Result<()> {
             ljos_cli::note_lookups(&hits);
             let id_space = ljos_cli::search_id_space(&hits);
             ranking = ljos_cli::ranking_for_printed(ranking, &hits);
-            let close_line = close_miss
-                .as_ref()
-                .map(|suggest| ljos_cli::word_rank::no_close_line_with(&asked, suggest.as_deref()));
+            // The word fallback already answered. One line names that.
+            // An empty page does not also print the ordinary miss, and it
+            // does not say to try again as if no rows were coming.
+            let busy_words = ranking.reason == ljos_cli::MEMORY_SEARCH_BUSY_REASON;
+            let busy_miss = busy_words && hits.is_empty();
+            let close_line = if busy_miss {
+                None
+            } else {
+                close_miss.as_ref().map(|suggest| {
+                    ljos_cli::word_rank::no_close_line_with(&asked, suggest.as_deref())
+                })
+            };
             // A shorter search would miss too when the store is empty, so
             // that page names remember. A store that already holds a lesson
             // names a shorter query instead.
-            let empty_store =
-                hits.is_empty() && close_line.is_none() && !unrelated && ljos_cli::nothing_stored();
+            let empty_store = !busy_miss
+                && hits.is_empty()
+                && close_line.is_none()
+                && !unrelated
+                && ljos_cli::nothing_stored();
             if porcelain {
                 print!("{}", ljos_cli::search_porcelain(&hits, &id_space));
             } else if json {
-                let relevant = floor_emptied.then(|| ljos_cli::word_rank::no_relevant_line(&asked));
-                let empty = relevant
-                    .as_deref()
-                    .or(close_line.as_deref())
-                    .or(unrelated.then_some(ljos_cli::NOTHING_RELEVANT));
-                let suggestion = if empty_store {
+                let relevant = (!busy_miss && floor_emptied)
+                    .then(|| ljos_cli::word_rank::no_relevant_line(&asked));
+                let empty = if busy_miss {
+                    None
+                } else {
+                    relevant
+                        .as_deref()
+                        .or(close_line.as_deref())
+                        .or(unrelated.then_some(ljos_cli::NOTHING_RELEVANT))
+                };
+                let suggestion = if busy_miss {
+                    None
+                } else if empty_store {
                     Some(ljos_cli::scan::store_lesson_command(&asked))
                 } else if floor_emptied {
                     Some(ljos_cli::word_rank::min_score_off_command(&asked))
@@ -5625,6 +5646,12 @@ fn run_command() -> Result<()> {
                         &receipt_rows,
                     )
                 );
+            } else if busy_miss {
+                let rank =
+                    ljos_cli::search_rank_for_person(&ljos_cli::search_rank_line(&ranking, &hits));
+                if !rank.is_empty() {
+                    eprint!("{rank}");
+                }
             } else {
                 let rank =
                     ljos_cli::search_rank_for_person(&ljos_cli::search_rank_line(&ranking, &hits));
@@ -5672,6 +5699,9 @@ fn run_command() -> Result<()> {
                         ))
                     );
                 }
+            }
+            if busy_miss {
+                std::process::exit(1);
             }
         }
         Cmd::Evidence { args } => {
@@ -6246,10 +6276,12 @@ fn run_command() -> Result<()> {
                 );
             } else {
                 if let Some(ranking) = ranking.as_ref() {
-                    eprint!(
-                        "{}",
-                        ljos_cli::search_rank_for_person(&ljos_cli::ranking_line(ranking))
-                    );
+                    let line = if ranking.reason == ljos_cli::MEMORY_SEARCH_BUSY_REASON {
+                        ljos_cli::search_busy_line(!memories.trim().is_empty())
+                    } else {
+                        ljos_cli::ranking_line(ranking)
+                    };
+                    eprint!("{}", ljos_cli::search_rank_for_person(&line));
                 }
                 let page = format!("{}{memories}{code}", said.stdout);
                 print!(
