@@ -316,6 +316,21 @@ fn a_new_seat_walks_from_search_to_finish_without_close() {
         &format!("sitting ended; ticket {id} is still open"),
         "finish without --close",
     );
+    let lines: Vec<&str> = finish.stdout.lines().collect();
+    assert!(
+        lines
+            .first()
+            .is_some_and(|first| first.starts_with("sitting ended; ticket")),
+        "the success line leads: {}",
+        walk.log
+    );
+    assert!(
+        lines
+            .get(1)
+            .is_some_and(|hint| hint.starts_with("no `--lesson` came with this finish")),
+        "the lesson hint follows it: {}",
+        walk.log
+    );
 
     let after = walk.ok(&["show", &id]);
     walk.expect(

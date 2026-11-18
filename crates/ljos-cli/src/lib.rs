@@ -46504,11 +46504,12 @@ pub fn not_assignee_message(
     }
 }
 
-/// The line `ljos finish` prints when the sitting had no lesson. The
-/// command names this issue, so it can be run as written.
+/// The line `ljos finish` prints when the sitting had no lesson. It comes
+/// after the line that says the sitting ended, and its command names this
+/// issue, so it can be run as written.
 fn missing_lesson_line(issue: &str) -> String {
     format!(
-        "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, so run `ljos finish {issue} --lesson \"...\"`"
+        "no `--lesson` came with this finish; a lesson taken earlier with `ljos remember` is kept, so run `ljos finish {issue} --lesson \"...\"` to add one."
     )
 }
 
@@ -47396,10 +47397,6 @@ pub fn finish(
         out.push('\n');
     }
     out.push_str(&lesson_lines);
-    if supplied.is_none() && !ticket_has_lesson(issue) {
-        out.push_str(&missing_lesson_line(issue));
-        out.push('\n');
-    }
     if verbose {
         match packset_island(&title, true) {
             Err(e) => out.push_str(&format!(
@@ -47479,6 +47476,10 @@ pub fn finish(
         }
     } else if handed_back {
         out.push_str(&format!("sitting ended; ticket {issue} is still open\n"));
+    }
+    if supplied.is_none() && !ticket_has_lesson(issue) {
+        out.push_str(&missing_lesson_line(issue));
+        out.push('\n');
     }
     // A cloud seat's deeds leave with the tracker. A box writes nothing.
     let (deeds, deed_paths) = deedbag::on_finish(issue);
@@ -84564,6 +84565,15 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "the memory links stay behind --verbose: {said}"
         );
         assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
+        let ended = said.find("sitting ended; ticket probe-lsn1 is still open");
+        let hint = said.find(&super::missing_lesson_line("probe-lsn1"));
+        assert!(ended < hint, "the hint follows the success line: {said}");
+        assert!(
+            said.lines()
+                .next()
+                .is_some_and(|first| first.starts_with("sitting ended")),
+            "{said}"
+        );
 
         let said = run_finish_lesson(none, Some("   "), true).unwrap();
         assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
