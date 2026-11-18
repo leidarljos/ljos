@@ -11,6 +11,7 @@
 //! A runner session id with no session seat on record gets that seat written.
 //!
 //! Without `--fix`, each of these rows ends with `ljos doctor --fix` in backticks.
+//! The pack row names that one command, and not `packset ensure` as well.
 //! `--fix` prints one line for each repair and one line for each problem
 //! it could not repair, and that line names the one command to run.
 
@@ -25,13 +26,22 @@ const CONFIG_TEXT: &str = "\
 # A key that is not set here keeps its default.\n\
 ";
 
-/// Append the fix hint to a pack row `ljos doctor --fix` can repair.
+/// The ending of a pack row whose one repair is `packset ensure`.
+const ENSURE_TAIL: &str = ", so run `packset ensure`.";
+
+/// Point a pack row at `ljos doctor --fix` when that command makes the
+/// repair. The row names one command: `--fix` runs `packset ensure` itself,
+/// so the row does not also name `packset ensure`. A row whose repair needs
+/// something else first, such as a free `PACKSET_PORT`, is left as it is.
 #[must_use]
 pub(crate) fn hint_pack(state: String) -> String {
-    if state.contains(HINT) || !state.contains("packset ensure") || !pack_may_start() {
+    if state.contains(HINT) || !pack_may_start() {
         return state;
     }
-    format!("{state} {HINT}")
+    match state.strip_suffix(ENSURE_TAIL) {
+        Some(head) => format!("{head}, so {HINT}."),
+        None => state,
+    }
 }
 
 /// Whether the session record already names this process's session seat.

@@ -45,10 +45,12 @@ With ``packset`` on ``PATH`` and nothing listening, a home that is not a tempora
 
 .. code:: text
 
-   no  memory    http://127.0.0.1:8761 does not answer. no pack writer is answering on 127.0.0.1:8761, so run `packset ensure`. run `ljos doctor --fix`
+   no  memory    http://127.0.0.1:8761 does not answer. no pack writer is answering on 127.0.0.1:8761, so run `ljos doctor --fix`.
 
 ..
    # proseguard:on
+
+That one command starts the writer. ``ljos doctor --fix`` runs ``packset ensure`` itself, and prints one line that says it did.
 
 Under a temporary home the writer does not start on its own.
 The home was ``/tmp/seat``.
@@ -59,7 +61,7 @@ The printed row is:
 
 .. code:: text
 
-   no  memory    http://127.0.0.1:8761 does not answer. the memory writer does not start on its own under a temporary HOME (/tmp/seat), so run `packset ensure`. run `ljos doctor --fix`
+   no  memory    http://127.0.0.1:8761 does not answer. the memory writer does not start on its own under a temporary HOME (/tmp/seat), so run `ljos doctor --fix`.
 
 ..
    # proseguard:on

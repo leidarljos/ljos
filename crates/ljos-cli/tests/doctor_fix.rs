@@ -354,9 +354,10 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
     let (text, err) = run(&["doctor"]);
     assert!(!log.exists(), "doctor started packset without --fix\n{err}");
     let pack = row(&text, "memory").unwrap_or("");
+    assert!(pack.ends_with(", so run `ljos doctor --fix`."), "{text}");
     assert!(
-        pack.contains("packset ensure") && pack.ends_with("run `ljos doctor --fix`"),
-        "{text}"
+        !pack.contains("packset ensure"),
+        "the row names one command, the one that does both: {text}"
     );
     assert!(text.contains("seat source"), "{text}");
 
