@@ -8,7 +8,7 @@ mod seat_env;
 #[path = "common/sibling.rs"]
 mod sibling;
 
-use std::io::Write as _;
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -70,6 +70,24 @@ fn call_mcp_env(
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let read_response = |stdout: &mut BufReader<_>, id| {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(
+                stdout.read_line(&mut line).unwrap(),
+                0,
+                "no response for {id}"
+            );
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if value["id"] == id {
+                break value;
+            }
+        }
+    };
     writeln!(
         stdin,
         "{}",
@@ -85,35 +103,38 @@ fn call_mcp_env(
         })
     )
     .unwrap();
+    stdin.flush().unwrap();
+    let initialized = read_response(&mut stdout, 1);
+    assert!(initialized["result"].is_object(), "{initialized}");
     writeln!(
         stdin,
         "{}",
         serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
     )
     .unwrap();
+    let mut answers = Vec::with_capacity(calls.len());
     for (idx, (name, args)) in calls.iter().enumerate() {
+        let id = idx + 2;
         writeln!(
             stdin,
             "{}",
             serde_json::json!({
                 "jsonrpc": "2.0",
-                "id": idx + 2,
+                "id": id,
                 "method": "tools/call",
                 "params": {"name": name, "arguments": args}
             })
         )
         .unwrap();
+        stdin.flush().unwrap();
+        answers.push(read_response(&mut stdout, id));
     }
     drop(stdin);
+    drop(stdout);
     let out = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8(out.stdout).unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(!stderr.contains("panicked"), "stderr:\n{stderr}");
-    stdout
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|value| value["id"].as_u64().is_some_and(|id| id >= 2))
-        .collect()
+    answers
 }
 
 fn result_text(answer: &serde_json::Value) -> String {
