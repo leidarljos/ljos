@@ -1103,6 +1103,7 @@ fn git_fetch(root: &Path, args: &[&str]) -> bool {
     crate::clear_git_repo_env(&mut cmd);
     cmd.arg("-c")
         .arg("protocol.file.allow=always")
+        .args(["-c", "gc.auto=0"])
         .arg("-C")
         .arg(root)
         .args(args)

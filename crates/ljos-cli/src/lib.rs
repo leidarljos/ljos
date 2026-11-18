@@ -47385,6 +47385,14 @@ pub fn finish(
     // rest of the pack waits for `ljos sync`.
     out.push_str(&flush_queue_before_seal());
     out.push_str(&sync::seal_ticket_in_passing(issue).unwrap_or_else(|e| format!("sync: {e:#}\n")));
+    if !matches!(
+        std::env::var("LJOS_TRACKER_GIT").ok().as_deref(),
+        Some("off" | "0" | "false")
+    ) {
+        if let Ok(layout) = vissue_core::Layout::resolve(None, None) {
+            maybe_gc_tracker(layout.root());
+        }
+    }
     Ok(out)
 }
 
@@ -47686,8 +47694,48 @@ pub(crate) fn git_at(dir: &Path) -> std::process::Command {
     // a hook would have exported, so `-C` is the checkout.
     apply_git_command_env(&mut cmd);
     clear_git_repo_env(&mut cmd);
-    cmd.arg("-C").arg(dir);
+    cmd.arg("-C").arg(dir).args(["-c", "gc.auto=0"]);
     cmd
+}
+
+/// Trigger a detached `git gc --auto` on `root`. Called at the end of
+/// `finish` and `sync` because per-commit tracker git commands pass
+/// `gc.auto=0`.
+pub(crate) fn maybe_gc_tracker(root: &Path) {
+    if refuse_ljos_checkout(root).is_err() {
+        return;
+    }
+    let mut gc = git_cmd();
+    apply_git_command_env(&mut gc);
+    clear_git_repo_env(&mut gc);
+    gc.arg("-C")
+        .arg(root)
+        .args(["-c", "gc.autoDetach=true", "gc", "--auto", "-q"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let cap = call_deadline::timeout();
+    let left = wall_left()
+        .unwrap_or(cap)
+        .min(cap)
+        .max(std::time::Duration::from_millis(1));
+    let Ok(mut child) = gc.spawn() else {
+        return;
+    };
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if start.elapsed() < left => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    }
 }
 
 /// Discovery should not walk up from a scratch path under `target/` into an
@@ -48495,6 +48543,7 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         let mut cmd = git_cmd();
         cmd.arg("-C")
             .arg(dir)
+            .args(["-c", "gc.auto=0"])
             .args(head)
             .arg("--")
             .args(paths)
