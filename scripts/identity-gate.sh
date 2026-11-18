@@ -13,9 +13,40 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-if ! hashes=$(git rev-list "$@"); then
-  echo "identity-gate: git rev-list failed" >&2
-  exit 1
+read_hashes() {
+  git rev-list "$@"
+}
+
+fallback_hashes() {
+  [ "$#" -eq 1 ] || return 1
+  case "$1" in
+    *..*) ;;
+    *) return 1 ;;
+  esac
+  before=${1%%..*}
+  after=${1#*..}
+  [ -n "$before" ] || return 1
+  [ -n "$after" ] || return 1
+  if base=$(git merge-base "$after" origin/develop 2>/dev/null); then
+    read_hashes "$base..$after"
+    return $?
+  fi
+  if only_new=$(read_hashes "$after" --not \
+    --exclude="refs/remotes/origin/HEAD" \
+    --remotes=origin 2>/dev/null); then
+    if [ -n "$only_new" ]; then
+      printf '%s\n' "$only_new"
+      return 0
+    fi
+  fi
+  read_hashes -1 "$after"
+}
+
+if ! hashes=$(read_hashes "$@"); then
+  if ! hashes=$(fallback_hashes "$@"); then
+    echo "identity-gate: git rev-list failed" >&2
+    exit 1
+  fi
 fi
 
 want="Rohit Goswami <rgoswami@ieee.org>"

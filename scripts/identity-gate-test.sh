@@ -188,6 +188,32 @@ must_fail "new branch trailer" "$gate" HEAD --not \
   --exclude="origin/HEAD" \
   --remotes=origin
 
+missing_before=1111111111111111111111111111111111111111
+
+# Push event fallback: unreachable before falls back to merge-base with
+# origin/develop.
+git checkout -q -B fallback-with-develop "$base"
+git commit --allow-empty -q -m "fallback keeps new work"
+git update-ref refs/remotes/origin/develop "$base"
+"$gate" "$missing_before..HEAD"
+git commit --allow-empty -q -m "note" \
+  -m "Co-authored-by: Ada Lovelace <ada@example.com>"
+must_fail "fallback with develop catches trailer" "$gate" "$missing_before..HEAD"
+
+# If origin/develop is missing, fallback judges the pushed commits alone.
+git update-ref -d refs/remotes/origin/develop
+git checkout -q -B fallback-head-only "$base"
+GIT_AUTHOR_NAME="Ada Lovelace" \
+  GIT_AUTHOR_EMAIL="ada@example.com" \
+  git commit --allow-empty -q -m "older foreign already on remote"
+old_foreign=$(git rev-parse HEAD)
+git update-ref refs/remotes/origin/old "$old_foreign"
+git commit --allow-empty -q -m "fallback without develop keeps new work"
+"$gate" "$missing_before..HEAD"
+git commit --allow-empty -q -m "note" \
+  -m "Co-authored-by: Ada Lovelace <ada@example.com>"
+must_fail "fallback without develop catches trailer" "$gate" "$missing_before..HEAD"
+
 must_fail "missing range" "$gate"
 
 echo "identity-gate-test: ok"
