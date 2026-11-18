@@ -907,3 +907,53 @@ fn release_of_an_unclaimed_todo_mints_no_node() {
         world.bob_graph()
     );
 }
+
+#[test]
+fn ljos_claim_names_the_same_missing_ticket_line_as_the_cli() {
+    let world = Shared::new();
+
+    let missing = world.bob_ljos(&["claim", "demo-nope"]);
+    let missing_line = String::from_utf8_lossy(&missing.stderr).trim().to_string();
+    assert!(
+        missing_line.contains("`ljos ready`"),
+        "cli missing line:\n{missing_line}"
+    );
+    let over = world.bob_mcp(
+        "ljos_claim",
+        serde_json::json!({"seat": "bob", "node": "demo-nope"}),
+    );
+    assert_eq!(over["result"]["isError"], true, "{over}");
+    let over_text = over["result"]["content"]
+        .as_array()
+        .and_then(|blocks| blocks.first())
+        .and_then(|block| block["text"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    assert_eq!(over_text, missing_line, "{over}");
+
+    let near = world.bob_ljos(&["claim", "demo-sh"]);
+    let near_line = String::from_utf8_lossy(&near.stderr).trim().to_string();
+    assert!(
+        near_line.contains("`ljos show demo-shr1`"),
+        "cli closest line:\n{near_line}"
+    );
+    let near_mcp = world.bob_mcp(
+        "ljos_claim",
+        serde_json::json!({"seat": "bob", "node": "demo-sh"}),
+    );
+    assert_eq!(near_mcp["result"]["isError"], true, "{near_mcp}");
+    let near_text = near_mcp["result"]["content"]
+        .as_array()
+        .and_then(|blocks| blocks.first())
+        .and_then(|block| block["text"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    assert_eq!(near_text, near_line, "{near_mcp}");
+    assert!(
+        !world.bob_graph().contains("demo-sh") && !world.bob_graph().contains("demo-nope"),
+        "a missing ljos_claim minted a node:\n{}",
+        world.bob_graph()
+    );
+}

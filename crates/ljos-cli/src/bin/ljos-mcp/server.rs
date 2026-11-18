@@ -2562,6 +2562,9 @@ impl LjosServer {
         Parameters(args): Parameters<TakeArgs>,
     ) -> Result<Json<Said>, McpError> {
         let assignee = call_assignee("claim", args.assignee.as_deref())?;
+        if let Some(line) = ljos_cli::ticket_node_refusal(&args.node) {
+            return Err(refused(anyhow::anyhow!(line)));
+        }
         ljos_cli::require_ticket_to_claim(&args.node).map_err(refused)?;
         let text = claim(&args.node, &assignee).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
