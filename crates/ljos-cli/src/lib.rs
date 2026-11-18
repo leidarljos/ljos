@@ -39768,6 +39768,58 @@ fn live_gen(id: &str, gen: Option<u64>) -> Result<u64> {
     })
 }
 
+/// `vissue_core::ops::note` for a ticket whose board may still carry old
+/// `Claimed-by` rows. The library reparses the file without them, so its
+/// write folds each stamp into the note text and leaves a line that no
+/// longer imports. This reads the stamps first and writes them back as
+/// they were.
+///
+/// # Errors
+///
+/// `text` is empty, `issue` is not on the tracker, or the file cannot be
+/// rewritten.
+pub(crate) fn note_keeping_claim_stamps(
+    layout: &vissue_core::Layout,
+    issue: &str,
+    text: &str,
+) -> Result<String> {
+    let text = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('"', "'");
+    if text.is_empty() {
+        bail!("note text is empty");
+    }
+    let hit = vissue_core::Router::load(layout.clone())?.find_by_id(issue)?;
+    let path = hit.path.clone();
+    let project = hit.project.clone();
+    let said = vissue_core::store::with_issues_lock(&path, || {
+        let mut doc = vissue_core::IssueDoc::parse_file(&project, &path)?;
+        keep_claim_stamps_on_disk(&mut doc, issue);
+        let heading = doc
+            .headings
+            .iter_mut()
+            .find(|heading| heading.id == issue)
+            .ok_or_else(|| vissue_core::Error::IssueNotFound {
+                id: issue.to_string(),
+            })?;
+        heading.logbook.insert(
+            0,
+            vissue_core::LogEntry {
+                timestamp: vissue_core::LogEntry::now(),
+                from_state: None,
+                to_state: None,
+                note: Some(text.clone()),
+                raw: None,
+            },
+        );
+        doc.write()?;
+        Ok(format!("{issue}: noted\n"))
+    })?;
+    Ok(said)
+}
+
 /// Put `text` on `issue` as a logbook note. A write that follows
 /// `ljos_start` uses this so the conversation keeps the one issue start
 /// opened.
@@ -39781,8 +39833,8 @@ pub fn attach_to_issue(issue: &str, text: &str) -> Result<String> {
         bail!("note: the text is empty");
     }
     let layout = vissue_core::Layout::resolve(None, None)?;
-    let said =
-        vissue_core::ops::note(&layout, issue, text).with_context(|| format!("note: {issue}"))?;
+    let said = note_keeping_claim_stamps(&layout, issue, text)
+        .with_context(|| format!("note: {issue}"))?;
     let persisted = persist_tracker(issue, "noted");
     Ok(format!("noted on {issue}\n{said}{persisted}"))
 }
@@ -43907,7 +43959,7 @@ pub fn reparent_issue(issue: &str, parent: &str) -> Result<String> {
         return Ok(format!("parent: {issue} is already under {parent}\n"));
     };
     let note = format!("parent changed: {was_parent} -> {parent}");
-    vissue_core::ops::note(&layout, issue, &note)
+    note_keeping_claim_stamps(&layout, issue, &note)
         .with_context(|| format!("parent: note: {issue}"))?;
     Ok(format!(
         "parent: {issue} now has parent {parent}\n{}",
@@ -67871,6 +67923,52 @@ mod tests {
             "import lost the stamp: {:?}",
             again.headings[0].logbook[0]
         );
+    }
+
+    /// A note written through the library call folds an old `Claimed-by`
+    /// stamp into its text, so the next import cannot read the row.
+    /// The helper `ljos parent` and `ljos_start` write through leaves each
+    /// stamp as it was on every ticket in the file.
+    #[test]
+    fn a_note_written_beside_old_claimed_by_stamps_leaves_them_importable() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = vissue_core::Layout::new(dir.path(), "Software");
+        std::fs::create_dir_all(layout.projects_dir()).unwrap();
+        let path = layout.project_issues_path("probe");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let minute = "[2026-11-17 Tue 17:13]";
+        let board = format!(
+            "#+TITLE: probe issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
+* TODO [#C] alpha\n:PROPERTIES:\n:ID:         aaa-1111\n:END:\n:LOGBOOK:\n\
+- Note: \"noon\" Claimed-by: saddle {minute}\n\
+- Claimed by saddle {minute}\n\
+:END:\n\
+* TODO [#C] beta\n:PROPERTIES:\n:ID:         bbb-2222\n:END:\n:LOGBOOK:\n\
+- Note: \"beta note\" Claimed-by: fortran {minute}\n\
+:END:\n"
+        );
+        std::fs::write(&path, &board).unwrap();
+        let said =
+            super::note_keeping_claim_stamps(&layout, "aaa-1111", "a \"later\"   word").unwrap();
+        assert!(said.contains("noted"), "{said}");
+        let rendered = std::fs::read_to_string(&path).unwrap();
+        for line in [
+            format!("- Note: \"noon\" Claimed-by: saddle {minute}"),
+            format!("- Claimed by saddle {minute}"),
+            format!("- Note: \"beta note\" Claimed-by: fortran {minute}"),
+        ] {
+            assert_eq!(
+                rendered.lines().filter(|l| *l == line).count(),
+                1,
+                "{line}\n{rendered}"
+            );
+        }
+        assert!(
+            rendered.contains("- Note: \"a 'later' word\" ["),
+            "{rendered}"
+        );
+        let again = vissue_core::IssueDoc::parse_file("probe", &path).unwrap();
+        assert_eq!(again.headings.len(), 2);
     }
 
     /// A rewrite of one ticket renders the whole file. Legacy `Claimed-by`
