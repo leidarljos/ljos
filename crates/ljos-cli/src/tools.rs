@@ -137,6 +137,35 @@ pub fn sh_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
+/// A shell word for prose: bare when safe to paste, else [`sh_quote`].
+///
+/// Safe values use only ASCII letters, digits, and `_@%+=:,./-`, and do not
+/// start with `-`.
+#[must_use]
+pub fn sh_word(word: &str) -> String {
+    if word.is_empty() || word.starts_with('-') {
+        return sh_quote(word);
+    }
+    let safe = |b: u8| {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
+            )
+    };
+    if word.bytes().all(safe) {
+        word.to_string()
+    } else {
+        sh_quote(word)
+    }
+}
+
+/// `cp` from `from` to `to`, safe to paste.
+#[must_use]
+pub fn shell_cp(from: &str, to: &str) -> String {
+    format!("cp -- {} {}", sh_quote(from), sh_quote(to))
+}
+
 /// `argv` with every `{key}` replaced from `vars`. A placeholder with no
 /// value is left as written, so a typo reaches the tool and its refusal
 /// names it.
@@ -381,6 +410,24 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["zellij", "tmux", "herdr"]);
         assert_eq!(tools[1], mine);
+    }
+
+    #[test]
+    fn sh_word_leaves_a_safe_token_bare() {
+        assert_eq!(sh_word("LJOS_WAKE_INKY_URL"), "LJOS_WAKE_INKY_URL");
+        assert_eq!(sh_word("probe-mine"), "probe-mine");
+    }
+
+    #[test]
+    fn sh_word_quotes_a_value_with_a_space_or_quote() {
+        assert_eq!(sh_word("has space"), "'has space'");
+        assert_eq!(sh_word("bob's"), "'bob'\\''s'");
+    }
+
+    #[test]
+    fn shell_cp_quotes_a_leading_dash_path() {
+        let line = shell_cp("/tmp/-dash/ballot.key", "/tmp/new/ballot.key");
+        assert_eq!(line, "cp -- '/tmp/-dash/ballot.key' '/tmp/new/ballot.key'");
     }
 
     #[test]

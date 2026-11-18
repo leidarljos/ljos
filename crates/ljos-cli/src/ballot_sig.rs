@@ -378,6 +378,30 @@ pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
     seat_key_file(seat)
 }
 
+struct SeatBallotPaths {
+    current: PathBuf,
+    folded_old: PathBuf,
+    name: String,
+    folded: String,
+}
+
+fn seat_ballot_paths(seat: &str) -> Option<SeatBallotPaths> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+    let seats = base.join("ljos").join("seats");
+    let seat = seat.trim();
+    let name = seat_dir_name(seat);
+    let folded = folded_seat_dir_name(seat);
+    Some(SeatBallotPaths {
+        current: seats.join(&name).join("ballot.key"),
+        folded_old: seats.join(&folded).join("ballot.key"),
+        name,
+        folded,
+    })
+}
+
 /// The per-seat key file, ignoring `LJOS_SEAT_KEY`.
 ///
 /// The directory keeps ASCII letters, digits, `-` and `.`, and writes any
@@ -387,25 +411,36 @@ pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
 /// so the folded file is no seat's current key.
 #[must_use]
 pub fn seat_key_file(seat: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-    let seats = base.join("ljos").join("seats");
-    let seat = seat.trim();
-    let name = seat_dir_name(seat);
-    let path = seats.join(&name).join("ballot.key");
-    let folded = folded_seat_dir_name(seat);
-    if folded != name && !folded.starts_with('.') && !path.exists() {
-        let old = seats.join(folded).join("ballot.key");
-        if old.is_file() {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::rename(&old, &path);
+    let layout = seat_ballot_paths(seat)?;
+    let path = layout.current;
+    if layout.folded != layout.name
+        && !layout.folded.starts_with('.')
+        && !path.exists()
+        && layout.folded_old.is_file()
+    {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
         }
+        let _ = std::fs::rename(&layout.folded_old, &path);
     }
     Some(path)
+}
+
+/// A `cp` line when an older folded ballot key still sits on disk and was
+/// not renamed into the seat path.
+#[must_use]
+pub fn seat_key_copy_line(seat: &str) -> Option<String> {
+    let layout = seat_ballot_paths(seat)?;
+    if layout.folded == layout.name || layout.current.is_file() || !layout.folded_old.is_file() {
+        return None;
+    }
+    Some(format!(
+        "seat key: copy with {}",
+        crate::tools::shell_cp(
+            &layout.folded_old.display().to_string(),
+            &layout.current.display().to_string(),
+        )
+    ))
 }
 
 fn seat_dir_name(seat: &str) -> String {
@@ -1978,6 +2013,22 @@ mod tests {
             std::fs::metadata(&a).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn a_folded_dot_seat_names_a_cp_line_with_dash_dash() {
+        let _lock = crate::test_env_lock();
+        let data = tempfile::tempdir().unwrap();
+        crate::with_env_mutation(|| {
+            // SAFETY: this test has the process environment lock.
+            unsafe { std::env::set_var("XDG_DATA_HOME", data.path()) };
+        });
+        let folded = data.path().join("ljos/seats/.dotseat/ballot.key");
+        std::fs::create_dir_all(folded.parent().unwrap()).unwrap();
+        std::fs::write(&folded, [9u8; 32]).unwrap();
+        let line = seat_key_copy_line(".dotseat").expect("copy line");
+        assert!(line.contains("cp -- "), "{line}");
+        assert!(line.contains(&folded.display().to_string()), "{line}");
     }
 
     #[test]
