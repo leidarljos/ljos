@@ -17,7 +17,7 @@ Writers: ``ljos_start``, ``ljos_file``, ``ljos_options``, ``ljos_note``, ``ljos_
 ``start_a_sitting``, ``run_a_panel``, ``check_a_handover``. Most tool descriptions open with
 when to call it. The resources are Markdown: the listing and a read both say ``text/markdown``. Every description in the tool, prompt and resource listings is one line.
 
-A writer needs a seat, and a reader runs with none. Six writers read until a call asks them to write: ``ljos_deed`` without ``add``, ``ljos_vote`` with no ballot, ``ljos_bump_plan`` with ``dry_run``, ``ljos_findings`` with neither ``remember`` nor ``issue``, ``ljos_group`` that only lists, and ``ljos_island`` without ``fire``.
+A writer needs a seat, and a reader runs with none. Seven writers read until a call asks them to write: ``ljos_deed`` without ``add``, ``ljos_vote`` with no ballot, ``ljos_bump_plan`` with ``dry_run``, ``ljos_habit`` with no ``value``, ``ljos_findings`` with neither ``remember`` nor ``issue``, ``ljos_group`` that only lists, and ``ljos_island`` without ``fire``. Each tool's ``seat`` argument says which kind it is: optional on a reader, needed on a shared server for a writer, and needed when the call writes for these seven.
 
 ``ljos_mail_search`` and ``ljos_mail_show`` read the owner's mailbox through notmuch. They are not in the core set, so ask for them with ``LJOS_MCP_TOOLS=core,mail_search,mail_show``. Both refuse until a ``[mail]`` table in the user's own ``ljos.toml`` names ``notmuch_config``, and a cloud seat refuses them. The `mail design <https://github.com/leidarljos/ljos/blob/develop/docs/design/mail.md>`__ has the table and the content checks.
 

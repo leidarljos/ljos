@@ -406,8 +406,31 @@ fn seat_argument(
     }
 }
 
-const SEAT_PROPERTY: &str =
-    "This seat's name. A write needs seat on a shared server. A read still runs with none.";
+const SEAT_ON_READ: &str = "This seat's name. Optional: this tool only reads.";
+const SEAT_ON_MIXED: &str = "This seat's name. Needed on a shared server when the call writes.";
+const SEAT_ON_WRITE: &str =
+    "This seat's name. Needed on a shared server, as this tool writes. `ljos seat` prints it.";
+
+/// Tools that read or write depending on the arguments.
+const SEAT_MIXED_TOOLS: &[&str] = &[
+    "ljos_deed",
+    "ljos_vote",
+    "ljos_bump_plan",
+    "ljos_habit",
+    "ljos_findings",
+    "ljos_group",
+    "ljos_island",
+];
+
+fn seat_property(name: &str) -> &'static str {
+    if runs_without_seat(name) {
+        SEAT_ON_READ
+    } else if SEAT_MIXED_TOOLS.contains(&name) {
+        SEAT_ON_MIXED
+    } else {
+        SEAT_ON_WRITE
+    }
+}
 
 /// One line for a write that named no seat and has no stamped seat of its own.
 fn missing_seat_line(tool: &str) -> String {
@@ -480,14 +503,14 @@ fn finish_close_line(issue: &str, text: &str) -> String {
 /// server reads it before the handler runs. It is not required in the
 /// schema. A write on a shared server still has to pass it, or the
 /// session has to carry a stamped seat of its own.
-fn offer_seat(schema: &mut serde_json::Map<String, serde_json::Value>) {
+fn offer_seat(name: &str, schema: &mut serde_json::Map<String, serde_json::Value>) {
     let properties = schema
         .entry("properties")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if let serde_json::Value::Object(map) = properties {
         map.entry("seat").or_insert_with(|| {
             serde_json::json!({
-                "description": SEAT_PROPERTY,
+                "description": seat_property(name),
                 "type": "string"
             })
         });
@@ -590,7 +613,7 @@ fn finish_schema(schema: &mut serde_json::Map<String, serde_json::Value>) {
 /// The tool as `tools/list` sends it.
 fn publish_tool(tool: &mut Tool) {
     let mut schema = tool.input_schema.as_ref().clone();
-    offer_seat(&mut schema);
+    offer_seat(&tool.name, &mut schema);
     finish_schema(&mut schema);
     tool.input_schema = std::sync::Arc::new(schema);
     if let Some(output) = tool.output_schema.take() {
@@ -5815,7 +5838,7 @@ mod tests {
             );
             assert_eq!(
                 seat.get("description").and_then(|value| value.as_str()),
-                Some(SEAT_PROPERTY),
+                Some(seat_property(&tool.name)),
                 "{}",
                 tool.name
             );

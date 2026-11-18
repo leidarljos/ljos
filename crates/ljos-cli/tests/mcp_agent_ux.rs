@@ -497,3 +497,32 @@ fn the_less_used_tools_say_what_they_do_in_plain_words() {
         "{policy}"
     );
 }
+
+#[test]
+fn the_seat_argument_says_whether_that_tool_needs_it() {
+    let mut session = Session::open(&[("LJOS_MCP_TOOLS", "all")]);
+    let response = session.request("tools/list", serde_json::json!({}));
+    let tools = response["result"]["tools"].as_array().expect("tools");
+    let seat_of = |name: &str| -> String {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is not listed"));
+        tool["inputSchema"]["properties"]["seat"]["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name} has no seat description"))
+            .to_string()
+    };
+    assert_eq!(
+        seat_of("ljos_show"),
+        "This seat's name. Optional: this tool only reads."
+    );
+    assert_eq!(
+        seat_of("ljos_note"),
+        "This seat's name. Needed on a shared server, as this tool writes. `ljos seat` prints it."
+    );
+    assert_eq!(
+        seat_of("ljos_vote"),
+        "This seat's name. Needed on a shared server when the call writes."
+    );
+}
