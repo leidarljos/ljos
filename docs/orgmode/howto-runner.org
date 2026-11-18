@@ -78,11 +78,17 @@ $ ljos onboard --harness json
 
 =ljos onboard= with no =--harness= onboards every runner it finds, at a terminal or in a pipe, and a pipe prints that JSON on stdout with the setup lines on stderr after the tracker, the memory writer and the deed store are set up.
 =ljos onboard --harness json= prints the JSON alone and leaves those stores unchanged.
-Paste it where the runner keeps its MCP servers. The =env= is empty on
-purpose. The server names the seat after the client that connects, so a
-runner that calls itself =acme-cli= is the seat =acme-cli= and a
-runner that calls itself =brio= is =brio=, with nothing set per runner.
-A shell the runner opens finds its seat through =LJOS_SEAT= when that is set. Writes on a shared ljos mcp server still take =seat= in the tool arguments or a stamped runner session.
+Paste it where the runner keeps its MCP servers.
+
+The server stays up when =packsetd= restarts and while the client is quiet.
+A line that is not JSON, an unknown method, a missing tracker, a missing seat, or a busy pack is one line and names the command that fixes it.
+=ljos_show= reads a ticket the way =ljos show= does.
+
+The =env= is empty on
+purpose. The server does not take the seat from the client that connects.
+Set =LJOS_SEAT= in that entry's =env=, or a =seat== line in
+=~/.config/ljos/env=, or a row in =~/.config/ljos/seats.toml= for reads; writes on a shared ljos mcp server still take =seat= in the tool arguments or a stamped runner session.
+A shell the runner opens finds its seat through =LJOS_SEAT= when that is set.
 The process tree is not a seat. With =LJOS_SEAT= unset, Claude Code, Codex and Cursor each take a seat from the session id the runner stamps.
 Two sessions are =claude-= and a short id, not one shared =claude=.
 Mail from one names that session, so the other can answer it.
@@ -98,21 +104,15 @@ holder	every-seat
 source	no seat rule matched; reading every seat
 #+end_src
 
-A read with no seat named looks at every seat. Set one with =export LJOS_SEAT=NAME=.
-A write with none set uses the login name, or a short stable name when that login is missing, and the first write says to set =LJOS_SEAT=.
-After a client connects, the source is the name that client sent:
-
-#+begin_src console
-$ ljos seat
-seat	acme-cli
-holder	acme-cli-39u
-source	the client name the MCP server received
-#+end_src
+A read with no seat named looks at every seat. Set one with =export LJOS_SEAT=ada=.
+After a client connects, =ljos seat= in that server's environment still
+reads =LJOS_SEAT=. The name the client sent is not the source. A write
+with none set uses the login name, or a short stable name when that login is missing, and the first write says to set =LJOS_SEAT=.
 
 The protocol goes where the agent reads its instructions: =ljos protocol=
 prints it, the server serves the same text at =ljos://protocol= and names
 it in its instructions, so a runner that loads neither skills nor
-resources still reads it first. Each tool description opens with when to
+resources still reads it first. Most tool descriptions open with when to
 call it.
 
 A runner that registers servers by a command of its own, or reads them

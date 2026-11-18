@@ -1,11 +1,12 @@
-.. [[[cog import ljos_version as v; v.lines("", ":description: A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos {version}.", ":cover: https://leidarljos.github.io/ljos/_static/og.png", "", "A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos {version}.", "")]]]
-
-:description: A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.44.0.
+:description: A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.44.0.
+===============
+Getting started
+===============
 
-.. [[[end]]]
+
+A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.44.0.
 
 Do the sections in order. They install ljos, store a lesson, search it, and open a day's work as a plan.
 The last section puts a second seat on a single ticket. The how-to guides cover one task each after that.
@@ -55,16 +56,16 @@ When the install stops
 
 The script names the cause and the command that fixes it.
 
-- There is no network, or the release download fails. Check the connection and run ``sh install.sh`` again. A version you name is ``sh install.sh --version VER``. Archives already on disk are ``sh install.sh --asset-dir DIR``.
-- The OS or CPU is not Linux or macOS on x86_64 or aarch64. The script prints one line naming those systems and ``cargo install --locked`` for the seat programs. On Windows, run the script inside WSL.
-- ``curl`` or ``wget``, ``tar``, or ``sha256sum`` is missing. On macOS the checksum tool is ``shasum``. The script names the missing tool. Install it and run ``sh install.sh`` again. Programs already unpacked are ``sh install.sh --from-dir DIR``.
-- A checksum does not match, or the download stops early. The script stops, deletes the partial file, and says to run ``sh install.sh`` again.
-- The install directory is not writable. The script names it and ``sh install.sh --bin-dir DIR``.
-- The install directory is not on ``PATH``. The script prints the line for bash (``~/.bashrc``), zsh (``~/.zshrc``) and fish (``~/.config/fish/config.fish``). It does not edit those files. ``--modify-path`` writes the bash and zsh lines. The Next line puts that directory on PATH and names the following command. With ``--no-onboard`` that command is ``ljos onboard``. An install that already ran ``ljos onboard`` names ``ljos doctor``.
-- An older ``ljos`` is earlier on ``PATH``. The script names both binaries and prints the ``export PATH`` line that puts the new one first.
-- Running the script again over the same version says it reinstalled that version. An older install says it updated, and names both versions.
-- ``--version VER`` or ``--pin REPO=VER`` for a release that does not exist says so, names the releases page, and the command ``sh install.sh --version VER`` or ``sh install.sh --pin REPO=VER``. A version the script itself names, when that release is not published and Rust is not installed, installs the latest release of that program and says so. With Rust installed, it builds that version from source.
-- A running ``ljos-mcp`` keeps the previous binary. Restart the assistant, or ``kill`` the pid the script prints, then run ``ljos doctor``.
+-  There is no network, or the release download fails. Check the connection and run ``sh install.sh`` again. A version you name is ``sh install.sh --version VER``. Archives already on disk are ``sh install.sh --asset-dir DIR``.
+-  The OS or CPU is not Linux or macOS on x86\ :sub:`64` or aarch64. The script prints one line naming those systems and ``cargo install --locked`` for the seat programs. On Windows, run the script inside WSL.
+-  ``curl`` or ``wget``, ``tar``, or ``sha256sum`` is missing. On macOS the checksum tool is ``shasum``. The script names the missing tool. Install it and run ``sh install.sh`` again. Programs already unpacked are ``sh install.sh --from-dir DIR``.
+-  A checksum does not match, or the download stops early. The script stops, deletes the partial file, and says to run ``sh install.sh`` again.
+-  The install directory is not writable. The script names it and ``sh install.sh --bin-dir DIR``.
+-  The install directory is not on ``PATH``. The script prints the line for bash (``~/.bashrc``), zsh (``~/.zshrc``) and fish (``~/.config/fish/config.fish``). It does not edit those files. ``--modify-path`` writes the bash and zsh lines. The Next line puts that directory on PATH and names the following command. With ``--no-onboard`` that command is ``ljos onboard``. An install that already ran ``ljos onboard`` names ``ljos doctor``.
+-  An older ``ljos`` is earlier on ``PATH``. The script names both binaries and prints the ``export PATH`` line that puts the new one first.
+-  Running the script again over the same version says it reinstalled that version. An older install says it updated, and names both versions.
+-  ``--version VER`` or ``--pin REPO=VER`` for a release that does not exist says so, names the releases page, and the command ``sh install.sh --version VER`` or ``sh install.sh --pin REPO=VER``. A version the script itself names, when that release is not published and Rust is not installed, installs the latest release of that program and says so. With Rust installed, it builds that version from source.
+-  A running ``ljos-mcp`` keeps the previous binary. Restart the assistant, or ``kill`` the pid the script prints, then run ``ljos doctor``.
 
 ``ljos onboard`` with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store, and the line names those three and ``ljos doctor`` as the next command. The deed store keeps signed records of the work. Install an agent, then run ``ljos onboard``. ``ljos onboard --example`` lists the tools.
 A pipe sets up the same three, with the Model Context Protocol (MCP) entry as the only text on stdout and the setup lines on stderr.
@@ -94,10 +95,10 @@ The tracker commits each change, so git needs an identity:
    $ git config --global user.name "Your Name"
    $ git config --global user.email "you@example.com"
    $ ljos doctor
-   warn	seat source	no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
-   info	encoder	not installed. Search matches words, so run `cargo install --locked packset-embed`.
-   info	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
-   ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
+   warn    seat source no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
+   info    encoder not installed. Search matches words, so run `cargo install --locked packset-embed`.
+   info    sitting gate    not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
+   ok  config  no ljos.toml key and no LJOS_ variable is set; defaults stand
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
 
 Without those two commands, ``ljos doctor`` adds a ``warn`` row named ``git identity`` that names them, and a tracker write is refused with the same two commands.
@@ -109,8 +110,6 @@ The ``sitting-gate`` row follows that. With no agent runner above the shell the 
 Under a runner the same row names the seat and the branches a push waits on, ``develop`` or ``main``, and the number of seats that push waits for.
 A fresh tracker has no seat list, so that number is 2. When ``vissue.toml`` lists one active seat, that seat's own vote settles the push.
 A ``warn`` or ``no`` row names anything that still needs action, and the ready line follows those rows. The config row is always printed. With nothing set it says the defaults apply. A missing ``ljos.toml`` is not a warning, because those defaults cover it. ``ljos doctor --fix`` writes that file when asked, and the file sets no keys. The next command is still ``ljos remember``. Add ``--all`` to see every row.
-
-Two sessions of one runner do not share a seat. With ``LJOS_SEAT`` unset, Claude Code, Codex and Cursor each take a name from the session id in this process, such as ``claude-k3j9x0a1b2``. An id that exists only on a parent does not count. Mail, claims and notes use that name, so one session can write to the other. Search and recall still read the whole runner: a lesson stored by one session is there for the next. Set ``LJOS_SEAT`` to a name of your own when the sessions should be one seat. ``ljos seat`` prints the name and where it came from. The how-to :doc:`Run two agents on one repository <howto-agents>` walks that case.
 
 To install by hand, with ``cargo-binstall`` already on ``PATH``, or to see what onboarding would write:
 
@@ -133,8 +132,6 @@ Trust it again after an upgrade rewrites one.
 A lesson and a search
 =====================
 
-.. BEGIN ljos-sample tutorial-search
-
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
@@ -151,8 +148,6 @@ A lesson and a search
      The lexical default is BM25+. It beat BM25 by two points on turns.
      place 1, 2 of 2 checks, id a6ae2751
 
-.. END ljos-sample tutorial-search
-
 The id and the review time are the ones that run printed. ``ljos show a6ae2751`` opens that memory. A ``local:`` id opens the same way. The name is the login name. This sample's login is ada.
 That line is printed on the first write that had to pick a seat. A later write in the same place does not print it again. A conversation that already has a seat record writes as that seat and does not print the line.
 Typed at a terminal, the search row says ``lesson, today``.
@@ -165,8 +160,6 @@ When the encoder ranked the page, this seat's hits come first. A word ranking gi
 That floor is the one the prompt hook uses for a hit the encoder lists at the top.
 A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is ``Nothing relevant was found.`` A match-mode line is not printed on that empty page.
 A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, ``0`` does not wait), following ``Retry-After`` or a JSON ``retry_ms``, and a writer that becomes free still ranks by meaning. When that wait runs out, search ranks by words, keeps a hit that names the subject, and the one line is ``The memory pack was busy, so these rows are word matches; run the search again for ranked results.`` When no words match, the line is ``The memory pack was busy and no words matched.`` and the command exits 1. A writer that is not running names ``packset ensure``.
-
-.. BEGIN ljos-sample tutorial-prefer
 
 .. code:: console
 
@@ -181,8 +174,6 @@ A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, 
    preference, today
      CombMNZ over RRF for fusing two ballots.
      place 1, 2 of 2 checks, id f8b725a9
-
-.. END ljos-sample tutorial-prefer
 
 ``ljos due`` lists claims when their review time arrives. A claim you stop reviewing sinks in search.
 The how-to :doc:`Keep memory current <howto-memory>` is the review clock, ``ljos graded`` and ``ljos forget``.
@@ -202,7 +193,9 @@ The id is the only line on standard output, so ``id=$(LJOS_SEAT=alice ljos file 
 The heading and the path are on standard error. A commit that landed is not printed. ``ljos file --verbose`` prints it. A refusal is still printed. The id in the heading is the same one.
 The ``file:`` line is the absolute path. ``/home/you`` above names the home directory.
 Under a runner that already recorded a seat, ljos names both and writes as ``LJOS_SEAT``.
-With no git identity the heading is still written, and the last line is ``The tracker commit was refused: Author identity unknown. Set it with `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`, then run the command again.``
+
+Two sessions of one runner do not share a seat. With ``LJOS_SEAT`` unset, Claude Code, Codex and Cursor each take a name from the session id in this process, such as ``claude-k3j9x0a1b2``. An id that exists only on a parent does not count. Mail, claims and notes use that name, so one session can write to the other. Search and recall still read the whole runner: a lesson stored by one session is there for the next. Set ``LJOS_SEAT`` to a name of your own when the sessions should be one seat. ``ljos seat`` prints the name and where it came from. The how-to :doc:`Run two agents on one repository <howto-agents>` walks that case.
+With no git identity the heading is still written, and the last line is :literal:`The tracker commit was refused: Author identity unknown. Set it with \`git config --global user.name "Your Name"` and \`git config --global user.email "you@example.com"\`, then run the command again.`
 ``ljos doctor`` then warns that the issue file is uncommitted.
 
 The file is Org. ``vissue show demo-2f5j`` prints the heading, and the tracker repository is the one ``ljos doctor --all`` names under ``tracker``.
@@ -251,12 +244,11 @@ One seat holds a ticket at a time. Bob's claim is refused, and the refusal names
    tracker: demo-2f5j STARTED under alice
    tracker git: committed chore(issues): demo-2f5j claimed by alice; no remote, kept local
    $ LJOS_SEAT=bob ljos claim demo-2f5j --assignee bob
-   label claim-conflict: claim: demo-2f5j is held by another (alice, seat alice, still running, since TIME), not by bob, so run `ljos send alice TEXT`.
+   claim: demo-2f5j is held by another (alice, seat alice, still running, since TIME), not by bob, so run `ljos send alice TEXT`.
 
-The line names ``ljos send``. TIME is when alice claimed it. The ticket stays with alice.
+The line goes to stderr and the exit status is 1. It names ``ljos send``. TIME is when alice claimed it. The ticket stays with alice.
+The same refusal over ``ljos mcp`` starts with ``label claim-conflict:``.
 Bob can file another ticket. To help on this one, bob writes a note.
-
-.. BEGIN ljos-sample tutorial-timeline
 
 .. code:: console
 
@@ -279,8 +271,6 @@ Bob can file another ticket. To help on this one, bob writes a note.
      note: [unverified 0123456789abcdef] the codec is one file
      | [end 0123456789abcdef]
 
-.. END ljos-sample tutorial-timeline
-
 ``ljos timeline`` prints the ticket's rows oldest first.
 The note is one row: ``note: [unverified HASH]`` the text ``[end HASH]``. The hash is the fence. The text inside is tracker text from the ticket.
 A row that does not fit wraps. The next line starts with ``|`` and keeps ``[end HASH]`` whole.
@@ -289,8 +279,6 @@ A row that does not fit wraps. The next line starts with ``|`` and keeps ``[end 
 
 Both seats can vote. From one shell the two ballots are one voice, and ``ljos consensus`` says they were folded on that shell:
 
-..
-   # proseguard:off
 .. code:: console
 
    $ LJOS_SEAT=alice ljos vote demo-2f5j --for keep --used none
@@ -334,9 +322,6 @@ Both seats can vote. From one shell the two ballots are one voice, and ``ljos co
        bob                      0.500
      holds: keep (1.000 of the group's weight)
 
-..
-   # proseguard:on
-
 The first line is the verdict: which option the ballots pick, and whether that clears a push onto ``develop`` or ``main``. ``push cite`` and ``protected push`` are the same checks in full.
 From one shell the two ballots are one voice, so they fold and the protected-branch check still wants a second seat. A vote in its own shell is its own voice, and those two clear the push.
 The lines under ``advice`` are the weighted settle. They do not clear that push. ``social power`` names each seat's weight in that one voice. ``holds`` names the option and its share of the group's weight.
@@ -369,8 +354,8 @@ does the same.
 Where next
 ==========
 
-- :doc:`How-to guides <howto>`: one task a page. Runners, two agents on one repository, the review clock, a sitting, mail, a signed handover, votes, and the command check.
-- :doc:`Run two agents on one repository <howto-agents>`: the seat each session gets, mail between them, and how they split the tickets.
-- :doc:`Reference <reference>`: every verb, the MCP tools, the hooks and the variables.
-- :doc:`Explanation <explanation>`: why the stores are split the way they are.
-- :doc:`How ljos compares <compare>`: the tables behind the comparisons above.
+-  :doc:`How-to guides <howto>`: one task a page. Runners, two agents on one repository, the review clock, a sitting, mail, a signed handover, votes, and the command check.
+-  :doc:`Run two agents on one repository <howto-agents>`: the seat each session gets, mail between them, and how they split the tickets.
+-  :doc:`Reference <reference>`: every verb, the MCP tools, the hooks and the variables.
+-  :doc:`Explanation <explanation>`: why the stores are split the way they are.
+-  :doc:`How ljos compares <compare>`: the tables behind the comparisons above.

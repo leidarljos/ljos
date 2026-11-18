@@ -21,7 +21,8 @@ One sitting on the ticket, one island per recipe before it is touched:
 has run. Without those files the command names the missing path.
 Then the ladder, each rung its own artifact: ``eb-stack recipe check``,
 ``eb-stack package bump`` (the lock under ``out/locks`` is ``resolves``),
-``eb-stack recipe lint``, ``eb-stack target doctor``, ``eb-stack campaign run`` and ``campaign status`` (``builds``, ``binary-verified``). Over MCP the
+``eb-stack recipe lint``, ``eb-stack target doctor``, ``eb-stack campaign
+run`` and ``campaign status`` (``builds``, ``binary-verified``). Over MCP the
 same verbs are ``eb_recipe_check``, ``eb_package_bump``, ``eb_recipe_lint``,
 ``eb_target_doctor``, ``eb_campaign_run``, ``eb_campaign_status``, beside
 ``ljos_sitting``, ``ljos_island``, ``ljos_remember`` and ``ljos_finish``.

@@ -1,6 +1,11 @@
 :description: How the seat meets the rest of the world: the memory systems it learns from, the concurrency designs it voted on, the runners it sits in, and the dogfooding that tests it every day.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
+===========
+Integration
+===========
+
+
 How the seat meets the rest of the world: the memory systems it learns
 from, the concurrency designs it voted on, the runners it sits in, and
 the dogfooding that tests it every day. The :doc:`explanation <explanation>`
@@ -8,6 +13,9 @@ says what the seat is; this page says what it plugs into and why.
 
 The seat among FOSS memory systems
 ==================================
+
+:doc:`How ljos compares <compare>` has the feature table against beads,
+Mem0, Letta, Zep, Basic Memory and git-bug, with a link to each tool's docs.
 
 Agent memory systems in the literature and on the market do one of a few
 jobs. The seat integrates with them rather than re-running them:
@@ -17,8 +25,8 @@ jobs. The seat integrates with them rather than re-running them:
 +=================================================================================================================+=============================================================================================================================================+=============================================================================================================================================+
 | Mem0 (doi:10.48550/arXiv.2504.19413)                                                                            | a model extracts facts from a conversation and decides per fact whether to add, update, delete or leave the store.                          | the seat does not extract: it stores an agent's lesson as written, labelled agent-derived and unreviewed, and a review keeps or drops it.   |
 |                                                                                                                 |                                                                                                                                             | At ``SessionEnd`` the seat keeps up to five cue-word sentences from the person's and the agent's prose as unverified agent notes the prompt |
-|                                                                                                                 |                                                                                                                                             | hook never injects, and ``LJOS_EXTRACT=on`` turns that on. The read is off by default, and a note is written only when the conversation has |
-|                                                                                                                 |                                                                                                                                             | an open sitting. With no sitting the hook prints one line and writes nothing, because packset keeps only notes that belong to a ticket.     |
+|                                                                                                                 |                                                                                                                                             | hook never injects, and ``LJOS_EXTRACT=off`` turns that off. The read is on by default, and a note is written only when the conversation    |
+|                                                                                                                 |                                                                                                                                             | has an open sitting. With no sitting the hook prints one line and writes nothing, because packset keeps only notes that belong to a ticket. |
 +-----------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------+
 | Zep (doi:10.48550/arXiv.2501.13956)                                                                             | a temporal knowledge graph with edges carrying the time an edge became true and stopped being true, plus fused lexical, dense and graph     | the pack carries the same two times on every claim (written-at and the live window a superseding claim closes) and fuses a prefix scan,     |
 |                                                                                                                 | retrieval                                                                                                                                   | BM25+ and a dense ballot; a Zep graph can be read as trust rows and island links, not as a second store                                     |
@@ -98,7 +106,7 @@ same everywhere and the envelope differs:
 +==========================+======================================================================================================+============================================================================================+=========================================================+======================================================================================================+
 | the terminal harness     | ``UserPromptSubmit`` context, skills, ``ljos://protocol``                                            | ``PreToolUse``, a rule warns                                                               | ``additionalContext``                                   | plugin ``ljos@leidarljos``; sitting and finish commands are in the repo                              |
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
-| the command harness      | hooks plus MCP server list                                                                           | ``PreToolUse``, a rule warns                                                               | ``additionalContext``                                   | prompt and ``PreToolUse``; ``shell_command`` payloads carry the command and session ``cwd`` only, so |
+| the command harness      | six hooks plus MCP server list                                                                       | ``PreToolUse``, a rule warns                                                               | ``additionalContext``                                   | prompt and ``PreToolUse``; ``shell_command`` payloads carry the command and session ``cwd`` only, so |
 |                          |                                                                                                      |                                                                                            |                                                         | ljos cannot read a ``workdir`` override                                                              |
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
 | the build harness        | ``PostToolUse`` ``additionalContext`` after the first tool (``UserPromptSubmit`` stdout is           | ``PreToolUse``, 10 seconds, the Trusted Computing Base (TCB) check's budget                | ``additionalContext``                                   | frozen file ``crates/ljos-cli/assets/grok/ljos.json``; ``LJOS_MCP_GENERATION`` bump respawns the     |

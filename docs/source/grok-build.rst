@@ -1,6 +1,11 @@
 :description: The pack only helps a build harness session if it reaches the model.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
+=================
+The build harness
+=================
+
+
 The pack only helps a build harness session if it reaches the model.
 
 The build harness discards ``UserPromptSubmit`` stdout. It passes ``PostToolUse``

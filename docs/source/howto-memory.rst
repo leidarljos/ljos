@@ -60,15 +60,17 @@ The one below is an example:
 .. code:: console
 
    $ ljos habit mab-cr-all 0.535 --unit acc --every 7d --source example-0000
-   7b1c... habit   due 2026-09-26T10:00:00.000Z    habit mab-cr-all stands at 0.535 acc (example-0000).
+   remembered (habit): habit mab-cr-all stands at 0.535 acc (example-0000).
+     id 7b1c0e5a, next review 2026-09-22 10:00 +00:00
    $ ljos habit mab-cr-all 0.579 --unit acc --every 7d --source example-0001
-   9e0a... habit   due 2026-10-03T09:12:41.000Z    habit mab-cr-all stands at 0.579 acc (example-0001).
+   remembered (habit): habit mab-cr-all stands at 0.579 acc (example-0001).
+     id 9e0a41d2, next review 2026-09-30 09:12 +00:00
    was 0.535 acc (8 days ago), now closed
    $ ljos habit
    mab-cr-all  0.579 acc   +0.044 since 0.535 (8 days ago) today   next reading in 7 days  example-0001
 
 The second reading supersedes the first, so the pack keeps one live value
-a habit and ``ljos search mab-cr-all --as-of 2026-09-15`` still answers
+for a habit, and ``ljos search mab-cr-all --as-of 2026-09-15`` still answers
 what it stood at then. The cadence is the reading's review clock: when a
 week passes with no new reading, ``ljos due`` lists the habit and the hook
 says so once a session. The sheet a paper's table is written from is the

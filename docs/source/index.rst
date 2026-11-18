@@ -29,18 +29,19 @@ claims work on one git repository of tickets. When agents disagree, they
 vote, and ljos settles the vote. It calls no model, and every store is a
 file a person can open.
 
-|image1|
+.. image:: _static/seat.svg
+   :width: 100.0%
 
 What it has done
 ================
 
-============ ==============================================================================================================================================
-9,112 tokens for the 22 core Model Context Protocol (MCP) tools, against 19,034 for all 54
+============ =============================================================================================================================
+9,148 tokens for the 22 core Model Context Protocol (MCP) tools, against 19,070 for all 54
 139.1 ms     warm prompt hook median on a pack of 10,000 lessons, down from 196.3 ms; ``prompt-hook.rows-10000.after`` in hook-latency.txt
 0 of 186     near-topic pairs merged; 12 of 78 duplicate pairs found
 2,293        tests passed on the 0.40.0 release commit, 0 failed
 MIT          licence; Rust; Linux and macOS
-============ ==============================================================================================================================================
+============ =============================================================================================================================
 
 :doc:`What ljos does <introduction>` lists each feature and the file
 that measured each number.
@@ -58,10 +59,10 @@ Install
    $ export PATH="$HOME/.local/bin:$PATH"
    $ cd "$HOME"
    $ ljos doctor
-   warn	seat source	no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
-   info	encoder	not installed. Search matches words, so run `cargo install --locked packset-embed`.
-   info	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
-   ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
+   warn    seat source no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
+   info    encoder not installed. Search matches words, so run `cargo install --locked packset-embed`.
+   info    sitting gate    not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
+   ok  config  no ljos.toml key and no LJOS_ variable is set; defaults stand
    ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
 
 With no seat named, the ``seat source`` row warns that the read uses every seat. When the encoder is not installed, an ``encoder`` row follows and names the install command this machine can run. That is ``cargo binstall --locked packset-embed`` when cargo-binstall is installed, ``cargo install --locked packset-embed`` when cargo is, and the release install line otherwise. The sample shows the cargo line. The ``sitting-gate`` row is ``info`` and says ``not active here`` when no agent runner is above the shell. The config row says the defaults apply when nothing is set. A missing ``ljos.toml`` is not a warning. Run ``ljos doctor`` from your home directory. In a checkout, the config row names ``.ljos/gates.toml`` instead.
@@ -85,8 +86,6 @@ part that needs action. Git needs ``user.name`` and ``user.email`` before the fi
 First commands
 ==============
 
-.. BEGIN ljos-sample tutorial-index
-
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
@@ -103,8 +102,6 @@ First commands
      place 1, 2 of 2 checks, id a6ae2751
    $ ljos file "Pick a codec" -p demo
 
-.. END ljos-sample tutorial-index
-
 ``ljos search`` prints the lesson when the query shares its words. ``ljos show a6ae2751`` opens that id. A ``local:`` id opens the same way.
 Typed at a terminal, the row is ``lesson, today``. Under a runner it says ``lesson, from an agent``.
 A word ranking splits an identifier, so ``list_scans`` matches ``list scans``.
@@ -115,20 +112,20 @@ A row that only shares a common word is left out, and the line is then
 Where to go next
 ================
 
-- :doc:`Getting started <getting-started>`: the tutorial, from install to a ticket and a second seat.
-- :doc:`How-to guides <howto>`: one task a page, from hooks and onboarding to handover, trust and sync.
-- :doc:`Reference <reference>`: every verb, server tool and variable.
-- :doc:`Explanation <explanation>` and :doc:`Architecture <architecture>`: why the design is what it is.
-- :doc:`How ljos compares <compare>`: the other memory tools and agent trackers.
-- :doc:`Integration <integration>` and :doc:`Grok Build <grok-build>`: the runners ljos sits in.
+-  :doc:`Getting started <getting-started>`: the tutorial, from install to a ticket and a second seat.
+-  :doc:`How-to guides <howto>`: one task a page, from hooks and onboarding to handover, trust and sync.
+-  :doc:`Reference <reference>`: every verb, server tool and variable.
+-  :doc:`Explanation <explanation>` and :doc:`Architecture <architecture>`: why the design is what it is.
+-  :doc:`How ljos compares <compare>`: the other memory tools and agent trackers.
+-  :doc:`Integration <integration>` and :doc:`Grok Build <grok-build>`: the runners ljos sits in.
 
 Community
 =========
 
-- Questions and bugs: `GitHub issues <https://github.com/leidarljos/ljos/issues>`__.
-- Changes: `CONTRIBUTING.md <https://github.com/leidarljos/ljos/blob/develop/CONTRIBUTING.md>`__.
-- Releases: `GitHub releases <https://github.com/leidarljos/ljos/releases>`__ and `CHANGELOG.md <https://github.com/leidarljos/ljos/blob/develop/CHANGELOG.md>`__.
-- The other leiðarljós programs: `github.com/leidarljos <https://github.com/leidarljos>`__.
+-  Questions and bugs: `GitHub issues <https://github.com/leidarljos/ljos/issues>`__.
+-  Changes: `CONTRIBUTING.md <https://github.com/leidarljos/ljos/blob/develop/CONTRIBUTING.md>`__.
+-  Releases: `GitHub releases <https://github.com/leidarljos/ljos/releases>`__ and `CHANGELOG.md <https://github.com/leidarljos/ljos/blob/develop/CHANGELOG.md>`__.
+-  The other leiðarljós programs: `github.com/leidarljos <https://github.com/leidarljos>`__.
 
 .. toctree::
    :maxdepth: 1
@@ -169,6 +166,3 @@ Community
 
    explanation
    architecture
-
-.. |image1| image:: _static/seat.svg
-   :width: 100.0%

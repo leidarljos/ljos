@@ -14,8 +14,6 @@ off that list.
 They still run.
 ``ljos help --all`` lists every command.
 
-.. BEGIN ljos-sample help
-
 .. code:: text
 
    $ ljos --version
@@ -45,7 +43,7 @@ They still run.
    Options:
          --all
              Print every row, the ones that answer included
-             
+
              [alias: --verbose]
 
          --fix
@@ -53,5 +51,3 @@ They still run.
 
      -h, --help
              Print help (see a summary with '-h')
-
-.. END ljos-sample help

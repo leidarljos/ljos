@@ -8,7 +8,7 @@
 |---+---|
 | =PACKSET_URL= | the pack client; unset, =http://127.0.0.1:8761= (=PACKSET_PORT= moves the port), or this user's own port when 8761 is another user's; =off= means no pack |
 | =PACKSET_WORKSPACE= | the pack workspace; unset, =seat= |
-| =LJOS_SEAT= | override for who is sitting. Unset, a harness default becomes the runner's name plus a short id of the session when this process has one from Claude Code, Codex or Cursor, so two sessions do not share a seat. An id that exists only on a parent does not name the seat. Search and recall still read that runner's family. An exported name is the seat. The process tree is not a seat. A read with none of those looks at every seat. A write uses the login name, or a short stable name when that login is missing, and the first write says to set it. When =vissue.toml= lists seats, a tracker write from a seat it does not list is refused, and a session seat of a listed runner is that runner's seat |
+| =LJOS_SEAT= | override for who is sitting. Unset, the seat is a =seat== line, =~/.config/ljos/seats.toml=, a parent seat record, or the most recent write on this machine. A harness default, such as =claude= or =codex=, becomes that runner plus a short id of the session when this process has one from Claude Code, Codex or Cursor, so two sessions do not share a seat. An id that exists only on a parent does not name the seat. Search and recall still read the runner's family. The connecting client's name does not name the seat, and neither does the process tree. A read with none of those looks at every seat. A write uses the login name, or a short stable name when that login is missing, and the first write says to set it. The holder is that seat tagged with the conversation's session. When =vissue.toml= lists seats, a tracker write from a seat it does not list is refused. A session seat of a listed runner is that runner's seat |
 | =VISSUE_ROOT=, =VISSUE_AGENT= | the tracker |
 | =DEEDAR_URL=, =DEEDAR_HOST_SIGNING_KEY= | the deed store; the key signs handovers, and =~/.config/deedar/host.key= is used when the variable is unset |
 | =CLAIMDAG_DIR= | the claim graph |
@@ -241,7 +241,7 @@ when it is empty, the member runs =grok= with the seat's fallback flags.
 
 =hooks_format = "cursor"= writes =hooks= in the editor harness's flat shape: =version=
 1, and one ={command, timeout}= entry an event. The seat registers the
-permission check, the prompt, both tool results, compaction, stop and session end
+session start, the permission check, the prompt, both tool results, compaction, stop and session end
 there. Events =~/.claude/settings.json= already runs stay in that file.
 =beforeShellExecution=, =preToolUse=, =beforeMCPExecution=,
 =beforeReadFile= and =postToolUseFailure= are still written here, since

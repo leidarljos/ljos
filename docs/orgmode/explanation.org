@@ -161,12 +161,13 @@ Branch protection on the remote does the rest.
 
 * Who is sitting
 
-The seat is the name an agent works under. =LJOS_SEAT= sets it. When it is unset, ljos derives a
-name from the runner, and a derived name is a seat. =ljos-mcp= does not take the seat from the
-client that connected. An MCP write on a shared server needs the =seat= argument when that
-session has no stamped seat of its own. The call is refused in one line, and the write is not
-stored under a guessed seat. A read still runs. =ljos seat= prints the seat, the holder, and
-where each name came from. When that source is the most recent write on this machine, it names =export LJOS_SEAT=NAME=.
+The seat is the name an agent works under. =LJOS_SEAT= sets it, and so does a =seat== line
+in =~/.config/ljos/env= or a row in =~/.config/ljos/seats.toml=. =ljos-mcp= does not take
+the seat from the client that connected. A read with none of those set looks at every seat.
+A write uses the login name, or a short stable name when that login is missing, and the first such write says to set =LJOS_SEAT=.
+An MCP write on a shared server needs the =seat= argument when that session has no stamped seat of its own.
+The call is refused in one line, and the write is not stored under a guessed seat. A read still runs.
+=ljos seat= prints the seat, the holder, and where each name came from. When that source is the most recent write on this machine, it names =export LJOS_SEAT=NAME=.
 
 With =LJOS_SEAT= unset, a session of Claude Code, Codex or Cursor sits as the runner's name plus a short id of the session id in this process. An id that exists only on a parent does not count.
 Mail, claims and notes use that name, so two sessions can tell each other apart.
@@ -174,9 +175,10 @@ Search and recall use the runner's name as the family, so a lesson is not split 
 An exported =LJOS_SEAT= is the seat for every session that carries it.
 The holder is =SEAT@session=, and the session id is the one the runner gives.
 
-On a fresh tracker with no seat list, any seat may write. An unset seat writes as the login
-name, or as a short stable name when that login is missing, and the first such write says to set =LJOS_SEAT=. Once the tracker's =vissue.toml= lists seats, a tracker write from a seat it
-does not list is refused.
+On a fresh tracker with no seat list, any seat may write. An unset seat with no conversation
+record writes as the login name, or as a short stable name when that login is missing, and the first write says so. A conversation that already has a
+seat record writes as that seat. Once the tracker's =vissue.toml= lists seats, a tracker write
+from a seat it does not list is refused.
 
 - =ljos seat add NAME= writes the seat's row in =vissue.toml=.
 - Solo mode: when =vissue.toml= lists one active seat, that seat's own vote settles consensus for
@@ -280,6 +282,20 @@ When the pack's decay slot is on, retrievability scales a search score, so an un
 sinks without vanishing. On a corpus where one claim per topic stays recalled, retrievability ranks
 the kept claim first 0.947 of the time. Lexical scoring is at chance, and a recency half-life gets
 0.270. The packset site carries the table.
+
+Many seats share one pack. =ljos search= prints this seat's hits first.
+Another seat's hit is kept when it names the subject, which is a lexical
+score of at least 0.5, or when the encoder's cosine with the query is at
+least 0.66. Packset sends that cosine apart from the fused score so a
+client can set a floor on it. 0.66 is the line already used when the
+encoder lists a hit at the top and the hit shares no word with the query: on
+that measured set, an unrelated prompt's best cosine stayed at 0.653.
+A cross-seat row under the line does not fill a short list. When those
+were the only rows, the command prints =Nothing relevant was found.= No match-mode line is printed on that empty page.
+=ljos search= also reads the tracker. A ticket whose title matches is included, and then one whose body or notes match. An exact or near-exact title is the first row, while the encoder is loading and after it has answered. A ticket this seat filed, claimed, or noted, whose title, body or notes cover two query terms, is placed with this seat's rows. The newest note weighs more than an older one. A ticket in a project this seat works in comes before another project's ticket that only shares a generic word such as docs, release, or video. A ticket with no seat tag is not this seat's, unless the tracker roster names only this seat. The row names the ticket id and the title, so =ljos recall ID= opens it.
+A search the pack answered with nothing prints no match-mode line. The line is =Nothing matched "which fusion". Try a shorter query, such as: ljos search fusion=. When the
+pack is busy, search ranks by words. Cosine is not required then, and a
+hit that names the subject still answers.
 
 A claim shown wrong is retracted with the deed that showed it. A contrary claim closes the old
 claim's window. The record that it was held stays.

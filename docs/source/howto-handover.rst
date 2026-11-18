@@ -17,8 +17,8 @@ signer. Create one only when the file is absent:
 
    $ test -f ~/.config/deedar/host.key || { head -c 32 /dev/urandom > ~/.config/deedar/host.key && chmod 600 ~/.config/deedar/host.key; }
    $ export DEEDAR_HOST_SIGNING_KEY=~/.config/deedar/host.key
-   $ ljos doctor --all | grep 'host key'
-   ok  signing key    /home/you/.config/deedar/host.key, the signing key for deeds
+   $ ljos doctor --all | grep 'signing key'
+   ok  signing key /home/you/.config/deedar/host.key, the signing key for deeds
 
 ``handover`` then signs the manifest and the log head. Write the bag, then
 the other seat receives it:
@@ -38,8 +38,6 @@ scratch stores; ``scripts/herd.sh`` is the concurrent contention check.
 Receive from the same sender again
 ==================================
 
-.. BEGIN ljos-sample receive-empty
-
 .. code:: console
 
    $ ljos receive /tmp/bag --keep ~/.local/share/ljos/peer.head
@@ -48,8 +46,6 @@ Receive from the same sender again
    no deeds enclosed
    signed by 0123456789abcdef (accepted)
    0 atoms enclosed, 0 trust rows
-
-.. END ljos-sample receive-empty
 
 The sample is a bag with no deeds.
 ``--keep`` writes the head of the log the bag carried, once a bag has one. Tell the sender its

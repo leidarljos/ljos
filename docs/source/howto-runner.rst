@@ -120,7 +120,7 @@ with none set uses the login name, or a short stable name when that login is mis
 The protocol goes where the agent reads its instructions: ``ljos protocol``
 prints it, the server serves the same text at ``ljos://protocol`` and names
 it in its instructions, so a runner that loads neither skills nor
-resources still reads it first. Each tool description opens with when to
+resources still reads it first. Most tool descriptions open with when to
 call it.
 
 A runner that registers servers by a command of its own, or reads them
@@ -155,7 +155,7 @@ which prints them. Until the name is in the file,
 
 ``--dry-run`` reports what would be written. The name ``runner`` in the example
 is not a program. Until that program is on ``PATH``, the mcp line is
-``no`` and says ``runner is not on PATH and must be installed, so run `ljos onboard --harness runner-with-a-command`.``
+``no`` and says :literal:`runner is not on PATH and must be installed, so run \`ljos onboard --harness runner-with-a-command\`.`
 That is the command to run after the program is installed, and this
 command exits 1. The skill line can still be ``ok``.
 The example file also passes ``XDG_RUNTIME_DIR`` for a runner that rebuilds its
@@ -168,7 +168,8 @@ and policyd sees none of the command harness's commands. ``ljos doctor`` reports
 the trust file has no ``trusted_hash``, or is older than the hooks file.
 
 The example carries the runners this seat has carried through one piece
-of work, each in the shape it takes the server: a runner with an ``mcp add`` of its own by that command; a runner with a TOML config
+of work, each in the shape it takes the server: a runner with an ``mcp
+add`` of its own by that command; a runner with a TOML config
 by a table appended to it; ``opencode`` and ``omp`` by a JSON pointer set in
 their MCP file; ``hermes`` by its ``mcp add`` with the tool question
 answered. The same verb takes ``cursor`` (the IDE and the ``agent`` CLI share
@@ -196,8 +197,6 @@ Seat a shell-only agent
 Example Host runs shell commands on a Linux box. It is not an MCP runner and
 it has no command hook, so the env file names its seat.
 
-.. BEGIN ljos-sample shell-hook
-
 .. code:: console
 
    $ ljos onboard --harness example-host --skills ~/.example-host/skills
@@ -208,8 +207,6 @@ it has no command hook, so the env file names its seat.
    label prompt-origin: not stored as the person's words (parent process is `bash`,
    not a known runner)
    $ ljos policy -- git push --force
-
-.. END ljos-sample shell-hook
 
 The label is the shell that ran the pipe. Bash is not a known runner, so the prompt is not stored as the person's words.
 ``--skills DIR`` writes the protocol there. ``ljos onboard --harness shell --skills DIR``

@@ -16,7 +16,7 @@ It stores the sentence as written. Search uses a local encoder when one is insta
 `ljos onboard --example` lists the runners, among them Claude Code, Codex and Cursor.
 
 
-- 9,112 tokens for the 22 core Model Context Protocol (MCP) tools, against 19,034 for all 54 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
+- 9,148 tokens for the 22 core Model Context Protocol (MCP) tools, against 19,070 for all 54 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
 - 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
 - The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
 - packset, the memory writer, publishes a LongMemEval_S session retrieval run ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). That page records the figures. This tree does not. The run scores retrieval, not answer accuracy.
@@ -65,7 +65,7 @@ kiln.sh: KILN_DOOR is unset. The door seats only when it is cold.
 dev@laptop:~$ ljos remember 'Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.'
 remembered (lesson): Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.
   id fcd167c8, next review 2026-11-14 15:08 +00:00
-standing: the hook shows it from the next prompt it bears on
+saved as a standing lesson; run `ljos search` to read it
 
 dev@laptop:~$ printf '%s\n' 'seat the kiln door' | ljos hook --prompt --text
 label prompt-origin: not stored as the person's words (parent process is `ljos`,
@@ -191,7 +191,7 @@ LJOS_SEAT=alice ljos claim ID --assignee alice
 LJOS_SEAT=bob ljos claim ID --assignee bob
 ```
 
-Bob's claim prints `label claim-conflict:`, names alice, and tells him to run `ljos send`. The ticket stays with alice.
+Bob's claim exits 1, names alice on stderr, and tells him to run `ljos send`. The ticket stays with alice. Over `ljos mcp` the same refusal starts with `label claim-conflict:`.
 `ljos note` writes on the ticket. `ljos timeline ID` prints that note as unverified tracker text. `vissue show ID` prints the logbook.
 Votes cast from one shell are one voice. `ljos consensus` says they were folded on that shell. A vote from each seat's own runner is its own voice. The getting-started page shows the fold.
 
@@ -219,7 +219,7 @@ tools, guard and memory first: `rule`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `show`, `ready`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. `measurements/mcp-size.txt` records
-9,112 tokens for the core set against 19,034 for all fifty-four.
+9,148 tokens for the core set against 19,070 for all fifty-four.
 `LJOS_MCP_TOOLS=all` lists every tool.
 
 ```json

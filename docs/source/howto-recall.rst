@@ -23,10 +23,13 @@ Add ``hooks`` to the runner's table and onboard again:
 .. code:: console
 
    $ ljos onboard --harness runner-with-a-command
-   ok  host key    /home/you/.config/deedar/host.key exists
    ok  runner-with-a-command mcp   ljos registered
-   ok  hook    memory hook: add it on UserPromptSubmit in /home/you/.runner/settings.json
+   ok  hook    /home/you/.runner/settings.json carries the memory hook on UserPromptSubmit, SessionEnd
    ok  skill   /home/you/.runner/skills/ljos/SKILL.md is current
+   ok  deeds   /home/you/.local/share/deedar/store exists
+   ok  tickets /home/you/.config/vissue/config.toml sets root = "/home/you/.local/share/vissue/tracker"
+   ok  memory  memory writer is up at http://127.0.0.1:8761
+   ok  signing key /home/you/.config/deedar/host.key exists. The deed store lists this key.
 
 From then on, before each prompt, the runner pipes it to ``ljos hook`` and
 the memories it activates return as context, preferences first.
@@ -63,14 +66,15 @@ A policy daemon does the same with the argv:
 .. code:: console
 
    $ echo "cargo test --release" | ljos hook
-   Remembered, shown 2 of 2, fused order, so run `ljos search`.
-     preference
-       Build and test on the cluster through Slurm, never on the laptop.
-     lesson
-       The lme dense run needs 40G and sessions only; windows and sessions ran past four hours.
+   Remembered, shown 1 of 1, fused order, so run `ljos search`.
+     preference, from an agent, not checked, today
+       Run cargo test --release only on the cluster, never on the laptop.
    $ ljos policy -- cargo test --release
    cargo test --release
+   allow
    Remembered, shown 1 of 1, fused order, so run `ljos search`.
+     preference, from an agent, not checked, today
+       Run cargo test --release only on the cluster, never on the laptop.
 
 Ask what a task involves
 ========================
@@ -131,7 +135,7 @@ Ask when
      note: the fused panel held at ten conversations
 
 ``proj-1a2b`` is a sample id ``ljos file`` printed. An unknown id prints
-``issue proj-1a2b not found. `ljos ready` lists the open tickets.``
+:literal:`issue proj-1a2b not found. \`ljos ready\` lists the open tickets.`
 Three stores, one dated list, oldest first: the tracker's logbook, the
 deeds the issue cites with the time each was produced, and the memories the
 issue's title activates with the time each was written. Each block names

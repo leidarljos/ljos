@@ -113,7 +113,7 @@ Exit 1.
 A command that exists and is not this install's =ljos-mcp= is a warning, and the exit stays 0 when nothing else failed:
 
 #+begin_src text
-warn	mcp	warning: ljos-mcp: /tmp/seat-probe/other/ljos-mcp is not this install's /agent/repos/ljos/target/debug/ljos-mcp (/tmp/seat-probe/.cursor/mcp.json), so run `ljos onboard --harness cursor`.
+warn	mcp	warning: ljos-mcp: /tmp/seat-probe/other/ljos-mcp is not this install's /home/you/.cargo/bin/ljos-mcp (/tmp/seat-probe/.cursor/mcp.json), so run `ljos onboard --harness cursor`.
 #+end_src
 
 On a cloud VM, a codespace, or CI the same rows say to run =ljos cloud up= instead of =ljos onboard --harness cursor=.

@@ -176,7 +176,8 @@ A runner on the machine is the judge through ``command``: an argv that
 reads the request JSON on stdin (``state``, and ``questions``, each with a
 ``type`` of ``noul`` or ``choice``, ``instructions`` and ``criteria``) and prints
 ``{"answers": {...}}`` on stdout inside ``budget_ms``. A ``noul`` answer is
-``{"noul": p}`` or a bare number; a ``choice`` answer is ``{"choice": KEY, "confidence": p, "probabilities": {...}}``, and a bare key means a
+``{"noul": p}`` or a bare number; a ``choice`` answer is ``{"choice": KEY,
+"confidence": p, "probabilities": {...}}``, and a bare key means a
 sure one. A question with no answer refuses the whole reply, so the hook
 takes its local path rather than half a judgment.
 

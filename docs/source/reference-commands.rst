@@ -15,7 +15,7 @@ A runtime failure exits 1.
 That is a missing program, a ticket the tracker does not hold, a store that is missing, read-only or full, a pack that was turned off, or a network error while upgrading.
 Mail, inbox and recall exit 75 when the pack is busy.
 A search that cannot ask the pack ranks by words from local data and says it fell back.
-The first line says why. A writer that is not running names ``packset ensure``. A writer that stays busy says the rows are word matches. When no words match, search exits 1.
+The first line says why. A writer that is not running names ``packset ensure``. A writer that stays busy says word search was used because memory search was busy.
 A remember that queued the lesson exits 0.
 Every failure is one line on stderr.
 The line says what went wrong and the command that fixes it.
@@ -31,7 +31,7 @@ The line says what went wrong and the command that fixes it.
 ``calibrate -p PROJECT [--rounds N]``
    Stores: consensus, pack. Estimate how often each voter has been right, from the project's past votes. The estimate is Dawid-Skene: it uses the ballots and no separate answer key. ``--rounds`` is how many expectation-maximisation passes to run.
 ``remember TEXT [-p PROJECT] [--as PERSONA] [--transient|--standing] [--verbose] [--valid-from DATE] [--valid-to DATE] [--json]``
-   Stores: pack. One lesson, stored as written, origin ``user-declared``. ``-p PROJECT`` records that project on the lesson. An unknown project name exits 1 and names the projects that exist. As a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the hook shows it from the next prompt it bears on; run under an agent runner it is an episode labelled agent-derived (an agent wrote it, and a person has not accepted it), kept and not a refresher until a review promotes it; ``--transient`` or ``--standing`` picks one either way. A lesson of one or two sentences is one row. A longer text is stored as one claim per pair of sentences, and the command prints each stored id and its text. A sentence of more than 29 words that the person types is stored as written, and ``--verbose`` prints one line to split it into two sentences. The same sentence from anywhere else is kept on this machine only: the command says the pack refused it, ``ljos search`` still finds the copy, and the hook does not show it. ``--valid-from`` and ``--valid-to`` are the days the claim holds in the world. A reading score past 14 is a hint, not a failure. The hint is printed only when the lesson, once identifiers, paths, code spans, commit SHAs and version strings are taken out, has at least 20 words and a sentence of at least 20 words. It says the lesson was saved, names that sentence, and gives the score and the aim of 14. ``--json`` prints the stored lesson with ``grade``, ``target`` and ``flagged_sentence``. A 503, including memory pressure, queues the lesson and a later command sends it. A duplicate prints the atom id already in the pack. A content refusal names size or policy. An empty text exits 2. A text past 1000 characters exits 2. When the pack is not answering, the lesson is queued and the command exits 0. A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, ``0`` does not wait). The wait follows ``Retry-After`` or a JSON ``retry_ms``. When the pack stays busy, nothing was stored, the line says to run ``ljos remember`` again, and the command exits 1. Turned off on purpose, the command exits 1. A pipe prints the same lines as a terminal. Example: ``ljos remember "The lexical default is BM25+."``.
+   Stores: pack. One lesson, stored as written, origin ``user-declared``. ``-p PROJECT`` records that project on the lesson. An unknown project name exits 1 and names the projects that exist. As a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the hook shows it from the next prompt it bears on; run under an agent runner it is an episode labelled agent-derived (an agent wrote it, and a person has not accepted it), kept and not a refresher until a review promotes it; ``--transient`` or ``--standing`` picks one either way. A lesson of one or two sentences is one row. A longer text is stored as one claim per pair of sentences, and the command prints each stored id and its text. A sentence of more than 29 words that the person types is stored as written, and ``--verbose`` prints one line to split it into two sentences. The same sentence from anywhere else is kept on this machine only: the command says the pack refused it, ``ljos search`` still finds the copy, and the hook does not show it. ``--valid-from`` and ``--valid-to`` are the days the claim is true in the world. A reading score past 14 is a hint, not a failure. The hint is printed only when the lesson, once identifiers, paths, code spans, commit SHAs and version strings are taken out, has at least 20 words and a sentence of at least 20 words. It says the lesson was saved, names that sentence, and gives the score and the aim of 14. ``--json`` prints the stored lesson with ``grade``, ``target`` and ``flagged_sentence``. A 503, including memory pressure, queues the lesson and a later command sends it. A duplicate prints the atom id already in the pack. A content refusal names size or policy. An empty text exits 2. A text past 1000 characters exits 2. When the pack is not answering, the lesson is queued and the command exits 0. A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, ``0`` does not wait). The wait follows ``Retry-After`` or a JSON ``retry_ms``. When the pack stays busy, nothing was stored, the line says to run ``ljos remember`` again, and the command exits 1. Turned off on purpose, the command exits 1. A pipe prints the same lines as a terminal. Example: ``ljos remember "The lexical default is BM25+."``.
 ``memories list|review|tui|prune``
    Stores: pack. Review the memories agents wrote on their own: ``list`` newest first, shown N of N, each claim wrapped with its seat, its ticket and a short id; unreviewed agents' memories by default; ``review`` keeps, drops, edits or merges them; ``tui`` browses them; ``prune`` names duplicates and never-recalled memories and writes only with ``--apply``. ``list --json`` prints the rows.
 ``prefer TEXT [--deny PATTERN] [--ask PATTERN] [--user --why REASON]``
@@ -43,7 +43,7 @@ The line says what went wrong and the command that fixes it.
 ``retire-notes``
    Stores: pack. Tombstone the note memories an older ``ljos note`` wrote; runs once per seat, and the tracker copies stay.
 ``search QUERY [-p PROJECT] [-n N] [--rerank] [--as-of TIME] [--valid-at DATE] [--explain] [--source-machine NAME] [--source-seat SEAT] [--import-id ID] [--min-score SCORE] [--json] [--porcelain] [--attempts]``
-   Stores: pack, tracker. ``-p PROJECT`` keeps that project's tickets and lessons, and lessons that name no project. An unknown project name exits 1 and names the projects that exist. Ranked claims with how many scorers named each and its age. This seat's hits come first when the encoder ranked them. A word ranking, which is what a local snapshot and an encoder that is not loaded use, scores by BM25 over words and split identifiers (``list_scans`` matches ``list scans``, ``SHA-1`` matches ``sha1``). packsetd with no encoder reports ``engine: linear``. Its own tokenizer still keeps ``list_scans`` as one word and scores a short prefix almost like an exact match, so a memory has to be among the rows it returns. Splitting ``_``, ``-``, ``.`` and a digit boundary in ``packset_core::search::tokens``, and not treating that prefix as an exact identifier, is the change on that side. A title or a tag counts twice a body word. Words that sit together get a proximity bonus. This seat's row gets a small boost, and a clearly closer row from another seat stays ahead. A row that does not cover enough of the query is left out. When every row is in that state the line is ``No close matches for "..."`` and it names a broader query. A row that does not name a subject word is left out when its score is under 34, and a row that only shares a stopword or a common weak word is left out. A score runs from 0 to 100. ``--min-score SCORE`` sets that line. ``--min-score 0`` prints every row. When the floor removes every row the line is ``No relevant matches for "QUERY".`` and it names ``--min-score 0``. A meaning row from another seat that only shares a generic word is left out unless the encoder's similarity is high. ``--json`` then sets ``close_matches`` to false and puts that sentence in ``reading``. ``ranking`` stays ``lexical``. The page names the place, the checks, a short id and the ticket. That id opens with ``ljos show``. A ``local:`` id opens the same way. The ranker score stays off that page. ``--json`` keeps the score. A tracker ticket whose title matches is included, and then one whose body or notes match. A title that shares only one common word with a longer query is left out. A distinctive word, or two shared words, still matches. An exact or near-exact title is the first row, while the encoder is loading and after it has answered. A ticket this seat filed, claimed, or noted, whose title, body or notes cover two query terms, is placed with this seat's rows. The newest note weighs more than an older one. A ticket in a project this seat works in comes before another project's ticket that only shares a generic word such as docs, release, or video. A ticket with no seat tag is not this seat's, unless the tracker roster names only this seat. That is the line ``This seat's rows come before another seat's.`` The row names the ticket id and the title, so ``ljos recall ID`` opens it. Another seat's hit is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. The cosine is how close the stored text is to the query, from 0 to 1. A short list is not padded with a weaker cross-seat hit. When those were the only rows, the line is ``Nothing relevant was found.`` No match-mode line is printed on that empty page. A search that found nothing prints no match-mode line. The line is ``Nothing matched "which fusion". Try a shorter query, such as: ljos search fusion``. The word is the longest content word, stop words skipped, and it is named only when it is not the whole query. The command is plain text, on its own line when the sentence would split it. When nothing is stored, a shorter search would miss too, and the line names ``ljos remember``. ``--json`` adds ``suggestion`` with the command the line names. A busy memory store is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, ``0`` does not wait). The wait follows ``Retry-After`` or a JSON ``retry_ms``. When it answers, the rows are ranked by meaning. When it stays busy, the rows are ranked by words and a hit that names the subject stays. The one line is ``The memory pack was busy, so these rows are word matches; run the search again for ranked results.`` A pack that accepts and does not answer uses that line when words match, after one short request. When no words match, the line is ``The memory pack was busy and no words matched.`` and the command exits 1. A pack that has not opened is waited out on ``LJOS_SEARCH_WARMUP_WAIT``. The signal is ``/health`` equal to ``not-ready``, or JSON ``ready`` false, or JSON ``code`` ``starting``. Words in the query are not that signal. When the wait runs out, search ranks by words and the one line is ``Used word search because memory is still starting.`` A dated search prints ``Memory is starting, so try again in a few seconds.`` and exits non-zero. A search while the encoder is still loading waits out a remaining time that fits in ``LJOS_SEARCH_WARMUP_WAIT`` seconds (5 when unset, ``0`` does not wait), and not past ``LJOS_CALL_TIMEOUT``, then ranks by meaning. A remaining time that is missing or longer than that budget keeps ``LJOS_SEARCH_WAIT`` (3 when unset). If it is still loading and rows are shown, the line is ``These are word matches, and meaning search will be ready shortly.`` When nothing is shown, one line names the command to rerun and, when the writer sends a remaining time, about how many seconds are left. A failed or missing encoder names the command that fixes it. ``--json`` puts ``semantic`` or ``lexical`` in ``ranking``. Starting the memory writer starts that load. ``--rerank`` scores the top hits again, slower and sharper, by reading the text itself; ``--as-of`` reads the memory store as it stood then; ``--valid-at`` asks what held in the world that day (``any`` keeps every window); ``--explain`` opens with how the rows are ordered and what the checks mean. ``--source-machine``, ``--source-seat`` and ``--import-id`` keep only those rows, before the limit. ``--json`` prints the rows. If the backend emits receipt tab rows, the formatted page still opens with ranked hits, and ``--json`` puts those rows in ``receipt_rows``. ``--porcelain`` prints one row per hit, the id, the kind and the text, separated by tabs, and leaves the page off. A receipt and another seat's mail stay off the page. ``--attempts`` includes failed commands. A memory store that does not answer ranks by words and exits 0. The first line says the writer is busy and names the command to rerun, with how many seconds to wait. A writer that is not running names ``packset ensure``. The pack is this seat's memory store. When nothing is storing memories, the command exits 75 when the line names ``packset ensure``, and exits 1 when packset is not on PATH. The command appends one line to ``recall.log`` in the ljos state directory: the time, the seat, ``search`` and the query. ``ljos_search`` appends that same line. Example: ``ljos search "lexical default"``.
+   Stores: pack, tracker. ``-p PROJECT`` keeps that project's tickets and lessons, and lessons that name no project. An unknown project name exits 1 and names the projects that exist. Ranked claims with how many scorers named each and its age. This seat's hits come first when the encoder ranked them. A word ranking, which is what a local snapshot and an encoder that is not loaded use, scores by BM25 over words and split identifiers (``list_scans`` matches ``list scans``, ``SHA-1`` matches ``sha1``). packsetd with no encoder reports ``engine: linear``. Its own tokenizer still keeps ``list_scans`` as one word and scores a short prefix almost like an exact match, so a memory has to be among the rows it returns. Splitting ``_``, ``-``, ``.`` and a digit boundary in ``packset_core::search::tokens``, and not treating that prefix as an exact identifier, is the change on that side. A title or a tag counts twice a body word. Words that sit together get a proximity bonus. This seat's row gets a small boost, and a clearly closer row from another seat stays ahead. A row that does not cover enough of the query is left out. When every row is in that state the line is ``No close matches for "..."`` and it names a broader query. A row that does not name a subject word is left out when its score is under 34, and a row that only shares a stopword or a common weak word is left out. A score runs from 0 to 100. ``--min-score SCORE`` sets that line. ``--min-score 0`` prints every row. When the floor removes every row the line is ``No relevant matches for "QUERY".`` and it names ``--min-score 0``. A meaning row from another seat that only shares a generic word is left out unless the encoder's similarity is high. ``--json`` then sets ``close_matches`` to false and puts that sentence in ``reading``. ``ranking`` stays ``lexical``. The page names the place, the checks, a short id and the ticket. That id opens with ``ljos show``. A ``local:`` id opens the same way. The ranker score stays off that page. ``--json`` keeps the score. A tracker ticket whose title matches is included, and then one whose body or notes match. A title that shares only one common word with a longer query is left out. A distinctive word, or two shared words, still matches. An exact or near-exact title is the first row, while the encoder is loading and after it has answered. A ticket this seat filed, claimed, or noted, whose title, body or notes cover two query terms, is placed with this seat's rows. The newest note weighs more than an older one. A ticket in a project this seat works in comes before another project's ticket that only shares a generic word such as docs, release, or video. A ticket with no seat tag is not this seat's, unless the tracker roster names only this seat. That is the line ``This seat's rows come before another seat's.`` The row names the ticket id and the title, so ``ljos recall ID`` opens it. Another seat's hit is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. The cosine is how close the stored text is to the query, from 0 to 1. A short list is not padded with a weaker cross-seat hit. When those were the only rows, the line is ``Nothing relevant was found.`` No match-mode line is printed on that empty page. A search that found nothing prints no match-mode line. The line is ``Nothing matched "which fusion". Try a shorter query, such as: ljos search fusion``. The word is the longest content word, stop words skipped, and it is named only when it is not the whole query. The command is plain text, on its own line when the sentence would split it. When nothing is stored, a shorter search would miss too, and the line names ``ljos remember``. ``--json`` adds ``suggestion`` with the command the line names. A busy memory store is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, ``0`` does not wait). The wait follows ``Retry-After`` or a JSON ``retry_ms``. When it answers, the rows are ranked by meaning. When it stays busy, the rows are ranked by words and a hit that names the subject stays. The one line is ``Used word search because memory search was busy.`` A pack that accepts and does not answer is that same line, after one short request. A pack that has not opened is waited out on ``LJOS_SEARCH_WARMUP_WAIT``. The signal is ``/health`` equal to ``not-ready``, or JSON ``ready`` false, or JSON ``code`` ``starting``. Words in the query are not that signal. When the wait runs out, search ranks by words and the one line is ``Used word search because memory is still starting.`` A dated search prints ``Memory is starting, so try again in a few seconds.`` and exits non-zero. A search while the encoder is still loading waits out a remaining time that fits in ``LJOS_SEARCH_WARMUP_WAIT`` seconds (5 when unset, ``0`` does not wait), and not past ``LJOS_CALL_TIMEOUT``, then ranks by meaning. A remaining time that is missing or longer than that budget keeps ``LJOS_SEARCH_WAIT`` (3 when unset). If it is still loading and rows are shown, the line is ``These are word matches, and meaning search will be ready shortly.`` When nothing is shown, one line names the command to rerun and, when the writer sends a remaining time, about how many seconds are left. A failed or missing encoder names the command that fixes it. ``--json`` puts ``semantic`` or ``lexical`` in ``ranking``. Starting the memory writer starts that load. ``--rerank`` scores the top hits again, slower and sharper, by reading the text itself; ``--as-of`` reads the memory store as it stood then; ``--valid-at`` asks what held in the world that day (``any`` keeps every window); ``--explain`` opens with how the rows are ordered and what the checks mean. ``--source-machine``, ``--source-seat`` and ``--import-id`` keep only those rows, before the limit. ``--json`` prints the rows. If the backend emits receipt tab rows, the formatted page still opens with ranked hits, and ``--json`` puts those rows in ``receipt_rows``. ``--porcelain`` prints one row per hit, the id, the kind and the text, separated by tabs, and leaves the page off. A receipt and another seat's mail stay off the page. ``--attempts`` includes failed commands. A memory store that does not answer ranks by words and exits 0. The first line says the writer is busy and names the command to rerun, with how many seconds to wait. A writer that is not running names ``packset ensure``. The pack is this seat's memory store. When nothing is storing memories, the command exits 75 when the line names ``packset ensure``, and exits 1 when packset is not on PATH. The command appends one line to ``recall.log`` in the ljos state directory: the time, the seat, ``search`` and the query. ``ljos_search`` appends that same line. Example: ``ljos search "lexical default"``.
 ``timeline ISSUE [-n N] [--json]``
    Stores: tracker, deed store, pack. The logbook, the cited deeds and the activated memories as one dated list, oldest first. The page says shown N of M and names each event's age and the gap since the one before. ``--json`` prints the rows.
 ``consolidate [--apply]``
@@ -104,10 +104,10 @@ The line says what went wrong and the command that fixes it.
    Stores: tracker. Tickets that are open and not waiting on an open ticket. This seat's claims come first. Unclaimed tickets follow by priority, then by the newest note, claim or filing. Another seat's claims follow, with claims untouched for ``LJOS_STALE_DAYS`` (7 when unset) last. The id breaks the last tie, so the order is deterministic. The page prints the first 20, headed ``ready  shown X of Y``. ``-n N`` and ``--limit N`` print N. ``--all`` prints every ticket. A short page ends with one line naming ``--limit``, ``--all``, ``-p`` and ``--mine``. ``--json`` prints ``shown``, ``total`` and ``rows`` for that same page and order. ``--mine`` keeps its separate meaning: it names the next unfinished item of each of this seat's plans. ``-p`` limits the list to one project.
 ``list [-p PROJECT] [-n N | --limit N | --all] [--json] [--mine]``
    Stores: tracker. The same command as ``ready``, with the same flags, the same order and the same page, headed ``ready  shown X of Y``. ``ls`` is the short spelling. ``-n N`` prints N tickets, ``--limit N`` is the same flag, and ``--all`` prints every ticket. ``-p PROJECT`` limits the list to one project. ``--json`` prints ``shown``, ``total`` and ``rows``. ``--mine`` names the next unfinished item of each of this seat's plans. The command exists so a new seat that types ``ljos list`` gets the open tickets. ``ljos issues``, ``ljos tickets`` and ``ljos todo`` are not commands, and each names ``ljos ready``.
-``show ID [--json] [--all | --verbose]``
+``show ID [--json] [--all|--verbose]``
    Stores: tracker, pack. One ticket, or one memory. A ticket id prints the full ticket page: its id, status, priority and full title wrapped to 80 columns, the claim seat and age when claimed, its parent and children, the tickets it waits on, the full body, and the notes. An open blocker is ``open`` and a finished one is ``closed``. None prints ``parent: none``, ``children: none`` and ``blockers: none``. The page prints the eight most recent notes, newest last. Each note has its time, age and the seat that wrote it. A longer log prints how many notes are earlier and names ``ljos show ISSUE --all``. ``--all`` prints every note. ``--verbose`` is the same flag. A memory id prints that memory. The id may be the full atom id, the eight hex characters ``ljos search`` and ``ljos remember`` print, or the ``local:`` form. The text wraps to 80 columns. The page names the kind, the level, the origin, the seat and the session that wrote it, when it was written, whether it is accepted, retired or superseded and by what, the tickets it cites, and the memories it links to. ``--json`` prints the ticket, including ``claim``, ``parent``, ``children``, ``blocked_by``, ``body`` and ``notes``, or the memory. An unknown id exits 1 and says it is neither a ticket nor a memory, and it names ``ljos search`` and ``ljos ready``. An id that matches more than one memory lists those ids. An id that matches more than one ticket exits 1 and names one ``ljos show`` command. A ticket filed under a doubled project path is found by the id in the file (``Software/hle-mm-yled``) and by that id with the leading segment removed (``hle-mm-yled``).
 ``note [ID] TEXT... [--quiet] [--verbose] [--json]``
-   Stores: tracker. A dated progress note on the issue, committed. With no id, ``ljos note "TEXT"`` writes on the issue this conversation holds. With none open, it exits 1 and names ``ljos sitting ISSUE``. An empty id exits 1 and writes nothing. ``ljos note ID TEXT`` notes on ID. When ID is not that issue, the note is still written and stderr names both; ``--quiet`` leaves that line off. On an issue another seat claimed (including across separate home directories sharing one tracker) it says so: the note is an assist, and ``ljos send`` reaches the holder; the note stays on the ticket and is never written into memory. A commit that landed is not printed, and neither is a push that landed. A refused commit, a refused push, or a push that was skipped is one sentence that names the command to run. ``--verbose`` prints the tracker and sync lines. ``--json`` prints ``text``, ``tracker_git`` and ``sync``. Example: ``ljos note "the door seats when it is cold"``.
+   Stores: tracker. A dated progress note on the issue, committed. With no id, ``ljos note "TEXT"`` writes on the issue this conversation is working on. With none open, it exits 1 and names ``ljos sitting ISSUE``. An empty id exits 1 and writes nothing. ``ljos note ID TEXT`` notes on ID. When ID is not that issue, the note is still written and stderr names both; ``--quiet`` leaves that line off. On an issue another seat claimed (including across separate home directories sharing one tracker) it says so: the note is an assist, and ``ljos send`` reaches the holder; the note stays on the ticket and is never written into memory. A commit that landed is not printed, and neither is a push that landed. A refused commit, a refused push, or a push that was skipped is one sentence that names the command to run. ``--verbose`` prints the tracker and sync lines. ``--json`` prints ``text``, ``tracker_git`` and ``sync``. Example: ``ljos note "the door seats when it is cold"``.
 ``withdraw ID [--note TEXT] [--as NAME]``
    Stores: tracker. Take back this seat's own ballot, or with ``--note`` a note it wrote; nothing is deleted, and the withdrawal is a dated note beside it; ``--as`` names the persona a ballot was cast under.
 ``reopen ID``
@@ -135,7 +135,7 @@ The line says what went wrong and the command that fixes it.
 ``claims [--mine | --stale [--days N] [--json]] [ARGS]``
    Stores: tracker. Who has claimed what: ``vissue claims`` with its flags (``--by NAME``, ``--json``, ``-p PROJECT``). ``--mine`` lists this seat's claims with no note, stored file or finish for a day. ``--stale`` lists the ones untouched for ``--days`` or longer (``LJOS_STALE_DAYS``, 7 when unset), oldest first, with the age and the command to finish, release or note each one. ``--json`` prints that list as an array.
 ``recall ID [--json] [--no-graph]``
-   Stores: tracker. The working set: the plan, the cited files and the notes for one ticket. When no lesson is stored on the issue, the line names ``ljos remember``. Lessons matched by the title or the issue's tags, and not filed on the issue, are listed under Related, with shown N of M. An id the tracker does not hold exits 1 and names ``ljos ready``. When ``graphify-out/graph.json`` is in the repository, a Code context section lists matching nodes with file and line and a few edges tagged EXTRACTED or INFERRED. ``--no-graph`` and ``LJOS_GRAPHIFY=off`` leave it out. ``--json`` puts the same text in the JSON document. A schema major other than 1 is named in that section, and the working set still prints. When nothing is storing memories, the command exits 75 when the line names ``packset ensure``, and exits 1 when packset is not on PATH. The command appends one line to ``recall.log`` in the ljos state directory: the time, the seat, ``recall`` and the issue. ``ljos_recall`` appends that same line. Example: ``ljos recall proj-1a2b``.
+   Stores: tracker. The working set: the plan, the cited files and the notes for one ticket. When no lesson is stored on the issue, the line names ``ljos remember``. Lessons matched by the title or the issue's tags, and not filed on the issue, are listed under Related, with shown N of M. An id the tracker does not hold exits 1 and names ``ljos ready``. When ``graphify-out/graph.json`` is in the repository, a Code context section lists matching nodes with file and line and a few edges tagged EXTRACTED or INFERRED. ``--no-graph`` and ``LJOS_GRAPHIFY=off`` leave it out. ``--json`` puts the same text in the JSON document. A schema major other than 1 is named in that section, and the working set still prints. When nothing is storing memories, the command exits 75 when the line names \`packset ensure\`, and exits 1 when packset is not on PATH. The command appends one line to ``recall.log`` in the ljos state directory: the time, the seat, ``recall`` and the issue. ``ljos_recall`` appends that same line. Example: ``ljos recall proj-1a2b``.
 ``vote ID [--for OPTION] [--confidence P] [--used ACCESSIONS|none] [--expect OPTION|JSON] [--as PERSONA] [--jev] [--withdraw]``
    Stores: tracker. Cast as this seat, never another, or read the tally; ``--confidence`` is a probability in (0, 1]; ``--used`` lists the deed accessions the ballot used, comma-separated, or ``none``, and is required with ``--for``; ``--expect`` records the forecast of the others on the same command; ``--withdraw`` takes back the ballot and its forecast, and the logbook keeps what it was. ``--as NAME --jev`` asks Jev for the persona's ballot: cast with the option's probability and a forecast at confidence 0.8 or above, noted and left for a subagent under it. ``--against REASON`` votes no, and ``--child ID`` names the open child that no ballot links. The tracker records the voter as ``VISSUE_AGENT``, which is this seat's name.
 ``predict ID --expect OPTION|JSON [--as PERSONA]``
@@ -167,11 +167,11 @@ The line says what went wrong and the command that fixes it.
 ``findings STATE [--remember] [--all] [--issue I]``
    Stores: pack, deed store, tracker. The typed findings of an eb-stack campaign state, one per line: id, status, class/disposition, stage, recipe, the fix or the summary; ``--remember`` stores one lesson per finding a person or a seat resolved at once (recipe, step, error line, fix), origin ``tool-echo`` at L0 (``derived``), under the recipe's name, its package and the class; ``ljos accept ID`` raises it to ``explicit``; ``--all`` takes the ones a later attempt superseded too; ``--issue`` cites the state file as a deed on the issue.
 ``memory export --out FILE [--machine NAME] [--json]``
-   Stores: pack, tracker. Write this seat's lessons to the file. The file is not sent. ``-`` writes it to stdout. The machine is ``--machine``, else ``LJOS_SYNC_HOST`` when that is set and not empty, else the hostname. Another seat's lessons stay out. The line is ``exported N memories to PATH``. When the lessons already in the file are the same, the file is left in place and the line is ``seed unchanged: N memories``. ``--json`` prints ``memories``, ``unchanged`` and ``path``. A busy pack is not waited out. A directory prints ``Error: memory: PATH is a directory. `ljos memory export --out FILE` writes a file`` and exits 1.
+   Stores: pack, tracker. Write this seat's lessons to the file. The file is not sent. ``-`` writes it to stdout. The machine is ``--machine``, else ``LJOS_SYNC_HOST`` when that is set and not empty, else the hostname. Another seat's lessons stay out. The line is ``exported N memories to PATH``. When the lessons already in the file are the same, the file is left in place and the line is ``seed unchanged: N memories``. ``--json`` prints ``memories``, ``unchanged`` and ``path``. A busy pack is not waited out. A directory prints :literal:`Error: memory: PATH is a directory. \`ljos memory export --out FILE\` writes a file` and exits 1.
 ``memory import FILE [--source-machine NAME] [--source-seat SEAT] [--as-machine NAME] [--json]``
-   Stores: tracker. Store the file in this seat's import slot under ``<tracker>/.ljos/memory/imports/<seat>/<sha256>/``. The import id is the SHA-256 of the file. ``--source-machine`` and ``--source-seat`` name the file when it carries neither. ``--as-machine`` records that machine and does not change the bytes. Rows are labelled ``imported,unintegrated``. One line names the counts: ``imported N, unchanged M, skipped K duplicates`` when a row repeats a content id in the file. A second import of the same bytes prints ``nothing new: N rows already present`` and does not call the memory store again. ``--json`` prints those counts and keeps ``import_id``, ``rows``, ``labels`` and ``searchable``. A missing file prints ``Error: memory: PATH is not a file. `ljos memory export --out PATH` writes one on the machine that has the lessons`` and exits 1. When the path is a directory the line is ``Error: memory: PATH is a directory. Pass the file `ljos memory export --out` wrote`` and exits 1.
+   Stores: tracker. Store the file in this seat's import slot under ``<tracker>/.ljos/memory/imports/<seat>/<sha256>/``. The import id is the SHA-256 of the file. ``--source-machine`` and ``--source-seat`` name the file when it carries neither. ``--as-machine`` records that machine and does not change the bytes. Rows are labelled ``imported,unintegrated``. One line names the counts: ``imported N, unchanged M, skipped K duplicates`` when a row repeats a content id in the file. A second import of the same bytes prints ``nothing new: N rows already present`` and does not call the memory store again. ``--json`` prints those counts and keeps ``import_id``, ``rows``, ``labels`` and ``searchable``. A missing file prints :literal:`Error: memory: PATH is not a file. \`ljos memory export --out PATH\` writes one on the machine that has the lessons` and exits 1. When the path is a directory the line is :literal:`Error: memory: PATH is a directory. Pass the file \`ljos memory export --out\` wrote` and exits 1.
 ``memory integrate [ID|--all] [--dry-run] [--json]``
-   Stores: pack, tracker. Map one import, or every import with ``--all``, onto lessons already stored. The same text keeps one canonical id. A second run of an import that is already integrated prints ``nothing new: N rows already integrated`` and reads no further. ``--dry-run`` prints ``dry-run`` and the mappings, and writes nothing. ``--json`` prints the mappings and adds ``imported``, ``unchanged``, ``skipped`` and ``reason``. With no id and no ``--all`` the line is ``Error: memory: pass an import id or --all. `ljos memory imports` lists the ids. `ljos memory integrate --all` maps every import`` and exits 1. Both together print ``Error: memory: pass an import id or --all, not both. `ljos memory imports` lists the ids`` and exits 1. An unknown id prints ``Error: memory: no import starts with PREFIX. `ljos memory imports` lists the ids`` and exits 1. When the prefix matches two or more ids the line is ``Error: memory: PREFIX starts N imports. Pass a longer id from `ljos memory imports``` and exits 1. An import with no rows uses ``Error: memory: import ID has no rows. `ljos memory imports` lists the slots`` and exits 1. ``--all`` with no imports prints ``no imports. `ljos memory import FILE` stores a file `ljos memory export --out` writes``. ``ljos mesh pull`` integrates the same way and writes the seat's seed at ``<tracker>/.ljos/memory/mesh/<seat>/seed.jsonl``.
+   Stores: pack, tracker. Map one import, or every import with ``--all``, onto lessons already stored. The same text keeps one canonical id. A second run of an import that is already integrated prints ``nothing new: N rows already integrated`` and reads no further. ``--dry-run`` prints ``dry-run`` and the mappings, and writes nothing. ``--json`` prints the mappings and adds ``imported``, ``unchanged``, ``skipped`` and ``reason``. With no id and no ``--all`` the line is :literal:`Error: memory: pass an import id or --all. \`ljos memory imports\` lists the ids. \`ljos memory integrate --all\` maps every import` and exits 1. Both together print :literal:`Error: memory: pass an import id or --all, not both. \`ljos memory imports\` lists the ids` and exits 1. An unknown id prints :literal:`Error: memory: no import starts with PREFIX. \`ljos memory imports\` lists the ids` and exits 1. When the prefix matches two or more ids the line is :literal:`Error: memory: PREFIX starts N imports. Pass a longer id from \`ljos memory imports\`` and exits 1. An import with no rows uses :literal:`Error: memory: import ID has no rows. \`ljos memory imports\` lists the slots` and exits 1. ``--all`` with no imports prints :literal:`no imports. \`ljos memory import FILE\` stores a file \`ljos memory export --out\` writes`. ``ljos mesh pull`` integrates the same way and writes the seat's seed at ``<tracker>/.ljos/memory/mesh/<seat>/seed.jsonl``.
 ``memory imports [--json]``
    Stores: tracker. List the slots. An empty list prints ``no imports``.
 ``sync [--key] [--import] [--export]``
@@ -228,7 +228,7 @@ The line says what went wrong and the command that fixes it.
 ``mesh acl [SWARM...]``
    Stores: machine. Print who on the private network may connect to whom. The rules are the access policy ``mesh.toml`` implies. ``up`` and ``down`` do not read that file.
 ``mesh pull --seat SEAT --from DIR``
-   Stores: pack, tracker. Read another machine's memory files into a seat and keep a copy of the rows brought in. An unchanged export is not read again. A second pull of unchanged exports does not call the pack or take the writer lock, and a busy pack is not waited out. The second line is ``exports skipped S, imported I``. A lane is one machine's memory file. A missing directory prints ``Error: mesh: PATH does not exist. Create it, or pass a directory of <lane>.jsonl files`` and exits 1. A path that is a file prints ``Error: mesh: PATH is not a directory. Pass a directory of <lane>.jsonl files`` and exits 1. A memory store that stops the pull prints ``Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the seed with rows still missing, so run `ljos mesh pull --seat SEAT --from DIR`.`` and exits 1.
+   Stores: pack, tracker. Read another machine's memory files into a seat and keep a copy of the rows brought in. An unchanged export is not read again. A second pull of unchanged exports does not call the pack or take the writer lock, and a busy pack is not waited out. The second line is ``exports skipped S, imported I``. A lane is one machine's memory file. A missing directory prints ``Error: mesh: PATH does not exist. Create it, or pass a directory of <lane>.jsonl files`` and exits 1. A path that is a file prints ``Error: mesh: PATH is not a directory. Pass a directory of <lane>.jsonl files`` and exits 1. A memory store that stops the pull prints :literal:`Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the seed with rows still missing, so run \`ljos mesh pull --seat SEAT --from DIR\`.` and exits 1.
 ``mesh push --seat SEAT --to DIR [--lane NAME]``
    Stores: pack. Write a seat's memories into a handoff directory as one lane file.
 ``mcp [ARGS...]``
@@ -331,129 +331,119 @@ They go in ``~/.cache/ljos/run`` when ``ljos-UID`` is another user's or a symlin
 This flag list is copied from command help.
 A test fails when this list and the binary differ.
 
-..
-   # proseguard:off
-
-.. BEGIN ljos-help-flags
-
-accept --at --quote --via
-agents --dry-run --harness
+accept –at –quote –via
+agents –dry-run –harness
 ask
-block --off --on
+block –off –on
 brief
-bump-plan --dry-run --generation --parent --project
-calibrate --project --rounds
-cards --cards --dir
-claim --assignee --next --role --slack --takeover
-claims --agent --by --days --json --mine --project --stale
+bump-plan –dry-run –generation –parent –project
+calibrate –project –rounds
+cards –cards –dir
+claim –assignee –next –role –slack –takeover
+claims –agent –by –days –json –mine –project –stale
 cloud
-cloud up --force --repoint
-complete --assignee --gen --status
+cloud up –force –repoint
+complete –assignee –gen –status
 completions
-conflicts --limit
-consensus --compare --deadline --json --no-file --quorum
-consolidate --apply
+conflicts –limit
+consensus –compare –deadline –json –no-file –quorum
+consolidate –apply
 current
-deed --add --porcelain --remove --ticket
-digest --json --mark --since
-doctor --all --fix --verbose
-due --all --json --judge
+deed –add –porcelain –remove –ticket
+digest –json –mark –since
+doctor –all –fix –verbose
+due –all –json –judge
 evidence
-export --json --machine --out
-file --body --deadline --json --options --parent --porcelain --priority --project --quorum --tags --top --type --verbose
-findings --all --issue --remember
-finish --assignee --beta --close --gen --json --lesson --new-option --outcome --quiet --status --verbose
-forget --json --why
+export –json –machine –out
+file –body –deadline –json –options –parent –porcelain –priority –project –quorum –tags –top –type –verbose
+findings –all –issue –remember
+finish –assignee –beta –close –gen –json –lesson –new-option –outcome –quiet –status –verbose
+forget –json –why
 git-hook
 git-hooks
-graded --lapsed
-group --add --remove
-habit --every --source --unit
-handover --issue --out --project --scope --since-size --to
-help --all
-hook --brief-once --drain --event --fail-on-deny --git-commit --git-hook --limit --prompt --runner --text
-hubs --json --limit
-hud --foreground --hide --install-desktop --show --toggle
-inbox --all --sync
-island --as --fire --json
+graded –lapsed
+group –add –remove
+habit –every –source –unit
+handover –issue –out –project –scope –since-size –to
+help –all
+hook –brief-once –drain –event –fail-on-deny –git-commit –git-hook –limit –prompt –runner –text
+hubs –json –limit
+hud –foreground –hide –install-desktop –show –toggle
+inbox –all –sync
+island –as –fire –json
 judge-score
-learn --beta --new-option --outcome --rule --share
-list --all --json --limit --mine --project
-log --seat
+learn –beta –new-option –outcome –rule –share
+list –all –json –limit –mine –project
+log –seat
 mcp
 memories
-memories list --all --json --seat --since --user
-memories prune --apply --days --json --stale
-memories review --all --drop --edit --json --keep --merge --seat --since --text --user
-memories tui --all --seat --since --user
+memories list –all –json –seat –since –user
+memories prune –apply –days –json –stale
+memories review –all –drop –edit –json –keep –merge –seat –since –text –user
+memories tui –all –seat –since –user
 memory
-memory export --json --machine --out
-memory import --as-machine --json --source-machine --source-seat
-memory imports --json
-memory integrate --all --dry-run --json
+memory export –json –machine –out
+memory import –as-machine –json –source-machine –source-seat
+memory imports –json
+memory integrate –all –dry-run –json
 merge-atoms
 merge-org
 mesh
 mesh acl
 mesh down
-mesh pull --from --seat
-mesh push --lane --seat --to
+mesh pull –from –seat
+mesh push –lane –seat –to
 mesh status
-mesh up --hostname --key-file --login-server
-note --json --quiet --verbose
-offboard --dry-run --harness --runner
-onboard --dry-run --example --harness --skills
-open-panel --cwd --log --prompt-file --session
+mesh up –hostname –key-file –login-server
+note –json –quiet –verbose
+offboard –dry-run –harness –runner
+onboard –dry-run –example –harness –skills
+open-panel –cwd –log –prompt-file –session
 options
-panel --cloud --designers --dry-run --harness --jev --out
+panel –cloud –designers –dry-run –harness –jev –out
 parent
 person-key
-persona --about --anchor --check --replace --retire --runner --view
+persona –about –anchor –check –replace –retire –runner –view
 personas
 playbook
 playbooks
-policy --fail-on-deny
-predict --as --expect
-prefer --as --ask --deny --deny-mention --deny-name --deny-reply-name --deny-reply-to --forget --keep --promote --review --sync --user --why
-proposals --seat --settle --status
-proposals amend --text
-protocol --full
+policy –fail-on-deny
+predict –as –expect
+prefer –as –ask –deny –deny-mention –deny-name –deny-reply-name –deny-reply-to –forget –keep –promote –review –sync –user –why
+proposals –seat –settle –status
+proposals amend –text
+protocol –full
 read
-ready --all --json --limit --mine --project
-reap --apply --idle
-recall --json --no-graph
-receive --import --keep --since
+ready –all –json –limit –mine –project
+reap –apply –idle
+recall –json –no-graph
+receive –import –keep –since
 record
-record check --tracker
-release --assignee --days --dry-run --older-than --stale --verbose --yes
-remember --as --json --project --standing --transient --valid-from --valid-to --verbose
+record check –tracker
+release –assignee –days –dry-run –older-than –stale –verbose –yes
+remember –as –json –project –standing –transient –valid-from –valid-to –verbose
 reopen
-reply --interrupt
+reply –interrupt
 retire-notes
-rule --json --user --verdict --why
-rules --json
-search --as-of --attempts --explain --import-id --json --limit --min-score --porcelain --project --rerank --source-machine --source-seat --valid-at
+rule –json –user –verdict –why
+rules –json
+search –as-of –attempts –explain –import-id –json –limit –min-score –porcelain –project –rerank –source-machine –source-seat –valid-at
 seat
 seat add
-seat grant --at --ids-file --quote --via
-send --group --interrupt --issue --new-seat
-show --all --json --verbose
-sitting --anyway --assignee --cards --dir --json --plan --playbook --project --top --verbose
-slot --key --model --run
+seat grant –at –ids-file –quote –via
+send –group –interrupt –issue –new-seat
+show –all –json –verbose
+sitting –anyway –assignee –cards –dir –json –plan –playbook –project –top –verbose
+slot –key –model –run
 statusline
-supervise --at --cwd --exit --failures --harness --max-restarts --restart --script --window
-sync --adopt --adopt-legacy --compact --dry-run --export --force --import --key
-timeline --json --limit
-trust --about --why
-uninstall --all --bin-dir --dry-run --keep-programs --no-stub --purge
-upgrade --dir --only
-usage --since
-vote --against --as --child --confidence --expect --for --jev --used --withdraw
-wake --clear --command --fire --from --interrupt --issue --key-env --key-file --msg --timeout --webhook
-withdraw --as --note
-workflow --round --start
-.. END ljos-help-flags
-
-..
-   # proseguard:on
-
+supervise –at –cwd –exit –failures –harness –max-restarts –restart –script –window
+sync –adopt –adopt-legacy –compact –dry-run –export –force –import –key
+timeline –json –limit
+trust –about –why
+uninstall –all –bin-dir –dry-run –keep-programs –no-stub –purge
+upgrade –dir –only
+usage –since
+vote –against –as –child –confidence –expect –for –jev –used –withdraw
+wake –clear –command –fire –from –interrupt –issue –key-env –key-file –msg –timeout –webhook
+withdraw –as –note
+workflow –round –start
