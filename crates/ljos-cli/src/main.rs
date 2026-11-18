@@ -108,7 +108,7 @@ enum MemoryCmd {
     ///
     /// Example: `ljos memory imports`
     Imports {
-        /// Print JSON.
+        /// Print each import as JSON, the same rows as the text.
         #[arg(long)]
         json: bool,
     },
@@ -1965,7 +1965,7 @@ enum Cmd {
     ///
     /// Example: `ljos rules`
     Rules {
-        /// Print them as JSON.
+        /// Print pattern, verdict and reason as JSON.
         #[arg(long)]
         json: bool,
     },

@@ -79,3 +79,19 @@ fn status_and_verdict_help_start_with_a_capital() {
         );
     }
 }
+
+#[test]
+fn json_flags_name_the_rows_they_print() {
+    for flag in ["--help", "-h"] {
+        let imports = help(&["memory", "imports", flag]);
+        assert!(
+            imports.contains("Print each import as JSON, the same rows as the text."),
+            "memory imports {flag}\n{imports}"
+        );
+        let rules = help(&["rules", flag]);
+        assert!(
+            rules.contains("Print pattern, verdict and reason as JSON."),
+            "rules {flag}\n{rules}"
+        );
+    }
+}
