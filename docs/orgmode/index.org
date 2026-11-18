@@ -106,6 +106,8 @@ $ ljos file "Pick a codec" -p demo
 =ljos search= prints the lesson when the query shares its words. =ljos show a6ae2751= opens that id. A =local:= id opens the same way.
 Typed at a terminal, the row is =lesson, today=. Under a runner it says =lesson, from an agent=.
 A word ranking splits an identifier, so =list_scans= matches =list scans=.
+A word in every row is common only once at least four rows carry it.
+Two lessons that share one word of the query still match.
 A row that only shares a common word is left out, and the line is then
 =No close matches for "..."=.
 =ljos file= prints the new id and commits the Org heading. [[file:getting-started.org][Getting started]] has the full transcript, including a second seat.

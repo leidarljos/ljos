@@ -15,8 +15,10 @@
 //! A row that matches any query term is a candidate. More matched terms rank
 //! higher, then rarer terms. Matching is case-insensitive. A light suffix
 //! rule treats `narration`, `narrated` and `narrate` as one word, and `video`
-//! and `videos` as one. A row that only shares a common word is left out.
-//! When nothing is close, the broader query names a term that occurs.
+//! and `videos` as one. A word in every row is common once four rows carry
+//! it, and a row that only shares that word is left out. A smaller store
+//! still returns the row. When nothing is close, the broader query names a
+//! term that occurs.
 
 use packset_client::Hit;
 
@@ -33,6 +35,13 @@ const K1: f64 = 1.2;
 
 /// How much document length counts. 0 is none, 1 is full.
 const B: f64 = 0.75;
+
+/// How many rows a word must sit in before a word that is in every row
+/// is common. Two lessons can share a word. That store is too small for
+/// the word to be common, and a query that meets a lesson on that word
+/// alone still returns the lesson. Four rows is where the cut used for
+/// a large store begins.
+const COMMON_ROWS: usize = 4;
 
 /// Function words. A coding noun such as `test` or `error` is not one:
 /// those are what a query is often about.
@@ -445,7 +454,10 @@ pub fn rank(docs: &[Doc<'_>], query: &str) -> Ranked {
             }
         }
     }
-    let common: Vec<bool> = concept_df.iter().map(|hits| n >= 2 && *hits == n).collect();
+    let common: Vec<bool> = concept_df
+        .iter()
+        .map(|hits| *hits >= COMMON_ROWS && *hits == n)
+        .collect();
     let mut any = false;
     let mut close: Vec<(usize, f64, usize, f64, usize)> = Vec::new();
     for (index, doc) in prepared.iter().enumerate() {
@@ -675,9 +687,10 @@ fn broader_command(query: &str) -> Option<String> {
 }
 
 /// A partial overlap stays when it is more than one term, or the one term
-/// is not in every row. One query word always stays: that word is the subject.
-/// A word that is in every row of a corpus is common, and a row that shares
-/// only that word is not close.
+/// is not common. One query word always stays: that word is the subject.
+/// A word is common when it is in every row and at least [`COMMON_ROWS`]
+/// rows carry it. Two lessons can share a word without that word being
+/// common.
 fn keep_partial(matched: &[usize], common: &[bool], query_terms: usize) -> bool {
     if matched.is_empty() {
         return false;
@@ -1291,7 +1304,7 @@ mod tests {
 
     #[test]
     fn a_broader_query_names_a_term_that_occurs() {
-        let docs: Vec<Doc<'_>> = (0..4)
+        let docs: Vec<Doc<'_>> = (0..COMMON_ROWS)
             .map(|_| Doc {
                 id: "tape",
                 own: true,
@@ -1307,6 +1320,34 @@ mod tests {
             other => panic!("a common word alone should not be a close match: {other:?}"),
         }
         assert!(matches!(rank(&docs, "xylophone plankton"), Ranked::None));
+    }
+
+    #[test]
+    fn two_lessons_keep_a_single_shared_word() {
+        let kiln = Doc {
+            id: "kiln",
+            own: true,
+            title: "",
+            tags: "",
+            body: "Seat the kiln door seal only when the clay is cold.",
+        };
+        let jar = Doc {
+            id: "jar",
+            own: true,
+            title: "",
+            tags: "",
+            body: "A wax seal keeps the jar shut.",
+        };
+        let docs = [kiln, jar];
+        match rank(&docs, "seal hinge") {
+            Ranked::Hits(rows) => {
+                assert!(
+                    rows.iter().any(|row| row.index == 0),
+                    "the kiln lesson matches seal: {rows:?}"
+                );
+            }
+            other => panic!("two lessons should keep a one-word match: {other:?}"),
+        }
     }
 
     /// The doc samples print these scores for a one-row word search.
