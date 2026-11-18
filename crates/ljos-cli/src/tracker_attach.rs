@@ -233,7 +233,7 @@ fn workspace_checkouts() -> Vec<PathBuf> {
 /// with: one written in the URL, or one a global rewrite adds to this
 /// same repository's URL. A rewrite to another repository lends nothing.
 fn origin(dir: &Path) -> Option<(String, Option<Secret>)> {
-    if !dir.exists() {
+    if !dir.join(".git").exists() {
         return None;
     }
     let written = git_line(dir, &["config", "--get", "remote.origin.url"])?;

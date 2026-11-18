@@ -2716,16 +2716,28 @@ fn git_set(dir: &Path, key: &str, value: &str) -> Result<()> {
 }
 
 fn is_work_tree(dir: &Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
     let Ok(out) = crate::git_cmd()
         .arg("-C")
         .arg(dir)
-        .args(["rev-parse", "--is-inside-work-tree"])
+        .args(["rev-parse", "--show-toplevel"])
         .stdin(std::process::Stdio::null())
         .output()
     else {
         return false;
     };
-    out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
+    if !out.status.success() {
+        return false;
+    }
+    let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if top.is_empty() {
+        return false;
+    }
+    let want = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let have = fs::canonicalize(&top).unwrap_or_else(|_| PathBuf::from(top));
+    have == want
 }
 
 fn write_mcp(

@@ -1083,6 +1083,56 @@ fn cloud_up_clones_the_tracker_a_workspace_checkout_holds() {
 }
 
 #[test]
+fn cloud_up_does_not_take_an_enclosing_checkout_as_the_tracker() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, origin) = tracker_vm(root.path());
+    let enclosing = root.path().join("enclosing");
+    fs::create_dir_all(&enclosing).unwrap();
+    git(root.path(), &["init", "-q", enclosing.to_str().unwrap()]);
+    identity(&enclosing);
+    git(
+        &enclosing,
+        &["remote", "add", "origin", "/elsewhere/product.git"],
+    );
+    write_project(
+        &enclosing,
+        "probe",
+        &board(&[issue_block("prod-1", "TODO", "", &[])]),
+    );
+    git(&enclosing, &["add", "-A"]);
+    git(&enclosing, &["commit", "-q", "-m", "boards"]);
+    fs::write(enclosing.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+
+    // Case 1: workspace search points to an enclosing product checkout with boards and an untracked vissue.toml.
+    std::env::set_var("LJOS_TRACKER_SEARCH", &enclosing);
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(
+        said.contains("has no shared tracker"),
+        "enclosing checkout was taken as tracker:\n{said}"
+    );
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    assert!(!env.contains("VISSUE_ROOT="), "{env}");
+
+    // Case 2: an empty tracker destination inside the enclosing checkout does not adopt the enclosing checkout.
+    let nested_dest = enclosing.join("nested/tracker");
+    fs::create_dir_all(&nested_dest).unwrap();
+    std::env::set_var("LJOS_TRACKER_DIR", &nested_dest);
+    std::env::set_var("LJOS_TRACKER_REMOTE", &origin);
+    let cloned = ljos_cli::cloud::up(false).unwrap();
+    assert!(
+        cloned.contains("tracker: cloned"),
+        "expected a fresh clone at nested_dest, not updating enclosing:\n{cloned}"
+    );
+    assert_eq!(
+        git(&enclosing, &["config", "--get", "remote.origin.url"]).trim(),
+        "/elsewhere/product.git",
+        "enclosing checkout origin was rewritten"
+    );
+    assert!(nested_dest.join("Software/probe/issues.org").is_file());
+}
+
+#[test]
 fn a_tracker_token_stays_private_and_answers_for_the_clone() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
