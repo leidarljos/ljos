@@ -333,8 +333,12 @@ fn ljos_vote_schema_describes_issue_options() {
         .as_str()
         .unwrap_or("");
     assert!(
-        desc.contains("--options"),
-        "ljos_vote choice schema does not mention --options: {desc:?}"
+        desc.contains("`Options:`") && desc.contains("`ljos_options`"),
+        "ljos_vote choice schema does not say where the options come from: {desc:?}"
+    );
+    assert!(
+        !desc.contains("--options"),
+        "ljos_vote choice schema names a command line flag: {desc:?}"
     );
 }
 
