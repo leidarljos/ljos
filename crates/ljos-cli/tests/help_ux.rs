@@ -36,3 +36,46 @@ fn policy_example_has_no_trailing_period() {
         );
     }
 }
+
+#[test]
+fn status_and_verdict_help_start_with_a_capital() {
+    for (args, line) in [
+        (
+            &["finish", "--help"][..],
+            "Status to record: done, failed, or cancelled.",
+        ),
+        (
+            &["finish", "-h"][..],
+            "Status to record: done, failed, or cancelled.",
+        ),
+        (
+            &["complete", "--help"][..],
+            "Status to record: done, failed, or cancelled. The default is done.",
+        ),
+        (
+            &["complete", "-h"][..],
+            "Status to record: done, failed, or cancelled. The default is done.",
+        ),
+        (
+            &["rule", "--help"][..],
+            "Label the warning deny or ask.",
+        ),
+        (&["rule", "-h"][..], "Label the warning deny or ask."),
+    ] {
+        let page = help(args);
+        assert!(page.contains(line), "{args:?} missing {line:?}\n{page}");
+    }
+    for args in [
+        &["finish", "--help"][..],
+        &["complete", "--help"][..],
+        &["rule", "--help"][..],
+    ] {
+        let page = help(args);
+        assert!(
+            !page.contains("\n          done, failed")
+                && !page.contains("\n          done (default)")
+                && !page.contains("\n          deny or ask labels"),
+            "{args:?} still opens a flag with a lowercase fragment\n{page}"
+        );
+    }
+}

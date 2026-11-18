@@ -1897,7 +1897,7 @@ enum Cmd {
     Complete {
         /// A tracker id, or a 32-hex claim-graph id.
         node: String,
-        /// done (default), failed, or cancelled.
+        /// Status to record: done, failed, or cancelled. The default is done.
         #[arg(long)]
         status: Option<String>,
         /// Claim generation recorded when the work was taken. Absent: the live one. A stale generation is refused.
@@ -1947,7 +1947,7 @@ enum Cmd {
     Rule {
         /// A glob over the whole command line: `rm -rf *`, `*--force*`, `git push --force*`.
         pattern: String,
-        /// deny or ask labels the warning; allow (with --user, at your own terminal) clears
+        /// Label the warning deny or ask. With `--user`, at your own terminal, allow clears
         /// the seat's warnings for the matching lines.
         #[arg(long, default_value = "ask")]
         verdict: String,
@@ -2460,7 +2460,7 @@ enum Cmd {
     Finish {
         /// The tracker id of the issue. Absent: the issue this conversation holds.
         issue: Option<String>,
-        /// done, failed, or cancelled.
+        /// Status to record: done, failed, or cancelled.
         #[arg(long, default_value = "done")]
         status: String,
         /// The lesson this work taught, two sentences at most.
