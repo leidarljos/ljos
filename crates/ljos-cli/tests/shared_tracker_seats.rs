@@ -738,3 +738,83 @@ fn a_refused_sitting_writes_no_playbook_note_or_local_record() {
         "a refused ljos_sitting wrote a local playbook record"
     );
 }
+
+#[test]
+fn complete_on_another_seats_ticket_refuses_without_changing_state() {
+    let world = Shared::new();
+    let taken = world.alice_ljos(&["claim", "demo-shr1"]);
+    assert!(taken.status.success(), "{}", said(&taken));
+
+    let issues = world.tracker.join("Software/demo/issues.org");
+    let before_org = std::fs::read_to_string(&issues).unwrap();
+
+    let refused = world.bob_ljos(&["complete", "demo-shr1"]);
+    let out_text = said(&refused);
+    assert!(
+        !refused.status.success(),
+        "complete on another seat's ticket exited 0:\n{out_text}"
+    );
+    assert!(
+        refused.stdout.is_empty(),
+        "expected empty stdout on refusal:\n{out_text}"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(
+        stderr.lines().count(),
+        1,
+        "expected one plain line on stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("alice"), "did not name holder:\n{stderr}");
+    assert!(
+        !stderr.contains("stays claimed by"),
+        "printed stays claimed by:\n{stderr}"
+    );
+    assert!(
+        !out_text.contains("label "),
+        "expected plain refusal line:\n{out_text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&issues).unwrap(),
+        before_org,
+        "complete on another seat's ticket changed tracker state"
+    );
+    assert!(
+        !world.bob_graph().contains("demo-shr1"),
+        "complete on another seat's ticket minted or marked a node:\n{}",
+        world.bob_graph()
+    );
+
+    // Even if bob's own claim graph already has a node for demo-shr1,
+    // completing it while alice owns the ticket must refuse and keep the node unchanged.
+    let id = ljos_cli::work_id("demo-shr1");
+    let upsert = Command::new("claimdag")
+        .arg("--dir")
+        .arg(world.bob.1.join("claimdag"))
+        .args(["upsert", "--id", &id, "--summary", "demo-shr1"])
+        .env("PATH", &world.path)
+        .output()
+        .unwrap();
+    assert!(upsert.status.success(), "{upsert:?}");
+    let before_graph = world.bob_graph();
+
+    let refused_existing = world.bob_ljos(&["complete", "demo-shr1"]);
+    assert!(
+        !refused_existing.status.success(),
+        "complete marked bob's existing node done:\n{}",
+        said(&refused_existing)
+    );
+    assert_eq!(world.bob_graph(), before_graph);
+    assert_eq!(std::fs::read_to_string(&issues).unwrap(), before_org);
+
+    let over_mcp = world.bob_mcp(
+        "ljos_complete",
+        serde_json::json!({"seat": "bob", "node": "demo-shr1"}),
+    );
+    assert_eq!(over_mcp["result"]["isError"], true, "{over_mcp}");
+    assert!(
+        over_mcp.to_string().contains("alice"),
+        "ljos_complete did not name alice: {over_mcp}"
+    );
+    assert_eq!(world.bob_graph(), before_graph);
+    assert_eq!(std::fs::read_to_string(&issues).unwrap(), before_org);
+}

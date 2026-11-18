@@ -1,0 +1,1 @@
+`ljos complete` and `ljos_complete` now refuse with a nonzero exit and one plain line naming the holder when another seat owns the ticket, without marking a local node done or printing `stays claimed by`.

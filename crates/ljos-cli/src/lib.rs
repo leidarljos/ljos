@@ -45805,8 +45805,37 @@ pub fn complete_as(
     gen: Option<u64>,
     reopen: bool,
 ) -> Result<String> {
-    let id = node_for(node)?;
+    complete_with_grant(node, status, assignee, gen, reopen, false)
+}
+
+fn complete_with_grant(
+    node: &str,
+    status: Option<&str>,
+    assignee: &str,
+    gen: Option<u64>,
+    reopen: bool,
+    allow_other_tracker_holder: bool,
+) -> Result<String> {
     let actor = work_id(&occupancy_scope(assignee, node));
+    if !allow_other_tracker_holder {
+        if let Some((_, live)) = live_other_hold_on_ticket(node, &actor, assignee) {
+            bail!(
+                "{}",
+                not_assignee_message(
+                    node,
+                    assignee,
+                    Some(&live),
+                    tracker_claimed_by(node).as_deref()
+                )
+            );
+        }
+        if let Some(who) = tracker_claimed_by(node) {
+            if !same_claimed_seat(&who, assignee, node) {
+                bail!("{}", not_assignee_message(node, assignee, None, Some(&who)));
+            }
+        }
+    }
+    let id = node_for(node)?;
     let gen_s = match live_gen(&id, gen) {
         Ok(g) => g.to_string(),
         Err(e) => {
@@ -46912,7 +46941,14 @@ pub fn finish(
         // handed back locally, and a later call reconciles the graph.
         let bound = arm_wall_budget_for(std::time::Duration::from_secs(3));
         let ended = if closing {
-            complete_as(issue, Some(status), assignee, gen, false)
+            complete_with_grant(
+                issue,
+                Some(status),
+                assignee,
+                gen,
+                false,
+                close_note.is_some(),
+            )
         } else {
             if let Some(expected) = gen {
                 let id = node_for(issue)?;
