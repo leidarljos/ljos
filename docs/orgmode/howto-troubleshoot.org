@@ -183,3 +183,12 @@ line and a fix command:
 the tracker config does not parse, so run `ljos doctor`.
 #+end_src
 
+* Empty search query
+
+=ljos search= with no query prints one usage line with the exact
+command shape, even when old queued lessons exist:
+
+#+begin_src text
+search: the query is empty, so run `ljos search "QUERY"`.
+#+end_src
+

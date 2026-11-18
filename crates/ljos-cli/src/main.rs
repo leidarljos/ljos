@@ -3842,6 +3842,24 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
 /// offboard, uninstall and doctor do not create the queue or its lock,
 /// and they do not rewrite a queue that is already there.
 fn queued_lesson_may_go(cmd: &Cmd) -> bool {
+    // A search with no query and no filters exits as usage. Keep that one
+    // line clean and skip queue drain noise.
+    if let Cmd::Search {
+        query,
+        source_machine,
+        source_seat,
+        import_id,
+        ..
+    } = cmd
+    {
+        if join(query).trim().is_empty()
+            && source_machine.is_none()
+            && source_seat.is_none()
+            && import_id.is_none()
+        {
+            return false;
+        }
+    }
     // A read-only proposal list must not drain the note queue. That drain
     // takes the queue lock and waits on the writer.
     if let Cmd::Proposals {
