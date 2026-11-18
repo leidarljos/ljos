@@ -962,13 +962,10 @@ mod tests {
 
     #[test]
     fn an_at_in_the_path_is_not_userinfo() {
-        let url = "git://127.0.0.1:19418/x@/home/ubuntu/seat/seat.git";
-        let want = "127.0.0.1/x@/home/ubuntu/seat/seat";
+        let url = "git://127.0.0.1:19418/x@/tmp/seat/seat.git";
+        let want = "127.0.0.1/x@/tmp/seat/seat";
         assert_eq!(push_repo_key(url), want);
-        assert_ne!(
-            push_repo_key(url),
-            push_repo_key("/home/ubuntu/seat/seat.git")
-        );
+        assert_ne!(push_repo_key(url), push_repo_key("/tmp/seat/seat.git"));
     }
 
     #[test]
