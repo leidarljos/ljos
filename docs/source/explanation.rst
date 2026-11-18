@@ -30,6 +30,8 @@ claim graph (claimdag) who is working on what right now, as a lease per sitting 
 consensus              the weighting that settles a vote                        computed from the tracker and the pack         nothing stored                ``ljos consensus``                                   ``ljos consensus ID``
 ====================== ======================================================== ============================================== ============================= ==================================================== ===========================
 
+``ljos search`` reads the pack and the tracker. A ticket whose title matches the query is included, and then one whose notes match. An exact or near-exact title is the first row, while the encoder is loading and after it has answered. The row names the ticket id and the title, so ``ljos recall ID`` opens it. A search that found nothing prints no match-mode line. The line is ``Nothing matched "which fusion". Try a shorter query, such as: ljos search fusion``.
+
 The claim graph shows itself least, by design. It answers one question while work runs: is
 anyone already on this ticket, here, now? ``ljos sitting`` takes the ticket's node before it
 returns. A second sitting on the same ticket learns who has it. ``ljos finish`` marks the node
