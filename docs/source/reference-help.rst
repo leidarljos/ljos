@@ -38,8 +38,6 @@ They still run.
 
    Exit 1 when a required program, the memory store or its token does not answer, the tool server a runner starts or the cloud signing key does not, the note queue is damaged, or the tracker directory is not writable. A tracker that has not been created yet does not fail this command.
 
-   Example: `ljos doctor`
-
    Usage: ljos doctor [OPTIONS]
 
    Options:
@@ -53,5 +51,7 @@ They still run.
 
      -h, --help
              Print help (see a summary with '-h')
+
+   Example: `ljos doctor`
 
 .. END ljos-sample help
