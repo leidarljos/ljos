@@ -18717,7 +18717,7 @@ fn harness_rows() -> Vec<Habitat> {
             name: "runners",
             state: format!(
                 "none named in {}, so run `ljos onboard --example`.",
-                path.display()
+                tools::sh_word(&path.display().to_string())
             ),
             ok: false,
         }];
@@ -18863,6 +18863,45 @@ fn harness_rows() -> Vec<Habitat> {
         });
     }
     rows
+}
+
+#[cfg(test)]
+mod doctor_row_path_quote_tests {
+    use super::*;
+
+    #[test]
+    fn doctor_rows_shell_quote_cloud_guard_and_runners_paths() {
+        let _env = test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home; touch MARK #");
+        let cfg = home.join(".config");
+        std::fs::create_dir_all(&cfg).unwrap();
+        with_env_mutation(|| unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", &cfg);
+        });
+        let guard = cloud::guard_row();
+        assert_eq!(guard.name, "cloud guard");
+        let allow = cloud_hook::allow_path().unwrap();
+        assert!(
+            guard
+                .state
+                .contains(&tools::sh_word(&allow.display().to_string())),
+            "{}",
+            guard.state
+        );
+        let runners = harness_rows()
+            .into_iter()
+            .find(|row| row.name == "runners")
+            .unwrap();
+        assert!(
+            runners
+                .state
+                .contains(&tools::sh_word(&harnesses_path().display().to_string())),
+            "{}",
+            runners.state
+        );
+    }
 }
 
 /// Run a runner's probe with a thirty-second limit; it passes when it

@@ -290,7 +290,7 @@ pub fn guard_row() -> crate::Habitat {
             name: "cloud guard",
             state: format!(
                 "missing in {}, and the cloud seat push rule is not installed, so run `ljos cloud up`.",
-                path.display()
+                crate::tools::sh_word(&path.display().to_string())
             ),
             ok: false,
         };
@@ -299,7 +299,7 @@ pub fn guard_row() -> crate::Habitat {
         name: "cloud guard",
         state: format!(
             "{} denies a push outside this seat's named branches and develop",
-            path.display()
+            crate::tools::sh_word(&path.display().to_string())
         ),
         ok: true,
     }
