@@ -24033,7 +24033,7 @@ pub fn remember_horizon(transient: bool, standing: bool, under_runner: bool) -> 
 /// the person runs instead. One sentence. Printed when this process has
 /// no login terminal or a runner is detected, and the stored record is
 /// not the person's.
-pub const STORED_ORIGIN_LINE: &str = "stored from an agent because no terminal was found or a runner was detected, so run `ljos remember` from your own login terminal.";
+pub const STORED_ORIGIN_LINE: &str = "stored from an agent because no terminal was found or a runner was detected; from your own login terminal, so run `ljos remember`.";
 
 /// What `ljos remember` prints when the pack refused the sentence and the
 /// copy lives only in this seat's state directory. Search still finds it.
