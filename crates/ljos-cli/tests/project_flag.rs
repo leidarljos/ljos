@@ -65,6 +65,10 @@ impl Seat {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with_url(args, &self.url)
+    }
+
+    fn run_with_url(&self, args: &[&str], url: &str) -> Output {
         let home = self.root.join("home");
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
@@ -85,7 +89,7 @@ impl Seat {
             .env("LJOS_SEARCH_WAIT", "0")
             .env("LJOS_SEARCH_WARMUP_WAIT", "0")
             .env("LJOS_SEARCH_BUSY_WAIT", "0")
-            .env("PACKSET_URL", &self.url)
+            .env("PACKSET_URL", url)
             .env("PACKSET_WORKSPACE", "seat")
             .env("PACKSET_AUTH", "off")
             .env("NO_COLOR", "1")
@@ -94,6 +98,64 @@ impl Seat {
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")))
+    }
+
+    fn mcp(&self, name: &str, arguments: serde_json::Value, url: &str) -> serde_json::Value {
+        let home = self.root.join("home");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+            .current_dir(self.root.join("work"))
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_STATE_HOME", home.join(".local/state"))
+            .env("XDG_RUNTIME_DIR", self.root.join("run"))
+            .env("TMPDIR", &self.root)
+            .env("VISSUE_ROOT", self.root.join("tracker"))
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("LJOS_SEAT", "alice")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("LJOS_HOOKD", "off")
+            .env("LJOS_SEARCH_WAIT", "0")
+            .env("LJOS_SEARCH_WARMUP_WAIT", "0")
+            .env("LJOS_SEARCH_BUSY_WAIT", "0")
+            .env("PACKSET_URL", url)
+            .env("PACKSET_WORKSPACE", "seat")
+            .env("PACKSET_AUTH", "off")
+            .env("LJOS_MCP_TOOLS", "all")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(30));
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        });
+        let mut stdin = child.stdin.take().unwrap();
+        for line in [
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "0"}}
+            }),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": name, "arguments": arguments}
+            }),
+        ] {
+            writeln!(stdin, "{line}").unwrap();
+        }
+        drop(stdin);
+        let out = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|v| v["id"] == 2)
+            .unwrap_or_else(|| panic!("no id=2 in {stdout}"))
     }
 }
 
@@ -373,4 +435,195 @@ fn a_verb_without_a_project_names_the_verbs_that_take_one() {
         stderr.lines().any(|row| row == line),
         "expected {line:?}\n{dump}"
     );
+}
+
+#[test]
+fn queued_remember_keeps_the_project_when_the_pack_is_down() {
+    let seat = Seat::open();
+    let dead = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port())
+    };
+    let queued = seat.run_with_url(
+        &["remember", "-p", "Finance", "Queued kiln finance lesson."],
+        &dead,
+    );
+    let dump = said(&queued);
+    assert!(queued.status.success(), "{dump}");
+
+    let mcp = seat.mcp(
+        "ljos_remember",
+        serde_json::json!({"seat": "alice", "project": "Garden", "text": "MCP queued garden lesson."}),
+        &dead,
+    );
+    assert!(
+        mcp.to_string().contains("queued for the next send"),
+        "{mcp}"
+    );
+
+    let flushed = seat.run(&["search", "kiln"]);
+    let dump = said(&flushed);
+    assert!(flushed.status.success(), "{dump}");
+    let posts = seat.posts.lock().unwrap();
+    assert_eq!(posts.len(), 2, "{posts:?}\n{dump}");
+    assert!(
+        posts.iter().any(|body| {
+            body.contains("Queued kiln finance lesson.") && body.contains("project:finance")
+        }),
+        "flushed CLI lesson lost project:finance:\n{posts:?}"
+    );
+    assert!(
+        posts.iter().any(|body| {
+            body.contains("MCP queued garden lesson.") && body.contains("project:garden")
+        }),
+        "flushed MCP lesson lost project:garden:\n{posts:?}"
+    );
+}
+
+#[test]
+fn search_project_does_not_name_min_score_for_another_projects_weak_hit() {
+    let mut seat = Seat::open();
+    let weak_body = r#"{"hits":[{"id":"lesson-garden-weak","kind":"lesson","text":"The JOSS editor keeps review comments in document order beside the line they mark.","score":10.0,"cosine":0.3,"ts":"2026-11-01T00:00:00.000Z","entities":["seat:alice","project:garden"],"ballots":1,"of":1}],"rank":"relevance"}"#.to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let status = r#"{"embedder":{"available":true,"answering":true,"enabled":true},"search":{"ranks":["fused","relevance"]}}"#;
+        for conn in listener.incoming().flatten() {
+            let weak_body = weak_body.clone();
+            thread::spawn(move || {
+                let mut sock = conn;
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if request_complete(&buf) {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if buf.is_empty() {
+                    return;
+                }
+                let head_end = buf
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .unwrap_or(buf.len());
+                let head = String::from_utf8_lossy(&buf[..head_end]);
+                let path = head
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("/")
+                    .split('?')
+                    .next()
+                    .unwrap_or("/");
+                let body = if path == "/v1/search" {
+                    weak_body
+                } else if path == "/v1/status" {
+                    status.to_string()
+                } else if path == "/v1/atoms" {
+                    r#"{"atoms":[]}"#.to_string()
+                } else {
+                    r#"{"ok":true}"#.to_string()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            });
+        }
+    });
+    seat.url = format!("http://127.0.0.1:{port}");
+
+    let query = "ridley-core landing order rebase review";
+    let finance = seat.run(&["search", query, "-p", "finance"]);
+    let dump = said(&finance);
+    assert!(finance.status.success(), "{dump}");
+    let stdout = String::from_utf8_lossy(&finance.stdout);
+    assert!(
+        !stdout.contains("--min-score 0") && !stdout.contains("No relevant matches"),
+        "finance search blamed min-score for garden's weak hit:\n{dump}"
+    );
+
+    let mcp = seat.mcp(
+        "ljos_search",
+        serde_json::json!({"query": query, "project": "finance"}),
+        &seat.url,
+    );
+    let text = mcp.to_string();
+    assert!(
+        !text.contains("min_score 0") && !text.contains("No relevant matches"),
+        "mcp finance search blamed min_score for garden's weak hit:\n{text}"
+    );
+
+    let garden = seat.run(&["search", query, "-p", "garden"]);
+    let dump = said(&garden);
+    assert!(garden.status.success(), "{dump}");
+    let stdout = String::from_utf8_lossy(&garden.stdout);
+    assert!(
+        stdout.contains("No relevant matches") && stdout.contains("--min-score 0"),
+        "garden search dropped its own weak hit without naming --min-score 0:\n{dump}"
+    );
+}
+
+#[test]
+fn project_flag_errors_cover_upper_p_long_project_and_start_alias() {
+    let seat = Seat::open();
+    for verb in ["note", "claim", "finish", "recall", "show"] {
+        for (flag, args) in [
+            ("-P", vec![verb, "-P", "finance"]),
+            ("--project", vec![verb, "--project", "finance"]),
+            ("--project", vec![verb, "--project=finance"]),
+        ] {
+            let out = seat.run(&args);
+            let dump = said(&out);
+            assert_eq!(out.status.code(), Some(2), "{args:?}\n{dump}");
+            let line = format!("ljos: {verb} has no flag {flag}. {VERBS}");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.lines().any(|row| row == line),
+                "expected {line:?}\n{dump}"
+            );
+        }
+    }
+
+    for (verb, args) in [
+        ("search", vec!["search", "-P", "finance", "kiln"]),
+        ("remember", vec!["remember", "-P", "finance", "The kiln."]),
+        ("list", vec!["list", "-P", "finance"]),
+        ("ready", vec!["ready", "-P", "finance"]),
+        ("file", vec!["file", "Title", "-P", "finance"]),
+        ("calibrate", vec!["calibrate", "-P", "finance"]),
+    ] {
+        let out = seat.run(&args);
+        let dump = said(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{dump}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&format!("ljos: {verb} has no flag -P, and the closest is -p")),
+            "expected -p suggestion for {verb}:\n{dump}"
+        );
+    }
+
+    let sitting_line = format!("ljos: sitting takes -p with --plan. {VERBS}");
+    for args in [
+        vec!["sitting", "-P", "finance"],
+        vec!["sitting", FINANCE_TICKET, "-P", "finance"],
+        vec!["start", "-p", "finance"],
+        vec!["start", FINANCE_TICKET, "-p", "finance"],
+    ] {
+        let out = seat.run(&args);
+        let dump = said(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{dump}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.lines().any(|row| row == sitting_line),
+            "expected {sitting_line:?} for {args:?}\n{dump}"
+        );
+    }
 }

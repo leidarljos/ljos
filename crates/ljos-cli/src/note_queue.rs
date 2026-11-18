@@ -50,6 +50,10 @@ pub struct Queued {
     /// Empty on a line written before this field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub home: String,
+    /// The tracker project recorded on a queued lesson. Empty when none
+    /// was named, or on a line written before this field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
 }
 
 impl Queued {
@@ -61,6 +65,7 @@ impl Queued {
             && self.supersedes == other.supersedes
             && self.seat == other.seat
             && self.home == other.home
+            && self.project.trim() == other.project.trim()
     }
 }
 
@@ -425,6 +430,7 @@ mod tests {
             supersedes: Vec::new(),
             seat: String::new(),
             home: String::new(),
+            project: String::new(),
         }
     }
 

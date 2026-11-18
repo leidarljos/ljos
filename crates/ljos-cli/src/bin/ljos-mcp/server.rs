@@ -2001,9 +2001,11 @@ impl LjosServer {
             ljos_cli::ticket_search::merge(&mut hits, &args.query);
         }
         ljos_cli::conceal_search_noise(&mut hits, false);
-        let emptied = ljos_cli::word_rank::apply_relevance_floor(&mut hits, &args.query, min_score);
         if let Some(name) = project.as_deref() {
             ljos_cli::keep_project(&mut hits, name);
+        }
+        let emptied = ljos_cli::word_rank::apply_relevance_floor(&mut hits, &args.query, min_score);
+        if project.is_some() {
             hits.truncate(10);
         }
         note_lookups(&hits);

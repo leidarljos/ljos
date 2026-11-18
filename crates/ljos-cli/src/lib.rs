@@ -23073,6 +23073,10 @@ pub(crate) fn queue_memory(
                 .collect(),
             seat: seat_name(),
             home: String::new(),
+            project: (kind == "lesson")
+                .then(lesson_project_entity)
+                .flatten()
+                .unwrap_or_default(),
         },
     )
 }
@@ -23204,6 +23208,8 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
         }));
     }
     let text = note.text.trim();
+    let project = (!note.project.trim().is_empty()).then(|| note.project.trim().to_string());
+    let _remember_project = RememberProject::set(project);
     let mut atom = atom_body("lesson", text, &client.workspace());
     stamp_queued_seat(&mut atom, &note.seat);
     stamp_issue(&mut atom, &note.issue);
@@ -23230,6 +23236,7 @@ fn queued_already_stored(client: &PacksetClient, note: &note_queue::Queued) -> O
     let want_raw = memories::lesson_key(&note.kind, text);
     let want_peeled = memories::lesson_key(&note.kind, &peeled);
     let issue = note.issue.trim();
+    let want_project = note.project.trim();
     atoms.into_iter().find_map(|atom| {
         let kind = atom["kind"].as_str().unwrap_or("");
         let held = memories::lesson_key(kind, atom["text"].as_str().unwrap_or(""));
@@ -23237,6 +23244,20 @@ fn queued_already_stored(client: &PacksetClient, note: &note_queue::Queued) -> O
             return None;
         }
         if atom["issue"].as_str().unwrap_or("").trim() != issue {
+            return None;
+        }
+        let have_project = atom["entities"]
+            .as_array()
+            .and_then(|entities| {
+                entities.iter().find_map(|tag| {
+                    tag.as_str()
+                        .and_then(|s| s.strip_prefix("project:"))
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                })
+            })
+            .unwrap_or("");
+        if !have_project.eq_ignore_ascii_case(want_project) {
             return None;
         }
         atom["id"]
@@ -24109,6 +24130,7 @@ fn queue_unjudged_lesson(issue: &str, text: &str) -> Result<bool> {
             supersedes: Vec::new(),
             seat: seat_name(),
             home: String::new(),
+            project: lesson_project_entity().unwrap_or_default(),
         },
     )
 }
@@ -71503,6 +71525,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 supersedes: Vec::new(),
                 seat: String::new(),
                 home: String::new(),
+                project: String::new(),
             },
         )
         .unwrap();
@@ -71577,6 +71600,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 supersedes: Vec::new(),
                 seat: String::new(),
                 home: String::new(),
+                project: String::new(),
             },
         )
         .unwrap();
@@ -71664,6 +71688,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 supersedes: Vec::new(),
                 seat: "fortranbot".into(),
                 home: home.display().to_string(),
+                project: String::new(),
             },
         )
         .unwrap();

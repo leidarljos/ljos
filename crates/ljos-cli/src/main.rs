@@ -2737,11 +2737,18 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
         here.at.join(" ")
     };
     if project_flag_typed(typed) {
-        let shown = project_flag_shown(typed);
-        return format!(
-            "ljos: {where_} has no flag {shown}. The verbs that take -p are {}.",
-            english_and(&here.project_verbs)
-        );
+        if matches!(where_.as_str(), "sitting" | "start")
+            && !args.iter().any(|arg| arg == "--plan")
+        {
+            return sitting_project_line();
+        }
+        if !here.flags.iter().any(|flag| flag == "-p") {
+            let shown = project_flag_shown(typed);
+            return format!(
+                "ljos: {where_} has no flag {shown}. The verbs that take -p are {}.",
+                english_and(&here.project_verbs)
+            );
+        }
     }
     match closest(bare, &names) {
         Some(name) => {
@@ -2834,7 +2841,10 @@ fn missing_argument(err: &clap::Error, args: &[String]) -> Option<String> {
             "usage needs a start day. Pass it as `ljos usage --since YYYY-MM-DD`.".to_string(),
         );
     }
-    if cmd == "sitting" && args_name_project(args) && !args.iter().any(|arg| arg == "--plan") {
+    if matches!(cmd.as_str(), "sitting" | "start")
+        && args_name_project(args)
+        && !args.iter().any(|arg| arg == "--plan")
+    {
         return Some(sitting_project_line());
     }
     Some(format!(
@@ -5564,11 +5574,11 @@ fn run_command() -> Result<()> {
             // receipt, a mail row and the other bookkeeping kinds are not
             // part of the page, in any of those paths.
             ljos_cli::conceal_search_noise(&mut hits, attempts);
-            let floor_emptied =
-                ljos_cli::word_rank::apply_relevance_floor(&mut hits, &asked, min_score);
             if let Some(project) = project.as_deref() {
                 ljos_cli::keep_project(&mut hits, project);
             }
+            let floor_emptied =
+                ljos_cli::word_rank::apply_relevance_floor(&mut hits, &asked, min_score);
             if !hits.is_empty() {
                 close_miss = None;
             }
