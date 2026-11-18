@@ -478,3 +478,28 @@ fn note_keeps_legacy_claimed_by_rows_on_every_ticket() {
     assert!(said.contains("noted"), "{said}");
     assert_stamps_kept(&board, minute, "ljos note");
 }
+
+#[test]
+fn a_block_and_its_release_render_old_claimed_by_rows_unchanged() {
+    let board = Board::new();
+    let minute = "[2026-11-17 Tue 17:13]";
+    board_with_legacy_stamps(&board, minute);
+    board.ok(&["block", &board.a, "--on", &board.b]);
+    assert_stamps_kept(&board, minute, "ljos block --on");
+    let first = std::fs::read_to_string(board.issues_path()).unwrap();
+    board.ok(&["block", &board.a, "--off", &board.b]);
+    assert_stamps_kept(&board, minute, "ljos block --off");
+    board.ok(&["block", &board.a, "--on", &board.b]);
+    let again = std::fs::read_to_string(board.issues_path()).unwrap();
+    assert_eq!(
+        first
+            .lines()
+            .filter(|l| l.contains("Claimed-by"))
+            .collect::<Vec<_>>(),
+        again
+            .lines()
+            .filter(|l| l.contains("Claimed-by"))
+            .collect::<Vec<_>>(),
+        "a second render changed a stamp"
+    );
+}
