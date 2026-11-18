@@ -47331,8 +47331,31 @@ pub fn finish(
     out.push_str(&tracker_sync::push_leftover());
     // What this ticket taught leaves the machine with the tracker. The
     // rest of the pack waits for `ljos sync`.
+    out.push_str(&flush_queue_before_seal());
     out.push_str(&sync::seal_ticket_in_passing(issue).unwrap_or_else(|e| format!("sync: {e:#}\n")));
     Ok(out)
+}
+
+/// Send what waits in the note queue before finish seals the atom log.
+///
+/// The seal reads the pack, so a lesson that finish itself queued on a
+/// busy pack, or one an MCP `ljos_finish` found already queued, was left
+/// out of the log and went to the pack only on the next call, after the
+/// seal. The wait is the one the finish command gives its own flush.
+/// Nothing queued returns at once and writes nothing.
+fn flush_queue_before_seal() -> String {
+    let dir = note_queue::state_dir();
+    if note_queue::pending_in(&dir).is_empty() {
+        return String::new();
+    }
+    let budget = std::time::Duration::from_secs(2);
+    let _deadline = pack_link::CommandDeadline::enter(budget);
+    let _clock = pack_link::PackClock::enter(budget);
+    let _quiet = pack_link::QuietPack::enter();
+    match flush_note_queue() {
+        Ok(done) => note_queue::drained_lines(&done),
+        Err(e) => format!("note queue: {e:#}\n"),
+    }
 }
 
 /// Pause between lock tries, plus a little jitter so a herd does not wake
@@ -84612,6 +84635,157 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "",
             "the chunk was not committed: {said}"
         );
+    }
+
+    /// A lesson left in the note queue while the pack was busy goes to the
+    /// pack before finish seals the atom log, so the sealed chunk carries
+    /// it. It used to go on the next call, after the seal had read a pack
+    /// that did not have it yet.
+    #[test]
+    fn finish_flushes_the_note_queue_before_it_seals() {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
+            return;
+        }
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let run = |cwd: &std::path::Path, bin: &str, args: &[&str]| {
+            let out = std::process::Command::new(bin)
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{bin} {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n* STARTED [#B] Finish a sitting\n:PROPERTIES:\n:ID:         probe-q7fl\n:END:\n",
+        )
+        .unwrap();
+        let state = dir.path().join("state");
+        let runtime = dir.path().join("run");
+        let config = dir.path().join("config");
+        for d in [&state, &runtime, &config] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "commit"),
+            ("HOME", dir.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+        ]);
+        let key = sync::identity_path();
+        std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+        let key_arg = key.to_str().unwrap();
+        run(dir.path(), "age-keygen", &["-o", key_arg]);
+        let public = run(dir.path(), "age-keygen", &["-y", key_arg]);
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!("name = \"surf\"\nrecipients = [\"{public}\"]\n"),
+        )
+        .unwrap();
+        run(&root, "git", &["init", "-q", "-b", "main"]);
+        run(
+            &root,
+            "git",
+            &["config", "user.email", "seat@example.invalid"],
+        );
+        run(&root, "git", &["config", "user.name", "seat"]);
+        run(&root, "git", &["config", "core.hooksPath", "/dev/null"]);
+        run(&root, "git", &["add", "."]);
+        run(&root, "git", &["commit", "-q", "-m", "seed"]);
+        let calls = dir.path().join("claimdag.log");
+        fake_claimdag(dir.path(), &calls);
+        let held: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::clone(&held);
+        let (url, _seen) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.contains("/v1/activate") {
+                (200, r#"{"island":[],"fired":0}"#.into())
+            } else if line.starts_with("POST") && line.contains("/v1/atoms") {
+                let body = req.split("\r\n\r\n").nth(1).unwrap_or("{}");
+                let mut atom: Value = serde_json::from_str(body).unwrap_or_default();
+                let mut held = store.lock().unwrap();
+                atom["id"] = Value::String(format!("q{}", held.len() + 1));
+                let reply = serde_json::json!({"id": atom["id"], "kind": "lesson"});
+                held.push(atom);
+                (200, reply.to_string())
+            } else if line.contains("/v1/atoms") {
+                let held = store.lock().unwrap();
+                (200, serde_json::json!({ "atoms": *held }).to_string())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let _url = PackUrl::set(&url);
+        let lesson = "A lesson the pack was too busy to take at the time.";
+        let queue = note_queue::state_dir();
+        note_queue::push_in(
+            &queue,
+            note_queue::Queued {
+                issue: "probe-q7fl".into(),
+                text: lesson.into(),
+                workspace: pack().unwrap().workspace(),
+                at: 1,
+                kind: "lesson".into(),
+                supersedes: Vec::new(),
+                seat: String::new(),
+                home: String::new(),
+                project: String::new(),
+            },
+        )
+        .unwrap();
+        let said = with_fake_on_path(dir.path(), || {
+            finish(
+                "probe-q7fl",
+                "done",
+                None,
+                None,
+                false,
+                LEARN_BETA,
+                "alice",
+                Some(2),
+                false,
+                false,
+            )
+        })
+        .unwrap_or_else(|e| panic!("finish failed: {e:#}"));
+        assert!(
+            note_queue::pending_in(&queue).is_empty(),
+            "the queue still waits after finish: {said}"
+        );
+        assert!(
+            said.contains("sync: sealed 1 surf atoms of probe-q7fl"),
+            "{said}"
+        );
+        let host = sync::host();
+        let sealed: String = std::fs::read_dir(root.join(format!(".ljos/atoms/{host}")))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "age"))
+            .map(|path| {
+                run(
+                    dir.path(),
+                    "age",
+                    &["-d", "-i", key_arg, path.to_str().unwrap()],
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(sealed.contains(lesson), "the sealed log lacks it: {sealed}");
     }
 
     #[test]
