@@ -1474,7 +1474,10 @@ fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
         "{mcp}"
     );
     let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
-    let bin_line = format!("export PATH=\"{}:$PATH\"", bin.display());
+    let bin_line = format!(
+        "export PATH={}:$PATH",
+        ljos_cli::tools::sh_quote(&bin.display().to_string())
+    );
     assert!(bashrc.contains(&bin_line), "{bashrc}");
     let path_at = bashrc.find(&bin_line).unwrap();
     let guard_at = bashrc.find("[ -z \"$PS1\" ] && return").unwrap();
@@ -1679,7 +1682,10 @@ fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
     std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
     clear_agent_ids();
     ljos_cli::cloud::up(false).unwrap();
-    let line = format!("export PATH=\"{}:$PATH\"", custom.display());
+    let line = format!(
+        "export PATH={}:$PATH",
+        ljos_cli::tools::sh_quote(&custom.display().to_string())
+    );
     let profile = fs::read_to_string(home.join(".profile")).unwrap();
     assert!(profile.contains(&line), "{profile}");
     let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
@@ -1758,7 +1764,10 @@ fn assert_path_before_guard(rc: &str, guard: &str) {
     ljos_cli::cloud::up(false).unwrap();
     let bin = home.join(".local/bin");
     let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
-    let line = format!("export PATH=\"{}:$PATH\"", bin.display());
+    let line = format!(
+        "export PATH={}:$PATH",
+        ljos_cli::tools::sh_quote(&bin.display().to_string())
+    );
     let path_at = bashrc.find(&line).unwrap_or_else(|| panic!("{bashrc}"));
     let guard_at = bashrc.find(guard).unwrap_or_else(|| panic!("{bashrc}"));
     assert!(path_at < guard_at, "{bashrc}");

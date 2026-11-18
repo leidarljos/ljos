@@ -105,11 +105,14 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
         }
     }
     lines.push(format!("seat: {seat}"));
+    if let Some(line) = crate::ballot_sig::seat_key_copy_line(&seat) {
+        lines.push(line);
+    }
     let key = prepare_seat_key(&seat)?;
     let public = crate::ballot_sig::key_from_file(&key)?.verifying_key();
     lines.push(format!(
         "seat key: {}, public {}",
-        key.display(),
+        crate::tools::sh_word(&key.display().to_string()),
         hex::encode(public.to_bytes())
     ));
 
@@ -447,7 +450,10 @@ pub fn reap_gone_owners(seat: Option<&str>, lease: u64) -> String {
                 out.push_str(&crate::persist_tracker(&heading.id, "release"));
             }
             Ok(None) => {}
-            Err(e) => out.push_str(&format!("could not release {}: {e}\n", heading.id)),
+            Err(e) => out.push_str(&format!(
+                "could not release {}: {e}\n",
+                crate::tools::sh_word(&heading.id)
+            )),
         }
     }
     out
@@ -2595,8 +2601,8 @@ fn ensure_tracker(
                 format!(
                     "{}. This machine has no shared tracker. Set {} to a token that can push to {}, or add that repository to this environment",
                     hide(&detail, remote),
-                    crate::tracker_attach::TOKEN_VAR,
-                    remote.shown
+                    crate::tools::sh_word(crate::tracker_attach::TOKEN_VAR),
+                    crate::tools::sh_word(&remote.shown)
                 ),
                 false,
             )
@@ -2876,7 +2882,7 @@ fn ensure_wakes() -> Result<Vec<String>> {
             };
             lines.push(format!(
                 "wake {seat}: {} is not https, nor http on this machine, so {said}",
-                one.name
+                crate::tools::sh_word(&one.name)
             ));
             continue;
         }
@@ -2885,7 +2891,7 @@ fn ensure_wakes() -> Result<Vec<String>> {
         if !wrote {
             lines.push(format!(
                 "wake {seat}: left the wake cloud up did not write; {} did not replace it",
-                one.name
+                crate::tools::sh_word(&one.name)
             ));
             continue;
         }
@@ -2895,8 +2901,9 @@ fn ensure_wakes() -> Result<Vec<String>> {
             ", which is unset now"
         };
         lines.push(format!(
-            "wake {seat}: posts to {} with the key in {key_env}{unset}",
-            one.name
+            "wake {seat}: posts to {} with the key in {}{unset}",
+            crate::tools::sh_word(&one.name),
+            crate::tools::sh_word(&key_env)
         ));
     }
     Ok(lines)
@@ -2943,15 +2950,20 @@ fn collision_line(seat: &str, group: &[WakeVar], retired: bool) -> String {
 }
 
 fn list_names(names: &[&str]) -> String {
+    let quote = |name: &str| crate::tools::sh_word(name);
     let Some((last, rest)) = names.split_last() else {
         return String::new();
     };
     if rest.is_empty() {
-        return (*last).to_string();
+        return quote(last);
     }
-    let mut line = rest.join(", ");
+    let mut line = rest
+        .iter()
+        .map(|name| quote(name))
+        .collect::<Vec<_>>()
+        .join(", ");
     line.push_str(" and ");
-    line.push_str(last);
+    line.push_str(&quote(last));
     line
 }
 
@@ -3469,7 +3481,10 @@ fn write_private(path: &Path, text: &str) -> Result<()> {
 }
 
 fn path_export_line(bin_dir: &Path) -> String {
-    format!("export PATH=\"{}:$PATH\"", bin_dir.display())
+    format!(
+        "export PATH={}:$PATH",
+        crate::tools::sh_quote(&bin_dir.display().to_string())
+    )
 }
 
 fn first_interactive_guard(text: &str) -> Option<usize> {
@@ -3618,7 +3633,9 @@ fn release_started(id: &str, holder: &str) -> Result<Option<String>, String> {
         }
         doc.write()?;
         Ok(Some(format!(
-            "tracker: {id} no longer claimed by {who}; STARTED handed back"
+            "tracker: {} no longer claimed by {}; STARTED handed back",
+            crate::tools::sh_word(id),
+            crate::tools::sh_word(&who)
         )))
     })
     .map_err(|e| e.to_string())
@@ -4581,6 +4598,43 @@ mod tests {
         let keys = json_seat_keys(&doc);
         assert!(keys.contains("ljos.seat"), "{keys:?}");
         assert!(keys.contains("ljos_seat"), "{keys:?}");
+    }
+
+    #[test]
+    fn a_tracker_clone_failure_line_quotes_the_remote_and_token_name() {
+        let line = format!(
+            "Set {} to a token that can push to {}",
+            crate::tools::sh_word(crate::tracker_attach::TOKEN_VAR),
+            crate::tools::sh_word("git@github.com:org/tracker.git"),
+        );
+        assert_eq!(
+            line,
+            "Set LJOS_TRACKER_TOKEN to a token that can push to git@github.com:org/tracker.git"
+        );
+    }
+
+    #[test]
+    fn path_export_line_quotes_the_directory() {
+        let line = path_export_line(Path::new("/opt/ljos/bin"));
+        assert_eq!(line, "export PATH='/opt/ljos/bin':$PATH");
+    }
+
+    #[test]
+    fn wake_lines_quote_variable_names() {
+        let _lock = crate::test_env_lock();
+        crate::with_env_mutation(|| {
+            // SAFETY: this test has the process environment lock.
+            unsafe {
+                std::env::set_var("LJOS_WAKE_INKY_URL", "https://example.org/hooks/inky");
+                std::env::set_var("LJOS_WAKE_INKY_KEY", "secret");
+            }
+        });
+        let lines = ensure_wakes().unwrap();
+        let said = lines.join("\n");
+        assert!(
+            said.contains("posts to LJOS_WAKE_INKY_URL with the key in LJOS_WAKE_INKY_KEY"),
+            "{said}"
+        );
     }
 
     #[test]

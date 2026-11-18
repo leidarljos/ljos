@@ -2036,7 +2036,7 @@ mod tests {
         let _lock = crate::test_env_lock();
         let data = tempfile::tempdir().unwrap();
         crate::with_env_mutation(|| {
-            // SAFETY: this test holds the process environment lock.
+            // SAFETY: this test has the process environment lock.
             unsafe { std::env::set_var("XDG_DATA_HOME", data.path()) };
         });
         let folded = data.path().join("ljos/seats/judge_model-1.5/ballot.key");
