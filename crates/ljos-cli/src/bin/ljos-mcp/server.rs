@@ -178,11 +178,25 @@ fn next_step(tool: &str) -> &'static str {
     }
 }
 
+/// The line after a tool that failed. The success lines say to run the
+/// command or finish the sitting, which is wrong after a refusal.
+fn failure_next(name: &str) -> String {
+    if name == "ljos_guard_check" {
+        "next: do not run the command; fix the line above and call ljos_guard_check again"
+            .to_string()
+    } else {
+        format!("next: fix the line above and call {name} again")
+    }
+}
+
 fn attach_next(name: &str, response: CallToolResponse) -> CallToolResponse {
     match response {
         CallToolResponse::Complete(mut result) => {
             let line = if name == "ljos_finish" && result.is_error == Some(true) {
                 "next: the sitting is still open; fix the line above and call ljos_finish again"
+                    .to_string()
+            } else if result.is_error == Some(true) {
+                failure_next(name)
             } else if name == "ljos_finish" {
                 let body = result
                     .content
@@ -190,7 +204,7 @@ fn attach_next(name: &str, response: CallToolResponse) -> CallToolResponse {
                     .filter_map(|block| block.as_text().map(|text| text.text.as_str()))
                     .collect::<Vec<_>>()
                     .join("\n");
-                finish_next_from(&body)
+                finish_next_from(&body).to_string()
             } else if name == "ljos_note" {
                 let body = result
                     .content
@@ -203,8 +217,9 @@ fn attach_next(name: &str, response: CallToolResponse) -> CallToolResponse {
                 } else {
                     next_step(name)
                 }
+                .to_string()
             } else {
-                next_step(name)
+                next_step(name).to_string()
             };
             result.content.push(ContentBlock::text(line));
             CallToolResponse::Complete(result)
@@ -4657,14 +4672,11 @@ impl ServerHandler for LjosServer {
         {
             let missing = request.name.to_string();
             let verb = missing.trim_start_matches("ljos_");
-            return Ok(attach_next(
-                &missing,
-                CallToolResult::error(vec![ContentBlock::text(format!(
-                    "{missing} is not in this server's tool set, and LJOS_MCP_TOOLS=all lists every tool, \
-                     so run `ljos {verb}`."
-                ))])
-                .into(),
-            ));
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "{missing} is not in this server's tool set, and LJOS_MCP_TOOLS=all lists every tool, \
+                 so run `ljos {verb}`."
+            ))])
+            .into());
         }
         if Self::tool_router().get(&request.name).is_none() {
             let missing = request.name.to_string();

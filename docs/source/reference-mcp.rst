@@ -45,6 +45,7 @@ A missing tracker names ``ljos onboard``.
 A busy pack names ``ljos search`` or ``ljos remember``.
 An unknown tool names ``ljos help``.
 Arguments that do not parse name the field that failed and the ``ljos help`` page for the tool.
+A failed call ends with a ``next:`` line that names the tool to call again once the line above is fixed, and ``ljos_guard_check`` adds that the command is not to run.
 An unknown method, or a line that is not JSON, names ``ljos mcp --help``.
 Setting ``LJOS_SEAT`` applies to reads only; a write on a shared ljos mcp server with no ``seat`` argument and no stamped session is refused and names ``ljos seat``.
 ``ljos_vote`` takes any option from the issue's ``--options`` in ``choice``, such as ``keep``, ``drop``, ``accept``, or ``reject``.

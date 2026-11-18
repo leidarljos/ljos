@@ -139,3 +139,33 @@ fn a_bad_argument_names_the_field_that_failed() {
         "ljos_guard_check: the arguments do not match the tool (missing field command), so run `ljos help policy`."
     );
 }
+
+#[test]
+fn a_failed_call_ends_with_a_next_line_that_fits_the_failure() {
+    let mut session = Session::open(&[]);
+    let guard = session.call("ljos_guard_check", serde_json::json!({"command": "  "}));
+    assert_eq!(guard["result"]["isError"], true, "{guard}");
+    let said = blocks(&guard);
+    assert_eq!(said[0], "guard: pass the command to check", "{said:?}");
+    assert_eq!(
+        said[1],
+        "next: do not run the command; fix the line above and call ljos_guard_check again"
+    );
+    let claim = session.call("ljos_claim", serde_json::json!({"seat": "ada"}));
+    let said = blocks(&claim);
+    assert_eq!(
+        said.last().unwrap(),
+        "next: fix the line above and call ljos_claim again"
+    );
+    let recall = session.call("ljos_recall", serde_json::json!({"issue": 7}));
+    assert_eq!(
+        blocks(&recall).last().unwrap(),
+        "next: fix the line above and call ljos_recall again"
+    );
+    let allowed = session.call("ljos_guard_check", serde_json::json!({"command": "ls"}));
+    assert_ne!(allowed["result"]["isError"], true, "{allowed}");
+    assert_eq!(
+        blocks(&allowed).last().unwrap(),
+        "next: run the command, minding any warning line"
+    );
+}
