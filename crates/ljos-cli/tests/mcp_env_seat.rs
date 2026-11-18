@@ -241,3 +241,61 @@ Options: keep, drop
         "{bob_reply:?}"
     );
 }
+
+#[test]
+fn ljos_vote_schema_describes_issue_options() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home)
+        .current_dir(home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "0"}}
+        })
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    )
+    .unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let list = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|v| v["id"] == 2)
+        .unwrap_or_else(|| panic!("no tools/list in {stdout}"));
+    let tools = list["result"]["tools"].as_array().unwrap();
+    let vote = tools
+        .iter()
+        .find(|t| t["name"] == "ljos_vote")
+        .expect("ljos_vote");
+    let desc = vote["inputSchema"]["properties"]["choice"]["description"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        desc.contains("--options"),
+        "ljos_vote choice schema does not mention --options: {desc:?}"
+    );
+}

@@ -364,9 +364,7 @@ const SEAT_PROPERTY: &str =
 
 /// One line for a write that named no seat and has no stamped seat of its own.
 fn missing_seat_line(tool: &str) -> String {
-    format!(
-        "{tool}: pass `seat` in arguments (`LJOS_SEAT` applies to reads only). `ljos seat` prints the name."
-    )
+    format!("{tool}: pass `seat` in arguments (`LJOS_SEAT` applies to reads only). `ljos seat` prints the name.")
 }
 
 /// Whether this call writes under a seat. A read still runs with none.
@@ -840,7 +838,7 @@ fn expect_text(value: &serde_json::Value) -> Option<String> {
 pub struct VoteArgs {
     /// The issue id.
     pub issue: String,
-    /// `accept` or `reject`. Absent, the tool shows the tally.
+    /// Option to vote for (such as `accept`, `reject`, or one from `--options`). Absent, the tool shows the tally.
     pub choice: Option<String>,
     /// Probability in (0, 1] that `choice` is the outcome. Absent, the
     /// ballot is not a forecast and will not be scored.
