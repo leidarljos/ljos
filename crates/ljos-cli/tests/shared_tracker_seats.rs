@@ -818,3 +818,56 @@ fn complete_on_another_seats_ticket_refuses_without_changing_state() {
     assert_eq!(world.bob_graph(), before_graph);
     assert_eq!(std::fs::read_to_string(&issues).unwrap(), before_org);
 }
+
+#[test]
+fn release_of_another_seats_ticket_mints_no_node() {
+    let world = Shared::new();
+    let taken = world.alice_ljos(&["claim", "demo-shr1"]);
+    assert!(taken.status.success(), "{}", said(&taken));
+    let issues = world.tracker.join("Software/demo/issues.org");
+    let before_org = std::fs::read_to_string(&issues).unwrap();
+
+    let refused = world.bob_ljos(&["release", "demo-shr1"]);
+    let text = said(&refused);
+    assert!(!refused.status.success(), "{text}");
+    assert!(
+        text.contains("ljos send alice TEXT"),
+        "release did not name alice:\n{text}"
+    );
+    assert_eq!(std::fs::read_to_string(&issues).unwrap(), before_org);
+    assert!(
+        !world.bob_graph().contains("demo-shr1"),
+        "a refused release minted a node:\n{}",
+        world.bob_graph()
+    );
+
+    let finished = world.bob_ljos(&["finish", "demo-shr1"]);
+    let fin = said(&finished);
+    assert!(!finished.status.success(), "{fin}");
+    assert!(
+        fin.contains("ljos send alice TEXT"),
+        "finish did not name alice:\n{fin}"
+    );
+    assert_eq!(std::fs::read_to_string(&issues).unwrap(), before_org);
+    assert!(
+        !world.bob_graph().contains("demo-shr1"),
+        "a refused finish minted a node:\n{}",
+        world.bob_graph()
+    );
+
+    let over_mcp = world.bob_mcp(
+        "ljos_release",
+        serde_json::json!({"seat": "bob", "node": "demo-shr1"}),
+    );
+    assert_eq!(over_mcp["result"]["isError"], true, "{over_mcp}");
+    assert!(
+        over_mcp.to_string().contains("ljos send alice TEXT"),
+        "{over_mcp}"
+    );
+    assert_eq!(std::fs::read_to_string(&issues).unwrap(), before_org);
+    assert!(
+        !world.bob_graph().contains("demo-shr1"),
+        "a refused ljos_release minted a node:\n{}",
+        world.bob_graph()
+    );
+}

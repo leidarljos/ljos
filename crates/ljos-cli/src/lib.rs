@@ -40360,6 +40360,20 @@ fn claim_graph_slow(which: &str) -> anyhow::Error {
     )
 }
 
+/// A release that would refuse after minting a node. Another seat's tracker
+/// claim stops here, so the refusing seat's graph stays untouched.
+fn release_refused_before_mint(node: &str, assignee: &str) -> Result<()> {
+    if let Some(who) = tracker_claimed_by(node) {
+        if !same_claimed_seat(&who, assignee, node) {
+            bail!(
+                "{}",
+                not_assignee_message(node, assignee, None, Some(who.as_str()))
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Hand a session node back before it is terminal: ready again, assignee
 /// cleared, generation moved. A node the claim graph no longer holds (a
 /// lease reclaim freed it, a completion ended it, the graph never had it)
@@ -40370,7 +40384,8 @@ fn claim_graph_slow(which: &str) -> anyhow::Error {
 ///
 /// The claim graph's refusal: held by somebody else, or not held and the
 /// tracker has nothing of this holder's to hand back. A blank id is refused
-/// before the claim graph is asked.
+/// before the claim graph is asked. Another seat's tracker claim is refused
+/// before a node is minted.
 pub fn release(node: &str, assignee: &str) -> Result<String> {
     // A blank id hashes to one node nobody named. Asking the claim graph
     // about it waits as long as the graph takes, and a release of it
@@ -40378,6 +40393,7 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
     if node.trim().is_empty() {
         bail!("release: the id is empty; pass a tracker id, or a 32-hex claim-graph id");
     }
+    release_refused_before_mint(node, assignee)?;
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
     let said = match run_captured("claimdag", &["release", &id, "--actor", &actor]) {
@@ -46950,6 +46966,7 @@ pub fn finish(
                 close_note.is_some(),
             )
         } else {
+            release_refused_before_mint(issue, assignee)?;
             if let Some(expected) = gen {
                 let id = node_for(issue)?;
                 let got = run_captured("claimdag", &["get", &id])?.stdout;
