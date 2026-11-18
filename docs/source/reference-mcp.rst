@@ -39,7 +39,7 @@ The server stays up when ``packsetd`` restarts, when a line is not JSON, and whi
 A dead socket is opened again on the same call.
 A failure is one line and names the command.
 A missing tracker names ``ljos onboard``.
-A write with no seat names ``ljos seat``.
+A write with no seat names ``ljos seat`` and explains that ``LJOS_SEAT`` applies to reads only, so writes on a shared ljos mcp server pass ``seat`` in arguments or carry a stamped runner session.
 A busy pack names ``ljos search`` or ``ljos remember``.
 An unknown tool names ``ljos help``.
 An unknown method, or a line that is not JSON, names ``ljos mcp --help``.

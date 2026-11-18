@@ -95,7 +95,7 @@ A line that is not JSON, an unknown method, a missing tracker, a missing seat, o
 The ``env`` is empty on
 purpose. The server does not take the seat from the client that connects.
 Set ``LJOS_SEAT`` in that entry's ``env``, or a ``seat=`` line in
-``~/.config/ljos/env``, or a row in ``~/.config/ljos/seats.toml``.
+``~/.config/ljos/env``, or a row in ``~/.config/ljos/seats.toml`` for reads; writes on a shared ljos mcp server still take ``seat`` in the tool arguments or a stamped runner session.
 A shell the runner opens finds its seat through ``LJOS_SEAT`` when that is set.
 The process tree is not a seat. With ``LJOS_SEAT`` unset, Claude Code, Codex and Cursor each take a seat from the session id the runner stamps.
 Two sessions are ``claude-`` and a short id, not one shared ``claude``.

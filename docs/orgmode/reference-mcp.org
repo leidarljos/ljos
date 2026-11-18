@@ -30,6 +30,7 @@ as text, so the model reads it as a tool result.
 A search or another pack tool with no writer, or a writer that answers 401,
 is that tool error and names =cargo install --locked packset= or
 =packset ensure=. It is not a protocol error, and it does not drop the list.
+Setting =LJOS_SEAT= applies to reads only; a write on a shared ljos mcp server with no =seat= argument and no stamped session is refused and names =ljos seat=.
 
 =ljos_ready= prints the same first page as =ljos ready=. The default is 20 tickets. =limit= changes that count and =all= prints every ticket. The last line of a short page names =--limit= and =--all=. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. The id breaks the final tie.
 

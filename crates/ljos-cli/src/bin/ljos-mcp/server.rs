@@ -364,7 +364,9 @@ const SEAT_PROPERTY: &str =
 
 /// One line for a write that named no seat and has no stamped seat of its own.
 fn missing_seat_line(tool: &str) -> String {
-    format!("{tool}: pass seat. `ljos seat` prints the name.")
+    format!(
+        "{tool}: pass `seat` in arguments (`LJOS_SEAT` applies to reads only). `ljos seat` prints the name."
+    )
 }
 
 /// Whether this call writes under a seat. A read still runs with none.
@@ -940,8 +942,8 @@ pub struct TakeArgs {
     /// The tracker id of the issue (`proj-1a2b`), or a 32-hex claim-graph id.
     pub node: String,
     /// Your name; a named worker occupies one slot per issue. Absent, this
-    /// conversation's holder: the session the runner stamped, else the seat
-    /// from LJOS_SEAT or seats.toml. The client's name is not a seat.
+    /// conversation's holder from the session the runner stamped, or pass `seat`.
+    /// The client's name and `LJOS_SEAT` are not used on writes.
     #[serde(default)]
     pub assignee: Option<String>,
 }
