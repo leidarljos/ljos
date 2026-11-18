@@ -40,6 +40,9 @@ use serde::{Deserialize, Serialize};
 const SCHEME: &str = "ljos";
 /// Where the sitting protocol is read from.
 const PROTOCOL_URI: &str = "ljos://protocol";
+/// The type the listing promises for the protocol and the cards, and the
+/// type a read answers with.
+const MARKDOWN: &str = "text/markdown";
 /// How long a resource listing or read stays fresh. Cards are rewritten by the
 /// human at any time, so nothing is cached; MCP protocol 2026-07-28 requires
 /// the caching fields on every cacheable result.
@@ -4950,7 +4953,7 @@ impl ServerHandler for LjosServer {
              after the work, and the refusals worth knowing. Read this first."
                 .into(),
         );
-        protocol.mime_type = Some("text/markdown".to_string());
+        protocol.mime_type = Some(MARKDOWN.to_string());
         Ok(ListResourcesResult::with_all_items(
             std::iter::once(protocol)
                 .chain(CARD_NAMES.iter().map(|name| {
@@ -4961,7 +4964,7 @@ impl ServerHandler for LjosServer {
                         "A card. Read-only; overflow is an error, not a prompt to write more."
                             .into(),
                     );
-                    resource.mime_type = Some("text/markdown".to_string());
+                    resource.mime_type = Some(MARKDOWN.to_string());
                     resource
                 }))
                 .collect(),
@@ -4977,12 +4980,12 @@ impl ServerHandler for LjosServer {
     ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri.clone();
         if uri == PROTOCOL_URI {
-            return Ok(
-                ReadResourceResult::new(vec![ResourceContents::text(protocol_text(), uri)])
-                    .with_ttl_ms(RESOURCE_TTL_MS)
-                    .with_cache_scope(CacheScope::Private)
-                    .into(),
-            );
+            return Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(protocol_text(), uri).with_mime_type(MARKDOWN)
+            ])
+            .with_ttl_ms(RESOURCE_TTL_MS)
+            .with_cache_scope(CacheScope::Private)
+            .into());
         }
         let name = card_named(&uri).ok_or_else(|| {
             McpError::resource_not_found(
@@ -4996,12 +4999,12 @@ impl ServerHandler for LjosServer {
         let path = self.cards_dir.join(name);
         // A missing card is an empty card; nothing is created.
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        Ok(
-            ReadResourceResult::new(vec![ResourceContents::text(text, uri)])
-                .with_ttl_ms(RESOURCE_TTL_MS)
-                .with_cache_scope(CacheScope::Private)
-                .into(),
-        )
+        Ok(ReadResourceResult::new(vec![
+            ResourceContents::text(text, uri).with_mime_type(MARKDOWN)
+        ])
+        .with_ttl_ms(RESOURCE_TTL_MS)
+        .with_cache_scope(CacheScope::Private)
+        .into())
     }
 }
 

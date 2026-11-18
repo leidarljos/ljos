@@ -196,3 +196,20 @@ fn a_tool_that_is_not_served_says_what_to_do() {
         ["ljos_mail_show is not in this server's tool set. Ask the person to set LJOS_MCP_TOOLS=all (or core,mail_show) and restart the server."]
     );
 }
+
+#[test]
+fn a_resource_is_read_as_the_type_the_listing_names() {
+    let mut session = Session::open(&[]);
+    let listed = session.request("resources/list", serde_json::json!({}));
+    let resources = listed["result"]["resources"].as_array().expect("resources");
+    assert_eq!(resources.len(), 3, "{listed}");
+    for resource in resources {
+        let uri = resource["uri"].as_str().unwrap();
+        assert_eq!(resource["mimeType"], "text/markdown", "{uri}");
+        let read = session.request("resources/read", serde_json::json!({"uri": uri}));
+        assert_eq!(
+            read["result"]["contents"][0]["mimeType"], "text/markdown",
+            "{uri}: {read}"
+        );
+    }
+}
