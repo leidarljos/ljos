@@ -629,6 +629,7 @@ enum Cmd {
     /// When that budget runs out the line is `Memory is starting, so try again in a few seconds.` and the command exits non-zero.
     /// The pack is this seat's memory store.
     /// Turned off on purpose, the command exits 1.
+    #[command(after_help = "Example: `ljos remember \"The lexical default is BM25+.\"`")]
     Remember {
         /// The lesson to store.
         text: Vec<String>,
@@ -890,6 +891,7 @@ enum Cmd {
     /// `The memory pack was busy, so these rows are word matches; run the search again for ranked results.`
     /// When no words match, the line is `The memory pack was busy and no words matched.` and the command exits 1.
     /// The pack is this seat's memory store.
+    #[command(after_help = "Example: `ljos search \"lexical default\"`")]
     Search {
         /// Words to look for.
         query: Vec<String>,
@@ -1129,6 +1131,7 @@ enum Cmd {
     /// the tracker and sync lines. `--json` keeps those lines in fields.
     ///
     /// Example: `LJOS_SEAT=alice ljos file "Pick a codec" -p demo`
+    #[command(after_help = "Example: `LJOS_SEAT=alice ljos file \"Pick a codec\" -p demo`")]
     File {
         /// The issue's title.
         title: String,
@@ -1221,6 +1224,7 @@ enum Cmd {
     /// id; any other first word is part of the note.
     ///
     /// Example: `ljos note "the door seats when it is cold"`
+    #[command(after_help = "Example: `ljos note \"the door seats when it is cold\"`")]
     Note {
         /// The note, or an issue id and then the note.
         #[arg(value_name = "WORDS", required = true, num_args = 1..)]
@@ -2122,8 +2126,7 @@ enum Cmd {
     /// not, the note queue is damaged, or the tracker directory is not
     /// writable. A tracker that has not been created yet does not fail this
     /// command.
-    ///
-    /// Example: `ljos doctor`
+    #[command(after_help = "Example: `ljos doctor`")]
     Doctor {
         /// Print every row, the ones that answer included.
         #[arg(long, visible_alias = "verbose")]
@@ -2180,7 +2183,10 @@ enum Cmd {
     /// `grant` records a quoted yes to close. `--via` has to be this
     /// process's seat.
     ///
-    /// Example: `LJOS_SEAT=alice ljos seat add alice`
+    /// Example: `ljos seat`
+    ///
+    /// Add one with `LJOS_SEAT=alice ljos seat add alice`.
+    #[command(after_help = "Example: `ljos seat`")]
     Seat {
         #[command(subcommand)]
         action: Option<SeatAction>,
@@ -2393,8 +2399,10 @@ enum Cmd {
     /// item. `ljos finish ITEM` ticks that item off. Once the tracker lists
     /// seats, this seat has to be one of them.
     ///
-    /// Example: `LJOS_SEAT=alice ljos sitting --plan "Ship the codec" -p day -- "measure the files"`
-    #[command(alias = "start")]
+    /// Example: `ljos sitting proj-1a2b`
+    ///
+    /// `ljos sitting --plan` files a checklist. Example: `LJOS_SEAT=alice ljos sitting --plan "Ship the codec" -p day -- "measure the files"`
+    #[command(alias = "start", after_help = "Example: `ljos sitting proj-1a2b`")]
     Sitting {
         /// The tracker id of the issue. Absent when `--plan` files a new one.
         #[arg(
@@ -2458,6 +2466,7 @@ enum Cmd {
     /// The line names `ljos sitting ISSUE`.
     ///
     /// Example: `ljos finish --lesson "Cold metal seats."`
+    #[command(after_help = "Example: `ljos finish --lesson \"Cold metal seats.\"`")]
     Finish {
         /// The tracker id of the issue. Absent: the issue this conversation holds.
         issue: Option<String>,

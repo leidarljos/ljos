@@ -42,24 +42,21 @@ fn status_and_verdict_help_start_with_a_capital() {
     for (args, line) in [
         (
             &["finish", "--help"][..],
-            "Status to record: done, failed, or cancelled.",
+            "Status to record: done, failed, or cancelled",
         ),
         (
             &["finish", "-h"][..],
-            "Status to record: done, failed, or cancelled.",
+            "Status to record: done, failed, or cancelled",
         ),
         (
             &["complete", "--help"][..],
-            "Status to record: done, failed, or cancelled. The default is done.",
+            "Status to record: done, failed, or cancelled. The default is done",
         ),
         (
             &["complete", "-h"][..],
-            "Status to record: done, failed, or cancelled. The default is done.",
+            "Status to record: done, failed, or cancelled. The default is done",
         ),
-        (
-            &["rule", "--help"][..],
-            "Label the warning deny or ask.",
-        ),
+        (&["rule", "--help"][..], "Label the warning deny or ask."),
         (&["rule", "-h"][..], "Label the warning deny or ask."),
     ] {
         let page = help(args);
@@ -85,12 +82,12 @@ fn json_flags_name_the_rows_they_print() {
     for flag in ["--help", "-h"] {
         let imports = help(&["memory", "imports", flag]);
         assert!(
-            imports.contains("Print each import as JSON, the same rows as the text."),
+            imports.contains("Print each import as JSON, the same rows as the text"),
             "memory imports {flag}\n{imports}"
         );
         let rules = help(&["rules", flag]);
         assert!(
-            rules.contains("Print pattern, verdict and reason as JSON."),
+            rules.contains("Print pattern, verdict and reason as JSON"),
             "rules {flag}\n{rules}"
         );
     }
@@ -98,7 +95,7 @@ fn json_flags_name_the_rows_they_print() {
 
 #[test]
 fn ready_and_list_project_flag_names_tickets() {
-    let line = "Limit the list to tickets in one project.";
+    let line = "Limit the list to tickets in one project";
     for args in [
         &["ready", "--help"][..],
         &["ready", "-h"][..],
@@ -113,7 +110,7 @@ fn ready_and_list_project_flag_names_tickets() {
 
 #[test]
 fn seat_grant_quote_is_the_owners_yes() {
-    let line = "The owner's yes, quoted as they said it.";
+    let line = "The owner's yes, quoted as they said it";
     for flag in ["--help", "-h"] {
         let page = help(&["seat", "grant", flag]);
         assert!(page.contains(line), "{flag}\n{page}");
@@ -127,10 +124,7 @@ fn cloud_about_names_the_install_and_the_clone() {
         let page = help(&["cloud", flag]);
         assert!(page.contains(words), "{flag}\n{page}");
         let root = help(&[flag]);
-        assert!(
-            root.contains(words),
-            "top-level {flag} cloud line\n{root}"
-        );
+        assert!(root.contains(words), "top-level {flag} cloud line\n{root}");
     }
     let long = help(&["cloud", "--help"]);
     assert!(
@@ -160,10 +154,7 @@ fn reap_about_says_apply_is_what_writes() {
 fn memories_prune_example_passes_stale() {
     for flag in ["--help", "-h"] {
         let page = help(&["memories", "prune", flag]);
-        assert!(
-            page.contains("`--stale` is required"),
-            "{flag}\n{page}"
-        );
+        assert!(page.contains("`--stale` is required"), "{flag}\n{page}");
         assert!(
             page.contains("Example: `ljos memories prune --stale`"),
             "{flag}\n{page}"
@@ -174,4 +165,42 @@ fn memories_prune_example_passes_stale() {
             "{flag} example omits --stale\n{page}"
         );
     }
+}
+
+#[test]
+fn everyday_commands_show_a_short_example_on_h() {
+    let cases = [
+        (&["file", "-h"][..], "ljos file \"Pick a codec\" -p demo"),
+        (&["sitting", "-h"][..], "ljos sitting proj-1a2b"),
+        (
+            &["note", "-h"][..],
+            "ljos note \"the door seats when it is cold\"",
+        ),
+        (
+            &["remember", "-h"][..],
+            "ljos remember \"The lexical default is BM25+.\"",
+        ),
+        (&["search", "-h"][..], "ljos search \"lexical default\""),
+        (
+            &["finish", "-h"][..],
+            "ljos finish --lesson \"Cold metal seats.\"",
+        ),
+        (&["seat", "-h"][..], "Example: `ljos seat`"),
+        (&["doctor", "-h"][..], "Example: `ljos doctor`"),
+    ];
+    for (args, needle) in cases {
+        let page = help(args);
+        assert!(page.contains(needle), "{args:?} missing {needle}\n{page}");
+    }
+    let sitting = help(&["sitting", "--help"]);
+    assert!(
+        sitting.contains("ljos sitting proj-1a2b")
+            && sitting.contains("ljos sitting --plan \"Ship the codec\""),
+        "{sitting}"
+    );
+    let seat = help(&["seat", "--help"]);
+    assert!(
+        seat.contains("Example: `ljos seat`") && seat.contains("ljos seat add alice"),
+        "{seat}"
+    );
 }
