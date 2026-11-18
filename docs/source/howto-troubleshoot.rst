@@ -102,6 +102,7 @@ With ``vissue`` installed and no tracker configured, the row is info and this fa
 
 The row names the directory ``ljos onboard`` makes, the way the deeds row names its store.
 It does not print vissue's refusal, which names the directory you were in.
+Ticket reads such as ``ljos show ID`` print the same one-line ``ljos onboard`` fix when no tracker is configured.
 
 ``VISSUE_ROOT`` pointing at a directory that is not there fails the doctor.
 The summary names the tracker, and the row is:

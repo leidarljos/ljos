@@ -573,6 +573,14 @@ fn a_missing_tracker_names_ljos_onboard_and_exits_1() {
         "No tracker found, so run `ljos onboard`. To make one by hand, read https://leidarljos.github.io/ljos/howto-by-hand.html"
     );
 
+    let shown = run_unboarded(&["show", "demo-1234"], None);
+    let shown_said = text(&shown);
+    assert_eq!(shown.status.code(), Some(1), "{shown_said}");
+    assert_eq!(
+        one_line(&shown.stderr),
+        "No tracker found, so run `ljos onboard`. To make one by hand, read https://leidarljos.github.io/ljos/howto-by-hand.html"
+    );
+
     let missing_named = root.path().join("missing-tracker");
     let named_out = run_unboarded(
         &["file", "Pick a codec", "-p", "demo"],
