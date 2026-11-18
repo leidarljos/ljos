@@ -39996,27 +39996,15 @@ fn with_tracker(said: String, node: &str, assignee: &str) -> Result<String> {
 pub const EMPTY_CLAIM_ID: &str =
     "claim: the id is empty; pass a tracker id, or omit it to claim the next ready node";
 
-/// Take a session node, and when the claim graph refuses because the
-/// assignee still holds another node, say which tracker id that is and the
-/// two verbs that free it. The bare refusal names a 32-hex id nobody can
-/// act on.
-///
-/// # Errors
-///
-/// The refusal, explained, or any other failure of the claim graph.
-pub fn claim(node: &str, assignee: &str) -> Result<String> {
-    if node.trim().is_empty() {
-        bail!(EMPTY_CLAIM_ID);
-    }
+fn check_tracker_claim_conflict(node: &str, assignee: &str) -> Result<(String, String)> {
     let assignee = claim_holder(assignee)?;
-    let assignee = assignee.as_str();
-    let actor = work_id(&occupancy_scope(assignee, node));
+    let actor = work_id(&occupancy_scope(&assignee, node));
     if let Some(held) = tracker_open_holder(node) {
-        if !same_claimed_seat(&held, assignee, node) {
-            if let Some((_, live)) = live_other_hold_on_ticket(node, &actor, assignee) {
+        if !same_claimed_seat(&held, &assignee, node) {
+            if let Some((_, live)) = live_other_hold_on_ticket(node, &actor, &assignee) {
                 return Err(policy_label::labelled(
                     "claim-conflict",
-                    held_by_another_message(node, assignee, &live, true),
+                    held_by_another_message(node, &assignee, &live, true),
                 ));
             }
             let clean = unscoped_holder(&held, node);
@@ -40034,6 +40022,23 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
             ));
         }
     }
+    Ok((assignee, actor))
+}
+
+/// Take a session node, and when the claim graph refuses because the
+/// assignee still holds another node, say which tracker id that is and the
+/// two verbs that free it. The bare refusal names a 32-hex id nobody can
+/// act on.
+///
+/// # Errors
+///
+/// The refusal, explained, or any other failure of the claim graph.
+pub fn claim(node: &str, assignee: &str) -> Result<String> {
+    if node.trim().is_empty() {
+        bail!(EMPTY_CLAIM_ID);
+    }
+    let (assignee, actor) = check_tracker_claim_conflict(node, assignee)?;
+    let assignee = assignee.as_str();
     let id = node_for(node)?;
     match run_captured("claimdag", &["claim", &id, "--assignee", &actor]) {
         Ok(said) => {
@@ -45077,23 +45082,34 @@ pub fn sitting_stream_started(
     // `anyway` stays on the command so an older caller still parses.
     // Open blockers are a label, with or without the flag.
     let _ = anyway;
-    // The recipe name is bound before the claim. The body is copied after,
-    // once the claim line is already out, because the pack copy is a read.
+    // Resolve the recipe name up front, but run claim and refusal checks
+    // before writing the playbook note or local record.
     let name = sitting_recipe(issue, &title, playbook)?;
+    let (resolved_assignee, actor) = check_tracker_claim_conflict(issue, assignee)?;
+    if let Some((_, live)) = live_other_hold_on_ticket(issue, &actor, &resolved_assignee) {
+        if !same_claimed_seat(&live.seat, &resolved_assignee, issue) {
+            return Err(policy_label::labelled(
+                "claim-conflict",
+                held_by_another_message(issue, &resolved_assignee, &live, true),
+            ));
+        }
+    }
+    if let Some(have) = bound_playbook(issue) {
+        if have != name {
+            return Err(policy_label::labelled(
+                "playbook-warning",
+                format!(
+                    "playbook: {issue} is bound to {have} until finish or release; \
+                 a new task is a new sitting"
+                ),
+            ));
+        }
+    }
     if deferred.is_none() {
         deferred = match wait_for_sitting_locks(issue, budget.total) {
             Ok(()) => None,
             Err(err) => Some(format!("{err:#}")),
         };
-    }
-    if deferred.is_none() {
-        if let Err(err) = bind_playbook(issue, &name) {
-            if claim_waits(&err) {
-                deferred = Some(format!("{err:#}"));
-            } else {
-                return Err(err);
-            }
-        }
     }
 
     let mut sections = SectionCursor::new();
@@ -45138,6 +45154,7 @@ pub fn sitting_stream_started(
         drop(bound);
         match claimed {
             Ok(claimed) => claimed,
+            Err(err) if policy_label::as_policy(&err).is_some() => return Err(err),
             Err(_err) if timed_out => local_tracker_claim(issue, assignee),
             Err(err) => return Err(err),
         }
@@ -45163,6 +45180,11 @@ pub fn sitting_stream_started(
         // A pending claim keeps the budget so a lock that already outlasted
         // it is not waited out again for twenty seconds in sync.
         budget.finish();
+        if let Err(err) = bind_playbook(issue, &name) {
+            if !claim_waits(&err) {
+                return Err(err);
+            }
+        }
         let persisted = persist_tracker(&claimed_issue, "claimed");
         emit_piece(&mut out, &mut emit, &persisted);
     }

@@ -683,3 +683,58 @@ fn a_claim_another_seat_refuses_leaves_no_node_in_the_refused_seats_graph() {
         world.bob_graph()
     );
 }
+
+#[test]
+fn a_refused_sitting_writes_no_playbook_note_or_local_record() {
+    let world = Shared::new();
+    let taken = world.alice_ljos(&["claim", "demo-shr1"]);
+    assert!(taken.status.success(), "{}", said(&taken));
+
+    let issues = world.tracker.join("Software/demo/issues.org");
+    let before_org = std::fs::read_to_string(&issues).unwrap();
+
+    let refused = world.bob_ljos(&["sitting", "demo-shr1"]);
+    assert!(!refused.status.success(), "{}", said(&refused));
+    assert!(
+        said(&refused).contains("alice"),
+        "refused sitting did not name alice:\n{}",
+        said(&refused)
+    );
+
+    let after_org = std::fs::read_to_string(&issues).unwrap();
+    assert_eq!(
+        after_org, before_org,
+        "a refused sitting wrote to the tracker:\n{after_org}"
+    );
+    assert!(
+        !after_org.contains("playbook:"),
+        "a refused sitting wrote a playbook note:\n{after_org}"
+    );
+    assert!(
+        !world.bob.1.join("playbook-demo-shr1").exists(),
+        "a refused sitting wrote a local playbook record"
+    );
+    assert!(
+        !world.bob_graph().contains("demo-shr1"),
+        "a refused sitting minted a node:\n{}",
+        world.bob_graph()
+    );
+
+    let over_mcp = world.bob_mcp(
+        "ljos_sitting",
+        serde_json::json!({"seat": "bob", "issue": "demo-shr1"}),
+    );
+    assert!(
+        over_mcp.to_string().contains("claim-conflict") && over_mcp.to_string().contains("alice"),
+        "{over_mcp}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&issues).unwrap(),
+        before_org,
+        "a refused ljos_sitting wrote to the tracker"
+    );
+    assert!(
+        !world.bob.1.join("playbook-demo-shr1").exists(),
+        "a refused ljos_sitting wrote a local playbook record"
+    );
+}
