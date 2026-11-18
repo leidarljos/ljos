@@ -660,3 +660,69 @@ fn show_over_mcp_prints_the_ticket() {
         "{mcp_text}"
     );
 }
+
+/// A value of the wrong type for a property of a tool's input schema.
+fn wrong_typed(schema: &serde_json::Value) -> serde_json::Value {
+    let takes_string = match &schema["type"] {
+        serde_json::Value::String(kind) => kind == "string",
+        serde_json::Value::Array(kinds) => kinds.iter().any(|kind| kind == "string"),
+        _ => false,
+    };
+    if takes_string {
+        serde_json::json!(1)
+    } else {
+        serde_json::json!("x")
+    }
+}
+
+#[test]
+fn every_tool_that_names_a_help_command_names_one_that_answers() {
+    let mut session = Session::open(&[("LJOS_MCP_TOOLS", "all")]);
+    session.send(&serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
+    let listed = session.next(Duration::from_secs(8));
+    let tools = listed["result"]["tools"].as_array().expect("tools");
+    assert!(tools.len() > 40, "{listed}");
+    let mut hinted = Vec::new();
+    for (index, tool) in tools.iter().enumerate() {
+        let name = tool["name"].as_str().unwrap();
+        let Some(properties) = tool["inputSchema"]["properties"].as_object() else {
+            continue;
+        };
+        let Some((field, schema)) = properties.iter().find(|(field, _)| *field != "seat") else {
+            continue;
+        };
+        let reply = call(
+            &mut session,
+            100 + index as u64,
+            name,
+            serde_json::json!({ "seat": "ada", field: wrong_typed(schema) }),
+        );
+        let line = first_line(&reply);
+        if !line.contains("the arguments do not match the tool") {
+            continue;
+        }
+        let command = line
+            .split('`')
+            .nth(1)
+            .unwrap_or_else(|| panic!("{name} named no command: {line}"));
+        let words: Vec<&str> = command.split_whitespace().collect();
+        assert_eq!(&words[..1], &["ljos"], "{name}: {line}");
+        let help = Command::new(env!("CARGO_BIN_EXE_ljos"))
+            .args(&words[1..])
+            .output()
+            .unwrap();
+        assert!(
+            help.status.success(),
+            "{name} says to run `{command}`, which failed: {}{}",
+            String::from_utf8_lossy(&help.stdout),
+            String::from_utf8_lossy(&help.stderr)
+        );
+        hinted.push(name.to_string());
+    }
+    for name in ["ljos_guard_check", "ljos_bump_plan", "ljos_mail_search"] {
+        assert!(
+            hinted.iter().any(|seen| seen == name),
+            "{name} was not reached, so its hint went unchecked: {hinted:?}"
+        );
+    }
+}

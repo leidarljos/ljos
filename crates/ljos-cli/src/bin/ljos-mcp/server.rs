@@ -1435,11 +1435,19 @@ fn command_token(text: &str) -> bool {
             .any(|ch| ch.is_control() || matches!(ch, '"' | '`' | '\\' | '$'))
 }
 
-/// `ljos help` plus the command for a tool name, when that name is one word.
-/// Otherwise plain `ljos help`.
+/// `ljos help` plus the command for a tool name, when that name is one word
+/// and the command exists. A tool that has no command of its name, or whose
+/// command is spelled otherwise, names the command that does answer, and a
+/// tool with no command at all names plain `ljos help`.
 fn help_command(name: &str) -> String {
     let name = name.trim();
-    let command = name.strip_prefix("ljos_").unwrap_or(name);
+    let tool = name.strip_prefix("ljos_").unwrap_or(name);
+    let command = match tool {
+        "guard_check" => "policy",
+        "bump_plan" => "bump-plan",
+        "mail_search" | "mail_show" => return "ljos help".to_string(),
+        other => other,
+    };
     if command_token(command) && !command.chars().any(char::is_whitespace) {
         format!("ljos help {command}")
     } else {
