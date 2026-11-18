@@ -261,3 +261,13 @@ When a ticket id is close to one in the tracker, ``show``, ``note`` and
 .. code:: text
 
    issue demo-kln not found, and the closest is demo-kiln, so run `ljos show demo-kiln`.
+
+File without a project
+======================
+
+``ljos file`` needs a project when there is no sitting and no seat default.
+The refusal names the exact command shape:
+
+.. code:: text
+
+   no project: name one with -p NAME, so run `ljos file "TITLE" -p NAME`.

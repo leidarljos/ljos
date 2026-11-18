@@ -5935,11 +5935,15 @@ fn run_command() -> Result<()> {
                 // printed once the ticket exists, so a missing tracker
                 // stays one error line.
                 None if top => ljos_cli::seat_tracker_project_no_cwd().ok_or_else(|| {
-                    anyhow::anyhow!("no project: name one with -p, or a parent with --parent")
+                    anyhow::anyhow!(
+                        "no project: name one with -p, or a parent with --parent, so run `ljos file \"TITLE\" -p NAME`."
+                    )
                 })?,
                 // A plain file still needs a known project from the sitting,
                 // config, or `LJOS_PROJECT`.
-                None => anyhow::bail!("no project: name one with -p NAME"),
+                None => anyhow::bail!(
+                    "no project: name one with -p NAME, so run `ljos file \"TITLE\" -p NAME`."
+                ),
             };
             let qd = match (quorum, deadline.as_deref()) {
                 (Some(n), Some(d)) => Some((n, d)),
