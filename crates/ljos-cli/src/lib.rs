@@ -1977,10 +1977,10 @@ pub fn runtime_fallback(tmp: &Path, home: Option<&Path>, uid: u32) -> PathBuf {
     match std::fs::symlink_metadata(&mine) {
         Err(_) => keyed(mine),
         Ok(m) if m.is_dir() && m.uid() == uid => keyed(mine),
-        Ok(_) => home.map_or_else(
-            || tmp.join(format!("ljos-{uid}-own")),
-            |h| h.join(".cache/ljos/run"),
-        ),
+        Ok(_) => home
+            .filter(|h| !h.as_os_str().is_empty() && h.is_absolute())
+            .map(|h| h.join(".cache/ljos/run"))
+            .unwrap_or_else(|| tmp.join(format!("ljos-{uid}-own"))),
     }
 }
 
@@ -56729,6 +56729,21 @@ mod tests {
             "{err}"
         );
         assert_eq!(pick_pack_port(Some(18000), me, theirs).unwrap(), None);
+    }
+
+    #[test]
+    fn a_relative_home_with_a_planted_symlink_falls_back_under_tmp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let uid = euid();
+        let mine = tmp.path().join(format!("ljos-{uid}"));
+        std::fs::create_dir(&mine).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::remove_dir(&mine).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), &mine).unwrap();
+        assert_eq!(
+            runtime_fallback(tmp.path(), Some(Path::new(".")), uid),
+            tmp.path().join(format!("ljos-{uid}-own"))
+        );
     }
 
     #[test]
