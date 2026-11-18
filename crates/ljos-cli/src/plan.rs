@@ -138,7 +138,10 @@ pub fn ready_mine(project: Option<&str>) -> Result<String> {
         }
         match next_open(&recs, &rec.heading.id) {
             Some((id, title)) => out.push_str(&titled(&format!("next: {id}  "), &title)),
-            None => out.push_str(&format!("{}  plan complete\n", rec.heading.id)),
+            None => out.push_str(&format!(
+                "{}  plan complete, so run `ljos finish {} --lesson \"...\"`.\n",
+                rec.heading.id, rec.heading.id
+            )),
         }
     }
     if out.is_empty() {
@@ -189,7 +192,7 @@ pub fn next_item_line(issue: &str) -> String {
     };
     match next_open(&recs, &parent) {
         Some((id, title)) => titled(&format!("next: {id}  "), &title),
-        None => "plan complete\n".to_string(),
+        None => format!("plan complete, so run `ljos finish {parent} --lesson \"...\"`.\n"),
     }
 }
 
@@ -613,7 +616,13 @@ mod tests {
             "{ticked}"
         );
         let ticked = tick_checklist(&opened.children[2].0).unwrap().unwrap();
-        assert!(ticked.contains("plan complete"), "{ticked}");
+        assert!(
+            ticked.contains(&format!(
+                "plan complete, so run `ljos finish {} --lesson \"...\"`.",
+                opened.parent
+            )),
+            "{ticked}"
+        );
         assert!(tick_checklist("day-nope").unwrap().is_none());
     }
 

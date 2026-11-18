@@ -153,3 +153,80 @@ fn a_busy_pack_costs_one_read_and_the_sitting_stays_quiet() {
         "the sitting never read the pack\n{said}"
     );
 }
+
+#[test]
+fn finishing_the_last_plan_item_names_the_parent_finish_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let tracker = dir.path().join("tracker");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(tracker.join("Software/day")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    let layout = vissue_core::Layout::new(&tracker, "Software");
+    let parent = vissue_core::ops::create(
+        &layout,
+        "day",
+        "Ship the codec",
+        vissue_core::ops::CreateOpts {
+            issue_type: Some("task"),
+            tags: Some("plan"),
+            quiet: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let child = vissue_core::ops::create(
+        &layout,
+        "day",
+        "measure the files",
+        vissue_core::ops::CreateOpts {
+            issue_type: Some("task"),
+            tags: Some("checklist"),
+            parent: Some(&parent),
+            quiet: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    script(
+        dir.path(),
+        "vissue",
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  identity) printf '%s\\n' 'vissue test' 'root={}' 'prefix=Software' ;;\n  *) exit 0 ;;\nesac\n",
+            tracker.display()
+        ),
+    );
+    script(dir.path(), "deedar", "#!/bin/sh\necho head\nexit 0\n");
+    let path = format!("{}:/usr/bin:/bin", dir.path().display());
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["finish", &child])
+        .current_dir(dir.path())
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_STATE_HOME", home.join(".state"))
+        .env("XDG_RUNTIME_DIR", dir.path().join("run"))
+        .env("VISSUE_ROOT", &tracker)
+        .env("VISSUE_NO_ROUTE", "1")
+        .env("LJOS_SEAT", "ada")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("PACKSET_URL", "off")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains(&format!(
+            "plan complete, so run `ljos finish {parent} --lesson \"...\"`."
+        )),
+        "last item did not name parent finish:\n{stdout}{stderr}"
+    );
+}
