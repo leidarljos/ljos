@@ -871,3 +871,39 @@ fn release_of_another_seats_ticket_mints_no_node() {
         world.bob_graph()
     );
 }
+
+#[test]
+fn release_of_an_unclaimed_todo_mints_no_node() {
+    let world = Shared::new();
+    let issues = world.tracker.join("Software/demo/issues.org");
+    let before_org = std::fs::read_to_string(&issues).unwrap();
+
+    let refused = world.bob_ljos(&["release", "demo-shr1"]);
+    let text = said(&refused);
+    assert!(!refused.status.success(), "{text}");
+    assert!(
+        text.contains("is not claimed") && text.contains("`ljos claim demo-shr1`"),
+        "{text}"
+    );
+    assert_eq!(std::fs::read_to_string(&issues).unwrap(), before_org);
+    assert!(
+        !world.bob_graph().contains("demo-shr1"),
+        "release of an unclaimed TODO minted a node:\n{}",
+        world.bob_graph()
+    );
+
+    let over_mcp = world.bob_mcp(
+        "ljos_release",
+        serde_json::json!({"seat": "bob", "node": "demo-shr1"}),
+    );
+    assert_eq!(over_mcp["result"]["isError"], true, "{over_mcp}");
+    assert!(
+        over_mcp.to_string().contains("`ljos claim demo-shr1`"),
+        "{over_mcp}"
+    );
+    assert!(
+        !world.bob_graph().contains("demo-shr1"),
+        "ljos_release of an unclaimed TODO minted a node:\n{}",
+        world.bob_graph()
+    );
+}

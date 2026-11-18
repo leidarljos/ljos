@@ -40361,17 +40361,51 @@ fn claim_graph_slow(which: &str) -> anyhow::Error {
 }
 
 /// A release that would refuse after minting a node. Another seat's tracker
-/// claim stops here, so the refusing seat's graph stays untouched.
+/// claim stops here when this seat's graph has no node for it, and so does a
+/// TODO ticket nobody has claimed. A node the graph already has still goes
+/// through release, which can report that the tracker claim stays with the
+/// other name. A STARTED heading with nobody on it still goes through the
+/// claim graph, because that release is what hands the heading back.
 fn release_refused_before_mint(node: &str, assignee: &str) -> Result<()> {
     if let Some(who) = tracker_claimed_by(node) {
-        if !same_claimed_seat(&who, assignee, node) {
+        if !same_claimed_seat(&who, assignee, node) && !graph_holds(node) {
             bail!(
                 "{}",
                 not_assignee_message(node, assignee, None, Some(who.as_str()))
             );
         }
+        return Ok(());
+    }
+    if unclaimed_todo(node) && !graph_holds(node) {
+        bail!("release: {node} is not claimed; `ljos claim {node}` claims it");
     }
     Ok(())
+}
+
+fn unclaimed_todo(node: &str) -> bool {
+    let Ok(card) = tracker_show_json(node) else {
+        return false;
+    };
+    let state = card["state"].as_str().unwrap_or("").trim();
+    let claimed = card["claimed_by"]
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    state == "TODO" && claimed.is_none()
+}
+
+/// `true` when this seat's claim graph already has a node for `issue`, or
+/// when the graph could not be asked. A missing graph and a missing node
+/// are both `false`, so a refusal can stop before `node_for` mints one.
+fn graph_holds(issue: &str) -> bool {
+    let id = work_id(issue);
+    match run_captured("claimdag", &["get", &id]) {
+        Ok(_) => true,
+        Err(err) => {
+            let text = format!("{err:#}");
+            !(text.contains("not found") || text.contains("no work graph"))
+        }
+    }
 }
 
 /// Hand a session node back before it is terminal: ready again, assignee
@@ -40384,8 +40418,9 @@ fn release_refused_before_mint(node: &str, assignee: &str) -> Result<()> {
 ///
 /// The claim graph's refusal: held by somebody else, or not held and the
 /// tracker has nothing of this holder's to hand back. A blank id is refused
-/// before the claim graph is asked. Another seat's tracker claim is refused
-/// before a node is minted.
+/// before the claim graph is asked. Another seat's tracker claim, and a TODO
+/// ticket nobody has claimed when this seat's graph has no node for it, are
+/// refused before a node is minted.
 pub fn release(node: &str, assignee: &str) -> Result<String> {
     // A blank id hashes to one node nobody named. Asking the claim graph
     // about it waits as long as the graph takes, and a release of it
