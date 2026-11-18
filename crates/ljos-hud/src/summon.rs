@@ -595,4 +595,19 @@ mod tests {
         let path = default_socket_path();
         assert_eq!(path.file_name().unwrap(), "hud.sock");
     }
+
+    #[test]
+    fn without_a_runtime_dir_the_socket_is_under_home_and_not_the_temp_dir() {
+        let _guard = crate::env_lock();
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::remove_var(SOCKET_ENV);
+            std::env::remove_var("XDG_RUNTIME_DIR");
+            std::env::set_var("HOME", "/home/ada");
+        }
+        assert_eq!(
+            default_socket_path(),
+            Path::new("/home/ada/.ljos/run/hud.sock")
+        );
+    }
 }
