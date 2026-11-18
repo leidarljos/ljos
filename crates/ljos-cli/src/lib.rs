@@ -33659,11 +33659,20 @@ pub fn prose_warning_shown(body: &Value, verbose: bool) -> Option<String> {
 /// One line after a pack write: id, kind, due, text. Not the embedding.
 #[must_use]
 pub fn format_write_ack(body: &serde_json::Value) -> String {
+    let due = body["due_at"]
+        .as_str()
+        .filter(|d| !d.is_empty())
+        .unwrap_or("-");
+    let due = if due == "-" {
+        due.to_string()
+    } else {
+        local_when(due)
+    };
     format!(
         "{}\t{}\tdue {}\t{}",
         body["id"].as_str().unwrap_or("?"),
         body["kind"].as_str().unwrap_or("?"),
-        body["due_at"].as_str().unwrap_or("-"),
+        due,
         body["text"].as_str().unwrap_or("").replace('\n', " "),
     )
 }
@@ -38792,7 +38801,7 @@ fn due_block(atom: &Value, label: &str, now: &str) -> String {
         Some(due) => {
             let age = age_of(Some(due), now);
             if age.is_empty() {
-                format!("due {due}")
+                format!("due {}", local_when(due))
             } else {
                 format!("due {age}")
             }
@@ -39253,13 +39262,18 @@ pub fn format_due(atoms: &[Value]) -> String {
     atoms
         .iter()
         .map(|a| {
+            let due = a["due_at"]
+                .as_str()
+                .filter(|d| !d.is_empty())
+                .unwrap_or("unreviewed");
+            let due = if due == "unreviewed" {
+                due.to_string()
+            } else {
+                local_when(due)
+            };
             format!(
-                "{}	{}	{}	{}
+                "{due}	{}	{}	{}
 ",
-                a["due_at"]
-                    .as_str()
-                    .filter(|d| !d.is_empty())
-                    .unwrap_or("unreviewed"),
                 a["kind"].as_str().unwrap_or(""),
                 a["id"].as_str().unwrap_or("-"),
                 a["text"].as_str().unwrap_or("")
@@ -71012,7 +71026,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert_eq!(
             after,
             format!(
-                "2026-10-31T08:46:00Z\tlesson\tlesson\tRecall ranks a memory by the ticket's own words and drops an unrelated agent note.\n{count}"
+                "{}\tlesson\tlesson\tRecall ranks a memory by the ticket's own words and drops an unrelated agent note.\n{count}",
+                super::local_when("2026-10-31T08:46:00Z")
             ),
             "before:\n{before}\nafter:\n{after}"
         );
@@ -80395,7 +80410,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 "due_at": "2026-09-15T00:00:00Z",
                 "text": "The encoder sits beside packsetd."
             })),
-            "ab\tlesson\tdue 2026-09-15T00:00:00Z\tThe encoder sits beside packsetd."
+            format!(
+                "ab\tlesson\tdue {}\tThe encoder sits beside packsetd.",
+                super::local_when("2026-09-15T00:00:00Z")
+            )
         );
         let fat = serde_json::json!({
             "id": "r1",
@@ -80475,7 +80493,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let table = format_due(&[serde_json::json!({
             "id": "x", "kind": "lesson", "text": "t", "due_at": "2026-01-01T00:00:00.000Z"
         })]);
-        assert_eq!(table, "2026-01-01T00:00:00.000Z\tlesson\tx\tt\n");
+        assert_eq!(
+            table,
+            format!("{}\tlesson\tx\tt\n", local_when("2026-01-01T00:00:00.000Z"))
+        );
     }
 
     fn read_http(s: &mut impl Read) -> String {

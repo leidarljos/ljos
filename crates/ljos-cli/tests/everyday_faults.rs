@@ -729,6 +729,27 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
     );
 }
 
+/// A due list and the tab row a write prints name the review in local
+/// time, the same way `remember` names the next review. The raw RFC 3339
+/// text stays out of both.
+#[test]
+fn a_due_list_prints_local_time() {
+    let due = "2026-11-02T14:29:43.738Z";
+    let local = ljos_cli::local_when(due);
+    let body = serde_json::json!({
+        "id": "21e499e4b8487a3abc7ff7479e9da102",
+        "kind": "lesson",
+        "due_at": due,
+        "text": "Cut a release only after the changelog names the search index."
+    });
+    let ack = ljos_cli::format_write_ack(&body);
+    assert!(ack.contains(&format!("due {local}")), "{ack}");
+    assert!(!ack.contains(due), "{ack}");
+    let table = ljos_cli::format_due(std::slice::from_ref(&body));
+    assert!(table.starts_with(&format!("{local}\t")), "{table}");
+    assert!(!table.contains(due), "{table}");
+}
+
 /// The line `ljos remember` prints when it stores an agent's lesson.
 /// One sentence: why this process is not the person, and the terminal
 /// command that stores the lesson as theirs.
