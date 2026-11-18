@@ -260,6 +260,30 @@ fn sums(dir: &Path, names: &[&str]) -> String {
     out
 }
 
+fn assert_shell_line_is_safe(line: &str, mark: &Path) {
+    let check = Command::new("bash")
+        .args(["-n", "-c", line])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{line}\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let run = Command::new("bash")
+        .arg("-c")
+        .arg(line)
+        .current_dir(mark.parent().unwrap_or_else(|| Path::new("/")))
+        .output()
+        .unwrap();
+    assert!(
+        !mark.exists(),
+        "{line}\n{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 #[test]
 fn a_checksum_mismatch_installs_nothing() {
     let _g = Guard::new();
@@ -488,6 +512,29 @@ fn an_encoder_checksum_mismatch_installs_neither_archive() {
         0,
         "the runtime's own sum matched, and it still waits for both"
     );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_missing_encoder_archive_shell_quotes_the_release_dir() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, rel) = encoder_machine(root.path());
+    let quoted = root.path().join("rel; touch MARK #");
+    fs::rename(&rel, &quoted).unwrap();
+    std::env::set_var("LJOS_RELEASE_DIR", &quoted);
+    fs::remove_file(quoted.join("packset-embed-x86_64-unknown-linux-gnu.tar.gz")).unwrap();
+    let said = ljos_cli::cloud::up(false).unwrap();
+    let line = said
+        .lines()
+        .find(|one| one.starts_with("encoder: "))
+        .unwrap();
+    assert!(
+        line.contains(&ljos_cli::tools::sh_word(&quoted.display().to_string())),
+        "{line}"
+    );
+    let mark = root.path().join("MARK");
+    assert_shell_line_is_safe(line, &mark);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

@@ -2462,7 +2462,7 @@ fn encoder_target_for(arch: &str, os: &str) -> Option<&'static str> {
 
 fn release_source() -> String {
     match std::env::var_os("LJOS_RELEASE_DIR").filter(|p| !p.is_empty()) {
-        Some(dir) => Path::new(&dir).display().to_string(),
+        Some(dir) => crate::tools::sh_word(&Path::new(&dir).display().to_string()),
         None => format!("release v{}", env!("CARGO_PKG_VERSION")),
     }
 }
