@@ -52375,7 +52375,15 @@ pub fn consensus_verdict(gate: &Value, protected: &Value) -> String {
         .unwrap_or_else(|| vec!["develop".into(), "main".into()]);
     let named = crate::sitting_gate::quoted_list(&branches);
     if !stands || choice.is_empty() {
-        return "verdict: the ballots do not pick an option yet, so run `ljos vote ISSUE --for OPTION`.\n".to_string();
+        let issue = cite
+            .get("issue")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("ISSUE");
+        return format!(
+            "verdict: the ballots do not pick an option yet, so run `ljos vote {issue} --for OPTION`.\n"
+        );
     }
     if protected
         .get("stands")

@@ -75,7 +75,7 @@ Settle under the pack's trust
 =============================
 
 ``ljos consensus ID`` reads the live trust rows and passes them to the
-settle (and to the tracker's, with ``--compare``). To anchor voters to their own ballots (Friedkin-Johnsen) on the
+settle (and to the tracker's, with ``--compare``). When the ballots do not settle a choice for a push yet, the first verdict line names that issue in its ``ljos vote`` command. To anchor voters to their own ballots (Friedkin-Johnsen) on the
 model crate alone, pass the rows as JSON tuples:
 
 .. code:: console

@@ -190,3 +190,22 @@ fn a_pack_that_does_not_answer_leaves_the_push_cite_unread() {
         "{doc}"
     );
 }
+
+#[test]
+fn unresolved_verdict_names_the_issue_id() {
+    let pack = empty_pack();
+    for ballots in [
+        r#"[{"agent":"saddle","choice":"rrf"}]"#,
+        r#"[{"agent":"alice","choice":"rrf"},{"agent":"bob","choice":"bm25"}]"#,
+    ] {
+        let (dir, home) = fakes(ballots);
+        let out = consensus_on(dir.path(), &home, &["proj-v0te", "--no-file"], &pack);
+        assert!(out.status.success(), "{out:?}");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let first = text.lines().next().unwrap_or("");
+        assert!(
+            first.contains("ljos vote proj-v0te --for OPTION") && !first.contains("ISSUE"),
+            "verdict did not name proj-v0te:\n{text}"
+        );
+    }
+}
