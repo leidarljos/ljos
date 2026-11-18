@@ -582,6 +582,8 @@ struct ReadyArgs {
     #[arg(long, conflicts_with = "mine")]
     json: bool,
     /// The next unfinished item of each plan this seat holds.
+    /// The sitting is the ticket this seat has open.
+    /// That ticket is named when it is not a plan.
     #[arg(long, conflicts_with = "json")]
     mine: bool,
     /// How many tickets to print. `-n` is this flag. The default page prints 20.
@@ -1476,6 +1478,7 @@ enum Cmd {
     /// A page that leaves tickets off ends with one line naming `--limit`, `--all`, `-p` and `--mine`.
     /// `--json` prints `shown`, `total` and `rows` for that same page and that same order.
     /// `--mine` names the next unfinished item of each plan this seat holds.
+    /// When the open sitting's ticket is not a plan, the line names that ticket and says it has no plan items.
     /// `ljos list` and `ljos ls` are the same command.
     ///
     /// Example: `ljos ready`
@@ -1489,6 +1492,7 @@ enum Cmd {
     /// `-p PROJECT` keeps one project.
     /// `--json` prints `shown`, `total` and `rows` for that same page and that same order.
     /// `--mine` names the next unfinished item of each plan this seat holds.
+    /// When the open sitting's ticket is not a plan, the line names that ticket and says it has no plan items.
     /// `ls` is the short spelling.
     ///
     /// Example: `ljos list -p proj`

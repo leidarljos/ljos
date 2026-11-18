@@ -112,8 +112,9 @@ pub fn add_items(parent: &str, items: &[String]) -> Result<Opened> {
 
 /// The next unfinished child of a plan this seat holds.
 ///
-/// `project` limits the list to that project. Empty of plans: one line
-/// that says so.
+/// `project` limits the list to that project. With no plan, the open
+/// sitting's ticket is named when that ticket is claimed and is not a
+/// plan. Otherwise one line says there is no unfinished item.
 ///
 /// # Errors
 ///
@@ -141,9 +142,39 @@ pub fn ready_mine(project: Option<&str>) -> Result<String> {
         }
     }
     if out.is_empty() {
-        out.push_str("no unfinished item\n");
+        out.push_str(
+            &sitting_ticket_line(&recs, &seat, want)
+                .unwrap_or_else(|| "no unfinished item\n".into()),
+        );
     }
     Ok(out)
+}
+
+/// The open sitting's ticket, when it is claimed and is not a plan.
+///
+/// `ready --mine` lists plan items. A sitting on one ticket has none.
+/// The line names that ticket. Empty when there is no such sitting.
+fn sitting_ticket_line(
+    recs: &[vissue_core::views::IssueRec],
+    seat: &str,
+    want: Option<&str>,
+) -> Option<String> {
+    let id = crate::recorded_sitting()?;
+    let rec = recs.iter().find(|rec| rec.heading.id == id)?;
+    if let Some(want) = want {
+        if !rec.project.eq_ignore_ascii_case(want) {
+            return None;
+        }
+    }
+    if plan_heading(&rec.heading) || !held_by(&rec.heading, seat) {
+        return None;
+    }
+    let mut out = format!("the sitting's ticket is {id} and has no plan items\n");
+    let title = rec.heading.title.trim();
+    if !title.is_empty() {
+        out.push_str(&titled(&format!("{id}  "), title));
+    }
+    Some(out)
 }
 
 /// The next line a sitting prints for `issue`, when it is a plan or one of
@@ -485,9 +516,12 @@ mod tests {
         git(&root, &["init", "-q"]);
         git(&root, &["config", "user.email", "ada@example.invalid"]);
         git(&root, &["config", "user.name", "ada"]);
+        let run = dir.path().join("run");
+        std::fs::create_dir_all(&run).unwrap();
         unsafe {
             std::env::set_var("VISSUE_ROOT", &root);
             std::env::set_var("LJOS_SEAT", "ada");
+            std::env::set_var("XDG_RUNTIME_DIR", &run);
             std::env::remove_var("LJOS_TRACKER_GIT");
             std::env::remove_var("ISSUE_ROOT");
         }
