@@ -46348,12 +46348,9 @@ pub fn not_assignee_message(
     }
 }
 
-/// The line `ljos finish` prints when the sitting had no lesson. The
-/// command names this issue, so it can be run as written.
-fn missing_lesson_line(issue: &str) -> String {
-    format!(
-        "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, so run `ljos finish {issue} --lesson \"...\"`"
-    )
+/// The line `ljos finish` prints when the sitting had no lesson.
+fn missing_lesson_line() -> String {
+    "no `--lesson` was given to finish. A lesson saved earlier with `ljos remember` is already kept. To add one now, run `ljos remember \"...\"`".to_string()
 }
 
 /// Whether a lesson given to `ljos finish` is the person's own: no agent
@@ -47241,7 +47238,7 @@ pub fn finish(
     }
     out.push_str(&lesson_lines);
     if supplied.is_none() && !ticket_has_lesson(issue) {
-        out.push_str(&missing_lesson_line(issue));
+        out.push_str(&missing_lesson_line());
         out.push('\n');
     }
     if verbose {
@@ -84040,8 +84037,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(lesson_claims("   ").is_empty());
     }
 
-    fn lesson_lines_in(text: &str, issue: &str) -> usize {
-        text.matches(&super::missing_lesson_line(issue)).count()
+    fn lesson_lines_in(text: &str) -> usize {
+        text.matches(&super::missing_lesson_line()).count()
     }
 
     fn claimdag_for(log: &std::path::Path, release_ok: bool) -> String {
@@ -84137,7 +84134,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     fn a_refused_finish_prints_nothing_about_a_lesson() {
         let err = run_finish_lesson(r#"{"atoms":[]}"#, None, false).unwrap_err();
         assert!(err.contains("the seat does not hold this node"), "{err}");
-        assert_eq!(lesson_lines_in(&err, "probe-lsn1"), 0, "{err}");
+        assert_eq!(lesson_lines_in(&err), 0, "{err}");
         assert!(!err.contains("remembered your lesson"), "{err}");
         assert!(!err.contains("the lesson was not kept"), "{err}");
         assert!(!err.contains(" as agent-derived"), "{err}");
@@ -84145,7 +84142,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let err = run_finish_lesson(r#"{"atoms":[]}"#, Some("The codec is one file."), false)
             .unwrap_err();
         assert!(err.contains("the seat does not hold this node"), "{err}");
-        assert_eq!(lesson_lines_in(&err, "probe-lsn1"), 0, "{err}");
+        assert_eq!(lesson_lines_in(&err), 0, "{err}");
         assert!(!err.contains("remembered your lesson"), "{err}");
         assert!(!err.contains("the lesson was not kept"), "{err}");
         assert!(!err.contains(" as agent-derived"), "{err}");
@@ -84165,7 +84162,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         .unwrap_err()
         .to_string();
         assert!(err.contains("is not one of"), "{err}");
-        assert_eq!(lesson_lines_in(&err, "probe-lsn1"), 0, "{err}");
+        assert_eq!(lesson_lines_in(&err), 0, "{err}");
     }
 
     /// The reminder is one line, and only when the ticket has no live lesson.
@@ -84183,10 +84180,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             !said.contains("island") && !said.contains("seed"),
             "the memory links stay behind --verbose: {said}"
         );
-        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said), 1, "{said}");
 
         let said = run_finish_lesson(none, Some("   "), true).unwrap();
-        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said), 1, "{said}");
 
         let other = r#"{"atoms":[{"id":"les-o","kind":"lesson","text":"Another ticket taught this.","issue":"probe-othr","entities":["issue:probe-othr"]}]}"#;
         let said = run_finish_lesson(other, None, true).unwrap();
@@ -84194,19 +84191,19 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             said.contains("sitting ended; ticket probe-lsn1 is still open"),
             "{said}"
         );
-        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said), 1, "{said}");
 
         let tomb = r#"{"atoms":[{"id":"les-t","kind":"lesson","text":"Withdrawn.","issue":"probe-lsn1","entities":["issue:probe-lsn1"],"tombstone":true}]}"#;
         let said = run_finish_lesson(tomb, None, true).unwrap();
-        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said), 1, "{said}");
 
         let note = r#"{"atoms":[{"id":"n-1","kind":"note","text":"A note is not a lesson.","issue":"probe-lsn1","entities":["issue:probe-lsn1"]}]}"#;
         let said = run_finish_lesson(note, None, true).unwrap();
-        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said), 1, "{said}");
 
         let pref = r#"{"atoms":[{"id":"p-1","kind":"preference","text":"Use the codec file.","issue":"probe-lsn1","entities":["issue:probe-lsn1"]}]}"#;
         let said = run_finish_lesson(pref, None, true).unwrap();
-        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
+        assert_eq!(lesson_lines_in(&said), 1, "{said}");
 
         let own = r#"{"atoms":[{"id":"les-1","kind":"lesson","text":"The codec is one file.","issue":"probe-lsn1","entities":["issue:probe-lsn1"]}]}"#;
         let said = run_finish_lesson(own, None, true).unwrap();
@@ -84214,14 +84211,14 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             said.contains("sitting ended; ticket probe-lsn1 is still open"),
             "{said}"
         );
-        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 0, "{said}");
+        assert_eq!(lesson_lines_in(&said), 0, "{said}");
 
         let entity = r#"{"atoms":[{"id":"les-e","kind":"lesson","text":"Tagged only.","entities":["issue:probe-lsn1"]}]}"#;
         let said = run_finish_lesson(entity, None, true).unwrap();
-        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 0, "{said}");
+        assert_eq!(lesson_lines_in(&said), 0, "{said}");
 
         let said = run_finish_lesson(none, Some("The codec is one file."), true).unwrap();
-        assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 0, "{said}");
+        assert_eq!(lesson_lines_in(&said), 0, "{said}");
         assert!(
             said.contains("remembered your lesson")
                 || said.contains(" as agent-derived")

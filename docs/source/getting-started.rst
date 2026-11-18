@@ -223,7 +223,6 @@ A plan files one parent and its checklist in a single tracker commit, claims the
    next: day-cd34  measure the files
    tracker: day-ab12 STARTED under alice
    matched by words (encoder not installed)
-   next: day-cd34  measure the files
    day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
    $ LJOS_SEAT=alice ljos finish day-cd34
    finished day-cd34; your open sitting is day-ab12
@@ -251,7 +250,7 @@ One seat holds a ticket at a time. Bob's claim is refused, and the refusal names
    tracker: demo-2f5j STARTED under alice
    tracker git: committed chore(issues): demo-2f5j claimed by alice; no remote, kept local
    $ LJOS_SEAT=bob ljos claim demo-2f5j --assignee bob
-   label claim-conflict: claim: demo-2f5j is held by another (alice, seat alice, still running, since TIME), not by bob, so run `ljos send alice TEXT`.
+   claim: demo-2f5j is held by another (alice, seat alice, still running, since TIME), not by bob, so run `ljos send alice TEXT`.
 
 The line names ``ljos send``. TIME is when alice claimed it. The ticket stays with alice.
 Bob can file another ticket. To help on this one, bob writes a note.

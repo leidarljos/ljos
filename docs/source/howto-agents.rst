@@ -179,7 +179,7 @@ One session claims a ticket. The other session's claim is refused and names the 
    tracker git: committed chore(issues): demo-2 claimed by claude-dxw6sq4j7l; no remote, kept local
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos finish demo-2
-   no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, so run `ljos finish demo-2 --lesson "..."`
+   no `--lesson` was given to finish. A lesson saved earlier with `ljos remember` is already kept. To add one now, run `ljos remember "..."`
    sitting ended; ticket demo-2 is still open
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos sitting demo-1

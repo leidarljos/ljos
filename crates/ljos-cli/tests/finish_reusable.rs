@@ -172,3 +172,27 @@ fn finish_hands_a_reusable_parent_back_before_the_next_sitting() {
     assert!(!reclaimed.contains("- Note: \"playbook:\""), "{reclaimed}");
     assert_eq!(reclaimed.matches("- Claimed by saddle ").count(), 1);
 }
+
+#[test]
+fn finish_without_a_lesson_names_a_command_that_still_works() {
+    let world = World::new();
+
+    let sitting = world.run(&["sitting", ISSUE]);
+    assert!(sitting.status.success(), "{}", text(&sitting));
+
+    let finished = world.run(&["finish", ISSUE]);
+    let finished_text = text(&finished);
+    assert!(finished.status.success(), "{finished_text}");
+    assert!(
+        finished_text.contains("run `ljos remember \"...\"`"),
+        "{finished_text}"
+    );
+    assert!(
+        !finished_text.contains(&format!("ljos finish {ISSUE} --lesson")),
+        "{finished_text}"
+    );
+    assert!(
+        finished_text.contains(&format!("sitting ended; ticket {ISSUE} is still open")),
+        "{finished_text}"
+    );
+}
