@@ -253,3 +253,51 @@ fn descriptions_are_one_line_of_single_spaces() {
         );
     }
 }
+
+/// The tools `tools/list` gives, by name.
+fn listed_tools(session: &mut Session) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let listed = session.request("tools/list", serde_json::json!({}));
+    listed["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|tool| (tool["name"].as_str().unwrap().to_string(), tool.clone()))
+        .collect()
+}
+
+fn description_of(
+    tools: &std::collections::BTreeMap<String, serde_json::Value>,
+    name: &str,
+) -> String {
+    tools[name]["description"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn the_longest_descriptions_say_what_to_pass_and_what_to_do_on_failure() {
+    let mut session = Session::open(&[("LJOS_MCP_TOOLS", "all")]);
+    let tools = listed_tools(&mut session);
+    let longest = tools
+        .keys()
+        .map(|name| description_of(&tools, name).len())
+        .max()
+        .unwrap();
+    assert!(longest < 1_300, "a description is {longest} characters");
+    let search = description_of(&tools, "ljos_search");
+    assert!(
+        search.contains("A failure means the pack writer is down, so call ljos_doctor."),
+        "{search}"
+    );
+    for word in ["as_of", "min_score", "project"] {
+        assert!(
+            search.contains(word),
+            "search does not name {word}: {search}"
+        );
+    }
+    assert!(!search.contains("cosine"), "{search}");
+    let consensus = description_of(&tools, "ljos_consensus");
+    assert!(
+        consensus.starts_with("Call this after the ballots are in."),
+        "{consensus}"
+    );
+    assert!(consensus.contains("Pass compare"), "{consensus}");
+}
