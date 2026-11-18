@@ -870,6 +870,11 @@ fn expect_documented(command: &str, output: &str) {
     }
     if command.contains("sitting") && command.contains("--plan") {
         assert!(output.contains("next:"), "{command}\n{output}");
+        assert_eq!(
+            output.matches("next:").count(),
+            1,
+            "{command}\nprinted next more than once:\n{output}"
+        );
         if !ljos_cli::tool_installed("packset-embed") {
             assert!(
                 output.contains("matched by words (encoder not installed)"),
@@ -1060,6 +1065,27 @@ fn the_getting_started_page_names_both_preference_rows() {
         assert!(
             text.contains("script or cron") && text.contains("lesson, from an agent"),
             "{rel} does not name the no-terminal lesson row"
+        );
+    }
+}
+
+#[test]
+fn the_getting_started_plan_sample_prints_next_once() {
+    for rel in [
+        "../../docs/source/getting-started.rst",
+        "../../docs/orgmode/getting-started.org",
+    ] {
+        let text = repo_file(rel);
+        let (_, after) = text
+            .split_once("ljos sitting --plan")
+            .unwrap_or_else(|| panic!("{rel} missing sitting --plan"));
+        let (block, _) = after
+            .split_once("ljos finish day-cd34")
+            .unwrap_or_else(|| panic!("{rel} missing finish day-cd34"));
+        assert_eq!(
+            block.matches("next: day-cd34  measure the files").count(),
+            1,
+            "{rel} printed the plan's next line more than once:\n{block}"
         );
     }
 }
