@@ -110,6 +110,39 @@ fn text(out: &Output) -> String {
 }
 
 #[test]
+fn plain_finish_after_repeated_sitting_hands_the_parent_back_once() {
+    let world = World::new();
+
+    for _ in 0..2 {
+        let sitting = world.run(&["sitting", ISSUE]);
+        assert!(sitting.status.success(), "{}", text(&sitting));
+    }
+
+    let finished = world.run(&["finish", ISSUE]);
+    let finished_text = text(&finished);
+    assert!(finished.status.success(), "{finished_text}");
+    assert!(
+        String::from_utf8_lossy(&finished.stdout)
+            .contains(&format!("sitting ended; ticket {ISSUE} is still open")),
+        "{finished_text}"
+    );
+    assert!(!finished_text.contains("finished ljos-wh2y as done"));
+    assert!(!finished_text.contains("release: status done"));
+
+    let handed_back = world.org();
+    assert!(
+        handed_back.contains("* TODO [#C] Keep the long parent reusable"),
+        "{handed_back}"
+    );
+    assert!(!handed_back.contains(":CLAIMED_BY:"), "{handed_back}");
+    assert!(
+        !handed_back.contains("- Note: \"playbook:\""),
+        "{handed_back}"
+    );
+    assert_eq!(handed_back.matches("- Claimed by saddle ").count(), 1);
+}
+
+#[test]
 fn finish_hands_a_reusable_parent_back_before_the_next_sitting() {
     let world = World::new();
 
