@@ -237,3 +237,153 @@ fn separate_homes_sharing_one_tracker_do_not_steal_claims() {
     assert!(org.contains(":CLAIMED_BY: alice"), "{org}");
     assert!(!org.contains(":CLAIMED_BY: bob"), "{org}");
 }
+
+#[test]
+fn separate_homes_report_holder_and_unclaimed_state_on_release_and_finish() {
+    let vissue = sibling::require("vissue").unwrap_or_else(|e| panic!("{e}"));
+    let claimdag = sibling::require("claimdag").unwrap_or_else(|e| panic!("{e}"));
+    let _deedar = sibling::require("deedar").unwrap_or_else(|e| panic!("{e}"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let alice_home = dir.path().join("alice");
+    let alice_run = alice_home.join("run");
+    let bob_home = dir.path().join("bob");
+    let bob_run = bob_home.join("run");
+    let tracker = dir.path().join("tracker");
+    for d in [
+        &alice_home,
+        &alice_run,
+        &bob_home,
+        &bob_run,
+        &tracker.join("Software/demo"),
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    let issues = tracker.join("Software/demo/issues.org");
+    std::fs::write(
+        &issues,
+        "\
+#+TITLE: demo
+#+VISSUE: 1
+#+CATEGORY: demo
+#+TODO: TODO STARTED | DONE CANCELLED
+
+* TODO [#C] Shared release ticket
+:PROPERTIES:
+:ID:         demo-rel1
+:END:
+",
+    )
+    .unwrap();
+
+    let siblings = vissue.parent().unwrap();
+    assert_eq!(claimdag.parent(), Some(siblings));
+    let path = format!("{}:/usr/bin:/bin", siblings.display());
+
+    let alice_claim = run_ljos(
+        &path,
+        &alice_home,
+        &alice_run,
+        &tracker,
+        "alice",
+        &["claim", "demo-rel1"],
+    );
+    assert!(
+        alice_claim.status.success(),
+        "{}",
+        String::from_utf8_lossy(&alice_claim.stderr)
+    );
+
+    // Bob releasing or finishing alice's held ticket must name alice and `ljos send`.
+    let bob_release = run_ljos(
+        &path,
+        &bob_home,
+        &bob_run,
+        &tracker,
+        "bob",
+        &["release", "demo-rel1"],
+    );
+    assert!(!bob_release.status.success(), "{bob_release:?}");
+    let rel_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&bob_release.stdout),
+        String::from_utf8_lossy(&bob_release.stderr)
+    );
+    assert!(
+        rel_text.contains("ljos send alice TEXT") && !rel_text.contains("claimdag failed"),
+        "bob release:\n{rel_text}"
+    );
+
+    let mcp_rel = call_mcp_one(
+        &path,
+        &bob_home,
+        &bob_run,
+        &tracker,
+        "bob",
+        "ljos_release",
+        serde_json::json!({"seat": "bob", "node": "demo-rel1"}),
+    );
+    let mcp_text = mcp_rel.to_string();
+    assert_eq!(mcp_rel["result"]["isError"], true, "{mcp_rel}");
+    assert!(
+        mcp_text.contains("ljos send alice TEXT") && !mcp_text.contains("claimdag failed"),
+        "bob ljos_release:\n{mcp_text}"
+    );
+
+    let bob_finish = run_ljos(
+        &path,
+        &bob_home,
+        &bob_run,
+        &tracker,
+        "bob",
+        &["finish", "demo-rel1", "--lesson", "bob note"],
+    );
+    assert!(!bob_finish.status.success(), "{bob_finish:?}");
+    let fin_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&bob_finish.stdout),
+        String::from_utf8_lossy(&bob_finish.stderr)
+    );
+    assert!(
+        fin_text.contains("ljos send alice TEXT") && !fin_text.contains("claimdag failed"),
+        "bob finish:\n{fin_text}"
+    );
+
+    // Alice releases the ticket cleanly.
+    let alice_release = run_ljos(
+        &path,
+        &alice_home,
+        &alice_run,
+        &tracker,
+        "alice",
+        &["release", "demo-rel1"],
+    );
+    assert!(
+        alice_release.status.success(),
+        "{}",
+        String::from_utf8_lossy(&alice_release.stderr)
+    );
+
+    // Releasing an already unclaimed ticket prints a clear message naming `ljos claim`.
+    let again = run_ljos(
+        &path,
+        &alice_home,
+        &alice_run,
+        &tracker,
+        "alice",
+        &["release", "demo-rel1"],
+    );
+    assert!(!again.status.success(), "{again:?}");
+    let again_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&again.stdout),
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(
+        again_text.contains("is not claimed")
+            && again_text.contains("ljos claim demo-rel1")
+            && !again_text.contains("claimdag failed"),
+        "unclaimed release:\n{again_text}"
+    );
+}

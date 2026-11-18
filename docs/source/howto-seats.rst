@@ -40,6 +40,7 @@ A seat that holds a ticket notes it with ``ljos note "TEXT"`` and ends it with `
 Pass an id to name a different ticket. With no ticket open, both exit 1 and name ``ljos sitting ISSUE``.
 
 ``ljos release ISSUE`` gives one ticket back. The ticket stays open.
+Releasing a ticket another seat claimed names that seat and ``ljos send``, and releasing an unclaimed ticket names ``ljos claim``.
 A pile of quiet claims is one command, ``ljos release --stale``.
 It releases every claim this seat holds that has been quiet longer than the hand-back window (``LJOS_LEASE_SECS``, 900 seconds) and whose conversation is not running on this host.
 Another seat's claim stays. The ticket stays open.

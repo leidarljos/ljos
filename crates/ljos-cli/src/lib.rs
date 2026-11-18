@@ -40384,7 +40384,19 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
                         "{prefix}claim graph: {node} held by nobody ({why})\n{line}\n"
                     ))
                 }
-                _ => Err(e),
+                Ok(Some(_)) => {
+                    if let Some(who) = tracker_claimed_by(node) {
+                        bail!("{}", not_assignee_message(node, assignee, None, Some(&who)));
+                    }
+                    Err(e)
+                }
+                Ok(None) => {
+                    if unheld_refusal(&text).is_some() {
+                        bail!("release: {node} is not claimed; `ljos claim {node}` claims it");
+                    }
+                    Err(e)
+                }
+                Err(_) => Err(e),
             };
         }
     };
@@ -45771,8 +45783,14 @@ pub fn not_assignee_message(
                     hold.seat, hold.seat
                 )
             } else {
+                let (seat, _) = holder_parts(&name);
+                let seat = if seat.is_empty() {
+                    name.as_str()
+                } else {
+                    seat.as_str()
+                };
                 format!(
-                    "{node} is held by another ({name}), not by {mine}, so run `ljos send {name} TEXT`."
+                    "{node} is held by another ({name}), not by {mine}, so run `ljos send {seat} TEXT`."
                 )
             }
         }
