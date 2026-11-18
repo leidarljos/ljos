@@ -1543,14 +1543,32 @@ fn plain_arguments(name: &str, response: CallToolResponse) -> CallToolResponse {
     else {
         return response;
     };
-    if !text.starts_with("failed to deserialize parameters") {
+    let Some(rest) = text.strip_prefix("failed to deserialize parameters") else {
         return response;
-    }
+    };
     let help = help_command(name);
+    let reason = argument_reason(rest);
+    let detail = if reason.is_empty() {
+        String::new()
+    } else {
+        format!(" ({reason})")
+    };
     CallToolResult::error(vec![ContentBlock::text(format!(
-        "{name}: the arguments do not match the tool, so run `{help}`."
+        "{name}: the arguments do not match the tool{detail}, so run `{help}`."
     ))])
     .into()
+}
+
+/// The reason serde gave for an argument it refused, on one line and with
+/// no backticks, so the command after it stays the first backticked word.
+fn argument_reason(rest: &str) -> String {
+    let reason = rest.trim_start_matches(':').trim();
+    let reason = reason.split(" at line ").next().unwrap_or(reason);
+    reason
+        .replace('`', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A refusal. `call_tool` hands it to the model as a tool result with
