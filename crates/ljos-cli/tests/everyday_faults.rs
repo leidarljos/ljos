@@ -134,7 +134,7 @@ fn an_extra_ticket_id_names_the_form_and_exits_2() {
         ),
         (
             &["sitting", "demo-kiln", "demo-tile"][..],
-            "ljos: sitting expected the tracker id of the issue, so run `LJOS_SEAT=alice ljos sitting --plan \"Ship the codec\" -p day -- \"measure the files\"`.",
+            "ljos: sitting expected the tracker id of the issue, so run `ljos sitting proj-1a2b`.",
         ),
         (
             &["help", "show", "demo-tile"][..],
