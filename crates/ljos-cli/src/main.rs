@@ -1973,8 +1973,7 @@ enum Cmd {
     ///
     /// Put `--` before the command when that command has its own flags.
     /// The line after the command is what ljos remembers about it.
-    ///
-    /// Example: `ljos policy -- git push --force`.
+    #[command(after_help = "Example: `ljos policy -- git push --force`")]
     Policy {
         /// Exit 1 only when the answer denies the cloud seat push rule
         /// (a push outside the allowlist, a force push, or a branch delete).
