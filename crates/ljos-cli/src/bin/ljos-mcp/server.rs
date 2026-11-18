@@ -2037,7 +2037,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. It returns rows of what this seat and other seats learned, each with a score from 0 to 100. The score ranks the match and does not say the claim is true. This seat's rows come first, and another seat's row appears only when it names the subject. An empty list means nothing matched. When the encoder or the pack is busy or still starting, the reading says the rows are word matches, and a repeat call ranks them. A failure means the pack writer is down, so call ljos_doctor. Pass as_of to ask what the seat knew at an earlier time, min_score to change the cutoff (34 by default, 0 returns every row), and project to keep one project's tickets and lessons. Follow with ljos_island for the cluster the task touches.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. It returns rows of what this seat and other seats learned, each with a score from 0 to 100. The score ranks the match and does not say the claim is true. This seat's rows come first, and another seat's row appears only when it names the subject. An empty list means nothing matched. When the encoder or the pack is busy or still starting, the reading says the rows are word matches, and a repeat call ranks them. A failure means the pack writer is down, so call ljos_doctor. Pass as_of to ask what the seat knew at an earlier time, min_score to change the cutoff (34 by default, 0 returns every row), and project to keep one project's tickets and lessons.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -2534,7 +2534,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when a decision has more than one defensible answer: cast one ballot, or omit the option to read the count. Pass `confidence` in (0, 1], the probability that the choice is the outcome (DeGroot 1974, doi:10.1080/01621459.1974.10480137). Omit it only when you are not forecasting; a hard vote is not scored. ljos_learn scores confidence once the outcome is named; no settle and no push cite weighs it. Pass `expect` as the option you think the others will pick, or an object of option to share: that private forecast is what the surprisingly popular reading needs, and it belongs on this ballot rather than a later call. Pass `used` as comma-separated deed accessions, or `none` when the ballot used no deed (doi:10.1007/3-540-44503-X_20). The text that comes back is a count, not the settle. Call ljos_consensus before acting. `as` names the persona. The ballot is recorded with the casting seat and the parent session, and consensus counts it.",
+        description = "Call this when a decision has more than one defensible answer: cast one ballot, or omit the option to read the count. Pass `confidence` in (0, 1], the probability that the choice is the outcome (DeGroot 1974, doi:10.1080/01621459.1974.10480137). Omit it only when you are not forecasting; a hard vote is not scored. confidence is scored once the outcome is named, through `outcome` on ljos_finish; no settle and no push cite weighs it. Pass `expect` as the option you think the others will pick, or an object of option to share: that private forecast is what the surprisingly popular reading needs, and it belongs on this ballot rather than a later call. Pass `used` as comma-separated deed accessions, or `none` when the ballot used no deed (doi:10.1007/3-540-44503-X_20). The text that comes back is a count, not the settle. Call ljos_consensus before acting. `as` names the persona. The ballot is recorded with the casting seat and the parent session, and consensus counts it.",
         annotations(
             title = "Vote",
             read_only_hint = false,
@@ -2739,7 +2739,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to take the session node for an issue under your name, after ljos_recall. ljos_start and ljos_sitting already claim, and the server claims on the first write, so call this only to name the issue yourself. A named worker occupies one slot: a busy refusal names the held node, and ljos_complete or ljos_release frees it. Pass takeover true to take a ticket over from another seat whose claim looks stale. Completing a node later does not close the ticket.",
+        description = "Call this to take the session node for an issue under your name, after ljos_recall. ljos_start and ljos_sitting already claim, and the server claims on the first write, so call this only to name the issue yourself. A named worker occupies one slot: a busy refusal names the held node, and ljos_finish or ljos_release frees it. Pass takeover true to take a ticket over from another seat whose claim looks stale. Completing a node later does not close the ticket.",
         annotations(
             title = "Claim a node",
             read_only_hint = false,
@@ -2891,7 +2891,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when you stop working on an issue without finishing it: the session node goes back to ready, your name is free to claim again, and the generation moves. Not for finished work; that is ljos_complete.",
+        description = "Call this when you stop working on an issue without finishing it: the session node goes back to ready, your name is free to claim again, and the generation moves. Not for finished work; that is ljos_finish.",
         annotations(
             title = "Hand a node back",
             read_only_hint = false,
@@ -3269,7 +3269,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this first in a sitting, and again whenever another tool fails: which habitats answer (binaries, pack, host key, deed store, tracker, claim graph) and whether this harness is onboarded. A row with optional true is an extra, so ok false there is no failure. A tool failing is a habitat down or refusing, never an empty answer.",
+        description = "Call this first in a sitting, and again whenever another tool fails: which habitats answer (binaries, pack, host key, deed store, tracker, claim graph) and whether this client is onboarded. A row with optional true is an extra, so ok false there is no failure. A tool failing is a habitat down or refusing, never an empty answer.",
         annotations(title = "Doctor", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_doctor(&self) -> Result<Json<Rows<HabitatRow>>, McpError> {
@@ -3548,7 +3548,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to write to another seat, or to every other member of a group. Pass to or group, the text, interrupt when the next prompt should see it first, and issue when the message is about that vissue issue. A reply later keeps the issue. A seat this pack has never heard from is refused with the seats it knows; pass new_seat to write to one that has not started yet. The id in the answer is what ljos_read and ljos_reply take.",
+        description = "Call this to write to another seat, or to every other member of a group. Pass to or group, the text, interrupt when the next prompt should see it first, and issue when the message is about that vissue issue. A reply later keeps the issue. A seat this pack has never heard from is refused with the seats it knows; pass new_seat to write to one that has not started yet. The id in the answer is what ljos_reply takes.",
         annotations(
             title = "Send",
             read_only_hint = false,

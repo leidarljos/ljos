@@ -319,7 +319,7 @@ fn claim_file_and_deed_each_describe_their_own_call() {
     );
     assert!(
         claim.contains(
-            "a busy refusal names the held node, and ljos_complete or ljos_release frees it"
+            "a busy refusal names the held node, and ljos_finish or ljos_release frees it"
         ),
         "{claim}"
     );
@@ -525,4 +525,38 @@ fn the_seat_argument_says_whether_that_tool_needs_it() {
         seat_of("ljos_vote"),
         "This seat's name. Needed on a shared server when the call writes."
     );
+}
+
+#[test]
+fn a_default_description_names_only_tools_the_server_lists() {
+    let mut session = Session::open(&[]);
+    let tools = listed_tools(&mut session);
+    let mut texts = Vec::new();
+    for (name, tool) in &tools {
+        texts.push((name.clone(), description_of(&tools, name)));
+        if let Some(props) = tool["inputSchema"]["properties"].as_object() {
+            for (field, prop) in props {
+                if let Some(text) = prop["description"].as_str() {
+                    texts.push((format!("{name}.{field}"), text.to_string()));
+                }
+            }
+        }
+    }
+    for (place, text) in texts {
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("ljos_") {
+            let word: String = rest[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || *c == '_')
+                .collect();
+            let word = word.trim_end_matches('_');
+            assert!(
+                tools.contains_key(word),
+                "{place} names {word}, which the default set does not list: {text}"
+            );
+            rest = &rest[at + 5..];
+        }
+    }
+    let release = description_of(&tools, "ljos_release");
+    assert!(release.contains("that is ljos_finish."), "{release}");
 }

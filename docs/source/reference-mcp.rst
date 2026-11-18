@@ -28,6 +28,7 @@ By default the server lists the core set, in this order: ``ljos_rule``,
 ``ljos_inbox``, ``ljos_reply``, ``ljos_vote``, ``ljos_consensus`` and ``ljos_doctor``.
 ``LJOS_MCP_TOOLS=all`` lists every tool above: the core set first, then the rest
 by name, then the persona and playbook tools.
+A description in the core set names only tools the core set lists, so a call it suggests is one the server answers. ``ljos_finish`` frees a claim and names the outcome that scores a vote.
 ``LJOS_MCP_TOOLS`` also takes names split on commas or spaces, with or
 without the ``ljos_`` prefix, where ``core`` stands for the core set. A call
 to a tool the server does not list is refused. The line asks the person to set ``LJOS_MCP_TOOLS`` and restart the server, and names the shell command to run meanwhile when the tool has one. A tool that fails answers with ``isError`` set and the reason
@@ -49,7 +50,7 @@ An unknown method, or a line that is not JSON, names ``ljos mcp --help``.
 Setting ``LJOS_SEAT`` applies to reads only; a write on a shared ljos mcp server with no ``seat`` argument and no stamped session is refused and names ``ljos seat``.
 Every tool that takes an issue says the id is the tracker id ``ljos_ready`` prints, such as ``proj-1a2b``. ``ljos_vote`` takes any option from the issue's ``Options:`` line in ``choice``, such as ``keep``, ``drop``, ``accept``, or ``reject``, and ``ljos_options`` writes that line.
 
-``ljos_claim`` takes ``takeover`` set to true to take a ticket over from another seat whose claim looks stale, the step ``ljos claim ID --takeover`` takes. A holder that is running, or whose claim moved inside the lease, is refused with the ``claim-conflict`` label and nothing changes. The old holder is named in a note on the ticket. ``ljos_start`` and ``ljos_sitting`` already claim, and the server claims on the first write, so call ``ljos_claim`` only to name the issue yourself. A named worker occupies one slot, and a ``busy`` refusal names the held node. ``ljos_complete`` or ``ljos_release`` frees it. ``ljos_deed`` is the same: a git commit is cited as a deed for you, so call it for the other deeds.
+``ljos_claim`` takes ``takeover`` set to true to take a ticket over from another seat whose claim looks stale, the step ``ljos claim ID --takeover`` takes. A holder that is running, or whose claim moved inside the lease, is refused with the ``claim-conflict`` label and nothing changes. The old holder is named in a note on the ticket. ``ljos_start`` and ``ljos_sitting`` already claim, and the server claims on the first write, so call ``ljos_claim`` only to name the issue yourself. A named worker occupies one slot, and a ``busy`` refusal names the held node. ``ljos_finish`` or ``ljos_release`` frees it. ``ljos_deed`` is the same: a git commit is cited as a deed for you, so call it for the other deeds.
 
 ``ljos_start`` is the short opening: it recalls and claims. ``ljos_sitting`` is the full opening in the protocol's order, and stops at the first store that does not answer. Pass ``issue``, or ``plan`` with ``items`` to file the checklist in one tracker commit. ``playbook`` is one of ``sit``, ``arena``, ``land``, ``company-panel``, ``overnight`` or ``feature``, and stays bound until ``ljos_finish`` or ``ljos_release``. Leave ``assignee`` out unless the call runs as a named worker.
 
