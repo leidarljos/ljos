@@ -21723,6 +21723,9 @@ fn listed_of<T: Listed>(
         Ok(answer) => answer,
     };
     if !(200..300).contains(&answered.status) {
+        if answered.status == 401 {
+            anyhow::bail!("the writer at {url} refused this seat's token, so {WRITER_PORT_FIX}.");
+        }
         anyhow::bail!("{url}: status code {}", answered.status);
     }
     // Outside a hook nothing keeps the whole atoms, so the body is read

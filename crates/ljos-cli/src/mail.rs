@@ -764,8 +764,17 @@ fn ensure_mail(client: &crate::PacksetClient, verb: &str) -> Result<()> {
                     format!("{verb}: {}", unsupported_mail(version.as_deref())),
                 ))
             }
-            Probe::Store => Err(err).context("mail: the pack did not answer"),
+            Probe::Store => Err(mail_store_error(err)),
         },
+    }
+}
+
+fn mail_store_error(err: anyhow::Error) -> anyhow::Error {
+    let text = format!("{err:#}");
+    if text.contains("refused this seat's token") || text.contains("status code 401") {
+        err
+    } else {
+        err.context("mail: the pack did not answer")
     }
 }
 
@@ -776,7 +785,7 @@ fn listed() -> Result<Vec<Value>> {
     match super::atoms_mail(&client, &workspace) {
         Err(err) if super::is_read_shed(&err) || super::is_deadline_miss(&err) => Err(err),
         Err(err) if super::is_pack_busy(&err) => Err(super::pack_busy_err()),
-        Err(err) => Err(err).context("mail: the pack did not answer"),
+        Err(err) => Err(mail_store_error(err)),
         Ok(atoms) => Ok(atoms),
     }
 }
@@ -1002,7 +1011,8 @@ fn seats_heard() -> Result<Vec<Value>> {
     let workspace = client.workspace();
     match super::atoms_lean(&client, &workspace) {
         Err(err) if super::is_pack_busy(&err) => Err(super::pack_busy_err()),
-        other => other.context("mail: the pack did not answer"),
+        Err(err) => Err(mail_store_error(err)),
+        Ok(atoms) => Ok(atoms),
     }
 }
 
