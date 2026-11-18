@@ -162,32 +162,35 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: dist/*.tar.gz*
-  # The dense encoder for cloud VMs: ONNX Runtime built here from source
-  # and packset-embed linked to it, which `ljos cloud up` installs on a
-  # cloud VM only. The job reads no ljos source, so a run by hand for an
-  # older tag builds the same pair.
+  # The dense encoder for cloud VMs: ONNX Runtime from v0.44.0 and
+  # packset-embed linked to it, which `ljos cloud up` installs on a cloud
+  # VM only. The job reads no ljos source, so a run by hand for an older
+  # tag builds the same pair.
   encoder:
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Ubuntu 22.04 ships protobuf-compiler 3.12.4. This job requires
-          # libprotoc 3.21.12, which Ubuntu 24.04 carries, so the encoder
-          # stays on 24.04.
           - os: ubuntu-24.04
             triple: x86_64-unknown-linux-gnu
+            ort_sha256: d217acc7b54d410a0e032ef3f5639b82e789c17a1f27c73bc14df1e9b3868448
           - os: ubuntu-24.04-arm
             triple: aarch64-unknown-linux-gnu
+            ort_sha256: a229d0aace85303416337b8345cadfabfea928f9c66db4bb276d9e87568edb6f
           - os: macos-latest
             triple: aarch64-apple-darwin
-            osx_arch: arm64
+            ort_sha256: 3489e7cff75ff8f1f007dbc0532f45c74e774c507432c5f8e2f04cde86fdb825
           - os: macos-latest
             triple: x86_64-apple-darwin
-            osx_arch: x86_64
+            ort_sha256: 636206c2b28f39d0a5ed171ea6351cdf26ce4258390e7fb22edc5b8955d7006b
     runs-on: ${{ matrix.os }}
     env:
       TARGET: ${{ matrix.triple }}
       ORT_VERSION: 1.28.3
+      # microsoft/onnxruntime has been unavailable since 2026-11-17.
+      # Return to a source build when it is available again.
+      ORT_SOURCE_RELEASE: v0.44.0
+      ORT_SHA256: ${{ matrix.ort_sha256 }}
       PACKSET_EMBED_VERSION: 0.17.0
     steps:
       # packset pins 1.89.0 in rust-toolchain.toml at v0.17.0.
@@ -204,72 +207,28 @@ jobs:
         with:
           persist-credentials: false
           path: _ljos
-      # ONNX Runtime 1.28.3 vendors protobuf 21.12, so protoc has to be
-      # that release: Debian's protobuf-compiler 3.21.12, which Ubuntu
-      # 24.04 carries. cdn.pyke.io resolves to nothing, so a build that
-      # reaches for the prebuilt runtime fails.
       - name: Build tools
+        if: runner.os == 'Linux'
         run: |
           set -eu
-          if [ "${RUNNER_OS}" = "Linux" ]; then
-            sudo timeout -k 5 90 bash _ljos/.github/scripts/apt-mirror.sh
-            sudo apt-get install -y --no-install-recommends build-essential cmake python3 protobuf-compiler pkg-config libssl-dev
-            protoc=/usr/bin/protoc
-          else
-            curl -fsSL -o "$RUNNER_TEMP/protoc.zip" \
-              https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-osx-universal_binary.zip
-            echo "1acab3d1f774d120d5a38bccb78fd379d35226b254dc258978bc45593478ca4c  $RUNNER_TEMP/protoc.zip" | shasum -a 256 -c -
-            unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
-            protoc="$RUNNER_TEMP/protoc/bin/protoc"
-          fi
-          test "$("$protoc" --version)" = "libprotoc 3.21.12"
-          echo "PROTOC=$protoc" >> "$GITHUB_ENV"
-          echo "0.0.0.0 cdn.pyke.io" | sudo tee -a /etc/hosts
-      # A release builds ONNX Runtime from source. A cache saved on another
-      # ref would ship that build, so a tag and a run by hand do not restore
-      # it. Other runs still save the build for a rerun.
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
-        id: ort
-        if: github.ref_type != 'tag' && github.event_name != 'workflow_dispatch'
-        with:
-          path: ${{ runner.temp }}/onnxruntime
-          key: onnxruntime-${{ env.ORT_VERSION }}-shared-telemetry-off-protoc-3.21.12-${{ env.TARGET }}
-      - name: Build ONNX Runtime from source
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' || steps.ort.outputs.cache-hit != 'true'
+          sudo timeout -k 5 90 bash _ljos/.github/scripts/apt-mirror.sh
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev
+      - name: Download ONNX Runtime
         run: |
           set -eu
-          src="$RUNNER_TEMP/onnxruntime-src"
           prefix="$RUNNER_TEMP/onnxruntime"
-          git clone --quiet --depth 1 --branch "v$ORT_VERSION" https://github.com/microsoft/onnxruntime "$src"
-          cd "$src"
-          if [ "${RUNNER_OS}" = "macOS" ]; then
-            ./build.sh --config Release --build_shared_lib --parallel --skip_tests \
-              --compile_no_warning_as_error --skip_submodule_sync \
-              --osx_arch "${{ matrix.osx_arch }}" \
-              --cmake_extra_defines "CMAKE_INSTALL_PREFIX=$prefix" \
-                onnxruntime_BUILD_UNIT_TESTS=OFF onnxruntime_USE_TELEMETRY=OFF \
-                "ONNX_CUSTOM_PROTOC_EXECUTABLE=$PROTOC"
-            grep -qx 'onnxruntime_USE_TELEMETRY:BOOL=OFF' build/MacOS/Release/CMakeCache.txt
-            grep -Eqx "ONNX_CUSTOM_PROTOC_EXECUTABLE:[A-Z]+=$PROTOC" build/MacOS/Release/CMakeCache.txt
-            cmake --install build/MacOS/Release
-          else
-            export CC=gcc CXX=g++
-            ./build.sh --config Release --build_shared_lib --parallel --skip_tests \
-              --compile_no_warning_as_error --skip_submodule_sync \
-              --cmake_extra_defines "CMAKE_INSTALL_PREFIX=$prefix" \
-                onnxruntime_BUILD_UNIT_TESTS=OFF onnxruntime_USE_TELEMETRY=OFF \
-                "ONNX_CUSTOM_PROTOC_EXECUTABLE=$PROTOC"
-            grep -qx 'onnxruntime_USE_TELEMETRY:BOOL=OFF' build/Linux/Release/CMakeCache.txt
-            grep -Eqx "ONNX_CUSTOM_PROTOC_EXECUTABLE:[A-Z]+=$PROTOC" build/Linux/Release/CMakeCache.txt
-            cmake --install build/Linux/Release
-          fi
-          cp LICENSE ThirdPartyNotices.txt "$prefix/"
+          archive="$RUNNER_TEMP/onnxruntime-$TARGET.tar.gz"
+          url="https://github.com/leidarljos/ljos/releases/download/$ORT_SOURCE_RELEASE/onnxruntime-$TARGET.tar.gz"
+          curl -fsSL "$url" -o "$archive"
+          echo "$ORT_SHA256  $archive" | shasum -a 256 -c -
+          mkdir -p "$prefix"
+          tar -C "$prefix" -xzf "$archive"
       # ort links the shared library in ORT_LIB_PATH and downloads nothing.
       # pkg-config stays out, so no other libonnxruntime can win. The rpath
       # finds the library in ../lib/onnxruntime beside the binary.
       - name: Build packset-embed against it
         env:
-          ORT_LIB_PATH: ${{ runner.temp }}/onnxruntime/lib
+          ORT_LIB_PATH: ${{ runner.temp }}/onnxruntime/lib/onnxruntime
           ORT_PREFER_DYNAMIC_LINK: "1"
           ORT_SKIP_DOWNLOAD: "1"
           LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
@@ -299,17 +258,9 @@ jobs:
           set -eu
           rt="onnxruntime-$TARGET"
           embed="packset-embed-$TARGET"
-          mkdir -p "dist/$rt/lib/onnxruntime" "dist/$embed/bin"
-          if [ "${RUNNER_OS}" = "macOS" ]; then
-            cp -L "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.1.dylib" "dist/$rt/lib/onnxruntime/"
-            find "$RUNNER_TEMP/onnxruntime/lib" -type f -name 'libonnxruntime*.dylib' -exec cp {} "dist/$rt/lib/onnxruntime/" \;
-          else
-            cp -L "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.so.1" "dist/$rt/lib/onnxruntime/"
-            find "$RUNNER_TEMP/onnxruntime/lib" -type f -name 'libonnxruntime.so*' -exec cp {} "dist/$rt/lib/onnxruntime/" \;
-          fi
-          cp "$RUNNER_TEMP/onnxruntime/LICENSE" "$RUNNER_TEMP/onnxruntime/ThirdPartyNotices.txt" "dist/$rt/lib/onnxruntime/"
+          mkdir -p dist "dist/$embed/bin"
+          cp "$RUNNER_TEMP/$rt.tar.gz" "dist/$rt.tar.gz"
           cp "$RUNNER_TEMP/embed/bin/packset-embed" "dist/$embed/bin/"
-          tar -C "dist/$rt" -czf "dist/$rt.tar.gz" lib
           tar -C "dist/$embed" -czf "dist/$embed.tar.gz" bin
           check="$RUNNER_TEMP/check"
           mkdir -p "$check"
@@ -331,9 +282,9 @@ jobs:
             sha256sum "$f" > "$f.sha256"
           done
           if [ "${RUNNER_OS}" = "macOS" ]; then
-            sha256sum "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.1.dylib" >> "$rt.tar.gz.sha256"
+            sha256sum "$RUNNER_TEMP/onnxruntime/lib/onnxruntime/libonnxruntime.1.dylib" >> "$rt.tar.gz.sha256"
           else
-            sha256sum "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.so.1" >> "$rt.tar.gz.sha256"
+            sha256sum "$RUNNER_TEMP/onnxruntime/lib/onnxruntime/libonnxruntime.so.1" >> "$rt.tar.gz.sha256"
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
