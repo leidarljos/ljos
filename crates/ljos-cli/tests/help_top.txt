@@ -1,0 +1,106 @@
+Memory, a work tracker and a command guard for coding runners
+
+Usage: ljos <COMMAND>
+
+Start:
+  doctor       Check that ljos is ready, and print the rows that need action
+  onboard      Connect ljos to a coding runner, or print the MCP entry to paste into one
+  protocol     Print how work on one ticket is meant to run
+  prefer       Save one standing preference for how work should be done
+  remember     Remember one lesson, stored as written
+  search       Show what ljos remembers about a topic, best match first
+  sitting      Start work on a ticket, or file a plan and sit it
+  finish       Finish work on a ticket: remember the lesson, strengthen the memories it used, hand the claim back
+  due          List the memories due for review soonest
+  help         Print this message, or the help of one command
+
+Daily:
+  note         Note progress on an issue, dated, and commit the tracker
+  file         File a ticket. The new id is the only line on stdout
+  show         Show one ticket, or one memory
+  ready        List tickets that are open and not waiting on another open ticket
+  list         List the open tickets. The same command as `ljos ready`
+  claims       Show who holds which ticket
+  inbox        List mail this seat has not read
+  digest       Show what every seat did, newest first
+  rule         Add a command-guard rule: a pattern over the command line and a verdict
+  rules        List the command guard's rules: verdict, pattern and reason, one a line
+  sync         Copy this seat's memory to the other machines that share the tracker
+  hud          Open the due, claims and trust window
+  seat         Show the seat in use, or add one to the tracker
+  cards        Print USER.md and MEMORY.md from this directory
+
+Tracker:
+  claim        Take a ticket so this seat is the one working on it
+  release      Give a ticket back. It is open again, and the claim generation moves
+  complete     Mark the claim finished. The ticket stays open
+  reap         Release claims idle past a window and mail each seat. Without `--apply` it prints what would happen
+  options      Append `Options: A, B` to an issue. Two or more, separated by commas
+  block        Record that a ticket waits on another, or drop that edge
+  parent       Move a ticket under another parent ticket
+  deed         Name a stored file on a ticket, or list the ones named
+  evidence     Check that a stored file is intact, and that the files it came from are too
+  record       Check ballot records
+  current      Say whether a stored file is still the latest copy
+  recall       Show the plan, the cited files and the notes for one ticket
+  timeline     List an issue's history, oldest first
+  log          List one seat's tracker commits
+  usage        Count the tracker commits each seat made since a day
+  reopen       Put a finished or cancelled issue back to the state it had before it was closed
+  withdraw     Take back this seat's own ballot or note on an issue. Nothing is deleted: the withdrawal is a dated note beside it
+
+Memory:
+  memory       Copy memories to a file, or bring a file from another machine into this seat
+  memories     Review the memories agents wrote on their own: list, keep, edit, merge, drop, prune, or browse them in a terminal viewer
+  export       Write this seat's memories to a file. The same as `ljos memory export`
+  accept       Accept a stored memory or a waiting proposal, so a later search treats it as kept
+  forget       Retire one memory by id. The text stays, marked retired
+  proposals    List lesson proposals waiting on a review
+  conflicts    List memories that contradict each other
+  consolidate  Close a memory that a later one rewrites
+  hubs         List the memories most other memories point at
+  island       List the memories a task wakes up
+  handover     Write a signed directory another seat can receive
+  receive      Check a handover directory. `--import` stores its memories here
+  graded       Record that one due review was graded
+  habit        Record a number you measure again later, or list the ones you keep
+
+Coordination:
+  send         Write to one seat (`SEAT TEXT...`), or to a group with `--group NAME`
+  read         Write a read receipt for one message
+  reply        Answer a message. The reply goes to its sender and keeps its issue
+  group        List a group of seats, or change who is in it
+  wake         Set how an idle seat is told that mail arrived
+  vote         Cast this seat's vote, or show the tally when `--for` is omitted
+  consensus    Show what the votes decide, and whether a push may proceed
+  panel        Write one brief per persona for an issue, or start those personas
+  persona      Define a persona, a voter that keeps its own view
+  personas     List each persona: name, anchor, domains, view, and who defined it
+  agents       Write every persona as an agent a runner can start by name
+  ask          Hand a persona a question or a task in its own session, opening its pane when it is closed
+  brief        Print the brief a subagent playing a persona starts from
+  playbook     Bind a playbook to an issue and copy its recipe into the working set, before personas enter
+  playbooks    List the recipes on offer: sit, arena, land, company-panel, overnight, feature
+  workflow     Show where a parent ticket's workflow stands, and the next step
+  predict      Forecast how the others will vote on an issue; two or more forecasts let the settle name the surprisingly popular answer
+  trust        Record how much one voter counts another's view
+  calibrate    Estimate how often each voter has been right, from the project's past votes
+  learn        Update how much each voter's ballot counts, from the option that was right
+
+Admin:
+  policy       Show what the command guard says about a command. It runs nothing
+  offboard     Remove runner configuration written by onboard
+  uninstall    Remove ljos from this machine
+  upgrade      Install a published release next to this ljos
+  git-hooks    Install, remove, or show the global git hooks that book commits
+  person-key   Set, clear, or show the passphrase that unlocks this person's key
+  cloud        Install the release binaries and clone the shared tracker
+  mesh         Join or leave the private network, print who may connect, or move memories through a handoff directory
+  mcp          Start the tool server a runner connects to
+  completions  Print a shell completion script for bash, zsh, fish, powershell or elvish
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+A seat is the name in `LJOS_SEAT`: the person or agent this process acts as. Start with `ljos doctor`, `ljos prefer "..."`, `ljos policy -- COMMAND` and `ljos onboard`. `ljos protocol` explains the rest. `ljos help --all` lists every command.

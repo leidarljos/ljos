@@ -2,6 +2,7 @@
 
 ljos_test_boot::harness!();
 
+use std::path::PathBuf;
 use std::process::Command;
 
 fn help(args: &[&str]) -> String {
@@ -203,4 +204,54 @@ fn everyday_commands_show_a_short_example_on_h() {
         seat.contains("Example: `ljos seat`") && seat.contains("ljos seat add alice"),
         "{seat}"
     );
+}
+
+fn command_names(help_text: &str) -> Vec<String> {
+    help_text
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("  ")?;
+            if rest.starts_with('-') || rest.starts_with(' ') {
+                return None;
+            }
+            rest.split_whitespace().next().map(str::to_string)
+        })
+        .collect()
+}
+
+#[test]
+fn top_level_help_matches_the_snapshot_and_names_real_commands() {
+    let long = help(&["--help"]);
+    let short = help(&["-h"]);
+    assert_eq!(long, short, "-h and --help differ");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/help_top.txt");
+    let expected = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        long, expected,
+        "top-level help drifted from tests/help_top.txt"
+    );
+    let names = command_names(&long);
+    assert!(names.len() > 40, "{names:?}");
+    for name in &names {
+        for flag in ["--help", "-h"] {
+            let page = help(&[name, flag]);
+            assert!(
+                page.contains("Usage: ljos"),
+                "{name} {flag} is not a command\n{page}"
+            );
+        }
+    }
+    for hidden in [
+        "merge-org",
+        "hook",
+        "bump-plan",
+        "retire-notes",
+        "slot",
+        "start",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == hidden),
+            "{hidden} is on the top list"
+        );
+    }
 }
