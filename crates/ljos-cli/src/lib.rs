@@ -23525,6 +23525,12 @@ pub const EMPTY_TICKET_ID: &str =
 /// No id was given and this conversation holds no ticket.
 pub const NO_OPEN_SITTING: &str = "no open sitting, so run `ljos sitting ISSUE`.";
 
+/// [`NO_OPEN_SITTING`] for `ljos finish --close`. A close does not need a
+/// sitting once it names the ticket, and `ljos sitting` would claim the
+/// ticket again first.
+pub const NO_OPEN_SITTING_TO_CLOSE: &str =
+    "no open sitting, so run `ljos finish ID --close` with the id of the ticket to close.";
+
 /// `note` wrote `wrote` while this conversation holds `open`.
 #[must_use]
 pub fn other_sitting_line(wrote: &str, open: &str) -> String {

@@ -7516,6 +7516,9 @@ fn run_command() -> Result<()> {
                 Some(raw) => (raw, false),
                 None => {
                     let Some(open) = ljos_cli::held_issue() else {
+                        if close {
+                            bail!("{}", ljos_cli::NO_OPEN_SITTING_TO_CLOSE);
+                        }
                         bail!("{}", ljos_cli::NO_OPEN_SITTING);
                     };
                     (open, true)

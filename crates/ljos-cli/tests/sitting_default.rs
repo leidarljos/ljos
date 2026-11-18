@@ -212,6 +212,25 @@ fn a_finish_with_no_sitting_names_sitting() {
     assert_eq!(seat.org(), before);
 }
 
+/// `ljos finish --close` after the sitting ended has no ticket to read.
+/// The line does not send the person back to `ljos sitting`, which would
+/// claim the ticket again; it names the form that closes by id.
+#[test]
+fn a_close_with_no_sitting_names_the_form_that_takes_an_id() {
+    let seat = Seat::new();
+    let before = seat.org();
+    let out = seat.run(&["finish", "--close"]);
+    let text = said(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(out.stdout.is_empty(), "{text}");
+    assert_eq!(
+        stderr_line(&out),
+        "no open sitting, so run `ljos finish ID --close` with the id of the ticket to close."
+    );
+    assert!(!seat.calls().contains("vissue update"), "{}", seat.calls());
+    assert_eq!(seat.org(), before);
+}
+
 #[test]
 fn an_empty_note_id_never_touches_the_tracker() {
     let seat = Seat::new();
