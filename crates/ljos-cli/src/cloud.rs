@@ -4668,20 +4668,12 @@ mod tests {
                 "x86_64-apple-darwin",
             ]
         );
-        assert!(
-            yml.contains("protoc-21.12-osx-universal_binary.zip"),
-            "Darwin encoder build must pin protoc 3.21.12"
-        );
+        assert!(yml.contains("ORT_VERSION: 1.28.3"), "{yml}");
+        assert!(yml.contains("ORT_SOURCE_RELEASE: v0.44.0"), "{yml}");
         assert_eq!(
-            yml.matches("ONNX_CUSTOM_PROTOC_EXECUTABLE=$PROTOC").count(),
-            2,
-            "both macOS and Linux encoder builds pass ONNX_CUSTOM_PROTOC_EXECUTABLE"
-        );
-        assert_eq!(
-            yml.matches("ONNX_CUSTOM_PROTOC_EXECUTABLE:[A-Z]+=$PROTOC")
-                .count(),
-            2,
-            "both macOS and Linux encoder builds verify ONNX_CUSTOM_PROTOC_EXECUTABLE in CMakeCache.txt"
+            yml.matches("ort_sha256: ").count(),
+            4,
+            "each encoder target verifies its reused runtime archive"
         );
     }
 }

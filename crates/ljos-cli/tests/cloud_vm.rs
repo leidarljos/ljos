@@ -777,30 +777,27 @@ fn the_cloud_vm_doc_matches_the_encoder_install() {
 }
 
 #[test]
-fn a_release_build_does_not_reuse_another_onnx_runtime() {
+fn a_release_build_reuses_only_the_verified_onnx_runtime_archive() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml");
     let yml = fs::read_to_string(&path).unwrap();
     assert!(
-        yml.contains("github.ref_type != 'tag'"),
-        "a tag run restores the ONNX Runtime cache"
+        yml.contains("ORT_SOURCE_RELEASE: v0.44.0"),
+        "the source release is not pinned"
     );
     assert!(
-        yml.contains("github.event_name != 'workflow_dispatch'"),
-        "a dispatched release restores the ONNX Runtime cache"
+        yml.contains("releases/download/$ORT_SOURCE_RELEASE/onnxruntime-$TARGET.tar.gz"),
+        "the runtime is not downloaded from the pinned release"
     );
     assert!(
-        yml.contains("github.ref_type == 'tag'"),
-        "a tag run can skip the source build"
+        yml.contains("echo \"$ORT_SHA256  $archive\" | shasum -a 256 -c -"),
+        "the downloaded runtime is not checked against the target's sum"
     );
     assert!(
         yml.lines()
             .any(|line| line.contains("sha256sum") && line.contains("libonnxruntime")),
         "the release sums omit the built library"
     );
-    assert!(
-        yml.contains("cp -L"),
-        "the runtime archive still packs soname symlinks"
-    );
+    assert!(yml.contains("cp \"$RUNNER_TEMP/$rt.tar.gz\""), "{yml}");
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

@@ -732,7 +732,9 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
     assert!(seat.status.success(), "{seat_said}");
     assert!(!seat_said.contains("label seat-unresolved"), "{seat_said}");
     assert!(
-        seat_said.contains("reading every seat") || seat_said.contains("every-seat"),
+        seat_said.contains("no seat is set")
+            || seat_said.contains("reading every seat")
+            || seat_said.contains("every-seat"),
         "{seat_said}"
     );
 }

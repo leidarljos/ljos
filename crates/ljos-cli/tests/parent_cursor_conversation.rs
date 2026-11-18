@@ -90,7 +90,9 @@ fn a_parent_cursor_id_and_its_session_record_do_not_name_this_ljos() {
         "{text}"
     );
     assert!(
-        stdout.contains("every-seat") || stdout.contains("reading every seat"),
+        stdout.contains("no seat is set")
+            || stdout.contains("every-seat")
+            || stdout.contains("reading every seat"),
         "{text}"
     );
 }

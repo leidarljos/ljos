@@ -132,7 +132,9 @@ fn a_parent_session_id_does_not_name_this_process() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_ne!(field(&stdout, "seat"), forbidden.as_str(), "{text}");
     assert!(
-        stdout.contains("every-seat") || stdout.contains("reading every seat"),
+        stdout.contains("no seat is set")
+            || stdout.contains("every-seat")
+            || stdout.contains("reading every seat"),
         "{text}"
     );
 }

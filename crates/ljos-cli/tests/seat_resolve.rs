@@ -159,7 +159,7 @@ fn a_read_with_no_seat_covers_every_seat_and_a_write_names_unknown() {
         String::from_utf8_lossy(&read.stdout),
         String::from_utf8_lossy(&read.stderr)
     );
-    assert!(both.contains("reading every seat"), "{text}");
+    assert!(both.contains("no seat is set"), "{text}");
     assert!(!both.contains("label seat-unresolved"), "{text}");
 
     let doctor = world.ljos(&["doctor", "--all"], &[]);
@@ -170,7 +170,7 @@ fn a_read_with_no_seat_covers_every_seat_and_a_write_names_unknown() {
         String::from_utf8_lossy(&doctor.stderr)
     );
     assert!(
-        doctor_text.contains("reading every seat"),
+        doctor_text.contains("no seat is set"),
         "doctor names the rule: {text}"
     );
     assert!(!doctor_text.contains("label seat-unresolved"), "{text}");

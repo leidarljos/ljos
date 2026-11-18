@@ -147,7 +147,9 @@ fn a_mapped_main_conversation_sits_and_an_unresolved_one_exits_2() {
     );
     assert!(!both.contains("label seat-unresolved"), "{said}");
     assert!(
-        both.contains("reading every seat") || both.contains("every-seat"),
+        both.contains("no seat is set")
+            || both.contains("reading every seat")
+            || both.contains("every-seat"),
         "{said}"
     );
     assert!(!both.contains("this conversation's seat is seat"), "{said}");
