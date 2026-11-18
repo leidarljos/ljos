@@ -434,10 +434,14 @@ mod tests {
         }
     }
 
-    fn dir(name: &str) -> PathBuf {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    fn test_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/note-queue")
-            .join(name);
+            .join(format!("pid-{}", std::process::id()))
+    }
+
+    fn dir(name: &str) -> PathBuf {
+        let dir = test_root().join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -445,9 +449,7 @@ mod tests {
 
     #[test]
     fn a_read_does_not_create_the_queue_dir_or_the_lock() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/note-queue")
-            .join("absent-read");
+        let root = test_root().join("absent-read");
         let _ = std::fs::remove_dir_all(&root);
         let missing = root.join("ljos");
         assert!(pending_in(&missing).is_empty());

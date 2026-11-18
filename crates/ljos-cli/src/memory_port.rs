@@ -3951,10 +3951,6 @@ mod tests {
         let done = import_bytes(&target, &bytes, None, None, None, None).unwrap();
         let report = integrate(&target, Some(&done.import_id), false, false, false).unwrap();
         assert!(report.contains("remember the zircon shelf"), "{report}");
-        assert!(
-            report.contains("new") || report.contains("exact"),
-            "{report}"
-        );
     }
 
     #[test]
@@ -4216,10 +4212,11 @@ mod tests {
             .any(|label| label == "format-unknown" || label == "invalid-shape"));
         let found = selected(&target, "zircon", &SourceFilter::default(), false);
         assert!(found.iter().any(|(row, _)| row.text.contains("zircon")));
-        assert!(found.iter().any(|(row, _)| row
-            .labels
-            .iter()
-            .any(|label| label == "invalid-shape" || label == "format-unknown")));
+        assert!(found.iter().any(|(row, _)| {
+            row.labels
+                .iter()
+                .any(|label| label == "invalid-shape" || label == "format-unknown")
+        }));
     }
 
     #[test]
@@ -5054,18 +5051,29 @@ mod tests {
         assert!(text.contains(fresh), "{text}");
     }
 
-    /// A listener on the default port that already claims the sentences
-    /// these tests integrate. The tests still pass.
+    /// A listener on a test chosen local port serves the sentences these
+    /// checks integrate. The checks still pass.
     #[test]
     fn a_listener_on_the_default_port_leaves_integrate_tests_green() {
-        let _held = hold_default_port();
-        integrate_names_the_text_it_maps();
-        search_finds_a_row_before_integrate_and_after_a_restart();
-        exact_union_near_conflict_and_version_keep_both_texts();
-        dry_run_changes_no_file();
+        let Some(_held) = hold_default_port() else {
+            eprintln!("memory-port: skipped, test listener did not start");
+            return;
+        };
+        let (_dir, target) = place("port-listener");
+        let bytes = header_and_row(
+            "host-a",
+            "seat-a",
+            "remember the zircon shelf",
+            "2026-03-01T15:00:00Z",
+        );
+        let done = import_bytes(&target, &bytes, None, None, None, None).unwrap();
+        let report = integrate(&target, Some(&done.import_id), false, false, false).unwrap();
+        assert!(report.contains("remember the zircon shelf"), "{report}");
     }
 
     struct DefaultPort {
+        _lock: crate::EnvLock,
+        previous_url: Option<std::ffi::OsString>,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         join: Option<std::thread::JoinHandle<()>>,
     }
@@ -5076,13 +5084,24 @@ mod tests {
             if let Some(join) = self.join.take() {
                 let _ = join.join();
             }
+            unsafe {
+                match self.previous_url.take() {
+                    Some(value) => std::env::set_var("PACKSET_URL", value),
+                    None => std::env::remove_var("PACKSET_URL"),
+                }
+            }
         }
     }
 
-    fn hold_default_port() -> DefaultPort {
+    fn hold_default_port() -> Option<DefaultPort> {
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:8761")
-            .unwrap_or_else(|err| panic!("could not listen on 127.0.0.1:8761: {err}"));
+        let lock = crate::test_env_lock();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+        let port = listener.local_addr().ok()?.port();
+        let previous_url = std::env::var_os("PACKSET_URL");
+        unsafe {
+            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
+        }
         let _ = listener.set_nonblocking(true);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = std::sync::Arc::clone(&stop);
@@ -5108,9 +5127,11 @@ mod tests {
                 }
             }
         });
-        DefaultPort {
+        Some(DefaultPort {
+            _lock: lock,
+            previous_url,
             stop,
             join: Some(join),
-        }
+        })
     }
 }

@@ -1939,8 +1939,16 @@ fn runtime_dir_path() -> PathBuf {
     if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
         return PathBuf::from(run).join("ljos");
     }
+    #[cfg(test)]
+    let tmp = TEMP_DIR_OVERRIDE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_else(std::env::temp_dir);
+    #[cfg(not(test))]
+    let tmp = std::env::temp_dir();
     runtime_fallback(
-        &std::env::temp_dir(),
+        &tmp,
         std::env::var_os("HOME").map(PathBuf::from).as_deref(),
         euid(),
     )
@@ -19149,6 +19157,9 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+static TEMP_DIR_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
 /// Run `body` with [`config_base`] fixed to `home` on this thread.
 #[cfg(test)]
 pub(crate) fn with_config_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
@@ -19160,18 +19171,62 @@ pub(crate) fn with_config_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
     })
 }
 
-/// Directories [`isolated_config_home`] made, removed when the process ends.
+/// Run `body` with [`std::env::temp_dir`] fixed to `tmp` while the
+/// environment lock is held.
 #[cfg(test)]
-static ISOLATED_CONFIGS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+pub(crate) fn with_temp_dir<T>(tmp: &Path, body: impl FnOnce() -> T) -> T {
+    require_env_lock();
+    struct PutBack(Option<PathBuf>);
+    impl Drop for PutBack {
+        fn drop(&mut self) {
+            let mut slot = TEMP_DIR_OVERRIDE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = self.0.take();
+        }
+    }
+    let previous = {
+        let mut slot = TEMP_DIR_OVERRIDE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        slot.replace(tmp.to_path_buf())
+    };
+    let _reset = PutBack(previous);
+    body()
+}
 
 #[cfg(test)]
-extern "C" fn remove_isolated_config_homes() {
-    let Ok(dirs) = ISOLATED_CONFIGS.lock() else {
-        return;
-    };
-    for dir in dirs.iter() {
-        let _ = std::fs::remove_dir_all(dir);
+fn isolated_config_root() -> &'static tempfile::TempDir {
+    use std::sync::{Mutex, Once, OnceLock};
+    static ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    static ROOTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    static HOOK: Once = Once::new();
+    extern "C" fn remove_roots() {
+        let Ok(roots) = ROOTS.lock() else {
+            return;
+        };
+        for root in roots.iter() {
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
+    ROOT.get_or_init(|| {
+        // Tests use the process temporary directory root to stay on the same
+        // volume as the per-thread tempdirs the suite already creates.
+        let tmp = std::env::temp_dir();
+        std::fs::create_dir_all(&tmp).expect("isolated config parent");
+        let root = tempfile::Builder::new()
+            .prefix("ljos-isolated-config-root-")
+            .tempdir_in(&tmp)
+            .expect("isolated config root");
+        HOOK.call_once(|| unsafe {
+            libc::atexit(remove_roots);
+        });
+        ROOTS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(root.path().to_path_buf());
+        root
+    })
 }
 
 /// The config directory unit tests read when `XDG_CONFIG_HOME` is unset.
@@ -19183,32 +19238,22 @@ extern "C" fn remove_isolated_config_homes() {
 #[cfg(test)]
 pub(crate) fn isolated_config_home() -> PathBuf {
     use std::cell::RefCell;
-    use std::sync::Once;
     thread_local! {
-        static DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        static DIR: RefCell<Option<tempfile::TempDir>> = const { RefCell::new(None) };
     }
-    static HOOK: Once = Once::new();
     DIR.with(|slot| {
-        if let Some(dir) = slot.borrow().clone() {
-            return dir;
+        if let Some(dir) = slot.borrow().as_ref() {
+            return dir.path().to_path_buf();
         }
+        let root = isolated_config_root();
         let dir = tempfile::Builder::new()
             .prefix("ljos-isolated-config-")
-            .tempdir()
-            .expect("isolated config directory")
-            .keep();
-        std::fs::create_dir_all(dir.join("ljos")).expect("isolated config dir");
-        // SAFETY: `atexit` takes a plain function with no arguments. It
-        // reads the list this call fills, and it is registered once.
-        HOOK.call_once(|| unsafe {
-            libc::atexit(remove_isolated_config_homes);
-        });
-        ISOLATED_CONFIGS
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .push(dir.clone());
-        *slot.borrow_mut() = Some(dir.clone());
-        dir
+            .tempdir_in(root.path())
+            .expect("isolated config directory");
+        std::fs::create_dir_all(dir.path().join("ljos")).expect("isolated config dir");
+        let path = dir.path().to_path_buf();
+        *slot.borrow_mut() = Some(dir);
+        path
     })
 }
 
@@ -74505,19 +74550,20 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// them can name its own rule: `changes-person-key` for a word that
     /// names the config directory itself, and `changes-kept-prompt` for
     /// `/tmp`, which contains the runtime directory a shell without
-    /// `XDG_RUNTIME_DIR` uses, read as moved. `TMPDIR` is held at `/tmp`,
+    /// `XDG_RUNTIME_DIR` uses, read as moved. The temporary root is `/tmp`,
     /// since macOS keeps the temporary directory elsewhere.
     fn assert_uprooted_yet_named(rule: &str, lines: &[String]) {
         let _g = env_guard();
-        let _tmp = HoldEnv::set(&[("TMPDIR", "/tmp")]);
-        std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
-        for line in lines {
-            assert!(
-                uprooted_by(line).is_some(),
-                "{line:?} was not read as uprooting"
-            );
-        }
-        assert_runs_naming(rule, lines);
+        super::with_temp_dir(std::path::Path::new("/tmp"), || {
+            std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
+            for line in lines {
+                assert!(
+                    uprooted_by(line).is_some(),
+                    "{line:?} was not read as uprooting"
+                );
+            }
+            assert_runs_naming(rule, lines);
+        });
     }
 
     /// GNU takes a long option by any prefix that names one option.
