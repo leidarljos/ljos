@@ -423,3 +423,40 @@ fn a_rule_with_a_verdict_it_cannot_store_is_an_error_that_names_the_two_it_takes
         "`deny` or `ask`: a label the warning carries. Neither stops the command."
     );
 }
+
+#[test]
+fn an_issue_argument_says_where_the_id_comes_from_and_a_vote_names_no_flag() {
+    let mut session = Session::open(&[("LJOS_MCP_TOOLS", "all")]);
+    let tools = listed_tools(&mut session);
+    let property = |tool: &str, field: &str| -> String {
+        tools[tool]["inputSchema"]["properties"][field]["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{tool} has no {field} description"))
+            .to_string()
+    };
+    for tool in [
+        "ljos_recall",
+        "ljos_show",
+        "ljos_timeline",
+        "ljos_vote",
+        "ljos_predict",
+        "ljos_options",
+        "ljos_deed",
+        "ljos_note",
+        "ljos_learn",
+        "ljos_brief",
+        "ljos_playbook",
+    ] {
+        let said = property(tool, "issue");
+        assert!(
+            said.starts_with(
+                "The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`."
+            ),
+            "{tool}: {said}"
+        );
+    }
+    assert_eq!(
+        property("ljos_vote", "choice"),
+        "Option to vote for, one the issue's `Options:` line names, such as `accept` or `reject`. `ljos_options` writes that line. Absent, the tool shows the tally."
+    );
+}

@@ -728,7 +728,7 @@ pub struct AccessionArgs {
 /// A tracker node, and optionally a deed to cite on it.
 #[derive(Deserialize, JsonSchema)]
 pub struct DeedArgs {
-    /// The issue id.
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
     pub issue: String,
     /// An accession to cite. Absent, the tool lists what the issue cites.
     pub add: Option<String>,
@@ -765,7 +765,7 @@ pub struct FileArgs {
 /// A dated progress note on an issue.
 #[derive(Deserialize, JsonSchema)]
 pub struct NoteArgs {
-    /// The issue id. Omitted or blank is the issue this seat holds.
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`. Omitted or blank is the issue this seat has.
     #[serde(default)]
     pub issue: String,
     /// The note.
@@ -775,7 +775,7 @@ pub struct NoteArgs {
 /// Options appended to an issue's body.
 #[derive(Deserialize, JsonSchema)]
 pub struct OptionsArgs {
-    /// The issue id.
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
     pub issue: String,
     /// Two or more options. A comma inside one string splits it.
     pub options: Vec<String>,
@@ -784,14 +784,14 @@ pub struct OptionsArgs {
 /// A tracker node.
 #[derive(Deserialize, JsonSchema)]
 pub struct IssueArgs {
-    /// The issue id.
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
     pub issue: String,
 }
 
 /// One ticket, the same page `ljos show` prints.
 #[derive(Deserialize, JsonSchema)]
 pub struct ShowArgs {
-    /// The issue id.
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
     pub issue: String,
     /// Print every note. Absent, the page keeps the latest eight.
     #[serde(default)]
@@ -826,7 +826,7 @@ pub struct DigestArgs {
 /// The issue to settle, and whether to run the tracker's settle too.
 #[derive(Deserialize, JsonSchema)]
 pub struct ConsensusArgs {
-    /// The issue id.
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
     pub issue: String,
     /// Also run the tracker's own settle, whose numbers can differ from the
     /// model crate's once trust rows exist.
@@ -837,7 +837,7 @@ pub struct ConsensusArgs {
 /// A forecast of the others' ballots.
 #[derive(Deserialize, JsonSchema)]
 pub struct PredictArgs {
-    /// The issue id.
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
     pub issue: String,
     /// The option you expect to win, or an object of option to share.
     pub expect: serde_json::Value,
@@ -918,9 +918,9 @@ fn expect_text(value: &serde_json::Value) -> Option<String> {
 /// A ballot, or a request for the tally.
 #[derive(Deserialize, JsonSchema)]
 pub struct VoteArgs {
-    /// The issue id.
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
     pub issue: String,
-    /// Option to vote for (such as `accept`, `reject`, or one from `--options`). Absent, the tool shows the tally.
+    /// Option to vote for, one the issue's `Options:` line names, such as `accept` or `reject`. `ljos_options` writes that line. Absent, the tool shows the tally.
     pub choice: Option<String>,
     /// Probability in (0, 1] that `choice` is the outcome. Absent, the
     /// ballot is not a forecast and will not be scored.
@@ -953,7 +953,7 @@ pub struct VoteArgs {
 pub struct BriefArgs {
     /// The persona's name, as written with `ljos_persona`.
     pub name: String,
-    /// The tracker id of the issue.
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
     pub issue: String,
 }
 
@@ -1124,7 +1124,7 @@ pub struct TrustArgs {
 /// An issue and what turned out right on it.
 #[derive(Deserialize, JsonSchema)]
 pub struct LearnArgs {
-    /// The tracker id.
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
     pub issue: String,
     /// The option that turned out right.
     pub outcome: String,
@@ -1211,7 +1211,7 @@ pub struct SittingArgs {
 /// Bind a playbook to an issue.
 #[derive(Deserialize, JsonSchema)]
 pub struct PlaybookBindArgs {
-    /// The tracker id of the issue.
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
     pub issue: String,
     /// The recipe name: sit, arena, land, company-panel, overnight, feature.
     pub name: String,
