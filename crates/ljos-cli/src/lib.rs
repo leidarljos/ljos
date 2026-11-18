@@ -19310,7 +19310,7 @@ fn deed_store_step(dry: bool) -> Step {
     match made {
         Ok(()) => step(
             format!(
-                "created {}, the signed records of finished work. deedar (deed program) uses it while DEEDAR_URL (store address) is unset",
+                "created {}, for signed records of finished work",
                 dir.display()
             ),
             true,
@@ -71263,8 +71263,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
     }
 
-    /// A first onboard names deedar and the store variables in a few words.
-    /// The tutorial has not introduced them yet.
+    /// A first onboard explains each new store without exposing its
+    /// configuration variables.
     #[test]
     fn a_fresh_onboard_glosses_the_store_names() {
         let _g = env_guard();
@@ -71276,8 +71276,10 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(tracker.ok, "{}", tracker.detail);
         assert!(pack.ok, "{}", pack.detail);
         assert!(
-            deed.detail.contains("deedar (deed program)")
-                && deed.detail.contains("DEEDAR_URL (store address)"),
+            deed.detail
+                .ends_with(", for signed records of finished work")
+                && !deed.detail.contains("DEEDAR_URL")
+                && !deed.detail.contains("(deed program)"),
             "{}",
             deed.detail
         );
