@@ -8051,7 +8051,9 @@ pub fn shared_holder_note(node: &str, holder: &str, hold: &Hold) -> String {
          Every conversation of a runner that stamps no conversation id holds as {holder}, \
          so that process may be another conversation. If it is, `ljos release {node}` here \
          and export LJOS_SESSION_ID per conversation.",
-        hold.pid, hold.comm, hold.since
+        hold.pid,
+        hold.comm,
+        hold.since_when()
     )
 }
 
@@ -38498,7 +38500,11 @@ pub fn review_summary(atoms: &[Value], now: &str) -> String {
         .collect();
     later.sort_unstable();
     match later.first() {
-        Some(next) => format!("{due} due; {} scheduled, next at {next}", later.len()),
+        Some(next) => format!(
+            "{due} due; {} scheduled, next at {}",
+            later.len(),
+            local_when(next)
+        ),
         None if due == 0 => "0 due; nothing scheduled: this seat has remembered nothing yet".into(),
         None => format!("{due} due; nothing else scheduled"),
     }
@@ -40223,12 +40229,12 @@ pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, alive: b
     if alive {
         return format!(
             "claim: {node} is held by another ({}, seat {}, still running, since {}), not by {assignee}, so run `ljos send {} TEXT`.",
-            hold.assignee, hold.seat, hold.since, hold.seat
+            hold.assignee, hold.seat, hold.since_when(), hold.seat
         );
     }
     format!(
         "claim: {node} is still held by another ({}, seat {}, since {}), not by {assignee}. The recorded process has exited, and the ticket stays held. `ljos release {node} --assignee {}` releases it. `ljos sitting {node}` reclaims a claim quiet longer than the lease. `ljos claim {node} --takeover` takes it over once the claim has been quiet that long.",
-        hold.assignee, hold.seat, hold.since, hold.seat
+        hold.assignee, hold.seat, hold.since_when(), hold.seat
     )
 }
 
@@ -40281,7 +40287,7 @@ fn assist_line(issue: &str, hold: &Hold, seat: &str) -> Option<String> {
     (hold.seat != seat).then(|| {
         format!(
             "{} holds {issue} (since {}). This note is an assist, not a sitting: it is in the logbook the holder reads, and `ljos send {} TEXT` reaches the holder now\n",
-            hold.seat, hold.since, hold.seat
+            hold.seat, hold.since_when(), hold.seat
         )
     })
 }
@@ -40503,7 +40509,9 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                             with_tracker(
                                 format!(
                                     "took over from {}, {why} (held since {})\n{}",
-                                    h.assignee, h.since, said.stdout
+                                    h.assignee,
+                                    h.since_when(),
+                                    said.stdout
                                 ),
                                 node,
                                 assignee,
@@ -41442,7 +41450,8 @@ fn same_seat_note(node: &str, verb: &str, hold: &Hold) -> String {
     };
     format!(
         "{verb} {node} under {name}, another conversation of seat {} ({state}, held since {})\n",
-        hold.seat, hold.since
+        hold.seat,
+        hold.since_when()
     )
 }
 
@@ -41458,6 +41467,15 @@ pub struct Hold {
     pub pid: u32,
     pub comm: String,
     pub since: String,
+}
+
+impl Hold {
+    /// When the hold began as the other times a command prints it: local
+    /// time and the zone, not the RFC 3339 stamp the record keeps.
+    #[must_use]
+    pub fn since_when(&self) -> String {
+        local_when(&self.since)
+    }
 }
 
 fn hold_record_path(actor: &str) -> PathBuf {
@@ -46554,7 +46572,7 @@ pub fn not_assignee_message(
         .map(|h| {
             (
                 unscoped(&h.assignee),
-                format!(" (seat {}, since {})", h.seat, h.since),
+                format!(" (seat {}, since {})", h.seat, h.since_when()),
             )
         })
         .or_else(|| tracker.map(|t| (unscoped(t), " (the tracker's claim)".to_string())));
@@ -59352,7 +59370,10 @@ mod tests {
         let said = super::held_by_another_message("demo-aaaa", "brio", &hold, true);
         assert_eq!(
             said,
-            "claim: demo-aaaa is held by another (acme, seat acme, still running, since 2026-01-01T00:00:00.000Z), not by brio, so run `ljos send acme TEXT`."
+            format!(
+                "claim: demo-aaaa is held by another (acme, seat acme, still running, since {}), not by brio, so run `ljos send acme TEXT`.",
+                super::local_when("2026-01-01T00:00:00.000Z")
+            )
         );
         let gone = super::held_by_another_message("demo-aaaa", "brio", &hold, false);
         assert!(gone.contains("held by another"), "{gone}");
@@ -66215,7 +66236,10 @@ mod tests {
         );
         assert_eq!(
             super::review_summary(&atoms, now),
-            "3 due; 1 scheduled, next at 2030-01-01T00:00:00Z"
+            format!(
+                "3 due; 1 scheduled, next at {}",
+                super::local_when("2030-01-01T00:00:00Z")
+            )
         );
         assert_eq!(
             super::review_summary(&[atoms[4].clone()], now),

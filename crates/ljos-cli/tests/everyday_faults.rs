@@ -472,6 +472,23 @@ fn a_missing_seat_name_names_seat_add_and_exits_2() {
     assert!(out.stderr.is_empty(), "{said}");
 }
 
+/// The review clock names the next review as `remember` does, in local
+/// time with the zone, not as the pack's RFC 3339 stamp.
+#[test]
+fn the_due_line_names_the_next_review_as_remember_does() {
+    let atoms = vec![serde_json::json!({
+        "id": "a",
+        "kind": "lesson",
+        "text": "The kiln door seats cold.",
+        "due_at": "2030-01-01T00:00:00Z",
+        "entities": [],
+    })];
+    let line = ljos_cli::review_summary(&atoms, "2026-11-18T12:00:00Z");
+    let when = ljos_cli::local_when("2030-01-01T00:00:00Z");
+    assert_eq!(line, format!("0 due; 1 scheduled, next at {when}"));
+    assert!(!line.contains("T00:00:00Z"), "{line}");
+}
+
 #[test]
 fn two_seats_on_one_ticket_name_send() {
     let hold = ljos_cli::Hold {
@@ -482,12 +499,19 @@ fn two_seats_on_one_ticket_name_send() {
         since: "2026-01-01T00:00:00.000Z".into(),
     };
     let said = ljos_cli::held_by_another_message("demo-aaaa", "brio", &hold, true);
+    let when = ljos_cli::local_when("2026-01-01T00:00:00.000Z");
+    assert!(!when.contains('T'), "{when}");
     assert_eq!(
         said,
-        "claim: demo-aaaa is held by another (acme, seat acme, still running, since 2026-01-01T00:00:00.000Z), not by brio, so run `ljos send acme TEXT`."
+        format!(
+            "claim: demo-aaaa is held by another (acme, seat acme, still running, since {when}), not by brio, so run `ljos send acme TEXT`."
+        )
     );
+    assert!(!said.contains(".000Z"), "{said}");
     assert!(!said.contains('\n'));
     let gone = ljos_cli::held_by_another_message("demo-aaaa", "brio", &hold, false);
+    assert!(gone.contains(&format!("since {when})")), "{gone}");
+    assert!(!gone.contains(".000Z"), "{gone}");
     assert!(gone.contains("the ticket stays held"), "{gone}");
     assert!(
         gone.contains("`ljos release demo-aaaa --assignee acme` releases it"),

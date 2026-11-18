@@ -49,7 +49,7 @@ ok	seat	alice, holding as alice (from LJOS_SEAT)
 == cards
 == due
 unreviewed	conclusion	3f9c...	The lexical default is BM25+.
-1 due; 4 scheduled, next at 2026-09-13T09:12:00Z
+1 due; 4 scheduled, next at 2026-09-13 09:12 +00:00
 == island: Ship the fuse change?
 1.000	seed	ab8c...	3 weeks ago	CombMNZ over RRF for fusing two ballots.
 == blockers

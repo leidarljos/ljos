@@ -131,7 +131,7 @@ pub fn claim_takeover(node: &str, assignee: &str) -> Result<String> {
     if let Some((_, live)) = crate::live_other_hold_on_ticket(node, &actor, assignee) {
         return Err(refused(format!(
             "claim: {node} is held by another ({}, seat {}, still running, since {}), so `--takeover` refuses it and changes nothing. `ljos send {} TEXT` reaches the holder.",
-            live.assignee, live.seat, live.since, live.seat
+            live.assignee, live.seat, live.since_when(), live.seat
         )));
     }
     let lease = crate::lease_secs();
