@@ -13,7 +13,7 @@
 | =DEEDAR_URL=, =DEEDAR_HOST_SIGNING_KEY= | the deed store; the key signs handovers, and =~/.config/deedar/host.key= is used when the variable is unset |
 | =CLAIMDAG_DIR= | the claim graph |
 | =LJOS_CARDS_DIR= | the server's cards directory |
-| =LJOS_MCP_TOOLS= | the tools =ljos-mcp= lists; unset, the core set (see MCP tools); =all= lists every tool; else names split on commas or spaces |
+| =LJOS_MCP_TOOLS= | the tools =ljos-mcp= lists; unset, the core set (see [[file:reference-mcp.org][MCP tools]]); =all= lists every tool; else names split on commas or spaces |
 | =LJOS_HUD_BIN= | path to =ljos-hud=; else sibling of =ljos=, then PATH |
 | =LJOS_HUD_SOCKET= | summon socket; else =$XDG_RUNTIME_DIR/ljos/hud.sock= |
 | =LJOS_TRACKER_GIT= | =commit= commits the ticket's =issues.org=, and the sitting's and finish's sealed sync log, without pushing; =off= skips the commit and push, and the sync in passing; unset, commit and push. A landed commit or push is not printed. A refusal is one sentence. =--verbose= prints the lines. =ljos sync= by hand always pushes |
@@ -31,7 +31,7 @@
 | =LJOS_PANE_TOOL= | the one =[[tool]]= persona panes open in; unset, the first of the file's tools and the built-in herdr and tmux shapes that answers |
 | =LJOS_PANEL_RUNNER= | the runner a decision panel's members run on, through its =headless= argv; unset, the seat's own runner, else the build harness |
 | =LJOS_PANEL_CONCURRENCY= | how many decision-panel members start at once; unset, the machine's parallelism clamped to 4; =0= starts every member; =LJOS_MAX_PARALLEL= is the same knob |
-| =XDG_STATE_HOME=, =XDG_CACHE_HOME=, =XDG_RUNTIME_DIR= | where the Jev state, cache and runtime key live (see Jev settings); =XDG_RUNTIME_DIR= also keeps the hud socket and the seat records |
+| =XDG_STATE_HOME=, =XDG_CACHE_HOME=, =XDG_RUNTIME_DIR= | where the Jev state, cache and runtime key live (see [[file:reference-jev.org][Jev settings]]); =XDG_RUNTIME_DIR= also keeps the hud socket and the seat records |
 
 =~/.config/ljos/env= is loaded for the keys above that the shell leaves unset.
 
