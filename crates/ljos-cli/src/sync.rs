@@ -5449,6 +5449,7 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
                 mode == TrackerGit::Push,
             ));
         }
+        crate::maybe_gc_tracker(&root);
     }
     Ok(out)
 }
