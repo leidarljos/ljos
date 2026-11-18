@@ -38762,6 +38762,13 @@ fn format_due_page(shown: &[Value], matched: usize, summary: &str, sweep: &str) 
         out.push_str(&scan::wrap(sweep.trim(), scan::COLS));
         out.push('\n');
     }
+    if !shown.is_empty() {
+        out.push_str(&scan::wrap(
+            "grade one with `ljos graded ID`, or retire it with `ljos forget ID`.",
+            scan::COLS,
+        ));
+        out.push('\n');
+    }
     let ids: Vec<&str> = shown
         .iter()
         .map(|atom| atom["id"].as_str().unwrap_or(""))

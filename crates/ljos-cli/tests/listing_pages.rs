@@ -601,5 +601,11 @@ fn listing_commands_match_the_saved_pages() {
             }
         }
         snap(name, &text);
+        if name == "due" {
+            assert!(
+                text.contains("ljos graded ID") && text.contains("ljos forget ID"),
+                "due output missing graded/forget hint:\n{text}"
+            );
+        }
     }
 }

@@ -4,6 +4,7 @@ stdout:
 due  shown 8 of 17, soonest first
 the rest stay due and that list grades none, so run `ljos due --all`.
 17 due; nothing else scheduled
+grade one with `ljos graded ID`, or retire it with `ljos forget ID`.
 
 lesson, not reviewed yet, seat alice, ticket demo-kiln
   The damper sticks when the kiln is cold.
