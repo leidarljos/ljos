@@ -121,10 +121,18 @@ fn plain_finish_after_repeated_sitting_hands_the_parent_back_once() {
     let finished = world.run(&["finish", ISSUE]);
     let finished_text = text(&finished);
     assert!(finished.status.success(), "{finished_text}");
+    let finished_out = String::from_utf8_lossy(&finished.stdout);
     assert!(
-        String::from_utf8_lossy(&finished.stdout)
-            .contains(&format!("sitting ended; ticket {ISSUE} is still open")),
+        finished_out.contains(&format!("sitting ended; ticket {ISSUE} is still open")),
         "{finished_text}"
+    );
+    assert!(
+        finished_out.contains("so run `ljos remember \"...\"` to add one."),
+        "post-finish lesson hint did not name `ljos remember`: {finished_text}"
+    );
+    assert!(
+        !finished_out.contains(&format!("ljos finish {ISSUE} --lesson")),
+        "post-finish hint named `ljos finish` on an unclaimed ticket: {finished_text}"
     );
     assert!(!finished_text.contains("finished ljos-wh2y as done"));
     assert!(!finished_text.contains("release: status done"));

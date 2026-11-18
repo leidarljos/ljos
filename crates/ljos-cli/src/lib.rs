@@ -46563,12 +46563,11 @@ pub fn not_assignee_message(
 }
 
 /// The line `ljos finish` prints when the sitting had no lesson. It comes
-/// after the line that says the sitting ended, and its command names this
-/// issue, so it can be run as written.
-fn missing_lesson_line(issue: &str) -> String {
-    format!(
-        "no `--lesson` came with this finish; a lesson taken earlier with `ljos remember` is kept, so run `ljos finish {issue} --lesson \"...\"` to add one."
-    )
+/// after the line that says the sitting ended, and names `ljos remember`
+/// because the ticket is no longer claimed.
+fn missing_lesson_line() -> String {
+    "no `--lesson` came with this finish; a lesson taken earlier with `ljos remember` is kept, so run `ljos remember \"...\"` to add one."
+        .to_string()
 }
 
 /// Whether a lesson given to `ljos finish` is the person's own: no agent
@@ -47536,7 +47535,7 @@ pub fn finish(
         out.push_str(&format!("sitting ended; ticket {issue} is still open\n"));
     }
     if supplied.is_none() && !ticket_has_lesson(issue) {
-        out.push_str(&missing_lesson_line(issue));
+        out.push_str(&missing_lesson_line());
         out.push('\n');
     }
     // A cloud seat's deeds leave with the tracker. A box writes nothing.
@@ -84364,8 +84363,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(lesson_claims("   ").is_empty());
     }
 
-    fn lesson_lines_in(text: &str, issue: &str) -> usize {
-        text.matches(&super::missing_lesson_line(issue)).count()
+    fn lesson_lines_in(text: &str, _issue: &str) -> usize {
+        text.matches(&super::missing_lesson_line()).count()
     }
 
     fn claimdag_for(log: &std::path::Path, release_ok: bool) -> String {
@@ -84509,7 +84508,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
         assert_eq!(lesson_lines_in(&said, "probe-lsn1"), 1, "{said}");
         let ended = said.find("sitting ended; ticket probe-lsn1 is still open");
-        let hint = said.find(&super::missing_lesson_line("probe-lsn1"));
+        let hint = said.find(&super::missing_lesson_line());
         assert!(ended < hint, "the hint follows the success line: {said}");
         assert!(
             said.lines()
