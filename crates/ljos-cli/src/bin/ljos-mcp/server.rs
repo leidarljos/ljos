@@ -1203,7 +1203,7 @@ pub struct SittingArgs {
     pub anyway: bool,
     /// The recipe this sitting copies before recall (`sit`, `arena`, `land`,
     /// `company-panel`, `overnight`, `feature`). Absent, a closed-set token in the
-    /// title else sit. Held until finish or release.
+    /// title else sit. The recipe stays bound until `ljos_finish` or `ljos_release`.
     #[serde(default)]
     pub playbook: Option<String>,
 }
@@ -2745,7 +2745,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to begin work on an issue, or pass plan and items to file that checklist in one tracker commit and sit the parent. It is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Omit assignee. A call that sends no conversation id still sits, bound to this seat, the same sitting `ljos sitting` takes when LJOS_SEAT is set and no conversation is stamped. Pass _meta.conversation_id to sit as that conversation.",
+        description = "Call this to open a sitting on an issue in the protocol's full order, stopping at the first store that does not answer. ljos_start is the shorter opening. Pass issue, or plan with items to file that checklist in one tracker commit and sit the parent. Pass playbook (sit, arena, land, company-panel, overnight or feature) to name the recipe; absent, a recipe named in the title, else sit. Leave assignee out unless you run as a named worker. A call with no _meta.conversation_id sits as this seat, and _meta.conversation_id sits as that conversation.",
         annotations(
             title = "Open a sitting",
             read_only_hint = false,
@@ -3765,7 +3765,7 @@ impl LjosServer {
                 Read each shown row and `ljos_graded` it.\n\
              4. `ljos_search` then `ljos_island` with the task in your own words.\n\
              5. `ljos_playbook` on the node with a recipe name (sit, arena, land,\n\
-                company-panel, overnight) unless this sitting already holds one.\n\
+                company-panel, overnight or feature) unless this sitting already has one.\n\
                 Absent a name, the sitting matches the title or binds sit. The sitting\n\
                 copies the full body before recall; a panel is refused until one is bound.\n\
              6. `ljos_recall` on the node. What it stands on and what it cited.\n\

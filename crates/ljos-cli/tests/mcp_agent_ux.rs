@@ -344,3 +344,50 @@ fn claim_file_and_deed_each_describe_their_own_call() {
         "{text}"
     );
 }
+
+#[test]
+fn sitting_says_how_it_differs_from_start_and_names_every_playbook() {
+    let mut session = Session::open(&[("LJOS_MCP_TOOLS", "all")]);
+    let tools = listed_tools(&mut session);
+    let sitting = description_of(&tools, "ljos_sitting");
+    assert!(
+        sitting.contains("ljos_start is the shorter opening."),
+        "{sitting}"
+    );
+    assert!(
+        sitting.contains("Leave assignee out unless you run as a named worker."),
+        "{sitting}"
+    );
+    assert!(!sitting.contains("Omit assignee"), "{sitting}");
+    let names = "sit, arena, land, company-panel, overnight or feature";
+    assert!(sitting.contains(names), "{sitting}");
+    let param = tools["ljos_sitting"]["inputSchema"]["properties"]["playbook"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        param.ends_with("The recipe stays bound until `ljos_finish` or `ljos_release`."),
+        "{param}"
+    );
+    for name in [
+        "sit",
+        "arena",
+        "land",
+        "company-panel",
+        "overnight",
+        "feature",
+    ] {
+        assert!(param.contains(&format!("`{name}`")), "{param}");
+    }
+
+    let prompt = session.request(
+        "prompts/get",
+        serde_json::json!({"name": "start_a_sitting", "arguments": {}}),
+    );
+    let text = prompt["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        text.contains("(sit, arena, land,\ncompany-panel, overnight or feature)"),
+        "{text}"
+    );
+}
