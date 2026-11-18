@@ -62,10 +62,14 @@ pub(crate) fn settle() {
     let Ok(here) = std::env::current_dir() else {
         return;
     };
-    let named = project_named(&args);
+    settle_at(&here, &args, true);
+}
+
+fn settle_at(here: &Path, args: &[String], move_process_cwd: bool) {
+    let named = project_named(args);
     // A network or FUSE mount is left without a stat. getattr is the wait.
-    if remote_or_fuse(&here) {
-        park(&here);
+    if remote_or_fuse(here) {
+        park(here, move_process_cwd);
         return;
     }
     if named {
@@ -77,19 +81,19 @@ pub(crate) fn settle() {
         // check is what refuses a product checkout, and it is a local
         // read when this directory is not a slow mount.
         if env_tracker().is_some_and(|root| root != here) {
-            park(&here);
+            park(here, move_process_cwd);
             return;
         }
         // Nothing in the environment names a tracker. One stat asks
         // whether this directory is the tracker the seat is standing in.
         // It gives up when the mount does not answer.
         if timed_is_file(&here.join("vissue.toml")).is_none() {
-            park(&here);
+            park(here, move_process_cwd);
         }
         return;
     }
-    if timed_metadata(&here).is_none() {
-        park(&here);
+    if timed_metadata(here).is_none() {
+        park(here, move_process_cwd);
     }
 }
 
@@ -119,7 +123,10 @@ fn remember_skip(dir: &Path) {
 /// configuration names, when it is not inside a product checkout, is
 /// named on the environment so the command still writes there. Staying
 /// in `here` is what lets a later stat wait.
-fn park(here: &Path) {
+fn park(here: &Path, move_process_cwd: bool) {
+    if !move_process_cwd {
+        return;
+    }
     // The environment did not name a tracker. The seat's configuration
     // did, and it is not this directory. Name it so the command still
     // writes there after leaving. A tracker inside a product checkout is
@@ -421,6 +428,12 @@ fn stop_group(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    fn settle_for(here: &Path) {
+        settle_at(here, &[], false);
+    }
+
+    static CWD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn a_project_flag_or_a_ticket_id_names_the_project() {
@@ -492,5 +505,63 @@ mod tests {
         assert!(slow_mount(info, "/assets/seat/files"));
         assert!(slow_mount(info, "/mnt/nfs/tracker"));
         assert!(!slow_mount(info, "/tmp"));
+    }
+
+    #[test]
+    fn a_gone_working_directory_is_ignored() {
+        let _guard = CWD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().unwrap();
+        let gone = root.path().join("gone");
+        std::fs::create_dir_all(&gone).unwrap();
+        std::fs::remove_dir_all(&gone).unwrap();
+        let started = std::time::Instant::now();
+        settle_for(&gone);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "settle waited on a gone working directory"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_working_directory_is_ignored() {
+        let _guard = CWD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().unwrap();
+        let unreadable = root.path().join("unreadable");
+        std::fs::create_dir_all(&unreadable).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if unsafe { libc::geteuid() } == 0 {
+                return;
+            }
+            struct Restore(std::path::PathBuf, std::fs::Permissions);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    let _ = std::fs::set_permissions(&self.0, self.1.clone());
+                }
+            }
+            let original = std::fs::metadata(&unreadable).unwrap().permissions();
+            let _restore = Restore(unreadable.clone(), original);
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let started = std::time::Instant::now();
+            settle_for(&unreadable);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(3),
+                "settle waited on an unreadable working directory"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let started = std::time::Instant::now();
+            settle_for(&unreadable);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(3),
+                "settle waited on an unreadable working directory"
+            );
+        }
     }
 }
