@@ -768,7 +768,8 @@ when it is longer, and then the asking stops.
 A call that stays silent until its budget runs out is not tried again.
 An interactive command prints `pack busy, try again` and exits 75.
 When search still has no meaning rank it uses word search and prints
-`Used word search because memory search was busy.`
+`The memory pack was busy, so these rows are word matches; run the search again for ranked results.`
+When no words match, the line is `The memory pack was busy and no words matched.` and the command exits 1.
 A writer that is not running names `packset ensure`.
 A tracker write does not spend that wait.
 A sitting prints that listing and its recall before the review sweep.

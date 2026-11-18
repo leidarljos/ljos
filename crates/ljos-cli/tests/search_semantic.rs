@@ -341,16 +341,21 @@ fn a_busy_writer_names_the_reason_and_the_next_command() {
     }
     let search = seat.run("ada", &["search", "kiln schedule"]);
     let said = text(&search);
-    assert!(search.status.success(), "{said}");
     let stderr = String::from_utf8_lossy(&search.stderr);
+    let stdout = String::from_utf8_lossy(&search.stdout);
     let first = stderr
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("");
-    assert_eq!(
-        first, "Used word search because memory search was busy.",
-        "first line: {first}\n{said}"
-    );
+    let rows = "The memory pack was busy, so these rows are word matches; run the search again for ranked results.";
+    let miss = "The memory pack was busy and no words matched.";
+    if stdout.trim().is_empty() {
+        assert_eq!(search.status.code(), Some(1), "{said}");
+        assert_eq!(first, miss, "first line: {first}\n{said}");
+    } else {
+        assert!(search.status.success(), "{said}");
+        assert_eq!(first, rows, "first line: {first}\n{said}");
+    }
     assert!(!said.contains("pack busy, try again"), "{said}");
     assert!(
         !said.contains("the pack search did not answer in time"),

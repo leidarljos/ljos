@@ -1482,8 +1482,12 @@ fn help_command(name: &str) -> String {
     }
 }
 
-fn busy_search_line(command: &str) -> String {
-    format!("The pack is busy, so run `{command}`.")
+fn busy_reading(shown: bool) -> String {
+    if shown {
+        ljos_cli::MEMORY_SEARCH_BUSY_LINE.to_string()
+    } else {
+        ljos_cli::MEMORY_SEARCH_BUSY_EMPTY_LINE.to_string()
+    }
 }
 
 /// The empty-store sentence, with the query in the remember command.
@@ -1914,7 +1918,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. Each row carries that score. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A single generic word is not that subject, and then the similarity has to be high. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. The pack is starting when health is not-ready, or the JSON says ready is false or code is starting. Words in the query are not that signal. If the pack stays starting, the tool ranks by words and the reading starts with: Used word search because memory is still starting. A dated search has no word fallback and returns: Memory is starting, so try again in a few seconds. A pack that reports busy is asked again for a short time. If it stays busy, the tool ranks by words and the reading is one line that names `ljos search` and the quoted query. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Pass min_score to drop a row under that score when it does not name a subject word; 0 returns every row, and the default is 34. Pass project to keep that project's tickets and lessons, and lessons that name no project. Follow with ljos_island for the cluster the task touches.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. Each row carries that score. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A single generic word is not that subject, and then the similarity has to be high. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. The pack is starting when health is not-ready, or the JSON says ready is false or code is starting. Words in the query are not that signal. If the pack stays starting, the tool ranks by words and the reading starts with: Used word search because memory is still starting. A dated search has no word fallback and returns: Memory is starting, so try again in a few seconds. A pack that reports busy is asked again for a short time. If it stays busy, the tool ranks by words and the reading is one line: The memory pack was busy, so these rows are word matches; run the search again for ranked results. When no words match, the reading is: The memory pack was busy and no words matched. That result is not an error. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Pass min_score to drop a row under that score when it does not name a subject word; 0 returns every row, and the default is 34. Pass project to keep that project's tickets and lessons, and lessons that name no project. Follow with ljos_island for the cluster the task touches.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -1955,6 +1959,7 @@ impl LjosServer {
         // busy falls back to words, and the reading is one line that names
         // this query. A pack that is still starting keeps its own line.
         let again = search_command(&args.query);
+        let mut busy_fallback = false;
         let (mut hits, fault) = if args
             .as_of
             .as_deref()
@@ -1964,7 +1969,8 @@ impl LjosServer {
                 Ok(hits) => (hits, None),
                 Err(err) if ljos_cli::is_memory_starting(&err) => return Err(refused(err)),
                 Err(err) if ljos_cli::is_reported_busy(&err) || search_can_wait(&err) => {
-                    (Vec::new(), Some(busy_search_line(&again)))
+                    busy_fallback = true;
+                    (Vec::new(), None)
                 }
                 Err(err) => return Err(refused(err)),
             }
@@ -1975,10 +1981,10 @@ impl LjosServer {
                     ljos_cli::search_by_words(&args.query, fetch),
                     Some(ljos_cli::MEMORY_STARTING_FALLBACK_LINE.to_string()),
                 ),
-                Err(err) if ljos_cli::is_reported_busy(&err) || search_can_wait(&err) => (
-                    ljos_cli::search_by_words(&args.query, fetch),
-                    Some(busy_search_line(&again)),
-                ),
+                Err(err) if ljos_cli::is_reported_busy(&err) || search_can_wait(&err) => {
+                    busy_fallback = true;
+                    (ljos_cli::search_by_words(&args.query, fetch), None)
+                }
                 Err(err) => return Err(refused(err)),
             }
         };
@@ -2013,8 +2019,10 @@ impl LjosServer {
         let id_refs: Vec<&str> = id_space.iter().map(String::as_str).collect();
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
-        let waiting = fault.is_some();
-        let mut reading = if let Some(line) = fault {
+        let waiting = fault.is_some() || busy_fallback;
+        let mut reading = if busy_fallback {
+            busy_reading(!hits.is_empty())
+        } else if let Some(line) = fault {
             line
         } else if emptied {
             ljos_cli::word_rank::no_relevant_line(&args.query)
@@ -2031,12 +2039,14 @@ impl LjosServer {
             )
             .to_string()
         };
-        if let Some(ranking) = ljos_cli::ranking_now() {
-            let line =
-                ljos_cli::search_rank_for_person(&ljos_cli::search_rank_line(&ranking, &hits));
-            let note = line.trim();
-            if note.contains("encoder not installed") && !reading.contains(note) {
-                reading = format!("{note}\n{reading}");
+        if !busy_fallback {
+            if let Some(ranking) = ljos_cli::ranking_now() {
+                let line =
+                    ljos_cli::search_rank_for_person(&ljos_cli::search_rank_line(&ranking, &hits));
+                let note = line.trim();
+                if note.contains("encoder not installed") && !reading.contains(note) {
+                    reading = format!("{note}\n{reading}");
+                }
             }
         }
         if !waiting {

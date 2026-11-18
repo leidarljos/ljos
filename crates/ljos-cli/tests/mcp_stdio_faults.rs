@@ -77,6 +77,27 @@ fn busy() -> String {
     pack(|_path| (503, r#"{"error":"busy","line":"busy, retrying"}"#))
 }
 
+/// Search answers busy. The atom list holds one lesson the query names.
+fn busy_lesson() -> String {
+    pack(|path| {
+        if path.starts_with("/v1/search") {
+            (503, r#"{"error":"busy","line":"busy, retrying"}"#)
+        } else if path.starts_with("/v1/atoms") {
+            (
+                200,
+                r#"{"atoms":[{"id":"kiln1","kind":"lesson","text":"Seat the kiln door only when cold.","entities":["seat:ada"]}]}"#,
+            )
+        } else if path.starts_with("/v1/status") {
+            (
+                200,
+                r#"{"embedder":{"available":true,"answering":true,"enabled":true}}"#,
+            )
+        } else {
+            (200, r#"{"ready":true,"atoms":[]}"#)
+        }
+    })
+}
+
 struct Session {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
@@ -345,11 +366,13 @@ fn a_busy_pack_names_the_search_to_run_again() {
         "ljos_search",
         serde_json::json!({"query": "kiln door"}),
     );
+    assert_ne!(search["result"]["isError"], true, "{search}");
     let reading = search["result"]["structuredContent"]["reading"]
         .as_str()
         .unwrap_or("");
-    assert!(
-        reading.contains("The pack is busy") && reading.contains("ljos search \"kiln door\""),
+    assert_eq!(
+        reading,
+        ljos_cli::MEMORY_SEARCH_BUSY_EMPTY_LINE,
         "{reading}"
     );
     let quoted = call(
@@ -358,14 +381,12 @@ fn a_busy_pack_names_the_search_to_run_again() {
         "ljos_search",
         serde_json::json!({"query": "\""}),
     );
+    assert_ne!(quoted["result"]["isError"], true, "{quoted}");
     let quoted = quoted["result"]["structuredContent"]["reading"]
         .as_str()
         .unwrap_or("")
         .to_string();
-    assert!(
-        quoted.contains("ljos search kiln") && !quoted.contains("QUERY"),
-        "{quoted}"
-    );
+    assert_eq!(quoted, ljos_cli::MEMORY_SEARCH_BUSY_EMPTY_LINE, "{quoted}");
     assert!(session.alive());
     let remember = call(
         &mut session,
@@ -380,6 +401,34 @@ fn a_busy_pack_names_the_search_to_run_again() {
         "{line}"
     );
     assert!(!line.contains('\n'), "{line}");
+    assert!(session.alive());
+}
+
+#[test]
+fn a_busy_pack_with_a_word_match_is_one_result_line() {
+    let url = busy_lesson();
+    let mut session = Session::open(&[("PACKSET_URL", &url), ("LJOS_SEARCH_BUSY_WAIT", "0")]);
+    let search = call(
+        &mut session,
+        2,
+        "ljos_search",
+        serde_json::json!({"query": "kiln door", "seat": "ada"}),
+    );
+    assert_ne!(search["result"]["isError"], true, "{search}");
+    let reading = search["result"]["structuredContent"]["reading"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(reading, ljos_cli::MEMORY_SEARCH_BUSY_LINE, "{search}");
+    let body = search.to_string();
+    assert!(
+        body.contains("Seat the kiln door only when cold."),
+        "{search}"
+    );
+    assert!(!body.contains("pack busy, try again"), "{search}");
+    assert!(
+        !body.contains(ljos_cli::MEMORY_SEARCH_BUSY_EMPTY_LINE),
+        "{search}"
+    );
     assert!(session.alive());
 }
 

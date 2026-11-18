@@ -15037,7 +15037,11 @@ fn lexical_reason(ranking: &Ranking, shown: bool) -> String {
         return writer_busy_search_line(shown);
     }
     if ranking.reason == MEMORY_SEARCH_BUSY_REASON {
-        return MEMORY_SEARCH_BUSY_LINE.to_string();
+        return if shown {
+            MEMORY_SEARCH_BUSY_LINE.to_string()
+        } else {
+            MEMORY_SEARCH_BUSY_EMPTY_LINE.to_string()
+        };
     }
     if ranking.reason == MEMORY_STARTING_REASON {
         return MEMORY_STARTING_FALLBACK_LINE.to_string();
@@ -15055,8 +15059,25 @@ pub const WRITER_BUSY_REASON: &str = "writer is busy";
 /// ran out. The line is [`MEMORY_SEARCH_BUSY_LINE`].
 pub const MEMORY_SEARCH_BUSY_REASON: &str = "memory search was busy";
 
-/// The one line when search used words because the writer stayed busy.
-pub const MEMORY_SEARCH_BUSY_LINE: &str = "Used word search because memory search was busy.";
+/// The one line when search used words because the writer stayed busy
+/// and those words matched.
+pub const MEMORY_SEARCH_BUSY_LINE: &str = "The memory pack was busy, so these rows are word matches; run the search again for ranked results.";
+
+/// The one line when that word fallback matched nothing.
+pub const MEMORY_SEARCH_BUSY_EMPTY_LINE: &str = "The memory pack was busy and no words matched.";
+
+/// The stderr line for a busy word fallback. `shown` is whether rows follow.
+#[must_use]
+pub fn search_busy_line(shown: bool) -> String {
+    format!(
+        "{}\n",
+        if shown {
+            MEMORY_SEARCH_BUSY_LINE
+        } else {
+            MEMORY_SEARCH_BUSY_EMPTY_LINE
+        }
+    )
+}
 
 /// The ranking reason when the pack has not opened and the warm-up budget
 /// ran out. The line is [`MEMORY_STARTING_FALLBACK_LINE`].
@@ -16162,7 +16183,14 @@ fn ranking_doc(ranking: Option<&Ranking>, mut doc: Value) -> String {
             .get("hits")
             .and_then(Value::as_array)
             .is_some_and(|rows| !rows.is_empty());
-        doc["reason"] = Value::String(lexical_reason(ranking, shown));
+        // A busy word fallback already has `ranking`. The reason stays the
+        // short token. The sentence a person reads is not a JSON field.
+        let reason = if ranking.reason == MEMORY_SEARCH_BUSY_REASON {
+            MEMORY_SEARCH_BUSY_REASON.to_string()
+        } else {
+            lexical_reason(ranking, shown)
+        };
+        doc["reason"] = Value::String(reason);
     }
     let waited = search_waited_ms();
     if waited > 0 {
@@ -81562,11 +81590,18 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         };
         assert_eq!(
             ranking_line(&memory_busy),
-            "Used word search because memory search was busy.\n"
+            "The memory pack was busy and no words matched.\n"
         );
         assert_eq!(
             search_rank_line(&memory_busy, &[]),
-            "Used word search because memory search was busy.\n"
+            "The memory pack was busy and no words matched.\n"
+        );
+        assert_eq!(
+            search_rank_line(
+                &memory_busy,
+                &[hit("oak", "Oak Tree on Nov 23 is the morning plan.", 0.2)]
+            ),
+            "The memory pack was busy, so these rows are word matches; run the search again for ranked results.\n"
         );
         let busy = Ranking {
             mode: "lexical",

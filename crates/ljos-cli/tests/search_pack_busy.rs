@@ -18,7 +18,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const HIT: &str = "d-SEAMS keeps the migrate video beside the cut.";
-const BUSY: &str = "Used word search because memory search was busy.";
+const BUSY: &str = "The memory pack was busy, so these rows are word matches; run the search again for ranked results.";
+const BUSY_MISS: &str = "The memory pack was busy and no words matched.";
 const WORD_QUERY: &str = "GPRidge video narration";
 const BUSY_BODY: &str =
     r#"{"error":"packsetd is busy: every worker is answering and the queue is full; try again"}"#;
@@ -183,22 +184,21 @@ fn a_writer_that_stays_busy_uses_one_word_line() {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let text = format!("{stdout}{stderr}");
-    assert!(out.status.success(), "{text}");
+    assert_eq!(out.status.code(), Some(1), "{text}");
     let lines: Vec<&str> = stderr
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect();
-    assert_eq!(lines, [BUSY], "{text}");
+    assert_eq!(lines, [BUSY_MISS], "{text}");
+    assert!(stdout.trim().is_empty(), "{text}");
     assert!(!text.contains("pack busy, try again"), "{text}");
     assert!(
         !text.contains("the pack search did not answer in time"),
         "{text}"
     );
     assert!(!text.contains("The memory writer is busy"), "{text}");
-    assert!(
-        stdout.contains("No close matches"),
-        "the word page was not printed:\n{text}"
-    );
+    assert!(!text.contains("No close matches"), "{text}");
+    assert!(!text.contains(BUSY), "{text}");
     assert!(searches.load(Ordering::SeqCst) > 2, "{text}");
     assert!(
         took < Duration::from_secs(4),
@@ -207,7 +207,7 @@ fn a_writer_that_stays_busy_uses_one_word_line() {
     let (json, json_took) = search(&url, &home, &["search", "--json", WORD_QUERY]);
     let json_err = String::from_utf8_lossy(&json.stderr);
     let json_out = String::from_utf8_lossy(&json.stdout);
-    assert!(json.status.success(), "{json_out}{json_err}");
+    assert_eq!(json.status.code(), Some(1), "{json_out}{json_err}");
     assert!(
         json_err.trim().is_empty(),
         "json search printed a second line: {json_err}"
@@ -215,7 +215,13 @@ fn a_writer_that_stays_busy_uses_one_word_line() {
     let doc: serde_json::Value = serde_json::from_str(json_out.trim())
         .unwrap_or_else(|err| panic!("search json ({err}): {json_out}"));
     assert_eq!(doc["ranking"], "lexical", "{doc}");
-    assert_eq!(doc["reason"], BUSY, "{doc}");
+    assert_eq!(doc["reason"], "memory search was busy", "{doc}");
+    assert!(doc.get("reading").is_none(), "{doc}");
+    assert!(
+        !json_out.contains(BUSY) && !json_out.contains(BUSY_MISS),
+        "{doc}"
+    );
+    assert!(!json_out.contains("pack busy, try again"), "{doc}");
     assert!(
         json_took < Duration::from_secs(4),
         "json search waited {json_took:?}"
@@ -470,21 +476,144 @@ fn a_pack_that_accepts_and_stays_silent_uses_one_word_line() {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let text = format!("{stdout}{stderr}");
-    assert!(out.status.success(), "{text}");
+    assert_eq!(out.status.code(), Some(1), "{text}");
     let lines: Vec<&str> = stderr
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect();
-    assert_eq!(lines, [BUSY], "{text}");
+    assert_eq!(lines, [BUSY_MISS], "{text}");
+    assert!(stdout.trim().is_empty(), "{text}");
     assert!(!text.contains("pack busy, try again"), "{text}");
     assert!(
         !text.contains("the pack search did not answer in time"),
         "{text}"
     );
     assert!(!text.contains("The memory writer is busy"), "{text}");
+    assert!(!text.contains(BUSY), "{text}");
     // LJOS_SEARCH_BUSY_WAIT (2s) plus one short request (3s).
     assert!(
         took < Duration::from_secs(5),
         "a silent pack waited {took:?}, past the busy bound plus one request\n{text}"
     );
+}
+
+const LESSON: &str = "Seat the kiln door only when cold.";
+
+/// Search stays busy. The atom list holds one lesson the query names.
+fn serve_lesson() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            thread::spawn(move || {
+                let Ok(mut sock) = stream else { return };
+                let head = read_head(&mut sock);
+                let path = head
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("/")
+                    .split('?')
+                    .next()
+                    .unwrap_or("/");
+                if path == "/v1/search" {
+                    write_http(&mut sock, 503, BUSY_BODY, false);
+                } else if path == "/v1/status" {
+                    write_http(
+                        &mut sock,
+                        200,
+                        r#"{"embedder":{"available":true,"answering":true,"enabled":true}}"#,
+                        false,
+                    );
+                } else if path == "/v1/atoms" {
+                    write_http(
+                        &mut sock,
+                        200,
+                        r#"{"atoms":[{"id":"kiln1","kind":"lesson","text":"Seat the kiln door only when cold.","entities":["seat:ada"]}]}"#,
+                        false,
+                    );
+                } else {
+                    write_http(&mut sock, 200, "ok", false);
+                }
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+fn search_fast(url: &str, home: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env("LJOS_SEAT", "ada")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("PACKSET_AUTH", "off")
+        .env("PACKSET_URL", url)
+        .env("PACKSET_WORKSPACE", "seat")
+        .env("LJOS_SEARCH_BUSY_WAIT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap()
+}
+
+/// A busy pack with a word match prints one header, then the count and the row.
+/// JSON keeps `ranking` and the short reason, with no prose.
+#[test]
+fn a_busy_pack_with_a_word_match_prints_one_line() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    std::fs::create_dir_all(home.join(".local/state")).unwrap();
+    std::fs::create_dir_all(home.join("run")).unwrap();
+    let url = serve_lesson();
+    let out = search_fast(&url, &home, &["search", "kiln door"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let text = format!("{stdout}{stderr}");
+    assert!(out.status.success(), "{text}");
+    assert_eq!(stderr, format!("{BUSY}\n"), "{text}");
+    assert_eq!(
+        stdout,
+        "shown 1 of 1.\nThe first row is the closest match.\n\nlesson, from an agent\n  Seat the kiln door only when cold.\n  place 1, id kiln1\n",
+        "{text}"
+    );
+    assert!(!text.contains("pack busy, try again"), "{text}");
+    assert!(!text.contains(BUSY_MISS), "{text}");
+    assert!(stdout.contains(LESSON), "{text}");
+
+    let json = search_fast(&url, &home, &["search", "--json", "kiln door"]);
+    let json_err = String::from_utf8_lossy(&json.stderr);
+    let json_out = String::from_utf8_lossy(&json.stdout);
+    assert!(json.status.success(), "{json_out}{json_err}");
+    assert!(json_err.trim().is_empty(), "{json_err}");
+    let doc: serde_json::Value = serde_json::from_str(json_out.trim())
+        .unwrap_or_else(|err| panic!("search json ({err}): {json_out}"));
+    assert_eq!(doc["ranking"], "lexical", "{doc}");
+    assert_eq!(doc["reason"], "memory search was busy", "{doc}");
+    assert!(doc.get("reading").is_none(), "{doc}");
+    assert_eq!(doc["hits"][0]["text"], LESSON, "{doc}");
+    assert_eq!(doc["hits"][0]["id"], "kiln1", "{doc}");
+    assert!(
+        !json_out.contains(BUSY) && !json_out.contains(BUSY_MISS),
+        "{doc}"
+    );
+    assert!(!json_out.contains("pack busy, try again"), "{doc}");
+
+    let quiet = search_fast(&url, &home, &["search", "--porcelain", "kiln door"]);
+    let quiet_out = String::from_utf8_lossy(&quiet.stdout).into_owned();
+    let quiet_err = String::from_utf8_lossy(&quiet.stderr).into_owned();
+    assert!(quiet.status.success(), "{quiet_out}{quiet_err}");
+    assert!(quiet_err.is_empty(), "{quiet_err}");
+    assert_eq!(
+        quiet_out, "kiln1\tlesson\tSeat the kiln door only when cold.\n",
+        "{quiet_out}"
+    );
+    assert!(!quiet_out.contains(BUSY), "{quiet_out}");
 }
