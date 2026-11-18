@@ -57,6 +57,8 @@ Every tool that takes an issue says the id is the tracker id =ljos_ready= prints
 
 =ljos_ready= prints the same first page as =ljos ready=. The default is 20 tickets. =limit= changes that count and =all= prints every ticket. The last line of a short page names =--limit= and =--all=. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. The id breaks the final tie.
 
+=ljos_policy= prints an argument list as it would run, with the ruling a rule gives it, and runs nothing. It is not a check. =ljos_guard_check= takes a shell line and is the one to call before running a command. =ljos_conflicts= lists pairs of memories that may contradict each other and writes nothing. =ljos_graded= takes =recalled=, which is true by default and pushes the next review out; false brings it back sooner.
+
 =ljos_doctor= returns one row for each habitat with =name=, =state=, =ok= and =optional=. A row with =optional= true is an extra the seat runs without, such as =packset-embed=, =ljos-hud=, the cloud guard, the runners or the git hooks, so =ok= false there is not a failure. It is the row =ljos doctor= prints as =info=. A row with =optional= false and =ok= false needs a step. The install command a row names does not depend on the directory =ljos mcp= started in.
 
 =ljos_recall= adds a Code context section when =graphify-out/graph.json= is in the working directory's repository.

@@ -1958,7 +1958,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when reviewing the seat's memory for contradictions the words do not show: the lowest passes between single memories in the pack's embedding landscape, read by the optional `landscape` habitat. On a record of planted contradictions the lowest passes were the contradictions nine times in ten. Nothing is written; judge each pair, then ljos_forget the one that turned out wrong or ljos_remember the rewrite. Absent the habitat, the tool says so.",
+        description = "Call this when reviewing the seat's memory for contradictions the words do not show: it lists pairs of memories that may contradict each other, read by the optional `landscape` habitat. Nothing is written. Judge each pair, then ljos_forget the one that turned out wrong or ljos_remember the rewrite. Without the habitat, the tool says so.",
         annotations(
             title = "Contradiction candidates",
             read_only_hint = true,
@@ -1974,7 +1974,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this after a run of lessons on one matter, or after importing a handover: consolidate the seat's memory. Every claim that rewrites an earlier one of the same kind (same opening words, a new object; a correction; an explicit supersedes) closes the earlier one's validity window and names it, the rule a write applies on arrival run over what is already held. With apply false (the default) it reports the pairs and writes nothing; read them, then call again with apply true.",
+        description = "Call this after a run of lessons on one matter, or after importing a handover: consolidate the seat's memory. A claim that rewrites an earlier one of the same kind (same opening words with a new object, a correction, or an explicit supersedes) closes the earlier one's validity window and names it, the same rule a write applies on arrival. With apply false (the default) it reports the pairs and writes nothing; read them, then call again with apply true.",
         annotations(
             title = "Consolidate",
             read_only_hint = false,
@@ -2934,7 +2934,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Argv law: print the line as it would run. This is not a check, and reloading a pack is not one either; ljos-policyd is the trusted base when it is on PATH or POLICYD_BIN.",
+        description = "Call this to print a command given as an argument list, one element per argument, as it would run, with the ruling a rule gives it (empty when none applies). It runs nothing and is not a check. ljos_guard_check takes a shell line and is the tool to call before running a command.",
         annotations(
             title = "Print an argv",
             read_only_hint = true,
@@ -3466,7 +3466,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to see the playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight, feature. Kind playbook, weighed not recalled. Pack latest per name, shipped seed only when the pack has no live atom. Model names on a recipe are optional spawn hints; every panel still ends in ljos_vote --as then ljos_consensus.",
+        description = "Call this to see the playbooks in the pack: the closed set sit, arena, land, company-panel, overnight, feature. The pack's latest version of each is listed, and the shipped seed only when the pack has none. Model names on a recipe are optional spawn hints. Every panel still ends in ljos_vote with as set to the persona, then ljos_consensus.",
         annotations(title = "Playbooks", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_playbooks(&self) -> Result<Json<Rows<PlaybookRow>>, McpError> {
@@ -3484,7 +3484,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of a sitting, after the cards: the soonest eight claims whose review is due, plus how many are due in all. Read each shown row, then ljos_graded it recalled or lapsed. The sweep is `ljos due`; `ljos due --all` lists every due claim to read and puts none up for grading. The review clock moves only when you grade.",
+        description = "Call this at the start of a sitting, after the cards: the soonest eight claims whose review is due, plus how many are due in all. Read each shown row, then call ljos_graded with recalled true or false. The sweep is `ljos due`; `ljos due --all` lists every due claim to read and puts none up for grading. The review clock moves only when you grade.",
         annotations(title = "Due", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_due(&self) -> Result<Json<DuePage>, McpError> {
@@ -3506,7 +3506,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this for a claim ljos_due showed in the last hour, once you have checked it against the work; any other id is refused, and a backlog is left due rather than graded unread: recalled (default) pushes the next review out, lapsed brings it back sooner. Returns the atom with its new due_at.",
+        description = "Call this to grade a claim ljos_due showed in the last hour, once you have checked it against the work; any other id is refused. recalled (the default) pushes the next review out, and recalled false brings it back sooner. Returns the atom with its new due_at.",
         annotations(
             title = "Graded",
             read_only_hint = false,

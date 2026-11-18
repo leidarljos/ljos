@@ -460,3 +460,40 @@ fn an_issue_argument_says_where_the_id_comes_from_and_a_vote_names_no_flag() {
         "Option to vote for, one the issue's `Options:` line names, such as `accept` or `reject`. `ljos_options` writes that line. Absent, the tool shows the tally."
     );
 }
+
+#[test]
+fn the_less_used_tools_say_what_they_do_in_plain_words() {
+    let mut session = Session::open(&[("LJOS_MCP_TOOLS", "all")]);
+    let tools = listed_tools(&mut session);
+    let said = |name: &str| description_of(&tools, name);
+    let conflicts = said("ljos_conflicts");
+    assert!(
+        conflicts.contains("it lists pairs of memories that may contradict each other"),
+        "{conflicts}"
+    );
+    assert!(!conflicts.contains("nine times in ten"), "{conflicts}");
+    assert!(!said("ljos_consolidate").contains("run over what is already"));
+    let graded = said("ljos_graded");
+    assert!(
+        graded.contains("recalled (the default) pushes the next review out, and recalled false brings it back sooner."),
+        "{graded}"
+    );
+    let playbooks = said("ljos_playbooks");
+    assert!(!playbooks.contains("ljos_vote --as"), "{playbooks}");
+    assert!(
+        playbooks.contains("ljos_vote with as set to the persona"),
+        "{playbooks}"
+    );
+    assert!(said("ljos_due").contains("call ljos_graded with recalled true or false"));
+    let policy = said("ljos_policy");
+    assert!(
+        policy.starts_with("Call this to print a command given as an argument list"),
+        "{policy}"
+    );
+    assert!(
+        policy.contains(
+            "ljos_guard_check takes a shell line and is the tool to call before running a command."
+        ),
+        "{policy}"
+    );
+}
