@@ -575,7 +575,7 @@ enum HookFastCmd {
 /// The flags `ljos ready` and `ljos list` take.
 #[derive(Args, Debug)]
 struct ReadyArgs {
-    /// Only this project.
+    /// Limit the list to tickets in one project.
     #[arg(short = 'p', long)]
     project: Option<String>,
     /// Print `shown`, `total` and `rows`. The same page and order as the text.

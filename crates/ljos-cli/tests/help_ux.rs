@@ -95,3 +95,18 @@ fn json_flags_name_the_rows_they_print() {
         );
     }
 }
+
+#[test]
+fn ready_and_list_project_flag_names_tickets() {
+    let line = "Limit the list to tickets in one project.";
+    for args in [
+        &["ready", "--help"][..],
+        &["ready", "-h"][..],
+        &["list", "--help"][..],
+        &["list", "-h"][..],
+        &["ls", "--help"][..],
+    ] {
+        let page = help(args);
+        assert!(page.contains(line), "{args:?}\n{page}");
+    }
+}
