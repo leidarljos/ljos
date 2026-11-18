@@ -14810,8 +14810,17 @@ const ENCODER_WARM_EVERY: std::time::Duration = std::time::Duration::from_secs(1
 #[must_use]
 pub fn encoder_cold(status: &Value) -> bool {
     let embedder = &status["embedder"];
-    embedder["available"].as_bool().unwrap_or(false)
+    !encoder_binary_missing(status)
+        && embedder["available"].as_bool().unwrap_or(false)
         && embedder.get("answering").is_some_and(Value::is_null)
+}
+
+/// Whether status explicitly says there is no encoder program to start.
+///
+/// `available` can be stale while a writer is starting. An explicit null
+/// binary is definitive: there is no load in progress.
+fn encoder_binary_missing(status: &Value) -> bool {
+    status["embedder"].get("binary").is_some_and(Value::is_null)
 }
 
 /// Whether a warm-up may start: no marker, or one older than
@@ -16235,7 +16244,7 @@ pub fn encoder_lexical(status: &Value) -> bool {
     }
     let embedder = &status["embedder"];
     embedder.is_object()
-        && embedder["available"].as_bool() == Some(false)
+        && (encoder_binary_missing(status) || embedder["available"].as_bool() == Some(false))
         && embedder.get("answering").is_none_or(Value::is_null)
 }
 

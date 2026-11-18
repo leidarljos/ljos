@@ -171,11 +171,11 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
         ),
         (
             "loading with remaining_ms",
-            r#"{"available":true,"answering":null,"enabled":true,"remaining_ms":120000}"#,
+            r#"{"binary":"/usr/bin/packset-embed","available":true,"answering":null,"enabled":true,"remaining_ms":120000}"#,
         ),
         (
             "loading without remaining_ms",
-            r#"{"available":true,"answering":null,"enabled":true}"#,
+            r#"{"binary":"/usr/bin/packset-embed","available":true,"answering":null,"enabled":true}"#,
         ),
         (
             "failed",
@@ -184,6 +184,10 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
         (
             "not installed",
             r#"{"available":false,"answering":null,"enabled":true}"#,
+        ),
+        (
+            "not installed with stale availability",
+            r#"{"binary":null,"available":true,"answering":null,"enabled":true}"#,
         ),
     ];
     for (name, embedder) in cases {
@@ -203,7 +207,7 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
                     "failed: the runtime is missing. Search matches words, so run `{restart}`."
                 ),
             )),
-            "not installed" => Some((
+            "not installed" | "not installed with stale availability" => Some((
                 "info",
                 format!("not installed. Search matches words, so run `{doctor_install}`."),
             )),
@@ -217,7 +221,7 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
             "failed" => format!(
                 "The encoder failed (the runtime is missing), so these rows match words; run `{restart}`."
             ),
-            "not installed" => {
+            "not installed" | "not installed with stale availability" => {
                 format!("matched by words (encoder not installed), so run `{install}`.")
             }
             _ => unreachable!(),

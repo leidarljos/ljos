@@ -105,6 +105,7 @@ On a clean install the ready line names memory, the tracker and the command guar
 Run ``ljos doctor`` from your home directory. In a checkout that has ``.ljos/gates.toml``, the config row names that file.
 With no seat named, a ``seat source`` row warns that the read uses every seat.
 When the encoder is not installed, an ``encoder`` row follows and names the install command this machine can run. That is ``cargo binstall --locked packset-embed`` when cargo-binstall is installed, ``cargo install --locked packset-embed`` when cargo is, and the release install line otherwise. The sample shows the cargo line.
+A writer with no encoder binary is not described as loading, even if an earlier availability value is still present.
 The ``sitting-gate`` row follows that. With no agent runner above the shell the word is ``info``, and the person's commits, merges and pushes are not held.
 Under a runner the same row names the seat and the branches a push waits on, ``develop`` or ``main``, and the number of seats that push waits for.
 A fresh tracker has no seat list, so that number is 2. When ``vissue.toml`` lists one active seat, that seat's own vote settles the push.
