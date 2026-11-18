@@ -49,7 +49,7 @@ An unknown method, or a line that is not JSON, names ``ljos mcp --help``.
 Setting ``LJOS_SEAT`` applies to reads only; a write on a shared ljos mcp server with no ``seat`` argument and no stamped session is refused and names ``ljos seat``.
 ``ljos_vote`` takes any option from the issue's ``--options`` in ``choice``, such as ``keep``, ``drop``, ``accept``, or ``reject``.
 
-``ljos_claim`` takes ``takeover`` set to true to take a ticket over from another seat whose claim looks stale, the step ``ljos claim ID --takeover`` takes. A holder that is running, or whose claim moved inside the lease, is refused with the ``claim-conflict`` label and nothing changes. The old holder is named in a note on the ticket.
+``ljos_claim`` takes ``takeover`` set to true to take a ticket over from another seat whose claim looks stale, the step ``ljos claim ID --takeover`` takes. A holder that is running, or whose claim moved inside the lease, is refused with the ``claim-conflict`` label and nothing changes. The old holder is named in a note on the ticket. ``ljos_start`` and ``ljos_sitting`` already claim, and the server claims on the first write, so call ``ljos_claim`` only to name the issue yourself. A named worker occupies one slot, and a ``busy`` refusal names the held node. ``ljos_complete`` or ``ljos_release`` frees it. ``ljos_deed`` is the same: a git commit is cited as a deed for you, so call it for the other deeds.
 
 ``ljos_show`` prints the full ticket page ``ljos show`` prints: the header with the wrapped title, the claim if any, parent and children, blockers, the full body, and the latest notes.
 

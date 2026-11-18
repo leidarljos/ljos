@@ -2257,7 +2257,7 @@ impl LjosServer {
     // ---- the tracker ---------------------------------------------------------
 
     #[tool(
-        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this after the work produced something and the deed store minted it (deedar create): cite the accession on the issue. Omit the accession to list what the issue cites. A citation names the accession; the bytes stay in deedar.",
+        description = "Call this after the work produced something and the deed store minted it (deedar create): cite the accession on the issue. A git commit is cited as a deed for you, so call this for the other deeds. Omit add to list what the issue cites. A citation names the accession; the bytes stay in deedar.",
         annotations(
             title = "Cite a deed",
             read_only_hint = false,
@@ -2283,7 +2283,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this when the work turns up something to do that is not this issue: it files a child of the issue you hold (or of `parent`, or none with `top`), in that issue's project, and commits the tracker. A `project` other than the held issue's files at its top level, which is how a bug in a tool goes to the tool's project mid-sitting. Returns the new id, which a later child may name as its parent at once.",
+        description = "Call this when the work turns up something to do that is not this issue: it files a child of the issue you hold (or of `parent`, or none with `top`), in that issue's project, and commits the tracker. A `project` other than the held issue's files at its top level, which is how a bug in a tool goes to the tool's project mid-sitting. Returns the new id, which a later child may name as its parent at once.",
         annotations(
             title = "File work",
             read_only_hint = false,
@@ -2716,7 +2716,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this before starting work on an issue, after ljos_recall: it takes the session node for that tracker id under your name. A named worker occupies one slot (busy names the held node and ljos_complete / ljos_release). A harness seat occupies per issue. Pass takeover true to take a ticket over from another seat whose claim looks stale. Completing a node later does not close the ticket.",
+        description = "Call this to take the session node for an issue under your name, after ljos_recall. ljos_start and ljos_sitting already claim, and the server claims on the first write, so call this only to name the issue yourself. A named worker occupies one slot: a busy refusal names the held node, and ljos_complete or ljos_release frees it. Pass takeover true to take a ticket over from another seat whose claim looks stale. Completing a node later does not close the ticket.",
         annotations(
             title = "Claim a node",
             read_only_hint = false,
@@ -3773,8 +3773,8 @@ impl LjosServer {
                 The sitting then prints `== reclaim`, before `== claim`: claims\n\
                 quiet longer than the lease go back to ready when their\n\
                 conversation is gone.\n\
-             8. `ljos_claim` a session node for it. A harness seat occupies per\n\
-                issue; a named worker occupies one slot.\n\
+             8. `ljos_claim` a session node for it. A named worker occupies one\n\
+                slot, and busy means it still has another node.\n\
              \n\
              When something is learned that will still be true next sitting, say it\n\
              with `ljos_remember` in two short sentences. When the work shows a\n\

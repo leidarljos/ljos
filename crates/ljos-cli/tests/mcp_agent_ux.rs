@@ -301,3 +301,46 @@ fn the_longest_descriptions_say_what_to_pass_and_what_to_do_on_failure() {
     );
     assert!(consensus.contains("Pass compare"), "{consensus}");
 }
+
+#[test]
+fn claim_file_and_deed_each_describe_their_own_call() {
+    let mut session = Session::open(&[("LJOS_MCP_TOOLS", "all")]);
+    let tools = listed_tools(&mut session);
+    for name in ["ljos_file", "ljos_claim", "ljos_deed"] {
+        let said = description_of(&tools, name);
+        assert!(said.starts_with("Call this "), "{name}: {said}");
+        assert!(!said.contains("The seat already claims"), "{name}: {said}");
+        assert!(!said.contains("occupies per issue"), "{name}: {said}");
+    }
+    let claim = description_of(&tools, "ljos_claim");
+    assert!(
+        claim.contains("ljos_start and ljos_sitting already claim"),
+        "{claim}"
+    );
+    assert!(
+        claim.contains(
+            "a busy refusal names the held node, and ljos_complete or ljos_release frees it"
+        ),
+        "{claim}"
+    );
+    let deed = description_of(&tools, "ljos_deed");
+    assert!(
+        deed.contains("A git commit is cited as a deed for you"),
+        "{deed}"
+    );
+
+    let prompt = session.request(
+        "prompts/get",
+        serde_json::json!({"name": "start_a_sitting", "arguments": {}}),
+    );
+    let text = prompt["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(!text.contains("occupies per issue"), "{text}");
+    assert!(
+        text.contains(
+            "A named worker occupies one\nslot, and busy means it still has another node."
+        ),
+        "{text}"
+    );
+}
