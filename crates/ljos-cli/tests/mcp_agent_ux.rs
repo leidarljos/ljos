@@ -594,3 +594,32 @@ fn a_labelled_result_does_not_say_to_carry_on() {
         assert!(!next.contains("sitting is closed"), "{next}");
     }
 }
+
+#[test]
+fn filing_with_no_project_says_which_argument_to_pass() {
+    let tracker = tempfile::tempdir().unwrap();
+    std::fs::write(tracker.path().join("vissue.toml"), "seats = [\"ada\"]\n").unwrap();
+    let root = tracker.path().to_str().unwrap().to_string();
+    let ljos = std::path::Path::new(env!("CARGO_BIN_EXE_ljos"))
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let path = format!("{ljos}:/usr/bin:/bin");
+    let mut session = Session::open(&[
+        ("VISSUE_ROOT", &root),
+        ("VISSUE_NO_ROUTE", "1"),
+        ("PATH", &path),
+    ]);
+    let said = blocks(&session.call(
+        "ljos_file",
+        serde_json::json!({"title": "a task", "seat": "ada"}),
+    ));
+    assert_eq!(
+        said[0],
+        "ljos_file: no project to file in, so pass `project`, or `parent` to file under that issue",
+        "{said:?}"
+    );
+    assert!(!said[0].contains("-p NAME"), "{said:?}");
+}
