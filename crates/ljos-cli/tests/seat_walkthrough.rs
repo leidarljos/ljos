@@ -343,3 +343,28 @@ fn a_new_seat_walks_from_search_to_finish_without_close() {
 
     no_leftovers(walk.root.path());
 }
+
+/// Without `ljos onboard` nothing has made the deed store. The refusal says
+/// which store it is and the command that makes it, and nothing is claimed.
+#[test]
+fn a_sitting_before_the_deed_store_exists_names_the_command_that_makes_it() {
+    if !tools_ready() {
+        return;
+    }
+    let pack = ljos_test_boot::Packsetd::open();
+    let mut walk = Walk::open(pack.url(), false);
+    let filed = walk.ok(&["file", "Seat the kiln door", "-p", "demo"]);
+    let id = filed.stdout.trim().to_string();
+
+    let refused = walk.run(&["sitting", &id]);
+    assert_eq!(refused.code, 1, "{}", walk.log);
+    walk.expect(
+        &refused.stderr,
+        "sitting: deed store does not answer; nothing was claimed, so run `ljos onboard`.",
+        "a sitting with no deed store",
+    );
+    assert!(refused.stdout.is_empty(), "{}", walk.log);
+
+    let shown = walk.ok(&["show", &id]);
+    walk.expect(&shown.stdout, &format!("{id}  TODO"), "nothing was claimed");
+}

@@ -45349,7 +45349,7 @@ pub fn sitting_stream_started(
     }
     let mut out = String::new();
     let _claim_mark = ClaimGraphMark;
-    let (down, claim_missed) = sitting_hard_down();
+    let (down, claim_missed, next) = sitting_hard_down();
     let mut deferred =
         match sitting_budget_left("the deed, tracker and claim-graph checks", budget.total) {
             Ok(()) => None,
@@ -45357,7 +45357,7 @@ pub fn sitting_stream_started(
         };
     if !down.is_empty() {
         bail!(
-            "sitting: {} does not answer; nothing was claimed",
+            "sitting: {} does not answer; nothing was claimed, so run `{next}`.",
             down.join(", ")
         );
     }
@@ -45851,7 +45851,7 @@ fn stamp_tracker_quick(node: &str, assignee: &str) -> Result<()> {
 /// graph is asked for about two seconds; if it does not answer, the
 /// sitting still stamps the tracker. None of the three is a pack read.
 /// A `warn` tracker row answered: unpushed commits do not refuse the claim.
-fn sitting_hard_down() -> (Vec<String>, bool) {
+fn sitting_hard_down() -> (Vec<String>, bool, &'static str) {
     let mut rows = Vec::new();
     for (name, bin, args) in [
         ("deed store", "deedar", &["log", "head"][..]),
@@ -45899,7 +45899,20 @@ fn sitting_hard_down() -> (Vec<String>, bool) {
         .filter(|name| *name != "claim graph")
         .map(str::to_string)
         .collect();
-    (down, claim_missed)
+    (down, claim_missed, sitting_next_command(&rows))
+}
+
+/// The command a refused sitting names. A deed store nobody has made yet is
+/// what `ljos onboard` creates. Any other refusal is one `ljos doctor` names.
+fn sitting_next_command(rows: &[Habitat]) -> &'static str {
+    let unmade = rows
+        .iter()
+        .any(|row| row.name == "deed store" && !row.ok && row.state.contains("no store at"));
+    if unmade && std::env::var_os("DEEDAR_URL").is_none_or(|url| url.is_empty()) {
+        "ljos onboard"
+    } else {
+        "ljos doctor"
+    }
 }
 
 /// Which recipe a sitting binds before it claims. The pack is not asked:
@@ -68105,6 +68118,44 @@ mod tests {
                 1,
                 "row moved or dropped: {line}\n{rendered}"
             );
+        }
+    }
+
+    #[test]
+    fn a_refused_sitting_names_onboard_for_a_deed_store_nobody_made() {
+        let _g = env_guard();
+        let absent = vec![
+            super::Habitat {
+                name: "deed store",
+                state: "deedar failed (exit 1): set DEEDAR_URL or pass --url; no store at /s"
+                    .into(),
+                ok: false,
+            },
+            super::Habitat {
+                name: "tracker",
+                state: "vissue 0.24.0".into(),
+                ok: true,
+            },
+        ];
+        let broken = vec![super::Habitat {
+            name: "deed store",
+            state: "deedar not on PATH, so run `cargo install --locked deedar-cli`.".into(),
+            ok: false,
+        }];
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            std::env::remove_var("DEEDAR_URL");
+        }
+        assert_eq!(super::sitting_next_command(&absent), "ljos onboard");
+        assert_eq!(super::sitting_next_command(&broken), "ljos doctor");
+        // SAFETY: as above.
+        unsafe {
+            std::env::set_var("DEEDAR_URL", "file:///elsewhere");
+        }
+        assert_eq!(super::sitting_next_command(&absent), "ljos doctor");
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("DEEDAR_URL");
         }
     }
 
