@@ -88,6 +88,7 @@ pub mod slot;
 pub mod subagent;
 pub mod swap_log;
 pub mod sync;
+pub mod takeover;
 pub mod ticket_search;
 pub mod tool_bound;
 pub mod tools;
@@ -39833,7 +39834,7 @@ fn is_sole_or_ancestor_parent_hold(parent: &str, seat: &str, hold_pid: u32) -> b
 ///
 /// `alive` is whether the process that wrote the hold is still running.
 /// A dead process does not mean the ticket is free: the claim stays, and
-/// the line names `ljos release` and `ljos sitting`.
+/// the line names `ljos release`, `ljos sitting` and `ljos claim --takeover`.
 #[must_use]
 pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, alive: bool) -> String {
     if alive {
@@ -39843,7 +39844,7 @@ pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, alive: b
         );
     }
     format!(
-        "claim: {node} is still held by another ({}, seat {}, since {}), not by {assignee}. The recorded process has exited, and the ticket stays held. `ljos release {node} --assignee {}` releases it. `ljos sitting {node}` reclaims a claim quiet longer than the lease.",
+        "claim: {node} is still held by another ({}, seat {}, since {}), not by {assignee}. The recorded process has exited, and the ticket stays held. `ljos release {node} --assignee {}` releases it. `ljos sitting {node}` reclaims a claim quiet longer than the lease. `ljos claim {node} --takeover` takes it over once the claim has been quiet that long.",
         hold.assignee, hold.seat, hold.since, hold.seat
     )
 }
@@ -40005,6 +40006,12 @@ fn check_tracker_claim_conflict(node: &str, assignee: &str) -> Result<(String, S
                 return Err(policy_label::labelled(
                     "claim-conflict",
                     held_by_another_message(node, &assignee, &live, true),
+                ));
+            }
+            if let Some(quiet) = takeover::stale_for(node) {
+                return Err(policy_label::labelled(
+                    "claim-conflict",
+                    takeover::stale_refusal(node, &assignee, &held, quiet),
                 ));
             }
             let clean = unscoped_holder(&held, node);

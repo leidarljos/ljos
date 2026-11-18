@@ -958,6 +958,23 @@ pub struct TakeArgs {
     pub assignee: Option<String>,
 }
 
+/// A session node to take, and whether to take it from a holder that looks gone.
+#[derive(Deserialize, JsonSchema)]
+pub struct ClaimNodeArgs {
+    /// The tracker id of the issue (`proj-1a2b`), or a 32-hex claim-graph id.
+    pub node: String,
+    /// Your name; a named worker occupies one slot per issue. Absent, this
+    /// conversation's holder from the session the runner stamped, under the
+    /// seat `LJOS_SEAT` names when it is set, or pass `seat`. The client's
+    /// name is not a seat.
+    #[serde(default)]
+    pub assignee: Option<String>,
+    /// `true` takes the ticket over from another seat whose claim looks
+    /// stale. A running or recently active holder is refused.
+    #[serde(default)]
+    pub takeover: bool,
+}
+
 /// Recall and claim before repo work.
 #[derive(Deserialize, JsonSchema)]
 pub struct StartArgs {
@@ -2559,14 +2576,19 @@ impl LjosServer {
     )]
     async fn ljos_claim(
         &self,
-        Parameters(args): Parameters<TakeArgs>,
+        Parameters(args): Parameters<ClaimNodeArgs>,
     ) -> Result<Json<Said>, McpError> {
         let assignee = call_assignee("claim", args.assignee.as_deref())?;
         if let Some(line) = ljos_cli::ticket_node_refusal(&args.node) {
             return Err(refused(anyhow::anyhow!(line)));
         }
         ljos_cli::require_ticket_to_claim(&args.node).map_err(refused)?;
-        let text = claim(&args.node, &assignee).map_err(refused)?;
+        let text = if args.takeover {
+            ljos_cli::takeover::claim_takeover(&args.node, &assignee)
+        } else {
+            claim(&args.node, &assignee)
+        }
+        .map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 

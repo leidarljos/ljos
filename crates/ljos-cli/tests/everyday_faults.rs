@@ -497,6 +497,10 @@ fn two_seats_on_one_ticket_name_send() {
         gone.contains("`ljos sitting demo-aaaa` reclaims a claim quiet longer than the lease"),
         "{gone}"
     );
+    assert!(
+        gone.contains("`ljos claim demo-aaaa --takeover` takes it over"),
+        "{gone}"
+    );
     assert!(!gone.contains('\n'));
 }
 

@@ -1802,11 +1802,21 @@ enum Cmd {
     /// One live claim per name. The tracker stores that claim as a session
     /// node, which is its record of who holds the ticket.
     ///
+    /// When another seat has the ticket, the refusal says whether that holder
+    /// looks stale: the claim quiet at least `LJOS_LEASE_SECS` (900 seconds
+    /// when unset) with no running conversation named for it on this host.
+    /// `--takeover` takes a stale claim over, notes the old holder on the
+    /// ticket, and refuses a holder that is running or active within the
+    /// lease, changing nothing.
+    ///
     /// Example: `LJOS_SEAT=alice ljos claim demo-2f5j`
     Claim {
         /// A tracker id, or a 32-hex claim-graph id. Omit when claiming next.
         #[arg(value_parser = named_node)]
         node: Option<String>,
+        /// Take the ticket over from a holder that looks stale. Needs an id.
+        #[arg(long, requires = "node", conflicts_with = "next")]
+        takeover: bool,
         /// Your name; mapped to one actor id. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
@@ -6490,6 +6500,7 @@ fn run_command() -> Result<()> {
         }
         Cmd::Claim {
             node,
+            takeover,
             assignee,
             next,
             role,
@@ -6501,7 +6512,12 @@ fn run_command() -> Result<()> {
                     let node = ljos_cli::on_disk(&node);
                     stop_ticket_node(&node);
                     ljos_cli::require_ticket_to_claim(&node)?;
-                    let said = match claim(&node, &assignee) {
+                    let said = if takeover {
+                        ljos_cli::takeover::claim_takeover(&node, &assignee)
+                    } else {
+                        claim(&node, &assignee)
+                    };
+                    let said = match said {
                         Ok(said) => said,
                         Err(err) => {
                             eprintln!("{}", ljos_cli::user_fault_line(&err));
@@ -6509,7 +6525,9 @@ fn run_command() -> Result<()> {
                         }
                     };
                     print!("{said}");
-                    print!("{}", ljos_cli::persist_tracker(&node, "claimed"));
+                    if !takeover {
+                        print!("{}", ljos_cli::persist_tracker(&node, "claimed"));
+                    }
                 }
                 None => {
                     let said = claim_next(&assignee, role.as_deref(), slack)?;
