@@ -596,6 +596,139 @@ fn a_close_without_a_login_terminal_names_the_terminal() {
     );
 }
 
+/// A home under /tmp is a sandbox. Memory says so in one line, and names
+/// the directory to use instead. Doctor, a fix and onboard start no writer.
+#[test]
+fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    for sub in [
+        ".config/ljos",
+        ".local/state/ljos",
+        ".local/share",
+        ".cache",
+        "run",
+        "bin",
+    ] {
+        std::fs::create_dir_all(home.join(sub)).unwrap();
+    }
+    let log = root.path().join("pack.log");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+        log.display()
+    );
+    let packset = home.join("bin/packset");
+    std::fs::write(&packset, &script).unwrap();
+    let curl = home.join("bin/curl");
+    std::fs::write(
+        &curl,
+        "#!/bin/sh\necho 'curl: network is unreachable' >&2\nexit 6\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [&packset, &curl] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ljos"))
+            .args(args)
+            .env_clear()
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", home.join("bin").display()),
+            )
+            .env("HOME", &home)
+            .env("USER", "ada")
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_STATE_HOME", home.join(".local/state"))
+            .env("XDG_CACHE_HOME", home.join(".cache"))
+            .env("XDG_RUNTIME_DIR", home.join("run"))
+            .env("TMPDIR", root.path())
+            .env("PACKSET_TIMEOUT_MS", "400")
+            .env("LJOS_HOOKD", "off")
+            .env("LJOS_TRACKER_GIT", "off")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let remembered = run(&["remember", "A lesson typed in a sandbox."]);
+    let said = text(&remembered);
+    let joined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&remembered.stdout),
+        String::from_utf8_lossy(&remembered.stderr)
+    );
+    assert!(
+        joined.contains("memory is off because the home is under /tmp"),
+        "{said}"
+    );
+    assert!(
+        joined.contains("set HOME to a directory outside /tmp"),
+        "{said}"
+    );
+    let reasons: Vec<_> = joined
+        .lines()
+        .filter(|line| line.contains("memory is off because the home is under /tmp"))
+        .collect();
+    assert_eq!(reasons.len(), 1, "{said}");
+    assert!(!joined.contains("packset ensure"), "{said}");
+    assert!(!joined.contains("queued"), "{said}");
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.contains("ensure"),
+        "remember started a writer: {calls}"
+    );
+
+    let doctor = run(&["doctor"]);
+    let said = text(&doctor);
+    let joined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&doctor.stdout),
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    assert!(
+        joined.contains("memory is off because the home is under /tmp"),
+        "{said}"
+    );
+    assert!(
+        joined.contains("set HOME to a directory outside /tmp"),
+        "{said}"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.contains("ensure"),
+        "doctor started a writer: {calls}"
+    );
+
+    let fixed = run(&["doctor", "--fix"]);
+    let said = text(&fixed);
+    let joined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&fixed.stdout),
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    assert!(
+        joined.contains("memory is off because the home is under /tmp"),
+        "{said}"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.contains("ensure"),
+        "doctor --fix started a writer: {calls}\n{said}"
+    );
+
+    let _onboard = run(&["onboard"]);
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.contains("ensure"),
+        "onboard started a writer: {calls}"
+    );
+}
+
 /// The line `ljos remember` prints when it stores an agent's lesson.
 /// One sentence: why this process is not the person, and the terminal
 /// command that stores the lesson as theirs.

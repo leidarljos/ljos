@@ -248,6 +248,10 @@ fn repair_pack() -> Option<String> {
             "left pack: packset is not on PATH, so run `cargo install --locked packset`".into(),
         );
     }
+    // A sandbox home must not detach a writer. Nothing stops it afterwards.
+    if let Some(line) = crate::sandbox_memory_off() {
+        return Some(line);
+    }
     // A test binary must not detach a writer. The `ljos` binary a test runs
     // is still the seat binary, and that path still runs `packset ensure`.
     if !crate::seat_binary() {

@@ -35,12 +35,12 @@ no	memory	http://127.0.0.1:8761 does not answer. no pack writer is answering on 
 
 That one command starts the writer. =ljos doctor --fix= runs =packset ensure= itself, and prints one line that says it did.
 
-Under a temporary home the writer does not start on its own.
+Under a temporary home memory is off, and =ljos doctor --fix= does not start a writer.
 The home was =/tmp/seat=.
-The printed row is:
+The printed row is one line:
 
 #+begin_src text
-no	memory	http://127.0.0.1:8761 does not answer. the memory writer does not start on its own under a temporary HOME (/tmp/seat), so run `ljos doctor --fix`.
+no	memory	http://127.0.0.1:8761 does not answer. memory is off because the home is under /tmp (/tmp/seat); set HOME to a directory outside /tmp
 #+end_src
 
 * No seat

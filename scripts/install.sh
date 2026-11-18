@@ -1290,14 +1290,21 @@ if [ -x "$BIN_DIR/packset-embed" ]; then
   fi
 fi
 
-# A temporary HOME is a test sandbox to ljos: the guard and the memory
-# writer stay off there. Say so, so a trial in /tmp does not mislead.
+# A temporary HOME is a test sandbox to ljos: memory stays off there, and
+# this install does not leave a writer running. Say so in one line.
 tmp_root=${TMPDIR:-/nonexistent}
-case "$(cd "$HOME" && pwd -P)/" in
-  /tmp/*|/var/tmp/*|/private/tmp/*|/dev/shm/*|"${tmp_root%/}"/*)
-    say "Note: HOME is a temporary directory, so the command guard and memory stay off;"
-    say "  \`ljos doctor\` says why. Install into a HOME outside /tmp to try them." ;;
+home_real=$(cd "$HOME" && pwd -P)
+root=
+case "${home_real}/" in
+  /tmp/*) root=/tmp ;;
+  /var/tmp/*) root=/var/tmp ;;
+  /private/tmp/*) root=/private/tmp ;;
+  /dev/shm/*) root=/dev/shm ;;
+  "${tmp_root%/}"/*) root=${tmp_root%/} ;;
 esac
+if [ -n "$root" ]; then
+  say "memory is off because the home is under ${root} (${home_real}); set HOME to a directory outside ${root}"
+fi
 # `--no-onboard` has not set up the guard or the pack home, so the
 # force-push sample would be a command the person did not ask to try.
 if [ "$ONBOARD" = 1 ]; then

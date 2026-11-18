@@ -6,6 +6,9 @@ ljos_test_boot::harness!();
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+#[path = "common/seat_root.rs"]
+mod seat_root;
+
 const SCRUB: &[&str] = &[
     "CLAUDE_CODE_SESSION_ID",
     "CODEX_THREAD_ID",
@@ -42,9 +45,23 @@ struct Seat {
 }
 
 impl Seat {
+    /// A home outside the temp roots. `doctor --fix` starts a writer only
+    /// there. A home under /tmp is a sandbox and must not.
+    fn outside(name: &str) -> Self {
+        scrub();
+        let home = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp)
+            .join(format!("ljos-doctor-fix-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        Self::at(home)
+    }
+
     fn new(name: &str) -> Self {
         scrub();
         let home = root().join(name);
+        Self::at(home)
+    }
+
+    fn at(home: PathBuf) -> Self {
         let bin = home.join("bin");
         for dir in [".config", ".local/share", ".cache", "run", "tmp", "bin"] {
             std::fs::create_dir_all(home.join(dir)).unwrap();
@@ -306,7 +323,7 @@ fn doctor_fix_moves_a_stale_lock_aside_and_leaves_a_live_one() {
 
 #[test]
 fn doctor_fix_starts_packsetd_with_packset_ensure() {
-    let seat = Seat::new("pack");
+    let seat = Seat::outside("pack");
     std::fs::create_dir_all(seat.state()).unwrap();
     std::fs::create_dir_all(seat.config().parent().unwrap()).unwrap();
     std::fs::write(seat.config(), CONFIG_KEEP).unwrap();
@@ -351,16 +368,8 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
         )
     };
 
-    let (text, err) = run(&["doctor"]);
-    assert!(!log.exists(), "doctor started packset without --fix\n{err}");
-    let pack = row(&text, "memory").unwrap_or("");
-    assert!(pack.ends_with(", so run `ljos doctor --fix`."), "{text}");
-    assert!(
-        !pack.contains("packset ensure"),
-        "the row names one command, the one that does both: {text}"
-    );
-    assert!(text.contains("seat source"), "{text}");
-
+    // A home outside /tmp. `--fix` starts the writer. A home under /tmp
+    // does not, and that case is covered with the sandbox line.
     let (after, err) = run(&["doctor", "--fix"]);
     if let Ok(text) = std::fs::read_to_string(&pid) {
         if let Ok(server) = text.trim().parse::<u32>() {

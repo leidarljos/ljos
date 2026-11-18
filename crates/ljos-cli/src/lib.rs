@@ -15120,6 +15120,9 @@ fn writer_fallback() -> (u64, String) {
 }
 
 fn writer_down_search_line(shown: bool) -> String {
+    if let Some(line) = sandbox_memory_off() {
+        return line;
+    }
     let what = if shown {
         "these rows were matched by words"
     } else {
@@ -19063,6 +19066,15 @@ fn pack_step(dry: bool) -> Step {
             ok: false,
         };
     }
+    // A sandbox home must not detach a writer. Nothing in this process
+    // stops it, and the home is about to vanish.
+    if let Some(line) = sandbox_memory_off() {
+        return Step {
+            what,
+            detail: line,
+            ok: true,
+        };
+    }
     if dry {
         return Step {
             what,
@@ -20618,6 +20630,53 @@ pub fn pack_down_line() -> String {
     render_down(&down_facts())
 }
 
+/// The directory a sandbox home sits under. `/tmp` wins over a longer
+/// temporary root that is inside it.
+fn sandbox_root_label(home: &Path) -> String {
+    const NAMED: &[&str] = &["/tmp", "/var/tmp", "/private/tmp", "/dev/shm"];
+    for name in NAMED {
+        if home.starts_with(name) {
+            return (*name).to_string();
+        }
+    }
+    let mut best = String::new();
+    for root in bookkeep::temp_roots() {
+        if home.starts_with(&root) {
+            let shown = root.display().to_string();
+            if shown.len() > best.len() {
+                best = shown;
+            }
+        }
+    }
+    if best.is_empty() {
+        "/tmp".into()
+    } else {
+        best
+    }
+}
+
+/// One line: memory is off because `home` is a sandbox, and the directory
+/// to set instead.
+fn memory_off_temp_line(home: &Path) -> String {
+    let root = sandbox_root_label(home);
+    format!(
+        "memory is off because the home is under {root} ({}); set HOME to a directory outside {root}",
+        home.display()
+    )
+}
+
+/// That line when this process's `HOME` is a sandbox and no writer address
+/// was named. A named `PACKSET_URL`, including `off`, keeps its own line.
+pub(crate) fn sandbox_memory_off() -> Option<String> {
+    if std::env::var("PACKSET_URL")
+        .ok()
+        .is_some_and(|url| !url.trim().is_empty())
+    {
+        return None;
+    }
+    bookkeep::temp_home().map(|home| memory_off_temp_line(&home))
+}
+
 fn down_facts() -> DownFacts {
     let url = std::env::var("PACKSET_URL")
         .ok()
@@ -20693,11 +20752,7 @@ fn render_down(facts: &DownFacts) -> String {
         );
     }
     if let Some(home) = &facts.temp {
-        return format!(
-            "the memory writer does not start on its own under a temporary HOME ({}), \
-             so run `packset ensure`.",
-            home.display()
-        );
+        return memory_off_temp_line(home);
     }
     format!(
         "no pack writer is answering on {}, so run `packset ensure`.",
@@ -20787,6 +20842,7 @@ fn text_is_down(text: &str) -> bool {
         || full.contains("no pack writer")
         || full.contains("packset ensure")
         || full.contains("packset is not on path")
+        || full.contains("memory is off")
 }
 
 fn writer_is_down(err: &anyhow::Error) -> bool {
@@ -22969,6 +23025,9 @@ fn queue_waiting_lesson(atom: &Value, err: anyhow::Error, prefix: &str) -> anyho
     if atom["kind"].as_str() != Some("lesson") || !note_can_wait(&err) {
         return err;
     }
+    if let Some(line) = sandbox_memory_off() {
+        return anyhow::Error::msg(line);
+    }
     let text = atom["text"].as_str().unwrap_or("");
     let copies = pack_copy::pack_copies(text);
     if copies.is_empty() {
@@ -23008,6 +23067,9 @@ fn client_or_queue(
     match pack() {
         Ok(client) => Ok(client),
         Err(e) if kind == "lesson" && note_can_wait(&e) => {
+            if let Some(line) = sandbox_memory_off() {
+                return Err(anyhow::Error::msg(line));
+            }
             let copies = pack_copy::pack_copies(text);
             let err = with_post_failure(prefix, e);
             if copies.is_empty() {
@@ -24155,6 +24217,11 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
             Err(err) if is_memory_starting(&err) => Err(err),
             Err(err) if pack_turned_off(&err) => Err(err),
             Err(err) if remember_should_queue(&err) => {
+                // A sandbox home does not queue a lesson nobody will send.
+                // The line says why memory is off and which HOME to use.
+                if let Some(line) = sandbox_memory_off() {
+                    return Err(anyhow::Error::msg(line));
+                }
                 // Load has not judged the words. Keep the sentence as given,
                 // even when a local prose check would turn it away.
                 queue_busy_lesson(text);
@@ -55950,8 +56017,10 @@ mod tests {
         assert_eq!(super::take_guard_note(), None, "a temp HOME names no rule");
         let refused = super::ensure_writer().expect_err("a temp HOME names its refusal");
         assert!(
-            refused.to_string().contains("temporary HOME")
-                && refused.to_string().contains("packset ensure"),
+            refused.to_string().contains("memory is off")
+                && refused.to_string().contains("under /tmp")
+                && refused.to_string().contains("set HOME")
+                && !refused.to_string().contains("packset ensure"),
             "{refused}"
         );
         assert!(!marker.exists(), "a temp HOME started the pack daemon");

@@ -458,7 +458,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-fn temp_roots() -> Vec<PathBuf> {
+pub(crate) fn temp_roots() -> Vec<PathBuf> {
     #[cfg(test)]
     if let Some(roots) = TEST_TEMP_ROOTS.with(|r| r.borrow().clone()) {
         return roots;
