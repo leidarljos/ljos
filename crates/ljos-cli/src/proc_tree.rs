@@ -2722,18 +2722,22 @@ mod tests {
     /// runtime that has recorded no tool call.
     #[test]
     fn a_tool_call_record_is_seen_when_xdg_runtime_dir_differs() {
-        let _guard = crate::test_env_lock();
         let home = tempfile::tempdir().unwrap();
         let writer = tempfile::tempdir().unwrap();
         let reader = tempfile::tempdir().unwrap();
+        let tmpdir = writer.path().join("tmp");
+        std::fs::create_dir_all(&tmpdir).unwrap();
+        // Hold the env lock after all tempdirs so drop order restores env
+        // before those directories are deleted.
+        let _guard = crate::test_env_lock();
         // SAFETY: geteuid has no arguments and only reads process identity.
         let uid = unsafe { libc::geteuid() };
-        let fallback = crate::runtime_fallback(&writer.path().join("tmp"), Some(home.path()), uid);
+        let fallback = crate::runtime_fallback(&tmpdir, Some(home.path()), uid);
         // SAFETY: this test holds `test_env_lock`, which puts the variables
         // back when it drops. Nothing else on this thread reads them.
         unsafe {
             std::env::set_var("HOME", home.path());
-            std::env::set_var("TMPDIR", writer.path().join("tmp"));
+            std::env::set_var("TMPDIR", &tmpdir);
             std::env::remove_var("XDG_RUNTIME_DIR");
         }
         let opener = Proc {
