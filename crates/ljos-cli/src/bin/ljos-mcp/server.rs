@@ -1372,9 +1372,9 @@ pub struct TrustRow {
 /// What a habitat printed.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Said {
-    /// The habitat's answer, as it printed it.
+    /// The tool's answer, as the command prints it.
     pub text: String,
-    /// What it said aside, when anything.
+    /// Lines printed apart from the answer. Null when there were none.
     pub aside: Option<String>,
 }
 
@@ -1502,11 +1502,24 @@ fn named_in_meta(meta: &serde_json::Map<String, serde_json::Value>, key: &str) -
 }
 
 fn said(out: ljos_cli::Said) -> Json<Said> {
-    let aside = out.stderr.trim();
+    let aside = without_file_paths(&out.stderr);
     Json(Said {
         text: out.stdout,
-        aside: (!aside.is_empty()).then(|| aside.to_string()),
+        aside: (!aside.is_empty()).then_some(aside),
     })
+}
+
+/// The tracker prints `file: /path/to/issues.org` after a write. The path
+/// names the person's home and is no input to a later call, so it is left
+/// out of what the model reads.
+fn without_file_paths(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|line| !line.starts_with("file: /"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 /// One line when the writer answered busy. A down writer is not this:

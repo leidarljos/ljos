@@ -635,3 +635,20 @@ fn the_file_schema_names_the_type_values_and_no_other_client() {
     let all = serde_json::to_string(&tools).unwrap();
     assert!(!all.contains("OpenHands"), "a schema names another client");
 }
+
+#[test]
+fn the_text_and_aside_fields_say_what_they_are_in_plain_words() {
+    let mut session = Session::open(&[]);
+    let tools = listed_tools(&mut session);
+    let props = &tools["ljos_ready"]["outputSchema"]["properties"];
+    assert_eq!(
+        props["text"]["description"],
+        "The tool's answer, as the command prints it."
+    );
+    let aside = props["aside"]["description"].as_str().unwrap();
+    assert_eq!(
+        aside,
+        "Lines printed apart from the answer. Null when there were none."
+    );
+    assert!(!aside.contains("habitat"), "{aside}");
+}
