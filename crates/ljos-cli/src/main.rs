@@ -5988,6 +5988,12 @@ fn run_command() -> Result<()> {
                 Ok(said) => rest.push_str(&said),
                 Err(e) => eprintln!("ljos file: {e:#}"),
             }
+            if !id.is_empty() && parent.is_none() {
+                let _ = std::fmt::Write::write_fmt(
+                    &mut rest,
+                    format_args!("next: `ljos sitting {id}` starts work.\n"),
+                );
+            }
             let detail = git_detail(verbose);
             // The id is the only line on stdout, so `ID=$(ljos file ...)`
             // captures the id the docs name. The heading and the path go

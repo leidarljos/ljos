@@ -261,6 +261,11 @@ fn a_new_seat_walks_from_search_to_finish_without_close() {
     walk.expect(&filed.stderr, "project: demo", "file");
     walk.expect(&filed.stderr, &format!("{id}  TODO"), "file");
     walk.expect(&filed.stderr, "issues.org", "file");
+    walk.expect(
+        &filed.stderr,
+        &format!("next: `ljos sitting {id}` starts work."),
+        "file names the next command",
+    );
 
     let sitting = walk.ok(&["sitting", &id]);
     walk.expect(

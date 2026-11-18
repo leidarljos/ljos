@@ -161,6 +161,7 @@ One session claims a ticket. The other session's claim is refused and names the 
    project: demo
    demo-1  TODO  [#C]  Measure the files
    file: /home/ada/data/vissue/tracker/Software/demo/issues.org
+   next: `ljos sitting demo-1` starts work.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos claim demo-1
    gen=2
@@ -175,6 +176,7 @@ One session claims a ticket. The other session's claim is refused and names the 
    project: demo
    demo-2  TODO  [#C]  Write the note
    file: /home/ada/data/vissue/tracker/Software/demo/issues.org
+   next: `ljos sitting demo-2` starts work.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos claim demo-2
    gen=2

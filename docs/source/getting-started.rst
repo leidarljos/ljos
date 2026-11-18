@@ -224,9 +224,10 @@ A ticket
    project: demo
    demo-2f5j  TODO  [#C]  Pick a codec
    file: /home/you/.local/share/vissue/tracker/Software/demo/issues.org
+   next: `ljos sitting demo-2f5j` starts work.
 
 The id is the only line on standard output, so ``id=$(LJOS_SEAT=alice ljos file ...)`` captures it.
-The heading and the path are on standard error. A commit that landed is not printed. ``ljos file --verbose`` prints it. A refusal is still printed. The id in the heading is the same one.
+The heading, path and next command are on standard error. A commit that landed is not printed. ``ljos file --verbose`` prints it. A refusal is still printed. The id in the heading is the same one.
 The ``file:`` line is the absolute path. ``/home/you`` above names the home directory.
 Under a runner that already recorded a seat, ljos names both and writes as ``LJOS_SEAT``.
 With no git identity the heading is still written, and the last line is ``The tracker commit was refused: Author identity unknown. Set it with `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`, then run the command again.``
