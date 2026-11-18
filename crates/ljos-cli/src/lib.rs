@@ -1939,13 +1939,6 @@ fn runtime_dir_path() -> PathBuf {
     if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
         return PathBuf::from(run).join("ljos");
     }
-    #[cfg(test)]
-    let tmp = TEMP_DIR_OVERRIDE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-        .unwrap_or_else(std::env::temp_dir);
-    #[cfg(not(test))]
     let tmp = std::env::temp_dir();
     runtime_fallback(
         &tmp,
@@ -19187,9 +19180,6 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
-static TEMP_DIR_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
-
 /// Run `body` with [`config_base`] fixed to `home` on this thread.
 #[cfg(test)]
 pub(crate) fn with_config_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
@@ -19199,30 +19189,6 @@ pub(crate) fn with_config_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
         *slot.borrow_mut() = prev;
         out
     })
-}
-
-/// Run `body` with [`std::env::temp_dir`] fixed to `tmp` while the
-/// environment lock is held.
-#[cfg(test)]
-pub(crate) fn with_temp_dir<T>(tmp: &Path, body: impl FnOnce() -> T) -> T {
-    require_env_lock();
-    struct PutBack(Option<PathBuf>);
-    impl Drop for PutBack {
-        fn drop(&mut self) {
-            let mut slot = TEMP_DIR_OVERRIDE
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = self.0.take();
-        }
-    }
-    let previous = {
-        let mut slot = TEMP_DIR_OVERRIDE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        slot.replace(tmp.to_path_buf())
-    };
-    let _reset = PutBack(previous);
-    body()
 }
 
 #[cfg(test)]
@@ -56045,9 +56011,12 @@ mod tests {
         );
         assert_eq!(super::take_guard_note(), None, "a temp HOME names no rule");
         let refused = super::ensure_writer().expect_err("a temp HOME names its refusal");
+        let temp =
+            std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let under_temp = format!("under {}", temp.display());
         assert!(
             refused.to_string().contains("memory is off")
-                && refused.to_string().contains("under /tmp")
+                && refused.to_string().contains(&under_temp)
                 && refused.to_string().contains("set HOME")
                 && !refused.to_string().contains("packset ensure"),
             "{refused}"
@@ -74399,22 +74368,36 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// Each line is read by the person key's tree guards, and runs past
     /// the seat guard naming `rule`. A check the seat guard makes before
     /// them can name its own rule: `changes-person-key` for a word that
-    /// names the config directory itself, and `changes-kept-prompt` for
-    /// `/tmp`, which contains the runtime directory a shell without
-    /// `XDG_RUNTIME_DIR` uses, read as moved. The temporary root is `/tmp`,
-    /// since macOS keeps the temporary directory elsewhere.
+    /// names the config directory itself.
     fn assert_uprooted_yet_named(rule: &str, lines: &[String]) {
         let _g = env_guard();
-        super::with_temp_dir(std::path::Path::new("/tmp"), || {
-            std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
-            for line in lines {
-                assert!(
-                    uprooted_by(line).is_some(),
-                    "{line:?} was not read as uprooting"
-                );
-            }
-            assert_runs_naming(rule, lines);
-        });
+        assert_uprooted_yet_named_locked(rule, lines);
+    }
+
+    /// Each move uproots the person's key. It names the kept prompt too
+    /// when `/tmp` contains the real runtime directory, and otherwise names
+    /// `uproots-person-key`.
+    fn assert_uprooted_move_to_tmp(lines: &[String]) {
+        let _g = env_guard();
+        let tmp = kept_prompt::resolve(std::path::Path::new("/tmp"));
+        let rule = if kept_prompt::inside(&tmp) || kept_prompt::above(&tmp).is_some() {
+            "changes-kept-prompt"
+        } else {
+            "uproots-person-key"
+        };
+        assert_uprooted_yet_named_locked(rule, lines);
+    }
+
+    /// [`assert_uprooted_yet_named`] while the environment lock is held.
+    fn assert_uprooted_yet_named_locked(rule: &str, lines: &[String]) {
+        std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
+        for line in lines {
+            assert!(
+                uprooted_by(line).is_some(),
+                "{line:?} was not read as uprooting"
+            );
+        }
+        assert_runs_naming(rule, lines);
     }
 
     /// GNU takes a long option by any prefix that names one option.
@@ -74426,14 +74409,11 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "rm --rec -f ~".into(),
         ]);
         assert_uprooted_yet_named("changes-person-key", &["rm -f --r ~/.config".into()]);
-        assert_uprooted_yet_named(
-            "changes-kept-prompt",
-            &[
-                "mv --target=/tmp ~".into(),
-                "mv --targ /tmp ~".into(),
-                "mv --target-directory /tmp ~".into(),
-            ],
-        );
+        assert_uprooted_move_to_tmp(&[
+            "mv --target=/tmp ~".into(),
+            "mv --targ /tmp ~".into(),
+            "mv --target-directory /tmp ~".into(),
+        ]);
     }
 
     /// A short option's value may follow its letter in one word, and
@@ -74445,10 +74425,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "mv -ft/tmp ~".into(),
             "rm -vfR ~".into(),
         ]);
-        assert_uprooted_yet_named(
-            "changes-kept-prompt",
-            &["mv -ft /tmp ~".into(), "mv -vft /tmp ~".into()],
-        );
+        assert_uprooted_move_to_tmp(&["mv -ft /tmp ~".into(), "mv -vft /tmp ~".into()]);
     }
 
     /// The shell makes brace expansions before the tilde and the rest.
