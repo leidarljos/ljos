@@ -622,39 +622,39 @@ pub fn no_relevant_page(query: &str) -> String {
 }
 
 /// A search before anything has been stored. A shorter query would miss
-/// too, so the sentence names the command that stores a lesson. One word
-/// is quoted in that command. Several words stay `TEXT`, because no one
-/// word is the lesson. The command is plain text.
+/// too, so the sentence names the command that stores a lesson. The query
+/// is not echoed into that command: a search term is not a lesson, so the
+/// command carries the placeholder `LESSON`. The command is plain text.
 #[must_use]
 pub fn empty_store_line(query: &str) -> String {
-    let query = query.trim();
-    let shown = crate::word_rank::quote_query(query);
-    let cmd = store_lesson_command(query);
-    format!("Nothing matched {shown}. A shorter search would miss too. Try storing a lesson, such as: {cmd}")
+    let shown = crate::word_rank::quote_query(query.trim());
+    format!(
+        "{} {}",
+        empty_store_prose(&shown),
+        store_lesson_command(query)
+    )
 }
 
 /// [`empty_store_line`] for a terminal. The command is not wrapped.
 #[must_use]
 pub fn empty_store_page(query: &str) -> String {
-    let query = query.trim();
-    let shown = crate::word_rank::quote_query(query);
+    let shown = crate::word_rank::quote_query(query.trim());
     let cmd = store_lesson_command(query);
-    let prose = format!(
-        "Nothing matched {shown}. A shorter search would miss too. Try storing a lesson, such as:"
-    );
-    plain_command_page(&prose, Some(&cmd))
+    plain_command_page(&empty_store_prose(&shown), Some(&cmd))
 }
 
-/// `ljos remember` with the query in quotes. A query that cannot be
-/// quoted names the sample lesson from the getting started page.
+/// The sentences before the command of an empty-store search.
 #[must_use]
-pub fn store_lesson_command(query: &str) -> String {
-    let query = query.trim();
-    if query.is_empty() || query.chars().any(char::is_control) {
-        "ljos remember \"The lexical default is BM25+.\"".to_string()
-    } else {
-        remember_quoted(query)
-    }
+pub fn empty_store_prose(shown: &str) -> String {
+    format!(
+        "Nothing matched {shown}. A shorter search would miss too. Try storing a lesson in your own words, such as:"
+    )
+}
+
+/// `ljos remember` with the placeholder `LESSON`, whatever was searched.
+#[must_use]
+pub fn store_lesson_command(_query: &str) -> String {
+    "ljos remember \"LESSON\"".to_string()
 }
 
 /// Prose stays within [`COLS`]. `cmd`, when set, is not wrapped. It stays
@@ -683,18 +683,6 @@ fn ended(text: &str) -> String {
         out.push('\n');
     }
     out
-}
-
-fn remember_quoted(text: &str) -> String {
-    let mut quoted = String::from("\"");
-    for ch in text.chars() {
-        if matches!(ch, '"' | '\\' | '$' | '`') {
-            quoted.push('\\');
-        }
-        quoted.push(ch);
-    }
-    quoted.push('"');
-    format!("ljos remember {quoted}")
 }
 
 fn search_hint(query: &str, limit: usize, asks: bool) -> String {

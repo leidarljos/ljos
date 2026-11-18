@@ -34,18 +34,22 @@ fn a_miss_names_a_shorter_query_in_plain_text() {
     assert!(!page.contains('`'), "{page}");
     assert_eq!(
         ljos_cli::scan::empty_store_line("lexical default"),
-        "Nothing matched \"lexical default\". A shorter search would miss too. Try storing a lesson, such as: ljos remember \"lexical default\""
+        "Nothing matched \"lexical default\". A shorter search would miss too. Try storing a lesson in your own words, such as: ljos remember \"LESSON\""
     );
     assert_eq!(
         ljos_cli::scan::empty_store_line("fusing"),
-        "Nothing matched fusing. A shorter search would miss too. Try storing a lesson, such as: ljos remember \"fusing\""
+        "Nothing matched fusing. A shorter search would miss too. Try storing a lesson in your own words, such as: ljos remember \"LESSON\""
     );
     let stored = ljos_cli::scan::empty_store_page("which fusion method");
     assert!(
         stored
             .lines()
-            .any(|line| line == "ljos remember \"which fusion method\""),
+            .any(|line| line == "ljos remember \"LESSON\""),
         "{stored}"
+    );
+    assert!(
+        !stored.contains("remember \"which") && !stored.contains("remember \"fusion"),
+        "the query is not offered as a lesson: {stored}"
     );
     assert!(!stored.contains('`'), "{stored}");
 }

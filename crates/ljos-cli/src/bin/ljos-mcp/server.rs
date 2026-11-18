@@ -1490,25 +1490,21 @@ fn busy_reading(shown: bool) -> String {
     }
 }
 
-/// The empty-store sentence, with the query in the remember command.
-/// A query that cannot be quoted names the kiln lesson instead of a stand-in.
+/// The empty-store sentence. The remember command is the general one: the
+/// query is shown in the prose and is not offered as a lesson.
 fn empty_store_concrete(query: &str) -> String {
     let flat: String = query.split_whitespace().collect::<Vec<_>>().join(" ");
-    let (shown, cmd) = if command_token(&flat) && !flat.is_empty() {
-        let shown = if flat.contains(char::is_whitespace) {
-            format!("\"{flat}\"")
-        } else {
-            flat.clone()
-        };
-        (shown, format!("ljos remember \"{flat}\""))
+    let shown = if !command_token(&flat) {
+        "this query".to_string()
+    } else if flat.contains(char::is_whitespace) {
+        format!("\"{flat}\"")
     } else {
-        (
-            "this query".to_string(),
-            "ljos remember \"Seat the kiln door only when cold.\"".to_string(),
-        )
+        flat
     };
     format!(
-        "Nothing matched {shown}. A shorter search would miss too. Try storing a lesson, such as: {cmd}"
+        "{} {}",
+        ljos_cli::scan::empty_store_prose(&shown),
+        ljos_cli::scan::store_lesson_command(query)
     )
 }
 

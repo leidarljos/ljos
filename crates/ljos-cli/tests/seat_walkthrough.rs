@@ -239,6 +239,16 @@ fn a_new_seat_walks_from_search_to_finish_without_close() {
         "Nothing matched \"kiln door\"",
         "search on an empty pack",
     );
+    walk.expect(
+        &miss.stdout,
+        "ljos remember \"LESSON\"",
+        "the empty-store hint names a lesson in general terms",
+    );
+    assert!(
+        !miss.stdout.contains("remember \"kiln door\""),
+        "the query is not offered as a lesson: {}",
+        walk.log
+    );
 
     let filed = walk.ok(&["file", "Seat the kiln door", "-p", "demo"]);
     let id = filed.stdout.trim().to_string();
