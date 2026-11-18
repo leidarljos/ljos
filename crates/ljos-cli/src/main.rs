@@ -844,7 +844,7 @@ enum Cmd {
     /// word wins a tie. The command is plain text, on its own line when the
     /// sentence would split it. A query that is already that word does not
     /// add the command. When nothing is stored, a shorter search would miss
-    /// too, and the line names `ljos remember` with the query in quotes.
+    /// too, and the line names `ljos remember "LESSON"`.
     /// `--json` adds `suggestion`
     /// with the command the line names, and leaves the other fields as they
     /// are. A row that does not name a subject word is left out when its
