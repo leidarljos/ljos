@@ -5,6 +5,339 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.45.0 (2026-11-18)
+
+### Features
+
+- `ljos claim ID --takeover` takes a ticket over from another seat whose claim looks stale, and `ljos_claim` takes `takeover` for the same step through `ljos mcp`.
+  A claim is stale when it has been quiet for at least `LJOS_LEASE_SECS` (900 seconds when unset) and no running conversation on this host is named for the ticket.
+  A running or recently active holder is refused with a non-zero exit and nothing changes.
+  A takeover that goes ahead leaves a note on the ticket naming the old holder.
+  The refusal a plain `ljos claim` prints for a stale holder says so and names the command.
+
+### Fixes
+
+- A `CURSOR_CONVERSATION_ID` that exists only on a parent process no longer names this process's seat from a session record under a shared `XDG_RUNTIME_DIR`.
+  Seat lookup and session record reads use only the session variables set on this `ljos` process.
+- A busy search names the query that was sent, as in `ljos search "kiln door"`.
+  When that query cannot be quoted the line names `ljos search kiln`.
+  A call that names a tool names `ljos help` with that tool, and a call with no tool name names `ljos help`.
+- A checkout install no longer warns that the share folder fault variants are unused.
+  Those variants stay available to the tests.
+- A claim that another seat's tracker claim refuses no longer leaves a session node in the claim graph of the seat that was refused.
+  The node was minted before the refusal.
+- A failed tracker clone line from `ljos cloud up` now treats `LJOS_TRACKER_TOKEN` and the remote URL as shell words, quoting only when needed.
+- A git hook does not probe its working directory. Git has already opened that checkout and is waiting on the hook.
+  A stat thread that has not started is not a mount that refused to answer, so the process stays in the directory it was run from.
+- A healthy packsetd ranks `ljos search` by meaning, and local snapshot rows no longer take the page away from the writer's hits.
+  When the writer is not running, the first line names `packset ensure`.
+  A busy writer gets a first line with the search to rerun and how many seconds to wait.
+- A pack that accepts `ljos search` and does not answer is one line, `Used word search because memory search was busy.`
+  That read stops after one short request, and a later read in the same command does not wait again.
+- A pipe of `ljos onboard` sets up the tracker, the memory writer and the deed store.
+  The Model Context Protocol (MCP) entry is the only text on stdout.
+  The setup lines go to stderr.
+  `ljos file` then files a ticket.
+- A prompt asks the judge after the pack search returns.
+  The search keeps its own budget, and the judge then has its own wait.
+- A seat disagreement no longer tells a shell that already set `LJOS_SEAT` to set it again.
+- A second conversation of one seat keeps its own sitting.
+  `ljos sitting ID` claims that id for this conversation, or exits with one line that says why and names `ljos sitting ID`.
+  `ljos finish ID` finishes that id while another sitting is open, and stderr names both ids.
+  Another conversation's sitting is not this conversation's open sitting.
+- A short sitting no longer prints `host: the kernel killed a process within the last hour`; `ljos doctor` still does.
+- A short stable seat name is not folded into `seat`, so a claim under it is kept and an export of that seat includes the memories just written.
+- A sitting at a person's terminal names the seat on the STARTED line.
+  A conversation id left on that shell does not add a session tag.
+  Under a runner the tag stays, so two conversations do not share a claim.
+- A sitting on a decision ticket in a pack with no personas now prints one line that says no panel is seated and names `ljos persona NAME --anchor A --view ...`, where it said "the panel could not be written" and stored the refusal as an attempt.
+- A sitting whose work graph does not exist yet says the first claim creates it.
+  The line no longer tells the seat to set `CLAIMDAG_DIR`.
+- A test no longer leaves `packsetd` listening on `127.0.0.1:8761`.
+  Integrate tests set `PACKSET_URL` to `off`, so a writer already on that port does not change the result.
+  `ljos` names both homes in one line when the writer on its port is for a different `HOME`.
+- A test stops only a `packsetd` it started, and only when that start is after the test.
+  A writer for another `HOME` keeps running, including one that began during the test.
+  The stop is `SIGTERM`, and `SIGKILL` follows only after two seconds.
+- A write with no seat named uses the login name, or a short stable name when that login is missing, and the line that says to set LJOS_SEAT is printed once.
+  `ljos note ID TEXT` prints one line, `ID: noted`, when the note is saved.
+  `ljos search` leaves out a ticket whose title shares only one common word with a longer query, and a distinctive word or two shared words still match.
+- An empty `ljos search` names `ljos remember` with the query in quotes.
+  A query that cannot be quoted names `ljos remember "The lexical default is BM25+."`.
+- An install whose `gh attestation verify` answers HTTP 404 counts that archive as not published.
+  The checksum line names the archive.
+  A signature that does not match is still a failed check.
+- Concurrent hook calls now queue briefly per seat, and calls for different `LJOS_SEAT` values proceed independently. A stale flight lock from a dead process is reclaimed. A lock timeout names the process and `ljos doctor --fix`.
+- Lib tests no longer set `TMPDIR` to a missing path in proc-tree runtime fallback coverage, closing a cross-thread tempdir race.
+- Make the ljos mcp seat test wait for each response before it sends a dependent request.
+- Missing required arguments on nested subcommands now point to the nested subcommand `--help` instead of the parent help page.
+  Empty `ljos prefer` and `ljos policy` invocations now exit 2 with the exact command to run.
+- Root command aliases `close`, `create`, `new`, `delete`, `rm`, `remove`, `status`, `stats`, and `edit` now suggest `finish`, `file`, `forget`, `doctor`, `digest`, and `memories` instead of `cloud`, `seat`, or `help`.
+- Tests stop depending on a fixed home path in `cloud_hook` fixtures, and `cwd_probe` now covers gone and unreadable working directories so those probe cases return without waiting.
+- The PATH line `ljos cloud up` writes into shell startup files now single quotes the install directory instead of using double quotes.
+- The `assignee` text of `ljos_claim`, `ljos_release` and `ljos_sitting` no longer says `LJOS_SEAT` is unused on writes, or that `seats.toml` names the seat.
+  A conversation the runner stamped writes under the seat `LJOS_SEAT` names.
+- The checkout installer keeps Cargo temporary installation paths out of its progress output.
+- The consensus verdict and the refusal for an issue with no ballots now name `ljos vote ISSUE --for OPTION --used none`.
+  The command they named before was refused for a missing `--used`.
+- The documented ljos mcp tool and token counts now match the measured tool list, and the size check covers each published count.
+- The installer distinguishes release lookup from the archive download in its progress output.
+- The reaped claim line from `ljos cloud up` now treats the issue id and holder name as shell words, quoting only when needed.
+- The session authored warning now prints once per command run, and `ljos sync` now prints a no change line when its sync pass produces no output.
+- Tracker git operations pass `gc.auto=0` so commits, syncs, and fetches do not stall on inline repacks, and `ljos finish` and `ljos sync` invoke `git -c gc.autoDetach=true gc --auto -q` out of band.
+- When an older folded seat key must be copied by hand, `ljos cloud up` prints `cp --` with single quoted paths.
+- With `HOME` unset, empty or relative, the runtime directory under `/tmp` no longer falls back to a relative `.cache/ljos/run` path.
+- With `XDG_RUNTIME_DIR` unset, the runtime directory under the temporary directory is now keyed by `HOME`, so a held issue from one home is no longer read from another home of the same user as "held issue ... is on another tracker".
+- Wrong ljos mcp arguments now name the matching `ljos help` command.
+- `explain_git_refusal` now names `Committer identity unknown` when git stopped on a missing committer identity instead of always printing `Author identity unknown`.
+- `ljos block ISSUE WORD` now suggests `--on WORD` when `WORD` looks like a ticket id.
+  The hint replaces the generic `no command` line for that case.
+- `ljos block proj-1a2b proj-9c3d` records that the first ticket waits on the second, the same as `--on`.
+  Further ids are further tickets it waits on.
+  A following id beside `--on` or `--off` is refused in one line.
+  An extra ticket id on a command that takes an id names what that command expected and the form from its example.
+- `ljos block` now keeps old `Claimed-by` logbook rows scoped to the ticket named on the command.
+  When multiple tickets share one minute stamp, `ljos block`, `ljos release`, and plan ordering keep note, state, and finish rows instead of rewriting them to `- Claimed by ...`.
+- `ljos block`, `ljos release`, `ljos finish`, and plan ordering keep each ticket's old `Claimed-by` row when they rewrite the file.
+  Two rows that share one minute on one ticket stay on their own lines.
+- `ljos claim` now exits 1 with one stderr line when the ticket is missing or another seat has claimed it.
+- `ljos claim` takes a 32-hex claim-graph id again.
+  The check for a ticket that does not exist looked that id up in the tracker and refused it as `issue ID not found`.
+- `ljos claim`, `ljos release`, `ljos complete`, `ljos playbook`, `ljos note`, `ljos vote`, `ljos consensus`, `ljos deed`, `ljos options`, `ljos block`, `ljos withdraw`, `ljos learn`, `ljos handover`, and `ljos predict` now refuse an unknown ticket id before acting and point to `ljos ready` or the closest ticket id.
+- `ljos claim`, `ljos sitting`, and `ljos_claim` now refuse naming the claiming seat and `ljos send` when another seat has already claimed the ticket in a shared tracker.
+- `ljos cloud up` checks that the tracker destination is its own git checkout root rather than an enclosing repository when checking for an existing work tree or reading its origin.
+- `ljos cloud up` wake lines now treat `LJOS_WAKE_<SEAT>_URL` and `LJOS_WAKE_<SEAT>_KEY` as shell words, quoting them only when a character would not be safe to paste bare.
+- `ljos complete` and `ljos_complete` now refuse with a nonzero exit and one plain line naming the holder when another seat owns the ticket, without marking a local node done or printing `stays claimed by`.
+- `ljos consensus` asks the tracker once and prints that weighted settle: the count, `social power`, and the option's share.
+  The model crate's reading, with shares and influence, stays on `--json`.
+- `ljos consensus` asks the tracker once for the weighted settle when the model crate is installed, and once when it is not.
+  It does not ask a second time for the plain page.
+- `ljos consensus` now fills the issue id into its unresolved `verdict:` line instead of printing literal `ISSUE`.
+- `ljos consensus` prints the tracker's weighted settle on the page a person reads.
+  The count, each seat's social power, and the option with its share of the group's weight are that advice.
+  The model reading stays on `ljos consensus --json`.
+  `ljos show` leaves a signature line off the plain page.
+  `ljos show --all` prints it.
+  `scripts/install.sh --from-checkout` lists each crate while Cargo compiles, and that compile is split across units with a lighter optimize so the first `ljos search` arrives sooner.
+  A checkout build no longer prints an unused variant warning while it compiles.
+- `ljos digest` lists each seat, and the lines under that seat, in one order on every machine.
+  Git, guard and memory times are in Coordinated Universal Time (UTC), a tracker time with no zone now counts as UTC too, and each line shows its clock in UTC.
+  Lines at the same instant sort by text, kind, issue, source and identity, and two seats whose newest lines share an instant sort by seat name.
+  A deed that answers within two seconds is kept. The old 400 ms cut dropped it on a busy machine.
+- `ljos doctor` does not warn that `ljos.toml` is missing when the defaults apply.
+  `ljos doctor --fix` still writes that file, and the file sets no keys.
+- `ljos doctor` names `cargo binstall --locked packset-embed` when cargo-binstall is installed.
+  It names `cargo install --locked packset-embed` when cargo is, `sh scripts/install.sh` when that file is in the working directory, and the release install line otherwise.
+- `ljos doctor` now has a `git identity` warning when git has no author name or email, and the row names `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`.
+  When git refuses the tracker commit for a missing identity, the error names those two commands too, where it said only to set `user.name` and `user.email`.
+  A seat with an identity sees an `ok` row under `ljos doctor --all` and nothing in the short report.
+- `ljos file --top` with no `-p` uses the seat project when one is set; otherwise it exits 1 and names `-p`.
+- `ljos file TITLE` keeps the parent-placement line on stderr when it files under the current sitting issue.
+  The line names the parent id and the `--top -p` form for filing at the project top.
+- `ljos file TITLE` no longer invents a project from the checkout directory name.
+  When no parent and no `-p` are present, it uses `LJOS_PROJECT` when set, or exits 1 with an error that names `-p NAME`.
+- `ljos file TITLE` prints only the new ticket id on stdout.
+  The placement and tracker prose stays on stderr, so `T=$(ljos file ...)` captures one id line.
+- `ljos file` and `ljos sitting` resolve the tracker and the seat without reading the working directory when `-p` or the ticket id already names the project.
+  A working directory on a network or FUSE mount is left unread, and a slow probe of it, git discovery included, is given up.
+  When the tracker does not answer, the command fails and prints nothing on stdout.
+  Filing under one named project does not open the other project boards under that prefix.
+- `ljos file` from a checkout with no tracker names `ljos onboard` instead of a private directory.
+  A tracker that is already named still files.
+- `ljos file` leaves a sitting recorded for another tracker out of the new ticket.
+  The line names that ticket and says the new one is filed at the top of the project.
+  A sitting on this tracker is still the parent.
+- `ljos file`, `ljos ready`, and `ljos note` now print `No tracker found, so run \`ljos onboard\`.` when no tracker is configured instead of naming `--root` or `VISSUE_ROOT`.
+- `ljos finish ID` and `ljos release --stale` now take over and clear claims from older holders of the same seat, including sessions whose local record is gone, and print one line naming the old holder.
+  Claims belonging to other seats and claims whose conversation is still running on this host stay claimed.
+- `ljos finish` and `ljos release` leave a claim recorded as the bare seat when another live process of that seat still has it.
+  `ljos release --stale` leaves a claim under another tag when that record is still running.
+  `ljos release --stale` leaves the claim when a live record of the ticket is next to a dead one.
+- `ljos finish` hands an open ticket back without marking its session done, and its output says the sitting ended while the ticket remains open.
+  `ljos release` accepts a session that is already finished without an error.
+  Finishing a sitting no longer writes an empty playbook note or duplicates existing claim history.
+- `ljos finish` now sends the note queue before it seals the ticket's atoms.
+  A lesson queued on a busy pack, or one `ljos mcp` `ljos_finish` found queued, is in the sealed chunk instead of reaching the pack after the seal.
+- `ljos inbox`, `ljos read`, `ljos reply`, and `ljos send` now report HTTP 401 as a refused seat token with the `PACKSET_PORT` recovery command instead of saying the pack did not answer.
+- `ljos list` and `ljos ls` print the open tickets, with the same page and the same order as `ljos ready`.
+  They take the flags `ljos ready` takes, which are `-p`, `--project`, `-n`, `--limit`, `--all`, `--json` and `--mine`.
+  Before this, `ljos list` stopped with the line `no command list`.
+  `ljos help` names `list` beside `ready`, and the command reference and getting started name it too.
+  `ljos issues`, `ljos tickets` and `ljos todo` are still not commands, and each one names `ljos ready`.
+- `ljos mcp` now names a help command that exists when the arguments of `ljos_guard_check`, `ljos_bump_plan`, `ljos_mail_search` or `ljos_mail_show` do not match the tool.
+  It named `ljos help guard_check` and the like, which `ljos help` refused.
+- `ljos mcp` stays up when packsetd restarts, when a line is not json, and while the client is quiet.
+  A failure is one line naming the command, among them `packset ensure`, `ljos onboard`, `ljos seat`, `ljos search`, `ljos remember` and `ljos help`.
+  `ljos_show` prints the ticket the way `ljos show` does.
+- `ljos mcp` write refusals now state that `LJOS_SEAT` applies to reads only and `seat` must be passed in tool arguments, matching the docs.
+- `ljos note` commits the seat line when another writer has already committed the note.
+  The line sits at the top of the logbook, above that note, and `issues.org` stays clean.
+- `ljos note` now prints the assist line naming the claiming seat and `ljos send` when another seat claimed the ticket in a shared tracker from a separate home directory.
+- `ljos note` now refuses a malformed id argument with exit 1 instead of treating it as plain note text.
+  This covers multiline values captured from other commands.
+- `ljos onboard` glosses `PACKSET_URL` as the memory writer address when it starts a writer.
+- `ljos parent ISSUE PARENT` moves an existing ticket to a new parent by changing that ticket's parent link.
+  The command refuses an unknown parent, refuses a cycle, and records a dated note on the moved ticket.
+- `ljos parent` and the note `ljos_start` leaves on an open ticket keep an old `Claimed-by` row as it was.
+  The row was folded into the note text, so a later import could not read it.
+- `ljos ready` prints 20 tickets by default and ends a short page with the `--limit` and `--all` hint.
+  The asking seat's claims come first, followed by unclaimed work by priority and recent activity, other seats' claims, and long-stale claims.
+  `--json` reports the full total while returning the requested page.
+  The ljos mcp `ljos_ready` tool uses the same page, order and hint, and accepts `limit` and `all`.
+- `ljos ready` prints the first 20 tickets, headed `ready  shown X of Y`.
+  `-n N` prints N tickets and `--all` prints every ticket.
+  `--mine` still names the next plan item.
+- `ljos ready` puts a ticket this seat claimed first, then higher priority, then the newest note, claim or filing.
+  The id breaks the last tie, and a ticket nobody claimed comes before one another seat claimed.
+  A short page names `--limit`, `--all`, `-p` and `--mine`.
+  `--json` prints `shown`, `total` and `rows` for that same page and that same order.
+- `ljos release` and `ljos_release` over `ljos mcp` now refuse a TODO ticket nobody has claimed before they mint a session node, and they name `ljos claim`.
+  That refusal runs only when this seat's graph has no node yet, so a release the claim graph accepts can still say the tracker claim stays with another name.
+- `ljos release`, `ljos finish`, and `ljos_release` over `ljos mcp` now refuse another seat's ticket before they mint a session node.
+  The refusing seat's claim graph gains no node, and the tracker heading is left as it was.
+- `ljos release`, `ljos_release`, and `ljos finish` now name the claiming seat and `ljos send` across separate home directories, and `ljos release` on an unclaimed ticket names `ljos claim`.
+- `ljos remember` prints the same lines when stdout is a pipe as it does on a terminal.
+  `--json` prints the stored lesson.
+- `ljos remember` with `-p` or `project` through `ljos mcp` keeps the project name when the pack is down so the flushed lesson still carries its `project:` entity.
+  `ljos search` with `-p` and `ljos_search` with `project` filter hits by project before applying `--min-score`, so another project's weak match no longer suggests `--min-score 0` on an empty project search.
+  `-P` on a verb that takes `-p` suggests `-p`, and `ljos start -p` without `--plan` prints the `sitting` plan hint.
+- `ljos search` and `ljos recall` ask a busy pack again for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset, `0` does not wait), and they follow `Retry-After` or a JSON `retry_ms`.
+  They rank by words when the pack stays busy, and one line says memory search was busy.
+  `ljos remember` uses that same wait. When the pack stays busy, nothing was stored, the line says to run `ljos remember` again, and the command exits 1.
+  A busy answer is status `429` or `503`, or a JSON `busy` or `code` field. Words in the body are not that signal.
+- `ljos search` and `ljos recall` now name an encoder install command that is available on the machine.
+- `ljos search` and `ljos remember` take `-p` and `--project`.
+  `ljos search -p NAME` keeps that project's tickets and lessons, and lessons that name no project.
+  `ljos remember -p NAME` records that project on the lesson.
+  An unknown project name exits 1 and names the projects that exist.
+  A verb that does not take `-p` names the verbs that do.
+  `ljos sitting` takes `-p` with `--plan`, and without `--plan` it names those verbs.
+  `ljos_search` and `ljos_remember` take the same `project` argument.
+- `ljos search` drops a row that only shares a stopword or a common weak word. It also drops a row under 34 that does not name a subject word.
+  A word match and a meaning match both print a score from 0 to 100.
+  A meaning row from another seat that only shares a generic word is left out unless the encoder's similarity is high.
+  `--min-score` sets that line, and `--min-score 0` prints every row.
+  When the floor removes every row the line is `No relevant matches for "QUERY".` and it names `--min-score 0`.
+- `ljos search` names `ljos finish ID --lesson "..."` when the first row is a ticket this seat claimed.
+- `ljos search` no longer prints backend receipt tab rows before ranked hits.
+  `ljos mcp` search drops those rows from tool output.
+  `ljos search --json` keeps backend receipt tab rows in `receipt_rows`.
+- `ljos search` places a ticket this seat filed, claimed, or noted with this seat's rows when the title, body, or notes match the query.
+  The newest note weighs more than an older note on that ticket.
+  A ticket in a project this seat works in, from its notes or the tracker in the working directory, sorts before another project's ticket that only shares a generic word such as docs, release, or video.
+  An untagged ticket is not this seat's. A pack memory with no seat tag is this seat's own store. A tracker roster that names only this seat is where an untagged ticket is local.
+- `ljos search` prints one line when the memory pack is busy and the rows are word matches.
+  When no words match, that one line says so and the command exits 1.
+- `ljos search` prints the formatted page.
+  Raw rows are `ljos search --porcelain` or `ljos search --json`.
+  A receipt and another seat's mail stay off that page, on a word search fallback and on a shared pack.
+- `ljos search` prints the full page hint once on the count line when more rows may exist.
+- `ljos search` ranks a ticket this seat claimed above another project's ticket when the body or notes contain the query terms and the other title only shares a generic word.
+  `ljos remember` keeps one or two sentences as one lesson. A longer text is stored as one claim per pair of sentences, and the command prints each stored id and text.
+- `ljos search` reads a starting pack from `/health` or a JSON `code`, not from words in the answer.
+  Search ranks a query with busy, try again, or starting as usual.
+  When the pack stays starting, search ranks by words and one line says memory is still starting.
+  `ljos recall`, `ljos remember`, `ljos finish` and the agent search tool use that same signal.
+- `ljos search` retries a busy packsetd for about two seconds, so it still answers by meaning while packsetd serves another seat.
+  When that wait runs out, one line says word search was used because memory search was busy.
+  A tracker write does not spend that wait.
+- `ljos search` says meaning search will be ready shortly only while the encoder reports that it is warming.
+- `ljos search` shows the asking seat and the named ticket project first, removes weak common-word matches from other seats, and labels strong cross-seat matches.
+- `ljos search`, `ljos recall`, the search tool and hook context follow the pack fused order (score fusion, then diversity, then spaced recall).
+  This seat's rows come before another seat's rows.
+  The rank line names that fused order.
+  A packsetd that answers `packsetd warming` stays up for ensure, doctor, search, remember, the search tool and admission.
+  `ljos doctor` shows `warming` and the time from `eta_s`.
+  Search does not say memory is starting while that daemon answers a search.
+- `ljos seat` names `export LJOS_SEAT=NAME` when the seat is the most recent write on this machine.
+- `ljos show ID` opens a memory when the id is a full atom id, the eight hex characters `ljos search` and `ljos remember` print, or a `local:` id.
+  An unknown id says it is neither a ticket nor a memory and names `ljos search`.
+  `--json` prints the same record.
+- `ljos show proj-1a2b` prints the ticket body under the header, then the most recent notes, newest last, each with its age and seat.
+  The page keeps eight notes and names the earlier ones with `ljos show proj-1a2b --all`.
+  `--verbose` prints every note, the same as `--all`.
+  `--json` adds `body` and `notes`.
+- `ljos show` wraps the full ticket title at eighty columns without cutting it, and prints the claim seat and age when claimed, the parent ticket, child tickets, blockers, the full body, and the notes in order with each note's time, age, and author seat.
+  Long note lists print the eight newest notes and name `--all` for the rest.
+  `--json` carries `claim`, `parent`, `children`, `blocked_by`, `body`, and `notes` with each note's `time`.
+  The `ljos_show` tool on `ljos mcp` returns the same ticket page.
+- `ljos sitting "My title"` without `--plan` says how to start a plan with `--plan` when the title is not a ticket id.
+  A ticket id the tracker does not have still names `ljos search`.
+- `ljos sitting --plan` accepts `--top` with the same meaning as on `ljos file`.
+- `ljos sitting --plan` now prints the next checklist item once.
+- `ljos sitting --plan` on a `--no-embed` install prints `matched by words (encoder not installed)` instead of internal memory jargon.
+  `ljos search` tells a new reader the first row is the closest match and says how many checks picked each hit.
+  `ljos remember` names the prompt hook only when one is wired, and otherwise says the lesson is in `ljos search`.
+  Doc samples were regenerated.
+- `ljos sitting --plan` prints one line with the age of a conversation ticket older than a day and `ljos sitting ID` to switch.
+- `ljos sitting --plan` with no tracker set up now stops before it writes anything and names `ljos onboard`.
+  It used to make `Software/<project>/issues.org` under the working directory, then exit 1 on a deed store that was not there.
+  `ljos mcp` `ljos_start` with an items list gives the same answer.
+- `ljos sitting` now runs claim and refusal checks before binding a playbook, so a sitting refused on another seat's ticket writes no `playbook:` note and no local playbook record.
+- `ljos sitting` on an id the tracker does not have names that id and names `ljos search`.
+  `ljos mcp` `ljos_sitting` does the same, and the working directory is left as it was.
+  `ljos note` on that id, in a product checkout, stops before `vissue` can create `vissue.toml`.
+- `ljos sitting` on an id the tracker does not hold names that id and does not write into the working directory.
+  `ljos note`, `ljos finish`, `ljos claim` and `ljos file --parent` do not start a tracker in that directory.
+  A product checkout is left as it was when vissue would have initialised one there.
+- `ljos sitting` selects related lessons from the ticket title and project, preferring the asking seat while keeping labelled strong matches from other seats.
+- `ljos_claim` describes `takeover` in its `ljos mcp` tool description and resolves legacy issue aliases with `on_disk`.
+  `ljos claim --takeover` documentation fixes the inline literal markup around `LJOS_LEASE_SECS=0` and `--takeover`.
+- `ljos_claim` over `ljos mcp` now uses the same missing ticket line as `ljos claim`, including `ljos ready` and the closest id.
+- `ljos_claim`, `ljos_release` and `ljos_complete` over `ljos mcp` now refuse a ticket id the tracker does not have, as `ljos claim`, `ljos release` and `ljos complete` do.
+  `ljos_claim` used to mint a session node for a mistyped id, and `ljos_release` told the caller to `ljos claim` a ticket that does not exist.
+- `ljos_doctor` over `ljos mcp` checks the sibling `ljos` binary instead of comparing `ljos` against `ljos-mcp`, so a clean install no longer reports `seat binary` as failing.
+- `ljos_doctor` over `ljos mcp` now marks each optional row with `optional` true, so an absent `packset-embed`, `ljos-hud`, cloud guard, runners or git hooks row with `ok` false no longer reads as a failure.
+  The encoder install command in that row, and in `ljos doctor`, no longer changes with whether `ljos mcp` started in a checkout with an `install.sh`.
+- `ljos_note` with no open sitting says to start one with `ljos sitting`.
+  The next line names that call instead of `ljos_finish`.
+- `ljos_remember` prints the same lines as `ljos remember`, including whether the lesson is standing.
+  An omitted transient flag stores a standing lesson, and passing transient true still stores an episode.
+- `ljos_search` names the missing encoder with the same install command as `ljos search`.
+  The reading talks about the score on each row.
+- `ljos_vote` schema help now notes that `choice` accepts any option from `--options`, not only `accept` or `reject`.
+- `ljos` now checks tool-call records in both the active `XDG_RUNTIME_DIR` path and the default runtime path, so overriding `XDG_RUNTIME_DIR` does not hide an existing record.
+  When a tool-call record cannot be found after a recorded write fault, `ljos` now names each `tool-calls` path it checked.
+- `ljos` now retries a slow tracker call before failing, and `ljos search` retries a busy memory search before falling back to word matches.
+- `ljos` with no arguments leaves off `sh install.sh --no-embed` when the binary is the installed program.
+  A binary built under a cargo target directory still names that command.
+- `scripts/install.sh --no-embed --no-onboard` names `ljos onboard` on the Next line.
+  An install that already ran `ljos onboard` still names `ljos doctor`.
+- `scripts/install.sh --no-onboard` does not run the `ljos policy -- git push --force origin topic` sample.
+  An install that runs `ljos onboard` still prints that sample.
+- `scripts/install.sh` run from a checkout names `sh scripts/install.sh --from-checkout` to build that checkout's ljos and ljos-mcp and to install the sibling tools.
+  The published release remains a complete install.
+  The installer checks one archive's build attestation while the next archive downloads, and checks a shared archive once.
+
+### Documentation
+
+- The README opens with what ljos achieves and how it compares with the other tools.
+  The docs index and the introduction use the token counts in `measurements/mcp-size.txt`.
+- The command reference no longer says the hud socket goes in the runtime directory that is keyed by `HOME`.
+  Without `XDG_RUNTIME_DIR` the hud socket is `~/.ljos/run/hud.sock`.
+- The docs and the README now match what the built binary prints and lists.
+  The Model Context Protocol (MCP) page sorts all 54 tools into writers and readers as the server does.
+  It also names the mail tools, the fault lines and the 0.66 cosine floor.
+  The introduction and the comparison quote 22 core tools, and `scripts/mcp-size.sh --check` now checks those lines.
+  Bob's refused claim is shown as the bare stderr line with exit 1, and `label claim-conflict:` is named as the `ljos mcp` form.
+  The architecture page names the eight events Claude Code gets and the six events Codex gets, and the editor hook list adds session start.
+  The recall demo, the `ljos remember`, `ljos habit`, `ljos onboard`, `ljos policy`, `ljos git-hooks status` and `ljos doctor` samples show the lines the commands print.
+  `ljos remember --help` and `ljos seat --help` say a write with no seat uses the login name, not `unknown-` and the host name.
+- The getting-started install note says there is no network, or the release download fails.
+  An empty search says a match-mode line is not printed.
+
+### Miscellaneous
+
+- A sitting on an issue id the tracker does not have leaves every file as it was.
+  That is true of `ljos sitting` and of the `ljos mcp` sitting tool, in a product checkout, in a tracker, and beside a seat roster in `vissue.toml`.
+  The refusal is one line, and it names the id and `ljos ready` when the tracker can be read.
+  The tests compare the bytes of each file in the product checkout, the tracker and the config directory before and after, so an edit to `vissue.toml` fails them as well as a new file.
+- A test renders a board with old `Claimed-by` rows through `ljos block` on and off, and the rows come back byte for byte.
+- Cover opencode CLI and `ljos mcp` lesson writes against `packsetd` in an integration test.
+- The `ljos mcp` restarted-writer test waits for its port when a parallel test has it bound, so the test no longer fails with `Address already in use`.
+- `ljos sitting demo-none` still says the ticket was not found and names `ljos search`.
+
+
 ## 0.44.0 (2026-11-16)
 
 ### Features

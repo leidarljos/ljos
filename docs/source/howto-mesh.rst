@@ -5,7 +5,6 @@
 Move memory across lanes
 ========================
 
-
 A lane writes its memories into a shared directory. The seat that keeps the
 copy reads that directory, stores one lesson per text, and writes a seed
 file whose bytes follow from those texts.
@@ -33,19 +32,20 @@ unread. A line that is a header, or a line that is not a lesson, is left
 unread as well.
 
 The text's SHA-256 is the identity of a lesson. So is the lane plus the row
-id, when the line carries ``atom_id``, ``row_id`` or ``id``. The first copy is
-imported. A copy already in the pack is unchanged, and is not imported
-again. A repeated text in this same pull is a duplicate. The command prints
-``imported N, unchanged U, skipped M duplicates``, then
+id, when the line carries ``atom_id``, ``row_id`` or ``id``. The first copy
+is imported. A copy already in the pack is unchanged, and is not
+imported again. A repeated text in this same pull is a duplicate. The
+command prints ``imported N, unchanged U, skipped M duplicates``, then
 ``exports skipped S, imported I``.
 ``S`` is exports this run did not import.
 ``I`` is exports whose bytes were new to the seat's record of that file.
 
 A new row is stored in the seat's import slot with the labels
-``imported,unintegrated``. ``pull`` then integrates the seat's imports. That is
-the same work as a full ``ljos memory integrate``, and the pull script does not
-run that verb itself. Integrate keeps one copy of a text already in the pack,
-posts a new one once, and relabels the row ``imported,integrated``.
+``imported,unintegrated``. ``pull`` then integrates the seat's imports.
+That is the same work as a full ``ljos memory integrate``, and the pull
+script does not run that verb itself. Integrate keeps one copy of a text already in the pack,
+posts a new one once, and relabels the row
+``imported,integrated``.
 
 The atom stored for a lesson carries a packset tag ``lane:<name>`` for each
 lane that held the text, and ``seat:<seat>`` for the seat that received it.
@@ -85,11 +85,11 @@ The file is rewritten only when its bytes would change.
 ``pull`` takes an exclusive lock on the handoff directory and on the seat.
 Two pulls of one seat wait, and the seed holds one copy of each text.
 
-A writer that answers 503 is asked again once, after the ``Retry-After`` it sent,
-with the same deadline. A second 503, a 408, or a writer that is not
+A writer that answers 503 is asked again once, after the ``Retry-After`` it
+sent, with the same deadline. A second 503, a 408, or a writer that is not
 answering stops the pull. The line is one line, and it exits 1:
 
-:literal:`Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the seed with rows still missing, so run \`ljos mesh pull --seat SEAT --from DIR\`.`
+``Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the seed with rows still missing, so run `ljos mesh pull --seat SEAT --from DIR`.``
 
 A 408 uses ``the deadline passed before this request ran`` as ``CAUSE``. A second
 503 uses the writer's line, or ``packsetd busy, retrying later``. A writer that
@@ -130,4 +130,4 @@ The bytes land under a temporary name in the same folder and take the real
 name when the write has finished, so a later pull reads a whole seed. One
 operation waits 60 seconds. ``LJOS_SHARE_WAIT`` sets that wait, in seconds.
 
-:literal:`Error: mesh: /srv/handoff: Transport endpoint is not connected. Check the mount, then rerun \`ljos mesh pull --seat box --from /srv/handoff\`.`
+``Error: mesh: /srv/handoff: Transport endpoint is not connected. Check the mount, then rerun `ljos mesh pull --seat box --from /srv/handoff`.``

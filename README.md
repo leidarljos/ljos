@@ -3,7 +3,7 @@
 ljos stores a lesson. A later prompt shows it when the prompt bears on that lesson.
 
 [//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
-These notes describe ljos 0.44.0.
+These notes describe ljos 0.45.0.
 [//]: # ([[[end]]])
 
 ## Achievements

@@ -1,1 +1,0 @@
-`ljos file --top` with no `-p` uses the seat project when one is set; otherwise it exits 1 and names `-p`.

@@ -1,1 +1,0 @@
-`ljos search` names `ljos finish ID --lesson "..."` when the first row is a ticket this seat claimed.

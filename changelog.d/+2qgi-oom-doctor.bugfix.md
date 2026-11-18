@@ -1,1 +1,0 @@
-A short sitting no longer prints `host: the kernel killed a process within the last hour`; `ljos doctor` still does.

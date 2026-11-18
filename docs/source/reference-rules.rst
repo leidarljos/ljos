@@ -34,8 +34,7 @@ outside quotes, and each piece is read again inside: the bodies of
 ``$(...)``, backticks, ``<(...)``, ``>(...)`` and subshells; the script of
 ``sh -c``, ``eval``, ``env -S``, ``trap``, ``alias``, ``su -c``, ``script -c``,
 ``flock -c`` and ``nix-shell --run``; a here-string or here-document fed to a
-shell, and ``echo`` or ``printf`` piped into one; the commands of ``find
--exec``; and the line ``ssh`` runs on its host. Leading ``NAME=value`` words,
+shell, and ``echo`` or ``printf`` piped into one; the commands of ``find -exec``; and the line ``ssh`` runs on its host. Leading ``NAME=value`` words,
 wrappers (``sudo``, ``doas``, ``env``, ``time``, ``nohup``, ``exec``, ``command``,
 ``nice``, ``ionice``, ``timeout``, ``setsid``, ``stdbuf``, ``xargs``, ``flock``,
 ``chronic``, ``unbuffer``, ``watch``), ``case`` patterns and function

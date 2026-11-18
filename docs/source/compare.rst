@@ -57,27 +57,27 @@ Licence                             MIT                                         
 Where each one is ahead
 =======================
 
--  **Mem0** extracts facts from a conversation nobody said to remember, then
-   adds, updates or deletes them (`add <https://docs.mem0.ai/core-concepts/memory-operations/add>`__).
-   ljos keeps only what someone wrote, so it misses those facts.
--  **Zep and Graphiti** keep a temporal graph: each fact has the window it
-   was true in, and a new fact invalidates an old one with its time kept
-   (`concepts <https://help.getzep.com/concepts>`__). ljos keeps the same two
-   times on a claim but has no entity graph.
--  **Letta** gives the agent tools to edit its own memory and a git-tracked
-   memory file system (`SDK page <https://docs.letta.com/concepts/memgpt>`__).
-   ljos has no model in the loop, so nothing reorganises memory between turns.
--  **Basic Memory** stores Markdown notes with wikilinks that people and
-   agents edit together, with semantic search
-   (`README <https://github.com/basicmachines-co/basic-memory>`__). ljos's
-   memory is short claims, not documents.
--  **beads** stores tickets in Dolt, a SQL database with cell-level merge
-   and hash-based ids that avoid merge collisions
-   (`README <https://github.com/steveyegge/beads>`__). ljos merges Org text
-   through git.
--  **git-bug** keeps issues inside the project's own git objects and bridges
-   them to other trackers (`README <https://github.com/git-bug/git-bug>`__).
-   ljos keeps its tracker in a separate repository and has no bridges.
+- **Mem0** extracts facts from a conversation nobody said to remember, then
+  adds, updates or deletes them (`add <https://docs.mem0.ai/core-concepts/memory-operations/add>`__).
+  ljos keeps only what someone wrote, so it misses those facts.
+- **Zep and Graphiti** keep a temporal graph: each fact has the window it
+  was true in, and a new fact invalidates an old one with its time kept
+  (`concepts <https://help.getzep.com/concepts>`__). ljos keeps the same two
+  times on a claim but has no entity graph.
+- **Letta** gives the agent tools to edit its own memory and a git-tracked
+  memory file system (`SDK page <https://docs.letta.com/concepts/memgpt>`__).
+  ljos has no model in the loop, so nothing reorganises memory between turns.
+- **Basic Memory** stores Markdown notes with wikilinks that people and
+  agents edit together, with semantic search
+  (`README <https://github.com/basicmachines-co/basic-memory>`__). ljos's
+  memory is short claims, not documents.
+- **beads** stores tickets in Dolt, a SQL database with cell-level merge
+  and hash-based ids that avoid merge collisions
+  (`README <https://github.com/steveyegge/beads>`__). ljos merges Org text
+  through git.
+- **git-bug** keeps issues inside the project's own git objects and bridges
+  them to other trackers (`README <https://github.com/git-bug/git-bug>`__).
+  ljos keeps its tracker in a separate repository and has no bridges.
 
 What only ljos does here
 ========================
@@ -85,11 +85,11 @@ What only ljos does here
 Of the seven tools in the table, ljos is the one whose docs describe all
 three of these together:
 
--  A ballot per agent and a settle that weighs voters by who turned out
-   right (``ljos vote``, ``ljos consensus``, ``ljos learn``).
--  A memory written as said, labelled by who said it, with a review clock
-   and no model.
--  A handover the receiving machine checks before it imports.
+- A ballot per agent and a settle that weighs voters by who turned out
+  right (``ljos vote``, ``ljos consensus``, ``ljos learn``).
+- A memory written as said, labelled by who said it, with a review clock
+  and no model.
+- A handover the receiving machine checks before it imports.
 
 Code maps
 =========
@@ -121,10 +121,10 @@ Sources
 
 Read on 2026-11-10.
 
--  beads: `README <https://github.com/steveyegge/beads>`__ (features, commands, licence), `docs <https://beads.gascity.com/>`__.
--  Mem0: `open-source overview <https://docs.mem0.ai/open-source/overview>`__ (default components), `add <https://docs.mem0.ai/core-concepts/memory-operations/add>`__ (extraction, ``infer``), `licence <https://github.com/mem0ai/mem0/blob/main/LICENSE>`__.
--  Letta: `SDK page <https://docs.letta.com/concepts/memgpt>`__ (memory blocks, MemFS, channels, self-hosting), `letta-code <https://github.com/letta-ai/letta-code>`__ (current source, Apache-2.0).
--  Zep and Graphiti: `Zep concepts <https://help.getzep.com/concepts>`__ (fact invalidation, provenance), `Graphiti README <https://github.com/getzep/graphiti>`__ (graph databases, model and embedder, Apache-2.0).
--  Basic Memory: `README <https://github.com/basicmachines-co/basic-memory>`__ (Markdown files, Model Context Protocol server, semantic search, optional cloud, AGPL-3.0).
--  git-bug: `README <https://github.com/git-bug/git-bug>`__ (issues in git, bridges, GPL-3.0).
--  graphify, read on 2026-11-13: `README <https://github.com/Graphify-Labs/graphify>`__ (``graphify-out/graph.json``, ``graph.schema_version``, the ``/graphify`` skill, Apache-2.0).
+- beads: `README <https://github.com/steveyegge/beads>`__ (features, commands, licence), `docs <https://beads.gascity.com/>`__.
+- Mem0: `open-source overview <https://docs.mem0.ai/open-source/overview>`__ (default components), `add <https://docs.mem0.ai/core-concepts/memory-operations/add>`__ (extraction, ``infer``), `licence <https://github.com/mem0ai/mem0/blob/main/LICENSE>`__.
+- Letta: `SDK page <https://docs.letta.com/concepts/memgpt>`__ (memory blocks, MemFS, channels, self-hosting), `letta-code <https://github.com/letta-ai/letta-code>`__ (current source, Apache-2.0).
+- Zep and Graphiti: `Zep concepts <https://help.getzep.com/concepts>`__ (fact invalidation, provenance), `Graphiti README <https://github.com/getzep/graphiti>`__ (graph databases, model and embedder, Apache-2.0).
+- Basic Memory: `README <https://github.com/basicmachines-co/basic-memory>`__ (Markdown files, Model Context Protocol server, semantic search, optional cloud, AGPL-3.0).
+- git-bug: `README <https://github.com/git-bug/git-bug>`__ (issues in git, bridges, GPL-3.0).
+- graphify, read on 2026-11-13: `README <https://github.com/Graphify-Labs/graphify>`__ (``graphify-out/graph.json``, ``graph.schema_version``, the ``/graphify`` skill, Apache-2.0).

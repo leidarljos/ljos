@@ -1,10 +1,9 @@
 :description: Two agents on one repository each get a seat, so they can mail each other and each hold a ticket. Search and recall stay one family for a runner.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-================================
+===================================
 Run two agents on one repository
-================================
-
+===================================
 
 Two agents on one repository each get a seat. One can mail the other, and each can hold its own ticket. A lesson stored by one session of a runner is there for the other sessions of that runner.
 
@@ -16,6 +15,8 @@ See the seat
 ============
 
 Claude Code reads ``CLAUDE_CODE_SESSION_ID``. Codex reads ``CODEX_THREAD_ID``, and ``CODEX_SESSION_ID`` when the thread id is unset. Cursor reads ``CURSOR_CONVERSATION_ID``. The seat is the runner's name plus a short id of that value. With none of those set, and no seat named, a read prints ``every-seat``.
+
+.. BEGIN ljos-sample agents-seats
 
 .. code:: console
 
@@ -54,12 +55,16 @@ Claude Code reads ``CLAUDE_CODE_SESSION_ID``. Codex reads ``CODEX_THREAD_ID``, a
    holder  cursor-e6ghys7rpo@e6ghys7rpo
    source  CURSOR_CONVERSATION_ID in this process
 
+.. END ljos-sample agents-seats
+
 When both Codex variables are set, ``CODEX_THREAD_ID`` is the one that names the seat. The holder is the seat, an ``@``, and the same short id. Mail is addressed to the seat. A claim is held under the holder, so two sessions do not hold one ticket together.
 
 Set a name when the sessions should be one seat
-===============================================
+================================================
 
 ``LJOS_SEAT`` and ``--seat`` are the seat as written. Set one when these sessions should be a single seat, or when you want a name you chose. The session id tags the holder and is named in the source. It does not print a note, and the write uses your name.
+
+.. BEGIN ljos-sample agents-named
 
 .. code:: console
 
@@ -73,10 +78,14 @@ Set a name when the sessions should be one seat
    holder  ada@f2pu9d56g0
    source  --seat; session CLAUDE_CODE_SESSION_ID
 
+.. END ljos-sample agents-named
+
 What the sessions share
 =======================
 
 Search and recall treat every session of one runner as one family. The second session's search of the first session's lesson has no ``from`` line. A Cursor session's search names the Claude session the lesson came from. Mail, a claim and a sitting stay with the session that holds them.
+
+.. BEGIN ljos-sample agents-memory
 
 .. code:: console
 
@@ -103,12 +112,16 @@ Search and recall treat every session of one runner as one family. The second se
      Measure the files before picking a codec.
      place 1, 2 of 2 checks, id …
 
+.. END ljos-sample agents-memory
+
 The id on a search row opens with ``ljos show``. A ``local:`` id opens the same way.
 
 Mail the other session
 ======================
 
 Session two stores a lesson, so the pack has heard from it. ``ljos send`` prints ``sent ID from SEAT to RECIPIENT``. The recipient's inbox shows the message. The sender's inbox shows a receipt once that message has been read, not the message itself. A name no seat has written under is refused, and the line lists every seat that has. ``--new-seat`` writes to a seat that has not started.
+
+.. BEGIN ljos-sample agents-mail
 
 .. code:: console
 
@@ -129,10 +142,14 @@ Session two stores a lesson, so the pack has heard from it. ``ljos send`` prints
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos send claude "the build is red"
    label recipient-unseen: send: no seat named claude has written to this pack, so the message would wait unread. Did you mean claude-dxw6sq4j7l? Other seats: claude-f2pu9d56g0. Pass --new-seat to write to a seat that has not started yet
 
+.. END ljos-sample agents-mail
+
 Split the tickets
 =================
 
 One session claims a ticket. The other session's claim is refused and names the holder, and ``ljos send`` reaches that seat. Separate home directories sharing one tracker still enforce that occupancy from the tracker's claimed seat. The second session files its own ticket, claims it, and ``ljos finish`` ends that sitting. ``ljos sitting`` on the ticket the first session claimed is refused the same way. The first ticket stays with the first session.
+
+.. BEGIN ljos-sample agents-tickets
 
 .. code:: console
 
@@ -168,7 +185,11 @@ One session claims a ticket. The other session's claim is refused and names the 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos sitting demo-1
    claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`.
 
+.. END ljos-sample agents-tickets
+
 ``ljos recall`` prints the ticket from the one tracker, so both sessions read the same text. The related lesson is this runner's, so it has no ``from`` line. The Cursor search above is the one that names the other runner.
+
+.. BEGIN ljos-sample agents-recall
 
 .. code:: console
 
@@ -195,10 +216,14 @@ One session claims a ticket. The other session's claim is refused and names the 
        Measure the files before picking a codec.
        id …
 
+.. END ljos-sample agents-recall
+
 When the session has no id
 ==========================
 
 A process with no session id, whose seat would be the bare runner name, shares that name. Here the last write on this machine was the seat ``claude``, and this process has no session id. ``ljos seat`` says so. The fix is one line. A different name in each session splits them. The same name in every session is one seat.
+
+.. BEGIN ljos-sample agents-noid
 
 .. code:: console
 
@@ -214,3 +239,5 @@ A process with no session id, whose seat would be the bare runner name, shares t
    seat    ada
    holder  ada
    source  LJOS_SEAT
+
+.. END ljos-sample agents-noid

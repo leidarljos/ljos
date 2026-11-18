@@ -26,17 +26,14 @@ Each persona is one atom in the pack; its ballots carry its name. The
 settle takes its anchor, never below the 0.5 every other voter on the
 ballot, the seat too, settles at: the reviewer at 0.2 settles at 0.5 and
 counts as much as a seat, and the reader at 0.8 moves most of the way
-toward the others. A trust row scoped with ``--about
-docs`` weighs only on issues whose title says ``docs``, and ``--about`` is
+toward the others. A trust row scoped with ``--about docs`` weighs only on issues whose title says ``docs``, and ``--about`` is
 also what seats a persona: ``ljos panel ISSUE`` and the ``run_a_panel``
 prompt brief only the personas whose domains the issue's title or its
 island names, and every persona when none does.
 
-A persona keeps its own tree over the seat's facts. ``ljos remember --as
-NAME`` writes into the set ``persona-NAME``, where the duplicate and
+A persona keeps its own tree over the seat's facts. ``ljos remember --as NAME`` writes into the set ``persona-NAME``, where the duplicate and
 replacement rules run among its own conclusions and never against the
-seat's or another persona's; the seat still reads every set. ``ljos
-island CUE --as NAME`` walks the pack through that persona's link
+seat's or another persona's; the seat still reads every set. ``ljos island CUE --as NAME`` walks the pack through that persona's link
 weights, and with ``--fire`` tightens the paths it walked under its own
 name (``link_weights_by``), leaving the seat's weights as they were. Two
 personas that read the same island differently end up with different
@@ -98,6 +95,8 @@ same pair supersedes it.
 Move the trust rows without an outcome
 ======================================
 
+.. BEGIN ljos-sample calibrate
+
 .. code:: console
 
    $ ljos calibrate -p demo
@@ -106,6 +105,8 @@ Move the trust rows without an outcome
    alice weighs bob at 0.917
    alice weighs carol at 0.643
    ...
+
+.. END ljos-sample calibrate
 
 The command needs one project issue with two or more ballots. With fewer it
 names that and exits 1.

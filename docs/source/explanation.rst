@@ -1,18 +1,16 @@
-:description: This page describes ljos 0.44.0.
+.. [[[cog import ljos_version as v; v.lines("", ":description: This page describes ljos {version}.", ":cover: https://leidarljos.github.io/ljos/_static/og.png", "", "This page describes ljos {version}.", "")]]]
+
+:description: This page describes ljos 0.45.0.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-===========
-Explanation
-===========
+This page describes ljos 0.45.0.
 
-
-This page describes ljos 0.44.0.
+.. [[[end]]]
 
 One seat over the habitats
 ==========================
 
-.. image:: _static/seat.svg
-   :width: 100.0%
+|image1|
 
 ljos keeps nothing of its own. Each kind of fact lives in one store. ljos calls that
 store's command line to read or write it.
@@ -32,8 +30,6 @@ claim graph (claimdag) who is working on what right now, as a lease per sitting 
 consensus              the weighting that settles a vote                        computed from the tracker and the pack         nothing stored                ``ljos consensus``                                   ``ljos consensus ID``
 ====================== ======================================================== ============================================== ============================= ==================================================== ===========================
 
-``ljos search`` reads the pack and the tracker. A ticket whose title matches the query is included, and then one whose notes match. An exact or near-exact title is the first row, while the encoder is loading and after it has answered. The row names the ticket id and the title, so ``ljos recall ID`` opens it. A search that found nothing prints no match-mode line. The line is ``Nothing matched "which fusion". Try a shorter query, such as: ljos search fusion``.
-
 The claim graph shows itself least, by design. It answers one question while work runs: is
 anyone already on this ticket, here, now? ``ljos sitting`` takes the ticket's node before it
 returns. A second sitting on the same ticket learns who has it. ``ljos finish`` marks the node
@@ -45,12 +41,12 @@ ticket, and the pack cites it in a memory. The deed store answers for it.
 The contracts
 =============
 
--  Citing a deed names it. The bytes stay in deedar.
--  A finish ends the sitting. A person closes the ticket when the work is accepted.
--  A finish hands the claim back and puts the ticket in the state it had before the claim.
--  Cards are read-only. The seat writes to the pack, and a person writes the cards.
--  A tool that fails is a store refusing or down, and it says which. It is never an empty answer.
--  ljos calls no model, unless the person turns on Jev.
+- Citing a deed names it. The bytes stay in deedar.
+- A finish ends the sitting. A person closes the ticket when the work is accepted.
+- A finish hands the claim back and puts the ticket in the state it had before the claim.
+- Cards are read-only. The seat writes to the pack, and a person writes the cards.
+- A tool that fails is a store refusing or down, and it says which. It is never an empty answer.
+- ljos calls no model, unless the person turns on Jev.
 
 How a shell command is judged
 =============================
@@ -59,7 +55,7 @@ Before an agent's shell command runs, the runner's hook hands it to ``ljos hook`
 asks ``ljos-policyd`` and relays the answer. policyd is the one place that says whether a
 command is dangerous. It is the trusted part. ljos is not. By default neither stops the
 command: the answer is a label and a warning line, and the command runs.
-block-on-warning does not block. It warns with the rule's label.
+``block-on-warning`` does not block. It warns with the rule's label.
 A cloud seat's push rule, below, is the one exception.
 
 An earlier ljos ran nine checks of its own before it asked policyd. Each check came from a
@@ -83,16 +79,16 @@ scripts a command runs.
 
 The built-in law covers:
 
--  privilege: ``sudo``, and ``chmod`` that sets setuid
--  code from the network: ``curl`` or ``wget`` piped to a shell, and decoded text piped to a shell
--  raw disks: writes with ``dd of=/dev/...``, ``mkfs`` and ``wipefs``
--  deletes: ``rm -rf`` outside the work tree and ``/tmp``, and recursive ``chmod`` or ``chown`` on system trees
--  shared history: a force push to ``main``, ``master``, ``develop`` or a protected branch
--  published refs: deleting a remote branch, ``git filter-branch``, ``git filter-repo``, ``git reflog expire``, and deleting a published ref
--  uncommitted work: ``git reset --hard``, ``git clean -f``, ``git checkout .`` and ``git stash clear``, as one warning
--  credentials: reading a named credential file, or sending one over the network
--  its own rules: writes to the hook files, the policy files and the ljos programs
--  mail: outbound mail whose From is not the person's own address
+- privilege: ``sudo``, and ``chmod`` that sets setuid
+- code from the network: ``curl`` or ``wget`` piped to a shell, and decoded text piped to a shell
+- raw disks: writes with ``dd of=/dev/...``, ``mkfs`` and ``wipefs``
+- deletes: ``rm -rf`` outside the work tree and ``/tmp``, and recursive ``chmod`` or ``chown`` on system trees
+- shared history: a force push to ``main``, ``master``, ``develop`` or a protected branch
+- published refs: deleting a remote branch, ``git filter-branch``, ``git filter-repo``, ``git reflog expire``, and deleting a published ref
+- uncommitted work: ``git reset --hard``, ``git clean -f``, ``git checkout .`` and ``git stash clear``, as one warning
+- credentials: reading a named credential file, or sending one over the network
+- its own rules: writes to the hook files, the policy files and the ljos programs
+- mail: outbound mail whose From is not the person's own address
 
 An ordinary push of a branch runs.
 A lease push or a force push runs too, with one ``allow\twarn\tgit-force-push\t...`` line, and the bypass log keeps the label.
@@ -105,20 +101,20 @@ policyd warns on a token on the command line. A remote URL that carries a token 
 line, so the warning is the same. The line is kept in shell history, and the token is visible
 in the process list.
 
-Push with a credential through GIT\ :sub:`ASKPASS` or a git credential helper, never with a token in the URL or argv.
+Push with a credential through GIT_ASKPASS or a git credential helper, never with a token in the URL or argv.
 
-GIT\ :sub:`ASKPASS` names a program. Git runs that program and reads the password from its standard
+``GIT_ASKPASS`` names a program. Git runs that program and reads the password from its standard
 output. The program prints the token alone. Git passes its prompt as the program's only
-argument. /path/to/askpass and REF are placeholders.
+argument. ``/path/to/askpass`` and ``REF`` are placeholders.
 
 .. code:: console
 
    $ GIT_ASKPASS=/path/to/askpass git push origin REF
 
 A git credential helper is a program git runs when it needs a password. Git passes the
-argument get. The helper prints two lines. The first line is username=USER. The second line
-is password= with the token immediately after the equals sign. The helper reads the token
-from a file. The git command names the helper. /path/to/helper, USER and REF are placeholders.
+argument ``get``. The helper prints two lines. The first line is ``username=USER``. The second line
+is ``password=`` with the token immediately after the equals sign. The helper reads the token
+from a file. The git command names the helper. ``/path/to/helper``, ``USER`` and ``REF`` are placeholders.
 
 .. code:: console
 
@@ -144,13 +140,13 @@ Each swap also shows a note naming both commands and keeps a row in
 The two checks ljos keeps
 -------------------------
 
--  The tracker is written through ljos. A command, or a file tool, that writes the tracker's
-   files by hand gets a warning. Ticket text is data, so a ticket body that mentions a path or a
-   command is never read as one.
--  A push onto a protected branch warns when the ticket of the current sitting has no settled
-   consensus. The push runs. With one active seat, that seat's own vote settles it.
-   With two or more, the normal quorum applies. The ``pre-push`` git hook, once installed,
-   still holds that push under a runner.
+- The tracker is written through ljos. A command, or a file tool, that writes the tracker's
+  files by hand gets a warning. Ticket text is data, so a ticket body that mentions a path or a
+  command is never read as one.
+- A push onto a protected branch warns when the ticket of the current sitting has no settled
+  consensus. The push runs. With one active seat, that seat's own vote settles it.
+  With two or more, the normal quorum applies. The ``pre-push`` git hook, once installed,
+  still holds that push under a runner.
 
 What fails open
 ---------------
@@ -196,11 +192,11 @@ record writes as the login name, or as a short stable name when that login is mi
 seat record writes as that seat. Once the tracker's ``vissue.toml`` lists seats, a tracker write
 from a seat it does not list is refused.
 
--  ``ljos seat add NAME`` writes the seat's row in ``vissue.toml``.
--  Solo mode: when ``vissue.toml`` lists one active seat, that seat's own vote settles consensus for
-   the push check. With two or more seats, the normal quorum applies.
--  A grant with ``close=own`` lets one named seat close the tickets it filed or has claimed.
--  Without a grant, ``ljos finish`` leaves the ticket open, and a person closes it.
+- ``ljos seat add NAME`` writes the seat's row in ``vissue.toml``.
+- Solo mode: when ``vissue.toml`` lists one active seat, that seat's own vote settles consensus for
+  the push check. With two or more seats, the normal quorum applies.
+- A grant with ``close=own`` lets one named seat close the tickets it filed or has claimed.
+- Without a grant, ``ljos finish`` leaves the ticket open, and a person closes it.
 
 A grant is made with ``ljos seat grant SEAT close=own --quote "..." --at ISO --via RECORDER``. The
 row lives in ``vissue.toml``. It holds the quote, the time, the recorder and the tracker commit. A
@@ -291,8 +287,7 @@ log does not keep the prompt. Nothing here trains on Jev's answers.
 Memory that grows, is reviewed, decays, and is retracted
 ========================================================
 
-.. image:: _static/memory.svg
-   :width: 100.0%
+|image2|
 
 A claim enters the pack because someone said to keep it. It enters a review clock at the same
 moment. The clock is the spaced-repetition model that the Free Spaced Repetition Scheduler fits to
@@ -349,8 +344,7 @@ working set is.
 Islands
 -------
 
-.. image:: _static/island.svg
-   :width: 100.0%
+|image3|
 
 A task does not touch everything a seat knows. The pack links each claim to the claims it shares
 names with. ``ljos island`` finds the cluster a task activates. The top search hits are the seeds,
@@ -361,12 +355,12 @@ When the seat goes on to use an island, ``ljos island --fire`` says so. The stro
 together, and the weight of each link between them grows. Links nobody walks fade without being
 deleted. That is Hebb's rule with Oja's forgetting term (doi:10.1007/BF00275687).
 
-The island lost as a ranking on LongMemEval\ :sub:`S`. The fused arm on that run
+The island lost as a ranking on LongMemEval_S. The fused arm on that run
 encodes with e5-large-v2. Activation flows to well-connected claims, and a
 question asks for something else. So the island is what the seat prints beside the hits for
 orientation, and what fires together after use. It is never the order the hits come in.
 
-``longmemeval_s_recall`` scored the public cleaned LongMemEval\ :sub:`S` file on one CPU.
+``longmemeval_s_recall`` scored the public cleaned LongMemEval_S file on one CPU.
 From a checkout, invoke it as ``cargo run --release -p longmemeval_s_recall``.
 Read the program at ``scripts/longmemeval_s_recall``.
 The program keeps a download only after the pinned sha256 matches.
@@ -403,8 +397,7 @@ arithmetic, and the reader reads the order.
 Handover that can be checked
 ============================
 
-.. image:: _static/handover.svg
-   :width: 100.0%
+|image4|
 
 A handover is a BagIt bag. It holds the tracker slice, the pack's atoms, and the deeds both
 cite. Each deed carries its inclusion receipt against the log head. The manifest is signed when the
@@ -460,3 +453,12 @@ Forgetting here is by review, not by age. Time is data, as in Zep. Retrieval is 
 fused together, and every hit says how many scorers named it. Above the pack, the seat adds what a
 memory alone does not have. Votes settle under trust that learns. Deeds record what the work
 produced. A claim graph says who holds what. A handover is one another seat can check.
+
+.. |image1| image:: _static/seat.svg
+   :width: 100.0%
+.. |image2| image:: _static/memory.svg
+   :width: 100.0%
+.. |image3| image:: _static/island.svg
+   :width: 100.0%
+.. |image4| image:: _static/handover.svg
+   :width: 100.0%

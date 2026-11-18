@@ -1,1 +1,0 @@
-Concurrent hook calls now queue briefly per seat, and calls for different `LJOS_SEAT` values proceed independently. A stale flight lock from a dead process is reclaimed. A lock timeout names the process and `ljos doctor --fix`.

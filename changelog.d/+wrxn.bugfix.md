@@ -1,2 +1,0 @@
-A `CURSOR_CONVERSATION_ID` that exists only on a parent process no longer names this process's seat from a session record under a shared `XDG_RUNTIME_DIR`.
-Seat lookup and session record reads use only the session variables set on this `ljos` process.

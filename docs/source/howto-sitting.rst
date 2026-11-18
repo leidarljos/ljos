@@ -7,10 +7,12 @@ Sit an issue
 
 
 Open the day's work
-===================
+====================
 
 A plan files the parent and its checklist in one tracker commit, claims the parent, and prints each item with its id.
 Set ``LJOS_SEAT`` to the seat that files it. Once ``vissue.toml`` lists seats, that seat has to be on the list. ``ljos seat add`` writes the row.
+
+.. BEGIN ljos-sample sitting-plan
 
 .. code:: console
 
@@ -37,6 +39,8 @@ Set ``LJOS_SEAT`` to the seat that files it. Once ``vissue.toml`` lists seats, t
    day-ab12  STARTED  [#C]  Ship the codec
    ...
    See more with `--limit` or `--all`. Narrow with `-p` or `--mine`.
+
+.. END ljos-sample sitting-plan
 
 Plain ``ljos ready`` prints 20 tickets and ends a short page with the ``--limit`` and ``--all`` hint shown above.
 
@@ -152,10 +156,10 @@ With Jev on, the ``Stop`` and ``SubagentStop`` hooks audit the turn once
 before the agent stops. The audit reads four parts of the turn, bounded
 to a few thousand tokens:
 
--  the person's last request
--  the shell commands the turn ran since that request
--  the latest test output, or the last output when no test ran
--  the final message from the agent
+- the person's last request
+- the shell commands the turn ran since that request
+- the latest test output, or the last output when no test ran
+- the final message from the agent
 
 Jev answers three questions about it:
 

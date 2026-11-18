@@ -1,11 +1,6 @@
 :description: How the seat meets the rest of the world: the memory systems it learns from, the concurrency designs it voted on, the runners it sits in, and the dogfooding that tests it every day.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-===========
-Integration
-===========
-
-
 How the seat meets the rest of the world: the memory systems it learns
 from, the concurrency designs it voted on, the runners it sits in, and
 the dogfooding that tests it every day. The :doc:`explanation <explanation>`

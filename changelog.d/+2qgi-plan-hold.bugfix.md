@@ -1,1 +1,0 @@
-`ljos sitting --plan` prints one line with the age of a conversation ticket older than a day and `ljos sitting ID` to switch.

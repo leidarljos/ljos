@@ -1,11 +1,6 @@
 :description: ljos coordinates the pack, the tracker, the claim graph and the policy check for the runners it sits in. A persona runs in its own pane. The seat process does not share that pane's address space.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-============
-Architecture
-============
-
-
 ``ljos`` coordinates the pack, the tracker, the claim graph and the policy
 check for the runners it sits in. A persona runs in its own pane. The seat
 process does not share that pane's address space.

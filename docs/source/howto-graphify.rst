@@ -5,7 +5,6 @@
 Use ljos with graphify
 ======================
 
-
 graphify maps a repository into ``graphify-out/graph.json``.
 ljos remembers what agents learned and tracks their work.
 When that file is present, ``ljos recall`` adds a code context section from it.

@@ -9,252 +9,233 @@ Environment and sync files
 Environment
 ===========
 
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| Variable                                                    | Read by                                                                                                                                                                                                                                                                                                                                       |
-+=============================================================+===============================================================================================================================================================================================================================================================================================================================================+
-| ``PACKSET_URL``                                             | the pack client; unset, ``http://127.0.0.1:8761`` (``PACKSET_PORT`` moves the port), or this user's own port when 8761 is another user's; ``off`` means no pack                                                                                                                                                                               |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``PACKSET_WORKSPACE``                                       | the pack workspace; unset, ``seat``                                                                                                                                                                                                                                                                                                           |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_SEAT``                                               | override for who is sitting. Unset, the seat is a ``seat=`` line, ``~/.config/ljos/seats.toml``, a parent seat record, or the most recent write on this machine. A harness default, such as ``claude`` or ``codex``, becomes that runner plus a short id of the session when this process has one from Claude Code, Codex or Cursor, so two   |
-|                                                             | sessions do not share a seat. An id that exists only on a parent does not name the seat. Search and recall still read the runner's family. The connecting client's name does not name the seat, and neither does the process tree. A read with none of those looks at every seat. A write uses the login name, or a short stable name when    |
-|                                                             | that login is missing, and the first write says to set it. The holder is that seat tagged with the conversation's session. When ``vissue.toml`` lists seats, a tracker write from a seat it does not list is refused. A session seat of a listed runner is that runner's seat                                                                 |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``VISSUE_ROOT``, ``VISSUE_AGENT``                           | the tracker                                                                                                                                                                                                                                                                                                                                   |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``DEEDAR_URL``, ``DEEDAR_HOST_SIGNING_KEY``                 | the deed store; the key signs handovers, and ``~/.config/deedar/host.key`` is used when the variable is unset                                                                                                                                                                                                                                 |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``CLAIMDAG_DIR``                                            | the claim graph                                                                                                                                                                                                                                                                                                                               |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_CARDS_DIR``                                          | the server's cards directory                                                                                                                                                                                                                                                                                                                  |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_MCP_TOOLS``                                          | the tools ``ljos-mcp`` lists; unset, the core set (see MCP tools); ``all`` lists every tool; else names split on commas or spaces                                                                                                                                                                                                             |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_HUD_BIN``                                            | path to ``ljos-hud``; else sibling of ``ljos``, then PATH                                                                                                                                                                                                                                                                                     |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_HUD_SOCKET``                                         | summon socket; else ``$XDG_RUNTIME_DIR/ljos/hud.sock``                                                                                                                                                                                                                                                                                        |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_TRACKER_GIT``                                        | ``commit`` commits the ticket's ``issues.org``, and the sitting's and finish's sealed sync log, without pushing; ``off`` skips the commit and push, and the sync in passing; unset, commit and push. A landed commit or push is not printed. A refusal is one sentence. ``--verbose`` prints the lines. ``ljos sync`` by hand always pushes   |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_TRACKER_PUSH_WAIT``                                  | seconds the tracker push after a claim or finish waits; 5 when unset                                                                                                                                                                                                                                                                          |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_SEARCH_BUSY_WAIT``                                   | seconds ``ljos search``, ``ljos recall``, and ``ljos remember`` keep asking a pack that reports busy; 2 when unset, ``0`` does not wait. A ``Retry-After`` or a JSON ``retry_ms`` sets one pause when it is longer                                                                                                                            |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_SEARCH_WAIT``                                        | seconds ``ljos search`` waits for an encoder that is still loading; 3 when unset, ``0`` does not wait. Rows shown while it loads are word matches, and the line says meaning search will be ready shortly. When nothing is shown, the line names how long to wait before running the search again                                             |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_SEARCH_WARMUP_WAIT``                                 | seconds ``ljos search`` waits when the encoder is loading and the reported remaining time fits; 5 when unset, ``0`` does not wait. The wait stays inside ``LJOS_CALL_TIMEOUT``. A longer or unknown load keeps ``LJOS_SEARCH_WAIT``                                                                                                           |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_INBOX_SYNC_WAIT``                                    | seconds ``ljos inbox --sync COMMIT`` keeps fetching until the remote has the commit; 30 when unset, ``0`` fetches once                                                                                                                                                                                                                        |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_USER_RULES_SYNC``                                    | ``off`` stops user rules from being pulled or pushed through any tracker, and ``ljos prefer --user --sync`` refuses; unset, they sync through a tracker whose ``.ljos/sync.toml`` names a scope                                                                                                                                               |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_USER_RULES_TRACKER``                                 | the tracker checkout user rules sync through; unset, ``repos`` in ``~/.config/ljos/sync.toml``, then ``ISSUE_ROOT`` or ``VISSUE_ROOT``, then the seat's vissue config, then the working directory when it is a tracker                                                                                                                        |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_USER_RULES_SYNC_MS``                                 | milliseconds each user-rule sync may take; 4000 after a write, 1500 at session start, 8000 for ``--sync`` when unset                                                                                                                                                                                                                          |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_TRACK_WORK``                                         | ``on`` makes the hooks ask a conversation with no issue to open one and sit; read from the environment, else ``~/.config/ljos/env``; unset, they say nothing until it sits                                                                                                                                                                    |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_GRAPHIFY``                                           | path to a graphify ``graph.json`` for ``ljos recall``; unset, ``graphify-out/graph.json`` from the working directory up to the repository root; ``off`` leaves the code context section out. A ``graphify`` key in ``ljos.toml`` is the same setting when the variable is unset                                                               |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``XDG_CONFIG_HOME``                                         | where ``ljos/harnesses.toml`` is read from; ``~/.config`` when unset                                                                                                                                                                                                                                                                          |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_PANE_TOOL``                                          | the one ``[[tool]]`` persona panes open in; unset, the first of the file's tools and the built-in herdr and tmux shapes that answers                                                                                                                                                                                                          |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_PANEL_RUNNER``                                       | the runner a decision panel's members run on, through its ``headless`` argv; unset, the seat's own runner, else the build harness                                                                                                                                                                                                             |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``LJOS_PANEL_CONCURRENCY``                                  | how many decision-panel members start at once; unset, the machine's parallelism clamped to 4; ``0`` starts every member; ``LJOS_MAX_PARALLEL`` is the same knob                                                                                                                                                                               |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``XDG_STATE_HOME``, ``XDG_CACHE_HOME``, ``XDG_RUNTIME_DIR`` | where the Jev state, cache and runtime key live (see Jev settings); ``XDG_RUNTIME_DIR`` also keeps the hud socket and the seat records                                                                                                                                                                                                        |
-+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+=========================================================== =========================================================================================================================================================================================================================================================================================================================
+Variable                                                    Read by
+=========================================================== =========================================================================================================================================================================================================================================================================================================================
+``PACKSET_URL``                                             the pack client; unset, ``http://127.0.0.1:8761`` (``PACKSET_PORT`` moves the port), or this user's own port when 8761 is another user's; ``off`` means no pack
+``PACKSET_WORKSPACE``                                       the pack workspace; unset, ``seat``
+``LJOS_SEAT``                                               override for who is sitting. Unset, the seat is a ``seat=`` line, ``~/.config/ljos/seats.toml``, a parent seat record, or the most recent write on this machine. A harness default, such as ``claude`` or ``codex``, becomes that runner plus a short id of the session when this process has one from Claude Code, Codex or Cursor, so two sessions do not share a seat. An id that exists only on a parent does not name the seat. Search and recall still read the runner's family. The connecting client's name does not name the seat, and neither does the process tree. A read with none of those looks at every seat. A write uses the login name, or a short stable name when that login is missing, and the first write says to set it. The holder is that seat tagged with the conversation's session. When ``vissue.toml`` lists seats, a tracker write from a seat it does not list is refused. A session seat of a listed runner is that runner's seat
+``VISSUE_ROOT``, ``VISSUE_AGENT``                           the tracker
+``DEEDAR_URL``, ``DEEDAR_HOST_SIGNING_KEY``                 the deed store; the key signs handovers, and ``~/.config/deedar/host.key`` is used when the variable is unset
+``CLAIMDAG_DIR``                                            the claim graph
+``LJOS_CARDS_DIR``                                          the server's cards directory
+``LJOS_MCP_TOOLS``                                          the tools ``ljos-mcp`` lists; unset, the core set (see MCP tools); ``all`` lists every tool; else names split on commas or spaces
+``LJOS_HUD_BIN``                                            path to ``ljos-hud``; else sibling of ``ljos``, then PATH
+``LJOS_HUD_SOCKET``                                         summon socket; else ``$XDG_RUNTIME_DIR/ljos/hud.sock``
+``LJOS_TRACKER_GIT``                                        ``commit`` commits the ticket's ``issues.org``, and the sitting's and finish's sealed sync log, without pushing; ``off`` skips the commit and push, and the sync in passing; unset, commit and push. A landed commit or push is not printed. A refusal is one sentence. ``--verbose`` prints the lines. ``ljos sync`` by hand always pushes
+``LJOS_TRACKER_PUSH_WAIT``                                  seconds the tracker push after a claim or finish waits; 5 when unset
+``LJOS_SEARCH_BUSY_WAIT``                                   seconds ``ljos search``, ``ljos recall``, and ``ljos remember`` keep asking a pack that reports busy; 2 when unset, ``0`` does not wait. A ``Retry-After`` or a JSON ``retry_ms`` sets one pause when it is longer
+``LJOS_SEARCH_WAIT``                                        seconds ``ljos search`` waits for an encoder that is still loading; 3 when unset, ``0`` does not wait. Rows shown while it loads are word matches, and the line says meaning search will be ready shortly. When nothing is shown, the line names how long to wait before running the search again
+``LJOS_SEARCH_WARMUP_WAIT``                                 seconds ``ljos search`` waits when the encoder is loading and the reported remaining time fits; 5 when unset, ``0`` does not wait. The wait stays inside ``LJOS_CALL_TIMEOUT``. A longer or unknown load keeps ``LJOS_SEARCH_WAIT``
+``LJOS_INBOX_SYNC_WAIT``                                    seconds ``ljos inbox --sync COMMIT`` keeps fetching until the remote has the commit; 30 when unset, ``0`` fetches once
+``LJOS_USER_RULES_SYNC``                                    ``off`` stops user rules from being pulled or pushed through any tracker, and ``ljos prefer --user --sync`` refuses; unset, they sync through a tracker whose ``.ljos/sync.toml`` names a scope
+``LJOS_USER_RULES_TRACKER``                                 the tracker checkout user rules sync through; unset, ``repos`` in ``~/.config/ljos/sync.toml``, then ``ISSUE_ROOT`` or ``VISSUE_ROOT``, then the seat's vissue config, then the working directory when it is a tracker
+``LJOS_USER_RULES_SYNC_MS``                                 milliseconds each user-rule sync may take; 4000 after a write, 1500 at session start, 8000 for ``--sync`` when unset
+``LJOS_TRACK_WORK``                                         ``on`` makes the hooks ask a conversation with no issue to open one and sit; read from the environment, else ``~/.config/ljos/env``; unset, they say nothing until it sits
+``LJOS_GRAPHIFY``                                           path to a graphify ``graph.json`` for ``ljos recall``; unset, ``graphify-out/graph.json`` from the working directory up to the repository root; ``off`` leaves the code context section out. A ``graphify`` key in ``ljos.toml`` is the same setting when the variable is unset
+``XDG_CONFIG_HOME``                                         where ``ljos/harnesses.toml`` is read from; ``~/.config`` when unset
+``LJOS_PANE_TOOL``                                          the one ``[[tool]]`` persona panes open in; unset, the first of the file's tools and the built-in herdr and tmux shapes that answers
+``LJOS_PANEL_RUNNER``                                       the runner a decision panel's members run on, through its ``headless`` argv; unset, the seat's own runner, else the build harness
+``LJOS_PANEL_CONCURRENCY``                                  how many decision-panel members start at once; unset, the machine's parallelism clamped to 4; ``0`` starts every member; ``LJOS_MAX_PARALLEL`` is the same knob
+``XDG_STATE_HOME``, ``XDG_CACHE_HOME``, ``XDG_RUNTIME_DIR`` where the Jev state, cache and runtime key live (see Jev settings); ``XDG_RUNTIME_DIR`` also keeps the hud socket and the seat records
+=========================================================== =========================================================================================================================================================================================================================================================================================================================
 
 ``~/.config/ljos/env`` is loaded for the keys above that the shell leaves unset.
 
 Config reference
 ----------------
 
-ljos reads ``ljos.toml`` from the user config (~/.config/ljos/ljos.toml), then the seat file (~/.config/ljos/seats/$LJOS\ :sub:`SEAT`/ljos.toml), then the project file (ljos.toml), then ``LJOS_CONFIG``, then .ljos/gates.toml. A later file overrides the keys it sets. ``graphify`` is read the other way: ``LJOS_GRAPHIFY``, then ``LJOS_CONFIG``, then the project file, then the seat file, then the user file, and the first value wins. ``[mail]`` is only the user's ljos.toml or mail.toml. ``[cloud] branches`` is only the seat file. A mistake is a warning. A hook and the MCP server print it and keep going. ``ljos doctor`` names the file or the environment variable that set each value.
+
+ljos reads ``ljos.toml`` from the user config (~/.config/ljos/ljos.toml), then the seat file (~/.config/ljos/seats/$LJOS_SEAT/ljos.toml), then the project file (ljos.toml), then ``LJOS_CONFIG``, then .ljos/gates.toml. A later file overrides the keys it sets. ``graphify`` is read the other way: ``LJOS_GRAPHIFY``, then ``LJOS_CONFIG``, then the project file, then the seat file, then the user file, and the first value wins. ``[mail]`` is only the user's ljos.toml or mail.toml. ``[cloud] branches`` is only the seat file. A mistake is a warning. A hook and the MCP server print it and keep going. ``ljos doctor`` names the file or the environment variable that set each value.
+
 
 ljos.toml keys
 ~~~~~~~~~~~~~~
 
--  ``attribution`` ([mail]) default unset
--  ``branches`` ([cloud] or the top of the file) default develop
--  ``command`` ([panel]) default unset
--  ``consensus_branches`` ([gates] or the top of the file) default develop, main
--  ``deny_file`` ([mail]) default unset
--  ``email`` ([identity]) default unset
--  ``graphify`` (the top of the file) default graphify-out/graph.json
--  ``harness`` ([panel]) default unset
--  ``headless`` ([panel]) default unset
--  ``identity`` ([mail]) default unset
--  ``idle_drop`` ([mcp]) default 120s
--  ``workflow.max_children`` ([workflow]) default 24
--  ``panel.max_children`` ([panel]) default 8
--  ``panel.max_descendants`` ([panel]) default 12
--  ``workflow.max_descendants`` ([workflow]) default 48
--  ``max_tokens`` ([panel] or [workflow]) default unset
--  ``max_wall_secs`` ([panel] or [workflow]) default unset
--  ``name`` ([identity]) default unset
--  ``notmuch`` ([mail]) default unset
--  ``notmuch_config`` ([mail]) default unset
--  ``orphan_idle`` ([mcp]) default 6h
--  ``owners`` (the top of the file) default unset
--  ``policyd_config`` ([gates] or the top of the file) default unset
--  ``project`` (the top of the file) default the git checkout directory name
--  ``protected_branches`` ([gates] or the top of the file) default main, master, develop
--  ``quorum`` ([gates] or the top of the file) default 2
--  ``rewrite`` ([gates] or the top of the file) default true
--  ``runner`` ([panel]) default unset
--  ``skip`` ([git\ :sub:`hooks`]) default /tmp, /var/tmp, /dev/shm
--  ``template`` ([panel]) default unset
 
-LJOS\_ variables
-~~~~~~~~~~~~~~~~
+- ``attribution`` ([mail]) default unset
+- ``branches`` ([cloud] or the top of the file) default develop
+- ``command`` ([panel]) default unset
+- ``consensus_branches`` ([gates] or the top of the file) default develop, main
+- ``deny_file`` ([mail]) default unset
+- ``email`` ([identity]) default unset
+- ``graphify`` (the top of the file) default graphify-out/graph.json
+- ``harness`` ([panel]) default unset
+- ``headless`` ([panel]) default unset
+- ``identity`` ([mail]) default unset
+- ``idle_drop`` ([mcp]) default 120s
+- ``workflow.max_children`` ([workflow]) default 24
+- ``panel.max_children`` ([panel]) default 8
+- ``panel.max_descendants`` ([panel]) default 12
+- ``workflow.max_descendants`` ([workflow]) default 48
+- ``max_tokens`` ([panel] or [workflow]) default unset
+- ``max_wall_secs`` ([panel] or [workflow]) default unset
+- ``name`` ([identity]) default unset
+- ``notmuch`` ([mail]) default unset
+- ``notmuch_config`` ([mail]) default unset
+- ``orphan_idle`` ([mcp]) default 6h
+- ``owners`` (the top of the file) default unset
+- ``policyd_config`` ([gates] or the top of the file) default unset
+- ``project`` (the top of the file) default the git checkout directory name
+- ``protected_branches`` ([gates] or the top of the file) default main, master, develop
+- ``quorum`` ([gates] or the top of the file) default 2
+- ``rewrite`` ([gates] or the top of the file) default true
+- ``runner`` ([panel]) default unset
+- ``skip`` ([git_hooks]) default /tmp, /var/tmp, /dev/shm
+- ``template`` ([panel]) default unset
 
--  ``LJOS_ASK_PACK`` default unset
--  ``LJOS_ATOMS_DRIVER`` default unset
--  ``LJOS_ATOM_NOW_MS`` default unset
--  ``LJOS_BIN`` default unset
--  ``LJOS_BIN_DIR`` default unset
--  ``LJOS_CALL_TIMEOUT`` default 60 seconds
--  ``LJOS_CAPTURE`` default on
--  ``LJOS_CARDS_DIR`` default unset
--  ``LJOS_CITE`` default unset
--  ``LJOS_CLOUD_AGE_SECRET`` default unset
--  ``LJOS_CONFIG`` default unset
--  ``LJOS_DEBUG`` default unset
--  ``LJOS_EXTRACT`` default unset
--  ``LJOS_EXTRACT_DEBUG`` default unset
--  ``LJOS_GIT_HOOK`` default unset
--  ``LJOS_GIT_HOOKS`` default unset
--  ``LJOS_GRAPHIFY`` default unset; then the graphify key, else graphify-out/graph.json
--  ``LJOS_GUARD`` default on outside a temporary home
--  ``LJOS_GUARD_FAIL_OPEN`` default unset
--  ``LJOS_GUARD_TIMEOUT`` default 5 seconds
--  ``LJOS_HARNESS_SESSION`` default unset
--  ``LJOS_HOLD`` default unset
--  ``LJOS_HOOKD`` default on
--  ``LJOS_HOOK_ADMIT_MS`` default unset
--  ``LJOS_HOOK_PACK_TIMEOUT_MS`` default 1500, at most 2000
--  ``LJOS_HOOK_QUEUE`` default unset
--  ``LJOS_HOOK_RELAY`` default unset
--  ``LJOS_HOOK_SLOTS`` default unset
--  ``LJOS_HOOK_TIMING`` default unset
--  ``LJOS_HUD_BIN`` default unset; sibling of ljos, then PATH
--  ``LJOS_HUD_LOG`` default unset; beside the summon socket
--  ``LJOS_HUD_SOCKET`` default $XDG\ :sub:`RUNTIMEDIR`/ljos/hud.sock
--  ``LJOS_HUD_TRAY`` default on
--  ``LJOS_INBOX_SYNC_WAIT`` default 30 seconds
--  ``LJOS_INSTALL_SH`` default unset
--  ``LJOS_INSTALL_URL`` default the published install script
--  ``LJOS_IN_HOOK`` default unset
--  ``LJOS_JUDGE`` default unset
--  ``LJOS_LEASE_SECS`` default 900
--  ``LJOS_MAX_PARALLEL`` default the machine's parallelism, clamped to 4
--  ``LJOS_MCP_BIN`` default unset
--  ``LJOS_MCP_CONFIG`` default unset
--  ``LJOS_MCP_FORWARDED`` default unset
--  ``LJOS_MCP_GENERATION`` default unset
--  ``LJOS_MCP_IDLE`` default 30 minutes
--  ``LJOS_MCP_IDLE_DROP`` default 120s
--  ``LJOS_MCP_ORPHAN_IDLE`` default 6h
--  ``LJOS_MCP_TIMEOUT`` default 30 seconds
--  ``LJOS_MCP_TIMEOUT_MS`` default unset; LJOS\ :sub:`MCPTIMEOUT` applies
--  ``LJOS_MCP_TOOLS`` default the core set
--  ``LJOS_MEMBER_BIN`` default unset
--  ``LJOS_MEMLOCK_TEST_CHILD`` default unset
--  ``LJOS_MEMORY_WHY`` default unset
--  ``LJOS_MEM_PORT`` default 8761
--  ``LJOS_MESH_KEY_FILE`` default unset
--  ``LJOS_MESH_LOGIN_SERVER`` default https://hs.grund.rgoswami.me
--  ``LJOS_MESH_TUN`` default /dev/net/tun
--  ``LJOS_MESH_WAIT`` default 30 seconds
--  ``LJOS_OFF`` default unset
--  ``LJOS_ORG_DRIVER`` default unset
--  ``LJOS_PACKSETD_SIGINT_CHILD`` default unset
--  ``LJOS_PACK_CONNECT_MS`` default 300, at most 1000
--  ``LJOS_PACK_TIMEOUT_MS`` default 4000, at most 5000
--  ``LJOS_PANEL_BIN`` default unset
--  ``LJOS_PANEL_CHILD`` default unset
--  ``LJOS_PANEL_COMMAND`` default unset
--  ``LJOS_PANEL_CONCURRENCY`` default the machine's parallelism, clamped to 4
--  ``LJOS_PANEL_HARNESS`` default unset
--  ``LJOS_PANEL_PERSONAS`` default unset
--  ``LJOS_PANEL_RUNNER`` default unset
--  ``LJOS_PANEL_TEMPLATE`` default unset
--  ``LJOS_PANE_TOOL`` default the first tool that answers
--  ``LJOS_POLICY_RECALL_WAIT`` default 3 seconds
--  ``LJOS_PROCESS_NONCE`` default unset
--  ``LJOS_PROC_TREE_PROBE`` default unset
--  ``LJOS_PROGRAMS`` default unset
--  ``LJOS_PROJECT`` default unset
--  ``LJOS_RELEASE_DIR`` default unset
--  ``LJOS_SEARCH_BUSY_WAIT`` default 2 seconds
--  ``LJOS_SEARCH_WAIT`` default 3 seconds
--  ``LJOS_SEARCH_WARMUP_WAIT`` default 5 seconds
--  ``LJOS_SEAT`` default unset
--  ``LJOS_SEAT_KEY`` default unset
--  ``LJOS_SESSION_ID`` default unset
--  ``LJOS_SHARE_FAULT`` default unset
--  ``LJOS_SHARE_WAIT`` default 60 seconds
--  ``LJOS_SHELL_SESSION`` default unset
--  ``LJOS_SITTING_CLAIM_WAIT`` default 10 seconds
--  ``LJOS_STALE_DAYS`` default 7
--  ``LJOS_SYNC_HOST`` default unset
--  ``LJOS_TEST_ARGV`` default unset
--  ``LJOS_TEST_CANON`` default unset
--  ``LJOS_TEST_CANON_TMP`` default unset
--  ``LJOS_TEST_HARNESS`` default unset
--  ``LJOS_TEST_HISTORY_ROOT`` default unset
--  ``LJOS_TEST_HOSTNAME`` default unset
--  ``LJOS_TEST_REQUIRE_TOOLS`` default unset
--  ``LJOS_TEST_SESSION`` default unset
--  ``LJOS_TRACKER_DIR`` default unset
--  ``LJOS_TRACKER_GIT`` default push
--  ``LJOS_TRACKER_LOCK_WAIT`` default 20 seconds
--  ``LJOS_TRACKER_PUSH_WAIT`` default 5 seconds
--  ``LJOS_TRACKER_REMOTE`` default unset
--  ``LJOS_TRACKER_SEARCH`` default unset
--  ``LJOS_TRACKER_TOKEN`` default unset
--  ``LJOS_TRACK_WORK`` default off
--  ``LJOS_UNATTENDED`` default unset
--  ``LJOS_UNSIGNED_BALLOTS`` default unset
--  ``LJOS_USER_RULES_SYNC`` default on
--  ``LJOS_USER_RULES_SYNC_MS`` default 4000 after a write, 1500 at session start, 8000 for –sync
--  ``LJOS_USER_RULES_TRACKER`` default unset
--  ``LJOS_WAKE_BIN`` default unset
--  ``LJOS_WAKE_COMMIT`` default unset
--  ``LJOS_WAKE_FROM`` default unset
--  ``LJOS_WAKE_INTERRUPT`` default unset
--  ``LJOS_WAKE_ISSUE`` default unset
--  ``LJOS_WAKE_LAUNCHER_KEY`` default unset
--  ``LJOS_WAKE_MSG`` default unset
--  ``LJOS_WAKE_SEAT`` default unset
--  ``LJOS_WRITER_PIDFILE`` default unset
--  ``LJOS_WRITER_STANDIN`` default unset
--  ``LJOS_WRITE_SCOPE`` default unset
+
+LJOS variables
+~~~~~~~~~~~~~~
+
+
+- ``LJOS_ASK_PACK`` default unset
+- ``LJOS_ATOMS_DRIVER`` default unset
+- ``LJOS_ATOM_NOW_MS`` default unset
+- ``LJOS_BIN`` default unset
+- ``LJOS_BIN_DIR`` default unset
+- ``LJOS_CAPTURE`` default on
+- ``LJOS_CARDS_DIR`` default unset
+- ``LJOS_CITE`` default unset
+- ``LJOS_CLOUD_AGE_SECRET`` default unset
+- ``LJOS_CONFIG`` default unset
+- ``LJOS_DEBUG`` default unset
+- ``LJOS_EXTRACT`` default unset
+- ``LJOS_EXTRACT_DEBUG`` default unset
+- ``LJOS_GIT_HOOK`` default unset
+- ``LJOS_GIT_HOOKS`` default unset
+- ``LJOS_GRAPHIFY`` default unset; then the graphify key, else graphify-out/graph.json
+- ``LJOS_GUARD`` default on outside a temporary home
+- ``LJOS_GUARD_FAIL_OPEN`` default unset
+- ``LJOS_GUARD_TIMEOUT`` default 5 seconds
+- ``LJOS_HARNESS_SESSION`` default unset
+- ``LJOS_HOLD`` default unset
+- ``LJOS_HOOKD`` default on
+- ``LJOS_HOOK_ADMIT_MS`` default unset
+- ``LJOS_HOOK_PACK_TIMEOUT_MS`` default 1500, at most 2000
+- ``LJOS_HOOK_QUEUE`` default unset
+- ``LJOS_HOOK_RELAY`` default unset
+- ``LJOS_HOOK_SLOTS`` default unset
+- ``LJOS_HOOK_TIMING`` default unset
+- ``LJOS_HUD_BIN`` default unset; sibling of ljos, then PATH
+- ``LJOS_HUD_LOG`` default unset; beside the summon socket
+- ``LJOS_HUD_SOCKET`` default $XDG_RUNTIME_DIR/ljos/hud.sock
+- ``LJOS_HUD_TRAY`` default on
+- ``LJOS_INBOX_SYNC_WAIT`` default 30 seconds
+- ``LJOS_INSTALL_SH`` default unset
+- ``LJOS_INSTALL_URL`` default the published install script
+- ``LJOS_IN_HOOK`` default unset
+- ``LJOS_JUDGE`` default unset
+- ``LJOS_LEASE_SECS`` default 900
+- ``LJOS_MAX_PARALLEL`` default the machine's parallelism, clamped to 4
+- ``LJOS_MCP_BIN`` default unset
+- ``LJOS_MCP_CONFIG`` default unset
+- ``LJOS_MCP_FORWARDED`` default unset
+- ``LJOS_MCP_GENERATION`` default unset
+- ``LJOS_MCP_IDLE`` default 30 minutes
+- ``LJOS_MCP_IDLE_DROP`` default 120s
+- ``LJOS_MCP_ORPHAN_IDLE`` default 6h
+- ``LJOS_MCP_TIMEOUT`` default 30 seconds
+- ``LJOS_MCP_TIMEOUT_MS`` default unset; LJOS_MCP_TIMEOUT applies
+- ``LJOS_MCP_TOOLS`` default the core set
+- ``LJOS_MEMBER_BIN`` default unset
+- ``LJOS_MEMLOCK_TEST_CHILD`` default unset
+- ``LJOS_MEMORY_WHY`` default unset
+- ``LJOS_MEM_PORT`` default 8761
+- ``LJOS_MESH_KEY_FILE`` default unset
+- ``LJOS_MESH_LOGIN_SERVER`` default https://hs.grund.rgoswami.me
+- ``LJOS_MESH_TUN`` default /dev/net/tun
+- ``LJOS_MESH_WAIT`` default 30 seconds
+- ``LJOS_OFF`` default unset
+- ``LJOS_ORG_DRIVER`` default unset
+- ``LJOS_PACKSETD_SIGINT_CHILD`` default unset
+- ``LJOS_PACK_CONNECT_MS`` default 300, at most 1000
+- ``LJOS_PACK_TIMEOUT_MS`` default 4000, at most 5000
+- ``LJOS_PANEL_BIN`` default unset
+- ``LJOS_PANEL_CHILD`` default unset
+- ``LJOS_PANEL_COMMAND`` default unset
+- ``LJOS_PANEL_CONCURRENCY`` default the machine's parallelism, clamped to 4
+- ``LJOS_PANEL_HARNESS`` default unset
+- ``LJOS_PANEL_PERSONAS`` default unset
+- ``LJOS_PANEL_RUNNER`` default unset
+- ``LJOS_PANEL_TEMPLATE`` default unset
+- ``LJOS_PANE_TOOL`` default the first tool that answers
+- ``LJOS_POLICY_RECALL_WAIT`` default 3 seconds
+- ``LJOS_PROCESS_NONCE`` default unset
+- ``LJOS_PROC_TREE_PROBE`` default unset
+- ``LJOS_PROGRAMS`` default unset
+- ``LJOS_PROJECT`` default unset
+- ``LJOS_RELEASE_DIR`` default unset
+- ``LJOS_SEARCH_BUSY_WAIT`` default 2 seconds
+- ``LJOS_SEARCH_WAIT`` default 3 seconds
+- ``LJOS_SEARCH_WARMUP_WAIT`` default 5 seconds
+- ``LJOS_SEAT`` default unset
+- ``LJOS_SEAT_KEY`` default unset
+- ``LJOS_SESSION_ID`` default unset
+- ``LJOS_SHARE_FAULT`` default unset
+- ``LJOS_SHARE_WAIT`` default 60 seconds
+- ``LJOS_SHELL_SESSION`` default unset
+- ``LJOS_SITTING_CLAIM_WAIT`` default 10 seconds
+- ``LJOS_STALE_DAYS`` default 7
+- ``LJOS_SYNC_HOST`` default unset
+- ``LJOS_TEST_ARGV`` default unset
+- ``LJOS_TEST_CANON`` default unset
+- ``LJOS_TEST_CANON_TMP`` default unset
+- ``LJOS_TEST_HARNESS`` default unset
+- ``LJOS_TEST_HISTORY_ROOT`` default unset
+- ``LJOS_TEST_HOSTNAME`` default unset
+- ``LJOS_TEST_REQUIRE_TOOLS`` default unset
+- ``LJOS_TEST_SESSION`` default unset
+- ``LJOS_TRACKER_DIR`` default unset
+- ``LJOS_TRACKER_GIT`` default push
+- ``LJOS_TRACKER_LOCK_WAIT`` default 20 seconds
+- ``LJOS_TRACKER_PUSH_WAIT`` default 5 seconds
+- ``LJOS_TRACKER_REMOTE`` default unset
+- ``LJOS_TRACKER_SEARCH`` default unset
+- ``LJOS_TRACKER_TOKEN`` default unset
+- ``LJOS_TRACK_WORK`` default off
+- ``LJOS_UNATTENDED`` default unset
+- ``LJOS_UNSIGNED_BALLOTS`` default unset
+- ``LJOS_USER_RULES_SYNC`` default on
+- ``LJOS_USER_RULES_SYNC_MS`` default 4000 after a write, 1500 at session start, 8000 for --sync
+- ``LJOS_USER_RULES_TRACKER`` default unset
+- ``LJOS_WAKE_BIN`` default unset
+- ``LJOS_WAKE_COMMIT`` default unset
+- ``LJOS_WAKE_FROM`` default unset
+- ``LJOS_WAKE_INTERRUPT`` default unset
+- ``LJOS_WAKE_ISSUE`` default unset
+- ``LJOS_WAKE_LAUNCHER_KEY`` default unset
+- ``LJOS_WAKE_MSG`` default unset
+- ``LJOS_WAKE_SEAT`` default unset
+- ``LJOS_WRITER_PIDFILE`` default unset
+- ``LJOS_WRITER_STANDIN`` default unset
+- ``LJOS_WRITE_SCOPE`` default unset
+
 
 Packset settings ljos passes through
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
--  ``PACKSET_AUTH`` default unset
--  ``PACKSET_HOME`` default $HOME/.local/share/packset
--  ``PACKSET_PORT`` default 8761
--  ``PACKSET_TIMEOUT_MS`` default unset; a hook uses 1500 and a command uses 4000
--  ``PACKSET_TOKEN`` default unset
--  ``PACKSET_TOKEN_FILE`` default unset
--  ``PACKSET_URL`` default http://127.0.0.1:8761
--  ``PACKSET_WORKSPACE`` default seat
+
+- ``PACKSET_AUTH`` default unset
+- ``PACKSET_HOME`` default $HOME/.local/share/packset
+- ``PACKSET_PORT`` default 8761
+- ``PACKSET_TIMEOUT_MS`` default unset; a hook uses 1500 and a command uses 4000
+- ``PACKSET_TOKEN`` default unset
+- ``PACKSET_TOKEN_FILE`` default unset
+- ``PACKSET_URL`` default http://127.0.0.1:8761
+- ``PACKSET_WORKSPACE`` default seat
+
 
 Vissue settings ljos passes through
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
--  ``ISSUE_ROOT`` default unset
--  ``VISSUE_AGENT`` default unset
--  ``VISSUE_CONFIG`` default $XDG\ :sub:`CONFIGHOME`/vissue/config.toml
--  ``VISSUE_NO_ROUTE`` default unset
--  ``VISSUE_PREFIX`` default Software, when ljos creates the tracker
--  ``VISSUE_ROOT`` default unset; then root in the vissue config, else $XDG\ :sub:`DATAHOME`/vissue/tracker
+
+- ``ISSUE_ROOT`` default unset
+- ``VISSUE_AGENT`` default unset
+- ``VISSUE_CONFIG`` default $XDG_CONFIG_HOME/vissue/config.toml
+- ``VISSUE_NO_ROUTE`` default unset
+- ``VISSUE_PREFIX`` default Software, when ljos creates the tracker
+- ``VISSUE_ROOT`` default unset; then root in the vissue config, else $XDG_DATA_HOME/vissue/tracker
 
 A temporary HOME or working directory
 -------------------------------------
@@ -346,29 +327,29 @@ or pack rule is one warning line in ``additionalContext``, and the call runs.
 The hook never answers ``deny``, ``ask`` or ``block``. Plain text on
 stdin is an argv line and answered in plain lines.
 
-+------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| Event                  | The hook does                                                                                                                                                                                                                                                                                                                                                                      |
-+========================+====================================================================================================================================================================================================================================================================================================================================================================================+
-| ``UserPromptSubmit``   | answers with the memories the prompt activates, preferences first, each once between compactions; with Jev on, asks which claims bear on the prompt and whether it corrects the agent or puts a choice                                                                                                                                                                             |
-+------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``SessionEnd``         | fires the memories injected during the session together and clears the session's record                                                                                                                                                                                                                                                                                            |
-+------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``PostToolUse``        | emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (the build harness sends this event)                                                                                                                                                                                                                                      |
-+------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``PostToolUseFailure`` | searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share at least two content words with the cue, each once between compactions                                                                                                                                                                    |
-+------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``PreCompact``         | fires up to eight of the memories injected so far, drops all of them from the session's record so a later prompt can bring them back, and keeps a note naming the issue the conversation still has claimed, for the next delivery                                                                                                                                                  |
-+------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``SessionStart``       | after a compaction (``source`` ``compact``), on a runner that takes its context, answers with that note; a fresh session hears one line. It says that ljos is on, the memory and due counts, the policy state, and up to three preferences                                                                                                                                         |
-+------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``PreToolUse``         | applies the TCB and pack rules to the command (matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch``); a rule is a warning and the call runs. It keeps the call's ``agent_id`` for each ``ljos`` line, and on a seat MCP tool (``^mcp__.+__ljos_.+$``) only notes a subagent's call, so the ballot binds the session plus that agent. A vissue write tool gets the same   |
-|                        | tracker write check's warning, which names ``ljos finish``                                                                                                                                                                                                                                                                                                                         |
-+------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``Stop``               | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then holds one turn for unread interrupt mail (``decision: block``, or ``followup_message`` in the editor harness) and    |
-|                        | receipts it                                                                                                                                                                                                                                                                                                                                                                        |
-+------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``SubagentStop``       | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once                                                                                                                                                                                                                                                   |
-+------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Event                  | The hook does                                                                                                                                                                                                                                                                                                                                                                       |
++========================+=====================================================================================================================================================================================================================================================================================================================================================================================+
+| ``UserPromptSubmit``   | answers with the memories the prompt activates, preferences first, each once between compactions; with Jev on, asks which claims bear on the prompt and whether it corrects the agent or puts a choice                                                                                                                                                                              |
++------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``SessionEnd``         | fires the memories injected during the session together and clears the session's record                                                                                                                                                                                                                                                                                             |
++------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``PostToolUse``        | emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (the build harness sends this event)                                                                                                                                                                                                                                       |
++------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``PostToolUseFailure`` | searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share at least two content words with the cue, each once between compactions                                                                                                                                                                     |
++------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``PreCompact``         | fires up to eight of the memories injected so far, drops all of them from the session's record so a later prompt can bring them back, and keeps a note naming the issue the conversation still has claimed, for the next delivery                                                                                                                                                   |
++------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``SessionStart``       | after a compaction (``source`` ``compact``), on a runner that takes its context, answers with that note; a fresh session hears one line. It says that ljos is on, the memory and due counts, the policy state, and up to three preferences                                                                                                                                          |
++------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``PreToolUse``         | applies the TCB and pack rules to the command (matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch``); a rule is a warning and the call runs. It keeps the call's ``agent_id`` for each ``ljos`` line, and on a seat MCP tool (``^mcp__.+__ljos_.+$``) only notes a subagent's call, so the ballot binds the session plus that agent. A vissue write tool gets the same    |
+|                        | tracker write check's warning, which names ``ljos finish``                                                                                                                                                                                                                                                                                                                          |
++------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``Stop``               | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then uses one turn for unread interrupt mail (``decision: block``, or ``followup_message`` in the editor harness) and     |
+|                        | receipts it                                                                                                                                                                                                                                                                                                                                                                         |
++------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``SubagentStop``       | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once                                                                                                                                                                                                                                                    |
++------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 The hook's book names the runner that owns its sitting, and the next
 session or MCP call finishes the sitting once that process is gone. The
@@ -385,13 +366,13 @@ it, so there the next MCP call finishes the hook's sitting, and
 Sync files
 ==========
 
-+-------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| File                                            | Contents                                                                                                                                                                                                                                                                                                                                                  |
-+=================================================+===========================================================================================================================================================================================================================================================================================================================================================+
-| ``.ljos/sync.toml`` (in the tracker repository) | the repository's scope and its age recipients; a ``[projects]`` table sends one project's lessons to another scope                                                                                                                                                                                                                                        |
-+-------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``.ljos/atoms/``                                | one sealed log per machine. ``<host>/snap-<seq>.jsonl.age`` is a snapshot sealed once, ``<host>/seg-<seq>-<hash>.jsonl.age`` is a segment sealed once, and ``<host>/plain.sha256`` is the plaintext hash. A sync writes nothing when that hash matches. ``ljos sync --compact``, or more than 64 segments, folds them into one new snapshot. A log from   |
-|                                                 | before this layout, ``<host>.jsonl.age`` and ``<host>.chunks/``, is copied once into ``snap-0`` and the segments, and the old path is removed                                                                                                                                                                                                             |
-+-------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``.ljos/user-rules/``                           | one file of user rules per machine, sealed to the scope's recipients (``<host>.json.age``); a plaintext ``<host>.json`` is from before the seal                                                                                                                                                                                                           |
-+-------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++-------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| File                                            | Contents                                                                                                                                                                                                                                                                                                                                                   |
++=================================================+============================================================================================================================================================================================================================================================================================================================================================+
+| ``.ljos/sync.toml`` (in the tracker repository) | the repository's scope and its age recipients; a ``[projects]`` table sends one project's lessons to another scope                                                                                                                                                                                                                                         |
++-------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``.ljos/atoms/``                                | one sealed log per machine. ``<host>/snap-<seq>.jsonl.age`` is a snapshot sealed once, ``<host>/seg-<seq>-<hash>.jsonl.age`` is a segment sealed once, and ``<host>/plain.sha256`` is the plaintext hash. A sync writes nothing when that hash matches. ``ljos sync --compact``, or more than 64 segments, folds them into one new snapshot. A log from    |
+|                                                 | before this layout, ``<host>.jsonl.age`` and ``<host>.chunks/``, is copied once into ``snap-0`` and the segments, and the old path is removed                                                                                                                                                                                                              |
++-------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``.ljos/user-rules/``                           | one file of user rules per machine, sealed to the scope's recipients (``<host>.json.age``); a plaintext ``<host>.json`` is from before the seal                                                                                                                                                                                                            |
++-------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+

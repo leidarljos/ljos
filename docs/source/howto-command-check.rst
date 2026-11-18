@@ -17,26 +17,26 @@ is the warning, and the command runs.
 
 It warns on these commands:
 
--  ``sudo``, and ``curl`` or ``wget`` into a shell, decoded text included.
--  ``chmod`` that sets setuid, and raw disk writes such as ``dd of=/dev/sda`` and ``mkfs``.
--  ``rm -rf`` outside the work tree and ``/tmp``, and recursive ``chmod`` or ``chown`` on system trees.
--  a force push to ``main``, ``master``, ``develop`` or a protected branch, and deleting a remote branch.
--  ``git filter-branch``, ``git filter-repo``, ``git reflog expire``, and deleting a published ref.
--  throwing away uncommitted work with ``git reset --hard``, ``git clean -f``, ``git checkout .`` or ``git stash clear``.
--  reading a named credential file, or sending one over the network.
--  writes to the hook files, the policy files and the ljos programs.
--  outbound mail whose From is not your own address.
+- ``sudo``, and ``curl`` or ``wget`` into a shell, decoded text included.
+- ``chmod`` that sets setuid, and raw disk writes such as ``dd of=/dev/sda`` and ``mkfs``.
+- ``rm -rf`` outside the work tree and ``/tmp``, and recursive ``chmod`` or ``chown`` on system trees.
+- a force push to ``main``, ``master``, ``develop`` or a protected branch, and deleting a remote branch.
+- ``git filter-branch``, ``git filter-repo``, ``git reflog expire``, and deleting a published ref.
+- throwing away uncommitted work with ``git reset --hard``, ``git clean -f``, ``git checkout .`` or ``git stash clear``.
+- reading a named credential file, or sending one over the network.
+- writes to the hook files, the policy files and the ljos programs.
+- outbound mail whose From is not your own address.
 
 Each warning is one line, ``allow\twarn\tRULE\tWARNING``, and the label is
 kept in ``$XDG_DATA_HOME/ljos/bypass.jsonl``.
 
 ljos keeps two checks of its own, because only ljos knows the tracker and the sitting:
 
--  ljos warns on a hand edit of the tracker's files, from a command or a
-   file tool. Use ``ljos file``, ``ljos note``, ``ljos vote`` and ``ljos finish``.
--  A protected-branch push warns when the current sitting's ticket has no
-   settled consensus. The push runs. The ``pre-push`` git hook, once
-   installed, refuses that push under a runner.
+- ljos warns on a hand edit of the tracker's files, from a command or a
+  file tool. Use ``ljos file``, ``ljos note``, ``ljos vote`` and ``ljos finish``.
+- A protected-branch push warns when the current sitting's ticket has no
+  settled consensus. The push runs. The ``pre-push`` git hook, once
+  installed, refuses that push under a runner.
 
 Let policyd fix a command
 =========================

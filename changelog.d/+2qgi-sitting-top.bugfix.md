@@ -1,1 +1,0 @@
-`ljos sitting --plan` accepts `--top` with the same meaning as on `ljos file`.

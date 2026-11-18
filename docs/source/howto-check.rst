@@ -9,9 +9,17 @@ Check the seat
 ``ljos doctor`` prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable.
 ``ljos doctor --all`` prints every row.
 
-The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.44.0.
+.. [[[cog import ljos_version as v; v.lines("", "The block is the ``ljos`` row from that command on a scratch seat, taken from ljos {version}.", "")]]]
 
-``ljos --version`` printed ``ljos 0.44.0``.
+The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.45.0.
+
+.. [[[end]]]
+
+.. [[[cog import ljos_version as v; v.lines("", "``ljos --version`` printed ``ljos {version}``.", "")]]]
+
+``ljos --version`` printed ``ljos 0.45.0``.
+
+.. [[[end]]]
 
 The scratch seat's day cache already holds that version, so the row says ``crates.io (cached)`` and neither ``behind`` nor ``ahead of``.
 The path stands in for the binary.
@@ -25,12 +33,16 @@ runner above the shell it says the person's git is not gated.
 ``info`` rows, including a missing cloud guard, are optional. A cloud seat runs
 ``ljos cloud up`` for that row. A machine that is not one can leave it.
 
+.. BEGIN ljos-sample doctor
+
 .. code:: text
 
    $ ljos --version
-   ljos 0.44.0
+   ljos 0.45.0
    $ ljos doctor --all
-   ok  ljos    /path/to/ljos  0.44.0  crates.io (cached) 0.44.0
+   ok  ljos    /path/to/ljos  0.45.0  crates.io (cached) 0.45.0
+
+.. END ljos-sample doctor
 
 Exit 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable.
 A tracker that has not been created is an info row and names ``ljos onboard``.

@@ -1,1 +1,0 @@
-With `XDG_RUNTIME_DIR` unset, the runtime directory under the temporary directory is now keyed by `HOME`, so a held issue from one home is no longer read from another home of the same user as "held issue ... is on another tracker".

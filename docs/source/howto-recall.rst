@@ -135,7 +135,7 @@ Ask when
      note: the fused panel held at ten conversations
 
 ``proj-1a2b`` is a sample id ``ljos file`` printed. An unknown id prints
-:literal:`issue proj-1a2b not found. \`ljos ready\` lists the open tickets.`
+``issue proj-1a2b not found. `ljos ready` lists the open tickets.``
 Three stores, one dated list, oldest first: the tracker's logbook, the
 deeds the issue cites with the time each was produced, and the memories the
 issue's title activates with the time each was written. Each block names

@@ -106,8 +106,7 @@ A vissue with ``--file-dissent`` files dissent children only under
 that flag; an older one files them on every run.
 
 A ballot's ``--confidence`` is recorded and weighs no settle and no seat
-tally. ``consensus`` says on how many ballots it was stated. ``learn ID
---outcome OPTION`` scores it once the outcome is known: Brier and log score
+tally. ``consensus`` says on how many ballots it was stated. ``learn ID --outcome OPTION`` scores it once the outcome is known: Brier and log score
 and calibration per voter.
 
 Without an outcome, ``calibrate`` estimates each voter's accuracy from the
