@@ -6,7 +6,7 @@ Troubleshoot doctor
 ===================
 
 
-``ljos doctor`` prints a summary line, then the rows that need action.
+``ljos doctor`` prints the rows that need action, then a summary line.
 Each row is ``no``, ``warn`` or ``info``, then the name, then the state.
 Exit 1 when a ``no`` row is a required part, the pack, the note queue, or a tracker root that is missing or not writable.
 A ``warn`` row does not change the exit code.
@@ -17,7 +17,7 @@ When the registry answers, a missing program's row names that version. These blo
 The pack writer
 ===============
 
-A checkout that had only ``ljos`` and ``ljos-mcp`` on ``PATH`` printed this summary and these pack rows.
+A checkout that had only ``ljos`` and ``ljos-mcp`` on ``PATH`` printed these pack rows and this summary.
 The other missing programs used the same shape, not on PATH, then ``cargo install --locked`` and the crate name. When the registry answers, the row also names that version.
 Exit 1.
 
@@ -27,10 +27,10 @@ Exit 1.
 .. code:: text
 
    $ ljos doctor
-   ljos is not ready: ljos-policyd, vissue, deedar, claimdag, packset, packsetd and memory do not answer. Optional extras: `ljos doctor --all`.
    no  packset not on PATH, so run `cargo install --locked packset`.
    no  packsetd    not on PATH, so run `cargo install --locked packset`.
    no  memory    http://127.0.0.1:8761 does not answer. no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.
+   ljos is not ready: ljos-policyd, vissue, deedar, claimdag, packset, packsetd and memory do not answer. Optional extras: `ljos doctor --all`.
 
 ..
    # proseguard:on
