@@ -13978,6 +13978,91 @@ pub fn project_name(raw: &str) -> Result<String, String> {
     Ok(rest.to_string())
 }
 
+/// Projects the tracker already has, in name order.
+#[must_use]
+pub fn known_projects() -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let Ok(layout) = vissue_core::Layout::resolve(None, None) else {
+        return Vec::new();
+    };
+    let layouts = vissue_core::Router::load(layout.clone())
+        .map(|router| {
+            router
+                .unique_layouts()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|_| vec![layout]);
+    for layout in &layouts {
+        if let Ok(projects) = vissue_core::store::list_projects(layout) {
+            names.extend(projects);
+        }
+    }
+    names.into_iter().collect()
+}
+
+/// The on disk name of a project the tracker already has.
+///
+/// # Errors
+///
+/// The name is empty, a slash is left after a repeated segment is removed,
+/// or no project has that name. The last of those names the projects that
+/// exist.
+pub fn require_known_project(name: &str) -> Result<String> {
+    let name = project_name(name).map_err(|err| anyhow::anyhow!(err))?;
+    let projects = known_projects();
+    if let Some(found) = projects.iter().find(|project| *project == &name) {
+        return Ok(found.clone());
+    }
+    let folded: Vec<String> = projects
+        .iter()
+        .filter(|project| project.eq_ignore_ascii_case(&name))
+        .cloned()
+        .collect();
+    match folded.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => {
+            let listed = if projects.is_empty() {
+                "none".to_string()
+            } else {
+                projects.join(", ")
+            };
+            bail!("project: {name} is not a project. The projects are {listed}.")
+        }
+        many => bail!(
+            "project: {name} matches {}. Pass one of those names.",
+            many.join(", ")
+        ),
+    }
+}
+
+/// Keep hits for `project`, and lessons that name no project.
+///
+/// A `project:` entity is the project. Otherwise an `issue:` entity names
+/// the project in its id. A row with neither stays: a lesson with no
+/// project tag is global. A ticket always carries an issue id.
+pub fn keep_project(hits: &mut Vec<Hit>, project: &str) {
+    hits.retain(|hit| hit_in_project(hit, project));
+}
+
+fn project_entity(entities: &[String]) -> Option<&str> {
+    entities.iter().find_map(|tag| {
+        let rest = tag.strip_prefix("project:")?.trim();
+        (!rest.is_empty()).then_some(rest)
+    })
+}
+
+fn hit_in_project(hit: &Hit, project: &str) -> bool {
+    if let Some(tagged) = project_entity(&hit.entities) {
+        return tagged.eq_ignore_ascii_case(project);
+    }
+    match issue_on(&hit.entities).and_then(issue_spot::project_of) {
+        Some(named) => named.eq_ignore_ascii_case(project),
+        None => true,
+    }
+}
+
 /// Whether `head` is the tracker root's directory or the org prefix.
 fn layout_segment(head: &str) -> bool {
     if head.is_empty() {
@@ -22086,6 +22171,14 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
             add_entities(&mut atom, [format!("scope:{scope}")]);
         }
     }
+    // `ljos remember -p` records the project on the lesson. A lesson with
+    // no project tag stays global, which is what search keeps beside a
+    // project's own rows.
+    if kind == "lesson" {
+        if let Some(project) = lesson_project_entity() {
+            add_entities(&mut atom, [format!("project:{project}")]);
+        }
+    }
     atom
 }
 
@@ -22169,6 +22262,41 @@ fn url_at_start(text: &str) -> bool {
 /// the seat learned it; these are when it was true (Graphiti's valid time).
 pub const VALID_FROM: &str = "valid_from:";
 pub const VALID_TO: &str = "valid_to:";
+
+thread_local! {
+    static REMEMBER_PROJECT: std::cell::Cell<Option<String>> = const { std::cell::Cell::new(None) };
+}
+
+/// The project `ljos remember -p` records on lessons written while this
+/// guard is alive. Dropping it restores the previous project.
+#[must_use = "the project is recorded until this guard drops"]
+pub struct RememberProject {
+    prev: Option<String>,
+}
+
+impl RememberProject {
+    /// Record `project` on each lesson written before this guard drops.
+    pub fn set(project: Option<String>) -> Self {
+        let prev = REMEMBER_PROJECT.with(|cell| cell.replace(project));
+        Self { prev }
+    }
+}
+
+impl Drop for RememberProject {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        REMEMBER_PROJECT.with(|cell| cell.set(prev));
+    }
+}
+
+fn lesson_project_entity() -> Option<String> {
+    REMEMBER_PROJECT.with(|cell| {
+        let current = cell.take();
+        let out = current.clone();
+        cell.set(current);
+        out
+    })
+}
 
 static VALIDITY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 

@@ -604,6 +604,8 @@ enum Cmd {
     ///
     /// Example: `ljos remember "The lexical default is BM25+."`
     ///
+    /// `-p PROJECT` records that project on the lesson. An unknown name exits 1 and names the projects.
+    ///
     /// One or two sentences are one lesson. The sentence break is the pack's,
     /// so an abbreviation is not a second lesson. A longer text is stored as
     /// one claim per pair of sentences. The command says it was split and
@@ -647,6 +649,11 @@ enum Cmd {
         /// The last day (YYYY-MM-DD) the claim holds. A plain search from the next day on leaves it out; `--valid-at` asks about another day.
         #[arg(long, value_name = "DATE")]
         valid_to: Option<String>,
+        /// Record this project on the lesson.
+        /// One name. A leading segment that repeats the tracker directory or its org prefix is dropped. Any other slash is refused.
+        /// An unknown name exits 1 and names the projects.
+        #[arg(short = 'p', long, value_name = "PROJECT")]
+        project: Option<String>,
     },
     /// Save one standing preference for how work should be done.
     ///
@@ -804,6 +811,9 @@ enum Cmd {
     ///
     /// Example: `ljos search "lexical default"`
     ///
+    /// `-p PROJECT` keeps that project's tickets and lessons, and lessons that name no project.
+    /// An unknown name exits 1 and names the projects.
+    ///
     /// This seat's hits come first. Another seat's hit is kept when it names
     /// the subject, or when the encoder's cosine reaches 0.66. The cosine is
     /// how close the stored text is to the query, from 0 to 1. A generic word
@@ -914,6 +924,11 @@ enum Cmd {
         /// Lowest score to keep. 34 when omitted. 0 prints every row, including a weak word match.
         #[arg(long, value_name = "SCORE", default_value = "34")]
         min_score: f64,
+        /// Only this project's tickets and lessons, plus lessons that name no project.
+        /// One name. A leading segment that repeats the tracker directory or its org prefix is dropped. Any other slash is refused.
+        /// An unknown name exits 1 and names the projects.
+        #[arg(short = 'p', long, value_name = "PROJECT")]
+        project: Option<String>,
     },
     /// List memories that contradict each other.
     ///
@@ -2386,9 +2401,9 @@ enum Cmd {
         /// No parent for the plan, even while an issue is held.
         #[arg(long, requires = "plan")]
         top: bool,
-        /// The project the plan is filed in. Absent: this checkout's prefix, else Software.
+        /// The project the plan is filed in. Pass it with `--plan`. Absent: this checkout's prefix, else Software.
         /// One name. A leading segment that repeats the tracker directory or its org prefix is dropped. Any other slash is refused.
-        #[arg(short = 'p', long, requires = "plan")]
+        #[arg(short = 'p', long)]
         project: Option<String>,
         /// Checklist items, after `--`.
         #[arg(
@@ -2721,6 +2736,13 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
     } else {
         here.at.join(" ")
     };
+    if project_flag_typed(typed) {
+        let shown = project_flag_shown(typed);
+        return format!(
+            "ljos: {where_} has no flag {shown}. The verbs that take -p are {}.",
+            english_and(&here.project_verbs)
+        );
+    }
     match closest(bare, &names) {
         Some(name) => {
             let flag = flag_text(typed, name, &here.flags);
@@ -2812,9 +2834,64 @@ fn missing_argument(err: &clap::Error, args: &[String]) -> Option<String> {
             "usage needs a start day. Pass it as `ljos usage --since YYYY-MM-DD`.".to_string(),
         );
     }
+    if cmd == "sitting" && args_name_project(args) && !args.iter().any(|arg| arg == "--plan") {
+        return Some(sitting_project_line());
+    }
     Some(format!(
         "{cmd} needs {missing}. `{help}` lists what to pass."
     ))
+}
+
+/// `-p` on `sitting` files a plan. Without `--plan` the line says so and
+/// names every verb that takes `-p`.
+fn sitting_project_line() -> String {
+    format!(
+        "ljos: sitting takes -p with --plan. The verbs that take -p are {}.",
+        project_verbs_sentence()
+    )
+}
+
+fn project_verbs_sentence() -> String {
+    english_and(&words_at(&[]).project_verbs)
+}
+
+fn project_flag_typed(typed: &str) -> bool {
+    matches!(project_flag_shown(typed), "-p" | "-P" | "--project")
+}
+
+fn project_flag_shown(typed: &str) -> &str {
+    typed.split('=').next().unwrap_or(typed)
+}
+
+fn args_name_project(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "-p" || arg == "-P" || arg == "--project" || arg.starts_with("--project=")
+    })
+}
+
+fn english_and(items: &[String]) -> String {
+    match items {
+        [] => "none".to_string(),
+        [one] => one.clone(),
+        [one, two] => format!("{one} and {two}"),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+fn project_verb_names(root: &clap::Command) -> Vec<String> {
+    let mut names = Vec::new();
+    for sub in root.get_subcommands() {
+        if sub.is_hide_set() {
+            continue;
+        }
+        let takes = sub.get_arguments().any(|arg| arg.get_short() == Some('p'));
+        if takes {
+            names.push(sub.get_name().to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn command_path_head(args: &[String]) -> String {
@@ -2853,6 +2930,8 @@ struct UsageWords {
     flags: Vec<String>,
     /// What an id-taking verb expected, and the command from its example line.
     form: Option<(String, String)>,
+    /// Verbs whose short flag `-p` names a project, in name order.
+    project_verbs: Vec<String>,
 }
 
 fn words_at(path: &[String]) -> UsageWords {
@@ -2869,6 +2948,7 @@ fn words_at(path: &[String]) -> UsageWords {
 fn words_at_inner(path: &[String]) -> UsageWords {
     let mut cmd = Cli::command();
     cmd.build();
+    let project_verbs = project_verb_names(&cmd);
     let mut at = Vec::new();
     for name in path {
         let Some(sub) = cmd.find_subcommand(name).cloned() else {
@@ -2882,6 +2962,7 @@ fn words_at_inner(path: &[String]) -> UsageWords {
         commands: child_names(&cmd),
         flags: flag_spellings(&cmd),
         form: ticket_form(&cmd),
+        project_verbs,
     }
 }
 
@@ -4790,6 +4871,7 @@ fn run_command() -> Result<()> {
             valid_from,
             valid_to,
             json,
+            project,
         } => {
             ljos_cli::config_diag::emit();
             if transient && standing {
@@ -4808,6 +4890,11 @@ fn run_command() -> Result<()> {
                 );
                 std::process::exit(USAGE_STATUS);
             }
+            let project = match project {
+                Some(name) => Some(ljos_cli::require_known_project(&name)?),
+                None => None,
+            };
+            let _remember_project = ljos_cli::RememberProject::set(project);
             ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
             // A paragraph or a session is several claims: each goes in on
             // its own, where the whole was refused at the pack's cap.
@@ -5262,10 +5349,15 @@ fn run_command() -> Result<()> {
             porcelain,
             attempts,
             min_score,
+            project,
         } => {
             if !min_score.is_finite() || min_score < 0.0 {
                 bail!("search: --min-score takes a number from 0 up, not {min_score}.");
             }
+            let project = match project {
+                Some(name) => Some(ljos_cli::require_known_project(&name)?),
+                None => None,
+            };
             ljos_cli::log_recall("search", &query.join(" "));
             // A cold encoder gets long enough to load and be asked again.
             // A warm pack keeps the short budget. Past it the word ranking
@@ -5298,7 +5390,7 @@ fn run_command() -> Result<()> {
             // more than the limit and cut to it once they are gone. A day
             // filter is what drops them. With `--valid-at any` the fetch
             // stays the printed limit.
-            let fetch = if day.is_some() {
+            let fetch = if day.is_some() || project.is_some() {
                 ljos_cli::valid_fetch(limit)
             } else {
                 limit
@@ -5474,6 +5566,9 @@ fn run_command() -> Result<()> {
             ljos_cli::conceal_search_noise(&mut hits, attempts);
             let floor_emptied =
                 ljos_cli::word_rank::apply_relevance_floor(&mut hits, &asked, min_score);
+            if let Some(project) = project.as_deref() {
+                ljos_cli::keep_project(&mut hits, project);
+            }
             if !hits.is_empty() {
                 close_miss = None;
             }
@@ -7245,6 +7340,10 @@ fn run_command() -> Result<()> {
             verbose,
             json,
         } => {
+            if plan.is_none() && project.is_some() {
+                eprintln!("{}", sitting_project_line());
+                std::process::exit(USAGE_STATUS);
+            }
             // A sitting on an unknown id names that id. Onboard would hide it.
             let mut memories = Vec::new();
             let mut full = String::new();

@@ -45,7 +45,7 @@ Setting =LJOS_SEAT= applies to reads only; a write on a shared ljos mcp server w
 The section is the same one =ljos recall= prints.
 =LJOS_GRAPHIFY=off= leaves it out. =LJOS_GRAPHIFY= set to a path reads that file.
 
-=ljos_search= keeps this seat's hits first. When nothing matched, the reading is =Nothing matched "QUERY"= and names a shorter query, in plain text, when one content word is shorter than the query. When nothing is stored, it names =ljos remember= with the query in quotes, because a shorter search would miss too. When the only rows were weaker, the reading is =Nothing relevant was found.=
+=ljos_search= keeps this seat's hits first. When nothing matched, the reading is =Nothing matched "QUERY"= and names a shorter query, in plain text, when one content word is shorter than the query. When nothing is stored, it names =ljos remember= with the query in quotes, because a shorter search would miss too. When the only rows were weaker, the reading is =Nothing relevant was found.= Pass =project= to keep that project's tickets and lessons, and lessons that name no project. An unknown project name is an error that names the projects that exist. =ljos_remember= takes =project= and records that project on the lesson.
 
 =ljos_search= and =ljos_recall= append one line to =recall.log= in the ljos state directory, the same line =ljos search= and =ljos recall= append.
 The line is the time, the seat, =search= or =recall=, and the query or the issue.

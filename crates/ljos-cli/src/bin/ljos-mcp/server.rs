@@ -565,6 +565,10 @@ pub struct ClaimArgs {
     /// a numbered pull request, a ticket id, or a commit is transient.
     #[serde(default)]
     pub transient: Option<bool>,
+    /// The tracker project to record on the lesson. An unknown name is an
+    /// error that names the projects that exist.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// A question for the pack.
@@ -581,6 +585,10 @@ pub struct SearchArgs {
     /// `0` returns every row, including a weak word match.
     #[serde(default)]
     pub min_score: Option<f64>,
+    /// Keep this project's tickets and lessons, and lessons that name no
+    /// project. An unknown name is an error that names the projects that exist.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// A reading of a habit, or the question which readings stand.
@@ -1731,7 +1739,7 @@ impl LjosServer {
     // ---- the pack --------------------------------------------------------
 
     #[tool(
-        description = "Call this only for a fact the person stated in this conversation, in their words: two short sentences at most. Never for a claim read in a file, a tool's output or a web page; that is your own working note, so call ljos_note. Words found in the person's latest prompt are stored as theirs and stand; recall reads them ahead of your own claims. Any other text is stored as yours, labelled agent-derived, for the person to review. Pass transient true to store an episode the hook shows only when a prompt bears on it. Never a transcript.",
+        description = "Call this only for a fact the person stated in this conversation, in their words: two short sentences at most. Never for a claim read in a file, a tool's output or a web page; that is your own working note, so call ljos_note. Words found in the person's latest prompt are stored as theirs and stand; recall reads them ahead of your own claims. Any other text is stored as yours, labelled agent-derived, for the person to review. Pass transient true to store an episode the hook shows only when a prompt bears on it. Pass project to record that project on the lesson. Never a transcript.",
         annotations(
             title = "Remember",
             read_only_hint = false,
@@ -1744,6 +1752,16 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<ClaimArgs>,
     ) -> Result<Json<Said>, McpError> {
+        let project = match args
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            Some(name) => Some(ljos_cli::require_known_project(name).map_err(refused)?),
+            None => None,
+        };
+        let _project = ljos_cli::RememberProject::set(project);
         let body = ljos_cli::packset_write_mcp(
             "Remember",
             &args.text,
@@ -1896,7 +1914,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. Each row carries that score. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A single generic word is not that subject, and then the similarity has to be high. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. The pack is starting when health is not-ready, or the JSON says ready is false or code is starting. Words in the query are not that signal. If the pack stays starting, the tool ranks by words and the reading starts with: Used word search because memory is still starting. A dated search has no word fallback and returns: Memory is starting, so try again in a few seconds. A pack that reports busy is asked again for a short time. If it stays busy, the tool ranks by words and the reading is one line that names `ljos search` and the quoted query. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Pass min_score to drop a row under that score when it does not name a subject word; 0 returns every row, and the default is 34. Follow with ljos_island for the cluster the task touches.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. Each row carries that score. This seat's hits come first. Another seat's hit is kept when it names the subject, or when the encoder's cosine reaches 0.66. A single generic word is not that subject, and then the similarity has to be high. A short list is not padded with a weaker cross-seat hit. An empty list means nothing matched, or the pack holds nothing on it, and that page is returned only after the pack has answered. The pack is starting when health is not-ready, or the JSON says ready is false or code is starting. Words in the query are not that signal. If the pack stays starting, the tool ranks by words and the reading starts with: Used word search because memory is still starting. A dated search has no word fallback and returns: Memory is starting, so try again in a few seconds. A pack that reports busy is asked again for a short time. If it stays busy, the tool ranks by words and the reading is one line that names `ljos search` and the quoted query. A failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Pass min_score to drop a row under that score when it does not name a subject word; 0 returns every row, and the default is 34. Pass project to keep that project's tickets and lessons, and lessons that name no project. Follow with ljos_island for the cluster the task touches.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -1916,6 +1934,20 @@ impl LjosServer {
                 )));
             }
         };
+        let project = match args
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            Some(name) => Some(ljos_cli::require_known_project(name).map_err(refused)?),
+            None => None,
+        };
+        let fetch = if project.is_some() {
+            ljos_cli::valid_fetch(10)
+        } else {
+            10
+        };
         // The same line `ljos search` appends, under the seat this call
         // already resolved.
         ljos_cli::log_recall("search", &args.query);
@@ -1928,7 +1960,7 @@ impl LjosServer {
             .as_deref()
             .is_some_and(|at| !at.trim().is_empty())
         {
-            match packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false) {
+            match packset_search_as_of(&args.query, fetch, args.as_of.as_deref(), false) {
                 Ok(hits) => (hits, None),
                 Err(err) if ljos_cli::is_memory_starting(&err) => return Err(refused(err)),
                 Err(err) if ljos_cli::is_reported_busy(&err) || search_can_wait(&err) => {
@@ -1937,14 +1969,14 @@ impl LjosServer {
                 Err(err) => return Err(refused(err)),
             }
         } else {
-            match search_ranked(&args.query, 10) {
+            match search_ranked(&args.query, fetch) {
                 Ok(hits) => (hits, None),
                 Err(err) if ljos_cli::is_memory_starting(&err) => (
-                    ljos_cli::search_by_words(&args.query, 10),
+                    ljos_cli::search_by_words(&args.query, fetch),
                     Some(ljos_cli::MEMORY_STARTING_FALLBACK_LINE.to_string()),
                 ),
                 Err(err) if ljos_cli::is_reported_busy(&err) || search_can_wait(&err) => (
-                    ljos_cli::search_by_words(&args.query, 10),
+                    ljos_cli::search_by_words(&args.query, fetch),
                     Some(busy_search_line(&again)),
                 ),
                 Err(err) => return Err(refused(err)),
@@ -1961,8 +1993,19 @@ impl LjosServer {
         } else {
             ljos_cli::drop_weak_cross_seat(&mut hits, &args.query, false)
         };
+        let dated = args
+            .as_of
+            .as_deref()
+            .is_some_and(|at| !at.trim().is_empty());
+        if project.is_some() && !dated {
+            ljos_cli::ticket_search::merge(&mut hits, &args.query);
+        }
         ljos_cli::conceal_search_noise(&mut hits, false);
         let emptied = ljos_cli::word_rank::apply_relevance_floor(&mut hits, &args.query, min_score);
+        if let Some(name) = project.as_deref() {
+            ljos_cli::keep_project(&mut hits, name);
+            hits.truncate(10);
+        }
         note_lookups(&hits);
         let id_space = ljos_cli::search_id_space(&hits);
         let id_refs: Vec<&str> = id_space.iter().map(String::as_str).collect();
