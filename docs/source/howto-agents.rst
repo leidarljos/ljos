@@ -147,7 +147,7 @@ Session two stores a lesson, so the pack has heard from it. ``ljos send`` prints
 Split the tickets
 =================
 
-One session holds a ticket. The other session's claim is refused and names the holder, and ``ljos send`` reaches that seat. The second session files its own ticket, claims it, and ``ljos finish`` ends that sitting. ``ljos sitting`` on the ticket the first session holds is refused the same way. The first ticket stays with the first session.
+One session claims a ticket. The other session's claim is refused and names the holder, and ``ljos send`` reaches that seat. Separate home directories sharing one tracker still enforce that occupancy from the tracker's claimed seat. The second session files its own ticket, claims it, and ``ljos finish`` ends that sitting. ``ljos sitting`` on the ticket the first session claimed is refused the same way. The first ticket stays with the first session.
 
 .. BEGIN ljos-sample agents-tickets
 

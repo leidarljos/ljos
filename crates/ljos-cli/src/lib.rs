@@ -39866,7 +39866,11 @@ fn stamp_tracker(node: &str, assignee: &str) -> Result<Option<String>> {
             };
             match after_reopen {
                 Ok(said) => Ok(said),
-                Err(e2) if tracker_claim_needs_force(&e2.to_string()) => {
+                Err(e2)
+                    if tracker_claim_needs_force(&e2.to_string())
+                        && tracker_open_holder(node)
+                            .is_none_or(|held| same_claimed_seat(&held, assignee, node)) =>
+                {
                     stamp_tracker_claim(node, assignee, true)
                 }
                 Err(e2) => Err(e2),
@@ -39916,6 +39920,29 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
     let assignee = assignee.as_str();
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
+    if let Some(held) = tracker_open_holder(node) {
+        if !same_claimed_seat(&held, assignee, node) {
+            if let Some((_, live)) = live_other_hold_on_ticket(node, &actor, assignee) {
+                return Err(policy_label::labelled(
+                    "claim-conflict",
+                    held_by_another_message(node, assignee, &live, true),
+                ));
+            }
+            let clean = unscoped_holder(&held, node);
+            let (seat, _) = holder_parts(clean);
+            let seat = if seat.is_empty() {
+                clean
+            } else {
+                seat.as_str()
+            };
+            return Err(policy_label::labelled(
+                "claim-conflict",
+                format!(
+                    "claim: {node} is held by another ({held}, seat {seat}), not by {assignee}, so run `ljos send {seat} TEXT`."
+                ),
+            ));
+        }
+    }
     match run_captured("claimdag", &["claim", &id, "--assignee", &actor]) {
         Ok(said) => {
             write_hold(&actor, assignee, node);
@@ -40715,6 +40742,19 @@ fn tracker_claimed_by(node: &str) -> Option<String> {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     })
+}
+
+fn tracker_open_holder(node: &str) -> Option<String> {
+    let v = tracker_show_json(node).ok()?;
+    let state = v["state"].as_str().unwrap_or("").trim();
+    if matches!(state, "DONE" | "CANCELLED") {
+        return None;
+    }
+    v["claimed_by"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// A running record blocks a takeover unless it is this conversation written
@@ -45193,7 +45233,11 @@ fn stamp_tracker_quick(node: &str, assignee: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(2);
     let stamped = match run_captured_within("vissue", &["claim", node], Some(assignee), wait) {
         Ok(_) => Ok(()),
-        Err(err) if tracker_claim_needs_force(&err.to_string()) => {
+        Err(err)
+            if tracker_claim_needs_force(&err.to_string())
+                && tracker_open_holder(node)
+                    .is_none_or(|held| same_claimed_seat(&held, assignee, node)) =>
+        {
             run_captured_within("vissue", &["claim", node, "--force"], Some(assignee), wait)
                 .map(|_| ())
         }
