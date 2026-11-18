@@ -110,3 +110,12 @@ fn ready_and_list_project_flag_names_tickets() {
         assert!(page.contains(line), "{args:?}\n{page}");
     }
 }
+
+#[test]
+fn seat_grant_quote_is_the_owners_yes() {
+    let line = "The owner's yes, quoted as they said it.";
+    for flag in ["--help", "-h"] {
+        let page = help(&["seat", "grant", flag]);
+        assert!(page.contains(line), "{flag}\n{page}");
+    }
+}

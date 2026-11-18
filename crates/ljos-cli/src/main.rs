@@ -474,7 +474,7 @@ enum SeatAction {
         /// Tickets this grant covers, one id per line.
         #[arg(long, value_name = "PATH")]
         ids_file: Option<PathBuf>,
-        /// The owner's words.
+        /// The owner's yes, quoted as they said it.
         #[arg(long)]
         quote: String,
         /// When the owner said it, as RFC 3339.
