@@ -399,10 +399,11 @@ pub fn guard_off_reason() -> Option<String> {
         return None;
     }
     temp_home().map(|home| {
+        let shown = home.display().to_string();
         format!(
             "off: HOME ({}) is a temporary directory, and ljos stays out of test sandboxes. \
              `LJOS_GUARD=on` keeps it on",
-            home.display()
+            shown.escape_debug()
         )
     })
 }
@@ -614,5 +615,21 @@ mod temp_path_tests {
             canon.display()
         );
         TEST_TEMP_ROOTS.with(|roots| roots.replace(None));
+    }
+
+    #[test]
+    fn guard_off_reason_escapes_home_newlines() {
+        let _env = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home\nrun-this");
+        std::fs::create_dir_all(&home).unwrap();
+        crate::with_env_mutation(|| unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("LJOS_OFF");
+            std::env::remove_var("LJOS_GUARD");
+        });
+        let reason = guard_off_reason().unwrap();
+        assert!(!reason.contains('\n'), "{reason:?}");
+        assert!(reason.contains("\\nrun-this"), "{reason}");
     }
 }
