@@ -136,7 +136,7 @@ fn pack() -> Option<ljos_test_boot::Packsetd> {
 }
 
 #[test]
-fn a_decision_on_a_pack_with_no_personas_skips_the_panel_in_one_line() {
+fn a_decision_on_a_pack_with_no_personas_prints_a_working_persona_command() {
     let Some(daemon) = pack() else {
         return;
     };
@@ -146,10 +146,21 @@ fn a_decision_on_a_pack_with_no_personas_skips_the_panel_in_one_line() {
     assert_eq!(code, 0, "{said}");
     assert!(
         said.contains(&format!(
-            "{id} is a decision. The pack has no personas yet, so no panel is seated; `ljos persona NAME --anchor A --view ...` adds one."
+            "{id} is a decision. The pack has no personas yet, so no panel is seated.\nAdd one with `ljos persona reviewer --anchor 0.5 --view \"checks codec choices\" --about codec`."
         )),
         "{said}"
     );
+    let (persona_code, persona_said) = seat.run(&[
+        "persona",
+        "reviewer",
+        "--anchor",
+        "0.5",
+        "--view",
+        "checks codec choices",
+        "--about",
+        "codec",
+    ]);
+    assert_eq!(persona_code, 0, "{persona_said}");
     assert!(!said.contains("could not be written"), "{said}");
     assert!(!said.contains(concat!("ho", "lds no personas")), "{said}");
     assert!(

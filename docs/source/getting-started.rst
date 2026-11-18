@@ -235,6 +235,7 @@ With no git identity the heading is still written, and the last line is ``The tr
 
 The file is Org. ``vissue show demo-2f5j`` prints the heading, and the tracker repository is the one ``ljos doctor --all`` names under ``tracker``.
 A sitting recorded for another tracker is not this ticket's parent. The line names that ticket and the new ticket is filed at the top of the project.
+When a decision has no personas, the sitting names a complete example: ``ljos persona reviewer --anchor 0.5 --view "checks codec choices" --about codec``.
 
 Open the day's work
 ===================

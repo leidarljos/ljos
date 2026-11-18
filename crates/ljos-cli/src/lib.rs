@@ -45731,7 +45731,7 @@ pub fn sitting_stream_started(
         // has written one yet. Asking `panel` would also store an attempt.
         if personas_from_pack().is_ok_and(|all| all.is_empty()) {
             piece.push_str(&format!(
-                "{issue} is a decision. The pack has no personas yet, so no panel is seated; `ljos persona NAME --anchor A --view ...` adds one.\n"
+                "{issue} is a decision. The pack has no personas yet, so no panel is seated.\nAdd one with `ljos persona reviewer --anchor 0.5 --view \"checks codec choices\" --about codec`.\n"
             ));
         } else {
             match panel(issue, &dir) {
