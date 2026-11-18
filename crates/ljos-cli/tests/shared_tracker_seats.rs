@@ -387,3 +387,83 @@ fn separate_homes_report_holder_and_unclaimed_state_on_release_and_finish() {
         "unclaimed release:\n{again_text}"
     );
 }
+
+#[test]
+fn separate_homes_print_assist_line_when_noting_another_seats_ticket() {
+    let vissue = sibling::require("vissue").unwrap_or_else(|e| panic!("{e}"));
+    let claimdag = sibling::require("claimdag").unwrap_or_else(|e| panic!("{e}"));
+    let _deedar = sibling::require("deedar").unwrap_or_else(|e| panic!("{e}"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let alice_home = dir.path().join("alice");
+    let alice_run = alice_home.join("run");
+    let bob_home = dir.path().join("bob");
+    let bob_run = bob_home.join("run");
+    let tracker = dir.path().join("tracker");
+    for d in [
+        &alice_home,
+        &alice_run,
+        &bob_home,
+        &bob_run,
+        &tracker.join("Software/demo"),
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    std::fs::write(
+        tracker.join("Software/demo/issues.org"),
+        "\
+#+TITLE: demo
+#+VISSUE: 1
+#+CATEGORY: demo
+#+TODO: TODO STARTED | DONE CANCELLED
+
+* TODO [#C] Assist note ticket
+:PROPERTIES:
+:ID:         demo-not1
+:END:
+",
+    )
+    .unwrap();
+
+    let siblings = vissue.parent().unwrap();
+    assert_eq!(claimdag.parent(), Some(siblings));
+    let path = format!("{}:/usr/bin:/bin", siblings.display());
+
+    let alice_claim = run_ljos(
+        &path,
+        &alice_home,
+        &alice_run,
+        &tracker,
+        "alice",
+        &["claim", "demo-not1"],
+    );
+    assert!(
+        alice_claim.status.success(),
+        "{}",
+        String::from_utf8_lossy(&alice_claim.stderr)
+    );
+
+    let bob_note = run_ljos(
+        &path,
+        &bob_home,
+        &bob_run,
+        &tracker,
+        "bob",
+        &["note", "demo-not1", "bob assist note"],
+    );
+    assert!(
+        bob_note.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bob_note.stderr)
+    );
+    let note_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&bob_note.stdout),
+        String::from_utf8_lossy(&bob_note.stderr)
+    );
+    assert!(
+        note_out.contains("alice") && note_out.contains("ljos send alice TEXT"),
+        "bob note missed assist line:\n{note_out}"
+    );
+}

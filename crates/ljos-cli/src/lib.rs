@@ -39785,22 +39785,40 @@ pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, alive: b
 /// Reads only; a node the claim graph lacks is not minted.
 #[must_use]
 pub fn assist_note_line(issue: &str) -> Option<String> {
+    let seat = seat_name();
     // claimdag is a read of the hold. A copy that never exits is skipped:
     // the note is already in the logbook, and the assist line is optional.
-    let got = run_captured_within(
+    if let Ok(got) = run_captured_within(
         "claimdag",
         &["get", &work_id(issue)],
         None,
         std::time::Duration::from_secs(2),
-    )
-    .ok()?;
-    let line = got.stdout.lines().next().unwrap_or_default();
-    let live = matches!(line.split_whitespace().nth(1), Some("claimed" | "running"));
-    if !live {
+    ) {
+        let line = got.stdout.lines().next().unwrap_or_default();
+        let live = matches!(line.split_whitespace().nth(1), Some("claimed" | "running"));
+        if live {
+            if let Some(hold) = holder_of(line).as_deref().and_then(read_hold) {
+                return assist_line(issue, &hold, &seat);
+            }
+        }
+    }
+    let held = tracker_open_holder(issue)?;
+    if same_claimed_seat(&held, &seat, issue) {
         return None;
     }
-    let hold = read_hold(&holder_of(line)?)?;
-    assist_line(issue, &hold, &seat_name())
+    let clean = unscoped_holder(&held, issue);
+    let (holder_seat, _) = holder_parts(clean);
+    let holder_seat = if holder_seat.is_empty() {
+        clean
+    } else {
+        holder_seat.as_str()
+    };
+    if holder_seat == seat {
+        return None;
+    }
+    Some(format!(
+        "{holder_seat} holds {issue}. This note is an assist, not a sitting: it is in the logbook the holder reads, and `ljos send {holder_seat} TEXT` reaches the holder now\n"
+    ))
 }
 
 /// [`assist_note_line`] for one hold record and this seat's name.
