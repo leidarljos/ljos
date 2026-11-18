@@ -96,3 +96,65 @@ fn a_parent_cursor_id_and_its_session_record_do_not_name_this_ljos() {
         "{text}"
     );
 }
+
+#[test]
+fn a_parent_cursor_id_in_another_home_does_not_leak_after_a_write_without_xdg_runtime_dir() {
+    let parent_root = tempfile::tempdir().unwrap();
+    let child_root = tempfile::tempdir().unwrap();
+    let child_home = child_root.path().join("home");
+    std::fs::create_dir_all(child_home.join(".config/ljos")).unwrap();
+    std::fs::create_dir_all(child_home.join(".local/state/ljos")).unwrap();
+    std::fs::write(
+        child_home.join(".local/state/ljos/seat-writes.log"),
+        "2026-11-18T19:00:00.000Z\tada\tbox\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_ljos");
+    let stub = child_root.path().join("bin");
+    std::fs::create_dir_all(&stub).unwrap();
+    let curl = stub.join("curl");
+    std::fs::write(&curl, "#!/bin/sh\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let script = format!(
+        "unset XDG_RUNTIME_DIR CURSOR_CONVERSATION_ID CURSOR_AGENT LJOS_SEAT; \
+         export HOME='{}' XDG_CONFIG_HOME='{}/.config' XDG_STATE_HOME='{}/.local/state' \
+         XDG_CACHE_HOME='{}/.cache' LJOS_SYNC_HOST=box PATH='{}:/usr/bin:/bin' LJOS_OFF=1 LJOS_HOOKD=off PACKSET_URL=off; \
+         {bin} seat; printf '%s\\n' '---'; {bin} doctor || true",
+        child_home.display(),
+        child_home.display(),
+        child_home.display(),
+        child_home.display(),
+        stub.display(),
+    );
+    let mut cmd = Command::new("bash");
+    cmd.args(["--noprofile", "--norc", "-c", &script])
+        .env("CURSOR_CONVERSATION_ID", "0199c0de-cursor-parent-only")
+        .env("HOME", parent_root.path())
+        .stdin(Stdio::null());
+    seat_env::clear(&mut cmd);
+    let out = cmd.output().unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let (seat_out, doctor_out) = stdout.split_once("\n---\n").unwrap_or((&stdout, ""));
+    assert_eq!(field(seat_out, "seat"), "ada", "{text}");
+    assert_eq!(field(seat_out, "holder"), "ada", "{text}");
+    assert_eq!(
+        field(seat_out, "source"),
+        "most recent write from this machine",
+        "{text}"
+    );
+    assert!(
+        !stdout.contains("CURSOR_CONVERSATION_ID"),
+        "ancestor CURSOR_CONVERSATION_ID leaked across HOME:\n{text}"
+    );
+    assert!(
+        doctor_out.contains("ok\tseat source\tada named by most recent write from this machine\n"),
+        "doctor leaked ancestor session:\n{text}"
+    );
+}

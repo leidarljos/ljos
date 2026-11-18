@@ -2482,22 +2482,33 @@ fn cached_ancestor_stamp() -> Option<Vec<(String, String)>> {
 /// Whether `pid`, named `comm`, is a cargo test runner binary under
 /// `target/.../deps/`.
 fn same_runtime_dir(env: &[(String, String)]) -> bool {
+    let my_home = std::env::var("HOME").ok().filter(|v| !v.is_empty());
+    let home_matches = || {
+        my_home
+            .as_deref()
+            .is_some_and(|mine| env.iter().any(|(k, v)| k == "HOME" && v == mine))
+    };
     let Ok(mine) = std::env::var("XDG_RUNTIME_DIR") else {
-        return true;
+        return home_matches();
     };
     if mine.is_empty() {
-        return true;
+        return home_matches();
     }
     match env.iter().find(|(k, _)| k == "XDG_RUNTIME_DIR") {
-        Some((_, v)) if !v.is_empty() => v == &mine,
+        Some((_, v)) if !v.is_empty() => {
+            v == &mine
+                && env
+                    .iter()
+                    .find(|(k, _)| k == "HOME")
+                    .is_none_or(|(_, h)| my_home.as_deref() == Some(h.as_str()))
+        }
         _ => {
             if std::env::var_os("LJOS_HOLD").is_some()
                 && std::env::var_os("CURSOR_CONVERSATION_ID").is_none()
             {
                 return false;
             }
-            let my_home = std::env::var("HOME").unwrap_or_default();
-            !my_home.is_empty() && env.iter().any(|(k, v)| k == "HOME" && v == &my_home)
+            home_matches()
         }
     }
 }
