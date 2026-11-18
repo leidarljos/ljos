@@ -5367,6 +5367,14 @@ fn run_command() -> Result<()> {
             if !min_score.is_finite() || min_score < 0.0 {
                 bail!("search: --min-score takes a number from 0 up, not {min_score}.");
             }
+            if join(&query).trim().is_empty()
+                && source_machine.is_none()
+                && source_seat.is_none()
+                && import_id.is_none()
+            {
+                eprintln!("search: the query is empty, so run `ljos search \"QUERY\"`.");
+                std::process::exit(USAGE_STATUS);
+            }
             let project = match project {
                 Some(name) => Some(ljos_cli::require_known_project(&name)?),
                 None => None,
