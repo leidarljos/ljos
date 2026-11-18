@@ -401,6 +401,9 @@ fn promised_in_readme(cmd: &str) -> Vec<&'static str> {
 fn doctor_ready(output: &str) -> bool {
     const WITH_GUARD: &str = "ljos is ready: memory, tracker and command guard work";
     const SANDBOX: &str = "ljos is ready: memory and tracker work";
+    if output.contains("ljos needs action:") {
+        return !output.contains("ljos is ready");
+    }
     if output.contains(WITH_GUARD) {
         return true;
     }
@@ -412,8 +415,8 @@ fn expect_output(cmd: &str, output: &str) {
         Some("doctor") => {
             assert!(
                 doctor_ready(output),
-                "{cmd}\nexpected the ready line with the command guard, or without it \
-                 because this home is a temporary directory\n{output}"
+                "{cmd}\nexpected a ready line with no action rows, or an action summary with no \
+                 ready line\n{output}"
             );
             for key in DOCTOR
                 .iter()

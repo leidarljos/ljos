@@ -105,7 +105,8 @@ A writer with no encoder binary is not described as loading, even if an earlier 
 The =sitting-gate= row follows that. With no agent runner above the shell the word is =info=, and the person's commits, merges and pushes are not held.
 Under a runner the same row names the seat and the branches a push waits on, =develop= or =main=, and the number of seats that push waits for.
 A fresh tracker has no seat list, so that number is 2. When =vissue.toml= lists one active seat, that seat's own vote settles the push.
-A =warn= or =no= row names anything that still needs action, and the ready line follows those rows. The config row is always printed. With nothing set it says the defaults apply. A missing =ljos.toml= is not a warning, because those defaults cover it. =ljos doctor --fix= writes that file when asked, and the file sets no keys. The next command is still =ljos remember=. Add =--all= to see every row.
+A =warn= or =no= row names anything that still needs action. The summary counts those rows and does not call ljos ready while any remain. A ready line appears only when no row needs action. The config row is always printed. With nothing set it says the defaults apply. A missing =ljos.toml= is not a warning, because those defaults cover it. =ljos doctor --fix= writes that file when asked, and the file sets no keys. The next command is still =ljos remember=. Add =--all= to see every row.
+=ljos doctor --all= also prints the optional =git hooks= row. When =core.hooksPath= is unset, that row ends with =, so run `ljos git-hooks install`.= It stays outside the short report and its action-row count.
 
 To install by hand, with =cargo-binstall= already on =PATH=, or to see what onboarding would write:
 

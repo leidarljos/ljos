@@ -134,10 +134,28 @@ fn doctor_flags_a_missing_git_identity_and_names_the_commands() {
     let seat = Seat::new();
     let out = seat.ljos(None, &["doctor"]);
     let text = said(&out);
+    assert!(text.contains("ljos is not ready"), "{text}");
+    assert!(!text.contains("ljos is ready"), "{text}");
     let line = row(&text, "git identity").unwrap_or_else(|| panic!("no git identity row:\n{text}"));
     assert!(line.starts_with("warn\t"), "{line}");
     assert!(line.contains(NAME_COMMAND), "{line}");
     assert!(line.contains(EMAIL_COMMAND), "{line}");
+}
+
+#[test]
+fn a_warning_row_gets_an_action_summary() {
+    let rows = [ljos_cli::Habitat {
+        name: "git identity",
+        state: "set user.name and user.email".to_string(),
+        ok: false,
+    }];
+    let text = ljos_cli::format_doctor_short(&rows);
+    assert_eq!(
+        text,
+        "ljos needs action: 1 row needs action. Every check: `ljos doctor --all`.\n\
+warn\tgit identity\tset user.name and user.email\n"
+    );
+    assert!(!text.contains("ljos is ready"), "{text}");
 }
 
 #[test]

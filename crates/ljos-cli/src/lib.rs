@@ -36824,6 +36824,7 @@ pub fn doctor_summary(rows: &[Habitat]) -> String {
         .into_iter()
         .filter(|name| *name != "claim graph")
         .collect();
+    let actions = rows.iter().filter(|row| doctor_needs_action(row)).count();
     if down.is_empty() && damaged.is_empty() && !unset.is_empty() {
         let mut line = unset_verdict(&unset, &working);
         if degraded {
@@ -36836,7 +36837,35 @@ pub fn doctor_summary(rows: &[Habitat]) -> String {
         }
         return line;
     }
+    if down.is_empty() && damaged.is_empty() && actions > 0 {
+        let noun = if actions == 1 {
+            "row needs"
+        } else {
+            "rows need"
+        };
+        let mut line = format!("ljos needs action: {actions} {noun} action");
+        if degraded {
+            line.push_str(note);
+        }
+        line.push('.');
+        if off > 0 {
+            line.push_str(" Optional extras: `ljos doctor --all`.\n");
+        } else {
+            line.push_str(" Every check: `ljos doctor --all`.\n");
+        }
+        return line;
+    }
     summary_line(&down, &damaged, &working, off, degraded, note)
+}
+
+/// Whether a row in the short doctor asks the person to do something.
+fn doctor_needs_action(row: &Habitat) -> bool {
+    let word = doctor_word(row);
+    matches!(word, "no" | "warn")
+        || plain_encoder_row(row)
+        || (word == "info"
+            && (READY_PARTS.iter().any(|(_, rows)| rows.contains(&row.name))
+                || row.name == "deed store"))
 }
 
 /// The line for a seat whose tracker or deed store is not there. A seat in
@@ -70257,10 +70286,11 @@ mod tests {
         let short = format_doctor_short(&rows);
         assert!(
             short.starts_with(
-                "ljos is ready: memory, tracker and command guard work (matched by words: the encoder failed)"
+                "ljos needs action: 1 row needs action (matched by words: the encoder failed)."
             ),
             "{short}"
         );
+        assert!(!short.contains("ljos is ready"), "{short}");
         assert!(short.contains("warn\tencoder\t"), "{short}");
         assert!(short.contains(ENCODER_RESTART_COMMAND), "{short}");
         assert!(short.contains("Search matches words"), "{short}");
@@ -70411,7 +70441,9 @@ mod tests {
         ];
         let short = format_doctor_short(&rows);
         assert!(
-            short.contains("ljos is ready") && short.contains("matched by words"),
+            short.contains("ljos needs action")
+                && short.contains("matched by words")
+                && !short.contains("ljos is ready"),
             "{short}"
         );
         assert!(

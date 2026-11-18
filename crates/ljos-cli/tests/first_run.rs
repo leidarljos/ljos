@@ -801,15 +801,22 @@ fn assert_step(
 
 fn expect_documented(command: &str, output: &str) {
     if command.contains("ljos doctor") && !command.contains("--all") && !command.contains("--fix") {
-        for key in [
-            "ljos is ready",
-            "memory",
-            "tracker",
-            "command guard",
-            "seat source",
-            "sitting gate",
-            "not active here",
-        ] {
+        let needs_action = output.lines().any(|line| {
+            line.starts_with("warn\t")
+                || line.starts_with("no\t")
+                || (line.starts_with("info\tencoder\t") && line.contains("not installed"))
+        });
+        if needs_action {
+            assert!(output.contains("ljos needs action"), "{command}\n{output}");
+            assert!(!output.contains("ljos is ready"), "{command}\n{output}");
+        } else {
+            assert!(output.contains("ljos is ready"), "{command}\n{output}");
+        }
+        let mut keys = vec!["seat source", "sitting gate", "not active here"];
+        if !needs_action {
+            keys.extend(["memory", "tracker", "command guard"]);
+        }
+        for key in keys {
             assert!(output.contains(key), "{command}\nmissing {key:?}\n{output}");
         }
         if !ljos_cli::tool_installed("packset-embed") {

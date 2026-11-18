@@ -1440,4 +1440,34 @@ fn doctor_all_formats_unset_git_hooks_with_backticks_and_so_run() {
         row,
         "info\tgit hooks\tcore.hooksPath is unset and a commit is not written on the open ticket, so run `ljos git-hooks install`."
     );
+
+    let rows = [
+        ljos_cli::Habitat {
+            name: "git identity",
+            state: "set user.name and user.email".to_string(),
+            ok: false,
+        },
+        ljos_cli::Habitat {
+            name: "git hooks",
+            state: "core.hooksPath is unset and a commit is not written on the open ticket, so run `ljos git-hooks install`.".to_string(),
+            ok: false,
+        },
+    ];
+    let report = format!(
+        "{}{}",
+        ljos_cli::doctor_summary(&rows),
+        ljos_cli::format_doctor(&rows)
+    );
+    assert!(
+        report.starts_with(
+            "ljos needs action: 1 row needs action. Optional extras: `ljos doctor --all`."
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains(
+            "info\tgit hooks\tcore.hooksPath is unset and a commit is not written on the open ticket"
+        ),
+        "{report}"
+    );
 }
