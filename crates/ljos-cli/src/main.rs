@@ -3620,7 +3620,11 @@ fn main() {
         let args: Vec<String> = std::env::args().skip(1).collect();
         ljos_cli::memory_port::record_memory_error(&args, &format!("{e:#}"));
         if let Some(label) = ljos_cli::policy_label::as_policy(e) {
-            println!("label {}: {}", label.label, label.detail);
+            if label.label == "close-unverified" {
+                eprintln!("{}", label.detail);
+            } else {
+                println!("label {}: {}", label.label, label.detail);
+            }
             // A seat that was not resolved, or is not on the roster, is a
             // failed command. 2 is the status a bad invocation already
             // uses, so a script that checks the status sees the failure.

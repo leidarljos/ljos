@@ -206,7 +206,7 @@ pub fn close_note(issue: &str) -> Result<Option<String>> {
             format!(
                 "finish: no terminal was found or a runner was detected, so a person closes a ticket from their own login terminal, or with \
              `ljos seat grant {slug} close=own --quote TEXT --at TIME --via SEAT`. \
-             Nothing was written"
+             Nothing was written."
             ),
         ));
     };
@@ -214,7 +214,7 @@ pub fn close_note(issue: &str) -> Result<Option<String>> {
         return Err(crate::policy_label::labelled(
             "close-unverified",
             format!(
-                "finish: {issue} is not {seat}'s to close. A grant of own covers a ticket this seat filed or holds. Nothing was written"
+                "finish: {issue} is not {seat}'s to close. A grant of own covers a ticket this seat filed or holds. Nothing was written."
             ),
         ));
     }

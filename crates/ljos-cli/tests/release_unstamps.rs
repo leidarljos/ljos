@@ -248,8 +248,8 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
             "ljos {args:?} should label the close and write nothing: {text}"
         );
         assert!(
-            text.contains("label close-unverified"),
-            "ljos {args:?} missing close label: {text}"
+            !text.contains("label close-unverified") && text.contains("Nothing was written."),
+            "ljos {args:?} close refusal format changed: {text}"
         );
         format!(
             "{}{}",
