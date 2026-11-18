@@ -48734,9 +48734,13 @@ fn git_names_no_author(said: &str) -> bool {
         || said.contains("unable to auto-detect email")
 }
 
-/// Attach the fix when git stopped because it has no author.
+/// Attach the fix when git stopped because it has no author or committer.
 fn explain_git_refusal(said: &str) -> String {
-    if git_names_no_author(said) {
+    if said.contains("Committer identity unknown") {
+        format!(
+            "Committer identity unknown. Set it with {GIT_IDENTITY_FIX}, then run the command again"
+        )
+    } else if git_names_no_author(said) {
         format!(
             "Author identity unknown. Set it with {GIT_IDENTITY_FIX}, then run the command again"
         )
@@ -48823,6 +48827,15 @@ demo-zcre  TODO  [#C]  Pick a parser
             explain_git_refusal("fatal: cannot lock ref"),
             "fatal: cannot lock ref"
         );
+    }
+
+    #[test]
+    fn a_missing_git_committer_names_committer_identity_unknown() {
+        let said = explain_git_refusal("Committer identity unknown");
+        assert!(said.starts_with("Committer identity unknown."), "{said}");
+        assert!(!said.contains("Author identity unknown"), "{said}");
+        assert!(said.contains("user.name"), "{said}");
+        assert!(said.contains("user.email"), "{said}");
     }
 }
 
