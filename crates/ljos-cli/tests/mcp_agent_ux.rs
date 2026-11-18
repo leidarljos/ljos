@@ -623,3 +623,15 @@ fn filing_with_no_project_says_which_argument_to_pass() {
     );
     assert!(!said[0].contains("-p NAME"), "{said:?}");
 }
+
+#[test]
+fn the_file_schema_names_the_type_values_and_no_other_client() {
+    let mut session = Session::open(&[]);
+    let tools = listed_tools(&mut session);
+    let props = &tools["ljos_file"]["inputSchema"]["properties"];
+    let kind = props["issue_kind"]["description"].as_str().unwrap();
+    assert_eq!(kind, "The type: `bug`, `task`, `feature` or `decision`.");
+    assert_eq!(props["priority"]["description"], "`A`, `B` or `C`.");
+    let all = serde_json::to_string(&tools).unwrap();
+    assert!(!all.contains("OpenHands"), "a schema names another client");
+}

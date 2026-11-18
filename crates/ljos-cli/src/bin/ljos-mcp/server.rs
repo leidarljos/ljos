@@ -779,14 +779,14 @@ pub struct FileArgs {
     pub top: bool,
     /// The project; absent, the parent's.
     pub project: Option<String>,
-    /// The type tag: bug, task, feature, decision. Named `issue_kind` in
-    /// the schema, since OpenHands builds a class per tool and a field
-    /// named `kind` collides with its own; `kind` is still read.
+    // Not `kind` in the schema: OpenHands builds a class per tool and a
+    // field of that name collides with its own. `kind` is still read.
+    /// The type: `bug`, `task`, `feature` or `decision`.
     #[serde(rename = "issue_kind", alias = "kind")]
     pub kind: Option<String>,
     /// Comma-separated tags.
     pub tags: Option<String>,
-    /// A, B or C.
+    /// `A`, `B` or `C`.
     pub priority: Option<String>,
     /// Body prose. A decision's body names `Options: A, B`.
     pub body: Option<String>,
