@@ -862,7 +862,7 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
         label = Some(authorship_warning(issue, &authored));
     }
     if let Some(why) = &label {
-        eprintln!("ljos: session-authored: {why}");
+        crate::session_authored_notice(why);
     }
     if let Some(choice) = held_choice(issue, voter) {
         ballot_sig::end_cast();

@@ -628,6 +628,7 @@ fn an_author_who_votes_is_labelled_and_the_settle_stands() {
         said.contains("ljos: session-authored:") && said.contains("authored candidate"),
         "{said}"
     );
+    assert_eq!(said.matches("ljos: session-authored:").count(), 1, "{said}");
     vote(&world, "bob", "sess-bob-0001", "demo-vote");
     let out = world.ljos("bob", "sess-bob-0001", &["consensus", "demo-vote"]);
     let said = text(&out);

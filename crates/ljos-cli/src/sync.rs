@@ -4887,7 +4887,8 @@ fn followed_refs(root: &Path) -> Vec<String> {
 /// A scope file that does not parse, the pack not answering, or age
 /// refusing to seal.
 pub fn sync_repo(pull_import: bool, export_log: bool) -> Result<String> {
-    sync_repos(pull_import, export_log, true)
+    let said = sync_repos(pull_import, export_log, true)?;
+    Ok(sync_summary(said))
 }
 
 /// [`sync_repo`] as the sitting and finish run it: a repository with no
@@ -4900,6 +4901,13 @@ pub fn sync_repo(pull_import: bool, export_log: bool) -> Result<String> {
 /// As [`sync_repo`].
 pub fn sync_repo_in_passing(pull_import: bool, export_log: bool) -> Result<String> {
     sync_repos(pull_import, export_log, false)
+}
+
+fn sync_summary(said: String) -> String {
+    if said.trim().is_empty() {
+        return "sync: checked configured trackers; nothing changed\n".into();
+    }
+    said
 }
 
 /// Export this machine's sealed log and push it.
@@ -6044,6 +6052,16 @@ pub fn exchange_user_rules(
 mod tests {
     use super::*;
     use std::os::unix::fs::FileTypeExt;
+
+    #[test]
+    fn sync_summary_names_checked_trackers_on_empty_output() {
+        assert_eq!(
+            sync_summary(String::new()),
+            "sync: checked configured trackers; nothing changed\n"
+        );
+        let kept = "sync: exported 1 probe atoms unchanged since the last export\n".to_string();
+        assert_eq!(sync_summary(kept.clone()), kept);
+    }
 
     /// A fifo, a directory, or a device node where a `.ljos` file should be
     /// is refused at once. Each open is bounded so a regression that waits

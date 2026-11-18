@@ -25901,10 +25901,21 @@ pub fn workflow_status(parent: &str) -> Result<Option<WorkflowStatus>> {
     let status = workflow_status_of(parent, &name, &children, &ballots, &cfg);
     if let Some(id) = latest {
         if let Some(why) = panel_gate::settle_refusal(&id) {
-            eprintln!("ljos: session-authored: {why}");
+            session_authored_notice(&why);
         }
     }
     Ok(Some(status))
+}
+
+/// Print one session-authored warning line per process and text.
+pub(crate) fn session_authored_notice(why: &str) {
+    static SEEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if !seen.insert(why.to_string()) {
+        return;
+    }
+    eprintln!("ljos: session-authored: {why}");
 }
 
 /// Why a close is refused on a workflow parent, or none
@@ -30289,7 +30300,7 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     if let Ok(v) = tracker_show_json(cite) {
         if let Some(why) = panel_gate::settle_refusal(cite) {
-            eprintln!("ljos: session-authored: {why}");
+            session_authored_notice(&why);
         }
         let (ballots, personas) = cite_ballots(cite)?;
         let signed = check_seat_signatures(cite, &ballots, &personas)?;
@@ -30408,7 +30419,7 @@ pub fn protected_push_refusal(
         );
     }
     if let Some(why) = hook_timed("cleared_refusal", || panel_gate::settle_refusal(issue)) {
-        eprintln!("ljos: session-authored: {why}");
+        session_authored_notice(&why);
     }
     let (rows, personas) = match hook_timed("cleared_cite", || cite_ballots(issue)) {
         Ok(found) => found,
@@ -30440,7 +30451,7 @@ pub fn protected_push_stands(issue: &str, quorum: usize) -> std::result::Result<
     let card =
         issue_record(issue).map_err(|e| format!("the tracker does not read {issue} ({e:#})"))?;
     if let Some(why) = panel_gate::settle_refusal(issue) {
-        eprintln!("ljos: session-authored: {why}");
+        session_authored_notice(&why);
     }
     let (ballots, personas) = cite_ballots(issue)?;
     let signed = check_seat_signatures(issue, &ballots, &personas)?;
