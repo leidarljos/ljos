@@ -361,7 +361,7 @@ fn block_after_concurrent_claims_and_notes_keeps_each_tickets_own_logbook_rows()
             }
             if line.contains("- Claimed by ") || line.contains("- Note: \"") {
                 if let Some((head, _)) = line.rsplit_once('[') {
-                    return format!("{}{}", head.trim_end(), fixed);
+                    return format!("{} {}", head.trim_end(), fixed);
                 }
             }
             line.to_string()

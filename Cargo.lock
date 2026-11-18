@@ -5668,9 +5668,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vissue-core"
-version = "0.23.1"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e99f9828fcb37de80bd5b870b407f6bfe5f53c2e2c1ba451f7bd224d99530cc"
+checksum = "4bbe9d611d2b0b5ae64beea5573d2ae3c8ff5aa2bd63e2b10365fbdd9e913fd5"
 dependencies = [
  "anyhow",
  "capnp",

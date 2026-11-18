@@ -27,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 which = "7"
-vissue-core = "0.23"
+vissue-core = "0.24.1"
 # [[[cog import ljos_version as v; v.lines('ljos = {{ path = "crates/ljos-cli", version = "{version}" }}')]]]
 ljos = { path = "crates/ljos-cli", version = "0.45.0" }
 # [[[end]]]

@@ -39983,7 +39983,6 @@ pub(crate) fn note_keeping_claim_stamps(
     let project = hit.project.clone();
     let said = vissue_core::store::with_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &path)?;
-        keep_claim_stamps_on_disk(&mut doc, issue);
         let heading = doc
             .headings
             .iter_mut()
@@ -40975,157 +40974,6 @@ fn unheld_refusal(text: &str) -> Option<&str> {
     (said.starts_with("status ") || said == "not found").then_some(said)
 }
 
-/// Whether `line` is a logbook row that still carries an old claim stamp.
-/// vissue folds that stamp into the note and writes a different line back.
-fn line_carries_claim_stamp(line: &str) -> bool {
-    let line = line.trim();
-    line.contains("Claimed-by:") || line.contains("Claimed by ")
-}
-
-fn strip_claim_stamp(note: &str) -> Option<String> {
-    for marker in [" Claimed-by:", " Claimed by "] {
-        let Some((head, tail)) = note.rsplit_once(marker) else {
-            continue;
-        };
-        let Some(pos) = tail.rfind('[') else {
-            continue;
-        };
-        return Some(format!("{} {}", head.trim_end(), tail[pos..].trim()));
-    }
-    None
-}
-
-fn claim_stamp_note_head(line: &str) -> Option<&str> {
-    if !line.trim_start().starts_with("- Note:") {
-        return None;
-    }
-    for marker in [" Claimed-by:", " Claimed by "] {
-        if let Some((head, _)) = line.rsplit_once(marker) {
-            return Some(head);
-        }
-    }
-    None
-}
-
-fn claim_stamp_matches_entry(src: &str, rendered: &str, timestamp: &str) -> bool {
-    if timestamp.is_empty() || !src.contains(timestamp) {
-        return false;
-    }
-    let src = src.trim();
-    let rendered = rendered.trim();
-    if src == rendered {
-        return true;
-    }
-    // A plain note at this minute renders with no claim marker. Treating the
-    // stamp with the marker removed as that note would move the stamp onto it.
-    if !line_carries_claim_stamp(rendered) {
-        return false;
-    }
-    strip_claim_stamp(src).is_some_and(|stripped| stripped.trim() == rendered)
-        || matches!(
-            (claim_stamp_note_head(src), claim_stamp_note_head(rendered)),
-            (Some(left), Some(right)) if left.trim() == right.trim()
-        )
-}
-
-fn claim_stamp_lines_for_issue(source: &str, issue: &str) -> Vec<String> {
-    let mut in_target = false;
-    let mut in_logbook = false;
-    let mut out = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim_end();
-        let raw = trimmed.trim();
-        if raw.starts_with("* ") {
-            in_target = false;
-            in_logbook = false;
-            continue;
-        }
-        if raw.starts_with(":ID:") {
-            in_target = raw
-                .split_once(":ID:")
-                .map(|(_, right)| right.trim() == issue)
-                .unwrap_or(false);
-            continue;
-        }
-        if !in_target {
-            continue;
-        }
-        if raw == ":LOGBOOK:" {
-            in_logbook = true;
-            continue;
-        }
-        if raw == ":END:" && in_logbook {
-            in_logbook = false;
-            continue;
-        }
-        if in_logbook && line_carries_claim_stamp(trimmed) {
-            out.push(trimmed.to_string());
-        }
-    }
-    out
-}
-
-/// Keep logbook lines that carry an old `Claimed-by` stamp. vissue's render
-/// folds the stamp into the note and the next parse does not read the same
-/// line. The original line is stored as the entry's raw text, which render
-/// writes back unchanged.
-///
-/// `issue` is the ticket the caller is editing. A later `write` renders every
-/// heading in the file, so each ticket's stamps are restored from that
-/// ticket alone. One stamp is applied to one row.
-pub(crate) fn keep_claim_stamp_lines(doc: &mut vissue_core::IssueDoc, source: &str, issue: &str) {
-    if !issue.is_empty() && !doc.headings.iter().any(|heading| heading.id == issue) {
-        return;
-    }
-    let ids: Vec<String> = doc
-        .headings
-        .iter()
-        .map(|heading| heading.id.clone())
-        .collect();
-    for id in ids {
-        restore_claim_stamps(doc, source, &id);
-    }
-}
-
-fn restore_claim_stamps(doc: &mut vissue_core::IssueDoc, source: &str, issue: &str) {
-    let stamps = claim_stamp_lines_for_issue(source, issue);
-    if stamps.is_empty() {
-        return;
-    }
-    let mut used = vec![false; stamps.len()];
-    let Some(heading) = doc.headings.iter_mut().find(|heading| heading.id == issue) else {
-        return;
-    };
-    for entry in &mut heading.logbook {
-        let rendered = entry.render();
-        if let Some(index) = stamps
-            .iter()
-            .enumerate()
-            .position(|(index, src)| !used[index] && src.trim() == rendered.trim())
-        {
-            used[index] = true;
-            continue;
-        }
-        let Some(index) = stamps.iter().enumerate().position(|(index, src)| {
-            !used[index] && claim_stamp_matches_entry(src, &rendered, entry.timestamp.as_str())
-        }) else {
-            continue;
-        };
-        if stamps[index].trim() != rendered.trim() {
-            entry.raw = Some(stamps[index].trim().to_string());
-            used[index] = true;
-        }
-    }
-}
-
-/// [`keep_claim_stamp_lines`] for the file `doc` was parsed from.
-pub(crate) fn keep_claim_stamps_on_disk(doc: &mut vissue_core::IssueDoc, issue: &str) {
-    let Ok(source) = std::fs::read_to_string(&doc.path) else {
-        return;
-    };
-    keep_claim_stamp_lines(doc, &source, issue);
-}
-
 /// Drop the tracker's claim on `issue` when `holder` holds it. The claim
 /// graph frees a node on release and on completion; the tracker kept
 /// `CLAIMED_BY`, so `ljos claims` listed every finished sitting as still
@@ -41159,7 +41007,6 @@ pub fn unstamp_tracker(issue: &str, holder: &str, reopen: bool) -> Result<Option
     };
     let said = vissue_core::store::with_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &path)?;
-        keep_claim_stamps_on_disk(&mut doc, issue);
         let Some(h) = doc.headings.iter_mut().find(|h| h.id == issue) else {
             return Ok(None);
         };
@@ -44025,7 +43872,6 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
     let file_path = path.clone();
     let changed = vissue_core::store::with_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &file_path)?;
-        keep_claim_stamps_on_disk(&mut doc, issue);
         let heading = doc
             .headings
             .iter_mut()
@@ -44130,7 +43976,6 @@ pub fn reparent_issue(issue: &str, parent: &str) -> Result<String> {
     let file_path = path.clone();
     let prior = vissue_core::store::with_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &file_path)?;
-        keep_claim_stamps_on_disk(&mut doc, issue);
         let heading = doc
             .headings
             .iter_mut()
@@ -58822,7 +58667,7 @@ mod tests {
     #[test]
     fn doctor_names_the_fix_for_a_tracker_a_seat_and_the_registry() {
         let dir = tempfile::tempdir().unwrap();
-        let id = |root: &str| format!("vissue 0.24.0\nroot={root}\nprefix=Software\n");
+        let id = |root: &str| format!("vissue 0.24.1\nroot={root}\nprefix=Software\n");
         let missing = dir.path().join("gone");
         let (state, ok) = super::tracker_state(&id(&missing.display().to_string()), "cwd");
         assert!(!ok);
@@ -58946,7 +58791,7 @@ mod tests {
             ("VISSUE_ROOT", ""),
             ("ISSUE_ROOT", ""),
         ]);
-        let id = format!("vissue 0.24.0\nroot={}\nprefix=Software\n", root.display());
+        let id = format!("vissue 0.24.1\nroot={}\nprefix=Software\n", root.display());
         let (state, ok) = super::with_config_home(&cfg_dir, || {
             super::tracker_state(&id, "seat config or working directory")
         });
@@ -68170,135 +68015,6 @@ mod tests {
         }
     }
 
-    /// A note that still carries an old `Claimed-by` stamp has to render and
-    /// parse back as the same line. Folding the stamp into the note text
-    /// drops it on the next rewrite.
-    #[test]
-    fn a_note_with_an_old_claimed_by_stamp_round_trips() {
-        let board = "\
-#+TITLE: sample issues
-#+TODO: TODO STARTED BLOCKED | DONE CANCELLED
-
-* TODO [#C] Probe
-:PROPERTIES:
-:ID:         probe-a1b2
-:END:
-:LOGBOOK:
-- Note: \"kept the drawer\" Claimed-by: saddle [2026-10-18 Sun 07:00]
-:END:
-";
-        let path = std::path::PathBuf::from("issues.org");
-        let mut doc = vissue_core::IssueDoc::parse("sample", path.clone(), board).unwrap();
-        super::keep_claim_stamp_lines(&mut doc, board, "probe-a1b2");
-        let rendered = doc.render_string();
-        let stamp = "- Note: \"kept the drawer\" Claimed-by: saddle [2026-10-18 Sun 07:00]";
-        assert!(
-            rendered.lines().any(|line| line == stamp),
-            "render dropped the Claimed-by stamp: {rendered}"
-        );
-        let mut again = vissue_core::IssueDoc::parse("sample", path, &rendered).unwrap();
-        super::keep_claim_stamp_lines(&mut again, &rendered, "probe-a1b2");
-        assert_eq!(again.render_string(), rendered);
-        assert!(
-            again.headings[0].logbook[0]
-                .render()
-                .contains("Claimed-by: saddle"),
-            "import lost the stamp: {:?}",
-            again.headings[0].logbook[0]
-        );
-    }
-
-    /// A note written through the library call folds an old `Claimed-by`
-    /// stamp into its text, so the next import cannot read the row.
-    /// The helper `ljos parent` and `ljos_start` write through leaves each
-    /// stamp as it was on every ticket in the file.
-    #[test]
-    fn a_note_written_beside_old_claimed_by_stamps_leaves_them_importable() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = vissue_core::Layout::new(dir.path(), "Software");
-        std::fs::create_dir_all(layout.projects_dir()).unwrap();
-        let path = layout.project_issues_path("probe");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let minute = "[2026-11-17 Tue 17:13]";
-        let board = format!(
-            "#+TITLE: probe issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
-* TODO [#C] alpha\n:PROPERTIES:\n:ID:         aaa-1111\n:END:\n:LOGBOOK:\n\
-- Note: \"noon\" Claimed-by: saddle {minute}\n\
-- Claimed by saddle {minute}\n\
-:END:\n\
-* TODO [#C] beta\n:PROPERTIES:\n:ID:         bbb-2222\n:END:\n:LOGBOOK:\n\
-- Note: \"beta note\" Claimed-by: fortran {minute}\n\
-:END:\n"
-        );
-        std::fs::write(&path, &board).unwrap();
-        let said =
-            super::note_keeping_claim_stamps(&layout, "aaa-1111", "a \"later\"   word").unwrap();
-        assert!(said.contains("noted"), "{said}");
-        let rendered = std::fs::read_to_string(&path).unwrap();
-        for line in [
-            format!("- Note: \"noon\" Claimed-by: saddle {minute}"),
-            format!("- Claimed by saddle {minute}"),
-            format!("- Note: \"beta note\" Claimed-by: fortran {minute}"),
-        ] {
-            assert_eq!(
-                rendered.lines().filter(|l| *l == line).count(),
-                1,
-                "{line}\n{rendered}"
-            );
-        }
-        assert!(
-            rendered.contains("- Note: \"a 'later' word\" ["),
-            "{rendered}"
-        );
-        let again = vissue_core::IssueDoc::parse_file("probe", &path).unwrap();
-        assert_eq!(again.headings.len(), 2);
-    }
-
-    /// A rewrite of one ticket renders the whole file. Legacy `Claimed-by`
-    /// rows on other tickets have to stay on those tickets, and two rows
-    /// that share a minute on one ticket have to stay on their own lines.
-    #[test]
-    fn claim_stamp_restore_keeps_every_ticket_and_same_minute_rows() {
-        let minute = "[2026-11-17 Tue 17:13]";
-        let board = format!(
-            "#+TITLE: probe issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
-* TODO [#C] alpha\n:PROPERTIES:\n:ID:         aaa-1111\n:END:\n:LOGBOOK:\n\
-- Note: \"noon\" Claimed-by: saddle {minute}\n\
-- Note: \"noon\" Claimed-by: other {minute}\n\
-- Note: \"noon\" {minute}\n\
-- Note: \"alpha plain\" {minute}\n\
-- Claimed by saddle {minute}\n\
-- State \"STARTED\" from \"TODO\" {minute}\n\
-:END:\n\
-* TODO [#C] beta\n:PROPERTIES:\n:ID:         bbb-2222\n:END:\n:LOGBOOK:\n\
-- Note: \"beta note\" Claimed-by: fortran {minute}\n\
-- Note: \"beta plain\" {minute}\n\
-- Claimed by fortran {minute}\n\
-:END:\n"
-        );
-        let path = std::path::PathBuf::from("issues.org");
-        let mut doc = vissue_core::IssueDoc::parse("probe", path, &board).unwrap();
-        super::keep_claim_stamp_lines(&mut doc, &board, "aaa-1111");
-        let rendered = doc.render_string();
-        for line in [
-            format!("- Note: \"noon\" Claimed-by: saddle {minute}"),
-            format!("- Note: \"noon\" Claimed-by: other {minute}"),
-            format!("- Note: \"noon\" {minute}"),
-            format!("- Note: \"alpha plain\" {minute}"),
-            format!("- Claimed by saddle {minute}"),
-            format!("- State \"STARTED\" from \"TODO\" {minute}"),
-            format!("- Note: \"beta note\" Claimed-by: fortran {minute}"),
-            format!("- Note: \"beta plain\" {minute}"),
-            format!("- Claimed by fortran {minute}"),
-        ] {
-            assert_eq!(
-                rendered.matches(line.as_str()).count(),
-                1,
-                "row moved or dropped: {line}\n{rendered}"
-            );
-        }
-    }
-
     #[test]
     fn a_refused_sitting_names_onboard_for_a_deed_store_nobody_made() {
         let _g = env_guard();
@@ -68311,7 +68027,7 @@ mod tests {
             },
             super::Habitat {
                 name: "tracker",
-                state: "vissue 0.24.0".into(),
+                state: "vissue 0.24.1".into(),
                 ok: true,
             },
         ];

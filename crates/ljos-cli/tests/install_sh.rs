@@ -158,7 +158,7 @@ fn print_assets_uses_the_sibling_pin_unless_latest() {
     );
     assert!(
         text.lines()
-            .all(|line| !line.starts_with("vissue-v0.24.0-")),
+            .all(|line| !line.starts_with("vissue-v0.24.1-")),
         "{text}"
     );
 }
@@ -1492,7 +1492,7 @@ fn a_pinned_version_with_no_release_says_how_to_list_versions() {
     );
 }
 
-/// The sibling pin names vissue 0.24.0, and that version has a GitHub
+/// The sibling pin names vissue 0.24.1, and that version has a GitHub
 /// release. The script installs that archive. It does not build from
 /// source, and it does not fall back to another tag. Cargo is not started.
 #[test]
@@ -1507,7 +1507,7 @@ fn a_default_pin_installs_its_release_archive() {
             "packset-v0.17.10",
             &["packset", "packsetd", "packset-mcp"][..],
         ),
-        ("vissue-v0.24.0", &["vissue", "vissue-mcp"][..]),
+        ("vissue-v0.24.1", &["vissue", "vissue-mcp"][..]),
         ("deedar-v0.4.0", &["deedar"][..]),
         ("claimdag-v0.8.0", &["claimdag"][..]),
         ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
@@ -1567,7 +1567,7 @@ case $url in
     ver=0.42.1
     case $repo in
       packset) ver=0.17.10 ;;
-      vissue) ver=0.24.0 ;;
+      vissue) ver=0.24.1 ;;
       deedar) ver=0.4.0 ;;
       claimdag) ver=0.8.0 ;;
       ljos-policyd) ver=0.7.0 ;;
@@ -1633,7 +1633,7 @@ exit 0
         .unwrap();
     let text = said(&out);
     assert!(out.status.success(), "{text}");
-    assert!(text.contains("vissue v0.24.0"), "{text}");
+    assert!(text.contains("vissue v0.24.1"), "{text}");
     assert!(!text.contains("has no release archive"), "{text}");
     assert!(!text.contains("from source"), "{text}");
     assert!(!cargo_log.exists(), "cargo was started:\n{text}");
@@ -1703,7 +1703,7 @@ fn the_archive_name_is_printed_before_the_download() {
             "packset-v0.17.10",
             &["packset", "packsetd", "packset-mcp"][..],
         ),
-        ("vissue-v0.24.0", &["vissue", "vissue-mcp"][..]),
+        ("vissue-v0.24.1", &["vissue", "vissue-mcp"][..]),
         ("deedar-v0.4.0", &["deedar"][..]),
         ("claimdag-v0.8.0", &["claimdag"][..]),
         ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
@@ -1824,7 +1824,7 @@ exit 0
             "--pin",
             "packset=0.17.10",
             "--pin",
-            "vissue=0.24.0",
+            "vissue=0.24.1",
             "--pin",
             "deedar=0.4.0",
             "--pin",
@@ -1897,7 +1897,7 @@ fn from_checkout_installs_ljos_and_the_sibling_tools() {
             "packset-v0.18.2",
             &["packset", "packsetd", "packset-mcp"][..],
         ),
-        ("vissue-v0.24.0", &["vissue", "vissue-mcp"][..]),
+        ("vissue-v0.24.1", &["vissue", "vissue-mcp"][..]),
         ("deedar-v0.4.0", &["deedar"][..]),
         ("claimdag-v0.8.0", &["claimdag"][..]),
         ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
@@ -2058,7 +2058,7 @@ fn a_missing_attestation_is_not_a_failed_check() {
             "packset-v0.17.10",
             &["packset", "packsetd", "packset-mcp"][..],
         ),
-        ("vissue-v0.24.0", &["vissue", "vissue-mcp"][..]),
+        ("vissue-v0.24.1", &["vissue", "vissue-mcp"][..]),
         ("deedar-v0.4.0", &["deedar"][..]),
         ("claimdag-v0.8.0", &["claimdag"][..]),
         ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
@@ -2112,7 +2112,7 @@ case $url in
     ver=0.42.1
     case $repo in
       packset) ver=0.17.10 ;;
-      vissue) ver=0.24.0 ;;
+      vissue) ver=0.24.1 ;;
       deedar) ver=0.4.0 ;;
       claimdag) ver=0.8.0 ;;
       ljos-policyd) ver=0.7.0 ;;

@@ -262,7 +262,7 @@ drop_pin() {
 # sits in the repository. A downloaded script carries the same versions.
 # --pin for one of them wins. --latest leaves every unpinned repository
 # at its latest release.
-# Three dot-separated numbers, such as 0.24.0. No grep: a PATH that
+# Three dot-separated numbers, such as 0.24.1. No grep: a PATH that
 # cannot fetch a release still has to name curl before anything else.
 version_ok() {
   case $1 in
@@ -303,7 +303,7 @@ EOF
   fi
   # The versions in .github/sibling-pin. release-install-check.sh
   # refuses a copy that has drifted.
-  for item in vissue=0.24.0 claimdag=0.8.0 deedar=0.4.0; do
+  for item in vissue=0.24.1 claimdag=0.8.0 deedar=0.4.0; do
     name=${item%%=*}
     [ -z "$(pinned "$name")" ] || continue
     PINS="$PINS $item"
@@ -375,7 +375,7 @@ latest_url() {
   wget -q --max-redirect=5 -S --spider "$1" 2>"$TMP/fetch.err" || return 1
   sed -n 's/^ *[Ll]ocation: *//p' "$TMP/fetch.err" | tail -n 1
 }
-# The tag of REPO's latest release, such as v0.24.0. A failure names the
+# The tag of REPO's latest release, such as v0.24.1. A failure names the
 # command that retries.
 latest_tag() {
   repo=$1

@@ -92,7 +92,7 @@ published() {
 
 # Versions fill the name. The shape is what the check holds.
 PACKSET_VER=0.17.7
-VISSUE_VER=0.24.0
+VISSUE_VER=0.24.1
 DEEDAR_VER=0.6.1
 CLAIMDAG_VER=0.8.0
 POLICYD_VER=0.7.0
