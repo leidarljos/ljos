@@ -2142,6 +2142,12 @@ fn install_binary(src: &Path, dest: &Path) -> Result<()> {
 
 fn install_from_dir(bin_dir: &Path, src: &Path) -> Result<String> {
     let sums_path = src.join("SHA256SUMS");
+    if !sums_path.is_file() {
+        bail!(
+            "{} has no SHA256SUMS",
+            crate::tools::sh_word(&src.display().to_string())
+        );
+    }
     let text =
         fs::read_to_string(&sums_path).with_context(|| format!("read {}", sums_path.display()))?;
     let mut want = BTreeMap::new();

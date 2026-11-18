@@ -314,6 +314,36 @@ fn a_checksum_mismatch_installs_nothing() {
     assert!(!bins.join("ljos-mcp").exists());
 }
 
+#[test]
+fn a_missing_release_sums_shell_quotes_the_release_dir() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let rel = root.path().join("rel; touch MARK #");
+    let bins = root.path().join("bins");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&rel).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::set_var("LJOS_BIN_DIR", &bins);
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    let line = err.lines().next().unwrap_or(&err);
+    assert!(
+        line.contains(&ljos_cli::tools::sh_word(&rel.display().to_string())),
+        "{line}"
+    );
+    let mark = root.path().join("MARK");
+    assert_shell_line_is_safe(line, &mark);
+}
+
 /// A later boot reruns `cloud up` from the `ljos` the first run installed.
 /// When the release directory holds a newer `ljos`, that run replaces its
 /// own binary, which Linux refuses to open for writing while it runs. A
