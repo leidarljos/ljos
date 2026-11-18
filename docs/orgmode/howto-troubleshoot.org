@@ -173,3 +173,12 @@ The refusal names the exact command shape:
 no project: name one with -p NAME, so run `ljos file "TITLE" -p NAME`.
 #+end_src
 
+* Corrupt tracker config
+
+When =vissue.toml= is damaged, commands that read tickets stop with one
+line and a fix command:
+
+#+begin_src text
+the tracker config does not parse, so run `ljos doctor`.
+#+end_src
+

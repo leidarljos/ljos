@@ -598,3 +598,17 @@ fn file_without_a_project_names_the_command_to_run() {
         "no project: name one with -p NAME, so run `ljos file \"TITLE\" -p NAME`."
     );
 }
+
+#[test]
+fn a_corrupt_tracker_config_names_doctor() {
+    let home = Home::new();
+    std::fs::write(home.root.join("tracker/vissue.toml"), "{bad toml").unwrap();
+    let out = home.run(&["show", "demo-kiln"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "the tracker config does not parse, so run `ljos doctor`."
+    );
+}

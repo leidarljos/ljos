@@ -23840,6 +23840,11 @@ fn ticket_line(err: &anyhow::Error) -> Option<String> {
         return Some(top);
     }
     let full = format!("{err:#}");
+    if tracker_config_parse_fault(&full) {
+        return Some(
+            "the tracker config does not parse, so run `ljos doctor`.".to_string(),
+        );
+    }
     let no_tracker = full.contains("not inside a tracker")
         || full.contains("is not a tracker")
         || full.contains("neither vissue.toml");
@@ -23859,6 +23864,11 @@ fn ticket_line(err: &anyhow::Error) -> Option<String> {
         }
     }
     None
+}
+
+fn tracker_config_parse_fault(detail: &str) -> bool {
+    let text = detail.to_ascii_lowercase();
+    text.contains("vissue.toml") && text.contains("parse ")
 }
 
 /// One plain line for a failure that reached the person.
