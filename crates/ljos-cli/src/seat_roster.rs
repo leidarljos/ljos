@@ -204,7 +204,7 @@ pub fn close_note(issue: &str) -> Result<Option<String>> {
         return Err(crate::policy_label::labelled(
             "close-unverified",
             format!(
-                "finish: a person closes a ticket. A standing grant is \
+                "finish: no terminal was found or a runner was detected, so a person closes a ticket from their own login terminal, or with \
              `ljos seat grant {slug} close=own --quote TEXT --at TIME --via SEAT`. \
              Nothing was written"
             ),

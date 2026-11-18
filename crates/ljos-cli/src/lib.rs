@@ -23967,6 +23967,12 @@ pub fn remember_horizon(transient: bool, standing: bool, under_runner: bool) -> 
     }
 }
 
+/// Why `ljos remember` stored the lesson as an agent's, and the terminal
+/// the person runs instead. One sentence. Printed when this process has
+/// no login terminal or a runner is detected, and the stored record is
+/// not the person's.
+pub const STORED_ORIGIN_LINE: &str = "stored from an agent because no terminal was found or a runner was detected, so run `ljos remember` from your own login terminal.";
+
 /// What `ljos remember` prints when the pack refused the sentence and the
 /// copy lives only in this seat's state directory. Search still finds it.
 /// The hook does not: it reads the pack.

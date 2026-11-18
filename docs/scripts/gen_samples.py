@@ -927,7 +927,14 @@ def as_terminal(text: str) -> str:
     text = text.replace("lesson, from an agent, today", "lesson, today")
     text = text.replace("lesson, the person's words, today", "lesson, today")
     text = text.replace("preference, from an agent, not checked, today", "preference, today")
-    return text
+    # The binary also says why this run stored an agent's lesson. A
+    # person's terminal does not print that sentence.
+    kept = [
+        line
+        for line in text.splitlines(keepends=True)
+        if not line.startswith("stored from an agent because")
+    ]
+    return "".join(kept)
 
 
 def tutorial_search(ljos: Path) -> dict[str, str]:

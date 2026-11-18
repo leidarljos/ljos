@@ -571,3 +571,44 @@ fn a_half_written_note_queue_names_finish() {
     assert!(joined.contains("is damaged:"), "{said}");
     assert!(joined.contains("so run `ljos finish`."), "{said}");
 }
+
+/// A close with no login terminal stays refused. The line is one sentence
+/// that names the missing terminal or the runner, and the terminal the
+/// person uses instead. An agent is still not a person.
+#[test]
+fn a_close_without_a_login_terminal_names_the_terminal() {
+    let err = ljos_cli::seat_roster::close_note("proj-aaaa")
+        .expect_err("a process with no login terminal does not close")
+        .to_string();
+    assert!(
+        err.contains("no terminal was found or a runner was detected"),
+        "{err}"
+    );
+    assert!(err.contains("own login terminal"), "{err}");
+    assert!(err.contains("a person closes a ticket"), "{err}");
+    assert!(err.contains("ljos seat grant"), "{err}");
+    assert!(err.contains("Nothing was written"), "{err}");
+    let why = err.split("Nothing was written").next().unwrap_or("");
+    assert_eq!(
+        why.matches('.').count(),
+        1,
+        "why and what to run are one sentence: {err}"
+    );
+}
+
+/// The line `ljos remember` prints when it stores an agent's lesson.
+/// One sentence: why this process is not the person, and the terminal
+/// command that stores the lesson as theirs.
+#[test]
+fn a_stored_agent_lesson_names_the_terminal() {
+    let line = ljos_cli::STORED_ORIGIN_LINE;
+    assert!(
+        line.contains("no terminal was found or a runner was detected"),
+        "{line}"
+    );
+    assert!(line.contains("`ljos remember`"), "{line}");
+    assert!(line.contains("own login terminal"), "{line}");
+    assert!(!line.contains('\n'), "{line}");
+    assert_eq!(line.matches('.').count(), 1, "{line}");
+    assert!(!line.contains("lesson, today"), "{line}");
+}

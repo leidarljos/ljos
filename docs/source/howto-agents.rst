@@ -93,6 +93,7 @@ Search and recall treat every session of one runner as one family. The second se
    remembered (lesson): Measure the files before picking a codec.
      id …, next review …
    saved as a standing lesson; run `ljos search` to read it
+   stored from an agent because no terminal was found or a runner was detected, so run `ljos remember` from your own login terminal.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos search "measure the files"
    matched by words (encoder not installed), so run `cargo install --locked packset-embed`.
@@ -129,6 +130,7 @@ Session two stores a lesson, so the pack has heard from it. ``ljos send`` prints
    remembered (lesson): Session two waits for the build to go green.
      id …, next review …
    saved as a standing lesson; run `ljos search` to read it
+   stored from an agent because no terminal was found or a runner was detected, so run `ljos remember` from your own login terminal.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos send claude-dxw6sq4j7l "the build is red"
    sent … from claude-f2pu9d56g0 to claude-dxw6sq4j7l

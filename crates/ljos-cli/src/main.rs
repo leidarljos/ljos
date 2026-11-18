@@ -4974,6 +4974,9 @@ fn run_command() -> Result<()> {
                     println!("{}", write_ack(&body, verbose));
                 }
                 eprintln!("{}", ljos_cli::remember_note(&body));
+                if !ljos_cli::person_present() && !ljos_cli::person_stored(&body) {
+                    eprintln!("{}", ljos_cli::STORED_ORIGIN_LINE);
+                }
                 if let Some(line) = ljos_cli::memories::reinforced_line(&body) {
                     eprintln!("{line}");
                 } else if let Some(ids) =
