@@ -158,9 +158,10 @@ enum MemCmd {
         #[command(flatten)]
         f: MemFilter,
     },
-    /// Name duplicates and never-recalled memories. A dry run unless --apply.
+    /// Name duplicates and memories that were never recalled. `--stale` is required.
     ///
-    /// Example: `ljos memories prune`
+    /// Without `--apply`, the command only lists them.
+    #[command(after_help = "Example: `ljos memories prune --stale`")]
     Prune {
         /// Name duplicates, and memories never recalled in `--days`. Required.
         #[arg(long)]

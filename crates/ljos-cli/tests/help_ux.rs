@@ -155,3 +155,23 @@ fn reap_about_says_apply_is_what_writes() {
     let root = help(&["--help"]);
     assert!(root.contains(words), "{root}");
 }
+
+#[test]
+fn memories_prune_example_passes_stale() {
+    for flag in ["--help", "-h"] {
+        let page = help(&["memories", "prune", flag]);
+        assert!(
+            page.contains("`--stale` is required"),
+            "{flag}\n{page}"
+        );
+        assert!(
+            page.contains("Example: `ljos memories prune --stale`"),
+            "{flag}\n{page}"
+        );
+        assert!(
+            !page.contains("Example: `ljos memories prune`\n")
+                && !page.contains("Example: `ljos memories prune`."),
+            "{flag} example omits --stale\n{page}"
+        );
+    }
+}
