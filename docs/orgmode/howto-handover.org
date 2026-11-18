@@ -9,7 +9,7 @@ Leave it in place. Replacing it makes =ljos doctor= say the key is not a
 signer. Create one only when the file is absent:
 
 #+begin_src console
-$ test -f ~/.config/deedar/host.key || { head -c 32 /dev/urandom > ~/.config/deedar/host.key && chmod 600 ~/.config/deedar/host.key; }
+$ test -f ~/.config/deedar/host.key || { mkdir -p ~/.config/deedar && head -c 32 /dev/urandom > ~/.config/deedar/host.key && chmod 600 ~/.config/deedar/host.key; }
 $ export DEEDAR_HOST_SIGNING_KEY=~/.config/deedar/host.key
 $ ljos doctor --all | grep 'signing key'
 ok	signing key	/home/you/.config/deedar/host.key, the signing key for deeds

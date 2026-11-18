@@ -66,7 +66,7 @@ A machine that only needed the binaries can leave them unset.
 The run's harness id is the ballot's session, so two runs count twice and a run or subagent that votes again counts once.
 When nothing names the run but the seat, =ljos vote= and the tally call the session unverified.
 Persona ballots and Jev ballots are advisory.
-The push check reads seat ballots only. See /Choose which branches the push check covers/.
+The push check reads seat ballots only. See [[file:howto-command-check.org][Read the command check]].
 
 * Settle under the pack's trust
 
