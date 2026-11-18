@@ -1554,7 +1554,7 @@ enum Cmd {
         #[arg(long)]
         no_graph: bool,
     },
-    /// Release claims idle past a window and mail each seat. A dry run without --apply.
+    /// Release claims idle past a window and mail each seat. Without `--apply` it prints what would happen.
     ///
     /// Example: `ljos reap`
     Reap {

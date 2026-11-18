@@ -138,3 +138,20 @@ fn cloud_about_names_the_install_and_the_clone() {
         "{long}"
     );
 }
+
+#[test]
+fn reap_about_says_apply_is_what_writes() {
+    let words = "Without `--apply` it prints what would happen";
+    for flag in ["--help", "-h"] {
+        let page = help(&["reap", flag]);
+        assert!(page.contains(words), "{flag}\n{page}");
+        assert!(!page.contains("A dry run without"), "{flag}\n{page}");
+    }
+    let long = help(&["reap", "--help"]);
+    assert!(
+        long.contains("Without `--apply` it prints what would happen."),
+        "{long}"
+    );
+    let root = help(&["--help"]);
+    assert!(root.contains(words), "{root}");
+}
