@@ -39,9 +39,11 @@ the one ``persona_session`` opened.
 Hooks
 =====
 
-Each runner names its own events. The terminal harness registers seven, including
-``PreCompact`` and ``SessionStart``. The command harness registers the prompt and
-``PreToolUse``. The build harness's frozen file,
+Each runner names its own events. The terminal harness registers eight:
+``UserPromptSubmit``, ``SessionEnd``, ``Stop``, ``PostToolUse``,
+``PreToolUse``, ``SubagentStop``, ``PreCompact`` and ``SessionStart``. The command harness registers six:
+``SessionStart``, ``UserPromptSubmit``, ``PreToolUse``, ``PostToolUse``,
+``Stop`` and ``SessionEnd``. The build harness's frozen file,
 ``crates/ljos-cli/assets/grok/ljos.json``, registers eight:
 ``UserPromptSubmit``, ``PostToolUse``, ``PostToolUseFailure``, ``PreToolUse``,
 ``PreCompact``, ``Stop``, ``SessionEnd`` and ``SubagentStop``. The build harness discards

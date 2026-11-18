@@ -32,7 +32,7 @@ person can open.
   tickets, memories and deeds, signed when the sender has a key.
   =ljos receive= checks it before import.
 - *One command, one Model Context Protocol (MCP) server.* =ljos= and
-  =ljos-mcp= serve the same verbs. The server lists 20 core tools by default.
+  =ljos-mcp= serve the same verbs. The server lists 22 core tools by default.
 - *Many runners.* =ljos onboard --example= lists them, among them Claude Code, Codex and Cursor.
 
 * Measured

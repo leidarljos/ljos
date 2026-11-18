@@ -192,7 +192,7 @@ A command that exists and is not this install's ``ljos-mcp`` is a warning. The e
 
 .. code:: text
 
-   warn    mcp warning: ljos-mcp: /tmp/seat-probe/other/ljos-mcp is not this install's /agent/repos/ljos/target/debug/ljos-mcp (/tmp/seat-probe/.cursor/mcp.json), so run `ljos onboard --harness cursor`.
+   warn    mcp warning: ljos-mcp: /tmp/seat-probe/other/ljos-mcp is not this install's /home/you/.cargo/bin/ljos-mcp (/tmp/seat-probe/.cursor/mcp.json), so run `ljos onboard --harness cursor`.
 
 ..
    # proseguard:on

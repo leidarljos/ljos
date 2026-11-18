@@ -65,7 +65,7 @@ kiln.sh: KILN_DOOR is unset. The door seats only when it is cold.
 dev@laptop:~$ ljos remember 'Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.'
 remembered (lesson): Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.
   id fcd167c8, next review 2026-11-14 15:08 +00:00
-standing: the hook shows it from the next prompt it bears on
+saved as a standing lesson; run `ljos search` to read it
 
 dev@laptop:~$ printf '%s\n' 'seat the kiln door' | ljos hook --prompt --text
 label prompt-origin: not stored as the person's words (parent process is `ljos`,
@@ -191,7 +191,7 @@ LJOS_SEAT=alice ljos claim ID --assignee alice
 LJOS_SEAT=bob ljos claim ID --assignee bob
 ```
 
-Bob's claim prints `label claim-conflict:`, names alice, and tells him to run `ljos send`. The ticket stays with alice.
+Bob's claim exits 1, names alice on stderr, and tells him to run `ljos send`. The ticket stays with alice. Over `ljos mcp` the same refusal starts with `label claim-conflict:`.
 `ljos note` writes on the ticket. `ljos timeline ID` prints that note as unverified tracker text. `vissue show ID` prints the logbook.
 Votes cast from one shell are one voice. `ljos consensus` says they were folded on that shell. A vote from each seat's own runner is its own voice. The getting-started page shows the fold.
 

@@ -324,7 +324,7 @@ What writes the pack
 read when the conversation has an open sitting. At ``SessionEnd``, the hook keeps up to five sentences
 that carry a cue word, from the person's and the agent's prose. It writes each as an unverified note
 on that sitting's ticket. With no sitting, it writes nothing. The prompt hook never injects those
-notes. The read is off unless ``LJOS_EXTRACT=on`` is set.
+notes. ``LJOS_EXTRACT=off`` turns the read off.
 
 A lesson an agent writes at ``finish`` is stored at once, labelled agent-derived at L0, and
 ``ljos accept`` marks it reviewed. A standing choice the person states in a

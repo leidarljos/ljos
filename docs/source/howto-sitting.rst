@@ -128,11 +128,20 @@ is closed, withdraw the no ballot and vote again, then ``ljos consensus``.
 .. code:: console
 
    $ ljos vote demo-0gmm --against "the notes omit the index" --used none --as perf-reviewer
-   Error: vote: a no ballot on demo-0gmm has to name a child ticket. `ljos file --parent demo-0gmm "TITLE"` files one, then `ljos vote demo-0gmm --against REASON --child ID` links it. Nothing was cast
-   $ ljos file --id-only "Name the search index in the notes" --parent demo-0gmm
+   label ballot-eligibility-warning: vote: a no ballot on demo-0gmm has to name a child ticket. `ljos file --parent demo-0gmm "TITLE"` files one, then `ljos vote demo-0gmm --against REASON --child ID` links it. Nothing was cast
+   $ ljos file --porcelain "Name the search index in the notes" --parent demo-0gmm
    demo-1zcv
    $ ljos vote demo-0gmm --against "the notes omit the index" --used none --as perf-reviewer --child demo-1zcv
+   demo-0gmm: perf-reviewer voted no
+   demo-0gmm: 1 vote from 1 option
+     no                       1 (perf-reviewer)
+     one ballot only: no, which nobody has agreed with yet
    recorded on the tracker: perf-reviewer for no on demo-0gmm
+   ballot signed by perf-reviewer with key d1e96e866f17… session alice
+   unverified session: nothing named the run but seat alice, so every run of that seat is one session
+   perf-reviewer cast by alice, parent alice
+   tracker git: committed chore(issues): demo-0gmm ballot cast by alice; no remote, kept local
+   demo-0gmm: noted
    no ballot linked to child demo-1zcv. demo-0gmm stays open while demo-1zcv is open. After `ljos finish demo-1zcv --close`, replace the ballot: `ljos vote demo-0gmm --withdraw --as perf-reviewer` then `ljos vote demo-0gmm --for OPTION --used none --as perf-reviewer`, then `ljos consensus demo-0gmm`.
 
 Hold a done claim beside a red test

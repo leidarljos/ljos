@@ -208,6 +208,21 @@ count_surfaces = [
         root / "docs/source/compare.rst",
         f"yes, {core['tools']} core tools",
     ),
+    (
+        "Org comparison",
+        root / "docs/orgmode/compare.org",
+        f"yes, {core['tools']} core tools",
+    ),
+    (
+        "Org introduction server line",
+        root / "docs/orgmode/introduction.org",
+        f"The server lists {core['tools']} core tools by default",
+    ),
+    (
+        "Sphinx introduction server line",
+        root / "docs/source/introduction.rst",
+        f"The server lists {core['tools']} core tools by default",
+    ),
 ]
 for label, path, clause in count_surfaces:
     if clause not in norm(path.read_text()):

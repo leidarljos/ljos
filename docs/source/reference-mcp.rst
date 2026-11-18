@@ -8,14 +8,18 @@ MCP tools
 
 The seat serves these over the Model Context Protocol (MCP).
 
-Writers: ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
+Writers: ``ljos_start``, ``ljos_file``, ``ljos_options``, ``ljos_note``, ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
 ``ljos_learn``, ``ljos_graded``, ``ljos_island``, ``ljos_deed``, ``ljos_vote``, ``ljos_predict``, ``ljos_rule``, ``ljos_claim``,
-``ljos_release``, ``ljos_complete``, ``ljos_consolidate``, ``ljos_findings`` (a reader without ``remember``), ``ljos_bump_plan`` (a reader with ``dry_run``), ``ljos_handover``, ``ljos_receive``, ``ljos_send``, ``ljos_read``, ``ljos_reply``, ``ljos_group``. Readers: ``ljos_search`` (with ``query`` and optional ``as_of``), ``ljos_conflicts``, ``ljos_inbox``,
-``ljos_timeline``, ``ljos_digest``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_recall`` (with ``issue``), ``ljos_ready``,
+``ljos_release``, ``ljos_complete``, ``ljos_consolidate``, ``ljos_findings``, ``ljos_bump_plan``, ``ljos_handover``, ``ljos_receive``, ``ljos_send``, ``ljos_inbox``, ``ljos_read``, ``ljos_reply``, ``ljos_group``. Readers: ``ljos_search`` (with ``query`` and optional ``as_of``), ``ljos_guard_check``, ``ljos_conflicts``, ``ljos_show``,
+``ljos_timeline``, ``ljos_digest``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_recall``, ``ljos_ready``,
 ``ljos_consensus``, ``ljos_brief``, ``ljos_personas``, ``ljos_playbooks``, ``ljos_cards``, ``ljos_policy``, ``ljos_doctor``, ``ljos_mail_search``, ``ljos_mail_show``. Resources:
 ``ljos://protocol``, ``ljos://cards/USER.md``, ``ljos://cards/MEMORY.md``. Prompts:
-``start_a_sitting``, ``run_a_panel``, ``check_a_handover``. Every tool description opens with
+``start_a_sitting``, ``run_a_panel``, ``check_a_handover``. Most tool descriptions open with
 when to call it.
+
+A writer needs a seat, and a reader runs with none. Six writers read until a call asks them to write: ``ljos_deed`` without ``add``, ``ljos_vote`` with no ballot, ``ljos_bump_plan`` with ``dry_run``, ``ljos_findings`` with neither ``remember`` nor ``issue``, ``ljos_group`` that only lists, and ``ljos_island`` without ``fire``.
+
+``ljos_mail_search`` and ``ljos_mail_show`` read the owner's mailbox through notmuch. They are not in the core set, so ask for them with ``LJOS_MCP_TOOLS=core,mail_search,mail_show``. Both refuse until a ``[mail]`` table in the user's own ``ljos.toml`` names ``notmuch_config``, and a cloud seat refuses them. The `mail design <https://github.com/leidarljos/ljos/blob/develop/docs/design/mail.md>`__ has the table and the content checks.
 
 By default the server lists the core set, in this order: ``ljos_rule``,
 ``ljos_prefer``, ``ljos_remember``, ``ljos_search``,
@@ -34,16 +38,15 @@ as text, so the model reads it as a tool result.
 A search or another pack tool with no writer, or a writer that answers 401,
 is that tool error and names ``cargo install --locked packset`` or
 ``packset ensure``. It is not a protocol error, and it does not drop the list.
-
 The server stays up when ``packsetd`` restarts, when a line is not JSON, and while the client is quiet.
 A dead socket is opened again on the same call.
 A failure is one line and names the command.
 A missing tracker names ``ljos onboard``.
-A write with no seat names ``ljos seat`` and explains that ``LJOS_SEAT`` applies to reads only, so writes on a shared ljos mcp server pass ``seat`` in arguments or carry a stamped runner session.
-``ljos_vote`` takes any option from the issue's ``--options`` in ``choice``, such as ``keep``, ``drop``, ``accept``, or ``reject``.
 A busy pack names ``ljos search`` or ``ljos remember``.
 An unknown tool names ``ljos help``.
 An unknown method, or a line that is not JSON, names ``ljos mcp --help``.
+Setting ``LJOS_SEAT`` applies to reads only; a write on a shared ljos mcp server with no ``seat`` argument and no stamped session is refused and names ``ljos seat``.
+``ljos_vote`` takes any option from the issue's ``--options`` in ``choice``, such as ``keep``, ``drop``, ``accept``, or ``reject``.
 
 ``ljos_claim`` takes ``takeover`` set to true to take a ticket over from another seat whose claim looks stale, the step ``ljos claim ID --takeover`` takes. A holder that is running, or whose claim moved inside the lease, is refused with the ``claim-conflict`` label and nothing changes. The old holder is named in a note on the ticket.
 
@@ -57,23 +60,16 @@ An unknown method, or a line that is not JSON, names ``ljos mcp --help``.
 The section is the same one ``ljos recall`` prints.
 ``LJOS_GRAPHIFY=off`` leaves it out. ``LJOS_GRAPHIFY`` set to a path reads that file.
 
-``ljos_start`` takes an optional ``items`` list. The ``task`` is the parent title.
-One call files that parent and the items in one tracker commit, claims the
-parent, and returns the checklist with ids. Pass ``issue`` with ``items`` to
-file the items under that ticket instead. ``ljos_sitting`` takes the same
-``items`` list, and ``plan`` when the parent does not exist yet. A call that
-sends no conversation id still sits, bound to this seat.
-That holder is the same sitting ``ljos sitting`` takes when ``LJOS_SEAT``
-is set and no conversation is named. ``_meta.conversation_id`` sits as that conversation. ``ljos_claim``
-uses the same holder. ``ljos_finish`` takes ``issue``, the checklist id, and ``lesson``.
-It marks that id done and names the next item. ``node`` is not a field.
-
-``ljos_search`` keeps this seat's hits first. Another seat's hit is kept
-when it names the subject, or when the encoder's cosine is at least 0.66.
-When nothing matched, the reading is ``Nothing matched "which fusion"``. It names a shorter query, in plain text, such as ``ljos search fusion``, when one content word is shorter than the query. When nothing is stored, it names ``ljos remember "kiln"`` for that one word, because a shorter search would miss too. When the only rows were weaker, the reading is ``Nothing relevant was found.`` Pass ``project`` to keep that project's tickets and lessons, and lessons that name no project. An unknown project name is an error that names the projects that exist. ``ljos_remember`` takes ``project`` and records that project on the lesson.
+``ljos_search`` keeps this seat's hits first. Another seat's hit is kept when it names the subject, or when the encoder's cosine with the query is at least 0.66. When nothing matched, the reading is ``Nothing matched "QUERY"`` and names a shorter query, in plain text, when one content word is shorter than the query. When nothing is stored, it names ``ljos remember`` with the query in quotes, because a shorter search would miss too. When the only rows were weaker, the reading is ``Nothing relevant was found.`` Pass ``project`` to keep that project's tickets and lessons, and lessons that name no project. An unknown project name is an error that names the projects that exist. ``ljos_remember`` takes ``project`` and records that project on the lesson.
 
 ``ljos_search`` and ``ljos_recall`` append one line to ``recall.log`` in the ljos state directory, the same line ``ljos search`` and ``ljos recall`` append.
 The line is the time, the seat, ``search`` or ``recall``, and the query or the issue.
 The seat is the one the call passed, else the one the session or the environment names.
 The verb on the line is ``search`` or ``recall``.
 
+``ljos_start`` takes an optional ``items`` list. The ``task`` is the parent title.
+One call files that parent and the items in one tracker commit, claims the
+parent, and returns the checklist with ids. Pass ``issue`` with ``items`` to
+file the items under that ticket instead. ``ljos_sitting`` takes the same
+``items`` list, and ``plan`` when the parent does not exist yet. ``ljos_finish``
+takes ``issue``, the checklist id, and ``lesson``. It marks that id done and names the next item.

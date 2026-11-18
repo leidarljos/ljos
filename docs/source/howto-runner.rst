@@ -120,7 +120,7 @@ with none set uses the login name, or a short stable name when that login is mis
 The protocol goes where the agent reads its instructions: ``ljos protocol``
 prints it, the server serves the same text at ``ljos://protocol`` and names
 it in its instructions, so a runner that loads neither skills nor
-resources still reads it first. Each tool description opens with when to
+resources still reads it first. Most tool descriptions open with when to
 call it.
 
 A runner that registers servers by a command of its own, or reads them

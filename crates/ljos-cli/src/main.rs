@@ -600,7 +600,8 @@ enum Cmd {
     /// person's latest prompt are theirs; any other text is a standing
     /// lesson labelled agent-derived (an agent wrote it, and a person has
     /// not accepted it), until a review keeps it. With no seat named, the
-    /// line says `unknown-` and the host name.
+    /// write uses the login name, or a short stable name when that login is
+    /// missing, and the first such write says to set `LJOS_SEAT`.
     ///
     /// Example: `ljos remember "The lexical default is BM25+."`
     ///
@@ -2165,8 +2166,9 @@ enum Cmd {
     /// Claude Code, Codex and Cursor each sit as the runner plus a short id,
     /// and the source line names that variable. An exported `LJOS_SEAT` is
     /// the seat as written. With no seat and no session id, a read prints
-    /// `every-seat` and a write uses `unknown-` and the host name. A session
-    /// with no id that would share the bare runner name says so.
+    /// `every-seat` and a write uses the login name, or a short stable name
+    /// when that login is missing. A session with no id that would share the
+    /// bare runner name says so.
     /// `add` writes a row in the tracker's vissue.toml. The first `add`
     /// starts the list, and a seat that is not on it cannot write.
     /// `grant` records a quoted yes to close. `--via` has to be this

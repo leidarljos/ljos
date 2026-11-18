@@ -251,9 +251,10 @@ One seat holds a ticket at a time. Bob's claim is refused, and the refusal names
    tracker: demo-2f5j STARTED under alice
    tracker git: committed chore(issues): demo-2f5j claimed by alice; no remote, kept local
    $ LJOS_SEAT=bob ljos claim demo-2f5j --assignee bob
-   label claim-conflict: claim: demo-2f5j is held by another (alice, seat alice, still running, since TIME), not by bob, so run `ljos send alice TEXT`.
+   claim: demo-2f5j is held by another (alice, seat alice, still running, since TIME), not by bob, so run `ljos send alice TEXT`.
 
-The line names ``ljos send``. TIME is when alice claimed it. The ticket stays with alice.
+The line goes to stderr and the exit status is 1. It names ``ljos send``. TIME is when alice claimed it. The ticket stays with alice.
+The same refusal over ``ljos mcp`` starts with ``label claim-conflict:``.
 Bob can file another ticket. To help on this one, bob writes a note.
 
 .. BEGIN ljos-sample tutorial-timeline

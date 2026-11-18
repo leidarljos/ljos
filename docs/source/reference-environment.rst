@@ -260,7 +260,7 @@ when it is empty, the member runs ``grok`` with the seat's fallback flags.
 
 ``hooks_format = "cursor"`` writes ``hooks`` in the editor harness's flat shape: ``version``
 1, and one ``{command, timeout}`` entry an event. The seat registers the
-permission check, the prompt, both tool results, compaction, stop and session end
+session start, the permission check, the prompt, both tool results, compaction, stop and session end
 there. Events ``~/.claude/settings.json`` already runs stay in that file.
 ``beforeShellExecution``, ``preToolUse``, ``beforeMCPExecution``,
 ``beforeReadFile`` and ``postToolUseFailure`` are still written here, since

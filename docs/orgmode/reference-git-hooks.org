@@ -7,7 +7,7 @@ The directory is =$LJOS_GIT_HOOKS= when that is set, otherwise =$XDG_DATA_HOME/l
 It prints =installed= and the directory.
 A =core.hooksPath= that was already set is saved as =previous-hooks-path= in that directory.
 When =core.hooksPath= still names that directory, =ljos git-hooks uninstall= puts the saved path back, or unsets it. It then removes the stubs and prints =uninstalled=.
-=ljos git-hooks status= prints =hooks:= and the directory, or =not installed=, then =core.hooksPath:= and the configured value, or =(unset)=.
+=ljos git-hooks status= prints =hooks:= and the directory, or =not installed=, then =core.hooksPath:= and the configured value, or =(unset)=. A third line says =ljos hooks run= when the stubs are the configured hooks, or =ljos hooks do not run; ljos git-hooks install= when they are not.
 =ljos onboard --harness example-host= installs the same hooks.
 
 Each stub chains to the repository's =.git/hooks/<name>= when that file is executable, otherwise to the saved path's hook of the same name, and keeps that hook's exit status.
