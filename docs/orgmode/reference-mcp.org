@@ -26,8 +26,7 @@ By default the server lists the core set, in this order: =ljos_rule=,
 by name, then the persona and playbook tools.
 =LJOS_MCP_TOOLS= also takes names split on commas or spaces, with or
 without the =ljos_= prefix, where =core= stands for the core set. A call
-to a tool the server does not list is refused with the shell command to
-run instead. A tool that fails answers with =isError= set and the reason
+to a tool the server does not list is refused. The line asks the person to set =LJOS_MCP_TOOLS= and restart the server, and names the shell command to run meanwhile when the tool has one. A tool that fails answers with =isError= set and the reason
 as text, so the model reads it as a tool result.
 =tools/list= does not wait on a seat, a tracker, =PACKSET_HOME=, or a running
 =packsetd=, so a fresh machine still receives the whole set it asked for.
@@ -39,7 +38,7 @@ A dead socket is opened again on the same call.
 A failure is one line and names the command.
 A missing tracker names =ljos onboard=.
 A busy pack names =ljos search= or =ljos remember=.
-An unknown tool names =ljos help=.
+An unknown tool names =tools/list= and =ljos help=.
 Arguments that do not parse name the field that failed and the =ljos help= page for the tool.
 A failed call ends with a =next:= line that names the tool to call again once the line above is fixed, and =ljos_guard_check= adds that the command is not to run.
 An unknown method, or a line that is not JSON, names =ljos mcp --help=.

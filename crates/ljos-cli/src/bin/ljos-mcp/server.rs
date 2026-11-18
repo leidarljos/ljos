@@ -178,6 +178,20 @@ fn next_step(tool: &str) -> &'static str {
     }
 }
 
+/// A tool this server has and did not list. The person changes the set, and
+/// the tool's shell command, when it has one, answers meanwhile.
+fn unlisted_line(tool: &str) -> String {
+    let verb = tool.trim_start_matches("ljos_");
+    let tail = match verb {
+        "guard_check" | "mail_search" | "mail_show" => String::new(),
+        "bump_plan" => ", or run `ljos bump-plan` in a shell".to_string(),
+        other => format!(", or run `ljos {other}` in a shell"),
+    };
+    format!(
+        "{tool} is not in this server's tool set. Ask the person to set LJOS_MCP_TOOLS=all (or core,{verb}) and restart the server{tail}."
+    )
+}
+
 /// The line after a tool that failed. The success lines say to run the
 /// command or finish the sitting, which is wrong after a refusal.
 fn failure_next(name: &str) -> String {
@@ -4168,7 +4182,10 @@ fn clarify_outbound(body: &[u8]) -> Vec<u8> {
                         "{message} is not a method this server serves, so run `ljos mcp --help`."
                     )),
                     Some(-32602) if message == "tool not found" => {
-                        Some("that tool is not served, so run `ljos help`.".to_string())
+                        Some(
+                            "that tool is not served, so call tools/list for the names this server serves, or run `ljos help`."
+                                .to_string(),
+                        )
                     }
                     _ => None,
                 };
@@ -4670,18 +4687,15 @@ impl ServerHandler for LjosServer {
             && !listed(set.as_deref(), &request.name)
             && Self::tool_router().get(&request.name).is_some()
         {
-            let missing = request.name.to_string();
-            let verb = missing.trim_start_matches("ljos_");
-            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "{missing} is not in this server's tool set, and LJOS_MCP_TOOLS=all lists every tool, \
-                 so run `ljos {verb}`."
+            return Ok(CallToolResult::error(vec![ContentBlock::text(unlisted_line(
+                &request.name,
             ))])
             .into());
         }
         if Self::tool_router().get(&request.name).is_none() {
             let missing = request.name.to_string();
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "{missing} is not a tool, so run `ljos help`."
+                "{missing} is not a tool, so call tools/list for the names this server serves, or run `ljos help`."
             ))])
             .into());
         }

@@ -169,3 +169,30 @@ fn a_failed_call_ends_with_a_next_line_that_fits_the_failure() {
         "next: run the command, minding any warning line"
     );
 }
+
+#[test]
+fn a_tool_that_is_not_served_says_what_to_do() {
+    let mut session = Session::open(&[]);
+    let unknown = session.call("ljos_remmeber", serde_json::json!({}));
+    assert_eq!(unknown["result"]["isError"], true, "{unknown}");
+    assert_eq!(
+        blocks(&unknown)[0],
+        "ljos_remmeber is not a tool, so call tools/list for the names this server serves, or run `ljos help`."
+    );
+    let unlisted = session.call("ljos_brief", serde_json::json!({}));
+    assert_eq!(unlisted["result"]["isError"], true, "{unlisted}");
+    assert_eq!(
+        blocks(&unlisted),
+        ["ljos_brief is not in this server's tool set. Ask the person to set LJOS_MCP_TOOLS=all (or core,brief) and restart the server, or run `ljos brief` in a shell."]
+    );
+    let plan = session.call("ljos_bump_plan", serde_json::json!({}));
+    assert_eq!(
+        blocks(&plan),
+        ["ljos_bump_plan is not in this server's tool set. Ask the person to set LJOS_MCP_TOOLS=all (or core,bump_plan) and restart the server, or run `ljos bump-plan` in a shell."]
+    );
+    let mail = session.call("ljos_mail_show", serde_json::json!({}));
+    assert_eq!(
+        blocks(&mail),
+        ["ljos_mail_show is not in this server's tool set. Ask the person to set LJOS_MCP_TOOLS=all (or core,mail_show) and restart the server."]
+    );
+}

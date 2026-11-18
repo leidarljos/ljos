@@ -1,0 +1,1 @@
+Tell an agent that calls a tool `ljos-mcp` does not serve to call `tools/list`, and tell it that an unlisted tool needs `LJOS_MCP_TOOLS` set by the person, with the right shell command for `ljos_bump_plan` and none for the mail tools.
