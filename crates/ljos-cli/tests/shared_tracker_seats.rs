@@ -650,3 +650,36 @@ fn ljos_mcp_refuses_a_ticket_that_does_not_exist_as_the_cli_does() {
         world.bob_graph()
     );
 }
+#[test]
+fn a_claim_another_seat_refuses_leaves_no_node_in_the_refused_seats_graph() {
+    let world = Shared::new();
+    let taken = world.alice_ljos(&["claim", "demo-shr1"]);
+    assert!(taken.status.success(), "{}", said(&taken));
+
+    let refused = world.bob_ljos(&["claim", "demo-shr1"]);
+    assert!(!refused.status.success(), "{}", said(&refused));
+    assert!(
+        said(&refused).contains("ljos send alice TEXT"),
+        "{}",
+        said(&refused)
+    );
+    assert!(
+        !world.bob_graph().contains("demo-shr1"),
+        "a refused claim left a node behind:\n{}",
+        world.bob_graph()
+    );
+
+    let over_mcp = world.bob_mcp(
+        "ljos_claim",
+        serde_json::json!({"seat": "bob", "node": "demo-shr1"}),
+    );
+    assert!(
+        over_mcp.to_string().contains("claim-conflict"),
+        "{over_mcp}"
+    );
+    assert!(
+        !world.bob_graph().contains("demo-shr1"),
+        "a refused ljos_claim left a node behind:\n{}",
+        world.bob_graph()
+    );
+}

@@ -39999,7 +39999,6 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
     }
     let assignee = claim_holder(assignee)?;
     let assignee = assignee.as_str();
-    let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
     if let Some(held) = tracker_open_holder(node) {
         if !same_claimed_seat(&held, assignee, node) {
@@ -40024,6 +40023,7 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
             ));
         }
     }
+    let id = node_for(node)?;
     match run_captured("claimdag", &["claim", &id, "--assignee", &actor]) {
         Ok(said) => {
             write_hold(&actor, assignee, node);
