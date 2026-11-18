@@ -920,6 +920,8 @@ def as_terminal(text: str) -> str:
     is not a login session, so the binary stores the lesson as an agent's.
     The substitution is fixed, so the sample does not depend on where the
     script runs. The how-to for two agents keeps the runner wording.
+    The tutorial-script sample is the same transcript with this
+    substitution left off, so it shows `lesson, from an agent`.
     """
     text = text.replace(_EPISODE, _STANDING)
     text = text.replace("lesson, from an agent, today", "lesson, today")
@@ -1013,15 +1015,18 @@ def tutorial_search(ljos: Path) -> dict[str, str]:
 
         shutil.rmtree(home, ignore_errors=True)
 
-    def finish(text: str, standin: str) -> str:
-        text = as_terminal(text)
+    def scrub(text: str, standin: str) -> str:
         text = text.replace(str(home), "/home/you")
         text = _REVIEW.sub("next review 2026-11-12 21:40 +00:00", text)
         text = _SHORT_ID.sub(standin, text)
         return text.strip() + "\n"
 
+    def finish(text: str, standin: str) -> str:
+        return scrub(as_terminal(text), standin)
+
     search = finish(remembered + found, "a6ae2751")
     prefer = finish(preferred + fused, "f8b725a9")
+    script = scrub(remembered + found, "a6ae2751")
     index_lines = [
         line
         for line in search.splitlines()
@@ -1048,7 +1053,11 @@ def tutorial_search(ljos: Path) -> dict[str, str]:
         raise SystemExit(f"gen_samples: search sample still uses an unknown host:\n{search}")
     if _STANDING not in search:
         raise SystemExit(f"gen_samples: search sample did not say the lesson stands:\n{search}")
-    return {"search": search, "prefer": prefer, "index": index}
+    if "lesson, from an agent" not in script or "lesson, today" in script:
+        raise SystemExit(
+            f"gen_samples: script sample is not the no-terminal transcript:\n{script}"
+        )
+    return {"search": search, "prefer": prefer, "index": index, "script": script}
 
 
 def _howto_seat(ljos: Path, prefix: str) -> tuple[Path, dict[str, str], Path]:

@@ -1011,6 +1011,15 @@ fn the_getting_started_search_sample_is_a_terminal() {
             !prefer.contains("from an agent"),
             "{rel} preference sample is a runner transcript:\n{prefer}"
         );
+        let script = sample_region(&text, "script");
+        assert!(
+            script.contains("lesson, from an agent"),
+            "{rel} script sample is not the no-terminal row:\n{script}"
+        );
+        assert!(
+            text.contains("script or cron"),
+            "{rel} does not name a script or cron"
+        );
         let timeline = sample_region(&text, "timeline");
         assert!(
             timeline.contains("[end 0123456789abcdef]"),
@@ -1047,6 +1056,10 @@ fn the_getting_started_page_names_both_preference_rows() {
         assert!(
             text.contains("lesson, today"),
             "{rel} does not name the terminal lesson row"
+        );
+        assert!(
+            text.contains("script or cron") && text.contains("lesson, from an agent"),
+            "{rel} does not name the no-terminal lesson row"
         );
     }
 }

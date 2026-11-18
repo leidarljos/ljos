@@ -156,9 +156,30 @@ A lesson and a search
 The id and the review time are the ones that run printed. ``ljos show a6ae2751`` opens that memory. A ``local:`` id opens the same way. The name is the login name. This sample's login is ada.
 That line is printed on the first write that had to pick a seat. A later write in the same place does not print it again. A conversation that already has a seat record writes as that seat and does not print the line.
 Typed at a terminal, the search row says ``lesson, today``.
-Under a runner the same row says ``lesson, from an agent``.
+With no terminal, a script or cron as well as a runner, the same row says ``lesson, from an agent``.
+
+.. BEGIN ljos-sample tutorial-script
+
+.. code:: console
+
+   $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
+   ljos: no seat was named and this write uses ada, so run `export LJOS_SEAT=NAME`.
+   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
+     id a6ae2751, next review 2026-11-12 21:40 +00:00
+   saved as a standing lesson; run `ljos search` to read it
+   $ ljos search "lexical default"
+   matched by words (encoder not installed), so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
+   shown 1 of 1.
+   The first row is the closest match.
+
+   lesson, from an agent, today
+     The lexical default is BM25+. It beat BM25 by two points on turns.
+     place 1, 2 of 2 checks, id a6ae2751
+
+.. END ljos-sample tutorial-script
+
 A preference stored at that terminal is ``preference, today``.
-Under a runner the preference row is ``preference, from an agent, not checked``.
+With no terminal, a script or cron as well as a runner, the preference row is ``preference, from an agent, not checked``.
 Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
 ``ljos search "which fusion"`` shares no word with either sentence and prints ``Nothing matched "which fusion". Try a shorter query, such as: ljos search fusion``. A match-mode line is not printed.
 When the encoder ranked the page, this seat's hits come first. A word ranking gives this seat a small boost instead, and a closer row from another seat stays ahead. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.

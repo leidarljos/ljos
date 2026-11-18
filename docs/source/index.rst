@@ -106,7 +106,7 @@ First commands
 .. END ljos-sample tutorial-index
 
 ``ljos search`` prints the lesson when the query shares its words. ``ljos show a6ae2751`` opens that id. A ``local:`` id opens the same way.
-Typed at a terminal, the row is ``lesson, today``. Under a runner it says ``lesson, from an agent``.
+Typed at a terminal, the row is ``lesson, today``. With no terminal, a script or cron as well as a runner, the row is ``lesson, from an agent``.
 A word ranking splits an identifier, so ``list_scans`` matches ``list scans``.
 A word in every row is common only once at least four rows carry it.
 Two lessons that share one word of the query still match.
