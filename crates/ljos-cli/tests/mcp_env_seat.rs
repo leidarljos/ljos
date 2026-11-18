@@ -22,6 +22,20 @@ fn call_mcp(
     seat: Option<&str>,
     calls: &[(&str, serde_json::Value)],
 ) -> Vec<serde_json::Value> {
+    call_mcp_env(path, home, tracker, pack_url, pack_home, seat, &[], calls)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn call_mcp_env(
+    path: &str,
+    home: &Path,
+    tracker: &Path,
+    pack_url: &str,
+    pack_home: &Path,
+    seat: Option<&str>,
+    env: &[(&str, &str)],
+    calls: &[(&str, serde_json::Value)],
+) -> Vec<serde_json::Value> {
     let runtime = home.join("run");
     std::fs::create_dir_all(&runtime).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
@@ -45,6 +59,9 @@ fn call_mcp(
     seat_env::clear(&mut cmd);
     if let Some(seat) = seat {
         cmd.env("LJOS_SEAT", seat);
+    }
+    for (key, value) in env {
+        cmd.env(key, value);
     }
     let mut child = cmd.spawn().unwrap();
     let pid = child.id();
@@ -298,4 +315,114 @@ fn ljos_vote_schema_describes_issue_options() {
         desc.contains("--options"),
         "ljos_vote choice schema does not mention --options: {desc:?}"
     );
+}
+
+fn listed_tools() -> Vec<serde_json::Value> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", dir.path())
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for line in [
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "0"}}
+        }),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+    ] {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let list = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|v| v["id"] == 2)
+        .unwrap_or_else(|| panic!("no tools/list in {stdout}"));
+    list["result"]["tools"].as_array().unwrap().clone()
+}
+
+/// A stamped conversation with `LJOS_SEAT` set writes under that seat with
+/// no `seat` argument, so a tool must not say `LJOS_SEAT` is unused.
+#[test]
+fn a_stamped_conversation_writes_under_ljos_seat_and_the_schema_says_so() {
+    let vissue = sibling::require("vissue").unwrap_or_else(|e| panic!("{e}"));
+    let claimdag = sibling::require("claimdag").unwrap_or_else(|e| panic!("{e}"));
+    let _deedar = sibling::require("deedar").unwrap_or_else(|e| panic!("{e}"));
+    let pack = ljos_test_boot::Packsetd::open();
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("alice");
+    let tracker = dir.path().join("tracker");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(tracker.join("Software/demo")).unwrap();
+    std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    std::fs::write(
+        tracker.join("Software/demo/issues.org"),
+        "\
+#+TITLE: demo
+#+VISSUE: 1
+#+CATEGORY: demo
+#+TODO: TODO STARTED | DONE CANCELLED
+
+* TODO [#C] Pick a codec
+:PROPERTIES:
+:ID:         demo-st4m
+:END:
+",
+    )
+    .unwrap();
+    let siblings = vissue.parent().unwrap();
+    assert_eq!(claimdag.parent(), Some(siblings));
+    let path = format!("{}:/usr/bin:/bin", siblings.display());
+
+    let answers = call_mcp_env(
+        &path,
+        &home,
+        &tracker,
+        pack.url(),
+        pack.pack_home(),
+        Some("alice"),
+        &[
+            (
+                "CURSOR_CONVERSATION_ID",
+                "bc-872164c1-e14f-56d0-a32e-fc0bd5afad41",
+            ),
+            ("CURSOR_AGENT", "1"),
+        ],
+        &[("ljos_claim", serde_json::json!({"node": "demo-st4m"}))],
+    );
+    assert_eq!(answers.len(), 1, "{answers:?}");
+    let text = result_text(&answers[0]);
+    assert_ne!(answers[0]["result"]["isError"], true, "{text}");
+    assert!(!text.contains("applies to reads only"), "{text}");
+    let org = std::fs::read_to_string(tracker.join("Software/demo/issues.org")).unwrap();
+    assert!(
+        org.contains(":CLAIMED_BY: alice"),
+        "the claim was not written under LJOS_SEAT:\n{org}"
+    );
+
+    for tool in listed_tools() {
+        let name = tool["name"].as_str().unwrap_or("");
+        if !matches!(name, "ljos_claim" | "ljos_release" | "ljos_sitting") {
+            continue;
+        }
+        let said = tool["inputSchema"]["properties"]["assignee"]["description"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            said.contains("LJOS_SEAT") && !said.contains("not used"),
+            "{name} assignee says LJOS_SEAT is unused on writes, which a stamped conversation shows is false: {said:?}"
+        );
+        assert!(!said.contains("seats.toml"), "{name}: {said:?}");
+    }
 }

@@ -951,8 +951,9 @@ pub struct TakeArgs {
     /// The tracker id of the issue (`proj-1a2b`), or a 32-hex claim-graph id.
     pub node: String,
     /// Your name; a named worker occupies one slot per issue. Absent, this
-    /// conversation's holder from the session the runner stamped, or pass `seat`.
-    /// The client's name and `LJOS_SEAT` are not used on writes.
+    /// conversation's holder from the session the runner stamped, under the
+    /// seat `LJOS_SEAT` names when it is set, or pass `seat`. The client's
+    /// name is not a seat.
     #[serde(default)]
     pub assignee: Option<String>,
 }
@@ -1104,8 +1105,9 @@ pub struct SittingArgs {
     #[serde(default)]
     pub items: Vec<String>,
     /// Your name; a named worker occupies one slot per issue. Absent, this
-    /// conversation's holder: the session the runner stamped, else the seat
-    /// from LJOS_SEAT or seats.toml. The client's name is not a seat.
+    /// conversation's holder from the session the runner stamped, under the
+    /// seat `LJOS_SEAT` names when it is set, or pass `seat`. The client's
+    /// name is not a seat.
     #[serde(default)]
     pub assignee: Option<String>,
     /// Accepted and ignored. A blocked issue is sat and labelled `blocked-by`.
