@@ -603,12 +603,13 @@ pub fn pinned(value: &str) -> bool {
         .is_some_and(|root| root == Path::new(value))
 }
 
-/// One sentence when this process has no tracker to write.
+/// One line when this process has no tracker to write. It names the
+/// command that makes one, and the how-to page that makes one by hand.
 ///
 /// A root named in the environment or in the seat's vissue configuration
 /// is that tracker, and so is a `vissue.toml` in the working directory.
 /// A bare `Software/` directory is not.
-pub const MISSING_TRACKER: &str = "No tracker found, so run `ljos onboard`.";
+pub const MISSING_TRACKER: &str = "No tracker found, so run `ljos onboard`. To make one by hand, read https://leidarljos.github.io/ljos/howto-by-hand.html";
 
 /// [`MISSING_TRACKER`] when nothing names a tracker. `None` when a later
 /// call can use the one that is named.
@@ -999,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_tracker_is_one_sentence() {
+    fn a_missing_tracker_is_one_line_that_names_the_how_to() {
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let saved = (

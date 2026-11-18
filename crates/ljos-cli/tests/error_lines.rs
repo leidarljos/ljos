@@ -532,7 +532,7 @@ fn a_missing_tracker_names_ljos_onboard_and_exits_1() {
     assert_eq!(ready.status.code(), Some(1), "{ready_said}");
     assert_eq!(
         one_line(&ready.stderr),
-        "No tracker found, so run `ljos onboard`."
+        "No tracker found, so run `ljos onboard`. To make one by hand, read https://leidarljos.github.io/ljos/howto-by-hand.html"
     );
 
     if tools::halt(tools::Tool::Vissue) {
@@ -543,7 +543,7 @@ fn a_missing_tracker_names_ljos_onboard_and_exits_1() {
     assert_eq!(filed.status.code(), Some(1), "{filed_said}");
     assert_eq!(
         one_line(&filed.stderr),
-        "No tracker found, so run `ljos onboard`."
+        "No tracker found, so run `ljos onboard`. To make one by hand, read https://leidarljos.github.io/ljos/howto-by-hand.html"
     );
 
     let noted = run_unboarded(&["note", "demo-1234", "note text"], None);
@@ -551,7 +551,7 @@ fn a_missing_tracker_names_ljos_onboard_and_exits_1() {
     assert_eq!(noted.status.code(), Some(1), "{noted_said}");
     assert_eq!(
         one_line(&noted.stderr),
-        "No tracker found, so run `ljos onboard`."
+        "No tracker found, so run `ljos onboard`. To make one by hand, read https://leidarljos.github.io/ljos/howto-by-hand.html"
     );
 
     let missing_named = root.path().join("missing-tracker");

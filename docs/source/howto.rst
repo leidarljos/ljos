@@ -15,6 +15,7 @@ Each page is one task. Start with the first two; the rest stand alone.
 - :doc:`Run two agents on one repository <howto-agents>`: each session gets a seat, they mail each other, and they split the tickets.
 - :doc:`Check the seat <howto-check>`: read what ljos doctor prints, which rows fail, and when it exits 1.
 - :doc:`Troubleshoot doctor <howto-troubleshoot>`: the row ljos doctor prints for a missing writer, seat, tracker, binary, Model Context Protocol entry or registry, and the command that fixes it.
+- :doc:`Make a tracker and a deed store by hand <howto-by-hand>`: make the two directories with a few shell lines, without ``ljos onboard``.
 - :doc:`Add a seat and let it close tickets <howto-seats>`: add a seat to the tracker and grant it the right to close named tickets.
 - :doc:`Bring memory into the prompt <howto-recall>`: turn on the prompt hook, ask what a task touches, and read an issue's history as one dated list.
 - :doc:`Keep memory current <howto-memory>`: keep the cards, record a number that is measured again and again, and retire a memory with its reason.
@@ -37,6 +38,7 @@ Each page is one task. Start with the first two; the rest stand alone.
    howto-agents
    howto-check
    howto-troubleshoot
+   howto-by-hand
    howto-seats
    howto-recall
    howto-memory

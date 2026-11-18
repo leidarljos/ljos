@@ -131,7 +131,7 @@ fn file_without_a_tracker_names_onboard() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!out.status.success(), "{stdout}{err}");
     let lines: Vec<_> = err.lines().filter(|line| !line.is_empty()).collect();
-    assert_eq!(lines, ["No tracker found, so run `ljos onboard`."], "{err}");
+    assert_eq!(lines, ["No tracker found, so run `ljos onboard`. To make one by hand, read https://leidarljos.github.io/ljos/howto-by-hand.html"], "{err}");
     assert!(!err.contains("ljos-vissue"), "{err}");
     assert!(!err.contains("VISSUE_ROOT"), "{err}");
     assert!(

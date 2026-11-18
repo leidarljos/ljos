@@ -36,7 +36,7 @@ const CORE: &[&str] = &[
     "ljos_doctor",
 ];
 
-const MISSING_TRACKER: &str = "No tracker found, so run `ljos onboard`.";
+const MISSING_TRACKER: &str = "No tracker found, so run `ljos onboard`. To make one by hand, read https://leidarljos.github.io/ljos/howto-by-hand.html";
 
 fn script(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
