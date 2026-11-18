@@ -334,16 +334,41 @@ fn doctor_names_onboard_when_no_tracker_exists() {
     std::os::unix::fs::symlink("habitat", bin.join("vissue")).unwrap();
     let (code, text) = doctor(&home, &format!("{}:/usr/bin:/bin", bin.display()));
     assert_eq!(code, 1, "{text}");
-    assert!(
-        text.contains(
-            "info\ttickets\tvissue failed (exit 1): not inside a tracker, so run `ljos onboard`.\n"
-        ),
-        "{text}"
+    let row = format!(
+        "info\ttickets\tno tracker at {}/.local/share/vissue/tracker, so run `ljos onboard`.\n",
+        home.display()
     );
+    assert!(text.contains(&row), "{text}");
     assert!(
         !text
             .lines()
             .any(|line| line.contains("tracker does not answer")),
         "{text}"
+    );
+}
+
+/// A seat that has not onboarded has no tracker yet. The row says so and
+/// names where onboard puts one, as the deed store row does. It does not
+/// print vissue's refusal, which names a directory nobody chose as the
+/// tracker and tells the person to pass `--root`.
+#[test]
+fn doctor_says_no_tracker_yet_without_vissues_refusal() {
+    let (home, bin) = layout("none-yet");
+    let _ = std::fs::remove_file(bin.join("vissue"));
+    std::os::unix::fs::symlink("habitat", bin.join("vissue")).unwrap();
+    let (_, text) = doctor(&home, &format!("{}:/usr/bin:/bin", bin.display()));
+    let row = text
+        .lines()
+        .find(|line| line.contains("\ttickets\t"))
+        .unwrap_or_else(|| panic!("no tickets row:\n{text}"));
+    assert!(!row.contains("vissue failed"), "{row}");
+    assert!(!row.contains("--root"), "{row}");
+    assert!(!row.contains("VISSUE_ROOT"), "{row}");
+    assert_eq!(
+        row,
+        format!(
+            "info\ttickets\tno tracker at {}/.local/share/vissue/tracker, so run `ljos onboard`.",
+            home.display()
+        )
     );
 }

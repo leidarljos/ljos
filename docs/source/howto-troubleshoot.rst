@@ -95,10 +95,13 @@ With ``vissue`` installed and no tracker configured, the row is info and this fa
 
 .. code:: text
 
-   info    tickets vissue failed (exit 1): /tmp/seat is not a tracker: it holds neither vissue.toml nor Software/. Name one with --root, or set VISSUE_ROOT, so run `ljos onboard`.
+   info    tickets no tracker at /tmp/seat/.local/share/vissue/tracker, so run `ljos onboard`.
 
 ..
    # proseguard:on
+
+The row names the directory ``ljos onboard`` makes, the way the deeds row names its store.
+It does not print vissue's refusal, which names the directory you were in.
 
 ``VISSUE_ROOT`` pointing at a directory that is not there fails the doctor.
 The summary names the tracker, and the row is:

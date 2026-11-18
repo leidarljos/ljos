@@ -35612,8 +35612,10 @@ fn habitat_down_state(name: &str, err: &anyhow::Error) -> String {
             .iter()
             .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()));
         if no_tracker && !root_named && !state.contains("ljos onboard") {
-            let trimmed = state.trim_end_matches('.').trim_end();
-            state = format!("{trimmed}, so run `ljos onboard`.");
+            state = match tracker_place::default_root() {
+                Some(root) => format!("no tracker at {}, so run `ljos onboard`.", root.display()),
+                None => "no tracker yet, so run `ljos onboard`.".to_string(),
+            };
         }
     }
     state
@@ -58845,20 +58847,18 @@ mod tests {
             "tracker",
             &anyhow::anyhow!("vissue failed (exit 1): not inside a tracker"),
         );
-        assert_eq!(
-            absent,
-            "vissue failed (exit 1): not inside a tracker, so run `ljos onboard`."
-        );
+        let want = match tracker_place::default_root() {
+            Some(root) => format!("no tracker at {}, so run `ljos onboard`.", root.display()),
+            None => "no tracker yet, so run `ljos onboard`.".to_string(),
+        };
+        assert_eq!(absent, want);
         let named = super::habitat_down_state(
             "tracker",
             &anyhow::anyhow!(
                 "vissue failed (exit 1): /tmp/seat is not a tracker: it holds neither vissue.toml nor Software/. Name one with --root, or set VISSUE_ROOT"
             ),
         );
-        assert_eq!(
-            named,
-            "vissue failed (exit 1): /tmp/seat is not a tracker: it holds neither vissue.toml nor Software/. Name one with --root, or set VISSUE_ROOT, so run `ljos onboard`."
-        );
+        assert_eq!(named, want);
         assert_eq!(
             super::doctor_word(&super::Habitat {
                 name: "tracker",
