@@ -2552,6 +2552,7 @@ impl LjosServer {
         Parameters(args): Parameters<TakeArgs>,
     ) -> Result<Json<Said>, McpError> {
         let assignee = call_assignee("claim", args.assignee.as_deref())?;
+        ljos_cli::require_ticket_to_claim(&args.node).map_err(refused)?;
         let text = claim(&args.node, &assignee).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
@@ -2694,6 +2695,9 @@ impl LjosServer {
         Parameters(args): Parameters<TakeArgs>,
     ) -> Result<Json<Said>, McpError> {
         let assignee = call_assignee("release", args.assignee.as_deref())?;
+        if let Some(line) = ljos_cli::ticket_node_refusal(&args.node) {
+            return Err(refused(anyhow::anyhow!(line)));
+        }
         let mut text = release(&args.node, &assignee).map_err(refused)?;
         text.push_str(&ljos_cli::persist_tracker(&args.node, "released"));
         Ok(Json(Said { text, aside: None }))
@@ -2713,6 +2717,9 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<FinishArgs>,
     ) -> Result<Json<Said>, McpError> {
+        if let Some(line) = ljos_cli::ticket_node_refusal(&args.node) {
+            return Err(refused(anyhow::anyhow!(line)));
+        }
         let text = complete(
             &args.node,
             args.status.as_deref(),

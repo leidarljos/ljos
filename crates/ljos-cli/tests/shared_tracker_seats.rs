@@ -611,3 +611,42 @@ fn a_claim_graph_id_is_claimed_without_a_ticket_of_that_name() {
     assert!(claimed.status.success(), "{}", said(&claimed));
     assert!(!said(&claimed).contains("not found"), "{}", said(&claimed));
 }
+#[test]
+fn ljos_mcp_refuses_a_ticket_that_does_not_exist_as_the_cli_does() {
+    let world = Shared::new();
+    let cli = world.bob_ljos(&["claim", "demo-nope"]);
+    assert!(!cli.status.success(), "{}", said(&cli));
+    assert!(said(&cli).contains("not found"), "{}", said(&cli));
+
+    for (tool, arguments) in [
+        (
+            "ljos_claim",
+            serde_json::json!({"seat": "bob", "node": "demo-nope"}),
+        ),
+        (
+            "ljos_release",
+            serde_json::json!({"seat": "bob", "node": "demo-nope"}),
+        ),
+        (
+            "ljos_complete",
+            serde_json::json!({"seat": "bob", "node": "demo-nope"}),
+        ),
+    ] {
+        let answer = world.bob_mcp(tool, arguments);
+        let text = answer.to_string();
+        assert_eq!(answer["result"]["isError"], true, "{tool}: {text}");
+        assert!(
+            text.contains("demo-nope") && text.contains("not found"),
+            "{tool}: {text}"
+        );
+        assert!(
+            !text.contains("ljos claim demo-nope"),
+            "{tool} sends the caller to claim a ticket that does not exist: {text}"
+        );
+    }
+    assert!(
+        !world.bob_graph().contains("demo-nope"),
+        "a missing ticket got a node:\n{}",
+        world.bob_graph()
+    );
+}

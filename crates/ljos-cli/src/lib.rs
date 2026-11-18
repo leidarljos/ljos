@@ -14009,6 +14009,17 @@ pub fn ticket_exists(id: &str) -> bool {
     issue_spot::find(id.trim()).is_some()
 }
 
+/// The refusal `ljos release` and `ljos complete` print for a tracker id that
+/// names no ticket. A blank id and a 32-hex claim-graph id are not looked up.
+#[must_use]
+pub fn ticket_node_refusal(id: &str) -> Option<String> {
+    let id = id.trim();
+    if id.is_empty() || (id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return None;
+    }
+    ticket_refusal(id)
+}
+
 /// Refuse a claim of a tracker id the tracker does not have, so a typo does
 /// not mint a session node under a name no ticket carries. A blank id is left
 /// to `claim`, which says so, and a 32-hex id is a claim-graph node. Neither
