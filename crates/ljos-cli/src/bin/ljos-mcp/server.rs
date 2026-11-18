@@ -214,6 +214,16 @@ fn attach_next(name: &str, response: CallToolResponse) -> CallToolResponse {
                     .to_string()
             } else if result.is_error == Some(true) {
                 failure_next(name)
+            } else if name != "ljos_note"
+                && result
+                    .content
+                    .first()
+                    .and_then(|block| block.as_text())
+                    .is_some_and(|text| text.text.starts_with("label "))
+            {
+                format!(
+                    "next: {name} did not do its work; follow the step the label names, or tell the person, then call {name} again"
+                )
             } else if name == "ljos_finish" {
                 let body = result
                     .content

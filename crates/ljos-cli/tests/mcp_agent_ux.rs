@@ -560,3 +560,37 @@ fn a_default_description_names_only_tools_the_server_lists() {
     let release = description_of(&tools, "ljos_release");
     assert!(release.contains("that is ljos_finish."), "{release}");
 }
+
+#[test]
+fn a_labelled_result_does_not_say_to_carry_on() {
+    let tracker = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tracker.path().join("vissue.toml"),
+        "prefix = \"proj\"\nseats = [\"alice\"]\n",
+    )
+    .unwrap();
+    let root = tracker.path().to_str().unwrap().to_string();
+    let mut session = Session::open(&[("VISSUE_ROOT", &root), ("VISSUE_NO_ROUTE", "1")]);
+    for (tool, arguments) in [
+        (
+            "ljos_file",
+            serde_json::json!({"title": "a task", "seat": "ada"}),
+        ),
+        (
+            "ljos_finish",
+            serde_json::json!({"lesson": "It rang.", "seat": "ada"}),
+        ),
+    ] {
+        let said = blocks(&session.call(tool, arguments));
+        assert!(said[0].starts_with("label seat-unlisted: "), "{said:?}");
+        let next = said.last().unwrap();
+        assert_eq!(
+            next,
+            &format!(
+                "next: {tool} did not do its work; follow the step the label names, or tell the person, then call {tool} again"
+            ),
+            "{said:?}"
+        );
+        assert!(!next.contains("sitting is closed"), "{next}");
+    }
+}
