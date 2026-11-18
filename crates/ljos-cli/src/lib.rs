@@ -7387,17 +7387,18 @@ fn onboard_detected_with_lookup(
         // The tracker, the deed store and the writer are the seat, not a
         // runner. A machine with no coding tool still gets them, or the
         // first `ljos doctor` says the tracker works before one exists.
-        let mut steps = vec![Step {
-            what: "runners".into(),
-            detail: no_runner_line(dry),
-            ok: true,
-        }];
-        steps.extend([
+        // Put the runners summary and `Next:` line last, after the setup steps.
+        let mut steps = vec![
             deed_store_step(dry),
             tracker_step(dry),
             pack_step(dry),
             host_key_step(dry),
-        ]);
+        ];
+        steps.push(Step {
+            what: "runners".into(),
+            detail: no_runner_line(dry),
+            ok: true,
+        });
         return Ok(steps);
     }
     let mut steps = vec![Step {
@@ -71197,20 +71198,16 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let steps =
             super::onboard_detected_with_lookup(true, None, &|_| false).expect("dry onboard");
         let whats: Vec<&str> = steps.iter().map(|s| s.what.as_str()).collect();
+        let runners = steps.last().expect("runners step");
+        assert_eq!(runners.what, "runners", "{steps:?}");
+        assert!(runners.detail.contains("found no coding tool"), "{steps:?}");
         assert!(
-            steps[0].detail.contains("found no coding tool"),
-            "{steps:?}"
-        );
-        assert!(
-            steps[0]
+            runners
                 .detail
                 .contains("would set up the tracker, the memory writer and the deed store."),
             "{steps:?}"
         );
-        assert!(
-            steps[0].detail.contains("Next: `ljos doctor`."),
-            "{steps:?}"
-        );
+        assert!(runners.detail.contains("Next: `ljos doctor`."), "{steps:?}");
         for need in ["deed store", "tracker", "pack", "host key"] {
             assert!(whats.contains(&need), "{whats:?}");
         }

@@ -195,6 +195,11 @@ fn onboard_with_no_assistant_names_the_next_command() {
         !text.contains("so run `ljos onboard`."),
         "onboard must not tell you to run the command you just ran: {text}"
     );
+    let last = text.lines().last().unwrap_or("");
+    assert!(
+        last.contains("Next: `ljos doctor`."),
+        "Next line should be last in onboard output:\n{text}"
+    );
 }
 
 /// A real deed store prints the signing key. Onboard says the store lists
