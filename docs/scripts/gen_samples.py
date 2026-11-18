@@ -910,7 +910,7 @@ _EPISODE = (
     "episode: the hook shows it when a prompt bears on it, "
     "and ljos graded promotes it to standing, so run `ljos due`."
 )
-_STANDING = "saved as a standing lesson; run `ljos search` to read it"
+_STANDING = "saved as a standing lesson; run `ljos search \"QUERY\"` to read it"
 
 
 def as_terminal(text: str) -> str:

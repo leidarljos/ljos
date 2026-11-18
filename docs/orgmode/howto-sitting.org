@@ -100,10 +100,10 @@ lesson, and the lists are not the same.
 #+begin_src console
 $ ljos remember --as release-engineer "Cut a release only after the changelog names the search index."
 21e499e4b8487a3abc7ff7479e9da102	lesson	due 2026-11-02 14:29 +00:00	Cut a release only after the changelog names the search index.
-saved as a standing lesson; run `ljos search` to read it
+saved as a standing lesson; run `ljos search "QUERY"` to read it
 $ ljos remember --as docs-reader "A newcomer looks for the search index in the notes."
 bac3e6e51514703c76672d163cc38cde	lesson	due 2026-11-02 14:29 +00:00	A newcomer looks for the search index in the notes.
-saved as a standing lesson; run `ljos search` to read it
+saved as a standing lesson; run `ljos search "QUERY"` to read it
 $ ljos brief release-engineer demo-0gmm
 What you remembered yourself:
 - [lesson, from an agent, today] Cut a release only after the changelog names the search index.

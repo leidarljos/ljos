@@ -24044,7 +24044,7 @@ pub fn remember_note(body: &Value) -> &'static str {
         if prompt_hook_wired() {
             "standing: the prompt hook will show this lesson on the next question it fits"
         } else {
-            "saved as a standing lesson; run `ljos search` to read it"
+            "saved as a standing lesson; run `ljos search \"QUERY\"` to read it"
         }
     } else {
         "episode: the prompt hook shows this when a question fits; `ljos due` can promote it to standing"

@@ -93,7 +93,7 @@ Search and recall treat every session of one runner as one family. The second se
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos remember "Measure the files before picking a codec."
    remembered (lesson): Measure the files before picking a codec.
      id …, next review …
-   saved as a standing lesson; run `ljos search` to read it
+   saved as a standing lesson; run `ljos search "QUERY"` to read it
    stored from an agent because no terminal was found or a runner was detected; from your own login terminal, so run `ljos remember`.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos search "measure the files"
@@ -130,7 +130,7 @@ Session two stores a lesson, so the pack has heard from it. ``ljos send`` prints
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos remember "Session two waits for the build to go green."
    remembered (lesson): Session two waits for the build to go green.
      id …, next review …
-   saved as a standing lesson; run `ljos search` to read it
+   saved as a standing lesson; run `ljos search "QUERY"` to read it
    stored from an agent because no terminal was found or a runner was detected; from your own login terminal, so run `ljos remember`.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos send claude-dxw6sq4j7l "the build is red"

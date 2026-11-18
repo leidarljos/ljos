@@ -65,7 +65,7 @@ kiln.sh: KILN_DOOR is unset. The door seats only when it is cold.
 dev@laptop:~$ ljos remember 'Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.'
 remembered (lesson): Seat the kiln door only when KILN_DOOR=cold. A missing setting is a config gap.
   id fcd167c8, next review 2026-11-14 15:08 +00:00
-saved as a standing lesson; run `ljos search` to read it
+saved as a standing lesson; run `ljos search "QUERY"` to read it
 
 dev@laptop:~$ printf '%s\n' 'seat the kiln door' | ljos hook --prompt --text
 label prompt-origin: not stored as the person's words (parent process is `ljos`,
