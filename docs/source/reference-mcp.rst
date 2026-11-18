@@ -15,7 +15,7 @@ Writers: ``ljos_start``, ``ljos_file``, ``ljos_options``, ``ljos_note``, ``ljos_
 ``ljos_consensus``, ``ljos_brief``, ``ljos_personas``, ``ljos_playbooks``, ``ljos_cards``, ``ljos_policy``, ``ljos_doctor``, ``ljos_mail_search``, ``ljos_mail_show``. Resources:
 ``ljos://protocol``, ``ljos://cards/USER.md``, ``ljos://cards/MEMORY.md``. Prompts:
 ``start_a_sitting``, ``run_a_panel``, ``check_a_handover``. Most tool descriptions open with
-when to call it. The resources are Markdown: the listing and a read both say ``text/markdown``.
+when to call it. The resources are Markdown: the listing and a read both say ``text/markdown``. Every description in the tool, prompt and resource listings is one line.
 
 A writer needs a seat, and a reader runs with none. Six writers read until a call asks them to write: ``ljos_deed`` without ``add``, ``ljos_vote`` with no ballot, ``ljos_bump_plan`` with ``dry_run``, ``ljos_findings`` with neither ``remember`` nor ``issue``, ``ljos_group`` that only lists, and ``ljos_island`` without ``fire``.
 

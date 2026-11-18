@@ -547,6 +547,30 @@ fn drop_odd_formats(value: &mut serde_json::Value) {
     }
 }
 
+/// Doc comments wrap at the source's line width, and the wrap reaches the
+/// schema as a newline in the middle of a sentence. Every description is
+/// one line of single spaces.
+fn join_wrapped_descriptions(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                match child {
+                    serde_json::Value::String(text) if key == "description" => {
+                        *text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    }
+                    _ => join_wrapped_descriptions(child),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                join_wrapped_descriptions(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A schema a strict client will load: an object, no draft identifier, no
 /// schemars-only format. The draft identifier points at a meta-schema the
 /// client has not loaded, and the client then refuses the whole list.
@@ -557,6 +581,7 @@ fn finish_schema(schema: &mut serde_json::Map<String, serde_json::Value>) {
     }
     let mut value = serde_json::Value::Object(std::mem::take(schema));
     drop_odd_formats(&mut value);
+    join_wrapped_descriptions(&mut value);
     if let serde_json::Value::Object(map) = value {
         *schema = map;
     }
@@ -3762,8 +3787,7 @@ impl LjosServer {
         )))
     }
 
-    /// Run a panel: one subagent per persona in the pack, each voting as
-    /// itself, then the settle under the trust rows.
+    /// Run a panel: one subagent per persona in the pack, each voting as itself, then the settle under the trust rows.
     #[prompt(name = "run_a_panel")]
     pub async fn run_a_panel_prompt(
         &self,

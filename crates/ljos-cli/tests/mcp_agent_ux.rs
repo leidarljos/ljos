@@ -213,3 +213,43 @@ fn a_resource_is_read_as_the_type_the_listing_names() {
         );
     }
 }
+
+/// Every `description` string under `value`, with the path it sits at.
+fn descriptions(value: &serde_json::Value, at: &str, out: &mut Vec<(String, String)>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                match child {
+                    serde_json::Value::String(text) if key == "description" => {
+                        out.push((at.to_string(), text.clone()));
+                    }
+                    _ => descriptions(child, &format!("{at}.{key}"), out),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                descriptions(item, &format!("{at}[{index}]"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn descriptions_are_one_line_of_single_spaces() {
+    let mut session = Session::open(&[("LJOS_MCP_TOOLS", "all")]);
+    let mut found = Vec::new();
+    for method in ["tools/list", "prompts/list", "resources/list"] {
+        let listed = session.request(method, serde_json::json!({}));
+        assert!(listed["error"].is_null(), "{method}: {listed}");
+        descriptions(&listed["result"], method, &mut found);
+    }
+    assert!(found.len() > 200, "only {} descriptions", found.len());
+    for (at, text) in &found {
+        assert!(
+            !text.contains(char::is_control) && !text.contains("  ") && text == text.trim(),
+            "{at} is not one line of single spaces: {text:?}"
+        );
+    }
+}
