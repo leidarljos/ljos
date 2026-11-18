@@ -52,6 +52,14 @@ Start a sitting, and end one
 .. code:: console
 
    $ ljos sitting proj-1a2b --verbose
+   sitting proj-1a2b: checking blockers
+   == blockers
+   none open; the issue is workable
+   == reclaim
+   no claim quiet longer than 900s
+   == claim
+   gen=2
+   tracker: proj-1a2b STARTED under alice
    == doctor
    ok  vissue  ...
    ok  seat    alice, holding as alice (from LJOS_SEAT)
@@ -61,8 +69,6 @@ Start a sitting, and end one
    1 due; 4 scheduled, next at 2026-09-13 09:12 +00:00
    == island: Ship the fuse change?
    1.000   seed    ab8c... 3 weeks ago CombMNZ over RRF for fusing two ballots.
-   == blockers
-   none open; the issue is workable
    == playbook
    sit
    A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook sit` or `ljos playbook ISSUE sit`). The sitting prints this body before recall and holds the name until finish or release.
@@ -76,10 +82,6 @@ Start a sitting, and end one
    2026-08-30, 13 days ago, tracker
      created
    ...
-   == reclaim
-   no claim quiet longer than 900s
-   == claim
-   gen=2
 
 One verb, in the protocol's order; it stops at the first store that does
 not answer and claims nothing. ``--playbook NAME`` copies a recipe
@@ -94,25 +96,26 @@ and ``ljos release`` hands it back.
 .. code:: console
 
    $ ljos finish proj-1a2b --lesson "CombMNZ held on turns. RRF lost two points." --outcome ship
-   finished proj-1a2b as done
-   remembered the lesson (id 51778929) as agent-derived; the hook shows it from the next prompt, and `ljos memories review` prunes it
+   remembered the lesson as agent-derived, unreviewed (id 51778929); search finds it now
    Learned. 6 trust rows rewritten. ... persona anchors moved. The outcome is kept: once 6 issues have one, ljos consensus discounts voters who err together. ... No stated probability, so there is no Brier score. A hard vote is not a claim of certainty.
-   the ticket proj-1a2b stays open and nobody holds it; a person closes it when the work is accepted
+   sitting ended; ticket proj-1a2b is still open
 
 Memories, a no vote, and a child
 ================================
 
 A seat remembers with no sitting open. ``--as NAME`` stores the lesson in
-the set ``persona-NAME``. Each persona's brief then carries that persona's
+the set ``persona-NAME``. Define each persona first with ``ljos persona`` before calling ``ljos brief``. Each persona's brief then carries that persona's
 lesson, and the lists are not the same.
 
 .. code:: console
 
    $ ljos remember --as release-engineer "Cut a release only after the changelog names the search index."
-   21e499e4b8487a3abc7ff7479e9da102    lesson  due 2026-11-02 14:29 +00:00    Cut a release only after the changelog names the search index.
+   remembered (lesson): Cut a release only after the changelog names the search index.
+     id 21e499e4, next review 2026-11-02 14:29 +00:00
    saved as a standing lesson; run `ljos search "QUERY"` to read it
    $ ljos remember --as docs-reader "A newcomer looks for the search index in the notes."
-   bac3e6e51514703c76672d163cc38cde    lesson  due 2026-11-02 14:29 +00:00    A newcomer looks for the search index in the notes.
+   remembered (lesson): A newcomer looks for the search index in the notes.
+     id bac3e6e5, next review 2026-11-02 14:29 +00:00
    saved as a standing lesson; run `ljos search "QUERY"` to read it
    $ ljos brief release-engineer demo-0gmm
    What you remembered yourself:
