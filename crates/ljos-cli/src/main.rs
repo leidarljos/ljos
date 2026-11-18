@@ -2171,8 +2171,8 @@ enum Cmd {
     /// With `LJOS_SEAT` unset, a session id in this process names the seat.
     /// Claude Code, Codex and Cursor each sit as the runner plus a short id,
     /// and the source line names that variable. An exported `LJOS_SEAT` is
-    /// the seat as written. With no seat and no session id, a read prints
-    /// `every-seat` and a write uses the login name, or a short stable name
+    /// the seat as written. With no seat and no session id, `ljos seat` prints
+    /// `none` (reads use every seat) and a write uses the login name, or a short stable name
     /// when that login is missing. A session with no id that would share the
     /// bare runner name says so.
     /// `add` writes a row in the tracker's vissue.toml. The first `add`

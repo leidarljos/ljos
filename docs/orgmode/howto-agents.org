@@ -10,7 +10,7 @@ A ticket id, a message id, a review time and the home directory below stand in f
 
 * See the seat
 
-Claude Code reads =CLAUDE_CODE_SESSION_ID=. Codex reads =CODEX_THREAD_ID=, and =CODEX_SESSION_ID= when the thread id is unset. Cursor reads =CURSOR_CONVERSATION_ID=. The seat is the runner's name plus a short id of that value. With none of those set, and no seat named, a read prints =every-seat=.
+Claude Code reads =CLAUDE_CODE_SESSION_ID=. Codex reads =CODEX_THREAD_ID=, and =CODEX_SESSION_ID= when the thread id is unset. Cursor reads =CURSOR_CONVERSATION_ID=. The seat is the runner's name plus a short id of that value. With none of those set, and no seat named, =ljos seat= prints =none= and reads use every seat.
 
 # BEGIN ljos-sample agents-seats
 #+begin_src console

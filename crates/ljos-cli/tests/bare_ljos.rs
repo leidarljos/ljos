@@ -105,6 +105,36 @@ fn seat_says_none_is_set_instead_of_naming_the_read_sentinel() {
 }
 
 #[test]
+fn seat_help_and_docs_report_none_instead_of_every_seat() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(dir.path(), &["seat", "--help"], &[]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("every-seat"),
+        "seat --help still names every-seat:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("`none`") && stdout.contains("every seat"),
+        "seat --help missing none/every seat:\n{stdout}"
+    );
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for rel in [
+        "docs/orgmode/howto-agents.org",
+        "docs/source/howto-agents.rst",
+        "docs/orgmode/howto-seats.org",
+        "docs/source/howto-seats.rst",
+    ] {
+        let body = std::fs::read_to_string(root.join(rel)).unwrap();
+        assert!(
+            !body.contains("every-seat"),
+            "{rel} still says a read prints every-seat"
+        );
+    }
+}
+
+#[test]
 fn bare_ljos_names_an_exported_seat() {
     let dir = tempfile::tempdir().unwrap();
     let out = run(dir.path(), &[], &[("LJOS_SEAT", "ada")]);
