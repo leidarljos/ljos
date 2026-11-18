@@ -119,3 +119,22 @@ fn seat_grant_quote_is_the_owners_yes() {
         assert!(page.contains(line), "{flag}\n{page}");
     }
 }
+
+#[test]
+fn cloud_about_names_the_install_and_the_clone() {
+    let words = "Install the release binaries and clone the shared tracker";
+    for flag in ["--help", "-h"] {
+        let page = help(&["cloud", flag]);
+        assert!(page.contains(words), "{flag}\n{page}");
+        let root = help(&[flag]);
+        assert!(
+            root.contains(words),
+            "top-level {flag} cloud line\n{root}"
+        );
+    }
+    let long = help(&["cloud", "--help"]);
+    assert!(
+        long.contains("Install the release binaries and clone the shared tracker."),
+        "{long}"
+    );
+}

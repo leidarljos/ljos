@@ -1013,7 +1013,7 @@ enum Cmd {
         /// The other side (`%B`).
         theirs: PathBuf,
     },
-    /// Put this machine on the shared tracker.
+    /// Install the release binaries and clone the shared tracker.
     ///
     /// Example: `ljos cloud up`
     Cloud {

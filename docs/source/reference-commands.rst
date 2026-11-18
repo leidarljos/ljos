@@ -218,7 +218,7 @@ The line says what went wrong and the command that fixes it.
 ``person-key set|clear|status``
    Stores: machine. Set, clear, or show the passphrase that unlocks this person's key. ``set`` and ``clear`` read the terminal. They are refused when a runner variable is set.
 ``cloud up [--force] [--repoint]``
-   Stores: release, tracker. Install the release binaries, write the tool command a runner starts. That command is the Model Context Protocol (MCP) entry, and clone ``LJOS_TRACKER_REMOTE``. ``--force`` downloads again. ``--repoint`` replaces the repository an earlier run recorded.
+   Stores: release, tracker. Install the release binaries, write the tool command a runner starts. That command is the Model Context Protocol (MCP) entry, and clone ``LJOS_TRACKER_REMOTE``. ``--force`` downloads again. ``--repoint`` replaces the repository an earlier run recorded. Example: ``ljos cloud up``.
 ``mesh up [--key-file PATH] [--login-server URL] [--hostname NAME]``
    Stores: machine. Join the private network and print this machine and the others on it. Headscale is the login server. A failure is one line on stderr and a non-zero status. Example: ``ljos mesh up --key-file ~/.config/ljos/mesh.key``.
 ``mesh down``
