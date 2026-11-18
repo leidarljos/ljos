@@ -467,3 +467,147 @@ fn separate_homes_print_assist_line_when_noting_another_seats_ticket() {
         "bob note missed assist line:\n{note_out}"
     );
 }
+
+/// Two homes on one tracker with one open ticket, and both onboarded.
+struct Shared {
+    _dir: tempfile::TempDir,
+    path: String,
+    tracker: std::path::PathBuf,
+    alice: (std::path::PathBuf, std::path::PathBuf),
+    bob: (std::path::PathBuf, std::path::PathBuf),
+}
+
+impl Shared {
+    fn new() -> Self {
+        let vissue = sibling::require("vissue").unwrap_or_else(|e| panic!("{e}"));
+        let claimdag = sibling::require("claimdag").unwrap_or_else(|e| panic!("{e}"));
+        let _deedar = sibling::require("deedar").unwrap_or_else(|e| panic!("{e}"));
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = dir.path().join("tracker");
+        let mut homes = Vec::new();
+        for name in ["alice", "bob"] {
+            let home = dir.path().join(name);
+            let run = home.join("run");
+            std::fs::create_dir_all(&run).unwrap();
+            homes.push((home, run));
+        }
+        std::fs::create_dir_all(tracker.join("Software/demo")).unwrap();
+        std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        std::fs::write(
+            tracker.join("Software/demo/issues.org"),
+            "\
+#+TITLE: demo
+#+VISSUE: 1
+#+CATEGORY: demo
+#+TODO: TODO STARTED | DONE CANCELLED
+
+* TODO [#C] Shared claim ticket
+:PROPERTIES:
+:ID:         demo-shr1
+:END:
+",
+        )
+        .unwrap();
+        let siblings = vissue.parent().unwrap();
+        assert_eq!(claimdag.parent(), Some(siblings));
+        let path = format!("{}:/usr/bin:/bin", siblings.display());
+        let bob = homes.pop().unwrap();
+        let alice = homes.pop().unwrap();
+        for (seat, (home, run)) in [("alice", &alice), ("bob", &bob)] {
+            let onboard = run_ljos(&path, home, run, &tracker, seat, &["onboard"]);
+            assert!(
+                onboard.status.success(),
+                "{seat} onboard failed: {}",
+                String::from_utf8_lossy(&onboard.stderr)
+            );
+        }
+        Self {
+            _dir: dir,
+            path,
+            tracker,
+            alice,
+            bob,
+        }
+    }
+
+    fn bob_ljos(&self, args: &[&str]) -> Output {
+        run_ljos(
+            &self.path,
+            &self.bob.0,
+            &self.bob.1,
+            &self.tracker,
+            "bob",
+            args,
+        )
+    }
+
+    fn alice_ljos(&self, args: &[&str]) -> Output {
+        run_ljos(
+            &self.path,
+            &self.alice.0,
+            &self.alice.1,
+            &self.tracker,
+            "alice",
+            args,
+        )
+    }
+
+    fn bob_mcp(&self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+        call_mcp_one(
+            &self.path,
+            &self.bob.0,
+            &self.bob.1,
+            &self.tracker,
+            "bob",
+            name,
+            arguments,
+        )
+    }
+
+    /// Every node in bob's claim graph, as `claimdag list --all` prints it.
+    fn bob_graph(&self) -> String {
+        let out = Command::new("claimdag")
+            .arg("--dir")
+            .arg(self.bob.1.join("claimdag"))
+            .args(["list", "--all"])
+            .env("PATH", &self.path)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("no work graph") {
+            return String::new();
+        }
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+}
+
+fn said(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+#[test]
+fn a_claim_graph_id_is_claimed_without_a_ticket_of_that_name() {
+    let world = Shared::new();
+    let minted = Command::new("claimdag")
+        .arg("--dir")
+        .arg(world.bob.1.join("claimdag"))
+        .args(["upsert", "--summary", "scratch work"])
+        .env("PATH", &world.path)
+        .output()
+        .unwrap();
+    assert!(minted.status.success(), "{minted:?}");
+    let id = String::from_utf8_lossy(&minted.stdout)
+        .split_whitespace()
+        .find(|word| word.len() == 32 && word.bytes().all(|b| b.is_ascii_hexdigit()))
+        .unwrap_or_else(|| panic!("no node id in {minted:?}"))
+        .to_string();
+
+    let claimed = world.bob_ljos(&["claim", &id]);
+    assert!(claimed.status.success(), "{}", said(&claimed));
+    assert!(!said(&claimed).contains("not found"), "{}", said(&claimed));
+}

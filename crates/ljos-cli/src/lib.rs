@@ -14009,6 +14009,30 @@ pub fn ticket_exists(id: &str) -> bool {
     issue_spot::find(id.trim()).is_some()
 }
 
+/// Refuse a claim of a tracker id the tracker does not have, so a typo does
+/// not mint a session node under a name no ticket carries. A blank id is left
+/// to `claim`, which says so, and a 32-hex id is a claim-graph node. Neither
+/// is looked up. `ljos claim` and `ljos_claim` both ask this before they take
+/// anything.
+///
+/// # Errors
+///
+/// `issue ID not found`, or the failure of the tracker lookup.
+pub fn require_ticket_to_claim(id: &str) -> Result<()> {
+    let id = id.trim();
+    if id.is_empty() || (id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Ok(());
+    }
+    match run_captured("vissue", &["show", id, "--json"]) {
+        Ok(said) if said.stdout.trim().is_empty() && !ticket_exists(id) => {
+            bail!("issue {id} not found")
+        }
+        Ok(_) => Ok(()),
+        Err(err) if format!("{err:#}").contains("not found") => bail!("issue {id} not found"),
+        Err(err) => Err(err),
+    }
+}
+
 /// The parent a held id may file under.
 ///
 /// `Ok(Some)` is the heading id, which is the held id when it is already
