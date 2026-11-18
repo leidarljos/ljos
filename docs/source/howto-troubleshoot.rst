@@ -76,14 +76,14 @@ With no ``LJOS_SEAT``, no ``--seat``, and no seat record, the short doctor print
 
 .. code:: text
 
-   warn    seat source no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
+   warn    seat source no seat is set; reads use every seat, so run `export LJOS_SEAT=NAME`.
 
 ..
    # proseguard:on
 
 The row is a warning.
 It does not by itself exit 1.
-``ljos seat`` prints ``source`` as ``no seat rule matched; reading every seat`` and exits 0.
+``ljos seat`` prints ``seat`` and ``holder`` as ``none``, names ``LJOS_SEAT`` and exits 0.
 
 The tracker
 ===========

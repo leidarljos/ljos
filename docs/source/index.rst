@@ -58,7 +58,7 @@ Install
    $ export PATH="$HOME/.local/bin:$PATH"
    $ cd "$HOME"
    $ ljos doctor
-   warn	seat source	no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
+   warn	seat source	no seat is set; reads use every seat, so run `export LJOS_SEAT=NAME`.
    info	encoder	not installed. Search matches words, so run `cargo install --locked packset-embed`.
    info	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
    ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand

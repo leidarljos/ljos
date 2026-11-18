@@ -114,7 +114,7 @@ fn doctor_warns_when_no_seat_was_named_and_names_the_export() {
     assert_eq!(code, 1, "{text}");
     assert!(
         text.contains(
-            "warn\tseat source\tno seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.\n"
+            "warn\tseat source\tno seat is set; reads use every seat, so run `export LJOS_SEAT=NAME`.\n"
         ),
         "{text}"
     );

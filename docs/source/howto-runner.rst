@@ -108,9 +108,10 @@ The how-to :doc:`Run two agents on one repository <howto-agents>` is two session
 .. code:: console
 
    $ ljos seat
-   seat    every-seat
-   holder  every-seat
-   source  no seat rule matched; reading every seat
+   seat    none
+   holder  none
+   source  no seat is set; reads use every seat
+   pick    Set LJOS_SEAT with `export LJOS_SEAT=NAME`.
 
 A read with no seat named looks at every seat. Set one with ``export LJOS_SEAT=ada``.
 After a client connects, ``ljos seat`` in that server's environment still

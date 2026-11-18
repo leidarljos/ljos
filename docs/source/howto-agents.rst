@@ -21,9 +21,10 @@ Claude Code reads ``CLAUDE_CODE_SESSION_ID``. Codex reads ``CODEX_THREAD_ID``, a
 .. code:: console
 
    $ ljos seat
-   seat    every-seat
-   holder  every-seat
-   source  no seat rule matched; reading every seat
+   seat    none
+   holder  none
+   source  no seat is set; reads use every seat
+   pick    Set LJOS_SEAT with `export LJOS_SEAT=NAME`.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos seat
    seat    claude-f2pu9d56g0

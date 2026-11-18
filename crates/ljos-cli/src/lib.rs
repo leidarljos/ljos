@@ -5856,16 +5856,16 @@ fn occupancy_scope(assignee: &str, issue: &str) -> String {
 #[must_use]
 pub fn seat_source_row(who: &Seat) -> Habitat {
     if who.source.starts_with("no seat rule matched") {
-        let detail = who.source.trim_end_matches('.');
         // A write that matched nothing names the seat it picked, so a
         // short doctor still says which name, and how to set one.
         let state = if who.source.contains("using an unknown seat") {
+            let detail = who.source.trim_end_matches('.');
             format!(
                 "{detail}; the seat is {}, so run `export LJOS_SEAT=NAME`.",
                 who.seat
             )
         } else {
-            format!("{detail}, so run `export LJOS_SEAT=NAME`.")
+            "no seat is set; reads use every seat, so run `export LJOS_SEAT=NAME`.".to_string()
         };
         return Habitat {
             name: "seat source",
@@ -6535,6 +6535,13 @@ pub fn exe_from_cargo_target(path: &Path) -> bool {
 /// `ljos seat`: who is sitting, one field a line.
 #[must_use]
 pub fn format_seat(seat: &Seat) -> String {
+    if seat_resolve::reads_every(&seat.seat) {
+        return "seat\tnone\n\
+                holder\tnone\n\
+                source\tno seat is set; reads use every seat\n\
+                pick\tSet LJOS_SEAT with `export LJOS_SEAT=NAME`.\n"
+            .to_string();
+    }
     let mut out = format!(
         "seat\t{}\nholder\t{}\nsource\t{}\n",
         seat.seat, seat.holder, seat.source
@@ -58857,7 +58864,7 @@ mod tests {
         assert_eq!(super::doctor_word(&seat), "warn");
         assert_eq!(
             seat.state,
-            "no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`."
+            "no seat is set; reads use every seat, so run `export LJOS_SEAT=NAME`."
         );
         assert!(super::healthy(std::slice::from_ref(&seat)));
 

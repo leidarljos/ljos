@@ -128,7 +128,7 @@ fn bare_ljos_prints_the_first_commands() {
     assert!(out.status.success(), "{}", text(&out));
     for line in [
         "Memory, a work tracker and a command guard for coding runners.",
-        "This read uses every seat, because no seat was named, so run `export LJOS_SEAT=NAME`.",
+        "No seat is set. Reads use every seat, so run `export LJOS_SEAT=NAME`.",
         "sh install.sh --no-embed",
         "ljos doctor",
         "ljos remember TEXT",

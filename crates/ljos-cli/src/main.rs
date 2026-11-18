@@ -3747,9 +3747,10 @@ fn opening_screen() -> String {
 /// A named seat keeps the doctor's `named by` phrase. A read that matched
 /// no seat says which seat it uses and why, and names the next command.
 fn seat_screen_line(state: &str) -> String {
-    if state.starts_with("no seat rule matched; reading every seat") {
-        return "This read uses every seat, because no seat was named, so run `export LJOS_SEAT=NAME`."
-            .to_string();
+    if state.starts_with("no seat rule matched; reading every seat")
+        || state.starts_with("no seat is set; reads use every seat")
+    {
+        return "No seat is set. Reads use every seat, so run `export LJOS_SEAT=NAME`.".to_string();
     }
     if let Some((name, source)) = state.split_once(" named by ") {
         if !name.is_empty() && !name.contains(' ') && !source.is_empty() {

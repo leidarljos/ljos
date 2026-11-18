@@ -48,12 +48,12 @@ no	memory	http://127.0.0.1:8761 does not answer. memory is off because the home 
 With no =LJOS_SEAT=, no =--seat=, and no seat record, the short doctor prints:
 
 #+begin_src text
-warn	seat source	no seat rule matched; reading every seat, so run `export LJOS_SEAT=NAME`.
+warn	seat source	no seat is set; reads use every seat, so run `export LJOS_SEAT=NAME`.
 #+end_src
 
 The row is a warning.
 It does not by itself exit 1.
-=ljos seat= prints =source= as =no seat rule matched; reading every seat= and exits 0.
+=ljos seat= prints =seat= and =holder= as =none=, names =LJOS_SEAT= and exits 0.
 
 * The tracker
 

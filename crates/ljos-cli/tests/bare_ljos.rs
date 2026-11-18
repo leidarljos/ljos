@@ -84,9 +84,23 @@ fn bare_ljos_names_the_seat_and_the_first_commands() {
     assert!(out.stderr.is_empty(), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        screen(
-            "This read uses every seat, because no seat was named, so run `export LJOS_SEAT=NAME`."
-        )
+        screen("No seat is set. Reads use every seat, so run `export LJOS_SEAT=NAME`.")
+    );
+}
+
+#[test]
+fn seat_says_none_is_set_instead_of_naming_the_read_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(dir.path(), &["seat"], &[]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(out.stderr.is_empty(), "{said}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "seat\tnone\n\
+         holder\tnone\n\
+         source\tno seat is set; reads use every seat\n\
+         pick\tSet LJOS_SEAT with `export LJOS_SEAT=NAME`.\n"
     );
 }
 
