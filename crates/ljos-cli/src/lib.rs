@@ -52656,7 +52656,7 @@ pub fn consensus_verdict(gate: &Value, protected: &Value) -> String {
             .filter(|s| !s.is_empty())
             .unwrap_or("ISSUE");
         return format!(
-            "verdict: the ballots do not pick an option yet, so run `ljos vote {issue} --for OPTION`.\n"
+            "verdict: the ballots do not pick an option yet, so run `ljos vote {issue} --for OPTION --used none`.\n"
         );
     }
     if protected
@@ -52901,7 +52901,7 @@ pub fn require_ballots(issue: &str, ballots: &[Value]) -> Result<()> {
     if ballots.is_empty() {
         bail!(
             "consensus: {issue} holds no ballots, so there is nothing to settle. \
-             `ljos vote {issue} --for OPTION` casts one, and a panel (`ljos panel {issue}`) casts one per persona"
+             `ljos vote {issue} --for OPTION --used none` casts one, and a panel (`ljos panel {issue}`) casts one per persona"
         );
     }
     Ok(())

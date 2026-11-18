@@ -42,13 +42,18 @@ fn consensus(dir: &Path, home: &Path, args: &[&str]) -> Output {
 
 /// [`consensus`] with `PACKSET_URL` set to `pack`.
 fn consensus_on(dir: &Path, home: &Path, args: &[&str], pack: &str) -> Output {
+    let mut all = vec!["consensus"];
+    all.extend_from_slice(args);
+    ljos_on(dir, home, &all, pack)
+}
+
+fn ljos_on(dir: &Path, home: &Path, args: &[&str], pack: &str) -> Output {
     let path = format!(
         "{}:{}",
         dir.display(),
         std::env::var("PATH").unwrap_or_default()
     );
     Command::new(env!("CARGO_BIN_EXE_ljos"))
-        .arg("consensus")
         .args(args)
         .current_dir(dir)
         .env_clear()
@@ -206,6 +211,50 @@ fn unresolved_verdict_names_the_issue_id() {
         assert!(
             first.contains("ljos vote proj-v0te --for OPTION") && !first.contains("ISSUE"),
             "verdict did not name proj-v0te:\n{text}"
+        );
+    }
+}
+
+/// The command a line tells the caller to run, with the placeholder filled.
+fn named_vote(line: &str) -> Vec<String> {
+    let command = line
+        .split('`')
+        .find(|part| part.starts_with("ljos vote "))
+        .unwrap_or_else(|| panic!("no vote command in {line:?}"));
+    command
+        .split_whitespace()
+        .skip(1)
+        .map(|word| if word == "OPTION" { "rrf" } else { word }.to_string())
+        .collect()
+}
+
+#[test]
+fn the_vote_a_consensus_names_is_one_the_vote_command_takes() {
+    let pack = empty_pack();
+    let (dir, home) = fakes(r#"[{"agent":"saddle","choice":"rrf"}]"#);
+    let out = consensus_on(dir.path(), &home, &["proj-v0te", "--no-file"], &pack);
+    assert!(out.status.success(), "{out:?}");
+    let verdict = String::from_utf8_lossy(&out.stdout).to_string();
+    let mut said = vec![verdict.lines().next().unwrap_or("").to_string()];
+
+    let (empty, empty_home) = fakes("[]");
+    let refused = consensus_on(empty.path(), &empty_home, &["proj-n0v0"], &pack);
+    said.push(String::from_utf8_lossy(&refused.stderr).to_string());
+
+    for line in said {
+        let words = named_vote(&line);
+        let args: Vec<&str> = words.iter().map(String::as_str).collect();
+        let (dir, home) = fakes("[]");
+        let ran = ljos_on(dir.path(), &home, &args, &pack);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert!(
+            !text.contains("a ballot records what it used"),
+            "`ljos {}` was refused for a missing `--used`:\n{text}",
+            args.join(" ")
         );
     }
 }
