@@ -19433,7 +19433,7 @@ fn tracker_step(dry: bool) -> Step {
             }
             step(
                 format!(
-                    "created {}, where tickets are kept. {} names it, so VISSUE_ROOT (tracker directory) is not needed",
+                    "created {} for tickets; wrote {}",
                     root.display(),
                     cfg.display()
                 ),
@@ -71284,7 +71284,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             deed.detail
         );
         assert!(
-            tracker.detail.contains("VISSUE_ROOT (tracker directory)"),
+            tracker.detail.contains(" for tickets; wrote ")
+                && !tracker.detail.contains("VISSUE_ROOT"),
             "{}",
             tracker.detail
         );

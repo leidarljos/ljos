@@ -124,6 +124,7 @@ To install by hand, with ``cargo-binstall`` already on ``PATH``, or to see what 
    $ ljos doctor
 
 ``ljos onboard`` writes the MCP entry, the hooks and the skill into each runner it finds.
+Its ticket row names the new tracker directory and the configuration file it wrote.
 ``ljos onboard --example`` lists the runners ljos knows.
 
 Nothing else needs a variable set. ``ljos onboard`` makes a deed store, a tracker and a
