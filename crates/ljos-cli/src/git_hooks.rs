@@ -366,7 +366,7 @@ pub fn hooks_state(ours: &Path, configured: Option<&str>) -> (bool, String) {
     let Some(path) = nonempty(configured) else {
         return (
             false,
-            format!("{HOOKS_UNSET}, so a commit is not written on the open ticket; {HOOKS_FIX}"),
+            format!("{HOOKS_UNSET} and a commit is not written on the open ticket, so run `{HOOKS_FIX}`."),
         );
     };
     let dir = Path::new(path);
@@ -384,11 +384,11 @@ pub fn hooks_state(ours: &Path, configured: Option<&str>) -> (bool, String) {
         None
     };
     let state = if let Some(note) = stale {
-        format!("core.hooksPath is {path}, but {note}; {HOOKS_FIX}")
+        format!("core.hooksPath is {path}, but {note}, so run `{HOOKS_FIX}`.")
     } else if same_dir(dir, ours) {
-        format!("core.hooksPath is {path}, but some hook stubs are missing there; {HOOKS_FIX}")
+        format!("core.hooksPath is {path}, but some hook stubs are missing there, so run `{HOOKS_FIX}`.")
     } else {
-        format!("core.hooksPath is {path}, and ljos is not chained there; {HOOKS_FIX}")
+        format!("core.hooksPath is {path}, and ljos is not chained there, so run `{HOOKS_FIX}`.")
     };
     (false, state)
 }
@@ -1603,12 +1603,20 @@ mod tests {
         let (ok, state) = super::hooks_state(&ours, None);
         assert!(!ok);
         assert!(state.starts_with(super::HOOKS_UNSET), "{state}");
+        assert!(
+            state.ends_with(&format!(", so run `{}`.", super::HOOKS_FIX)),
+            "{state}"
+        );
         assert_eq!(state.matches(super::HOOKS_FIX).count(), 1, "{state}");
 
         let (ok, state) = super::hooks_state(&ours, Some(&other_s));
         assert!(!ok, "{state}");
         assert!(state.contains(&other_s), "{state}");
         assert!(!state.contains(&ours_s), "{state}");
+        assert!(
+            state.ends_with(&format!(", so run `{}`.", super::HOOKS_FIX)),
+            "{state}"
+        );
         assert_eq!(state.matches(super::HOOKS_FIX).count(), 1, "{state}");
 
         super::chain_user_hooks(&other).unwrap();

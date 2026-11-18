@@ -1407,3 +1407,37 @@ fn a_git_hook_notes_only_a_seat_vissue_toml_lists() {
         book_log(&hab)
     );
 }
+
+#[test]
+fn doctor_all_formats_unset_git_hooks_with_backticks_and_so_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
+    std::fs::create_dir_all(home.join(".local/state/ljos")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["doctor", "--all"])
+        .current_dir(&home)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", dir.path().join("run"))
+        .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("PACKSET_URL", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("LJOS_OFF", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = stdout
+        .lines()
+        .find(|line| line.contains("\tgit hooks\t"))
+        .unwrap_or_else(|| panic!("no git hooks row:\n{stdout}"));
+    assert_eq!(
+        row,
+        "info\tgit hooks\tcore.hooksPath is unset and a commit is not written on the open ticket, so run `ljos git-hooks install`."
+    );
+}
