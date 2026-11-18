@@ -21,9 +21,8 @@ use ljos_cli::{
     policy_with_memory, predictions_of, protocol_text, read_campaign, receive, refine_default_hits,
     release, remember_findings, resolve_assignee, rows_about, run_captured, runner_pid,
     search_ranked, seat_name, settle_discount, sitting_gated, timeline, topic_words,
-    tracker_show_json, trust_from_pack, with_discount, write_persona,
-    write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA,
-    POLICY_TCB,
+    tracker_show_json, trust_from_pack, with_discount, write_persona, write_prediction, write_rule,
+    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,

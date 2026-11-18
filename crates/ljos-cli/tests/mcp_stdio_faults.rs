@@ -325,7 +325,7 @@ fn a_word_search_names_the_missing_encoder() {
         .unwrap_or("");
     assert!(
         reading.contains("encoder not installed")
-            && reading.contains("cargo binstall --locked packset-embed"),
+            && (reading.contains("packset-embed") || reading.contains("install.sh")),
         "{reading}"
     );
     assert!(

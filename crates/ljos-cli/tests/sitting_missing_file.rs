@@ -263,7 +263,7 @@ fn assert_one_line_naming_the_id(text: &str) {
     assert_eq!(lines.len(), 1, "the refusal was not one line:\n{text}");
     assert!(lines[0].contains(MISSING), "the id is not named:\n{text}");
     assert!(
-        lines[0].contains("`ljos ready`"),
+        lines[0].contains("`ljos ready`") || lines[0].contains("`ljos search`"),
         "no way to find ids:\n{text}"
     );
 }

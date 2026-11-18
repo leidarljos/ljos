@@ -215,11 +215,19 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
         answer.get("error").is_none() && answer["result"]["isError"] != true,
         "{answer}\n{stderr}"
     );
-    let said = answer["result"]["content"][0]["text"]
+    let raw = answer["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or("");
+    let said = serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| {
+            v.get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| raw.to_string());
     assert!(
-        said.contains("remembered (lesson)") && said.contains("standing:"),
+        said.contains("remembered (lesson)") && said.contains("saved as a standing lesson"),
         "ljos_remember did not print the command line:\n{said}"
     );
     assert!(

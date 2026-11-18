@@ -80924,7 +80924,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         assert!(episode_tags.contains("horizon:transient"), "{episode_tags}");
         let said = remember_mcp_text(&atom);
         assert!(said.contains("remembered (lesson)"), "{said}");
-        assert!(said.contains("standing:"), "{said}");
+        assert!(said.contains("saved as a standing lesson"), "{said}");
         assert!(!said.contains("inside.atom"), "{said}");
         assert!(!said.contains("schema"), "{said}");
         assert!(tags.contains(&persona_entity("reviewer")), "{tags}");
