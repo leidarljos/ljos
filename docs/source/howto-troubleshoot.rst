@@ -251,3 +251,13 @@ With ``curl`` unable to reach crates.io, doctor printed:
 A missing binary then has no version in parentheses: not on PATH, so run ``cargo install --locked packset``.
 The warning does not by itself exit 1.
 A copy already in the day cache is still used, and the row says ``crates.io (cached)``.
+
+Mistyped ticket id
+==================
+
+When a ticket id is close to one in the tracker, ``show``, ``note`` and
+``finish`` print one line with the closest id and a command to run:
+
+.. code:: text
+
+   issue demo-kln not found, and the closest is demo-kiln, so run `ljos show demo-kiln`.

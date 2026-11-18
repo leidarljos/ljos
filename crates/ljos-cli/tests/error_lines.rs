@@ -270,6 +270,25 @@ fn an_unknown_ticket_on_tracker_verbs_names_ready_and_exits_1() {
 }
 
 #[test]
+fn a_mistyped_ticket_id_names_the_closest_ticket_on_show_note_and_finish() {
+    let home = Home::new();
+    for args in [
+        &["show", "demo-kln"][..],
+        &["note", "demo-kln", "left a note"][..],
+        &["finish", "demo-kln"][..],
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(1), "{args:?}\n{said}");
+        assert_eq!(
+            one_line(&out.stderr),
+            "issue demo-kln not found, and the closest is demo-kiln, so run `ljos show demo-kiln`.",
+            "{args:?}\n{said}"
+        );
+    }
+}
+
+#[test]
 fn missing_arguments_on_nested_commands_and_empty_prefer_or_policy_name_their_help() {
     let home = Home::new();
     let cases: [(&[&str], &str); 11] = [

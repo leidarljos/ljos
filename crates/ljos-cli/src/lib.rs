@@ -43156,9 +43156,18 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
     }
     prefixes.sort();
     match prefixes.as_slice() {
-        [] => Some(format!(
-            "issue {id} not found. `ljos ready` lists the open tickets."
-        )),
+        [] => {
+            let ids = all_issue_ids(&layouts);
+            let guessed = closest_issue_id(id, &ids);
+            match guessed {
+                Some(one) => Some(format!(
+                    "issue {id} not found, and the closest is {one}, so run `ljos show {one}`."
+                )),
+                None => Some(format!(
+                    "issue {id} not found. `ljos ready` lists the open tickets."
+                )),
+            }
+        }
         [one] => Some(format!(
             "issue {id} not found, and the closest is {one}, so run `ljos show {one}`."
         )),
@@ -43186,6 +43195,87 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
             ))
         }
     }
+}
+
+fn all_issue_ids(layouts: &[vissue_core::Layout]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for layout in layouts {
+        let Ok(projects) = vissue_core::store::list_projects(layout) else {
+            continue;
+        };
+        for project in projects {
+            let path = layout.project_issues_path(&project);
+            let Ok(doc) = vissue_core::IssueDoc::parse_file(&project, &path) else {
+                continue;
+            };
+            for heading in doc.headings {
+                if !heading.id.is_empty() && !ids.contains(&heading.id) {
+                    ids.push(heading.id);
+                }
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn closest_issue_id<'a>(typed: &str, options: &'a [String]) -> Option<&'a str> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return None;
+    }
+    for option in options {
+        if option.eq_ignore_ascii_case(typed) && option != typed {
+            return Some(option);
+        }
+    }
+    let limit = max_issue_edits(typed);
+    if limit == 0 {
+        return None;
+    }
+    let folded = typed.to_ascii_lowercase();
+    let mut best: Option<(&str, usize)> = None;
+    for option in options {
+        let name = option.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case(typed) {
+            continue;
+        }
+        let distance = issue_edits(&folded, &name.to_ascii_lowercase());
+        if distance == 0 || distance > limit {
+            continue;
+        }
+        match best {
+            Some((prev, have)) if distance > have || (distance == have && name > prev) => {}
+            _ => best = Some((name, distance)),
+        }
+    }
+    best.map(|(name, _)| name)
+}
+
+fn max_issue_edits(typed: &str) -> usize {
+    match typed.chars().count() {
+        0 | 1 => 0,
+        2 | 3 => 1,
+        4..=7 => 2,
+        _ => 3,
+    }
+}
+
+fn issue_edits(left: &str, right: &str) -> usize {
+    let a: Vec<char> = left.chars().collect();
+    let b: Vec<char> = right.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut next = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        next[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            next[j + 1] = (prev[j + 1] + 1).min(next[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut next);
+    }
+    prev[b.len()]
 }
 
 /// Whether `err` is the tracker's miss for `issue`. `vissue recall` wraps
