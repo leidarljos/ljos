@@ -35490,6 +35490,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
     out
 }
 
+/// How a deed store row starts when nothing has made the store yet.
+const NO_DEED_STORE: &str = "no deed store at";
+
 /// What a habitat probe that exited prints, plus the one command that
 /// installs a missing binary. A tracker nobody has created yet names
 /// `ljos onboard`.
@@ -35499,6 +35502,14 @@ fn habitat_down_state(name: &str, err: &anyhow::Error) -> String {
         if !state.contains("cargo install") {
             let trimmed = state.trim_end_matches('.').trim_end();
             state = format!("{trimmed}, so run `{fix}`.");
+        }
+    }
+    if name == "deed store" {
+        if let Some(dir) = state.split("no store at ").nth(1) {
+            let named = std::env::var_os("DEEDAR_URL").is_some_and(|url| !url.is_empty());
+            if !named {
+                return format!("{NO_DEED_STORE} {}, so run `ljos onboard`.", dir.trim());
+            }
         }
     }
     if name == "tracker" {
@@ -36636,14 +36647,63 @@ pub fn doctor_summary(rows: &[Habitat]) -> String {
         .collect();
     let off = rows.iter().filter(|h| doctor_word(h) == "info").count();
     let words: Vec<(&str, &str)> = rows.iter().map(|h| (doctor_word(h), h.name)).collect();
-    summary_line(
-        &down,
-        &damaged,
-        &working_parts(&words),
-        off,
-        recall_word_matching(rows),
-        word_match_note(rows),
-    )
+    let working = working_parts(&words);
+    let degraded = recall_word_matching(rows);
+    let note = word_match_note(rows);
+    let unset: Vec<&str> = failing_for_sitting(rows)
+        .into_iter()
+        .filter(|name| *name != "claim graph")
+        .collect();
+    if down.is_empty() && damaged.is_empty() && !unset.is_empty() {
+        let mut line = unset_verdict(&unset, &working);
+        if degraded {
+            line = lexical_ready(line, note);
+            line.push('\n');
+        } else if off > 0 {
+            line.push_str(" Optional extras: `ljos doctor --all`.\n");
+        } else {
+            line.push_str(" Every check: `ljos doctor --all`.\n");
+        }
+        return line;
+    }
+    summary_line(&down, &damaged, &working, off, degraded, note)
+}
+
+/// The line for a seat whose tracker or deed store is not there. A seat in
+/// that state answers `ljos remember` and `ljos search`, and `ljos file` or
+/// `ljos sitting` would fail, so the line does not call it ready. It names
+/// what does work.
+fn unset_verdict(unset: &[&str], working: &[&str]) -> String {
+    let names: Vec<&str> = unset
+        .iter()
+        .map(|name| match *name {
+            "tracker" => "the tracker",
+            "deed store" => "the deed store",
+            other => other,
+        })
+        .collect();
+    let fails = if unset.contains(&"tracker") {
+        "`ljos file` and `ljos sitting` fail"
+    } else {
+        "`ljos sitting` fails"
+    };
+    let verb = if names.len() == 1 { "is" } else { "are" };
+    let mut line = format!(
+        "ljos runs, but {} {verb} not set up, so {fails}.",
+        and_list(&names)
+    );
+    if !working.is_empty() {
+        let list = and_list(working);
+        let mut chars = list.chars();
+        let first = chars.next().map(|c| c.to_uppercase().collect::<String>());
+        let verb = if working.len() == 1 { "works" } else { "work" };
+        line.push_str(&format!(
+            " {}{} {verb}.",
+            first.unwrap_or_default(),
+            chars.as_str()
+        ));
+    }
+    line
 }
 
 /// The parenthetical on a ready line when recall is matching words.
@@ -36833,6 +36893,7 @@ fn shown_short(word: &str, name: &str) -> bool {
         || name == "config"
         || name == "atoms"
         || (word == "info" && READY_PARTS.iter().any(|(_, rows)| rows.contains(&name)))
+        || (word == "info" && name == "deed store")
 }
 
 /// Whether a doctor row tells a seat that is not a cloud seat to run
@@ -45905,9 +45966,11 @@ fn sitting_hard_down() -> (Vec<String>, bool, &'static str) {
 /// The command a refused sitting names. A deed store nobody has made yet is
 /// what `ljos onboard` creates. Any other refusal is one `ljos doctor` names.
 fn sitting_next_command(rows: &[Habitat]) -> &'static str {
-    let unmade = rows
-        .iter()
-        .any(|row| row.name == "deed store" && !row.ok && row.state.contains("no store at"));
+    let unmade = rows.iter().any(|row| {
+        row.name == "deed store"
+            && !row.ok
+            && (row.state.contains("no store at") || row.state.starts_with(NO_DEED_STORE))
+    });
     if unmade && std::env::var_os("DEEDAR_URL").is_none_or(|url| url.is_empty()) {
         "ljos onboard"
     } else {
@@ -70154,13 +70217,17 @@ mod tests {
         assert!(healthy(&rows));
         assert_eq!(
             format_doctor_short(&rows),
-            "ljos is ready: memory and command guard work. Optional extras: `ljos doctor --all`.\n\
+            "ljos runs, but the tracker is not set up, so `ljos file` and `ljos sitting` fail. \
+             Memory and command guard work. Optional extras: `ljos doctor --all`.\n\
              info\ttickets\t`vissue identity` exited 1: not inside a tracker\n"
         );
         rows.push(habitat_row("guard", "off: LJOS_OFF is set", false));
         let short = format_doctor_short(&rows);
         assert!(
-            short.starts_with("ljos is ready: memory works. Optional extras"),
+            short.starts_with(
+                "ljos runs, but the tracker is not set up, so `ljos file` and `ljos sitting` fail. \
+                 Memory works."
+            ),
             "{short}"
         );
         assert!(
@@ -70183,6 +70250,48 @@ mod tests {
             "{sat}"
         );
         assert!(!sat.contains("ljos is ready"), "{sat}");
+    }
+
+    #[test]
+    fn a_missing_deed_store_keeps_the_ready_line_off() {
+        let rows = vec![
+            habitat_row("pack", "answers", true),
+            habitat_row("tracker", "answers", true),
+            habitat_row("policy", "ljos-policyd 0.5.0 (phronesis)", true),
+            habitat_row(
+                "deed store",
+                "no deed store at /d/deedar/store, so run `ljos onboard`.",
+                false,
+            ),
+        ];
+        let short = format_doctor_short(&rows);
+        assert_eq!(
+            short,
+            "ljos runs, but the deed store is not set up, so `ljos sitting` fails. \
+             Memory, tracker and command guard work. Optional extras: `ljos doctor --all`.\n\
+             info\tdeeds\tno deed store at /d/deedar/store, so run `ljos onboard`.\n"
+        );
+
+        let both = vec![
+            habitat_row("pack", "answers", true),
+            habitat_row(
+                "tracker",
+                "not inside a tracker, so run `ljos onboard`.",
+                false,
+            ),
+            habitat_row(
+                "deed store",
+                "no deed store at /d, so run `ljos onboard`.",
+                false,
+            ),
+        ];
+        let short = format_doctor_short(&both);
+        assert!(
+            short.starts_with(
+                "ljos runs, but the tracker and the deed store are not set up, so `ljos file` and `ljos sitting` fail. Memory works."
+            ),
+            "{short}"
+        );
     }
 
     #[test]

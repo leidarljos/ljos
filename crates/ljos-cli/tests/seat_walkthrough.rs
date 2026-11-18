@@ -353,6 +353,14 @@ fn a_sitting_before_the_deed_store_exists_names_the_command_that_makes_it() {
     }
     let pack = ljos_test_boot::Packsetd::open();
     let mut walk = Walk::open(pack.url(), false);
+    let doctor = walk.run(&["doctor"]);
+    walk.expect(
+        &doctor.stdout,
+        "info\tdeeds\tno deed store at ",
+        "the deeds row",
+    );
+    walk.expect(&doctor.stdout, ", so run `ljos onboard`.", "the deeds fix");
+    assert!(!doctor.stdout.contains("ljos is ready"), "{}", walk.log);
     let filed = walk.ok(&["file", "Seat the kiln door", "-p", "demo"]);
     let id = filed.stdout.trim().to_string();
 
