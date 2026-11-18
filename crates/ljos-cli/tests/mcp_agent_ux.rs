@@ -391,3 +391,35 @@ fn sitting_says_how_it_differs_from_start_and_names_every_playbook() {
         "{text}"
     );
 }
+
+#[test]
+fn a_rule_with_a_verdict_it_cannot_store_is_an_error_that_names_the_two_it_takes() {
+    let mut session = Session::open(&[("LJOS_MCP_TOOLS", "all")]);
+    for verdict in ["warn", "block", ""] {
+        let reply = session.call(
+            "ljos_rule",
+            serde_json::json!({
+                "seat": "ada", "pattern": "*--force*", "verdict": verdict, "why": "it rewrites history"
+            }),
+        );
+        assert_eq!(reply["result"]["isError"], true, "{verdict}: {reply}");
+        assert_eq!(
+            blocks(&reply),
+            [
+                format!("rule: verdict is deny or ask, not \"{verdict}\"; nothing was written"),
+                "next: fix the line above and call ljos_rule again".to_string(),
+            ]
+        );
+    }
+    let tools = listed_tools(&mut session);
+    let rule = description_of(&tools, "ljos_rule");
+    assert!(rule.contains("a verdict label, deny or ask."), "{rule}");
+    assert!(!rule.contains("ljos policy"), "{rule}");
+    let verdict = tools["ljos_rule"]["inputSchema"]["properties"]["verdict"]["description"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        verdict,
+        "`deny` or `ask`: a label the warning carries. Neither stops the command."
+    );
+}

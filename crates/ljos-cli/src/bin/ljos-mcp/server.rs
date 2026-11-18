@@ -851,7 +851,7 @@ pub struct PredictArgs {
 pub struct RuleArgs {
     /// A glob over the whole command line, such as `*--force*`.
     pub pattern: String,
-    /// `deny` or `ask`: a label the warning carries. Neither stops the action.
+    /// `deny` or `ask`: a label the warning carries. Neither stops the command.
     pub verdict: String,
     /// The reason the warning gives.
     pub why: String,
@@ -3113,7 +3113,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the work has shown that a kind of command needs a warning before it runs: writes a rule to the pack, a glob over the command line with a verdict label. The memory hook and `ljos policy` show its warning at the point of action and the command still runs, and it travels in handovers like any memory. Pass user true to write that law into the user config instead, shared by every seat and never reviewed.",
+        description = "Call this when the work has shown that a kind of command needs a warning before it runs. It writes a rule to the pack: a glob over the whole command line and a verdict label, deny or ask. ljos_guard_check and the memory hook show the warning at the point of action, and the command still runs. The rule travels in handovers like any memory. Pass user true to write it to the user config instead, shared by every seat and never reviewed.",
         annotations(
             title = "Write a rule",
             read_only_hint = false,
@@ -3126,9 +3126,16 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<RuleArgs>,
     ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+        let verdict = args.verdict.trim().to_ascii_lowercase();
+        if !matches!(verdict.as_str(), "deny" | "ask" | "allow") {
+            return Err(refused(anyhow::anyhow!(
+                "rule: verdict is deny or ask, not \"{}\"; nothing was written",
+                args.verdict.trim()
+            )));
+        }
         let rule = Rule {
             pattern: args.pattern,
-            verdict: args.verdict,
+            verdict,
             reason: args.why,
         };
         // No person sits at an MCP call, and the prompt does not raise a
