@@ -2610,7 +2610,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this before starting work on an issue, after ljos_recall: it takes the session node for that tracker id under your name. A named worker occupies one slot (busy names the held node and ljos_complete / ljos_release). A harness seat occupies per issue. Completing a node later does not close the ticket.",
+        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this before starting work on an issue, after ljos_recall: it takes the session node for that tracker id under your name. A named worker occupies one slot (busy names the held node and ljos_complete / ljos_release). A harness seat occupies per issue. Pass takeover true to take a ticket over from another seat whose claim looks stale. Completing a node later does not close the ticket.",
         annotations(
             title = "Claim a node",
             read_only_hint = false,
@@ -2624,14 +2624,15 @@ impl LjosServer {
         Parameters(args): Parameters<ClaimNodeArgs>,
     ) -> Result<Json<Said>, McpError> {
         let assignee = call_assignee("claim", args.assignee.as_deref())?;
-        if let Some(line) = ljos_cli::ticket_node_refusal(&args.node) {
+        let node = ljos_cli::on_disk(&args.node);
+        if let Some(line) = ljos_cli::ticket_node_refusal(&node) {
             return Err(refused(anyhow::anyhow!(line)));
         }
-        ljos_cli::require_ticket_to_claim(&args.node).map_err(refused)?;
+        ljos_cli::require_ticket_to_claim(&node).map_err(refused)?;
         let text = if args.takeover {
-            ljos_cli::takeover::claim_takeover(&args.node, &assignee)
+            ljos_cli::takeover::claim_takeover(&node, &assignee)
         } else {
-            claim(&args.node, &assignee)
+            claim(&node, &assignee)
         }
         .map_err(refused)?;
         Ok(Json(Said { text, aside: None }))

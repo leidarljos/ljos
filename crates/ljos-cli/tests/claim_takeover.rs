@@ -403,3 +403,86 @@ fn a_sitting_on_a_stale_ticket_names_the_takeover_and_then_opens() {
     assert!(sat.status.success(), "{}", said(&sat));
     assert!(world.org().contains(":CLAIMED_BY: bob"));
 }
+
+#[test]
+fn ljos_mcp_claim_describes_takeover() {
+    let world = World::new(&[("demo-tk10", None)]);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+    cmd.env_clear()
+        .env("PATH", &world.path)
+        .env("HOME", &world.bob_home)
+        .env("XDG_CONFIG_HOME", world.bob_home.join(".config"))
+        .env("XDG_DATA_HOME", world.bob_home.join(".local/share"))
+        .env("XDG_STATE_HOME", world.bob_home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", &world.bob_run)
+        .env("VISSUE_ROOT", &world.tracker)
+        .env("VISSUE_NO_ROUTE", "1")
+        .env("PACKSET_URL", "off")
+        .env("LJOS_TRACKER_GIT", "off")
+        .current_dir(&world.bob_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    seat_env::clear(&mut cmd);
+    let mut child = cmd.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for line in [
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "0"}}
+        }),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+    ] {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let listed = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|v| v["id"] == 2)
+        .unwrap_or_else(|| panic!("no id=2 in {stdout}"));
+    let tool = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "ljos_claim")
+        .expect("ljos_claim in tools/list");
+    let desc = tool["description"].as_str().unwrap_or("");
+    assert!(
+        desc.contains("takeover"),
+        "ljos_claim description does not mention takeover: {desc}"
+    );
+    assert!(
+        tool["inputSchema"]["properties"]["takeover"].is_object(),
+        "ljos_claim schema lacks takeover: {tool}"
+    );
+}
+
+#[test]
+fn takeover_of_own_claim_and_missing_ticket_through_cli_and_mcp() {
+    let world = World::new(&[("demo-tk11", None)]);
+    let claimed = world.alice(&["claim", "demo-tk11"]);
+    assert!(claimed.status.success(), "{}", said(&claimed));
+    let own = world.alice(&["claim", "demo-tk11", "--takeover"]);
+    let text = said(&own);
+    assert!(own.status.success(), "{text}");
+    assert!(!world.org().contains("took over"), "{}", world.org());
+
+    let missing = world.bob(&["claim", "demo-nope", "--takeover"]);
+    let text = said(&missing);
+    assert!(!missing.status.success(), "{text}");
+    assert!(text.contains("issue demo-nope not found"), "{text}");
+
+    let mcp_missing = world.bob_mcp(
+        "ljos_claim",
+        serde_json::json!({"seat": "bob", "node": "demo-nope", "takeover": true}),
+    );
+    assert_eq!(mcp_missing["result"]["isError"], true, "{mcp_missing}");
+    assert!(
+        mcp_missing.to_string().contains("issue demo-nope not found"),
+        "{mcp_missing}"
+    );
+}
