@@ -76,7 +76,7 @@ No seat, no =PACKSET_HOME=, and no =packsetd= are required for that list.
 A search then says to install =packset= or to run =packset ensure=, as a tool error the model can read.
 The installer checks each download against its published SHA-256 sum.
 It builds from source with =cargo= where a platform has no release.
-=--no-embed= leaves out the encoder. Search then matches words, and a search prints =matched by words (encoder not installed)= and names the same install command as =ljos doctor=.
+=--no-embed= leaves out the encoder. Search then matches words, and a search prints =matched by words (encoder not installed)= and names the same install command as =ljos doctor=. An MCP server names that install command on its first such search and leaves it off later searches.
 
 Read the script before you run it. It is =scripts/install.sh= in this repository.
 It runs =ljos onboard= for each coding runner it finds. With none found, it still sets up

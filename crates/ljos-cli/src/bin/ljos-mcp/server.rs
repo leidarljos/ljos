@@ -8,6 +8,10 @@
 //! Remember, Prefer and Forget, and the text is the claim.
 
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use anyhow::Context as _;
 
@@ -543,6 +547,8 @@ fn publish_tool(tool: &mut Tool) {
 pub struct LjosServer {
     /// Where the cards are read from. The command line's `--dir`.
     cards_dir: PathBuf,
+    /// Whether this server already named the missing encoder's install command.
+    encoder_install_named: Arc<AtomicBool>,
 }
 
 // ---- arguments -------------------------------------------------------------
@@ -1726,14 +1732,33 @@ impl LjosServer {
         let cards_dir = std::env::var_os("LJOS_CARDS_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        Self { cards_dir }
+        Self {
+            cards_dir,
+            encoder_install_named: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Open on a named cards directory, for a test.
     #[cfg(test)]
     #[must_use]
     pub fn at(cards_dir: PathBuf) -> Self {
-        Self { cards_dir }
+        Self {
+            cards_dir,
+            encoder_install_named: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Keep the word-search mode on every reading and name its install once.
+    fn search_rank_note(&self, line: &str) -> String {
+        let note = line.trim();
+        if note.contains("encoder not installed")
+            && self.encoder_install_named.swap(true, Ordering::Relaxed)
+        {
+            return note
+                .split_once(", so run")
+                .map_or_else(|| note.to_string(), |(mode, _)| format!("{mode}."));
+        }
+        note.to_string()
     }
 
     // ---- the pack --------------------------------------------------------
@@ -2039,8 +2064,8 @@ impl LjosServer {
             if let Some(ranking) = ljos_cli::ranking_now() {
                 let line =
                     ljos_cli::search_rank_for_person(&ljos_cli::search_rank_line(&ranking, &hits));
-                let note = line.trim();
-                if note.contains("encoder not installed") && !reading.contains(note) {
+                let note = self.search_rank_note(&line);
+                if note.contains("encoder not installed") && !reading.contains(note.as_str()) {
                     reading = format!("{note}\n{reading}");
                 }
             }
@@ -4947,6 +4972,22 @@ fn card_named(uri: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use rmcp::handler::server::ServerHandler;
+
+    #[test]
+    fn a_server_names_the_encoder_install_once() {
+        let server = LjosServer::at(PathBuf::from("."));
+        let line = "matched by words (encoder not installed), so run `cargo install --locked packset-embed`.\n";
+        assert_eq!(
+            server.search_rank_note(line),
+            line.trim(),
+            "the first search must name the install"
+        );
+        assert_eq!(
+            server.search_rank_note(line),
+            "matched by words (encoder not installed).",
+            "a later search must keep the mode without repeating the install"
+        );
+    }
 
     /// `close: true` is not a field of this tool. Passing it is an error.
     #[test]
