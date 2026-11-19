@@ -50,6 +50,9 @@ const QUOTED_SHAPES: &[&str] = &[
     "user:pass",
 ];
 
+/// Usage placeholders the command reference prints as the help writes them.
+const PLACEHOLDERS: &[&str] = &["KEY=VALUE"];
+
 fn docs() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/orgmode");
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -105,6 +108,7 @@ fn explained(class: Class, line: &str) -> bool {
     let lower = line.to_lowercase();
     match class {
         Class::Term => VENDOR_WORDS.iter().any(|word| lower.contains(word)),
+        Class::Secret if PLACEHOLDERS.iter().any(|p| line.contains(p)) => true,
         _ => QUOTED_SHAPES.iter().any(|shape| line.contains(shape)),
     }
 }
