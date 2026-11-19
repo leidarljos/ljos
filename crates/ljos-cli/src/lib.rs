@@ -24399,17 +24399,48 @@ pub fn remember_queued_split_line(n: usize) -> String {
     )
 }
 
+/// What `ljos remember` prints when a split stored some chunks and queued
+/// the others. A queued chunk is saved by a later command.
+#[must_use]
+pub fn remember_mixed_split_line(stored: usize, queued: usize) -> String {
+    let noun = |n: usize| if n == 1 { "claim" } else { "claims" };
+    format!(
+        "remember: stored {stored} {} and queued {queued} {} for a later call, because a lesson is at most two sentences, so run `ljos search`.",
+        noun(stored),
+        noun(queued)
+    )
+}
+
+/// The line that opens a split `ljos remember`, for `stored` chunks the pack
+/// contains and `queued` chunks waiting for a later call.
+#[must_use]
+pub fn remember_split_summary(stored: usize, queued: usize) -> String {
+    match (stored, queued) {
+        (_, 0) => remember_split_line(stored),
+        (0, _) => remember_queued_split_line(queued),
+        _ => remember_mixed_split_line(stored, queued),
+    }
+}
+
 /// One JSON document for `ljos remember --json`.
 ///
-/// `claims` lists every chunk the pack accepted, including a duplicate.
-/// `failed` is present when a later chunk was refused, and names that text.
+/// `claims` lists every chunk the pack accepted, including a duplicate, and
+/// every chunk that was queued. `stored` counts the first kind and `queued`
+/// the second. `failed` is present when a later chunk was refused, and names
+/// that text.
 ///
 /// # Errors
 ///
 /// The document could not be encoded.
 pub fn remember_json_page(claims: &[Value], failed: &[Value]) -> Result<String> {
     let mut page = serde_json::Map::new();
+    let queued = claims
+        .iter()
+        .filter(|claim| claim["queued"].as_bool() == Some(true))
+        .count();
     page.insert("claims".into(), Value::Array(claims.to_vec()));
+    page.insert("stored".into(), Value::from(claims.len() - queued));
+    page.insert("queued".into(), Value::from(queued));
     if !failed.is_empty() {
         page.insert("failed".into(), Value::Array(failed.to_vec()));
     }
@@ -72126,6 +72157,16 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             remember_split_line(1),
             "remember: stored as 1 claim, because a lesson is at most two sentences, so run `ljos search`."
         );
+        assert_eq!(
+            remember_split_summary(1, 1),
+            "remember: stored 1 claim and queued 1 claim for a later call, because a lesson is at most two sentences, so run `ljos search`."
+        );
+        assert_eq!(
+            remember_split_summary(2, 3),
+            "remember: stored 2 claims and queued 3 claims for a later call, because a lesson is at most two sentences, so run `ljos search`."
+        );
+        assert_eq!(remember_split_summary(2, 0), remember_split_line(2));
+        assert_eq!(remember_split_summary(0, 2), remember_queued_split_line(2));
         let hit = |atom: &Value| Hit {
             id: None,
             text: "Run the linter before the push.".into(),

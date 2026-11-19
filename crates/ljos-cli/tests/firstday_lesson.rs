@@ -169,13 +169,12 @@ fn a_paragraph_says_why_it_was_stored_as_more_than_one_claim() {
     };
     let seat = Seat::on(daemon.url());
     let (code, stdout, stderr) = seat.run(&["remember", PARA]);
-    assert_eq!(code, 0, "{stdout}{stderr}");
-    assert!(
-        stderr.contains(
-            "remember: stored as 2 claims, because a lesson is at most two sentences, so run `ljos search`."
-        ),
-        "{stderr}"
-    );
+    let said = format!("{stdout}{stderr}");
+    assert_eq!(code, 0, "{said}");
+    let summary =
+        "remember: stored as 2 claims, because a lesson is at most two sentences, so run `ljos search`.";
+    assert!(said.contains(summary), "{said}");
+    assert_eq!(said.matches(summary).count(), 1, "{said}");
 }
 
 #[test]
