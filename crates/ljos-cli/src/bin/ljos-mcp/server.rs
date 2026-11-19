@@ -3367,7 +3367,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this after eb_campaign_run or eb_campaign_status on a bump: the campaign's typed findings, one row each with its class, stage, recipe, the error line and the fix. With remember, one lesson per finding a person or a seat resolved is stored at once under the recipe's name, labelled tool-echo until `ljos accept` raises it. With issue, the state file is cited as a deed on the issue. Findings a later attempt merely got past are skipped unless all.",
+        description = "Call this after `eb-stack campaign run` or `eb-stack campaign status` on a bump: the campaign's typed findings, one row each with its class, stage, recipe, the error line and the fix. With remember, one lesson per finding a person or a seat resolved is stored at once under the recipe's name, labelled tool-echo until `ljos accept` raises it. With issue, the state file is cited as a deed on the issue. Findings a later attempt merely got past are skipped unless all.",
         annotations(
             title = "Campaign findings",
             read_only_hint = false,
@@ -3729,7 +3729,7 @@ pub struct PickUpArgs {
 /// An eb-stack campaign state to read or remember.
 #[derive(Deserialize, JsonSchema)]
 pub struct FindingsArgs {
-    /// The campaign state file (`campaign.json`) `eb_campaign_run` keeps.
+    /// The campaign state file (`campaign.json`) `eb-stack campaign run` keeps.
     pub state: String,
     /// Write one lesson per finding a person or a seat resolved.
     #[serde(default)]

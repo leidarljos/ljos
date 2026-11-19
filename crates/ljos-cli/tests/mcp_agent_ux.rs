@@ -255,7 +255,7 @@ fn descriptions_are_one_line_of_single_spaces() {
 }
 
 /// `ljos_bump_plan` says what it returns, and no description sends an agent to
-/// a tool this server does not list.
+/// an `ljos_*` or `eb_*` tool this server does not list.
 #[test]
 fn the_bump_plan_description_names_only_what_ljos_serves() {
     let mut session = Session::open(&[("LJOS_MCP_TOOLS", "all")]);
@@ -276,7 +276,9 @@ fn the_bump_plan_description_names_only_what_ljos_serves() {
         for (at, text) in &found {
             for token in text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                .filter(|t| t.starts_with("ljos_") && t.len() > 5)
+                .filter(|t| {
+                    (t.starts_with("ljos_") && t.len() > 5) || (t.starts_with("eb_") && t.len() > 3)
+                })
             {
                 if token.ends_with('_') {
                     continue;
