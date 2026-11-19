@@ -50185,6 +50185,31 @@ pub fn format_search_stored(
     seat_ahead: bool,
     store: &[String],
 ) -> String {
+    format_search_stored_with_flags(
+        hits,
+        matched,
+        capped,
+        explain,
+        query,
+        seat_ahead,
+        store,
+        &[],
+    )
+}
+
+/// [`format_search_stored`] with active CLI filter flags kept in the rerun hint.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn format_search_stored_with_flags(
+    hits: &[Hit],
+    matched: usize,
+    capped: bool,
+    explain: bool,
+    query: &str,
+    seat_ahead: bool,
+    store: &[String],
+    extra_flags: &[String],
+) -> String {
     let now = now_utc();
     let mine = seat_name();
     let reading = search_reading(hits.len(), seat_ahead);
@@ -50223,18 +50248,21 @@ pub fn format_search_stored(
         .collect();
     let refs: Vec<&str> = store.iter().map(String::as_str).collect();
     let top_hint = search_finish_hint(hits);
-    scan::search_page(&scan::SearchPage {
-        rows: &rows,
-        shown: hits.len(),
-        matched,
-        capped,
-        top_hint: top_hint.as_deref(),
-        explain,
-        query,
-        reading,
-        seat_ahead,
-        store: &refs,
-    })
+    scan::search_page_with_flags(
+        &scan::SearchPage {
+            rows: &rows,
+            shown: hits.len(),
+            matched,
+            capped,
+            top_hint: top_hint.as_deref(),
+            explain,
+            query,
+            reading,
+            seat_ahead,
+            store: &refs,
+        },
+        extra_flags,
+    )
 }
 
 /// When the first search row is a ticket this seat claimed, name finish with a lesson.

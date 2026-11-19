@@ -5619,6 +5619,41 @@ fn run_command() -> Result<()> {
                 seat: source_seat,
                 import_id,
             };
+            let mut rerun_flags: Vec<String> = Vec::new();
+            if let Some(p) = project.as_deref() {
+                rerun_flags.push("-p".to_string());
+                rerun_flags.push(p.to_string());
+            }
+            if let Some(m) = filter.machine.as_deref() {
+                rerun_flags.push("--source-machine".to_string());
+                rerun_flags.push(m.to_string());
+            }
+            if let Some(s) = filter.seat.as_deref() {
+                rerun_flags.push("--source-seat".to_string());
+                rerun_flags.push(s.to_string());
+            }
+            if let Some(id) = filter.import_id.as_deref() {
+                rerun_flags.push("--import-id".to_string());
+                rerun_flags.push(id.to_string());
+            }
+            if attempts {
+                rerun_flags.push("--attempts".to_string());
+            }
+            if rerank {
+                rerun_flags.push("--rerank".to_string());
+            }
+            if let Some(t) = as_of.as_deref() {
+                rerun_flags.push("--as-of".to_string());
+                rerun_flags.push(t.to_string());
+            }
+            if let Some(d) = valid_at.as_deref() {
+                rerun_flags.push("--valid-at".to_string());
+                rerun_flags.push(d.to_string());
+            }
+            if (min_score - 34.0).abs() > 1e-9 {
+                rerun_flags.push("--min-score".to_string());
+                rerun_flags.push(min_score.to_string());
+            }
             if !dated || filter.active() {
                 ljos_cli::memory_port::merge_search(
                     &mut hits,
@@ -5777,7 +5812,7 @@ fn run_command() -> Result<()> {
                     print!(
                         "{}",
                         ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(
-                            &ljos_cli::format_search_stored(
+                            &ljos_cli::format_search_stored_with_flags(
                                 &hits,
                                 matched,
                                 capped,
@@ -5785,6 +5820,7 @@ fn run_command() -> Result<()> {
                                 &asked,
                                 ranking.mode != "lexical",
                                 &id_space,
+                                &rerun_flags,
                             ),
                             human_color()
                         ))

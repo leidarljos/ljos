@@ -494,6 +494,13 @@ pub struct SearchPage<'a> {
 /// The human search page.
 #[must_use]
 pub fn search_page(page: &SearchPage<'_>) -> String {
+    search_page_with_flags(page, &[])
+}
+
+/// [`search_page`] with active filter flags included in the command that
+/// requests more rows.
+#[must_use]
+pub fn search_page_with_flags(page: &SearchPage<'_>, extra_flags: &[String]) -> String {
     if page.rows.is_empty() {
         return nothing_matched_page(page.query);
     }
@@ -504,7 +511,7 @@ pub fn search_page(page: &SearchPage<'_>) -> String {
             out.push('\n');
         }
     }
-    out.push_str(&shown_line(page));
+    out.push_str(&shown_line(page, extra_flags));
     out.push('\n');
     if page.explain {
         let reading = page.reading.trim();
@@ -541,24 +548,35 @@ pub fn search_page(page: &SearchPage<'_>) -> String {
     out
 }
 
-fn shown_line(page: &SearchPage<'_>) -> String {
+fn shown_line(page: &SearchPage<'_>, extra_flags: &[String]) -> String {
     let shown = page.shown;
     let matched = page.matched.max(shown);
-    if shown < matched {
-        let line = format!(
-            "shown {shown} of {matched}, {}",
-            search_hint(page.query, next_limit(matched, page.capped), page.capped,)
-        );
-        return wrap(&line, COLS);
+    let limit = if shown < matched {
+        next_limit(matched, page.capped)
+    } else if page.capped && shown > 0 {
+        shown.saturating_mul(2).max(shown + 1)
+    } else {
+        return format!("shown {shown} of {matched}.");
+    };
+    let cmd = search_more_command(extra_flags, page.query, limit);
+    let cmd_span = if cmd.contains('`') {
+        cmd.clone()
+    } else {
+        format!("`{cmd}`")
+    };
+    let one = if page.capped {
+        format!("shown {shown} of {matched}. Run {cmd_span} to see more.")
+    } else {
+        format!("shown {shown} of {matched}. Run {cmd_span} to see all {matched}.")
+    };
+    if one.chars().count() <= COLS && !one.contains('\n') {
+        return one;
     }
-    if page.capped && shown > 0 {
-        let line = format!(
-            "shown {shown} of {shown}, {}",
-            search_hint(page.query, shown.saturating_mul(2).max(shown + 1), true)
-        );
-        return wrap(&line, COLS);
+    if page.capped {
+        format!("shown {shown} of {matched}. To see more, run:\n{cmd_span}")
+    } else {
+        format!("shown {shown} of {matched}. To see all {matched}, run:\n{cmd_span}")
     }
-    format!("shown {shown} of {matched}.")
 }
 
 fn next_limit(matched: usize, capped: bool) -> usize {
@@ -685,25 +703,92 @@ fn ended(text: &str) -> String {
     out
 }
 
-fn search_hint(query: &str, limit: usize, asks: bool) -> String {
-    let verb = if asks {
-        "and the next page asks for more"
-    } else {
-        "and the next page lists the rest"
-    };
-    let query = query.trim();
-    let usable = !query.is_empty()
-        && !query
+fn posix_arg(word: &str) -> String {
+    if !word.is_empty()
+        && !word.starts_with('-')
+        && word
             .chars()
-            .any(|ch| ch.is_control() || ch == '`' || ch == '"');
-    let cmd = if usable && query.contains(char::is_whitespace) {
-        format!("ljos search \"{query}\" -n {limit}")
-    } else if usable {
-        format!("ljos search {query} -n {limit}")
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+    {
+        return word.to_string();
+    }
+    if !word.is_empty()
+        && !word.chars().any(|ch| {
+            ch.is_control()
+                || matches!(
+                    ch,
+                    '"' | '\\'
+                        | '$'
+                        | '`'
+                        | '!'
+                        | '\''
+                        | '*'
+                        | '?'
+                        | '['
+                        | ']'
+                        | '('
+                        | ')'
+                        | '{'
+                        | '}'
+                        | '&'
+                        | '|'
+                        | ';'
+                        | '<'
+                        | '>'
+                        | '#'
+                        | '~'
+                )
+        })
+    {
+        return format!("\"{word}\"");
+    }
+    if word.chars().any(char::is_control) {
+        let mut out = String::from("$'");
+        for ch in word.chars() {
+            match ch {
+                '\\' => out.push_str("\\\\"),
+                '\'' => out.push_str("\\'"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('\'');
+        return out;
+    }
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+fn search_more_command(extra_flags: &[String], query: &str, limit: usize) -> String {
+    let mut parts = vec!["ljos".to_string(), "search".to_string()];
+    parts.extend(extra_flags.iter().map(|token| {
+        if token.starts_with('-')
+            && token
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            token.clone()
+        } else {
+            posix_arg(token)
+        }
+    }));
+    let query = query.trim();
+    if query.is_empty() {
+        parts.push("-n".to_string());
+        parts.push(limit.to_string());
+    } else if query.starts_with('-') {
+        parts.push("-n".to_string());
+        parts.push(limit.to_string());
+        parts.push("--".to_string());
+        parts.push(posix_arg(query));
     } else {
-        format!("ljos search -n {limit}")
-    };
-    format!("{verb}, so run `{cmd}`.")
+        parts.push(posix_arg(query));
+        parts.push("-n".to_string());
+        parts.push(limit.to_string());
+    }
+    parts.join(" ")
 }
 
 fn search_row(row: &SearchRow<'_>, id_label: &str) -> String {
@@ -1091,7 +1176,7 @@ mod tests {
     }
 
     #[test]
-    fn a_capped_search_page_names_the_next_page_once() {
+    fn a_capped_search_page_names_a_runnable_command_without_wrapping_it() {
         let row = SearchRow {
             label: "lesson",
             age: "today",
@@ -1120,11 +1205,69 @@ mod tests {
         let page_text = search_page(&page);
         let first = page_text.lines().next().unwrap_or("");
         assert_eq!(
-            first.matches("and the next page asks for more").count(),
-            1,
-            "{first}"
+            first,
+            "shown 1 of 19. Run `ljos search kiln -n 38` to see more."
         );
-        assert!(!first.contains(", or more"), "{first}");
+
+        let quoted = SearchPage {
+            rows: &rows,
+            shown: 1,
+            matched: 12,
+            capped: false,
+            top_hint: None,
+            explain: false,
+            query: "a \"b\" $c",
+            reading: "",
+            seat_ahead: false,
+            store: &[],
+        };
+        let quoted_text = search_page(&quoted);
+        assert!(
+            quoted_text.contains("`ljos search 'a \"b\" $c' -n 12`"),
+            "{quoted_text}"
+        );
+        assert!(
+            !quoted_text.contains("next page"),
+            "still mentions next page:\n{quoted_text}"
+        );
+
+        let dash = SearchPage {
+            rows: &rows,
+            shown: 1,
+            matched: 12,
+            capped: false,
+            top_hint: None,
+            explain: false,
+            query: "-flag",
+            reading: "",
+            seat_ahead: false,
+            store: &[],
+        };
+        let dash_text = search_page(&dash);
+        assert!(
+            dash_text.contains("`ljos search -n 12 -- \"-flag\"`"),
+            "{dash_text}"
+        );
+
+        let filtered = search_page_with_flags(
+            &SearchPage {
+                rows: &rows,
+                shown: 1,
+                matched: 12,
+                capped: false,
+                top_hint: None,
+                explain: false,
+                query: "",
+                reading: "",
+                seat_ahead: false,
+                store: &[],
+            },
+            &["--source-seat".to_string(), "alice".to_string()],
+        );
+        assert!(
+            filtered.contains("`ljos search --source-seat alice -n 12`"),
+            "{filtered}"
+        );
     }
 
     #[test]
