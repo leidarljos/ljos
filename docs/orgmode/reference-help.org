@@ -13,7 +13,7 @@ They still run.
 # BEGIN ljos-sample help
 #+begin_src text
 $ ljos --version
-ljos 0.45.0
+ljos 0.45.1
 $ ljos --help
 Memory, a work tracker and a command guard for coding runners
 

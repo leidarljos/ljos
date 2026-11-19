@@ -1,1 +1,0 @@
-The identity check now falls back from an unreachable push before range to a merge base with origin/develop, then to commits not reachable from origin refs, and finally to the pushed tip when that list is empty.
