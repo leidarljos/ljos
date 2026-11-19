@@ -365,7 +365,11 @@ Both seats can vote. From one shell the two ballots are one voice, and ``ljos co
 
 The first line is the verdict: which option the ballots pick, and whether that clears a push onto ``develop`` or ``main``. ``push cite`` and ``protected push`` are the same checks in full.
 From one shell the two ballots are one voice, so they fold and the protected-branch check still wants a second seat. A vote in its own shell is its own voice, and those two clear the push.
-The lines under ``advice`` are the weighted settle. They do not clear that push. ``social power`` names each seat's weight in that one voice. ``holds`` names the option and its share of the group's weight.
+The lines under ``advice`` are the weighted settle.
+They count every recorded ballot, including ballots the verdict folds together and ballots labelled ``authored:``.
+The verdict counts one ballot per voice and leaves authored ballots out.
+The advice does not clear that push.
+``social power`` names each seat's weight in that one voice. ``holds`` names the option and its share of the group's weight.
 A signature line and ``tracker git:`` follow each vote. A ballot is its own voice when the cast has no shell, no agent runner and no earlier row that shares a session, a parent or the root session of one runner.
 The how-to :doc:`Vote and settle a decision <howto-vote>` is that case, and ``ljos learn``.
 The docs of beads, Mem0, Letta, Zep, Basic Memory and git-bug, read on 2026-11-10, describe no vote. The comparison is :doc:`How ljos compares <compare>`.

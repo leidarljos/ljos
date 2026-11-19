@@ -45,7 +45,9 @@ Cast a reviewer's ballot from its own run
 Each reviewer is its own subagent or run, such as a cloud runner or a CI job, and casts its own ballot rather than reporting a verdict in prose.
 A subagent's ballot binds the parent session plus the subagent, ``SESSION:AGENT``: the ``agent_id`` the terminal harness's hook sees, or the command harness thread under its root session.
 An opencode subagent is a session of its own.
-Two subagents of one session count twice, the parent and a subagent count as two, and a subagent that wrote a candidate cannot vote.
+Two subagents of one session count twice, and the parent and a subagent count as two.
+A subagent that wrote a candidate can vote.
+Its ballot is stored with an ``authored:`` label and a warning, but the verdict leaves it out of the count.
 A run on another machine needs ljos and the tracker there.
 ``ljos cloud up`` installs ljos on that machine and clones the shared tracker repository that ``LJOS_TRACKER_REMOTE`` names, so the ballot is pushed where the other runs fetch it.
 

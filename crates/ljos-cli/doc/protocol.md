@@ -326,8 +326,9 @@ cloud seat git runs only the hooks the repository and the login name.
   by `--as`. Ballots that share a session id, a parent, a calling shell
   or an agent runner's root session count as one
   voice, the latest when they disagree, and consensus names the ballots
-  it folded and why. It
-  refuses to settle when a session authored a candidate and also voted.
+  it folded and why. A session that authored a candidate can vote.
+  Its ballot stays recorded with an `authored: CANDIDATE` label and a warning.
+  The verdict leaves that ballot out of the count and still settles.
   Each reviewer casts
   `ljos vote ISSUE --for X --confidence C --used DEED --as NAME`. A verdict reported
   in prose is not a ballot.
@@ -342,7 +343,8 @@ cloud seat git runs only the hooks the repository and the login name.
   voice, and one agent runner's root session is one voice. A subagent of
   that root counts with its parent. The tally names
   that parent, that shell or that runner, and the ballots folded into it. A subagent
-  that wrote a candidate cannot vote. A voter changes its ballot by withdrawing it,
+  that wrote a candidate can vote. Its ballot gets an `authored:` label and a warning,
+  and the verdict leaves it out of the count. A voter changes its ballot by withdrawing it,
   `ljos vote ISSUE --withdraw --as NAME`, then casting again; a cast while
   it still has one is refused and names those two steps. A run on
   another machine has ljos installed there
