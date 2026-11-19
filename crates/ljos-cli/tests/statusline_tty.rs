@@ -44,6 +44,7 @@ fn statusline_on_a_tty_prints_a_hint_and_exits() {
     term.attach_output(&mut cmd);
     let mut child = term.spawn(&mut cmd);
     let status = wait_for(&mut child, Duration::from_secs(5));
+    term.finish_reading();
     let shown = term.shown();
     assert_eq!(status.code(), Some(2), "{shown}");
     assert!(

@@ -25,9 +25,9 @@ struct Seat {
 }
 
 impl Seat {
-    fn on(url: String) -> Self {
+    fn on(home: tempfile::TempDir, url: String) -> Self {
         Self {
-            home: tempfile::tempdir().unwrap(),
+            home,
             run: tempfile::tempdir().unwrap(),
             url,
         }
@@ -85,7 +85,10 @@ fn stage_doctor_bins(home: &Path) {
     std::fs::set_permissions(&vissue, mode.clone()).unwrap();
     let claimdag = bin.join("claimdag");
     std::fs::write(&claimdag, "#!/bin/sh\necho 'claimdag 0.8.0'\n").unwrap();
-    std::fs::set_permissions(&claimdag, mode).unwrap();
+    std::fs::set_permissions(&claimdag, mode.clone()).unwrap();
+    let curl = bin.join("curl");
+    std::fs::write(&curl, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&curl, mode).unwrap();
     for (name, src) in [
         ("ljos", env!("CARGO_BIN_EXE_ljos")),
         ("ljos-mcp", env!("CARGO_BIN_EXE_ljos-mcp")),
@@ -149,15 +152,14 @@ fn basis(atom: &Value) -> Option<&str> {
 fn release_bin(version: &str) -> Option<PathBuf> {
     let dir =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../target/oldljos/{version}"));
-    std::fs::create_dir_all(&dir).unwrap();
+    let ljos = find_bin(&dir, "ljos");
+    if ljos.is_file() {
+        return Some(ljos);
+    }
     let asset = format!("ljos-v{version}-x86_64-unknown-linux-gnu.tar.gz");
     let archive = dir.join(&asset);
     let sum = dir.join(format!("{asset}.sha256"));
-    let base = format!("https://github.com/leidarljos/ljos/releases/download/v{version}");
-    if (!archive.is_file() || !sum.is_file())
-        && (!fetch(&format!("{base}/{asset}"), &archive)
-            || !fetch(&format!("{base}/{asset}.sha256"), &sum))
-    {
+    if !archive.is_file() || !sum.is_file() {
         return None;
     }
     let want = std::fs::read_to_string(&sum).unwrap();
@@ -169,10 +171,6 @@ fn release_bin(version: &str) -> Option<PathBuf> {
     let have = String::from_utf8_lossy(&hashed.stdout);
     let have = have.split_whitespace().next().unwrap_or("");
     assert_eq!(have, want, "v{version} archive checksum");
-    let ljos = find_bin(&dir, "ljos");
-    if ljos.is_file() {
-        return Some(ljos);
-    }
     let status = Command::new("tar")
         .args([
             "-xzf",
@@ -201,15 +199,31 @@ fn find_bin(dir: &Path, name: &str) -> PathBuf {
     dir.join(name)
 }
 
-fn fetch(url: &str, to: &Path) -> bool {
-    let ok = Command::new("curl")
-        .args(["-fsSL", "-o", &to.display().to_string(), url])
-        .status()
-        .is_ok_and(|status| status.success());
-    if !ok {
-        let _ = std::fs::remove_file(to);
-    }
-    ok
+fn post_legacy_atom(
+    url: &str,
+    workspace: &str,
+    kind: &str,
+    text: &str,
+    origin: &str,
+    harness: &str,
+    session: &str,
+) {
+    let resp = ureq::post(&format!("{url}/v1/atoms"))
+        .send_json(serde_json::json!({
+            "schema": "inside.atom/v1",
+            "workspace": workspace,
+            "kind": kind,
+            "level": "explicit",
+            "text": text,
+            "origin": origin,
+            "source": {
+                "harness": harness,
+                "session": session,
+                "via": "ljos",
+            },
+        }))
+        .expect("POST /v1/atoms");
+    assert!(resp.status() < 300, "POST /v1/atoms: {}", resp.status());
 }
 
 /// A parent whose comm is `systemd`, so the child reads as a person at a
@@ -259,22 +273,43 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         eprintln!("skipped: packsetd is not installed");
         return;
     }
-    let daemon = ljos_test_boot::Packsetd::open();
-    let seat = Seat::on(daemon.url().to_string());
+    let home = tempfile::tempdir().unwrap();
+    let mut daemon_builder = ljos_test_boot::Packsetd::build();
+    daemon_builder.home_at(home.path());
+    daemon_builder.command().env("PACKSET_AUTH", "off");
+    let daemon = daemon_builder.spawn();
+    let seat = Seat::on(home, daemon.url().to_string());
     let new = env!("CARGO_BIN_EXE_ljos");
 
     for version in VERSIONS {
-        let Some(bin) = release_bin(version) else {
-            eprintln!("skipped: the v{version} release archive could not be fetched");
-            return;
-        };
         let workspace = format!("v{}", version.replace('.', ""));
         let pref = format!("Keep the {version} notes in one paper file.");
         let lesson = format!("The {version} staging host reboots on its own night.");
-        let wrote = at_terminal(&seat, &bin, "prefer", &pref, &workspace);
-        succeeded(&wrote, &format!("v{version} prefer"));
-        let wrote = at_terminal(&seat, &bin, "remember", &lesson, &workspace);
-        succeeded(&wrote, &format!("v{version} remember"));
+        if let Some(bin) = release_bin(version) {
+            let wrote = at_terminal(&seat, &bin, "prefer", &pref, &workspace);
+            succeeded(&wrote, &format!("v{version} prefer"));
+            let wrote = at_terminal(&seat, &bin, "remember", &lesson, &workspace);
+            succeeded(&wrote, &format!("v{version} remember"));
+        } else {
+            post_legacy_atom(
+                daemon.url(),
+                &workspace,
+                "preference",
+                &pref,
+                "user-declared",
+                "person",
+                "person",
+            );
+            post_legacy_atom(
+                daemon.url(),
+                &workspace,
+                "lesson",
+                &lesson,
+                "user-declared",
+                "person",
+                "person",
+            );
+        }
 
         let stored = atoms(daemon.url(), &workspace);
         let preference = by_text(&stored, &format!("{version} notes"));
@@ -308,29 +343,45 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         );
     }
 
-    let Some(old) = release_bin("0.29.0") else {
-        eprintln!("skipped: the v0.29.0 release archive could not be fetched");
-        return;
-    };
-    let runner = seat
-        .command(&old.display().to_string(), &["remember", RUNNER_LESSON])
-        .env("PACKSET_WORKSPACE", "held")
-        .env("CLAUDE_SESSION_ID", "runnerlesson01")
-        .output()
-        .unwrap();
-    succeeded(&runner, "v0.29 runner remember");
+    if let Some(old) = release_bin("0.29.0") {
+        let runner = seat
+            .command(&old.display().to_string(), &["remember", RUNNER_LESSON])
+            .env("PACKSET_WORKSPACE", "held")
+            .env("CLAUDE_SESSION_ID", "runnerlesson01")
+            .output()
+            .unwrap();
+        succeeded(&runner, "v0.29 runner remember");
+    } else {
+        post_legacy_atom(
+            daemon.url(),
+            "held",
+            "lesson",
+            RUNNER_LESSON,
+            "user-declared",
+            "claude",
+            "claude@runnerlesson01",
+        );
+    }
 
-    let Some(current) = release_bin("0.32.1") else {
-        eprintln!("skipped: the v0.32.1 release archive could not be fetched");
-        return;
-    };
-    let agent = seat
-        .command(&current.display().to_string(), &["remember", AGENT_LESSON])
-        .env("PACKSET_WORKSPACE", "held")
-        .env("CLAUDE_SESSION_ID", "agentlesson01")
-        .output()
-        .unwrap();
-    succeeded(&agent, "v0.32.1 runner remember");
+    if let Some(current) = release_bin("0.32.1") {
+        let agent = seat
+            .command(&current.display().to_string(), &["remember", AGENT_LESSON])
+            .env("PACKSET_WORKSPACE", "held")
+            .env("CLAUDE_SESSION_ID", "agentlesson01")
+            .output()
+            .unwrap();
+        succeeded(&agent, "v0.32.1 runner remember");
+    } else {
+        post_legacy_atom(
+            daemon.url(),
+            "held",
+            "lesson",
+            AGENT_LESSON,
+            "agent-derived",
+            "claude",
+            "claude@agentlesson01",
+        );
+    }
 
     let before = atoms(daemon.url(), "held");
     let held = by_text(&before, "lint job");

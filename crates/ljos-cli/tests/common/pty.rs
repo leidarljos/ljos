@@ -7,15 +7,17 @@ use std::io::{Read as _, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub struct Pty {
     master: std::fs::File,
     /// Held open here so the master never reads EIO while the child is
     /// between closing its copy and opening `/dev/tty`.
-    slave: OwnedFd,
+    slave: Mutex<Option<OwnedFd>>,
     shown: Arc<Mutex<Vec<u8>>>,
+    reader_done: Arc<(Mutex<bool>, Condvar)>,
+    reader: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 #[allow(dead_code)]
@@ -49,8 +51,10 @@ impl Pty {
         };
         Self {
             master,
-            slave,
+            slave: Mutex::new(Some(slave)),
             shown: Arc::new(Mutex::new(Vec::new())),
+            reader_done: Arc::new((Mutex::new(false), Condvar::new())),
+            reader: Mutex::new(None),
         }
     }
 
@@ -58,14 +62,18 @@ impl Pty {
     /// is true and the text is what a person at a prompt sees. Call this
     /// before [`Self::spawn`].
     pub fn attach_output(&self, cmd: &mut Command) {
-        cmd.stdout(Self::stdio_dup(self.slave.as_raw_fd()));
-        cmd.stderr(Self::stdio_dup(self.slave.as_raw_fd()));
+        let guard = self.slave.lock().unwrap();
+        let fd = guard.as_ref().expect("pty slave open").as_raw_fd();
+        cmd.stdout(Self::stdio_dup(fd));
+        cmd.stderr(Self::stdio_dup(fd));
     }
 
     /// Point `cmd`'s stdin at this terminal, so `is_terminal` is true.
     /// Call this before [`Self::spawn`].
     pub fn attach_stdin(&self, cmd: &mut Command) {
-        cmd.stdin(Self::stdio_dup(self.slave.as_raw_fd()));
+        let guard = self.slave.lock().unwrap();
+        let fd = guard.as_ref().expect("pty slave open").as_raw_fd();
+        cmd.stdin(Self::stdio_dup(fd));
     }
 
     /// A copy of `fd` owned by a `Stdio`. The original stays open.
@@ -81,7 +89,13 @@ impl Pty {
     /// pty. Its stdin, stdout and stderr are whatever `cmd` sets; the
     /// slave side is not one of them unless the test asks.
     pub fn spawn(&self, cmd: &mut Command) -> Child {
-        let fd = self.slave.as_raw_fd();
+        let fd = self
+            .slave
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("pty slave open")
+            .as_raw_fd();
         // SAFETY: setsid, ioctl and close are async-signal-safe and touch
         // only this child.
         unsafe {
@@ -94,18 +108,68 @@ impl Pty {
             });
         }
         let child = cmd.spawn().expect("spawn on a pty");
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         let mut master = self.master.try_clone().unwrap();
         let shown = Arc::clone(&self.shown);
-        std::thread::spawn(move || {
+        let reader_done = Arc::clone(&self.reader_done);
+        let handle = std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
-            while let Ok(n) = master.read(&mut buf) {
-                if n == 0 {
-                    break;
+            loop {
+                match master.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => shown.lock().unwrap().extend_from_slice(&buf[..n]),
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
                 }
-                shown.lock().unwrap().extend_from_slice(&buf[..n]);
             }
+            let (lock, cvar) = &*reader_done;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
         });
+        *self.reader.lock().unwrap() = Some(handle);
         child
+    }
+
+    /// Close the parent's slave handle so the reader hits EOF once the
+    /// child and its descendants close theirs, then drain buffered output.
+    pub fn finish_reading(&self) {
+        *self.slave.lock().unwrap() = None;
+        let (lock, cvar) = &*self.reader_done;
+        let guard = lock.lock().unwrap();
+        let (guard, _) = cvar
+            .wait_timeout_while(guard, Duration::from_secs(2), |done| !*done)
+            .unwrap();
+        let finished = *guard;
+        drop(guard);
+        if finished {
+            if let Some(handle) = self.reader.lock().unwrap().take() {
+                let _ = handle.join();
+            }
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut last = self.shown.lock().unwrap().len();
+        let mut quiet_since = Instant::now();
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            let now = self.shown.lock().unwrap().len();
+            if now != last {
+                last = now;
+                quiet_since = Instant::now();
+            } else if quiet_since.elapsed() >= Duration::from_millis(120) {
+                break;
+            }
+        }
+    }
+
+    /// Wait for `child` to exit, close the slave handle, and drain every
+    /// byte the child wrote to the terminal before returning.
+    pub fn wait_output(&self, child: Child, secs: u64) -> std::process::Output {
+        let out = wait_output(child, secs);
+        self.finish_reading();
+        out
     }
 
     /// What the child wrote to the terminal so far.
