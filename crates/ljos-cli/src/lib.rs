@@ -38363,8 +38363,8 @@ pub fn handover_scoped(
     Ok(lines)
 }
 
-/// Sign a handover manifest with this seat's key. A manifest that already
-/// has a signature is left as it is: the machine key does not sign it again.
+/// Sign a handover manifest with the host key. A manifest that already has
+/// a signature is left as it is.
 ///
 /// # Errors
 ///
@@ -38374,12 +38374,8 @@ pub fn sign_handover_manifest(manifest: &Path) -> Result<String> {
     if sig.is_file() {
         return Ok("already signed; left unchanged".into());
     }
-    if let Some(key) = seat_handover_key() {
+    if let Some(key) = host_key_path() {
         let said = vouch_sign(manifest, Some(&key))?;
-        return Ok(said.stdout.trim_end().to_string());
-    }
-    if host_key_path().is_some() {
-        let said = vouch_sign(manifest, None)?;
         return Ok(said.stdout.trim_end().to_string());
     }
     Ok(
@@ -38387,15 +38383,6 @@ pub fn sign_handover_manifest(manifest: &Path) -> Result<String> {
          `ljos onboard` writes one"
             .into(),
     )
-}
-
-fn seat_handover_key() -> Option<PathBuf> {
-    let seat = std::env::var("LJOS_SEAT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())?;
-    let path = ballot_sig::seat_key_path(&seat)?;
-    (path.is_file() && !ballot_sig::is_box_host_key(&path)).then_some(path)
 }
 
 fn vouch_sign(manifest: &Path, key: Option<&Path>) -> Result<Said> {
