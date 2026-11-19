@@ -16,6 +16,7 @@ $ ljos seat add carol
 
 =ljos seat= prints the name in use, or =none= when no seat is set and reads use every seat.
 A write with no name set uses the login name, or a short stable name when that login is missing, and the first write says so.
+The recent-write fallback applies only to a session id recorded with that write; it does not give the seat to a later session with another id.
 If you added another seat first, the next line tells you to run =ljos seat add= for your own seat.
 That row is how you get back on the list.
 

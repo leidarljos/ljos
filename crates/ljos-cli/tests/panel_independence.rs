@@ -2223,6 +2223,23 @@ fn counted(world: &World, issue: &str) -> String {
 }
 
 #[test]
+fn an_explicit_write_does_not_name_a_later_claude_session() {
+    let world = World::new();
+    let issue = "demo-seat-write-sessions";
+    let script = format!(
+        "CLAUDE_CODE_SESSION_ID=claude-session-one LJOS_SEAT=alice \"$LJOS\" vote {issue} --for ship --used none; echo \"first $?\"\n\
+         env -u LJOS_SEAT -u VISSUE_AGENT CLAUDE_CODE_SESSION_ID=claude-session-two \"$LJOS\" vote {issue} --for hold --used none; echo \"second $?\"\n"
+    );
+    let out = shell(&world, &[], &script);
+    let said = text(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("first 0"), "{said}");
+    assert!(stdout.contains("second 0"), "{said}");
+    assert!(!stdout.contains("label repeated-ballot"), "{said}");
+    assert!(stdout.contains("session claude-session-two"), "{said}");
+}
+
+#[test]
 fn one_shell_that_renames_its_session_between_casts_casts_once() {
     // One shell casts, sets another session or run id, and casts again on
     // the same issue. Each variable that names a session is a way to try.

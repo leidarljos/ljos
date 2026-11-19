@@ -249,7 +249,11 @@ fn file_with_no_seat_names_the_unknown_seat() {
     let again = Bench::new();
     let log = again.root.join("home/.state/ljos/seat-writes.log");
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
-    std::fs::write(&log, "2026-11-13T00:00:00.000Z\tunknown-box\tbox\n").unwrap();
+    std::fs::write(
+        &log,
+        "2026-11-13T00:00:00.000Z\tunknown-box\tbox\t2c12969d-0000-4000-8000-000000000000\n",
+    )
+    .unwrap();
     let out = again.ljos_env(&[("LJOS_SYNC_HOST", "box")], file);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(

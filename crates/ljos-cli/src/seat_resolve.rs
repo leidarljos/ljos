@@ -115,6 +115,7 @@ pub(crate) fn named_from_env() -> Option<(String, &'static str)> {
     let write_log = writes_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default();
+    let session_ids = lookup_ids();
     let host = crate::sync::host();
     let inputs = Inputs {
         flag: flag.as_deref(),
@@ -123,6 +124,7 @@ pub(crate) fn named_from_env() -> Option<(String, &'static str)> {
         map_seat: map.as_ref().map(|(name, rule)| (name.as_str(), *rule)),
         parent_seat: parent.as_deref(),
         write_log: &write_log,
+        session_ids: &session_ids,
         host: &host,
         user: None,
     };
@@ -165,7 +167,20 @@ pub fn note_seat_write(seat: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let line = format!("{}\t{seat}\t{}\n", write_stamp(), crate::sync::host());
+    let sessions: Vec<String> = lookup_ids()
+        .into_iter()
+        .map(|id| id.replace(['\t', '\r', '\n'], ""))
+        .filter(|id| !id.is_empty())
+        .collect();
+    let suffix = sessions
+        .iter()
+        .map(|id| format!("\t{id}"))
+        .collect::<String>();
+    let line = format!(
+        "{}\t{seat}\t{}{suffix}\n",
+        write_stamp(),
+        crate::sync::host()
+    );
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -186,6 +201,8 @@ pub(crate) struct Inputs<'a> {
     pub map_seat: Option<(&'a str, &'static str)>,
     pub parent_seat: Option<&'a str>,
     pub write_log: &'a str,
+    /// Session ids carried by this invocation.
+    pub session_ids: &'a [String],
     pub host: &'a str,
     /// `USER` or `LOGNAME`, when one is a usable seat. Tests set this
     /// directly. Production reads the login in [`login_name`].
@@ -212,7 +229,7 @@ pub(crate) fn pick(inputs: &Inputs<'_>) -> Option<(String, &'static str)> {
     if let Some(name) = inputs.parent_seat.and_then(usable) {
         return Some((name, "parent process seat record"));
     }
-    if let Some(name) = recent_line(inputs.write_log, inputs.host) {
+    if let Some(name) = recent_line(inputs.write_log, inputs.host, inputs.session_ids) {
         return Some((name, "most recent write from this machine"));
     }
     None
@@ -479,7 +496,7 @@ fn stamp_key(ts: &str) -> String {
     }
 }
 
-fn recent_line(text: &str, host: &str) -> Option<String> {
+fn recent_line(text: &str, host: &str, session_ids: &[String]) -> Option<String> {
     let host = host.trim();
     if host.is_empty() || text.is_empty() {
         return None;
@@ -497,6 +514,18 @@ fn recent_line(text: &str, host: &str) -> Option<String> {
             continue;
         };
         if line_host.trim() != host {
+            continue;
+        }
+        let written_sessions: Vec<&str> =
+            parts.map(str::trim).filter(|id| !id.is_empty()).collect();
+        let same_session = if session_ids.is_empty() {
+            written_sessions.is_empty()
+        } else {
+            written_sessions
+                .iter()
+                .any(|written| session_ids.iter().any(|current| current == written))
+        };
+        if !same_session {
             continue;
         }
         let Some(seat) = usable(seat) else {
@@ -535,6 +564,7 @@ mod tests {
             map_seat: None,
             parent_seat: None,
             write_log: "",
+            session_ids: &[],
             host: "box",
             user: None,
         }
@@ -597,14 +627,14 @@ mod tests {
 2026-11-11T00:00:01Z\tbob\tbox
 2026-11-11T00:00:01Z\talice\tbox
 ";
-        assert!(recent_line(log, "box").is_none());
+        assert!(recent_line(log, "box", &[]).is_none());
         let one = "\
 2026-11-10T00:00:00Z\talice\tbox
 2026-11-11T00:00:00Z\tbob\tbox
 2026-11-11T00:00:00Z\tbob\tother
 ";
-        assert_eq!(recent_line(one, "box").as_deref(), Some("bob"));
-        assert!(recent_line(one, "elsewhere").is_none());
+        assert_eq!(recent_line(one, "box", &[]).as_deref(), Some("bob"));
+        assert!(recent_line(one, "elsewhere", &[]).is_none());
     }
 
     /// Two writes in one second used to read as every seat. The fraction
@@ -616,13 +646,13 @@ mod tests {
 2026-11-11T00:00:01Z\tcarol\tbox
 2026-11-11T00:00:01.250Z\tbob\tbox
 ";
-        assert_eq!(recent_line(log, "box").as_deref(), Some("bob"));
+        assert_eq!(recent_line(log, "box", &[]).as_deref(), Some("bob"));
         let tied = "\
 2026-11-11T00:00:01.000Z\talice\tbox
 2026-11-11T00:00:01Z\tbob\tbox
 ";
         assert!(
-            recent_line(tied, "box").is_none(),
+            recent_line(tied, "box", &[]).is_none(),
             "equal stamps stay a tie"
         );
         let stamp = write_stamp();
@@ -633,6 +663,25 @@ mod tests {
             .unwrap_or("");
         assert_eq!(frac.len(), 3, "{stamp}");
         assert!(frac.chars().all(|c| c.is_ascii_digit()), "{stamp}");
+    }
+
+    #[test]
+    fn a_write_only_names_sessions_recorded_with_it() {
+        let one = "session-one-0001".to_string();
+        let two = "session-two-0002".to_string();
+        let log = "\
+2026-11-11T00:00:00Z\talice\tbox\tsession-one-0001
+2026-11-11T00:00:01Z\tbob\tbox\tsession-two-0002
+";
+        assert_eq!(
+            recent_line(log, "box", std::slice::from_ref(&one)).as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            recent_line(log, "box", std::slice::from_ref(&two)).as_deref(),
+            Some("bob")
+        );
+        assert!(recent_line(log, "box", &["session-three-0003".into()]).is_none());
     }
 
     #[test]
