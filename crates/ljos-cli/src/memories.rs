@@ -694,10 +694,9 @@ pub fn stale(all: &[Memory], days: i64, today: &str) -> Vec<Stale> {
     }
     let cutoff = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d")
         .ok()
-        .map(|d| {
-            (d - chrono::Duration::days(days))
-                .format("%Y-%m-%d")
-                .to_string()
+        .and_then(|d| {
+            let back = chrono::Duration::try_days(days)?;
+            Some(d.checked_sub_signed(back)?.format("%Y-%m-%d").to_string())
         });
     if let Some(cutoff) = cutoff {
         for m in &newest_first {

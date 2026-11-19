@@ -322,6 +322,7 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
             apply,
             json,
         } => {
+            count_from_zero("memories prune", "--days", days);
             if !stale {
                 bail!("memories prune: pass --stale");
             }
@@ -1656,7 +1657,7 @@ enum Cmd {
     /// Example: `ljos reap`
     Reap {
         /// How long a claim may sit with no claim or tracker commit: 6h, 90m, 2d.
-        #[arg(long, default_value = "6h")]
+        #[arg(long, default_value = "6h", allow_hyphen_values = true)]
         idle: String,
         /// Release and mail. Absent: print what would happen.
         #[arg(long)]
@@ -1979,7 +1980,12 @@ enum Cmd {
         #[arg(long, requires = "stale")]
         yes: bool,
         /// Quiet longer than this before a claim is released: `900`, `15m`, `6h` or `2d`. The default is `LJOS_LEASE_SECS`, 900 seconds.
-        #[arg(long, value_name = "DURATION", requires = "stale")]
+        #[arg(
+            long,
+            value_name = "DURATION",
+            requires = "stale",
+            allow_hyphen_values = true
+        )]
         older_than: Option<String>,
         /// Print what would be released and change nothing.
         #[arg(long, requires = "stale")]
@@ -2480,7 +2486,7 @@ enum Cmd {
         #[arg(long, default_value = "", allow_hyphen_values = true)]
         unit: String,
         /// How often a reading is taken: 7d, 24h, 2w, 30m. The next is due one cadence on.
-        #[arg(long, default_value = "7d")]
+        #[arg(long, default_value = "7d", allow_hyphen_values = true)]
         every: String,
         /// Where the reading came from: a job id, a run, a file.
         #[arg(long, default_value = "")]
@@ -3058,9 +3064,14 @@ fn value_sentence(err: &clap::Error, args: &[String]) -> Option<String> {
 
 fn bad_value(err: &clap::Error, args: &[String]) -> Option<String> {
     use clap::error::ContextKind;
-    let value = context_one(err, ContextKind::InvalidValue)?;
     let flag = context_one(err, ContextKind::InvalidArg).unwrap_or_default();
     let flag = flag.split_whitespace().next().unwrap_or(flag.as_str());
+    let is_flag = flag.starts_with('-');
+    let value = match context_one(err, ContextKind::InvalidValue) {
+        Some(value) => value,
+        None if is_flag && err.get(ContextKind::InvalidValue).is_some() => "\"\"".to_string(),
+        None => return None,
+    };
     let flag = if flag.is_empty() {
         "value".to_string()
     } else if flag.starts_with('-') {
@@ -3069,6 +3080,14 @@ fn bad_value(err: &clap::Error, args: &[String]) -> Option<String> {
         format!("--{flag}")
     };
     let cmd = command_path_head(args);
+    if err.kind() == clap::error::ErrorKind::ValueValidation
+        && is_flag
+        && value.parse::<f64>().is_ok_and(|n| n < 0.0)
+    {
+        return Some(format!(
+            "{cmd}: {flag} takes a number from 0 up, not {value}."
+        ));
+    }
     let help = help_of(&cmd);
     Some(format!(
         "{cmd}: {flag} does not accept {value}. The values it takes are in `{help}`."
@@ -5098,6 +5117,12 @@ fn refuse_range(line: String) -> ! {
     std::process::exit(USAGE_STATUS);
 }
 
+/// A span flag (`--idle`, `--older-than`, `--every`) whose text does not read
+/// as a span is a bad invocation: the line is printed and the command exits 2.
+fn span_or_refuse<T>(span: Result<T>) -> T {
+    span.unwrap_or_else(|err| refuse_range(err.to_string()))
+}
+
 fn count_from_zero(cmd: &str, flag: &str, n: i64) -> u64 {
     if n < 0 {
         refuse_range(format!("{cmd}: {flag} takes a number from 0 up, not {n}."));
@@ -6032,7 +6057,11 @@ fn run_command() -> Result<()> {
             min_score,
             project,
         } => {
-            if !min_score.is_finite() || min_score < 0.0 {
+            if !min_score.is_finite() {
+                eprintln!("search: --min-score needs a finite number, not {min_score}.");
+                std::process::exit(USAGE_STATUS);
+            }
+            if min_score < 0.0 {
                 eprintln!("search: --min-score takes a number from 0 up, not {min_score}.");
                 std::process::exit(USAGE_STATUS);
             }
@@ -6952,6 +6981,9 @@ fn run_command() -> Result<()> {
             project,
             args,
         } => {
+            if let Some(n) = days {
+                count_from_zero("claims", "--days", n);
+            }
             let forwarded =
                 by.is_some() || agent.is_some() || project.is_some() || !args.is_empty();
             if (mine || stale) && forwarded {
@@ -7061,7 +7093,7 @@ fn run_command() -> Result<()> {
         Cmd::Reap { idle, apply } => {
             print!(
                 "{}",
-                ljos_cli::reap::reap(ljos_cli::reap::parse_idle(&idle)?, apply)?
+                ljos_cli::reap::reap(span_or_refuse(ljos_cli::reap::parse_idle(&idle)), apply)?
             )
         }
         Cmd::Vote {
@@ -7076,6 +7108,9 @@ fn run_command() -> Result<()> {
             against,
             child,
         } => {
+            if let Some(c) = confidence {
+                unit_interval("vote", "--confidence", c);
+            }
             stop_ticket(&issue);
             let against_note = if let Some(reason) =
                 against.as_deref().map(str::trim).filter(|s| !s.is_empty())
@@ -7469,6 +7504,9 @@ fn run_command() -> Result<()> {
             dry_run,
             verbose,
         } => {
+            if let Some(n) = days {
+                count_from_zero("release", "--days", n);
+            }
             // `release HEX --assignee NAME` hands back a claim another
             // name still holds. `--stale` with an id is refused here, in
             // one line, rather than as a flag conflict.
@@ -7493,10 +7531,9 @@ fn run_command() -> Result<()> {
                         );
                     }
                 }
-                let window = match older_than.as_deref() {
-                    Some(raw) => Some(ljos_cli::quiet_claims::parse_older_than(raw)?),
-                    None => None,
-                };
+                let window = older_than
+                    .as_deref()
+                    .map(|raw| span_or_refuse(ljos_cli::quiet_claims::parse_older_than(raw)));
                 print!(
                     "{}",
                     ljos_cli::quiet_claims::release_quiet(
@@ -8128,7 +8165,7 @@ fn run_command() -> Result<()> {
         } => match (name, value) {
             (Some(name), Some(value)) => {
                 finite_number("habit", "value", value);
-                let every_s = parse_every(&every)?;
+                let every_s = span_or_refuse(parse_every(&every));
                 let (body, prev) = habit(&name, value, &unit, every_s, &source)?;
                 println!("{}", write_ack(&body, false));
                 if let Some(p) = prev {
