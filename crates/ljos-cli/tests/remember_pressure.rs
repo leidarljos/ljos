@@ -171,3 +171,22 @@ fn json_prints_a_claims_document_when_every_chunk_is_already_stored() {
     assert_eq!(claims[0]["duplicate"], true, "{said}");
     assert_eq!(claims[0]["text"], "pin the fuse", "{said}");
 }
+
+#[test]
+fn a_fully_queued_split_says_queued() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let text = "Fire the kiln before dusk. Leave the door shut until the shelf is cold. Write the batch number on the shelf card.";
+    let out = remember_with(port, &["remember", text]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!(
+        "status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(out.status.success(), "{said}");
+    assert!(stderr.contains("remember: queued as 2 claims"), "{said}");
+    assert!(!stderr.contains("stored as"), "{said}");
+    assert!(!stdout.contains("stored as"), "{said}");
+}
