@@ -628,9 +628,9 @@ struct ReadyArgs {
 /// `ljos workflow` subcommands for a stored skeleton.
 #[derive(Subcommand)]
 enum WorkflowCmd {
-    /// Check an Org skeleton and store it as a deed with its sha256 and version.
+    /// Check an Org skeleton and store its bytes with the sha256 and the version.
     ///
-    /// The same bytes are a no-op. A changed body needs a higher `#+version`.
+    /// The same bytes are a no-op. A changed body needs a higher `#+version`. A deed is the stored copy of that file.
     ///
     /// Example: `ljos workflow define docs/examples/workflows/release.org`
     Define {
@@ -2033,7 +2033,7 @@ enum Cmd {
     ///
     /// The feature workflow files its design child with `--start feature`, and the next panel round with `--round`. A round count does not close the parent. Running `--start feature` again files nothing new.
     ///
-    /// `define FILE` checks an Org skeleton and stores it as a deed. `--start NAME` files one ticket per step under the parent. `revise` gathers notes from a run into a proposal, and `--apply` stores the next version after consensus settles revise. `render` writes a public Org page.
+    /// `define FILE` checks an Org skeleton and stores its bytes. A deed is a stored file of the skeleton. `--start NAME` files one ticket per step under the parent. `revise` gathers notes from a run into a proposal, and `--apply` stores the next version after consensus settles revise. `render` writes a public Org page.
     ///
     /// Example: `ljos workflow proj-1a2b`
     #[command(subcommand_negates_reqs = true)]
