@@ -662,3 +662,16 @@ fn free_text_on_recall_points_at_search_and_exits_2() {
         assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
     }
 }
+
+#[test]
+fn search_with_packset_url_off_reports_packs_turned_off() {
+    let home = Home::new();
+    let out = home.run(&["search", "usability"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "This seat has packs turned off (PACKSET_URL=off), so nothing was matched by words. Run `unset PACKSET_URL` to turn them on."
+    );
+    assert!(!said.contains("writer is busy"), "{said}");
+}

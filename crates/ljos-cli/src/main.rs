@@ -5564,6 +5564,13 @@ fn run_command() -> Result<()> {
                         },
                     )
                 }
+                Err(err) if !dated && ljos_cli::pack_turned_off(&err) => (
+                    ljos_cli::search_by_words(&asked, fetch),
+                    ljos_cli::Ranking {
+                        mode: "lexical",
+                        reason: ljos_cli::PACK_OFF_REASON,
+                    },
+                ),
                 Err(err)
                     if !dated
                         && (ljos_cli::pack_unreachable(&err)

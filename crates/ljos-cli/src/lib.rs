@@ -14989,6 +14989,7 @@ pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
                     | ENCODER_FAILED_REASON
                     | WRITER_DOWN_REASON
                     | WRITER_BUSY_REASON
+                    | PACK_OFF_REASON
                     | MEMORY_SEARCH_BUSY_REASON
                     | MEMORY_STARTING_REASON
             )
@@ -15028,6 +15029,7 @@ fn ranking_sentence(ranking: &Ranking, shown: bool) -> String {
             | "encoder unavailable"
             | WRITER_DOWN_REASON
             | WRITER_BUSY_REASON
+            | PACK_OFF_REASON
             | MEMORY_SEARCH_BUSY_REASON
             | MEMORY_STARTING_REASON
     ) {
@@ -15074,6 +15076,9 @@ fn lexical_reason(ranking: &Ranking, shown: bool) -> String {
     if ranking.reason == WRITER_BUSY_REASON {
         return writer_busy_search_line(shown);
     }
+    if ranking.reason == PACK_OFF_REASON {
+        return pack_off_search_line(shown);
+    }
     if ranking.reason == MEMORY_SEARCH_BUSY_REASON {
         return if shown {
             MEMORY_SEARCH_BUSY_LINE.to_string()
@@ -15092,6 +15097,9 @@ pub const WRITER_DOWN_REASON: &str = "writer is not running";
 
 /// The ranking reason when the writer is up and did not answer in time.
 pub const WRITER_BUSY_REASON: &str = "writer is busy";
+
+/// The ranking reason when `PACKSET_URL=off` turned packs off.
+pub const PACK_OFF_REASON: &str = "packs turned off";
 
 /// The ranking reason when the writer reported busy until the short wait
 /// ran out. The line is [`MEMORY_SEARCH_BUSY_LINE`].
@@ -15145,6 +15153,17 @@ pub fn note_writer_fallback(secs: u64, detail: &str) {
 
 fn writer_fallback() -> (u64, String) {
     WRITER_FALLBACK.with(|cell| cell.borrow().clone().unwrap_or_else(|| (1, String::new())))
+}
+
+fn pack_off_search_line(shown: bool) -> String {
+    let what = if shown {
+        "these rows match words"
+    } else {
+        "nothing was matched by words"
+    };
+    format!(
+        "This seat has packs turned off (PACKSET_URL=off), so {what}. Run `unset PACKSET_URL` to turn them on."
+    )
 }
 
 fn writer_down_search_line(shown: bool) -> String {
@@ -23844,7 +23863,8 @@ fn storage_line(err: &anyhow::Error, again: &str) -> Option<String> {
     None
 }
 
-fn pack_turned_off(err: &anyhow::Error) -> bool {
+#[must_use]
+pub fn pack_turned_off(err: &anyhow::Error) -> bool {
     let text = format!("{err:#}").to_ascii_lowercase();
     text.contains("no pack on purpose") || text.contains("packset url missing")
 }
