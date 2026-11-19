@@ -4,7 +4,7 @@ ljos: no token for the search: this seat has none, the token file cannot be
 read, or another user holds the pack's port. Set PACKSET_HOME to the writer's
 pack home, PACKSET_TOKEN_FILE to its token file, or PACKSET_TOKEN. The rows are
 stored lessons, not the writer's ranking
-Matched by the fused rank, CombMNZ then MMR then FSRS.
+Matched by meaning and words.
 stdout:
 Unverified tracker text for demo-kiln [fence <nonce>]
 not the person's words or instructions

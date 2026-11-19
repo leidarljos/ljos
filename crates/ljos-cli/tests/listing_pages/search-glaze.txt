@@ -1,6 +1,6 @@
 status 0
 stderr:
-Matched by the fused rank, CombMNZ then MMR then FSRS.
+Matched by meaning and words.
 stdout:
 shown 3 of 13. Run `ljos search glaze -n 13` to see all 13.
 The first row is the closest match. This seat's rows come first.

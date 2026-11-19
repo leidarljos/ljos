@@ -310,7 +310,7 @@ fn a_cross_seat_meaning_hit_on_a_generic_word_is_not_an_answer() {
     assert!(kept.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains(WEBDAV), "{stdout}{stderr}");
     assert!(!stdout.contains("travel weighs"), "{stdout}{stderr}");
-    assert!(stderr.contains(ljos_cli::FUSED_RANK_LINE), "{stderr}");
+    assert!(stderr.contains(ljos_cli::MEANING_LINE), "{stderr}");
 }
 
 #[test]

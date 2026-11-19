@@ -15003,17 +15003,52 @@ pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
         }
         return String::new();
     }
+    if ranking.mode != "lexical" {
+        return format!("{}\n", semantic_match_line(hits));
+    }
     ranking_sentence(ranking, true)
 }
 
-/// The stderr line when the rows are in the pack's fused order.
+/// The default line for a fused page when no hit-level signals are available.
+pub const MEANING_AND_WORDS_LINE: &str = "Matched by meaning and words.";
+
+/// The default line when only the meaning retriever returned the shown rows.
+pub const MEANING_LINE: &str = "Matched by meaning.";
+
+/// The default line when only the word retriever returned the shown rows.
+pub const WORDS_LINE: &str = "Matched by words.";
+
+/// The technical ranking description shown by `ljos search --explain`.
 ///
 /// CombMNZ fuses the ballots, MMR diversifies them, and FSRS scales by
 /// retrievability. That is the order the page prints. The encoder's
 /// `dense_rank` is not this order.
-pub const FUSED_RANK_LINE: &str = "Matched by the fused rank, CombMNZ then MMR then FSRS.";
+pub const FUSED_RANK_EXPLANATION: &str = "Matched by the fused rank, CombMNZ then MMR then FSRS.";
 
-/// One line for stderr: a word match, or the fused rank.
+/// The fused page's default line, kept as the public name older callers use.
+pub const FUSED_RANK_LINE: &str = MEANING_AND_WORDS_LINE;
+
+/// Describe which retrievers returned the hits on a semantic page.
+///
+/// A cosine is the meaning retriever's signal. Two or more ballots mean
+/// both retrievers named a hit; without a cosine, a hit came from words.
+fn semantic_match_line(hits: &[Hit]) -> &'static str {
+    let mut meaning = false;
+    let mut words = false;
+    for hit in hits {
+        let from_meaning = hit_cosine(hit).is_some();
+        meaning |= from_meaning;
+        words |= hit.ballots.is_some_and(|ballots| ballots >= 2) || !from_meaning;
+    }
+    match (meaning, words) {
+        (true, true) => MEANING_AND_WORDS_LINE,
+        (true, false) => MEANING_LINE,
+        (false, true) => WORDS_LINE,
+        (false, false) => MEANING_AND_WORDS_LINE,
+    }
+}
+
+/// One line for stderr: a word match, or the retrievers behind the fused rank.
 /// `--json` keeps `mode` as `lexical` or `semantic`.
 ///
 /// A load is read as an empty page here. Search uses [`search_rank_line`],
@@ -15025,7 +15060,7 @@ pub fn ranking_line(ranking: &Ranking) -> String {
 
 fn ranking_sentence(ranking: &Ranking, shown: bool) -> String {
     if ranking.mode != "lexical" {
-        return format!("{FUSED_RANK_LINE}\n");
+        return format!("{MEANING_AND_WORDS_LINE}\n");
     }
     if matches!(
         ranking.reason,
@@ -50332,7 +50367,7 @@ pub fn search_reading(n: usize, seat_ahead: bool) -> &'static str {
     if n == 0 {
         "Nothing matched."
     } else if seat_ahead {
-        "The first row is the closest match, and this seat's rows come first. A score from 0 to 100 is how well the sentence matched. The fraction is how many stored checks picked this row. Neither says whether the text is true. A later line on the same matter replaces an earlier one."
+        "The first row is the closest match, and this seat's rows come first. CombMNZ fuses the word and meaning ballots, MMR diversifies them, and FSRS scales them by retrievability. A score from 0 to 100 is how well the sentence matched. The fraction is how many stored checks picked this row. Neither says whether the text is true. A later line on the same matter replaces an earlier one."
     } else {
         "The first row is the closest match. A score from 0 to 100 is how well the sentence matched. The fraction is how many stored checks picked this row. Neither says whether the text is true."
     }
@@ -82504,7 +82539,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 mode: "semantic",
                 reason: "",
             }),
-            format!("{FUSED_RANK_LINE}\n")
+            format!("{MEANING_AND_WORDS_LINE}\n")
         );
         let semantic = Ranking {
             mode: "semantic",
@@ -82515,6 +82550,38 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "",
             "an empty page does not say the rows were matched by the fused rank"
         );
+        let mut meaning = hit("meaning", "the morning plan", 0.9);
+        note_cosine(&mut meaning, Some(0.8));
+        assert_eq!(
+            search_rank_line(&semantic, &[meaning.clone()]),
+            "Matched by meaning.\n"
+        );
+        let words = hit("words", "the morning plan", 0.8);
+        assert_eq!(
+            search_rank_line(&semantic, std::slice::from_ref(&words)),
+            "Matched by words.\n"
+        );
+        meaning.ballots = Some(2);
+        meaning.of = Some(2);
+        assert_eq!(
+            search_rank_line(&semantic, &[meaning]),
+            format!("{MEANING_AND_WORDS_LINE}\n")
+        );
+        assert_eq!(
+            search_rank_line(
+                &semantic,
+                &[words, {
+                    let mut row = hit("meaning-2", "the dawn plan", 0.7);
+                    note_cosine(&mut row, Some(0.7));
+                    row
+                }]
+            ),
+            format!("{MEANING_AND_WORDS_LINE}\n")
+        );
+        let explained = search_reading(1, true);
+        for method in ["CombMNZ", "MMR", "FSRS"] {
+            assert!(explained.contains(method), "{explained}");
+        }
     }
 
     /// Rows on the page while the encoder loads are word matches. An empty

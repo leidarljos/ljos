@@ -1,6 +1,6 @@
 status 0
 stderr:
-Matched by the fused rank, CombMNZ then MMR then FSRS.
+Matched by meaning and words.
 stdout:
 shown 1 of 1.
 The first row is the closest match. This seat's rows come first.
