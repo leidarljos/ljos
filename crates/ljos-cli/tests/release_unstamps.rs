@@ -243,9 +243,10 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        assert!(
-            out.status.success(),
-            "ljos {args:?} should label the close and write nothing: {text}"
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "ljos {args:?} should refuse the close and write nothing: {text}"
         );
         assert!(
             !text.contains("label close-unverified") && text.contains("Nothing was written."),
