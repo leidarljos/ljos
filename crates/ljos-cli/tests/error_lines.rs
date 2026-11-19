@@ -675,3 +675,20 @@ fn search_with_packset_url_off_reports_packs_turned_off() {
     );
     assert!(!said.contains("writer is busy"), "{said}");
 }
+
+#[test]
+fn unknown_proposals_status_names_valid_values_and_exits_2() {
+    let home = Home::new();
+    for bad in ["bogus", ""] {
+        let out = home.run(&["proposals", "--status", bad], &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{bad:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{bad:?}\n{said}");
+        let want = if bad.is_empty() {
+            "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not an empty value."
+        } else {
+            "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not bogus."
+        };
+        assert_eq!(one_line(&out.stderr), want, "{bad:?}\n{said}");
+    }
+}

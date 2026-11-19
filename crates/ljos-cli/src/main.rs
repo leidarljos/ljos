@@ -763,7 +763,7 @@ enum Cmd {
         /// Only proposals filed by this seat. `unknown` is a row that names none.
         #[arg(long)]
         seat: Option<String>,
-        /// Keep only this status: open, accepted, refused, or already-in-pack. `in-pack` lists rows already stored.
+        /// Keep only this status: open, accepted, refused, or already-in-pack. `in-pack` lists rows already stored. Unknown values exit 2.
         #[arg(long)]
         status: Option<String>,
         /// Mark each open row that is already stored as already-in-pack, and record the time. A second run writes nothing and deletes nothing.
@@ -5276,6 +5276,20 @@ fn run_command() -> Result<()> {
             status,
             settle,
         } => {
+            if let Some(raw) = status.as_deref() {
+                let trimmed = raw.trim();
+                if !ljos_cli::admit::is_valid_status(trimmed) {
+                    let bad = if trimmed.is_empty() {
+                        "an empty value"
+                    } else {
+                        trimmed
+                    };
+                    eprintln!(
+                        "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not {bad}."
+                    );
+                    std::process::exit(USAGE_STATUS);
+                }
+            }
             if let Some(ProposalCmd::Amend { id, text }) = cmd {
                 let text = if text == "-" {
                     let mut buf = String::new();

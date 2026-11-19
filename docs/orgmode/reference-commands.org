@@ -112,7 +112,7 @@ The line says what went wrong and the command that fixes it.
 - =block ISSUE [OTHER...] [--on ID|--off ID]= :: Stores: tracker. Record that one ticket waits on another. A following id is the same as =--on=. Further ids are further tickets it waits on. =--on= adds that edge. =--off= drops it. A following id beside =--on= or =--off= is refused.
 - =parent ISSUE PARENT= :: Stores: tracker. Move =ISSUE= under =PARENT= by editing only that ticket's parent link. The write refuses an unknown parent, refuses a cycle, records a dated note on =ISSUE=, and commits the tracker.
 - =export --out FILE [--machine NAME] [--json]= :: Stores: pack, tracker. The same command as =memory export=.
-- =proposals [--seat SEAT] [--status STATUS] [--settle]= :: Stores: pack. List lesson proposals waiting on a review. =--seat= keeps one seat. =--status= is open, accepted, refused, already-in-pack, or in-pack. =--settle= records already-in-pack on open rows the pack already holds, and deletes nothing.
+- =proposals [--seat SEAT] [--status STATUS] [--settle]= :: Stores: pack. List lesson proposals waiting on a review. =--seat= keeps one seat. =--status= is open, accepted, refused, already-in-pack, or in-pack. Unknown status values exit 2. =--settle= records already-in-pack on open rows the pack already holds, and deletes nothing.
 - =proposals amend ID --text TEXT= :: Stores: pack. Record a revised text and run the readability checks, without accepting. =--text -= reads stdin.
 - =merge-org BASE OURS THEIRS= :: Stores: tracker. Field-merge one issue file. git calls this as the =ljos-org= merge driver, =%O= =%A= =%B=. The merged text replaces ours.
 - =judge-score= :: Stores: pack. Score the judge log against outcomes: accuracy and calibration per decision.
