@@ -773,10 +773,14 @@ fn impossible_as_of_dates_exit_2() {
 #[test]
 fn invalid_flag_values_on_search_and_remember_exit_2() {
     let home = Home::new();
-    let cases: [(&[&str], &str); 5] = [
+    let cases: [(&[&str], &str); 6] = [
         (
             &["search", "kiln", "--min-score=-1"],
             "search: --min-score takes a number from 0 up, not -1.",
+        ),
+        (
+            &["search", "kiln", "--min-score", "inf"],
+            "search: --min-score needs a finite number, not inf.",
         ),
         (
             &["search", "kiln", "--as-of", "bogus"],
@@ -1002,4 +1006,21 @@ fn no_write_send_and_options_refusals_exit_1_on_stdout() {
         );
         assert!(out.stderr.is_empty(), "{args:?}\n{said}");
     }
+}
+
+#[test]
+fn an_empty_value_on_a_count_flag_is_named() {
+    let home = Home::new();
+    let out = home.run(
+        &["search", "kiln", "--limit", ""],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "search: --limit does not accept \"\". The values it takes are in `ljos search --help`.",
+        "{said}"
+    );
 }
