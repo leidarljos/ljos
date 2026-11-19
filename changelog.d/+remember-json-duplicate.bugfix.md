@@ -1,3 +1,3 @@
-`ljos remember --json` printed nothing when every chunk was already stored.
-The command now prints one claims document, with those claims in the array.
-When a later chunk fails, that same document lists what was stored and what failed, and the command exits 1.
+`ljos remember --json` now prints one claim object for a single claim, including a duplicate or queued claim.
+When text splits into several claims, it prints one document with a `claims` array and `stored` and `queued` counts instead of a stream of claim objects.
+An all-duplicate split and a split that later fails still print that document, and plain split output reports stored and queued counts once.

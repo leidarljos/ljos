@@ -646,9 +646,10 @@ enum Cmd {
         /// Print a warning when a sentence is over 29 words. The memory is still stored.
         #[arg(long)]
         verbose: bool,
-        /// Print one JSON document with a `claims` array, for one claim and for several.
+        /// Print JSON. One claim is that object, with `id` at the top.
+        /// A split into several claims is one document with a `claims` array, `stored` and `queued`.
         /// The grade, the aim and the sentence that raised the grade are fields on each claim.
-        /// A lesson the pack already stores is in that array. A later chunk that fails is listed under `failed`.
+        /// A duplicate of a split is in that array. A later chunk that fails is listed under `failed`.
         #[arg(long)]
         json: bool,
         /// The day (YYYY-MM-DD) the claim starts to hold in the world. `ljos search --valid-at` leaves it out before then.
@@ -5492,6 +5493,8 @@ fn run_command() -> Result<()> {
                     continue;
                 }
                 if body["queued"].as_bool() == Some(true) {
+                    // JSON stdout is always one document, so prose goes to
+                    // stderr for one claim and a split alike.
                     if json {
                         eprintln!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
                     } else {
@@ -5532,8 +5535,17 @@ fn run_command() -> Result<()> {
                     ljos_cli::remember_split_summary(stored.len(), queued_n)
                 );
             }
-            if json {
+            if json && split {
                 println!("{}", ljos_cli::remember_json_page(&json_bodies, &failed)?);
+            } else if json {
+                // One claim is the claim object, the shape from before the
+                // split document. A hard failure prints nothing here and
+                // exits 1.
+                if failed.is_empty() {
+                    if let Some(body) = json_bodies.first() {
+                        println!("{}", serde_json::to_string_pretty(body)?);
+                    }
+                }
             } else if split && !stored.is_empty() {
                 print!("{}", split_claims_page(stored.len(), queued_n, &stored));
             }
