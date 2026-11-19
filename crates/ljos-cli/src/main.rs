@@ -8324,23 +8324,31 @@ fn render_workflow(
         skel = ljos_cli::workflow_skel::fill_vars(&skel, &vars)?;
     }
     let page = ljos_cli::workflow_skel::render_skeleton(&skel);
+    let page_hits = ljos_cli::scrub::scan_public(&page);
+    if !page_hits.is_empty() || ljos_cli::scrub::scrub_public(&page) != page {
+        bail!(
+            "workflow: rendered page failed public check: {}",
+            page_hits.join("; ")
+        );
+    }
     if check {
         let Some(path) = out else {
             bail!("workflow: `--check` compares the file named with `--out`");
         };
-        let have = std::fs::read_to_string(path).unwrap_or_default();
+        let have = std::fs::read_to_string(path)
+            .with_context(|| format!("workflow: read {}", path.display()))?;
         let mut why = Vec::new();
         if have != page {
             why.push("the file differs from a fresh render".to_string());
         }
-        if ljos_cli::scrub::scrub_public(&page) != page {
-            why.push("the rendered page still has a model name or a seat name".to_string());
-        }
-        if ljos_cli::scrub::scrub_public(&have) != have {
-            why.push(
-                "the file still has a local path, a seat token, an agent id, a model name or a seat name"
-                    .to_string(),
-            );
+        let have_hits = ljos_cli::scrub::scan_public(&have);
+        if !have_hits.is_empty() {
+            why.push(format!(
+                "the file failed public scan ({})",
+                have_hits.join("; ")
+            ));
+        } else if ljos_cli::scrub::scrub_public(&have) != have {
+            why.push("the file still has content the public scrubber removes".to_string());
         }
         if !why.is_empty() {
             bail!("workflow: {}: {}", path.display(), why.join("; "));

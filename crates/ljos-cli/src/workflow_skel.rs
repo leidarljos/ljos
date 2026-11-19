@@ -1227,14 +1227,27 @@ fn topo(skel: &Skeleton) -> Result<Vec<String>> {
     Ok(order)
 }
 
+fn scrub_inline_or(text: &str, fallback: &str) -> String {
+    let cleaned = scrub_public(text);
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.replace('\n', " ")
+    }
+}
+
 fn render_org(skel: &Skeleton) -> String {
     let order = topo(skel).unwrap_or_else(|_| skel.steps.iter().map(|s| s.key.clone()).collect());
-    let mut out = format!("#+title: {}\n#+version: {}\n\n", skel.title, skel.version);
+    let title = scrub_inline_or(&skel.title, "Workflow");
+    let mut out = format!("#+title: {title}\n#+version: {}\n\n", skel.version);
     for key in &order {
         let Some(step) = skel.steps.iter().find(|s| s.key == *key) else {
             continue;
         };
-        out.push_str(&format!("* {}\n:PROPERTIES:\n", step.title));
+        let key_fallback = scrub_inline_or(&step.key, "step");
+        let step_title = scrub_inline_or(&step.title, &key_fallback);
+        out.push_str(&format!("* {step_title}\n:PROPERTIES:\n"));
         out.push_str(&format!(":STEP: {}\n", step.key));
         if step.depends.is_empty() {
             out.push_str(":DEPENDS:\n");
@@ -1243,7 +1256,11 @@ fn render_org(skel: &Skeleton) -> String {
         }
         out.push_str(&format!(":KIND: {}\n", step.kind.word()));
         if let Some(role) = &step.role {
-            out.push_str(&format!(":ROLE: {role}\n"));
+            let clean_role = scrub_public(role);
+            let clean_role = clean_role.trim();
+            if !clean_role.is_empty() {
+                out.push_str(&format!(":ROLE: {clean_role}\n"));
+            }
         }
         if let Some(n) = step.quorum {
             out.push_str(&format!(":QUORUM: {n}\n"));
@@ -1253,9 +1270,13 @@ fn render_org(skel: &Skeleton) -> String {
         }
         out.push_str(":END:\n");
         if !step.body.is_empty() {
-            out.push('\n');
-            out.push_str(&step.body);
-            out.push('\n');
+            let clean_body = scrub_public(&step.body);
+            let clean_body = clean_body.trim();
+            if !clean_body.is_empty() {
+                out.push('\n');
+                out.push_str(clean_body);
+                out.push('\n');
+            }
         }
         out.push('\n');
     }
@@ -1266,10 +1287,12 @@ fn render_org(skel: &Skeleton) -> String {
         let Some(step) = skel.steps.iter().find(|s| s.key == *key) else {
             continue;
         };
+        let key_fallback = scrub_inline_or(&step.key, "step");
+        let step_title = scrub_inline_or(&step.title, &key_fallback);
         out.push_str(&format!(
             "  \"{}\" [label=\"{}\"];\n",
             dot_escape(&step.key),
-            dot_escape(&step.title)
+            dot_escape(&step_title)
         ));
     }
     for key in &order {

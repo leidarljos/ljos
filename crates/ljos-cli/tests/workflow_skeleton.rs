@@ -711,6 +711,170 @@ fn render_drops_versioned_models_and_seat_names() {
 }
 
 #[test]
+fn render_scrubs_all_adversarial_classes_and_passes_check_and_org_lint() {
+    let board = Board::new();
+    let adv = concat!("\
+#+title: \u{ff27}\u{ff30}\u{ff34}4 Release
+#+version: 1
+
+* Check Cl\u{200b}aude and [[[file:/etc/passwd][x]]]
+:PROPERTIES:
+:STEP: check
+:DEPENDS:
+:KIND: do
+:ROLE: seat saddle
+:END:
+
+Update Cargo.toml to v1.2.3, e.g. the manifest, i.e. the version.
+Cl\u{200b}aude wrote this note.
+\u{ff27}\u{ff30}\u{ff34} drafted this line.
+GPT4 checked it.
+Claude3 verified it.
+ChatGPT, Anthropic, OpenAI, Gemini, Grok, Copilot, Llama, Mistral, Codex, Composer, Cursor reviewed it.
+Run a subagent, chatbot, LLM, and AI agent on it.
+Read file:///home/x and /home/x/repo today.
+Export GITHUB_TOKEN=zzz and KEY=abc with password: x before running.
+Slack x", "ox", "b-12345-abcde and gh", "p_1234567890abcdef and github", "_pat_11ABC_xyz and sk", "-proj-123456 and AKI", "AIOSFODNN7EXAMPLE.
+Connect 10.0.0.1 and 2001:db8::1 and [::1]:8761 on box.tail1234.ts.net or db.internal or nas.local.
+Mail alice@example.com or seat:carol or saddle about it.
+Click [[[file:/etc/passwd][x]]] and [[file:/home/x][x]] and [[https://example.com][link]] and [fn:1].
+
+* Sign off
+:PROPERTIES:
+:STEP: signoff
+:DEPENDS: check
+:KIND: signoff
+:END:
+
+Options: ship, hold
+");
+    let path = board.write_skel("adv.org", adv);
+    let out = board.dir.path().join("adv-public.org");
+    let out_s = out.to_str().unwrap();
+    board.ok(&[
+        "workflow",
+        "render",
+        "adv",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out_s,
+    ]);
+    let page = std::fs::read_to_string(&out).unwrap();
+    assert!(page.contains("Cargo.toml"), "{page}");
+    assert!(page.contains("v1.2.3"), "{page}");
+    assert!(page.contains("e.g."), "{page}");
+    assert!(page.contains("i.e."), "{page}");
+    assert!(page.contains("* check"), "{page}");
+    assert!(page.contains("#+title: Workflow"), "{page}");
+    for leaked in [
+        "Claude",
+        "claude",
+        "GPT",
+        "gpt",
+        "ChatGPT",
+        "Anthropic",
+        "OpenAI",
+        "Gemini",
+        "Grok",
+        "Copilot",
+        "Llama",
+        "Mistral",
+        "Codex",
+        "Composer",
+        "Cursor",
+        "subagent",
+        "chatbot",
+        "LLM",
+        "AI agent",
+        "file://",
+        "file:/",
+        "/home/x",
+        "/etc/passwd",
+        "GITHUB_TOKEN",
+        "zzz",
+        "password:",
+        concat!("x", "oxb-"),
+        concat!("gh", "p_"),
+        concat!("githu", "b_pat_"),
+        concat!("s", "k-proj"),
+        concat!("AK", "IA"),
+        "10.0.0.1",
+        "2001:db8::1",
+        "::1",
+        "ts.net",
+        "db.internal",
+        "nas.local",
+        "alice@example.com",
+        "saddle",
+        "carol",
+        "[[",
+        "]]",
+        "[fn:1]",
+        "\u{200b}",
+    ] {
+        assert!(!page.contains(leaked), "leaked {leaked:?} in:\n{page}");
+    }
+
+    let checked = board.ok(&[
+        "workflow",
+        "render",
+        "adv",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out_s,
+        "--check",
+    ]);
+    assert!(checked.contains("matches"), "{checked}");
+
+    if std::path::Path::new("/usr/bin/emacs").is_file() {
+        let lint = Command::new("/usr/bin/emacs")
+            .args([
+                "--batch",
+                "-Q",
+                "--eval",
+                "(progn (require (quote org)) (require (quote org-lint)) (find-file (car command-line-args-left)) (let ((issues (org-lint))) (when issues (dolist (i issues) (message \"%S\" i)) (kill-emacs 1))))",
+                out_s,
+            ])
+            .output()
+            .unwrap();
+        assert!(lint.status.success(), "org-lint failed:\n{}", text(&lint));
+    }
+
+    for dirty_line in [
+        "Cl\u{200b}aude\n",
+        "\u{ff27}\u{ff30}\u{ff34}\n",
+        "GPT4\n",
+        "Claude3\n",
+        "subagent\n",
+        "file:///home/x\n",
+        "GITHUB_TOKEN=zzz\n",
+        "password: x\n",
+        concat!("x", "ox", "b-12345-abcde\n"),
+        concat!("github", "_pat_11ABC_xyz\n"),
+        "10.0.0.1\n",
+        "2001:db8::1\n",
+        "box.ts.net\n",
+        "alice@example.com\n",
+        "[[[file:/etc/passwd][x]]]\n",
+    ] {
+        std::fs::write(&out, format!("{page}{dirty_line}")).unwrap();
+        let err = board.fail(&[
+            "workflow",
+            "render",
+            "adv",
+            "--file",
+            path.to_str().unwrap(),
+            "--out",
+            out_s,
+            "--check",
+        ]);
+        assert!(!err.contains("matches"), "accepted {dirty_line:?}: {err}");
+    }
+}
+
+#[test]
 fn the_feature_workflow_still_files_its_design_child() {
     let board = Board::new();
     let parent = first_id(&board.ok(&["file", "Add a codec", "--top", "-p", "demo"]));
