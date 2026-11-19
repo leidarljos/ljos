@@ -423,7 +423,13 @@ pub fn statusline(input: &str) -> String {
             }
         }
     }
-    let mut parts = vec![format!("ljos {}", whoami().seat)];
+    let seat = whoami().seat;
+    let shown_seat = if seat_resolve::reads_every(&seat) {
+        "none"
+    } else {
+        &seat
+    };
+    let mut parts = vec![format!("ljos {shown_seat}")];
     if let Some(issue) = held_issue() {
         parts.push(issue);
     }

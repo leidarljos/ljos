@@ -73,5 +73,5 @@ fn statusline_on_a_closed_stdin_prints_the_line() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{text}\n{err}");
     assert!(!err.contains("pipe that JSON"), "{err}");
-    assert!(text.contains("ljos "), "{text}");
+    assert!(text.starts_with("ljos none · "), "{text}");
 }

@@ -250,6 +250,6 @@ In ``~/.claude/settings.json``:
    {"statusLine": {"type": "command", "command": "ljos statusline"}}
 
 The row reads the seat, the issue the conversation has open, and the claims due
-for review. A session's line is cached
+for review. With no seat set, it shows ``none``. A session's line is cached
 for fifteen seconds. A pack that does not answer in 300 ms shows as
 ``pack down``.
