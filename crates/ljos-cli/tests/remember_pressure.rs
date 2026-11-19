@@ -190,3 +190,103 @@ fn a_fully_queued_split_says_queued() {
     assert!(!stderr.contains("stored as"), "{said}");
     assert!(!stdout.contains("stored as"), "{said}");
 }
+
+/// A pack that stores the first post and drops the socket on every later
+/// one. `posts` counts the requests it read.
+fn serve_first_then_drop(
+    first_body: &str,
+) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let posts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&posts);
+    let first_body = first_body.to_string();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut sock) = stream else { break };
+            let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                match sock.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                }
+            }
+            if !buf.starts_with(b"POST ") {
+                continue;
+            }
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                let resp = format!(
+                    "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{first_body}",
+                    first_body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        }
+    });
+    (port, posts)
+}
+
+const TWO_CLAIMS: &str = "Fire the kiln before dusk. Leave the door shut until the shelf is cold. Write the batch number on the shelf card.";
+
+#[test]
+fn a_split_that_stored_one_chunk_and_queued_the_other_says_both() {
+    let (port, posts) = serve_first_then_drop(
+        r#"{"id":"abcdef0123456789","kind":"lesson","text":"Fire the kiln before dusk. Leave the door shut until the shelf is cold."}"#,
+    );
+    let out = remember_with(port, &["remember", TWO_CLAIMS]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!(
+        "status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(
+        posts.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "{said}"
+    );
+    assert!(out.status.success(), "{said}");
+    let want = "remember: stored 1 claim and queued 1 claim";
+    assert!(!stderr.contains(want), "{said}");
+    assert!(stdout.contains(want), "{said}");
+    assert_eq!(said.matches(want).count(), 1, "{said}");
+    assert!(!stderr.contains("stored as 2"), "{said}");
+    assert!(!stdout.contains("stored as 2"), "{said}");
+    assert!(stdout.contains("id abcdef01"), "{said}");
+    let queued = LAST_QUEUE.with(|slot| slot.borrow().clone());
+    assert!(queued.contains("Write the batch number"), "{queued}");
+    assert!(!queued.contains("Fire the kiln"), "{queued}");
+}
+
+#[test]
+fn json_reports_how_many_chunks_were_stored_and_how_many_queued() {
+    let (port, _posts) = serve_first_then_drop(
+        r#"{"id":"abcdef0123456789","kind":"lesson","text":"Fire the kiln before dusk. Leave the door shut until the shelf is cold."}"#,
+    );
+    let out = remember_with(port, &["remember", "--json", TWO_CLAIMS]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!(
+        "status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(out.status.success(), "{said}");
+    let page: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|err| panic!("stdout is not one JSON document: {err}\n{said}"));
+    assert_eq!(page["stored"], 1, "{said}");
+    assert_eq!(page["queued"], 1, "{said}");
+    let claims = page["claims"].as_array().unwrap();
+    assert_eq!(claims.len(), 2, "{said}");
+    assert_eq!(claims[0]["id"], "abcdef0123456789", "{said}");
+    assert_ne!(claims[0]["queued"], true, "{said}");
+    assert_eq!(claims[1]["queued"], true, "{said}");
+    assert!(!stderr.contains("stored as 2"), "{said}");
+}

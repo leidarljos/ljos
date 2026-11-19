@@ -3912,8 +3912,8 @@ fn stored_claim(body: &serde_json::Value, fallback: &str) -> (String, String) {
 /// Stdout when one remember stored several claims. The first line says it
 /// was split. Each claim then names its id and its text, so the first
 /// sentence is not dropped from the page.
-fn split_claims_page(n: usize, rows: &[(String, String)]) -> String {
-    let mut out = ljos_cli::remember_split_line(n);
+fn split_claims_page(stored: usize, queued: usize, rows: &[(String, String)]) -> String {
+    let mut out = ljos_cli::remember_split_summary(stored, queued);
     out.push('\n');
     for (id, text) in rows {
         out.push_str("id ");
@@ -5626,7 +5626,11 @@ fn run_command() -> Result<()> {
                     continue;
                 }
                 if body["queued"].as_bool() == Some(true) {
-                    println!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
+                    if json {
+                        eprintln!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
+                    } else {
+                        println!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
+                    }
                     continue;
                 }
                 if !json && !split {
@@ -5652,17 +5656,20 @@ fn run_command() -> Result<()> {
                     );
                 }
             }
-            if split && hard.is_none() {
-                if stored.is_empty() && queued_n == split_n {
-                    eprintln!("{}", ljos_cli::remember_queued_split_line(split_n));
-                } else if !stored.is_empty() {
-                    eprintln!("{}", ljos_cli::remember_split_line(split_n));
-                }
+            if split
+                && hard.is_none()
+                && (!stored.is_empty() || queued_n > 0)
+                && (json || stored.is_empty())
+            {
+                eprintln!(
+                    "{}",
+                    ljos_cli::remember_split_summary(stored.len(), queued_n)
+                );
             }
             if json {
                 println!("{}", ljos_cli::remember_json_page(&json_bodies, &failed)?);
             } else if split && !stored.is_empty() {
-                print!("{}", split_claims_page(split_n, &stored));
+                print!("{}", split_claims_page(stored.len(), queued_n, &stored));
             }
             if let Some(err) = hard {
                 return Err(err);
