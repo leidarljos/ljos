@@ -5,6 +5,87 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.45.1 (2026-11-18)
+
+### Fixes
+
+- A home under /tmp keeps memory off, and the one line says so and tells you to set HOME outside that directory.
+  Onboard and doctor --fix in that home do not start a pack writer.
+- A lesson stored with no terminal, as a script or cron runs it, is labelled `lesson, from an agent` on `ljos search`.
+  The docs show that row beside the terminal form `lesson, today`.
+- A refused `ljos sitting` names the command to run next.
+  A deed store that nothing has made yet names `ljos onboard`, and any other refusal names `ljos doctor`.
+- An MCP server names the missing encoder install command only on the first word search.
+- Doctor reports the number of rows that need action instead of calling the seat ready.
+- End `close-unverified` refusal messages with a period and drop the `label` prefix on CLI output while keeping the MCP label.
+- Format the `ljos doctor --all` git hooks action with backticks and `so run` when hooks are unset or incomplete.
+- Fresh onboarding describes the deed directory without printing an internal setting.
+- Fresh onboarding names the new ticket files without printing an internal setting.
+- Fresh onboarding no longer prints the memory writer's local address.
+- Keep ancestor session lookup inside matching `HOME` when `XDG_RUNTIME_DIR` is unset or shared so `ljos seat` and `ljos doctor` do not leak a parent runner's `CURSOR_CONVERSATION_ID`.
+- Missing encoders are reported as not installed with one install command instead of as loading.
+- Name `ljos finish <PARENT> --lesson "..."` when the last checklist item of a plan is ticked off.
+- Name `ljos graded ID` and `ljos forget ID` on `ljos due` when claims are due.
+- Name `ljos search "QUERY"` instead of bare `ljos search` in the standing-lesson hint after `ljos remember`.
+- Print the `runners` summary and `Next: \`ljos doctor\`` line last in `ljos onboard` when no runner is found.
+- Suggest `ljos remember "..."` instead of `ljos finish ID --lesson "..."` after a sitting has ended without a lesson.
+- Tests now avoid process wide TMPDIR edits by using a lock guarded temporary root override in runtime directory checks, which removes cross test NotFound races in isolated config and proc tree cases.
+  Note queue tests now write under a process specific target path, and the memory port integration check injects a local test port instead of expecting 127.0.0.1:8761 to be free.
+- Tests now use the machine's real temporary and runtime directories when checking sandbox memory messages and guard rules.
+- The `ljos doctor` memory row names one command when `ljos doctor --fix` can start the writer.
+  It used to name `packset ensure` and then `ljos doctor --fix` in one line.
+- The first decision sitting now prints a persona command with valid example values.
+- The identity check now falls back from an unreachable push before range to a merge base with origin/develop, then to commits not reachable from origin refs, and finally to the pushed tip when that list is empty.
+- The missing `SHA256SUMS` error now shell-quotes the release directory path.
+- The release encoder jobs now reuse the verified ONNX Runtime 1.28.3 archives from v0.44.0 when upstream source is unavailable.
+- The search hint for an empty store no longer offers the query as a lesson.
+  It suggests `ljos remember "LESSON"`, in the CLI and in the MCP tool.
+- The sentence `ljos remember` prints for an agent's lesson ends on `ljos remember`, and says to run that command from your own login terminal.
+- The temporary-home guard message now escapes newlines in `HOME`.
+- Tracker writers now preserve legacy claim-stamped logbook rows through the vissue parser.
+- With no seat selected, `ljos seat` now says none is set and names `LJOS_SEAT` instead of printing the read sentinel as a seat.
+- ``ljos file`` now names the command that starts work on a new top-level ticket.
+- `ljos cloud up` now shell-quotes a release directory when it reports a missing encoder archive.
+- `ljos doctor --all` now shell-quotes config paths in its cloud guard and runners rows.
+- `ljos doctor` no longer prints the ready line while `ljos file` or `ljos sitting` would fail.
+  A tracker or deed store that is not set up gets a line that says so and lists what works.
+  The deeds row shows in the short report and names `ljos onboard`.
+- `ljos doctor` on a seat that has not onboarded says there is no tracker, names the directory `ljos onboard` makes, and says to run it.
+  It used to print vissue's refusal, which named the directory the command ran in as if it were the tracker and told the person to pass `--root`.
+- `ljos due` and the tab row a write prints name a review time as local time and the zone, the same way `remember` does, not as RFC 3339 text.
+- `ljos due` now names the next review as `remember` does, as local time and the zone, for example `next at 2026-09-13 09:12 +00:00`, not as RFC 3339 text.
+  The claim refusal, the takeover refusal and the assist lines print when a hold began the same way, not as `2026-11-18T16:05:24.000Z`.
+- `ljos finish --close` with no open sitting names `ljos finish ID --close`, not `ljos sitting`, which would claim the ticket again.
+  Getting started says that a plain `ljos finish` has ended the sitting, so the ticket is closed by its id.
+- `ljos finish` with no `--lesson` opens with the line that says the sitting ended.
+  The lesson hint comes after it, and says a lesson taken earlier with `ljos remember` is kept.
+- `ljos ready --mine` names the open sitting's claimed ticket when that ticket is not a plan.
+  The line says the ticket has no plan items, instead of `no unfinished item`.
+- `ljos remember` with no login terminal, or when a runner is detected, still stores the lesson as an agent's and prints why, and names the login terminal that stores it as the person's.
+  `ljos finish --close` in that same case stays refused, and the refusal names that cause and the login terminal, or the seat grant, to use instead.
+  Getting started says a container, a CI runner, setsid, or a parent carrying runner variables is that case.
+- `ljos search` keeps a lesson that matches one word of the query when the store has fewer than four lessons.
+  A word that is in every lesson is common only once at least four lessons carry it, and a larger store still drops that single-word row.
+- `ljos search` with no words exits 2 and names `ljos search "QUERY"`.
+  It used to print `Nothing matched this query.` and exit 0.
+
+### Documentation
+
+- A how-to page, "Make a tracker and a deed store by hand", makes both with a few shell lines and no `ljos onboard`.
+  The refusal `ljos file` prints with no tracker now names that page.
+- Align `ljos search --help`, `README.md`, and the MCP reference with the `ljos remember "LESSON"` placeholder printed when nothing is stored.
+- Getting started says how to work one ticket with no plan: `ljos sitting ID`, `ljos note`, and `ljos finish` with and without `--close`.
+  It also says that `ljos file` files under an open sitting and that `ljos ready --mine` names a plan's next item.
+- Remove the duplicate `next:` line from the `ljos sitting --plan` sample in getting-started.
+- Update `ljos seat --help`, `howto-agents`, and `howto-seats` to report `none` instead of `every-seat` when no seat is set.
+
+### Miscellaneous
+
+- Tests now follow the current encoder release archive workflow and the revised no-seat output.
+- Tests walk the first sitting of a new seat on a fresh tracker, from `ljos search` to `ljos finish` without `--close`.
+  Tests pin that a seat's own ticket outranks other projects' tickets on two matching terms, that `ljos remember` prints every stored lesson id, that the search page follows the pack's fused rank, and that a `packsetd warming` health answer counts as up.
+
+
 ## 0.45.0 (2026-11-18)
 
 ### Features
