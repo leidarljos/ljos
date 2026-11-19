@@ -29104,7 +29104,15 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
     // under. While the pack still shows that stamp nothing in it has
     // moved, so the kept rules and preferences are what a listing would
     // say: one status read stands in for two listings.
-    let stamp = with_pack_timeout(HOOK_PACK_MS, || pack_stamp(&client));
+    let Ok(stamp) = with_pack_timeout(HOOK_PACK_MS, || pack_stamp(&client)) else {
+        let _ = std::fs::create_dir_all(runtime_dir());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        let _ = std::fs::write(pack_slow_mark(), b"");
+        return kept_only(kept);
+    };
     if let (Some(path), Some(stamp)) = (&kept, stamp.as_deref()) {
         if gate_kept_under(path, stamp) {
             #[expect(
@@ -29160,16 +29168,19 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
 /// seat's client drops the mark at once ([`forget_gate_fresh`]).
 const GATE_FRESH: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// The pack's last-write stamp, from one status read; None when the
-/// pack does not answer or has no stamp yet.
-fn pack_stamp(client: &PacksetClient) -> Option<String> {
-    client
-        .status(None)
-        .ok()?
-        .get("last_write_ts")?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+/// The pack's last-write stamp, from one status read. `Ok(None)` when the
+/// pack answers with no stamp yet or with an error that is not a timeout.
+/// `Err` when the read ran out of time, so the caller can stop asking.
+fn pack_stamp(client: &PacksetClient) -> Result<Option<String>, ()> {
+    match client.status(None) {
+        Ok(status) => Ok(status
+            .get("last_write_ts")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)),
+        Err(err) if pack_link::error_is_timeout(&err) => Err(()),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Whether the kept rules and preferences were read under `stamp`: the
