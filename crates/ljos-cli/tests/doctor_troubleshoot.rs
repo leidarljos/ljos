@@ -64,8 +64,12 @@ esac\n",
 }
 
 fn doctor(home: &Path, path: &str) -> (i32, String) {
+    doctor_args(home, path, &["doctor"])
+}
+
+fn doctor_args(home: &Path, path: &str, args: &[&str]) -> (i32, String) {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
-        .arg("doctor")
+        .args(args)
         .env_clear()
         .env("PATH", path)
         .env("HOME", home)
@@ -115,6 +119,22 @@ fn doctor_warns_when_no_seat_was_named_and_names_the_export() {
     assert!(
         text.contains(
             "warn\tseat source\tno seat is set; reads use every seat, so run `export LJOS_SEAT=NAME`.\n"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn doctor_all_names_landscape_and_its_source() {
+    let (home, bin) = layout("landscape");
+    let (_, text) = doctor_args(
+        &home,
+        &format!("{}:/usr/bin:/bin", bin.display()),
+        &["doctor", "--all"],
+    );
+    assert!(
+        text.contains(
+            "info\tlandscape\tnot on PATH; install it from https://github.com/leidarljos/landscape."
         ),
         "{text}"
     );

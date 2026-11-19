@@ -175,6 +175,18 @@ fn a_missing_tracker_program_names_the_install_and_exits_1() {
 }
 
 #[test]
+fn conflicts_names_the_missing_landscape_program_and_its_source() {
+    let home = Home::new();
+    let out = home.run(&["conflicts"], &[]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "conflicts: `landscape` was not found on PATH; install it from https://github.com/leidarljos/landscape"
+    );
+}
+
+#[test]
 fn a_missing_claim_program_names_the_install_and_exits_1() {
     let home = Home::new();
     // A TODO ticket that nobody has claimed stops before the claim graph.
@@ -267,6 +279,25 @@ fn an_unknown_ticket_on_tracker_verbs_names_ready_and_exits_1() {
         one_line(&prefix.stderr),
         "issue demo-ki not found, and the closest is demo-kiln, so run `ljos show demo-kiln`."
     );
+}
+
+#[test]
+fn a_mistyped_ticket_id_names_the_closest_ticket_on_show_note_and_finish() {
+    let home = Home::new();
+    for args in [
+        &["show", "demo-kln"][..],
+        &["note", "demo-kln", "left a note"][..],
+        &["finish", "demo-kln"][..],
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(1), "{args:?}\n{said}");
+        assert_eq!(
+            one_line(&out.stderr),
+            "issue demo-kln not found, and the closest is demo-kiln, so run `ljos show demo-kiln`.",
+            "{args:?}\n{said}"
+        );
+    }
 }
 
 #[test]
@@ -554,6 +585,14 @@ fn a_missing_tracker_names_ljos_onboard_and_exits_1() {
         "No tracker found, so run `ljos onboard`. To make one by hand, read https://leidarljos.github.io/ljos/howto-by-hand.html"
     );
 
+    let shown = run_unboarded(&["show", "demo-1234"], None);
+    let shown_said = text(&shown);
+    assert_eq!(shown.status.code(), Some(1), "{shown_said}");
+    assert_eq!(
+        one_line(&shown.stderr),
+        "No tracker found, so run `ljos onboard`. To make one by hand, read https://leidarljos.github.io/ljos/howto-by-hand.html"
+    );
+
     let missing_named = root.path().join("missing-tracker");
     let named_out = run_unboarded(
         &["file", "Pick a codec", "-p", "demo"],
@@ -565,4 +604,137 @@ fn a_missing_tracker_names_ljos_onboard_and_exits_1() {
         !one_line(&named_out.stderr).contains("ljos onboard"),
         "{named_said}"
     );
+}
+
+#[test]
+fn file_without_a_project_names_the_command_to_run() {
+    let home = Home::new();
+    let out = home.run(&["file", "Repair the kiln door"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "no project: name one with -p NAME, so run `ljos file \"TITLE\" -p NAME`."
+    );
+}
+
+#[test]
+fn a_corrupt_tracker_config_names_doctor() {
+    let home = Home::new();
+    std::fs::write(home.root.join("tracker/vissue.toml"), "{bad toml").unwrap();
+    let out = home.run(&["show", "demo-kiln"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "the tracker config does not parse, so run `ljos doctor`."
+    );
+}
+
+#[test]
+fn free_text_on_recall_points_at_search_and_exits_2() {
+    let home = Home::new();
+    let cases: [(&[&str], &str); 4] = [
+        (
+            &["recall", "usability first-run ljos cli"],
+            "recall: \"usability first-run ljos cli\" is not a ticket id, so run `ljos search \"usability first-run ljos cli\"`.",
+        ),
+        (
+            &["recall", "usability"],
+            "recall: \"usability\" is not a ticket id, so run `ljos search \"usability\"`.",
+        ),
+        (
+            &["recall", "   "],
+            "recall: the issue id is empty, so run `ljos recall proj-1a2b`.",
+        ),
+        (
+            &["recall", "--", "-flag"],
+            "recall: \"-flag\" is not a ticket id, so run `ljos search -- \"-flag\"`.",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
+    }
+}
+
+#[test]
+fn search_with_packset_url_off_reports_packs_turned_off() {
+    let home = Home::new();
+    let out = home.run(&["search", "usability"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "This seat has packs turned off (PACKSET_URL=off), so nothing was matched by words. Run `unset PACKSET_URL` to turn them on."
+    );
+    assert!(!said.contains("writer is busy"), "{said}");
+}
+
+#[test]
+fn unknown_proposals_status_names_valid_values_and_exits_2() {
+    let home = Home::new();
+    for bad in ["bogus", ""] {
+        let out = home.run(&["proposals", "--status", bad], &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{bad:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{bad:?}\n{said}");
+        let want = if bad.is_empty() {
+            "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not an empty value."
+        } else {
+            "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not bogus."
+        };
+        assert_eq!(one_line(&out.stderr), want, "{bad:?}\n{said}");
+    }
+}
+
+#[test]
+fn invalid_flag_values_on_search_and_remember_exit_2() {
+    let home = Home::new();
+    let cases: [(&[&str], &str); 5] = [
+        (
+            &["search", "kiln", "--min-score=-1"],
+            "search: --min-score takes a number from 0 up, not -1.",
+        ),
+        (
+            &["search", "kiln", "--as-of", "bogus"],
+            "search: --as-of \"bogus\" is not a date; write YYYY-MM-DD or RFC 3339.",
+        ),
+        (
+            &["search", "kiln", "--valid-at", "bogus"],
+            "search: --valid-at takes YYYY-MM-DD or any, not bogus.",
+        ),
+        (
+            &[
+                "remember",
+                "--transient",
+                "--standing",
+                "The kiln fires at dusk.",
+            ],
+            "remember: pass --transient or --standing, not both.",
+        ),
+        (
+            &[
+                "remember",
+                "--valid-from",
+                "2026-05-10",
+                "--valid-to",
+                "2026-05-01",
+                "The kiln fires at dusk.",
+            ],
+            "the window ends (2026-05-01) before it starts (2026-05-10)",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
+    }
 }

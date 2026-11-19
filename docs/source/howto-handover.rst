@@ -20,8 +20,9 @@ signer. Create one only when the file is absent:
    $ ljos doctor --all | grep 'signing key'
    ok  signing key    /home/you/.config/deedar/host.key, the signing key for deeds
 
-``handover`` then signs the manifest and the log head. Write the bag, then
-the other seat receives it:
+``handover`` then signs the manifest and the log head with the host key.
+Ballot keys are used only for votes. Write the bag, then the other seat
+receives it:
 
 .. code:: console
 

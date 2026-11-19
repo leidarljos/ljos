@@ -4876,7 +4876,7 @@ fn a_ci_seat_and_a_cloud_seat_vote_note_and_push_and_the_box_does_not_re_sign() 
 }
 
 #[test]
-fn a_signed_handover_is_not_signed_again_by_the_machine_key() {
+fn a_handover_keeps_an_existing_signature_and_uses_the_host_key_for_a_new_one() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     clear_agent_ids();
@@ -4917,8 +4917,8 @@ fn a_signed_handover_is_not_signed_again_by_the_machine_key() {
     let said = ljos_cli::sign_handover_manifest(&manifest).unwrap();
     assert!(said.contains("signed"), "{said}");
     let used = fs::read_to_string(&log).unwrap();
-    assert_eq!(used.trim(), seat_key.display().to_string());
-    assert_ne!(used.trim(), host.display().to_string());
+    assert_eq!(used.trim(), host.display().to_string());
+    assert_ne!(used.trim(), seat_key.display().to_string());
     assert_eq!(fs::read(&host).unwrap(), vec![8u8; 32]);
 }
 

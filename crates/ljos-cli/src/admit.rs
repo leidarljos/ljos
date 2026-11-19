@@ -1406,6 +1406,21 @@ fn wants_in_pack(status: &str) -> bool {
     status == "in-pack" || status == "already in pack"
 }
 
+/// Whether `status` is a known `--status` filter for `ljos proposals`.
+#[must_use]
+pub fn is_valid_status(status: &str) -> bool {
+    matches!(
+        status.trim(),
+        "open"
+            | "proposed"
+            | "accepted"
+            | "refused"
+            | "already-in-pack"
+            | "in-pack"
+            | "already in pack"
+    )
+}
+
 fn status_selected(rec: &Record, status: &str, held: &[Value]) -> bool {
     if wants_in_pack(status) {
         return rec.status == "already-in-pack"

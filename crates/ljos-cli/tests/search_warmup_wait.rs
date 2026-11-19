@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 
 const MEANING: &str = "the kiln schedule is the morning plan";
 const WORD: &str = "the kiln log is a word match";
-const WORD_LINE: &str = "These are word matches, and meaning search will be ready shortly.";
+const WORD_LINE_60: &str = "These are word matches; the encoder is loading (about 60 s left).";
+const WORD_LINE_3: &str = "These are word matches; the encoder is loading (about 3 s left).";
+const WORD_LINE_4: &str = "These are word matches; the encoder is loading (about 4 s left).";
 const TICKET_TITLE: &str = "GPRidge narrated video set";
 const TICKET_ID: &str = "Software-6mrw";
 
@@ -126,7 +128,7 @@ fn a_normal_search_without_an_answering_field_does_not_say_it_is_warming() {
     assert!(stdout.contains(MEANING), "{said}");
     assert!(stderr.contains("fused rank"), "{said}");
     assert!(
-        !stderr.contains(WORD_LINE)
+        !stderr.contains("These are word matches")
             && !stderr.contains("ready shortly")
             && !stderr.contains("loading"),
         "{said}"
@@ -175,9 +177,9 @@ fn json_doc(stdout: &str) -> serde_json::Value {
     serde_json::from_str(stdout.trim()).unwrap_or_else(|err| panic!("{err}: {stdout}"))
 }
 
-fn assert_word_fallback(stdout: &str, stderr: &str) {
+fn assert_word_fallback(stdout: &str, stderr: &str, want: &str) {
     assert!(
-        stderr.contains(WORD_LINE),
+        stderr.contains(want),
         "missing the word-match line:\n{stderr}"
     );
     assert!(
@@ -252,7 +254,7 @@ fn a_sixty_second_load_returns_word_matches_at_once() {
         elapsed < Duration::from_secs(2),
         "a long load was waited out: {elapsed:?}\n{said}"
     );
-    assert_word_fallback(&stdout, &stderr);
+    assert_word_fallback(&stdout, &stderr, WORD_LINE_60);
 
     let seat = serve(60_000, None);
     let (out, elapsed) = search(
@@ -269,7 +271,7 @@ fn a_sixty_second_load_returns_word_matches_at_once() {
     );
     let doc = json_doc(&stdout);
     assert_eq!(doc["ranking"], "lexical", "{doc}");
-    assert_eq!(doc["reason"], WORD_LINE, "{doc}");
+    assert_eq!(doc["reason"], WORD_LINE_60, "{doc}");
     assert!(doc.get("waited_ms").is_none(), "{doc}");
     assert!(
         doc["hits"]
@@ -294,7 +296,7 @@ fn a_warmup_wait_of_zero_does_not_wait() {
         elapsed < Duration::from_secs(2),
         "wait=0 still waited: {elapsed:?}\n{said}"
     );
-    assert_word_fallback(&stdout, &stderr);
+    assert_word_fallback(&stdout, &stderr, WORD_LINE_3);
 }
 
 /// The warm-up poll stops at `LJOS_CALL_TIMEOUT` even when the reported
@@ -314,7 +316,7 @@ fn the_warmup_wait_stops_inside_the_call_deadline() {
         elapsed >= Duration::from_millis(800),
         "the search did not wait inside the deadline: {elapsed:?}\n{said}"
     );
-    assert_word_fallback(&stdout, &stderr);
+    assert_word_fallback(&stdout, &stderr, WORD_LINE_4);
 
     let seat = serve(4_000, None);
     let (out, elapsed) = search(&seat, &["search", "--json", "kiln"], &env);
@@ -326,7 +328,7 @@ fn the_warmup_wait_stops_inside_the_call_deadline() {
     );
     let doc = json_doc(&stdout);
     assert_eq!(doc["ranking"], "lexical", "{doc}");
-    assert_eq!(doc["reason"], WORD_LINE, "{doc}");
+    assert_eq!(doc["reason"], WORD_LINE_4, "{doc}");
     let waited = doc["waited_ms"].as_u64().unwrap_or_else(|| panic!("{doc}"));
     assert!(
         (500..2_500).contains(&waited),
@@ -445,7 +447,7 @@ fn a_long_load_keeps_the_ticket_title_with_the_word_matches() {
         elapsed < Duration::from_secs(2),
         "a long load was waited out: {elapsed:?}\n{said}"
     );
-    assert!(stderr.contains(WORD_LINE), "{stderr}");
+    assert!(stderr.contains(WORD_LINE_60), "{stderr}");
     assert!(
         !stderr.contains("rerun") && !stderr.contains("fused rank"),
         "{stderr}"
@@ -468,7 +470,7 @@ fn a_long_load_keeps_the_ticket_title_with_the_word_matches() {
     );
     let doc = json_doc(&stdout);
     assert_eq!(doc["ranking"], "lexical", "{doc}");
-    assert_eq!(doc["reason"], WORD_LINE, "{doc}");
+    assert_eq!(doc["reason"], WORD_LINE_60, "{doc}");
     assert!(doc.get("waited_ms").is_none(), "{doc}");
     let hit = ticket_hit(&doc);
     assert_eq!(hit["kind"], "ticket", "{doc}");

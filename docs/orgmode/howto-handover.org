@@ -15,8 +15,9 @@ $ ljos doctor --all | grep 'signing key'
 ok	signing key	/home/you/.config/deedar/host.key, the signing key for deeds
 #+end_src
 
-=handover= then signs the manifest and the log head. Write the bag, then
-the other seat receives it:
+=handover= then signs the manifest and the log head with the host key.
+Ballot keys are used only for votes. Write the bag, then the other seat
+receives it:
 
 #+begin_src console
 $ ljos handover --out /tmp/bag --issue proj-1a2b

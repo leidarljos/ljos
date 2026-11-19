@@ -212,7 +212,7 @@ fn the_same_title_is_found_while_the_encoder_loads() {
     let said = text(&out);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("These are word matches, and meaning search will be ready shortly.")
+        stderr.contains("These are word matches; the encoder has not answered yet.")
             && !stderr.contains("rerun"),
         "the warm-up line was missing:\n{said}"
     );
@@ -229,7 +229,7 @@ fn a_subset_is_found_while_the_encoder_loads() {
     shows_ticket(&out);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("These are word matches, and meaning search will be ready shortly.")
+        stderr.contains("These are word matches; the encoder has not answered yet.")
             && !stderr.contains("rerun"),
         "the warm-up line was missing:\n{}",
         text(&out)
@@ -268,7 +268,7 @@ fn a_word_form_in_the_title_is_found_while_the_encoder_loads() {
         "the miss named a term that is not in the title:\n{said}"
     );
     assert!(
-        stderr.contains("These are word matches, and meaning search will be ready shortly.")
+        stderr.contains("These are word matches; the encoder has not answered yet.")
             && !stderr.contains("rerun"),
         "the word-matches line was missing:\n{said}"
     );

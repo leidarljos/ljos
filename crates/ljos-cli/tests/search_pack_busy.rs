@@ -438,7 +438,7 @@ fn a_recall_that_stays_busy_uses_one_word_line() {
     let root = seat_home();
     let home = root.path().join("home");
     let (url, searches) = serve(usize::MAX);
-    let (out, took) = recall(&url, &home, "catalog");
+    let (out, took) = recall(&url, &home, "demo-catalog");
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(text.contains(BUSY), "{text}");

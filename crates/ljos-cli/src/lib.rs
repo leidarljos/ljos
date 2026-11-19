@@ -423,7 +423,13 @@ pub fn statusline(input: &str) -> String {
             }
         }
     }
-    let mut parts = vec![format!("ljos {}", whoami().seat)];
+    let seat = whoami().seat;
+    let shown_seat = if seat_resolve::reads_every(&seat) {
+        "none"
+    } else {
+        &seat
+    };
+    let mut parts = vec![format!("ljos {shown_seat}")];
     if let Some(issue) = held_issue() {
         parts.push(issue);
     }
@@ -14983,6 +14989,7 @@ pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
                     | ENCODER_FAILED_REASON
                     | WRITER_DOWN_REASON
                     | WRITER_BUSY_REASON
+                    | PACK_OFF_REASON
                     | MEMORY_SEARCH_BUSY_REASON
                     | MEMORY_STARTING_REASON
             )
@@ -15022,6 +15029,7 @@ fn ranking_sentence(ranking: &Ranking, shown: bool) -> String {
             | "encoder unavailable"
             | WRITER_DOWN_REASON
             | WRITER_BUSY_REASON
+            | PACK_OFF_REASON
             | MEMORY_SEARCH_BUSY_REASON
             | MEMORY_STARTING_REASON
     ) {
@@ -15046,10 +15054,11 @@ fn ranking_sentence(ranking: &Ranking, shown: bool) -> String {
 /// word matches, and an empty page names the command to run again.
 fn lexical_reason(ranking: &Ranking, shown: bool) -> String {
     if ranking.reason == ENCODER_LOADING_REASON {
+        let status = read_encoder_status();
         if shown {
-            return WORD_MATCH_WHILE_LOADING.to_string();
+            return word_match_while_loading(status.as_ref());
         }
-        return encoder_loading_line(read_encoder_status().as_ref(), &current_invocation());
+        return encoder_loading_line(status.as_ref(), &current_invocation());
     }
     if ranking.reason == ENCODER_FAILED_REASON {
         let why = read_encoder_status()
@@ -15066,6 +15075,9 @@ fn lexical_reason(ranking: &Ranking, shown: bool) -> String {
     }
     if ranking.reason == WRITER_BUSY_REASON {
         return writer_busy_search_line(shown);
+    }
+    if ranking.reason == PACK_OFF_REASON {
+        return pack_off_search_line(shown);
     }
     if ranking.reason == MEMORY_SEARCH_BUSY_REASON {
         return if shown {
@@ -15085,6 +15097,9 @@ pub const WRITER_DOWN_REASON: &str = "writer is not running";
 
 /// The ranking reason when the writer is up and did not answer in time.
 pub const WRITER_BUSY_REASON: &str = "writer is busy";
+
+/// The ranking reason when `PACKSET_URL=off` turned packs off.
+pub const PACK_OFF_REASON: &str = "packs turned off";
 
 /// The ranking reason when the writer reported busy until the short wait
 /// ran out. The line is [`MEMORY_SEARCH_BUSY_LINE`].
@@ -15138,6 +15153,17 @@ pub fn note_writer_fallback(secs: u64, detail: &str) {
 
 fn writer_fallback() -> (u64, String) {
     WRITER_FALLBACK.with(|cell| cell.borrow().clone().unwrap_or_else(|| (1, String::new())))
+}
+
+fn pack_off_search_line(shown: bool) -> String {
+    let what = if shown {
+        "these rows match words"
+    } else {
+        "nothing was matched by words"
+    };
+    format!(
+        "This seat has packs turned off (PACKSET_URL=off), so {what}. Run `unset PACKSET_URL` to turn them on."
+    )
 }
 
 fn writer_down_search_line(shown: bool) -> String {
@@ -15379,13 +15405,36 @@ pub fn encoder_retry_secs(status: Option<&Value>) -> Option<u64> {
         .map(|ms| ms.div_ceil(1000).max(1))
 }
 
-/// What a search prints when it shows rows while the encoder is loading.
+/// What a search prints when it shows rows while the encoder has not
+/// answered yet.
 ///
-/// One sentence. The rows are word matches, and meaning search will be
-/// ready shortly. It does not name a command to run again.
-/// An empty page uses [`encoder_loading_line`].
+/// One sentence. The rows are word matches. When the writer reports an
+/// active load or remaining seconds, the line says so; otherwise it says
+/// the encoder has not answered yet, without promising when it will be
+/// ready.
 pub const WORD_MATCH_WHILE_LOADING: &str =
-    "These are word matches, and meaning search will be ready shortly.";
+    "These are word matches; the encoder has not answered yet.";
+
+fn encoder_actively_loading(status: &Value) -> bool {
+    let embedder = &status["embedder"];
+    embedder["loading"].as_bool() == Some(true)
+        || embedder["state"]
+            .as_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case("loading"))
+        || embedder["load"].is_object()
+}
+
+/// What a search prints when it shows rows while the encoder is cold.
+#[must_use]
+pub fn word_match_while_loading(status: Option<&Value>) -> String {
+    if let Some(secs) = encoder_retry_secs(status) {
+        return format!("These are word matches; the encoder is loading (about {secs} s left).");
+    }
+    if status.is_some_and(encoder_actively_loading) {
+        return "These are word matches; the encoder is loading.".to_string();
+    }
+    WORD_MATCH_WHILE_LOADING.to_string()
+}
 
 /// What a search prints when the encoder is present and still loading
 /// and the page has no rows.
@@ -23814,7 +23863,8 @@ fn storage_line(err: &anyhow::Error, again: &str) -> Option<String> {
     None
 }
 
-fn pack_turned_off(err: &anyhow::Error) -> bool {
+#[must_use]
+pub fn pack_turned_off(err: &anyhow::Error) -> bool {
     let text = format!("{err:#}").to_ascii_lowercase();
     text.contains("no pack on purpose") || text.contains("packset url missing")
 }
@@ -23840,6 +23890,9 @@ fn ticket_line(err: &anyhow::Error) -> Option<String> {
         return Some(top);
     }
     let full = format!("{err:#}");
+    if tracker_config_parse_fault(&full) {
+        return Some("the tracker config does not parse, so run `ljos doctor`.".to_string());
+    }
     let no_tracker = full.contains("not inside a tracker")
         || full.contains("is not a tracker")
         || full.contains("neither vissue.toml");
@@ -23859,6 +23912,11 @@ fn ticket_line(err: &anyhow::Error) -> Option<String> {
         }
     }
     None
+}
+
+fn tracker_config_parse_fault(detail: &str) -> bool {
+    let text = detail.to_ascii_lowercase();
+    text.contains("vissue.toml") && text.contains("parse ")
 }
 
 /// One plain line for a failure that reached the person.
@@ -33744,6 +33802,7 @@ const SEAT_BINS: &[(&str, &str)] = &[
     ("packset-embed", "packset-embed"),
     ("packset-mcp", "packset"),
     ("ljos-hud", "ljos-hud"),
+    ("landscape", "landscape"),
 ];
 
 /// First `N.N.N` in a `--version` line.
@@ -35298,6 +35357,11 @@ pub fn doctor_seat() -> Vec<Habitat> {
             ),
             (None, _, _) if *bin == "ljos-hud" => (
                 "not on PATH and ljos statusline works without it, so run `cargo install --locked ljos-hud`."
+                    .to_string(),
+                false,
+            ),
+            (None, _, _) if *bin == "landscape" => (
+                "not on PATH; install it from https://github.com/leidarljos/landscape."
                     .to_string(),
                 false,
             ),
@@ -38349,8 +38413,8 @@ pub fn handover_scoped(
     Ok(lines)
 }
 
-/// Sign a handover manifest with this seat's key. A manifest that already
-/// has a signature is left as it is: the machine key does not sign it again.
+/// Sign a handover manifest with the host key. A manifest that already has
+/// a signature is left as it is.
 ///
 /// # Errors
 ///
@@ -38360,12 +38424,8 @@ pub fn sign_handover_manifest(manifest: &Path) -> Result<String> {
     if sig.is_file() {
         return Ok("already signed; left unchanged".into());
     }
-    if let Some(key) = seat_handover_key() {
+    if let Some(key) = host_key_path() {
         let said = vouch_sign(manifest, Some(&key))?;
-        return Ok(said.stdout.trim_end().to_string());
-    }
-    if host_key_path().is_some() {
-        let said = vouch_sign(manifest, None)?;
         return Ok(said.stdout.trim_end().to_string());
     }
     Ok(
@@ -38373,15 +38433,6 @@ pub fn sign_handover_manifest(manifest: &Path) -> Result<String> {
          `ljos onboard` writes one"
             .into(),
     )
-}
-
-fn seat_handover_key() -> Option<PathBuf> {
-    let seat = std::env::var("LJOS_SEAT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())?;
-    let path = ballot_sig::seat_key_path(&seat)?;
-    (path.is_file() && !ballot_sig::is_box_host_key(&path)).then_some(path)
 }
 
 fn vouch_sign(manifest: &Path, key: Option<&Path>) -> Result<Said> {
@@ -39580,7 +39631,7 @@ pub fn packset_hubs(limit: usize) -> Result<Value> {
 pub fn conflicts(limit: usize) -> Result<String> {
     if which::which("landscape").is_err() {
         bail!(
-            "conflicts: `landscape` is not on PATH; it is the optional habitat that reads the pack's geometry (leidarljos/landscape)"
+            "conflicts: `landscape` was not found on PATH; install it from https://github.com/leidarljos/landscape"
         );
     }
     let client = pack()?;
@@ -43156,9 +43207,18 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
     }
     prefixes.sort();
     match prefixes.as_slice() {
-        [] => Some(format!(
-            "issue {id} not found. `ljos ready` lists the open tickets."
-        )),
+        [] => {
+            let ids = all_issue_ids(&layouts);
+            let guessed = closest_issue_id(id, &ids);
+            match guessed {
+                Some(one) => Some(format!(
+                    "issue {id} not found, and the closest is {one}, so run `ljos show {one}`."
+                )),
+                None => Some(format!(
+                    "issue {id} not found. `ljos ready` lists the open tickets."
+                )),
+            }
+        }
         [one] => Some(format!(
             "issue {id} not found, and the closest is {one}, so run `ljos show {one}`."
         )),
@@ -43186,6 +43246,86 @@ pub fn ticket_refusal(id: &str) -> Option<String> {
             ))
         }
     }
+}
+
+fn all_issue_ids(layouts: &[vissue_core::Layout]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for layout in layouts {
+        let Ok(projects) = vissue_core::store::list_projects(layout) else {
+            continue;
+        };
+        for project in projects {
+            let path = layout.project_issues_path(&project);
+            let Ok(doc) = vissue_core::IssueDoc::parse_file(&project, &path) else {
+                continue;
+            };
+            for heading in doc.headings {
+                if !heading.id.is_empty() && !ids.contains(&heading.id) {
+                    ids.push(heading.id);
+                }
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn closest_issue_id<'a>(typed: &str, options: &'a [String]) -> Option<&'a str> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return None;
+    }
+    for option in options {
+        if option.eq_ignore_ascii_case(typed) && option != typed {
+            return Some(option);
+        }
+    }
+    let limit = max_issue_edits(typed);
+    if limit == 0 {
+        return None;
+    }
+    let folded = typed.to_ascii_lowercase();
+    let mut best: Option<(&str, usize)> = None;
+    for option in options {
+        let name = option.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case(typed) {
+            continue;
+        }
+        let distance = issue_edits(&folded, &name.to_ascii_lowercase());
+        if distance == 0 || distance > limit {
+            continue;
+        }
+        match best {
+            Some((prev, have)) if distance > have || (distance == have && name > prev) => {}
+            _ => best = Some((name, distance)),
+        }
+    }
+    best.map(|(name, _)| name)
+}
+
+fn max_issue_edits(typed: &str) -> usize {
+    match typed.chars().count() {
+        0 | 1 => 0,
+        2 | 3 => 1,
+        _ => 2,
+    }
+}
+
+fn issue_edits(left: &str, right: &str) -> usize {
+    let a: Vec<char> = left.chars().collect();
+    let b: Vec<char> = right.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut next = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        next[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            next[j + 1] = (prev[j + 1] + 1).min(next[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut next);
+    }
+    prev[b.len()]
 }
 
 /// Whether `err` is the tracker's miss for `issue`. `vissue recall` wraps
@@ -50065,6 +50205,31 @@ pub fn format_search_stored(
     seat_ahead: bool,
     store: &[String],
 ) -> String {
+    format_search_stored_with_flags(
+        hits,
+        matched,
+        capped,
+        explain,
+        query,
+        seat_ahead,
+        store,
+        &[],
+    )
+}
+
+/// [`format_search_stored`] with active CLI filter flags kept in the rerun hint.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn format_search_stored_with_flags(
+    hits: &[Hit],
+    matched: usize,
+    capped: bool,
+    explain: bool,
+    query: &str,
+    seat_ahead: bool,
+    store: &[String],
+    extra_flags: &[String],
+) -> String {
     let now = now_utc();
     let mine = seat_name();
     let reading = search_reading(hits.len(), seat_ahead);
@@ -50103,18 +50268,21 @@ pub fn format_search_stored(
         .collect();
     let refs: Vec<&str> = store.iter().map(String::as_str).collect();
     let top_hint = search_finish_hint(hits);
-    scan::search_page(&scan::SearchPage {
-        rows: &rows,
-        shown: hits.len(),
-        matched,
-        capped,
-        top_hint: top_hint.as_deref(),
-        explain,
-        query,
-        reading,
-        seat_ahead,
-        store: &refs,
-    })
+    scan::search_page_with_flags(
+        &scan::SearchPage {
+            rows: &rows,
+            shown: hits.len(),
+            matched,
+            capped,
+            top_hint: top_hint.as_deref(),
+            explain,
+            query,
+            reading,
+            seat_ahead,
+            store: &refs,
+        },
+        extra_flags,
+    )
 }
 
 /// When the first search row is a ticket this seat claimed, name finish with a lesson.
@@ -51209,6 +51377,12 @@ pub fn age_of(ts: Option<&str>, now: &str) -> String {
         d if d < 730 => format!("{} months ago", d / 30),
         d => format!("{} years ago", d / 365),
     }
+}
+
+/// Whether `ts` opens with a `YYYY-MM-DD` calendar date as `--as-of` expects.
+#[must_use]
+pub fn valid_as_of(ts: &str) -> bool {
+    days_of_stamp(Some(ts)).is_some()
 }
 
 /// Days since the epoch of an RFC 3339 stamp's date, or none when the
@@ -82045,6 +82219,18 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let shown = search_rank_line(&loading, &[row]);
         assert_eq!(shown, format!("{WORD_MATCH_WHILE_LOADING}\n"));
         assert!(!shown.contains("rerun"), "{shown}");
+        assert!(!shown.contains("shortly"), "{shown}");
+        let with_eta = serde_json::json!({"embedder":{"available":true,"answering":null,"remaining_ms":12000}});
+        assert_eq!(
+            word_match_while_loading(Some(&with_eta)),
+            "These are word matches; the encoder is loading (about 12 s left)."
+        );
+        let active =
+            serde_json::json!({"embedder":{"available":true,"answering":null,"loading":true}});
+        assert_eq!(
+            word_match_while_loading(Some(&active)),
+            "These are word matches; the encoder is loading."
+        );
         let _guard = env_guard();
         let _off = HoldEnv::set(&[("PACKSET_URL", "off")]);
         let empty = search_rank_line(&loading, &[]);

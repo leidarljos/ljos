@@ -66,7 +66,12 @@ fn show_ticket_or_neither(id: &str, json: bool, all: bool) -> Result<String> {
     }
     match show_ticket(id, json, all) {
         Ok(text) => Ok(text),
-        Err(err) if plain_miss(&err.to_string()) => bail!("{}", neither(id)),
+        Err(err) if plain_miss(&err.to_string()) => {
+            if let Some(line) = crate::tracker_place::missing_tracker_line() {
+                bail!("{line}");
+            }
+            bail!("{}", neither(id));
+        }
         Err(err) => Err(err),
     }
 }

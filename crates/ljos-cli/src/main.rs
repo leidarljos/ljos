@@ -108,7 +108,7 @@ enum MemoryCmd {
     ///
     /// Example: `ljos memory imports`
     Imports {
-        /// Print JSON.
+        /// Print each import as JSON, the same rows as the text.
         #[arg(long)]
         json: bool,
     },
@@ -158,9 +158,10 @@ enum MemCmd {
         #[command(flatten)]
         f: MemFilter,
     },
-    /// Name duplicates and never-recalled memories. A dry run unless --apply.
+    /// Name duplicates and memories that were never recalled. `--stale` is required.
     ///
-    /// Example: `ljos memories prune`
+    /// Without `--apply`, the command only lists them.
+    #[command(after_help = "Example: `ljos memories prune --stale`")]
     Prune {
         /// Name duplicates, and memories never recalled in `--days`. Required.
         #[arg(long)]
@@ -474,7 +475,7 @@ enum SeatAction {
         /// Tickets this grant covers, one id per line.
         #[arg(long, value_name = "PATH")]
         ids_file: Option<PathBuf>,
-        /// The owner's words.
+        /// The owner's yes, quoted as they said it.
         #[arg(long)]
         quote: String,
         /// When the owner said it, as RFC 3339.
@@ -575,7 +576,7 @@ enum HookFastCmd {
 /// The flags `ljos ready` and `ljos list` take.
 #[derive(Args, Debug)]
 struct ReadyArgs {
-    /// Only this project.
+    /// Limit the list to tickets in one project.
     #[arg(short = 'p', long)]
     project: Option<String>,
     /// Print `shown`, `total` and `rows`. The same page and order as the text.
@@ -628,6 +629,7 @@ enum Cmd {
     /// When that budget runs out the line is `Memory is starting, so try again in a few seconds.` and the command exits non-zero.
     /// The pack is this seat's memory store.
     /// Turned off on purpose, the command exits 1.
+    #[command(after_help = "Example: `ljos remember \"The lexical default is BM25+.\"`")]
     Remember {
         /// The lesson to store.
         text: Vec<String>,
@@ -761,7 +763,7 @@ enum Cmd {
         /// Only proposals filed by this seat. `unknown` is a row that names none.
         #[arg(long)]
         seat: Option<String>,
-        /// Keep only this status: open, accepted, refused, or already-in-pack. `in-pack` lists rows already stored.
+        /// Keep only this status: open, accepted, refused, or already-in-pack. `in-pack` lists rows already stored. Unknown values exit 2.
         #[arg(long)]
         status: Option<String>,
         /// Mark each open row that is already stored as already-in-pack, and record the time. A second run writes nothing and deletes nothing.
@@ -872,9 +874,9 @@ enum Cmd {
     /// the line is `Memory is starting, so try again in a few seconds.` and
     /// the command exits non-zero. A remaining
     /// time that is absent or longer than that budget keeps `LJOS_SEARCH_WAIT`
-    /// (3 when unset). If it is still loading and rows
-    /// are shown, the line is `These are word matches, and meaning search
-    /// will be ready shortly.` When nothing is shown, one line names the command
+    /// (3 when unset). If the encoder is still not ready and rows
+    /// are shown, the line says they are word matches and names the reported
+    /// load time when one is sent. When nothing is shown, one line names the command
     /// to rerun and, when a remaining time is reported, about how many
     /// seconds are left. A failed or missing encoder
     /// names the command that fixes it. `--json` puts
@@ -889,6 +891,7 @@ enum Cmd {
     /// `The memory pack was busy, so these rows are word matches; run the search again for ranked results.`
     /// When no words match, the line is `The memory pack was busy and no words matched.` and the command exits 1.
     /// The pack is this seat's memory store.
+    #[command(after_help = "Example: `ljos search \"lexical default\"`")]
     Search {
         /// Words to look for.
         query: Vec<String>,
@@ -1013,7 +1016,7 @@ enum Cmd {
         /// The other side (`%B`).
         theirs: PathBuf,
     },
-    /// Put this machine on the shared tracker.
+    /// Install the release binaries and clone the shared tracker.
     ///
     /// Example: `ljos cloud up`
     Cloud {
@@ -1128,6 +1131,7 @@ enum Cmd {
     /// the tracker and sync lines. `--json` keeps those lines in fields.
     ///
     /// Example: `LJOS_SEAT=alice ljos file "Pick a codec" -p demo`
+    #[command(after_help = "Example: `LJOS_SEAT=alice ljos file \"Pick a codec\" -p demo`")]
     File {
         /// The issue's title.
         title: String,
@@ -1220,6 +1224,7 @@ enum Cmd {
     /// id; any other first word is part of the note.
     ///
     /// Example: `ljos note "the door seats when it is cold"`
+    #[command(after_help = "Example: `ljos note \"the door seats when it is cold\"`")]
     Note {
         /// The note, or an issue id and then the note.
         #[arg(value_name = "WORDS", required = true, num_args = 1..)]
@@ -1539,6 +1544,7 @@ enum Cmd {
     /// Example: `ljos recall proj-1a2b`
     ///
     /// When no lesson is stored on the issue, the line names `ljos remember`.
+    /// Free text or an argument without a ticket id exits 2 and points at `ljos search`.
     /// A busy memory store is asked again for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset, `0` does not wait).
     /// The wait follows `Retry-After` or a JSON `retry_ms`.
     /// When it stays busy, the rows are ranked by words and one line says the memory pack was busy.
@@ -1554,7 +1560,7 @@ enum Cmd {
         #[arg(long)]
         no_graph: bool,
     },
-    /// Release claims idle past a window and mail each seat. A dry run without --apply.
+    /// Release claims idle past a window and mail each seat. Without `--apply` it prints what would happen.
     ///
     /// Example: `ljos reap`
     Reap {
@@ -1897,7 +1903,7 @@ enum Cmd {
     Complete {
         /// A tracker id, or a 32-hex claim-graph id.
         node: String,
-        /// done (default), failed, or cancelled.
+        /// Status to record: done, failed, or cancelled. The default is done.
         #[arg(long)]
         status: Option<String>,
         /// Claim generation recorded when the work was taken. Absent: the live one. A stale generation is refused.
@@ -1947,7 +1953,7 @@ enum Cmd {
     Rule {
         /// A glob over the whole command line: `rm -rf *`, `*--force*`, `git push --force*`.
         pattern: String,
-        /// deny or ask labels the warning; allow (with --user, at your own terminal) clears
+        /// Label the warning deny or ask. With `--user`, at your own terminal, allow clears
         /// the seat's warnings for the matching lines.
         #[arg(long, default_value = "ask")]
         verdict: String,
@@ -1965,7 +1971,7 @@ enum Cmd {
     ///
     /// Example: `ljos rules`
     Rules {
-        /// Print them as JSON.
+        /// Print pattern, verdict and reason as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -1973,8 +1979,7 @@ enum Cmd {
     ///
     /// Put `--` before the command when that command has its own flags.
     /// The line after the command is what ljos remembers about it.
-    ///
-    /// Example: `ljos policy -- git push --force`.
+    #[command(after_help = "Example: `ljos policy -- git push --force`")]
     Policy {
         /// Exit 1 only when the answer denies the cloud seat push rule
         /// (a push outside the allowlist, a force push, or a branch delete).
@@ -2122,8 +2127,7 @@ enum Cmd {
     /// not, the note queue is damaged, or the tracker directory is not
     /// writable. A tracker that has not been created yet does not fail this
     /// command.
-    ///
-    /// Example: `ljos doctor`
+    #[command(after_help = "Example: `ljos doctor`")]
     Doctor {
         /// Print every row, the ones that answer included.
         #[arg(long, visible_alias = "verbose")]
@@ -2180,7 +2184,10 @@ enum Cmd {
     /// `grant` records a quoted yes to close. `--via` has to be this
     /// process's seat.
     ///
-    /// Example: `LJOS_SEAT=alice ljos seat add alice`
+    /// Example: `ljos seat`
+    ///
+    /// Add one with `LJOS_SEAT=alice ljos seat add alice`.
+    #[command(after_help = "Example: `ljos seat`")]
     Seat {
         #[command(subcommand)]
         action: Option<SeatAction>,
@@ -2393,8 +2400,10 @@ enum Cmd {
     /// item. `ljos finish ITEM` ticks that item off. Once the tracker lists
     /// seats, this seat has to be one of them.
     ///
-    /// Example: `LJOS_SEAT=alice ljos sitting --plan "Ship the codec" -p day -- "measure the files"`
-    #[command(alias = "start")]
+    /// Example: `ljos sitting proj-1a2b`
+    ///
+    /// `ljos sitting --plan` files a checklist. Example: `LJOS_SEAT=alice ljos sitting --plan "Ship the codec" -p day -- "measure the files"`
+    #[command(alias = "start", after_help = "Example: `ljos sitting proj-1a2b`")]
     Sitting {
         /// The tracker id of the issue. Absent when `--plan` files a new one.
         #[arg(
@@ -2458,10 +2467,11 @@ enum Cmd {
     /// The line names `ljos sitting ISSUE`.
     ///
     /// Example: `ljos finish --lesson "Cold metal seats."`
+    #[command(after_help = "Example: `ljos finish --lesson \"Cold metal seats.\"`")]
     Finish {
         /// The tracker id of the issue. Absent: the issue this conversation holds.
         issue: Option<String>,
-        /// done, failed, or cancelled.
+        /// Status to record: done, failed, or cancelled.
         #[arg(long, default_value = "done")]
         status: String,
         /// The lesson this work taught, two sentences at most.
@@ -3509,6 +3519,48 @@ fn vissue_id_parts(word: &str) -> Option<(&str, &str)> {
     .then_some((project, suffix))
 }
 
+fn looks_like_ticket_id(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if let Some((project, suffix)) = vissue_id_parts(trimmed) {
+        return project.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        }) && !suffix.is_empty();
+    }
+    ticket_like(trimmed)
+}
+
+fn recall_search_command(text: &str) -> String {
+    let arg = if text
+        .chars()
+        .any(|ch| ch.is_control() || matches!(ch, '"' | '\\' | '$' | '`' | '!'))
+    {
+        if text.chars().any(char::is_control) {
+            let escaped = text
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t");
+            format!("$'{escaped}'")
+        } else {
+            format!("'{}'", text.replace('\'', "'\\''"))
+        }
+    } else {
+        format!("\"{text}\"")
+    };
+    if text.starts_with('-') {
+        format!("ljos search -- {arg}")
+    } else {
+        format!("ljos search {arg}")
+    }
+}
+
 /// A node named on the command line. A blank one is an error at once,
 /// not the next ready node: only an omitted id claims next.
 fn named_node(raw: &str) -> Result<String, String> {
@@ -3833,6 +3885,24 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
 /// offboard, uninstall and doctor do not create the queue or its lock,
 /// and they do not rewrite a queue that is already there.
 fn queued_lesson_may_go(cmd: &Cmd) -> bool {
+    // A search with no query and no filters exits as usage. Keep that one
+    // line clean and skip queue drain noise.
+    if let Cmd::Search {
+        query,
+        source_machine,
+        source_seat,
+        import_id,
+        ..
+    } = cmd
+    {
+        if join(query).trim().is_empty()
+            && source_machine.is_none()
+            && source_seat.is_none()
+            && import_id.is_none()
+        {
+            return false;
+        }
+    }
     // A read-only proposal list must not drain the note queue. That drain
     // takes the queue lock and waits on the writer.
     if let Cmd::Proposals {
@@ -4897,7 +4967,8 @@ fn run_command() -> Result<()> {
         } => {
             ljos_cli::config_diag::emit();
             if transient && standing {
-                bail!("remember: pass --transient or --standing, not both");
+                eprintln!("remember: pass --transient or --standing, not both.");
+                std::process::exit(USAGE_STATUS);
             }
             let text = join(&text);
             if text.trim().is_empty() {
@@ -4917,7 +4988,10 @@ fn run_command() -> Result<()> {
                 None => None,
             };
             let _remember_project = ljos_cli::RememberProject::set(project);
-            ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
+            if let Err(err) = ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref()) {
+                eprintln!("{err}");
+                std::process::exit(USAGE_STATUS);
+            }
             // A paragraph or a session is several claims: each goes in on
             // its own, where the whole was refused at the pack's cap.
             // Two sentences stay one row. A longer text is split, and
@@ -5206,6 +5280,20 @@ fn run_command() -> Result<()> {
             status,
             settle,
         } => {
+            if let Some(raw) = status.as_deref() {
+                let trimmed = raw.trim();
+                if !ljos_cli::admit::is_valid_status(trimmed) {
+                    let bad = if trimmed.is_empty() {
+                        "an empty value"
+                    } else {
+                        trimmed
+                    };
+                    eprintln!(
+                        "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not {bad}."
+                    );
+                    std::process::exit(USAGE_STATUS);
+                }
+            }
             if let Some(ProposalCmd::Amend { id, text }) = cmd {
                 let text = if text == "-" {
                     let mut buf = String::new();
@@ -5377,7 +5465,8 @@ fn run_command() -> Result<()> {
             project,
         } => {
             if !min_score.is_finite() || min_score < 0.0 {
-                bail!("search: --min-score takes a number from 0 up, not {min_score}.");
+                eprintln!("search: --min-score takes a number from 0 up, not {min_score}.");
+                std::process::exit(USAGE_STATUS);
             }
             if join(&query).trim().is_empty()
                 && source_machine.is_none()
@@ -5387,6 +5476,25 @@ fn run_command() -> Result<()> {
                 eprintln!("search: the query is empty, so run `ljos search \"QUERY\"`.");
                 std::process::exit(USAGE_STATUS);
             }
+            if let Some(at) = as_of.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if !ljos_cli::valid_as_of(at) {
+                    eprintln!(
+                        "search: --as-of {at:?} is not a date; write YYYY-MM-DD or RFC 3339."
+                    );
+                    std::process::exit(USAGE_STATUS);
+                }
+            }
+            let day = match valid_at.as_deref().map(str::trim) {
+                Some("any") => None,
+                Some(d) => {
+                    if chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_err() {
+                        eprintln!("search: --valid-at takes YYYY-MM-DD or any, not {d}.");
+                        std::process::exit(USAGE_STATUS);
+                    }
+                    Some(d.to_string())
+                }
+                None => Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
+            };
             let project = match project {
                 Some(name) => Some(ljos_cli::require_known_project(&name)?),
                 None => None,
@@ -5394,9 +5502,8 @@ fn run_command() -> Result<()> {
             ljos_cli::log_recall("search", &query.join(" "));
             // A cold encoder gets long enough to load and be asked again.
             // A warm pack keeps the short budget. Past it the word ranking
-            // prints. Rows say they are word matches and that meaning search
-            // will be ready shortly. An empty page names the command to run
-            // again.
+            // prints. Rows say they are word matches and name any reported
+            // load time. An empty page names the command to run again.
             // Held across the status probe that sizes the budget, so a pack
             // that accepts and stays silent spends one request, not one per
             // later read.
@@ -5409,16 +5516,6 @@ fn run_command() -> Result<()> {
             };
             let _deadline = ljos_cli::pack_link::CommandDeadline::enter(budget);
             let _pack_clock = ljos_cli::pack_link::PackClock::enter(budget);
-            let day = match valid_at.as_deref().map(str::trim) {
-                Some("any") => None,
-                Some(d) => {
-                    chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
-                        anyhow::anyhow!("search: --valid-at takes YYYY-MM-DD or any, not {d}.")
-                    })?;
-                    Some(d.to_string())
-                }
-                None => Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
-            };
             // Expired claims are dropped after the pack answers, so ask for
             // more than the limit and cut to it once they are gone. A day
             // filter is what drops them. With `--valid-at any` the fetch
@@ -5494,6 +5591,13 @@ fn run_command() -> Result<()> {
                         },
                     )
                 }
+                Err(err) if !dated && ljos_cli::pack_turned_off(&err) => (
+                    ljos_cli::search_by_words(&asked, fetch),
+                    ljos_cli::Ranking {
+                        mode: "lexical",
+                        reason: ljos_cli::PACK_OFF_REASON,
+                    },
+                ),
                 Err(err)
                     if !dated
                         && (ljos_cli::pack_unreachable(&err)
@@ -5549,6 +5653,41 @@ fn run_command() -> Result<()> {
                 seat: source_seat,
                 import_id,
             };
+            let mut rerun_flags: Vec<String> = Vec::new();
+            if let Some(p) = project.as_deref() {
+                rerun_flags.push("-p".to_string());
+                rerun_flags.push(p.to_string());
+            }
+            if let Some(m) = filter.machine.as_deref() {
+                rerun_flags.push("--source-machine".to_string());
+                rerun_flags.push(m.to_string());
+            }
+            if let Some(s) = filter.seat.as_deref() {
+                rerun_flags.push("--source-seat".to_string());
+                rerun_flags.push(s.to_string());
+            }
+            if let Some(id) = filter.import_id.as_deref() {
+                rerun_flags.push("--import-id".to_string());
+                rerun_flags.push(id.to_string());
+            }
+            if attempts {
+                rerun_flags.push("--attempts".to_string());
+            }
+            if rerank {
+                rerun_flags.push("--rerank".to_string());
+            }
+            if let Some(t) = as_of.as_deref() {
+                rerun_flags.push("--as-of".to_string());
+                rerun_flags.push(t.to_string());
+            }
+            if let Some(d) = valid_at.as_deref() {
+                rerun_flags.push("--valid-at".to_string());
+                rerun_flags.push(d.to_string());
+            }
+            if (min_score - 34.0).abs() > 1e-9 {
+                rerun_flags.push("--min-score".to_string());
+                rerun_flags.push(min_score.to_string());
+            }
             if !dated || filter.active() {
                 ljos_cli::memory_port::merge_search(
                     &mut hits,
@@ -5707,7 +5846,7 @@ fn run_command() -> Result<()> {
                     print!(
                         "{}",
                         ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(
-                            &ljos_cli::format_search_stored(
+                            &ljos_cli::format_search_stored_with_flags(
                                 &hits,
                                 matched,
                                 capped,
@@ -5715,6 +5854,7 @@ fn run_command() -> Result<()> {
                                 &asked,
                                 ranking.mode != "lexical",
                                 &id_space,
+                                &rerun_flags,
                             ),
                             human_color()
                         ))
@@ -5926,11 +6066,15 @@ fn run_command() -> Result<()> {
                 // printed once the ticket exists, so a missing tracker
                 // stays one error line.
                 None if top => ljos_cli::seat_tracker_project_no_cwd().ok_or_else(|| {
-                    anyhow::anyhow!("no project: name one with -p, or a parent with --parent")
+                    anyhow::anyhow!(
+                        "no project: name one with -p, or a parent with --parent, so run `ljos file \"TITLE\" -p NAME`."
+                    )
                 })?,
                 // A plain file still needs a known project from the sitting,
                 // config, or `LJOS_PROJECT`.
-                None => anyhow::bail!("no project: name one with -p NAME"),
+                None => anyhow::bail!(
+                    "no project: name one with -p NAME, so run `ljos file \"TITLE\" -p NAME`."
+                ),
             };
             let qd = match (quorum, deadline.as_deref()) {
                 (Some(n), Some(d)) => Some((n, d)),
@@ -6284,8 +6428,24 @@ fn run_command() -> Result<()> {
             json,
             no_graph,
         } => {
-            stop_ticket(&issue);
             ljos_cli::config_diag::emit();
+            let trimmed = issue.trim();
+            if trimmed.is_empty() {
+                eprintln!("recall: the issue id is empty, so run `ljos recall proj-1a2b`.");
+                std::process::exit(USAGE_STATUS);
+            }
+            if !looks_like_ticket_id(trimmed) {
+                let search_cmd = recall_search_command(trimmed);
+                if search_cmd.contains('`') {
+                    eprintln!("recall: that text is not a ticket id, so run {search_cmd}.");
+                } else {
+                    let shown =
+                        format!("\"{}\"", trimmed.replace('\\', "\\\\").replace('"', "\\\""));
+                    eprintln!("recall: {shown} is not a ticket id, so run `{search_cmd}`.");
+                }
+                std::process::exit(USAGE_STATUS);
+            }
+            stop_ticket(&issue);
             ljos_cli::log_recall("recall", &issue);
             let said = ljos_cli::tracker_recall(&issue).map_err(ticket_error)?;
             eprint!("{}", ljos_cli::without_raw_rows(&said.stderr));

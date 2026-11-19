@@ -102,6 +102,7 @@ With ``vissue`` installed and no tracker configured, the row is info and this fa
 
 The row names the directory ``ljos onboard`` makes, the way the deeds row names its store.
 It does not print vissue's refusal, which names the directory you were in.
+Ticket reads such as ``ljos show ID`` print the same one-line ``ljos onboard`` fix when no tracker is configured.
 
 ``VISSUE_ROOT`` pointing at a directory that is not there fails the doctor.
 The summary names the tracker, and the row is:
@@ -251,3 +252,53 @@ With ``curl`` unable to reach crates.io, doctor printed:
 A missing binary then has no version in parentheses: not on PATH, so run ``cargo install --locked packset``.
 The warning does not by itself exit 1.
 A copy already in the day cache is still used, and the row says ``crates.io (cached)``.
+
+Mistyped ticket id
+==================
+
+When a ticket id is close to one in the tracker, ``show``, ``note`` and
+``finish`` print one line with the closest id and a command to run:
+
+.. code:: text
+
+   issue demo-kln not found, and the closest is demo-kiln, so run `ljos show demo-kiln`.
+
+File without a project
+======================
+
+``ljos file`` needs a project when there is no sitting and no seat default.
+The refusal names the exact command shape:
+
+.. code:: text
+
+   no project: name one with -p NAME, so run `ljos file "TITLE" -p NAME`.
+
+Corrupt tracker config
+======================
+
+When ``vissue.toml`` is damaged, commands that read tickets stop with one
+line and a fix command:
+
+.. code:: text
+
+   the tracker config does not parse, so run `ljos doctor`.
+
+Empty search query
+==================
+
+``ljos search`` with no query prints one usage line with the exact
+command shape, even when old queued lessons exist:
+
+.. code:: text
+
+   search: the query is empty, so run `ljos search "QUERY"`.
+
+Free text on recall
+===================
+
+``ljos recall`` takes one ticket id.
+Text with spaces or without a project prefix exits 2 and points at the search command:
+
+.. code:: text
+
+   recall: "usability first-run ljos cli" is not a ticket id, so run `ljos search "usability first-run ljos cli"`.

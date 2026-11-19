@@ -506,7 +506,7 @@ fn a_search_past_the_wait_says_to_rerun_and_names_the_ranking() {
         .unwrap_or_else(|err| panic!("search json did not parse ({err}): {json_out}"));
     assert_eq!(doc["ranking"], "lexical", "{doc}");
     assert_eq!(
-        doc["reason"], "These are word matches, and meaning search will be ready shortly.",
+        doc["reason"], "These are word matches; the encoder is loading (about 4 s left).",
         "{doc}"
     );
     let hits = doc["hits"].as_array().unwrap_or_else(|| panic!("{doc}"));
@@ -686,4 +686,55 @@ fn a_busy_pack_still_ranks_this_seats_lesson_by_words() {
         !said.contains("the pack search did not answer in time"),
         "{said}"
     );
+}
+
+#[test]
+fn truncated_search_prints_a_runnable_limit_command() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let hits = serde_json::json!({
+        "hits": [
+            {"id": "aaaaaaaa11111111", "kind": "lesson", "text": "usability \"kiln\" rule 1", "score": 0.9, "entities": ["seat:travel"]},
+            {"id": "bbbbbbbb22222222", "kind": "lesson", "text": "usability \"kiln\" rule 2", "score": 0.8, "entities": ["seat:travel"]},
+            {"id": "cccccccc33333333", "kind": "lesson", "text": "usability \"kiln\" rule 3", "score": 0.7, "entities": ["seat:travel"]}
+        ],
+        "rank": "fused"
+    });
+    let url = serve_search(
+        Box::leak(hits.to_string().into_boxed_str()),
+        200,
+        r#"{"atoms":[]}"#,
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args([
+            "search",
+            "usability \"kiln\"",
+            "-n",
+            "2",
+            "--min-score",
+            "0",
+        ])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LJOS_SEAT", "travel")
+        .env("PACKSET_URL", &url)
+        .env("PACKSET_AUTH", "off")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("shown 2 of 3.")
+            && stdout.contains("`ljos search --min-score 0 'usability \"kiln\"' -n 3`"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("next page"), "{stdout}");
 }

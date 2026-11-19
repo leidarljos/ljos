@@ -138,3 +138,42 @@ fn empty_store_search_help_and_docs_name_lesson_placeholder() {
         );
     }
 }
+
+#[test]
+fn an_empty_search_stays_one_line_even_with_a_queued_lesson() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let state = home.join(".local/state/ljos");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("note-queue.jsonl"),
+        "{\"issue\":\"demo-kiln\",\"text\":\"The kiln fires at dusk.\",\"workspace\":\"ws\",\"at\":1}\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["search"])
+        .current_dir(dir.path())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", dir.path().join("run"))
+        .env("TMPDIR", dir.path())
+        .env("LJOS_SEAT", "testseat")
+        .env("LJOS_HOOKD", "off")
+        .env("LJOS_NO_AUTOSTART", "1")
+        .env("PACKSET_URL", "http://127.0.0.1:9")
+        .env("PACKSET_AUTH", "off")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert_eq!(
+        stderr.trim(),
+        "search: the query is empty, so run `ljos search \"QUERY\"`."
+    );
+    assert!(out.stdout.is_empty(), "{stderr}");
+}
