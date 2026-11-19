@@ -223,6 +223,12 @@ jobs:
           echo "$ORT_SHA256  $archive" | shasum -a 256 -c -
           mkdir -p "$prefix"
           tar -C "$prefix" -xzf "$archive"
+          libdir="$prefix/lib/onnxruntime"
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            [ -e "$libdir/libonnxruntime.dylib" ] || cp "$libdir/libonnxruntime.1.dylib" "$libdir/libonnxruntime.dylib"
+          else
+            [ -e "$libdir/libonnxruntime.so" ] || cp "$libdir/libonnxruntime.so.1" "$libdir/libonnxruntime.so"
+          fi
       # ort links the shared library in ORT_LIB_PATH and downloads nothing.
       # pkg-config stays out, so no other libonnxruntime can win. The rpath
       # finds the library in ../lib/onnxruntime beside the binary.

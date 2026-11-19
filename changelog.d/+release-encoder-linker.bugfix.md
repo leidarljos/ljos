@@ -1,0 +1,1 @@
+The release encoder workflow now creates `libonnxruntime.so` or `libonnxruntime.dylib` from the versioned ONNX Runtime library once the archive is extracted, so `packset-embed` can link with `-lonnxruntime` on all matrix targets.
