@@ -23841,9 +23841,7 @@ fn ticket_line(err: &anyhow::Error) -> Option<String> {
     }
     let full = format!("{err:#}");
     if tracker_config_parse_fault(&full) {
-        return Some(
-            "the tracker config does not parse, so run `ljos doctor`.".to_string(),
-        );
+        return Some("the tracker config does not parse, so run `ljos doctor`.".to_string());
     }
     let no_tracker = full.contains("not inside a tracker")
         || full.contains("is not a tracker")
@@ -43267,8 +43265,7 @@ fn max_issue_edits(typed: &str) -> usize {
     match typed.chars().count() {
         0 | 1 => 0,
         2 | 3 => 1,
-        4..=7 => 2,
-        _ => 3,
+        _ => 2,
     }
 }
 
