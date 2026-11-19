@@ -257,8 +257,10 @@ fn a_missing_encoder_is_unavailable_not_still_loading() {
     assert_eq!(doc["ranking"], "lexical", "{doc}");
     let reason = doc["reason"].as_str().unwrap_or("");
     assert!(
-        reason.starts_with("matched by words (encoder not installed), so run `")
-            && !reason.contains("cargo binstall"),
+        reason.starts_with("matched by words (encoder not installed), so ")
+            && !reason.contains("cargo binstall")
+            && !reason.contains("curl")
+            && !reason.contains("install.sh"),
         "{doc}"
     );
     assert!(

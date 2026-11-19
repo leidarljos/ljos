@@ -222,7 +222,14 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
                 "The encoder failed (the runtime is missing), so these rows match words; run `{restart}`."
             ),
             "not installed" | "not installed with stale availability" => {
-                format!("matched by words (encoder not installed), so run `{install}`.")
+                if install.starts_with("curl ") || install.starts_with("wget ") {
+                    format!(
+                        "matched by words (encoder not installed), so read {} or run `ljos doctor`.",
+                        ljos_cli::INSTALL_PAGE
+                    )
+                } else {
+                    format!("matched by words (encoder not installed), so run `{install}`.")
+                }
             }
             _ => unreachable!(),
         };

@@ -76,7 +76,7 @@ No seat, no =PACKSET_HOME=, and no =packsetd= are required for that list.
 A search then says to install =packset= or to run =packset ensure=, as a tool error the model can read.
 The installer checks each download against its published SHA-256 sum.
 It builds from source with =cargo= where a platform has no release.
-=--no-embed= leaves out the encoder. Search then matches words, and a search prints =matched by words (encoder not installed)= and names the same install command as =ljos doctor=. An MCP server names that install command on its first such search and leaves it off later searches.
+=--no-embed= leaves out the encoder. Search then matches words, and a search prints =matched by words (encoder not installed)= and names the install command =ljos doctor= names when that command is a cargo one. When it would be a download run through a shell, the line points at the install page, https://leidarljos.github.io/ljos/getting-started.html#install, and at =ljos doctor= instead. An MCP server names that install step on its first such search and leaves it off later searches.
 
 Read the script before you run it. It is =scripts/install.sh= in this repository.
 It runs =ljos onboard= for each coding runner it finds. With none found, it still sets up
@@ -138,7 +138,7 @@ remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on
   id a6ae2751, next review 2026-11-12 21:40 +00:00
 saved as a standing lesson; run `ljos search "QUERY"` to read it
 $ ljos search "lexical default"
-matched by words (encoder not installed), so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
+matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.
 shown 1 of 1.
 The first row is the closest match.
 
@@ -163,7 +163,7 @@ remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on
 saved as a standing lesson; run `ljos search "QUERY"` to read it
 stored from an agent because no terminal was found or a runner was detected; from your own login terminal, so run `ljos remember`.
 $ ljos search "lexical default"
-matched by words (encoder not installed), so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
+matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.
 shown 1 of 1.
 The first row is the closest match.
 
@@ -188,7 +188,7 @@ $ ljos prefer "CombMNZ over RRF for fusing two ballots."
 remembered (preference): CombMNZ over RRF for fusing two ballots.
   id f8b725a9, next review 2026-11-12 21:40 +00:00
 $ ljos search fusing
-matched by words (encoder not installed), so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
+matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.
 shown 1 of 1.
 The first row is the closest match.
 

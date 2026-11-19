@@ -1886,7 +1886,7 @@ impl LjosServer {
             && self.encoder_install_named.swap(true, Ordering::Relaxed)
         {
             return note
-                .split_once(", so run")
+                .split_once(", so ")
                 .map_or_else(|| note.to_string(), |(mode, _)| format!("{mode}."));
         }
         note.to_string()
@@ -5128,6 +5128,17 @@ mod tests {
             server.search_rank_note(line),
             "matched by words (encoder not installed).",
             "a later search must keep the mode without repeating the install"
+        );
+    }
+
+    #[test]
+    fn a_server_names_the_install_page_once() {
+        let server = LjosServer::at(PathBuf::from("."));
+        let line = "matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.\n";
+        assert_eq!(server.search_rank_note(line), line.trim());
+        assert_eq!(
+            server.search_rank_note(line),
+            "matched by words (encoder not installed)."
         );
     }
 

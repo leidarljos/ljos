@@ -330,6 +330,56 @@ fn a_missing_seat_and_a_missing_tracker_name_the_command() {
     assert!(bare.alive());
 }
 
+/// With no cargo on `PATH` the encoder's install is a download, and a search
+/// reading does not tell an agent to fetch and run it.
+#[test]
+fn a_word_search_with_only_curl_points_at_the_install_page() {
+    let url = lexical_hits();
+    let tools = tempfile::tempdir().unwrap();
+    let curl = tools.path().join("curl");
+    std::fs::write(&curl, "#!/bin/sh\nexit 0\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = tools.path().display().to_string();
+    let mut session = Session::open(&[("PACKSET_URL", &url), ("PATH", &path)]);
+    let search = call(
+        &mut session,
+        2,
+        "ljos_search",
+        serde_json::json!({"query": "greeting", "seat": "ada"}),
+    );
+    assert_ne!(search["result"]["isError"], true, "{search}");
+    let reading = search["result"]["structuredContent"]["reading"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        reading.contains(
+            "matched by words (encoder not installed), so read \
+             https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`."
+        ),
+        "{reading}"
+    );
+    for word in ["curl", "install.sh", "| sh", "&& sh"] {
+        assert!(!reading.contains(word), "{word} in {reading}");
+    }
+    let again = call(
+        &mut session,
+        3,
+        "ljos_search",
+        serde_json::json!({"query": "greeting", "seat": "ada"}),
+    );
+    let reading = again["result"]["structuredContent"]["reading"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        reading.contains("matched by words (encoder not installed).")
+            && !reading.contains("getting-started"),
+        "{reading}"
+    );
+}
+
 #[test]
 fn a_word_search_names_the_missing_encoder() {
     let url = lexical_hits();
@@ -346,7 +396,11 @@ fn a_word_search_names_the_missing_encoder() {
         .unwrap_or("");
     assert!(
         reading.contains("encoder not installed")
-            && (reading.contains("packset-embed") || reading.contains("install.sh")),
+            && (reading.contains("packset-embed") || reading.contains("getting-started.html")),
+        "{reading}"
+    );
+    assert!(
+        !reading.contains("install.sh") && !reading.contains("curl "),
         "{reading}"
     );
     assert!(

@@ -15410,11 +15410,21 @@ fn encoder_failed_search_line(reason: &str) -> String {
     )
 }
 
+/// Where the install steps are written down.
+pub const INSTALL_PAGE: &str = "https://leidarljos.github.io/ljos/getting-started.html#install";
+
+/// The search line for a seat with no encoder. A package manager's command
+/// is named. A download that is fetched and run is not: an agent that reads
+/// the line would run it, so the line points at the install page and
+/// `ljos doctor` instead.
 fn encoder_missing_search_line() -> String {
-    format!(
-        "matched by words (encoder not installed), so run `{}`.",
-        encoder_install_command()
-    )
+    let command = encoder_install_command();
+    if command.starts_with("curl ") || command.starts_with("wget ") {
+        return format!(
+            "matched by words (encoder not installed), so read {INSTALL_PAGE} or run `ljos doctor`."
+        );
+    }
+    format!("matched by words (encoder not installed), so run `{command}`.")
 }
 
 /// A failure the search can answer with the word ranking. A pack that
@@ -81851,6 +81861,32 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     #[test]
+    fn a_missing_encoder_with_only_a_download_names_the_page_not_the_script() {
+        let _env = env_guard();
+        for tool in ["curl", "wget"] {
+            let bin = tempfile::tempdir().unwrap();
+            let stub = bin.path().join(tool);
+            std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            unsafe { std::env::set_var("PATH", bin.path()) };
+            let line = encoder_missing_search_line();
+            assert_eq!(
+                line,
+                "matched by words (encoder not installed), so read \
+                 https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`."
+            );
+            assert!(
+                !line.contains("curl") && !line.contains("wget") && !line.contains("sh install")
+            );
+            assert!(encoder_install_command().contains("install.sh"));
+        }
+    }
+
+    #[test]
     fn a_no_subject_floor_is_not_a_search_hit() {
         let query = "Carrollton Nov 23 morning timing";
         let hit = |id: &str, text: &str, score: f64| Hit {
@@ -81902,10 +81938,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         };
         assert_eq!(
             ranking_line(&missing),
-            format!(
-                "matched by words (encoder not installed), so run `{}`.\n",
-                encoder_install_command()
-            )
+            format!("{}\n", encoder_missing_search_line())
         );
         assert_eq!(
             search_rank_line(&missing, &[]),
