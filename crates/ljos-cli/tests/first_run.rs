@@ -79,12 +79,7 @@ struct Seat {
 
 impl Seat {
     fn open() -> Self {
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(std::env::temp_dir);
+        let base = seat_base().unwrap_or_else(|line| panic!("{line}"));
         let root = tempfile::Builder::new()
             .prefix(".ljos-first-run-")
             .tempdir_in(base)
@@ -290,8 +285,52 @@ fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
+/// Bytes a seat root may take. The deepest socket a seat opens sits about
+/// 30 bytes below it, and `sun_path` holds 103 on macOS.
+const ROOT_ROOM: usize = 70;
+
+/// Where the seat root goes: a directory with no git checkout above it,
+/// because the confused order runs from a directory that is not one, and
+/// outside every temporary root, because ljos turns memory off for a home
+/// that sits in one. The checkout's parent is the first choice. A checkout
+/// under `/tmp` or `/var/tmp` has a parent in a temporary root, and then a
+/// cache under `HOME` holds the seat.
+fn seat_base() -> Result<PathBuf, String> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let beside = manifest
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let cache =
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/ljos-test-seats"));
+    for candidate in [beside, cache].into_iter().flatten() {
+        if usable_seat_base(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err("no directory outside the temporary roots and outside a git checkout holds a first-run seat, so run the tests from a checkout outside /tmp or set HOME to a directory outside it.".to_string())
+}
+
+fn usable_seat_base(base: &Path) -> bool {
+    if ljos_cli::bookkeep::path_is_temp(Some(base)) || base.as_os_str().len() > ROOT_ROOM {
+        return false;
+    }
+    if std::fs::create_dir_all(base).is_err() {
+        return false;
+    }
+    !base.ancestors().any(|dir| dir.join(".git").exists())
+}
+
 fn tools_ready() -> bool {
     if tools::halt(tools::Tool::Vissue) || tools::halt(tools::Tool::Packsetd) {
+        return false;
+    }
+    if let Err(line) = seat_base() {
+        if std::env::var(tools::REQUIRE_TOOLS).ok().as_deref() == Some("1") {
+            panic!("{line}");
+        }
+        eprintln!("{line}");
         return false;
     }
     for name in ["claimdag", "deedar", "ljos-policyd", "packset"] {
@@ -305,6 +344,31 @@ fn tools_ready() -> bool {
         }
     }
     true
+}
+
+#[test]
+fn a_seat_base_sits_outside_the_temporary_roots_and_any_checkout() {
+    if let Ok(base) = seat_base() {
+        assert!(
+            !ljos_cli::bookkeep::path_is_temp(Some(&base)),
+            "{} is in a temporary root",
+            base.display()
+        );
+        assert!(
+            !base.ancestors().any(|dir| dir.join(".git").exists()),
+            "{} is inside a checkout",
+            base.display()
+        );
+    }
+    assert!(!usable_seat_base(&std::env::temp_dir()));
+    assert!(!usable_seat_base(Path::new("/tmp/ljos-first-run-seats")));
+    assert!(!usable_seat_base(Path::new("/var/tmp")));
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if manifest.ancestors().any(|dir| dir.join(".git").exists()) {
+        assert!(!usable_seat_base(manifest), "a checkout holds no seat");
+    }
+    let long = format!("/{}", "a".repeat(ROOT_ROOM));
+    assert!(!usable_seat_base(Path::new(&long)));
 }
 
 #[test]

@@ -66,6 +66,12 @@ The printed row is one line:
 ..
    # proseguard:on
 
+The first-run tests in ``crates/ljos-cli/tests/first_run.rs`` build a seat home, so they hit this row when the seat sits in a temporary directory.
+A checkout under ``/tmp`` or ``/var/tmp`` used to put the seat next to it, and the three tests that run a whole seat failed on that row.
+The seat now goes beside the checkout when that place is outside every temporary root and has no git checkout above it.
+Otherwise it goes under ``~/.cache/ljos-test-seats``.
+When neither place fits, the test prints one line that says so and stops, or fails with that line when ``LJOS_TEST_REQUIRE_TOOLS=1``.
+
 No seat
 =======
 
