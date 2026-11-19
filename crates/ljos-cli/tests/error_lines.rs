@@ -384,6 +384,20 @@ fn a_bad_limit_names_help_and_exits_2() {
 }
 
 #[test]
+fn a_limit_without_a_value_names_the_long_flag() {
+    let home = Home::new();
+    let out = home.run(&["search", "kiln", "-n"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "search: --limit needs a value",
+        "{said}"
+    );
+}
+
+#[test]
 fn a_missing_since_names_help_and_exits_2() {
     let home = Home::new();
     let out = home.run(&["usage"], &[]);
@@ -800,4 +814,15 @@ fn invalid_flag_values_on_search_and_remember_exit_2() {
         assert!(out.stdout.is_empty(), "{args:?}\n{said}");
         assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
     }
+}
+#[test]
+fn equals_binds_a_hyphen_leading_lesson_value() {
+    let home = Home::new();
+    let out = home.run(
+        &["finish", "demo-kiln", "--lesson=--json"],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&out);
+    assert_ne!(out.status.code(), Some(2), "{said}");
+    assert!(!said.contains("--lesson needs a value"), "{said}");
 }
