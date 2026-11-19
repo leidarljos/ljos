@@ -104,7 +104,7 @@ fn a_held_issue_is_named_when_the_file_lands_under_it() {
     let creates = seat.creates();
     assert_eq!(creates.len(), 1, "{creates:?}");
     assert!(
-        creates[0].starts_with("vissue create -p eb-stack --parent eb-stack-hqqx"),
+        creates[0].starts_with("vissue create --project=eb-stack --parent=eb-stack-hqqx"),
         "{creates:?}"
     );
     assert!(err.contains("eb-stack-hqqx"), "{err}");
@@ -195,7 +195,7 @@ fn a_scratch_checkout_uses_ljos_project_when_set() {
     let creates = seat.creates();
     assert_eq!(creates.len(), 1, "{creates:?}");
     assert!(
-        creates[0].starts_with("vissue create -p seatproj "),
+        creates[0].starts_with("vissue create --project=seatproj "),
         "{creates:?}"
     );
 }

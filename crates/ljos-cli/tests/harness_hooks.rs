@@ -620,8 +620,8 @@ cmd = args[0] if args else ""
 issue = args[1] if len(args) > 1 else ""
 if cmd == "vote" and "--json" in args:
     print(json.dumps(load(ballots).get(issue, [])))
-elif cmd == "vote" and "--for" in args:
-    choice = args[args.index("--for") + 1]
+elif cmd == "vote" and any(arg.startswith("--for=") for arg in args):
+    choice = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--for="))
     rows = load(ballots)
     rows.setdefault(issue, []).append({{"agent": os.environ.get("VISSUE_AGENT", ""), "choice": choice}})
     save(ballots, rows)
@@ -632,7 +632,8 @@ elif cmd == "show":
     print(json.dumps({{"id": issue, "title": "rig", "logbook": logbook}}))
 elif cmd == "note":
     rows = load(notes)
-    rows.setdefault(issue, []).append(" ".join(args[2:]))
+    text = args[3:] if len(args) > 2 and args[2] == "--" else args[2:]
+    rows.setdefault(issue, []).append(" ".join(text))
     save(notes, rows)
     print("noted")
 else:

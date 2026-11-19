@@ -82,7 +82,8 @@ elif cmd == "show":
 elif cmd == "note":
     ident = args[1]
     notes = load("notes.json", {{}})
-    notes.setdefault(ident, []).insert(0, {{"note": " ".join(args[2:])}})
+    text = args[3:] if len(args) > 2 and args[2] == "--" else args[2:]
+    notes.setdefault(ident, []).insert(0, {{"note": " ".join(text)}})
     save("notes.json", notes)
     print(ident + ": noted")
 elif cmd == "children":
@@ -93,8 +94,8 @@ elif cmd == "q":
     ident = "proj-k%03d" % len(issues)
     issues[ident] = {{"id": ident, "title": title, "state": "TODO", "project": "proj"}}
     save("issues.json", issues)
-    if "--parent" in args:
-        parent = args[args.index("--parent") + 1]
+    parent = next((arg.split("=", 1)[1] for arg in args if arg.startswith("--parent=")), None)
+    if parent:
         kids = load("children.json", {{}})
         kids.setdefault(parent, []).append(ident)
         save("children.json", kids)
