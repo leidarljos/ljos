@@ -28,15 +28,16 @@ $ ljos workflow PARENT
 $ ljos ready
 #+end_src
 
-A problem found while a step is open is a child of that step. The child blocks the step until it is closed.
+A problem found while a step is open is a child of that step, or a =ljos block= edge to another ticket inside or outside the run. Both block the step, appear in =ljos workflow PARENT=, and hold the sign-off until closed. Concurrent =--start= calls on the same parent wait on a per-run lock so each step is filed once.
 
 #+begin_src console
 $ ljos file "CI failed on the tag step" --parent STEP
+$ ljos block STEP --on OTHER
 #+end_src
 
 * Sign off
 
-The sign-off step stays open until every other step is done, no blocker under any step is open, =ljos consensus STEP --quorum 2= settles ship, and at least one deed named on the step passes =ljos evidence=. The quorum is the =:QUORUM:= property, and 2 when the skeleton omits it. =:DEED: yes= is what asks for the deed. =ljos complete= and =ljos finish= both refuse, exit 1, and list what is still missing.
+The sign-off step stays open until every other step is done, no blocker of any step is open, =ljos consensus STEP --quorum 2= settles ship, and at least one deed named on the step passes =ljos evidence=. The quorum is the =:QUORUM:= property, and 2 when the skeleton omits it. =:DEED: yes= is what asks for the deed. =ljos complete= and =ljos finish= both refuse, exit 1, and list what is still missing.
 
 #+begin_src console
 $ ljos consensus SIGNOFF --quorum 2
@@ -56,7 +57,7 @@ $ ljos workflow revise release --apply FILE
 
 * Publish the page
 
-=ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org= writes the steps in dependency order and a dot diagram. The page drops local absolute paths, seat names, agent ids and any line that names a bot. The same command with =--check= exits 1 when the committed file differs from a fresh render or still has one of those hits.
+=ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org= writes the steps in dependency order and a dot diagram. The page normalizes text, drops local paths, =file:= URLs, credentials, IP addresses, private hostnames, emails, Org link brackets, seat names, agent ids, and any line that names a model or tool. Render refuses to write a page its own check would reject, and =--check= exits 1 when the file differs from a fresh render or rescans with any hit.
 
 #+begin_src console
 $ ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org
