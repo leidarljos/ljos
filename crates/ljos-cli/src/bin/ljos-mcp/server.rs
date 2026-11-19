@@ -36,6 +36,10 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::shapes::{
+    shaped, ForgetOut, HabitOut, PersonaOut, PredictOut, PreferOut, RuleOut, Shaped, TrustOut,
+};
+
 /// The scheme the cards are addressable under.
 const SCHEME: &str = "ljos";
 /// Where the sitting protocol is read from.
@@ -1944,7 +1948,7 @@ impl LjosServer {
     async fn ljos_prefer(
         &self,
         Parameters(args): Parameters<PreferArgs>,
-    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+    ) -> Result<Json<Shaped<PreferOut>>, McpError> {
         if !args.user && (args.sync || args.forget.is_some() || args.promote.is_some()) {
             return Err(refused(anyhow::anyhow!(
                 "prefer: sync, forget and promote write a user rule. Pass user true"
@@ -1962,7 +1966,7 @@ impl LjosServer {
                     )));
                 }
                 return ljos_cli::user_rules::sync_now()
-                    .map(|report| object(serde_json::json!({"report": report})))
+                    .map(|report| shaped(serde_json::json!({"report": report})))
                     .map_err(refused);
             }
             if let Some(id) = args.forget {
@@ -1972,7 +1976,7 @@ impl LjosServer {
                     )));
                 }
                 return ljos_cli::user_rules::forget(&id)
-                    .map(|rule| object(ljos_cli::user_rules::to_value(&rule)))
+                    .map(|rule| shaped(ljos_cli::user_rules::to_value(&rule)))
                     .map_err(refused);
             }
             let why = args.why.unwrap_or_default();
@@ -2000,7 +2004,7 @@ impl LjosServer {
                 ljos_cli::user_rules::write_preference(&args.text, &why, &mention, &reply)
             };
             return rule
-                .map(|rule| object(ljos_cli::user_rules::to_value(&rule)))
+                .map(|rule| shaped(ljos_cli::user_rules::to_value(&rule)))
                 .map_err(refused);
         }
         ljos_cli::packset_write_mcp(
@@ -2009,7 +2013,7 @@ impl LjosServer {
             args.as_persona.as_deref(),
             Some(false),
         )
-        .map(object)
+        .map(shaped)
         .map_err(refused)
     }
 
@@ -2063,9 +2067,9 @@ impl LjosServer {
     async fn ljos_forget(
         &self,
         Parameters(args): Parameters<ForgetArgs>,
-    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+    ) -> Result<Json<Shaped<ForgetOut>>, McpError> {
         packset_forget(&args.id, args.why.as_deref())
-            .map(object)
+            .map(shaped)
             .map_err(refused)
     }
 
@@ -2243,7 +2247,7 @@ impl LjosServer {
     async fn ljos_habit(
         &self,
         Parameters(args): Parameters<HabitArgs>,
-    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+    ) -> Result<Json<Shaped<HabitOut>>, McpError> {
         let now = now_utc();
         if let (Some(name), Some(value)) = (&args.name, args.value) {
             let every_s = parse_every(args.every.as_deref().unwrap_or("7d")).map_err(refused)?;
@@ -2255,7 +2259,7 @@ impl LjosServer {
                 args.source.as_deref().unwrap_or(""),
             )
             .map_err(refused)?;
-            return Ok(object(serde_json::json!({
+            return Ok(shaped(serde_json::json!({
                 "reading": body,
                 "was": prev.map(|p| serde_json::json!({"value": p.value, "ts": p.ts, "id": p.id})),
             })));
@@ -2275,7 +2279,7 @@ impl LjosServer {
                 id: r.id,
             })
             .collect();
-        Ok(object(serde_json::json!(rows)))
+        Ok(shaped(serde_json::json!(rows)))
     }
 
     // ---- the deed store ----------------------------------------------------
@@ -3142,14 +3146,14 @@ impl LjosServer {
     async fn ljos_trust(
         &self,
         Parameters(args): Parameters<TrustArgs>,
-    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+    ) -> Result<Json<Shaped<TrustOut>>, McpError> {
         let row = Trust {
             from: args.from,
             to: args.to,
             weight: args.weight,
             about: args.about,
         };
-        write_trust(&row, &args.why).map(object).map_err(refused)
+        write_trust(&row, &args.why).map(shaped).map_err(refused)
     }
 
     #[tool(
@@ -3165,14 +3169,14 @@ impl LjosServer {
     async fn ljos_predict(
         &self,
         Parameters(args): Parameters<PredictArgs>,
-    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+    ) -> Result<Json<Shaped<PredictOut>>, McpError> {
         let who = ljos_cli::ballot_voter("predict", args.as_persona.as_deref()).map_err(refused)?;
         let expect = match &args.expect {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),
         };
         write_prediction(&args.issue, &who, &expect)
-            .map(object)
+            .map(shaped)
             .map_err(refused)
     }
 
@@ -3189,7 +3193,7 @@ impl LjosServer {
     async fn ljos_rule(
         &self,
         Parameters(args): Parameters<RuleArgs>,
-    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+    ) -> Result<Json<Shaped<RuleOut>>, McpError> {
         let verdict = args.verdict.trim().to_ascii_lowercase();
         if !matches!(verdict.as_str(), "deny" | "ask" | "allow") {
             return Err(refused(anyhow::anyhow!(
@@ -3207,10 +3211,10 @@ impl LjosServer {
         let basis = ljos_cli::Basis::Agent;
         if args.user {
             return ljos_cli::user_rules::write_argv(&rule, basis)
-                .map(|rule| object(ljos_cli::user_rules::to_value(&rule)))
+                .map(|rule| shaped(ljos_cli::user_rules::to_value(&rule)))
                 .map_err(refused);
         }
-        write_rule(&rule, basis).map(object).map_err(refused)
+        write_rule(&rule, basis).map(shaped).map_err(refused)
     }
 
     #[tool(
@@ -3243,7 +3247,7 @@ impl LjosServer {
     async fn ljos_persona(
         &self,
         Parameters(args): Parameters<PersonaArgs>,
-    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+    ) -> Result<Json<Shaped<PersonaOut>>, McpError> {
         let persona = Persona {
             name: args.name,
             anchor: args.anchor.unwrap_or(0.5),
@@ -3251,7 +3255,7 @@ impl LjosServer {
             entities: args.about,
             runner: args.runner,
         };
-        write_persona(&persona).map(object).map_err(refused)
+        write_persona(&persona).map(shaped).map_err(refused)
     }
 
     #[tool(

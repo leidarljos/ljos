@@ -11,6 +11,7 @@
 
 mod lifetime;
 mod server;
+mod shapes;
 
 use rmcp::{transport::stdio, ServiceExt};
 
