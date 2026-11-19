@@ -8217,7 +8217,7 @@ fn issue_topic_and_tags(id: &str) -> (Vec<String>, Vec<String>) {
     (topic, tags)
 }
 
-/// The verb of a command that writes the tracker under this seat. Listing
+/// Whether a workflow command writes the tracker under this seat.
 fn workflow_writes(action: &Option<WorkflowCmd>, start: &Option<String>, round: bool) -> bool {
     match action {
         Some(WorkflowCmd::Define { .. } | WorkflowCmd::Revise { .. }) => true,
@@ -8323,14 +8323,7 @@ fn render_workflow(
     if !vars.is_empty() {
         skel = ljos_cli::workflow_skel::fill_vars(&skel, &vars)?;
     }
-    let page = ljos_cli::workflow_skel::render_skeleton(&skel);
-    let page_hits = ljos_cli::scrub::scan_public(&page);
-    if !page_hits.is_empty() || ljos_cli::scrub::scrub_public(&page) != page {
-        bail!(
-            "workflow: rendered page failed public check: {}",
-            page_hits.join("; ")
-        );
-    }
+    let page = ljos_cli::workflow_skel::render_skeleton(&skel)?;
     if check {
         let Some(path) = out else {
             bail!("workflow: `--check` compares the file named with `--out`");
@@ -8347,8 +8340,6 @@ fn render_workflow(
                 "the file failed public scan ({})",
                 have_hits.join("; ")
             ));
-        } else if ljos_cli::scrub::scrub_public(&have) != have {
-            why.push("the file still has content the public scrubber removes".to_string());
         }
         if !why.is_empty() {
             bail!("workflow: {}: {}", path.display(), why.join("; "));

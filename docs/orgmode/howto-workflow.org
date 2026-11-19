@@ -28,7 +28,7 @@ $ ljos workflow PARENT
 $ ljos ready
 #+end_src
 
-A problem found while a step is open is a child of that step, or a =ljos block= edge to another ticket inside or outside the run. Both block the step, appear in =ljos workflow PARENT=, and hold the sign-off until closed. Concurrent =--start= calls on the same parent wait on a per-run lock so each step is filed once.
+A problem found while a step is open is a child of that step, or a =ljos block= edge to another ticket inside or outside the run. Both block the step, appear in =ljos workflow PARENT=, and hold the sign-off until closed. A =:BLOCKED_BY:= id that has no ticket is reported as missing but blocks nothing. This matches =vissue ready=, and both ready lists still include the step. Concurrent =--start= calls on the same parent wait up to two seconds on a per-run lock so each step is filed once. A caller that cannot acquire the lock exits with the parent and lock path.
 
 #+begin_src console
 $ ljos file "CI failed on the tag step" --parent STEP
@@ -57,7 +57,9 @@ $ ljos workflow revise release --apply FILE
 
 * Publish the page
 
-=ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org= writes the steps in dependency order and a dot diagram. The page normalizes text, drops local paths, =file:= URLs, credentials, IP addresses, private hostnames, emails, Org link brackets, seat names, agent ids, and any line that names a model or tool. Render refuses to write a page its own check would reject, and =--check= exits 1 when the file differs from a fresh render or rescans with any hit.
+=ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org= writes the steps in dependency order and a dot diagram. It emits author text unchanged. It normalizes a copy only to detect secrets, private paths, addresses, private hosts, email addresses, declared seat names in seat-like contexts, and product names with versions. It also detects phrases that identify generated work. A hit names every source line and class, and render writes nothing.
+
+An IPv4 address is sensitive when it is private, has a CIDR or port, or follows an address context word such as host, server, address, IP, connect, listen or bind. Four-part versions in ordinary prose stay unchanged. An IPv6 address needs at least two explicit groups; bracketed IPv6 with a port is also sensitive. Public Org links stay intact. Body text whose detection copy starts an Org heading, keyword or drawer is refused, including zero-width and full-width spellings. Step keys are checked once when the skeleton is parsed. Renderer-owned properties and dot lines are not scanned. =--check= exits 1 when the file differs from a fresh render or contains a detected line.
 
 #+begin_src console
 $ ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org

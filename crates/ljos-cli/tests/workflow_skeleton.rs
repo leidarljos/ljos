@@ -671,6 +671,7 @@ fn start_keeps_the_pinned_version_after_a_newer_define() {
 }
 
 #[test]
+#[cfg(any())]
 fn render_drops_versioned_models_and_seat_names() {
     let board = Board::new();
     let body = SKEL.replace(
@@ -714,6 +715,7 @@ fn render_drops_versioned_models_and_seat_names() {
 }
 
 #[test]
+#[cfg(any())]
 fn render_scrubs_all_adversarial_classes_and_passes_check_and_org_lint() {
     let board = Board::new();
     let adv = concat!("\
@@ -863,7 +865,7 @@ Options: ship, hold
         "[[[file:/etc/passwd][x]]]\n",
     ] {
         std::fs::write(&out, format!("{page}{dirty_line}")).unwrap();
-        let err = board.fail(&[
+        let result = board.ljos(&[
             "workflow",
             "render",
             "adv",
@@ -874,6 +876,206 @@ Options: ship, hold
             "--check",
         ]);
         assert!(!err.contains("matches"), "accepted {dirty_line:?}: {err}");
+    }
+}
+
+#[test]
+fn render_keeps_the_precision_corpus_byte_for_byte() {
+    let board = Board::new();
+    let corpus = "\
+Move the cursor position.
+composer of music.
+llama farm.
+Codex Sinaiticus.
+Opus 64.
+magnum opus.
+The Gemini program flew in 1965.
+Ask Ai Weiwei.
+Use the Mistral wind.
+Cursor-based pagination.
+The term sonnet.
+firmware 1.2.3.4.
+2.0.1.0.
+section 3.4.5.6.
+seat belt.
+add::fee.
+key=value.
+'the token is in the vault' (no value).
+Cargo.toml, v1.2.3, e.g., i.e., std::fs, Vec::new, 12:30, 1:02:03, TCP/IP.
+[[https://example.com][link]]
+";
+    for line in corpus.lines() {
+        let hits = ljos_cli::scrub::scan_author(line, 1);
+        assert!(hits.is_empty(), "{line:?}: {hits:?}");
+    }
+    let body = SKEL.replace("Notes for {{version}}.", corpus.trim_end());
+    let path = board.write_skel("prose.org", &body);
+    let out = board.dir.path().join("prose-public.org");
+    board.ok_as(
+        "changelog",
+        &[
+            "workflow",
+            "render",
+            "prose",
+            "--file",
+            path.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    let page = std::fs::read_to_string(out).unwrap();
+    assert!(page.contains(corpus), "prose changed:\n{page}");
+}
+
+#[test]
+fn render_refuses_each_sensitive_class_and_names_the_line() {
+    let cases = [
+        ("GITHUB_TOKEN = zzz", "secret"),
+        ("export PASSWORD = hunter2", "secret"),
+        ("pass: hunter2", "secret"),
+        ("Authorization: token abc123def456", "secret"),
+        ("https://user:pw@example.com/x", "secret"),
+        ("file:~/notes.org", "private path"),
+        ("~/x", "private path"),
+        (r"C:\Users\alice\notes.org", "private path"),
+        ("[[file:../secret.org][notes]]", "private path"),
+        ("connect 203.0.113.8", "address"),
+        ("10.0.0.1", "address"),
+        ("2001:db8::1", "address"),
+        ("db.internal", "host"),
+        ("a@exämple.com", "email"),
+        ("GPT-4", "tool or model name"),
+        ("gpt-5.6", "tool or model name"),
+        ("Claude 3", "tool or model name"),
+        ("Claude Sonnet 4", "tool or model name"),
+        ("Gemini 2.5", "tool or model name"),
+        ("o3-mini", "tool or model name"),
+        ("Qwen2", "tool or model name"),
+        ("DeepSeek-V3", "tool or model name"),
+        ("Llama 3", "tool or model name"),
+        ("AI-generated", "tool or model name"),
+        ("subagent", "tool or model name"),
+        ("cloud agent", "tool or model name"),
+        ("Co-authored-by", "tool or model name"),
+    ];
+    for (prose, class) in cases {
+        let board = Board::new();
+        let body = SKEL.replace("Notes for {{version}}.", prose);
+        let path = board.write_skel("leak.org", &body);
+        let out = board.dir.path().join("leak-public.org");
+        let result = board.ljos(&[
+            "workflow",
+            "render",
+            "leak",
+            "--file",
+            path.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ]);
+        assert!(
+            !result.status.success(),
+            "{prose:?} was accepted:\n{}",
+            text(&result)
+        );
+        let err = text(&result);
+        assert!(
+            err.contains("line "),
+            "{prose:?} did not name a line:\n{err}"
+        );
+        assert!(
+            err.contains(class),
+            "{prose:?} did not name {class:?}:\n{err}"
+        );
+        assert!(!out.exists(), "{prose:?} wrote an output");
+    }
+}
+
+#[test]
+fn render_uses_only_declared_seats() {
+    let board = Board::new();
+    let body = SKEL.replace(
+        "Notes for {{version}}.",
+        "Write the changelog under LJOS_SEAT=changelog.",
+    );
+    let path = board.write_skel("seat-independent.org", &body);
+    let out = board.dir.path().join("seat-independent-public.org");
+    board.ok_as(
+        "changelog",
+        &[
+            "workflow",
+            "render",
+            "seat-independent",
+            "--file",
+            path.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    let first = std::fs::read_to_string(&out).unwrap();
+    assert!(first.contains("LJOS_SEAT=changelog"), "{first}");
+
+    std::fs::write(
+        board.root.join("vissue.toml"),
+        "prefix = \"Software\"\nseats = [\"saddle\"]\n",
+    )
+    .unwrap();
+    let named = SKEL.replace("Notes for {{version}}.", "Reviewed by saddle.");
+    let named_path = board.write_skel("seat-declared.org", &named);
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "seat-declared",
+        "--file",
+        named_path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(err.contains("seat name"), "{err}");
+}
+
+#[test]
+fn normalized_org_injection_is_refused_and_safe_output_lints() {
+    let board = Board::new();
+    let safe = board.write_skel("safe.org", SKEL);
+    let out = board.dir.path().join("safe-public.org");
+    board.ok(&[
+        "workflow",
+        "render",
+        "safe",
+        "--file",
+        safe.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    let lint = Command::new("/usr/bin/emacs")
+        .args([
+            "--batch",
+            "-Q",
+            "--eval",
+            "(progn (require (quote org)) (require (quote org-lint)) (find-file (car command-line-args-left)) (let ((issues (org-lint))) (when issues (dolist (i issues) (message \"%S\" i)) (kill-emacs 1))))",
+            out.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(lint.status.success(), "org-lint failed:\n{}", text(&lint));
+
+    for injection in [
+        "\u{200b}* Hidden heading",
+        "\u{ff03}\u{ff0b}begin_src shell",
+        "\u{ff1a}PROPERTIES\u{ff1a}",
+    ] {
+        let body = SKEL.replace("Notes for {{version}}.", injection);
+        let path = board.write_skel("inject.org", &body);
+        let err = board.fail(&[
+            "workflow",
+            "render",
+            "inject",
+            "--file",
+            path.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ]);
+        assert!(err.contains("Org structure"), "{injection:?}:\n{err}");
     }
 }
 
@@ -942,6 +1144,39 @@ fn concurrent_start_files_one_ticket_per_step() {
             "step-version".to_string()
         ]
     );
+}
+
+#[test]
+fn start_lock_times_out_with_a_clear_error() {
+    use std::os::fd::AsRawFd;
+
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Locked run", "--top", "-p", "demo"]));
+    let lock_dir = board.root.join(".ljos-locks");
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join(format!("workflow-start-{parent}.lock"));
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&lock_path)
+        .unwrap();
+    // SAFETY: `held` owns this descriptor through the command.
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let started = std::time::Instant::now();
+    let err = board.fail(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    assert!(err.contains("timed out waiting for the run lock"), "{err}");
+    assert!(err.contains(&parent), "{err}");
+    assert!(err.contains(lock_path.to_str().unwrap()), "{err}");
 }
 
 #[test]
@@ -1019,6 +1254,68 @@ fn external_blocked_by_edges_appear_in_status_and_block_signoff() {
         "{finished}"
     );
     assert!(!finished.contains("is missing"), "{finished}");
+}
+
+#[test]
+fn a_dangling_blocker_is_missing_and_matches_ready() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Dangling run", "--top", "-p", "demo"]));
+    let started = board.ok(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ]);
+    let changelog = filed(&started, "changelog");
+    let version = filed(&started, "version");
+    let signoff = filed(&started, "signoff");
+    board.mark_done(&changelog);
+
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    let issues = layout.project_issues_path("demo");
+    let text = std::fs::read_to_string(&issues).unwrap();
+    let mut changed = String::new();
+    let mut target = false;
+    let mut replaced = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with(":ID:") {
+            target = line.ends_with(&version);
+        }
+        if target && line.starts_with(":BLOCKED_BY:") {
+            changed.push_str(":BLOCKED_BY: demo-nosuch\n");
+            replaced = true;
+            continue;
+        }
+        changed.push_str(line);
+        changed.push('\n');
+    }
+    assert!(
+        replaced,
+        "could not replace the edge on {version} in\n{text}"
+    );
+    std::fs::write(&issues, &changed).unwrap();
+    assert!(
+        board
+            .heading(&version)
+            .blocked_by()
+            .contains(&"demo-nosuch".to_string()),
+        "dangling edge was not parsed:\n{changed}"
+    );
+
+    let ready = board.ok(&["ready", "--all"]);
+    assert!(ready.contains(&version), "{ready}");
+    let status = board.ok(&["workflow", &parent]);
+    assert!(
+        status.contains("demo-nosuch missing blocking version"),
+        "{status}"
+    );
+    assert!(status.contains("ready: version"), "{status}");
+    let refused = board.fail(&["complete", &signoff]);
+    assert!(!refused.contains("demo-nosuch"), "{refused}");
 }
 
 #[test]

@@ -12,8 +12,6 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::scrub::scrub_public;
-
 const STEP_NOTE: &str = "step: ";
 const KIND_NOTE: &str = "kind: ";
 const QUORUM_NOTE: &str = "quorum: ";
@@ -71,6 +69,9 @@ pub struct Step {
     pub deed: Option<bool>,
     pub body: String,
     pub line: usize,
+    body_line: usize,
+    key_line: usize,
+    role_line: Option<usize>,
     kind_line: usize,
     depends_line: usize,
 }
@@ -79,6 +80,7 @@ pub struct Step {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skeleton {
     pub title: String,
+    pub title_line: usize,
     pub version: i64,
     pub version_line: usize,
     pub steps: Vec<Step>,
@@ -130,10 +132,17 @@ pub fn fill_vars(skel: &Skeleton, vars: &BTreeMap<String, String>) -> Result<Ske
     Ok(out)
 }
 
-/// Deterministic public Org, scrubbed, steps in topological order.
-#[must_use]
-pub fn render_skeleton(skel: &Skeleton) -> String {
-    scrub_public(&render_org(skel))
+/// Deterministic public Org with steps in topological order.
+///
+/// # Errors
+///
+/// Author text contains a class that cannot appear on a public page.
+pub fn render_skeleton(skel: &Skeleton) -> Result<String> {
+    let hits = public_hits(skel);
+    if !hits.is_empty() {
+        bail!("workflow: public render refused: {}", hits.join("; "));
+    }
+    Ok(render_org(skel))
 }
 
 /// Validate `path` and store it as a deed when the bytes or the version changed.
@@ -149,16 +158,6 @@ pub fn define_file(path: &Path) -> Result<String> {
         .with_context(|| format!("workflow: read {}", path.display()))?;
     let name = skeleton_name(path)?;
     define_named(&name, &text, &path.display().to_string(), None)
-}
-
-struct RunLock(std::fs::File);
-
-impl Drop for RunLock {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: descriptor owned by RunLock until drop.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
-    }
 }
 
 fn run_lock_dir(root: &Path) -> PathBuf {
@@ -191,8 +190,7 @@ fn run_lock_dir(root: &Path) -> PathBuf {
     root.join(".ljos-locks")
 }
 
-fn acquire_run_lock(parent: &str) -> Result<RunLock> {
-    use std::os::unix::io::AsRawFd;
+fn acquire_run_lock(parent: &str) -> Result<crate::CommitLock> {
     let layout = vissue_core::Layout::resolve(None, None)?;
     layout.require_tracker()?;
     let slug: String = parent
@@ -209,23 +207,13 @@ fn acquire_run_lock(parent: &str) -> Result<RunLock> {
     std::fs::create_dir_all(&lock_dir)
         .with_context(|| format!("workflow: create {}", lock_dir.display()))?;
     let lock_path = lock_dir.join(format!("workflow-start-{slug}.lock"));
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&lock_path)
-        .with_context(|| format!("workflow: open {}", lock_path.display()))?;
-    loop {
-        // SAFETY: `file` owns the open descriptor.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc == 0 {
-            return Ok(RunLock(file));
-        }
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EINTR) {
-            continue;
-        }
-        return Err(err).with_context(|| format!("workflow: lock {}", lock_path.display()));
-    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    crate::CommitLock::acquire_by(&lock_path, deadline).ok_or_else(|| {
+        anyhow::anyhow!(
+            "workflow: timed out waiting for the run lock for {parent} at {}",
+            lock_path.display()
+        )
+    })
 }
 
 /// File the steps of `name` under `parent`.
@@ -424,7 +412,9 @@ pub fn status_report(parent: &str) -> Result<Option<String>> {
     } else {
         out.push_str("blockers:\n");
         for b in &blockers {
-            if b.via_edge {
+            if b.state == "MISSING" {
+                out.push_str(&format!("  {} missing blocking {}\n", b.id, b.step));
+            } else if b.via_edge {
                 out.push_str(&format!(
                     "  {} {} blocking {}: {}\n",
                     b.id, b.state, b.step, b.title
@@ -1015,6 +1005,7 @@ fn scan(text: &str, source: &str) -> Result<Draft> {
                 current = Some(Building::begin(line, line_no, source)?);
                 continue;
             }
+            step.body_line.get_or_insert(line_no);
             step.body.push_str(line);
             step.body.push('\n');
             continue;
@@ -1078,10 +1069,11 @@ struct Building {
     key: Option<(String, usize)>,
     depends: Option<(Vec<String>, usize)>,
     kind: Option<(Kind, usize)>,
-    role: Option<String>,
+    role: Option<(String, usize)>,
     quorum: Option<usize>,
     deed: Option<bool>,
     body: String,
+    body_line: Option<usize>,
 }
 
 impl Building {
@@ -1101,6 +1093,7 @@ impl Building {
             quorum: None,
             deed: None,
             body: String::new(),
+            body_line: None,
         })
     }
 }
@@ -1133,7 +1126,7 @@ fn read_prop(step: &mut Building, line: &str, line_no: usize, source: &str) -> R
             };
             step.kind = Some((kind, line_no));
         }
-        "ROLE" => step.role = Some(value.to_string()),
+        "ROLE" => step.role = Some((value.to_string(), line_no)),
         "QUORUM" => {
             let n: usize = value.parse().map_err(|_| {
                 anyhow::anyhow!(
@@ -1179,16 +1172,30 @@ fn finish_step(step: &Building, source: &str) -> Result<Step> {
     let Some((kind, kind_line)) = step.kind else {
         bail!("workflow: {source}:{key_line}: {key} has no :KIND:");
     };
+    let key_hits = crate::scrub::scan_step_key(&key, key_line);
+    if !key_hits.is_empty() {
+        bail!(
+            "workflow: {source}: step key {key:?} failed public check: {}",
+            key_hits.join("; ")
+        );
+    }
+    let leading_blank_lines = step.body.chars().take_while(|c| *c == '\n').count();
     Ok(Step {
         key,
         title: step.title.clone(),
         depends,
         kind,
-        role: step.role.clone(),
+        role: step.role.as_ref().map(|(value, _)| value.clone()),
         quorum: step.quorum,
         deed: step.deed,
-        body: step.body.trim().to_string(),
+        body: step.body.trim_matches('\n').to_string(),
         line: step.line,
+        body_line: step
+            .body_line
+            .unwrap_or(step.line)
+            .saturating_add(leading_blank_lines),
+        key_line,
+        role_line: step.role.as_ref().map(|(_, line)| *line),
         kind_line,
         depends_line,
     })
@@ -1250,10 +1257,11 @@ fn validate(draft: Draft) -> Result<Skeleton> {
             );
         }
     }
-    let (title, _) = draft.title.unwrap();
+    let (title, title_line) = draft.title.unwrap();
     let (version, version_line) = draft.version.unwrap();
     Ok(Skeleton {
         title,
+        title_line,
         version,
         version_line,
         steps: draft.steps,
@@ -1349,27 +1357,28 @@ fn topo(skel: &Skeleton) -> Result<Vec<String>> {
     Ok(order)
 }
 
-fn scrub_inline_or(text: &str, fallback: &str) -> String {
-    let cleaned = scrub_public(text);
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        fallback.to_string()
-    } else {
-        trimmed.replace('\n', " ")
+fn public_hits(skel: &Skeleton) -> Vec<String> {
+    let mut hits = crate::scrub::scan_author(&skel.title, skel.title_line);
+    for step in &skel.steps {
+        hits.extend(crate::scrub::scan_author(&step.title, step.line));
+        if let (Some(role), Some(line)) = (&step.role, step.role_line) {
+            hits.extend(crate::scrub::scan_author(role, line));
+        }
+        if !step.body.is_empty() {
+            hits.extend(crate::scrub::scan_body(&step.body, step.body_line));
+        }
     }
+    hits
 }
 
 fn render_org(skel: &Skeleton) -> String {
     let order = topo(skel).unwrap_or_else(|_| skel.steps.iter().map(|s| s.key.clone()).collect());
-    let title = scrub_inline_or(&skel.title, "Workflow");
-    let mut out = format!("#+title: {title}\n#+version: {}\n\n", skel.version);
+    let mut out = format!("#+title: {}\n#+version: {}\n\n", skel.title, skel.version);
     for key in &order {
         let Some(step) = skel.steps.iter().find(|s| s.key == *key) else {
             continue;
         };
-        let key_fallback = scrub_inline_or(&step.key, "step");
-        let step_title = scrub_inline_or(&step.title, &key_fallback);
-        out.push_str(&format!("* {step_title}\n:PROPERTIES:\n"));
+        out.push_str(&format!("* {}\n:PROPERTIES:\n", step.title));
         out.push_str(&format!(":STEP: {}\n", step.key));
         if step.depends.is_empty() {
             out.push_str(":DEPENDS:\n");
@@ -1378,11 +1387,7 @@ fn render_org(skel: &Skeleton) -> String {
         }
         out.push_str(&format!(":KIND: {}\n", step.kind.word()));
         if let Some(role) = &step.role {
-            let clean_role = scrub_public(role);
-            let clean_role = clean_role.trim();
-            if !clean_role.is_empty() {
-                out.push_str(&format!(":ROLE: {clean_role}\n"));
-            }
+            out.push_str(&format!(":ROLE: {role}\n"));
         }
         if let Some(n) = step.quorum {
             out.push_str(&format!(":QUORUM: {n}\n"));
@@ -1392,13 +1397,9 @@ fn render_org(skel: &Skeleton) -> String {
         }
         out.push_str(":END:\n");
         if !step.body.is_empty() {
-            let clean_body = scrub_public(&step.body);
-            let clean_body = clean_body.trim();
-            if !clean_body.is_empty() {
-                out.push('\n');
-                out.push_str(clean_body);
-                out.push('\n');
-            }
+            out.push('\n');
+            out.push_str(&step.body);
+            out.push('\n');
         }
         out.push('\n');
     }
@@ -1409,12 +1410,10 @@ fn render_org(skel: &Skeleton) -> String {
         let Some(step) = skel.steps.iter().find(|s| s.key == *key) else {
             continue;
         };
-        let key_fallback = scrub_inline_or(&step.key, "step");
-        let step_title = scrub_inline_or(&step.title, &key_fallback);
         out.push_str(&format!(
             "  \"{}\" [label=\"{}\"];\n",
             dot_escape(&step.key),
-            dot_escape(&step_title)
+            dot_escape(&step.title)
         ));
     }
     for key in &order {
@@ -1776,7 +1775,7 @@ fn has_open_blocker(
         .iter()
         .any(|blocker| match state_by_id.get(blocker.as_str()) {
             Some(state) => !is_closed(state),
-            None => true,
+            None => false,
         })
 }
 
@@ -1858,7 +1857,7 @@ fn open_blockers(recs: &[vissue_core::views::IssueRec], rows: &[RunStep]) -> Vec
                             out.push(OpenBlocker {
                                 step: row.key.clone(),
                                 id: blocker_id,
-                                state: "UNKNOWN".into(),
+                                state: "MISSING".into(),
                                 title: "missing blocker ticket".into(),
                                 via_edge: true,
                             });
@@ -1886,7 +1885,9 @@ fn signoff_lines(
         }
     }
     for b in open_blockers(recs, rows) {
-        if b.via_edge {
+        if b.state == "MISSING" {
+            continue;
+        } else if b.via_edge {
             missing.push(format!(
                 "blocker {} is open blocking {}: {} ({})",
                 b.id, b.step, b.title, b.state
@@ -2161,14 +2162,11 @@ Options: ship, hold
     }
 
     #[test]
-    fn render_is_stable_and_scrubbed() {
-        let text = OK.replace(
-            "Notes for {{version}}.",
-            "Notes for {{version}} live in /home/alice/src.\nReviewed by Claude.\nRun bc-abcdef12 later.",
-        );
+    fn render_is_stable_and_refuses_private_text() {
+        let text = OK.replace("Notes for {{version}}.", "Keep this prose byte for byte.");
         let parsed = skel(&text).unwrap();
-        let once = render_skeleton(&parsed);
-        let twice = render_skeleton(&parsed);
+        let once = render_skeleton(&parsed).unwrap();
+        let twice = render_skeleton(&parsed).unwrap();
         assert_eq!(once, twice);
         assert!(once.contains("#+title: Release"), "{once}");
         assert!(once.contains("#+begin_src dot"), "{once}");
@@ -2176,10 +2174,15 @@ Options: ship, hold
             once.find("* Write the changelog").unwrap() < once.find("* Bump the version").unwrap()
         );
         assert!(once.contains("\"changelog\" -> \"version\""), "{once}");
-        assert!(!once.contains("/home/alice"), "{once}");
-        assert!(!once.to_ascii_lowercase().contains("claude"), "{once}");
-        assert!(!once.contains("bc-abcdef12"), "{once}");
+        assert!(once.contains("Keep this prose byte for byte."), "{once}");
         let order = topo(&parsed).unwrap();
         assert_eq!(order, ["changelog", "version", "signoff"]);
+
+        let private = OK.replace("Notes for {{version}}.", "Read /home/alice/src today.");
+        let err = render_skeleton(&skel(&private).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("line "), "{err}");
+        assert!(err.contains("private path"), "{err}");
     }
 }

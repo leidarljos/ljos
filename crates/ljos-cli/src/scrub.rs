@@ -1,6 +1,6 @@
-//! One scrub for text that a public page may carry.
+//! Detection for author text that a public page may carry.
 //!
-//! Workflow render and `render --check` both call [`scrub_public`] and [`scan_public`].
+//! Detection normalizes a copy. Rendering keeps the author's bytes.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -10,52 +10,68 @@ use icu_properties::{
 };
 use unicode_normalization::UnicodeNormalization as _;
 
-/// Remove local paths, file URLs, secrets, IPs, private hosts, emails,
-/// Org link brackets, seat tokens, agent ids, `bc-` ids and known seats.
-/// Drop any line that names a model, vendor, bot, subagent or LLM.
+/// Return `text` unchanged.
+///
+/// Kept as a compatibility helper for callers that used the old scrubber.
+/// Public rendering now refuses detected author text instead of rewriting it.
 #[must_use]
 pub fn scrub_public(text: &str) -> String {
-    scrub_with(text, &live_seats())
+    text.to_string()
 }
 
 /// Return a human-readable hit description for every disallowed item found
 /// in `text` without modifying it. An empty list means `text` is clean.
 #[must_use]
 pub fn scan_public(text: &str) -> Vec<String> {
-    scan_with(text, &live_seats())
+    scan_with(text, &declared_seats(), true, 1)
 }
 
-fn scrub_with(text: &str, seats: &[String]) -> String {
-    let mut out = String::new();
-    for line in text.split_inclusive('\n') {
-        let (raw_body, nl) = match line.strip_suffix('\n') {
-            Some(body) => (body, true),
-            None => (line, false),
-        };
-        let Some(cleaned) = scrub_line(raw_body, seats) else {
-            continue;
-        };
-        out.push_str(&cleaned);
-        if nl {
-            out.push('\n');
+/// Scan author-controlled text, assigning its first line `first_line`.
+#[must_use]
+pub fn scan_author(text: &str, first_line: usize) -> Vec<String> {
+    scan_with(text, &declared_seats(), false, first_line)
+}
+
+/// Scan a structural step key before the renderer writes it.
+#[must_use]
+pub fn scan_step_key(text: &str, line: usize) -> Vec<String> {
+    let seats = declared_seats();
+    let mut hits = scan_with(text, &seats, false, line);
+    let normalized = normalize_line(text);
+    if seats
+        .iter()
+        .any(|seat| seat.eq_ignore_ascii_case(&normalized))
+    {
+        hits.push(format!("line {line} contains seat name"));
+    }
+    hits
+}
+
+/// Scan body text and reject normalized Org structure prefixes.
+#[must_use]
+pub fn scan_body(text: &str, first_line: usize) -> Vec<String> {
+    let mut hits = scan_with(text, &declared_seats(), false, first_line);
+    for (idx, line) in text.lines().enumerate() {
+        let normalized = normalize_line(line);
+        let trimmed = normalized.trim_start();
+        if trimmed.starts_with('*') || trimmed.starts_with("#+") || is_drawer_start(trimmed) {
+            hits.push(format!("line {} contains Org structure", first_line + idx));
         }
     }
-    out
+    hits
 }
 
-fn scan_with(text: &str, seats: &[String]) -> Vec<String> {
+fn scan_with(text: &str, seats: &[String], skip_generated: bool, first_line: usize) -> Vec<String> {
     let mut hits = Vec::new();
     for (idx, line) in text.split_inclusive('\n').enumerate() {
-        let line_no = idx + 1;
+        let line_no = first_line + idx;
         let body = line.strip_suffix('\n').unwrap_or(line);
-        let normalized = normalize_line(body);
-        if normalized != body {
-            hits.push(format!(
-                "line {line_no} contains invisible or non-normalized characters"
-            ));
+        if skip_generated && is_generated_line(body) {
+            continue;
         }
+        let normalized = normalize_line(body);
         if names_model_or_bot(&normalized) {
-            hits.push(format!("line {line_no} names a model, vendor or tool"));
+            hits.push(format!("line {line_no} contains tool or model name"));
         }
         let chars: Vec<char> = normalized.chars().collect();
         let mut i = 0;
@@ -71,28 +87,33 @@ fn scan_with(text: &str, seats: &[String]) -> Vec<String> {
     hits
 }
 
-fn scrub_line(raw_body: &str, seats: &[String]) -> Option<String> {
-    let was_non_empty = !raw_body.trim().is_empty();
-    let mut current = normalize_line(raw_body);
-    for _ in 0..16 {
-        if names_model_or_bot(&current) {
-            return None;
-        }
-        let cleaned = scrub_tokens(&current, seats);
-        if was_non_empty && cleaned.trim().is_empty() {
-            return None;
-        }
-        let next = normalize_line(&cleaned);
-        if next == current {
-            return Some(next);
-        }
-        current = next;
-    }
-    if names_model_or_bot(&current) || (was_non_empty && current.trim().is_empty()) {
-        None
-    } else {
-        Some(current)
-    }
+fn is_generated_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with(":STEP:")
+        || trimmed.starts_with(":DEPENDS:")
+        || trimmed.starts_with(":KIND:")
+        || trimmed == ":PROPERTIES:"
+        || trimmed == ":END:"
+        || trimmed == "#+begin_src dot"
+        || trimmed == "#+end_src"
+        || trimmed == "digraph workflow {"
+        || trimmed == "rankdir=LR;"
+        || trimmed == "}"
+        || (trimmed.starts_with('"') && (trimmed.contains(" [label=") || trimmed.contains(" -> ")))
+}
+
+fn is_drawer_start(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix(':') else {
+        return false;
+    };
+    let Some((name, after)) = rest.split_once(':') else {
+        return false;
+    };
+    !name.is_empty()
+        && after.trim().is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn is_invisible(c: char) -> bool {
@@ -103,20 +124,16 @@ fn is_invisible(c: char) -> bool {
 
 fn normalize_line(line: &str) -> String {
     let visible: String = line.chars().filter(|&c| !is_invisible(c)).collect();
-    visible.nfkc().filter(|&c| !is_invisible(c)).collect()
+    visible
+        .nfkc()
+        .filter(|&c| !is_invisible(c))
+        .map(fold_lookalike)
+        .collect()
 }
 
-fn live_seats() -> Vec<String> {
+fn declared_seats() -> Vec<String> {
     let mut names = Vec::new();
-    for key in ["LJOS_SEAT", "VISSUE_AGENT"] {
-        if let Ok(value) = std::env::var(key) {
-            let value = normalize_line(value.trim());
-            if !value.is_empty() {
-                names.push(value);
-            }
-        }
-    }
-    for seat in crate::tracker_known_seats() {
+    for seat in crate::tracker_roster_names() {
         let norm = normalize_line(seat.trim());
         if !norm.is_empty() {
             names.push(norm);
@@ -171,119 +188,124 @@ fn fold_lookalike(c: char) -> char {
 }
 
 fn names_model_or_bot(line: &str) -> bool {
-    let folded: Vec<char> = normalize_line(line)
+    let folded: String = normalize_line(line)
         .chars()
         .flat_map(char::to_lowercase)
         .map(fold_lookalike)
         .collect();
-
-    const MODEL_OR_VENDOR_STEMS: &[&str] = &[
-        "gpt",
-        "chatgpt",
-        "claude",
-        "anthropic",
-        "openai",
-        "gemini",
-        "grok",
-        "copilot",
-        "llama",
-        "mistral",
-        "codex",
-        "composer",
-        "cursor",
-        "opus",
-        "sonnet",
-        "llm",
-        "chatbot",
+    let chars: Vec<char> = folded.chars().collect();
+    if [
+        "ai-generated",
+        "ai generated",
         "subagent",
-    ];
-    for stem in MODEL_OR_VENDOR_STEMS {
-        let needle: Vec<char> = stem.chars().collect();
-        if has_stem(&folded, &needle, true) {
-            return true;
-        }
+        "sub-agent",
+        "cloud agent",
+        "cloud-agent",
+        "co-authored-by",
+        "co-authored by",
+    ]
+    .iter()
+    .any(|phrase| contains_phrase(&folded, phrase))
+    {
+        return true;
     }
-
-    for stem in ["ai", "bot", "bots", "aiagent", "aiagents"] {
-        let needle: Vec<char> = stem.chars().collect();
-        if has_stem(&folded, &needle, false) {
-            return true;
-        }
-    }
-
-    has_joined_pair(&folded, "sub", "agent", true)
-        || has_joined_pair(&folded, "chat", "bot", true)
-        || has_joined_pair(&folded, "ai", "agent", true)
-        || has_joined_pair(&folded, "language", "model", true)
+    has_product_version(&chars, "gpt", false)
+        || has_product_version(&chars, "claude", false)
+        || has_named_product_version(&chars, "claude", "sonnet")
+        || has_product_version(&chars, "gemini", false)
+        || has_product_version(&chars, "qwen", true)
+        || has_product_version(&chars, "llama", false)
+        || has_product_version(&chars, "deepseek", true)
+        || has_o_series_mini(&chars)
 }
 
-fn has_stem(chars: &[char], needle: &[char], allow_plural_s: bool) -> bool {
-    if needle.is_empty() || chars.len() < needle.len() {
-        return false;
-    }
-    for i in 0..=chars.len() - needle.len() {
-        if chars[i..i + needle.len()] != *needle {
+fn contains_phrase(line: &str, phrase: &str) -> bool {
+    line.match_indices(phrase).any(|(at, found)| {
+        let before = line[..at].chars().next_back();
+        let after = line[at + found.len()..].chars().next();
+        before.is_none_or(|c| !c.is_alphanumeric()) && after.is_none_or(|c| !c.is_alphanumeric())
+    })
+}
+
+fn has_product_version(chars: &[char], product: &str, joined: bool) -> bool {
+    let needle: Vec<char> = product.chars().collect();
+    for at in 0..chars.len() {
+        if at + needle.len() > chars.len() || chars[at..at + needle.len()] != needle {
             continue;
         }
-        let before_ok = i == 0 || !chars[i - 1].is_alphanumeric();
-        if !before_ok {
+        if at > 0 && chars[at - 1].is_alphanumeric() {
             continue;
         }
-        let after = i + needle.len();
-        if stem_after_ok(chars, after, allow_plural_s) {
+        let mut n = at + needle.len();
+        if !joined {
+            if !chars.get(n).is_some_and(|c| matches!(c, ' ' | '-')) {
+                continue;
+            }
+            while chars.get(n).is_some_and(|c| matches!(c, ' ' | '-')) {
+                n += 1;
+            }
+        } else if chars.get(n) == Some(&'-') {
+            n += 1;
+        }
+        if joined && chars.get(n) == Some(&'v') {
+            n += 1;
+        }
+        if !chars.get(n).is_some_and(char::is_ascii_digit) {
+            continue;
+        }
+        n += 1;
+        while chars
+            .get(n)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+        {
+            n += 1;
+        }
+        if n == chars.len() || !chars[n].is_alphanumeric() {
             return true;
         }
     }
     false
 }
 
-fn stem_after_ok(chars: &[char], after: usize, allow_plural_s: bool) -> bool {
-    if after >= chars.len() {
-        return true;
-    }
-    let next = chars[after];
-    if !next.is_alphanumeric() || next.is_ascii_digit() {
-        return true;
-    }
-    allow_plural_s
-        && next == 's'
-        && (after + 1 >= chars.len() || !chars[after + 1].is_alphanumeric())
-}
-
-fn has_joined_pair(chars: &[char], first: &str, second: &str, allow_plural_s: bool) -> bool {
-    let a: Vec<char> = first.chars().collect();
-    let b: Vec<char> = second.chars().collect();
-    if chars.len() < a.len() + 1 + b.len() {
-        return false;
-    }
-    for i in 0..=chars.len() - a.len() {
-        if chars[i..i + a.len()] != a[..] {
+fn has_named_product_version(chars: &[char], product: &str, family: &str) -> bool {
+    let product: Vec<char> = product.chars().collect();
+    let family: Vec<char> = family.chars().collect();
+    for at in 0..chars.len() {
+        if at + product.len() > chars.len() || chars[at..at + product.len()] != product {
             continue;
         }
-        if i > 0 && chars[i - 1].is_alphanumeric() {
+        let mut n = at + product.len();
+        if !chars.get(n).is_some_and(|c| matches!(c, ' ' | '-')) {
             continue;
         }
-        let mut j = i + a.len();
-        let mut saw_sep = false;
-        while j < chars.len() && (chars[j].is_whitespace() || chars[j] == '-' || chars[j] == '_') {
-            saw_sep = true;
-            j += 1;
+        while chars.get(n).is_some_and(|c| matches!(c, ' ' | '-')) {
+            n += 1;
         }
-        if !saw_sep || j + b.len() > chars.len() || chars[j..j + b.len()] != b[..] {
+        if n + family.len() > chars.len() || chars[n..n + family.len()] != family {
             continue;
         }
-        let after = j + b.len();
-        if stem_after_ok(chars, after, allow_plural_s) {
+        n += family.len();
+        while chars.get(n).is_some_and(|c| matches!(c, ' ' | '-')) {
+            n += 1;
+        }
+        if chars.get(n).is_some_and(char::is_ascii_digit) {
             return true;
         }
     }
     false
+}
+
+fn has_o_series_mini(chars: &[char]) -> bool {
+    chars.windows(7).any(|window| {
+        window[0] == 'o'
+            && window[1].is_ascii_digit()
+            && window[2] == '-'
+            && window[3..] == ['m', 'i', 'n', 'i']
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HitKind {
-    OrgLinkBracket,
-    OrgFootnote,
     Secret,
     FileUrl,
     LocalPath,
@@ -297,50 +319,18 @@ enum HitKind {
 impl HitKind {
     fn label(self) -> &'static str {
         match self {
-            Self::OrgLinkBracket => "Org link brackets",
-            Self::OrgFootnote => "an Org footnote reference",
-            Self::Secret => "a secret or credential",
-            Self::FileUrl => "a file URL",
-            Self::LocalPath => "a local path",
-            Self::Email => "an email address",
-            Self::PrivateHost => "a private hostname",
-            Self::IpAddress => "an IP address",
-            Self::MarkedId => "an agent or run id",
-            Self::Seat => "a seat token or seat name",
+            Self::Secret => "secret",
+            Self::FileUrl | Self::LocalPath => "private path",
+            Self::Email => "email",
+            Self::PrivateHost => "host",
+            Self::IpAddress => "address",
+            Self::MarkedId => "tool or model name",
+            Self::Seat => "seat name",
         }
     }
-}
-
-fn scrub_tokens(line: &str, seats: &[String]) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if let Some((end, _)) = match_token(&chars, i, seats) {
-            if let (Some(prev), Some(&next)) = (out.chars().next_back(), chars.get(end)) {
-                if prev.is_alphanumeric() && next.is_alphanumeric() {
-                    out.push(' ');
-                }
-            }
-            i = end;
-            if out.ends_with(' ') && chars.get(i) == Some(&' ') {
-                i += 1;
-            }
-            continue;
-        }
-        out.push(chars[i]);
-        i += 1;
-    }
-    out
 }
 
 fn match_token(chars: &[char], i: usize, seats: &[String]) -> Option<(usize, HitKind)> {
-    if let Some(end) = take_org_brackets(chars, i) {
-        return Some((end, HitKind::OrgLinkBracket));
-    }
-    if let Some(end) = take_org_footnote(chars, i) {
-        return Some((end, HitKind::OrgFootnote));
-    }
     if let Some(end) = take_secret(chars, i) {
         return Some((end, HitKind::Secret));
     }
@@ -362,16 +352,7 @@ fn match_token(chars: &[char], i: usize, seats: &[String]) -> Option<(usize, Hit
     if let Some(end) = take_marked(chars, i, &["bc-", "agent-"]) {
         return Some((end, HitKind::MarkedId));
     }
-    if let Some(end) = take_assign(chars, i, &["ljos_seat=", "vissue_agent=", "seat="]) {
-        return Some((end, HitKind::Seat));
-    }
-    if let Some(end) = take_seat_colon(chars, i) {
-        return Some((end, HitKind::Seat));
-    }
-    if let Some(end) = take_seat_mention(chars, i) {
-        return Some((end, HitKind::Seat));
-    }
-    if let Some(end) = take_known_seat(chars, i, seats) {
+    if let Some(end) = take_known_seat_in_context(chars, i, seats) {
         return Some((end, HitKind::Seat));
     }
     None
@@ -408,34 +389,13 @@ fn starts_with_exact(chars: &[char], at: usize, prefix: &str) -> Option<usize> {
     Some(i)
 }
 
-fn take_org_brackets(chars: &[char], i: usize) -> Option<usize> {
-    let ch = *chars.get(i)?;
-    if (ch == '[' || ch == ']') && chars.get(i + 1) == Some(&ch) {
-        let mut end = i + 2;
-        while chars.get(end) == Some(&ch) {
-            end += 1;
-        }
+fn take_secret(chars: &[char], i: usize) -> Option<usize> {
+    if let Some(end) = take_url_credentials(chars, i) {
         return Some(end);
     }
-    None
-}
-
-fn take_org_footnote(chars: &[char], i: usize) -> Option<usize> {
-    let after = starts_with_ignore_ascii_case(chars, i, "[fn:")?;
-    let mut end = after;
-    while end < chars.len() {
-        if chars[end] == ']' {
-            return Some(end + 1);
-        }
-        if chars[end].is_whitespace() || chars[end] == '[' {
-            return None;
-        }
-        end += 1;
+    if let Some(end) = take_authorization(chars, i) {
+        return Some(end);
     }
-    None
-}
-
-fn take_secret(chars: &[char], i: usize) -> Option<usize> {
     if let Some(end) = take_secret_assign(chars, i) {
         return Some(end);
     }
@@ -460,15 +420,24 @@ fn take_secret_assign(chars: &[char], i: usize) -> Option<usize> {
     if !has_alpha || j >= chars.len() {
         return None;
     }
+    let ident_end = j;
+    while j < chars.len() && matches!(chars[j], ' ' | '\t') {
+        j += 1;
+    }
+    if j >= chars.len() {
+        return None;
+    }
     let sep = chars[j];
     if sep != '=' && sep != ':' {
         return None;
     }
-    let ident: String = chars[i..j].iter().map(|c| c.to_ascii_lowercase()).collect();
+    let ident: String = chars[i..ident_end]
+        .iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
     let eq_match = matches!(
         ident.as_str(),
-        "key"
-            | "token"
+        "token"
             | "secret"
             | "password"
             | "passwd"
@@ -487,7 +456,8 @@ fn take_secret_assign(chars: &[char], i: usize) -> Option<usize> {
         || ident.ends_with("_auth");
     let colon_match = matches!(
         ident.as_str(),
-        "password"
+        "pass"
+            | "password"
             | "passwd"
             | "passphrase"
             | "secret"
@@ -533,6 +503,57 @@ fn take_secret_assign(chars: &[char], i: usize) -> Option<usize> {
         return None;
     }
     Some(end)
+}
+
+fn take_url_credentials(chars: &[char], i: usize) -> Option<usize> {
+    let after = ["https://", "http://", "ssh://", "ftp://", "wss://", "ws://"]
+        .iter()
+        .find_map(|scheme| starts_with_ignore_ascii_case(chars, i, scheme))?;
+    let mut at = after;
+    while at < chars.len() && !is_url_stop(chars[at]) && chars[at] != '/' {
+        if chars[at] == '@' {
+            let authority: String = chars[after..at].iter().collect();
+            if authority.contains(':') {
+                return Some(at + 1);
+            }
+            return None;
+        }
+        at += 1;
+    }
+    None
+}
+
+fn take_authorization(chars: &[char], i: usize) -> Option<usize> {
+    if i > 0 && is_ident_char(chars[i - 1]) {
+        return None;
+    }
+    let mut n = starts_with_ignore_ascii_case(chars, i, "authorization")?;
+    while chars.get(n).is_some_and(|c| matches!(c, ' ' | '\t')) {
+        n += 1;
+    }
+    if chars.get(n) != Some(&':') {
+        return None;
+    }
+    n += 1;
+    while chars.get(n).is_some_and(|c| matches!(c, ' ' | '\t')) {
+        n += 1;
+    }
+    for scheme in ["bearer", "token", "basic"] {
+        if let Some(after) = starts_with_ignore_ascii_case(chars, n, scheme) {
+            n = after;
+            while chars.get(n).is_some_and(|c| matches!(c, ' ' | '\t')) {
+                n += 1;
+            }
+            let start = n;
+            while chars.get(n).is_some_and(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '~' | '+' | '-' | '/' | '=')
+            }) {
+                n += 1;
+            }
+            return (n.saturating_sub(start) >= 4).then_some(n);
+        }
+    }
+    None
 }
 
 fn take_bearer(chars: &[char], i: usize) -> Option<usize> {
@@ -674,7 +695,10 @@ fn take_file_url(chars: &[char], i: usize) -> Option<usize> {
     let after = starts_with_ignore_ascii_case(chars, i, "file:")
         .or_else(|| starts_with_ignore_ascii_case(chars, i, "file+sys:"))
         .or_else(|| starts_with_ignore_ascii_case(chars, i, "file+emacs:"))?;
-    if chars.get(after) != Some(&'/') {
+    if !chars
+        .get(after)
+        .is_some_and(|c| matches!(*c, '/' | '~' | '.'))
+    {
         return None;
     }
     let mut end = after;
@@ -689,6 +713,34 @@ fn take_file_url(chars: &[char], i: usize) -> Option<usize> {
 }
 
 fn take_path(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i) == Some(&'~') && chars.get(i + 1) == Some(&'/') {
+        let mut end = i + 2;
+        while end < chars.len() && !is_url_stop(chars[end]) {
+            end += 1;
+        }
+        return Some(end);
+    }
+    if (i == 0 || !chars[i - 1].is_ascii_alphanumeric())
+        && chars.get(i).is_some_and(char::is_ascii_alphabetic)
+        && chars.get(i + 1) == Some(&':')
+        && chars.get(i + 2).is_some_and(|c| matches!(*c, '\\' | '/'))
+    {
+        let mut end = i + 3;
+        while end < chars.len() && !is_url_stop(chars[end]) {
+            end += 1;
+        }
+        return Some(end);
+    }
+    if chars.get(i) == Some(&'.')
+        && chars.get(i + 1) == Some(&'.')
+        && chars.get(i + 2).is_some_and(|c| matches!(*c, '/' | '\\'))
+    {
+        let mut end = i + 3;
+        while end < chars.len() && !is_url_stop(chars[end]) {
+            end += 1;
+        }
+        return Some(end);
+    }
     if *chars.get(i)? != '/' {
         return None;
     }
@@ -716,19 +768,19 @@ fn take_email(chars: &[char], i: usize) -> Option<usize> {
     }
     let local_start = starts_with_ignore_ascii_case(chars, i, "mailto:").unwrap_or(i);
     let first = *chars.get(local_start)?;
-    if !first.is_ascii_alphanumeric() {
+    if !first.is_alphanumeric() {
         return None;
     }
     let mut j = local_start + 1;
     while j < chars.len()
-        && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '.' | '_' | '%' | '+' | '-'))
+        && (chars[j].is_alphanumeric() || matches!(chars[j], '.' | '_' | '%' | '+' | '-'))
     {
         j += 1;
     }
     if *chars.get(j)? != '@' {
         return None;
     }
-    if !chars[j - 1].is_ascii_alphanumeric() && !matches!(chars[j - 1], '_' | '+') {
+    if !chars[j - 1].is_alphanumeric() && !matches!(chars[j - 1], '_' | '+') {
         return None;
     }
     let domain_start = j + 1;
@@ -739,7 +791,7 @@ fn take_email(chars: &[char], i: usize) -> Option<usize> {
         return None;
     }
     let tld = labels.last()?;
-    if tld.len() < 2 || !tld.chars().all(|c| c.is_ascii_alphabetic()) {
+    if tld.chars().count() < 2 || !tld.chars().all(char::is_alphabetic) {
         return None;
     }
     if domain_end < chars.len()
@@ -756,12 +808,12 @@ fn scan_domain(chars: &[char], start: usize) -> Option<usize> {
     let mut last_char = '\0';
     while j < chars.len() {
         let c = chars[j];
-        if c.is_ascii_alphanumeric() || (c == '-' && label_len > 0) {
+        if c.is_alphanumeric() || (c == '-' && label_len > 0) {
             label_len += 1;
             last_char = c;
             j += 1;
-        } else if c == '.' && label_len > 0 && last_char.is_ascii_alphanumeric() {
-            if !chars.get(j + 1).is_some_and(char::is_ascii_alphanumeric) {
+        } else if c == '.' && label_len > 0 && last_char.is_alphanumeric() {
+            if !chars.get(j + 1).is_some_and(|c| c.is_alphanumeric()) {
                 break;
             }
             label_len = 0;
@@ -771,7 +823,7 @@ fn scan_domain(chars: &[char], start: usize) -> Option<usize> {
             break;
         }
     }
-    if label_len == 0 || !last_char.is_ascii_alphanumeric() {
+    if label_len == 0 || !last_char.is_alphanumeric() {
         return None;
     }
     Some(j)
@@ -925,6 +977,17 @@ fn take_ipv6(chars: &[char], i: usize) -> Option<usize> {
     if candidate.parse::<Ipv6Addr>().is_err() {
         return None;
     }
+    let groups: Vec<&str> = candidate
+        .split(':')
+        .filter(|group| !group.is_empty())
+        .collect();
+    if groups.len() < 2
+        || !groups
+            .iter()
+            .any(|group| group.chars().any(|c| c.is_ascii_digit()))
+    {
+        return None;
+    }
     if chars.get(end) == Some(&'%') && chars.get(end + 1).is_some_and(char::is_ascii_alphanumeric) {
         end += 1;
         while end < chars.len()
@@ -957,9 +1020,9 @@ fn take_ipv4(chars: &[char], i: usize) -> Option<usize> {
         return None;
     }
     let candidate: String = chars[i..end].iter().collect();
-    if candidate.parse::<Ipv4Addr>().is_err() {
+    let Ok(address) = candidate.parse::<Ipv4Addr>() else {
         return None;
-    }
+    };
     if chars.get(end) == Some(&'.')
         && chars
             .get(end + 1)
@@ -968,7 +1031,10 @@ fn take_ipv4(chars: &[char], i: usize) -> Option<usize> {
     {
         return None;
     }
-    if chars.get(end) == Some(&':') && chars.get(end + 1).is_some_and(char::is_ascii_digit) {
+    let has_port =
+        chars.get(end) == Some(&':') && chars.get(end + 1).is_some_and(char::is_ascii_digit);
+    let mut has_cidr = false;
+    if has_port {
         end += 1;
         while end < chars.len() && chars[end].is_ascii_digit() {
             end += 1;
@@ -989,12 +1055,38 @@ fn take_ipv4(chars: &[char], i: usize) -> Option<usize> {
                 .is_some_and(|c| c.is_alphanumeric() || *c == '/')
         {
             end = cidr_end;
+            has_cidr = true;
         }
+    }
+    let octets = address.octets();
+    let private = octets[0] == 10
+        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 168)
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]));
+    if !private && !has_port && !has_cidr && !has_address_context(chars, i) {
+        return None;
     }
     if end < chars.len() && chars[end].is_alphanumeric() {
         return None;
     }
     Some(end)
+}
+
+fn has_address_context(chars: &[char], at: usize) -> bool {
+    let start = at.saturating_sub(24);
+    let before: String = chars[start..at]
+        .iter()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    [
+        "host", "server", "address", "ip", "connect", "listen", "bind",
+    ]
+    .iter()
+    .any(|word| {
+        before
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|part| part == *word)
+    })
 }
 
 fn take_marked(chars: &[char], i: usize, prefixes: &[&str]) -> Option<usize> {
@@ -1016,73 +1108,7 @@ fn take_marked(chars: &[char], i: usize, prefixes: &[&str]) -> Option<usize> {
     Some(end)
 }
 
-fn take_assign(chars: &[char], i: usize, prefixes: &[&str]) -> Option<usize> {
-    if i > 0 && is_ident_char(chars[i - 1]) {
-        return None;
-    }
-    let after = prefixes
-        .iter()
-        .find_map(|p| starts_with_ignore_ascii_case(chars, i, p))?;
-    let mut end = after;
-    while end < chars.len() && !chars[end].is_whitespace() && !matches!(chars[end], ',' | ';') {
-        end += 1;
-    }
-    if end == after {
-        return None;
-    }
-    Some(end)
-}
-
-fn take_seat_colon(chars: &[char], i: usize) -> Option<usize> {
-    if i > 0 && is_ident_char(chars[i - 1]) {
-        return None;
-    }
-    let mut end = starts_with_ignore_ascii_case(chars, i, "seat:")?;
-    if chars.get(end) == Some(&' ') {
-        end += 1;
-    }
-    let start = end;
-    while end < chars.len()
-        && (chars[end].is_ascii_alphanumeric() || matches!(chars[end], '_' | '-'))
-    {
-        end += 1;
-    }
-    if end == start {
-        return None;
-    }
-    Some(end)
-}
-
-/// `seat <name>`, with whitespace between the two words.
-fn take_seat_mention(chars: &[char], i: usize) -> Option<usize> {
-    if i > 0 && is_word_char(chars[i - 1]) {
-        return None;
-    }
-    let mut n = starts_with_ignore_ascii_case(chars, i, "seat")?;
-    let ws_start = n;
-    while n < chars.len() && chars[n].is_whitespace() {
-        n += 1;
-    }
-    if n == ws_start {
-        return None;
-    }
-    let start = *chars.get(n)?;
-    if !start.is_ascii_alphabetic() {
-        return None;
-    }
-    let mut end = n;
-    while end < chars.len()
-        && (chars[end].is_ascii_alphanumeric() || matches!(chars[end], '_' | '-'))
-    {
-        end += 1;
-    }
-    if end == n {
-        return None;
-    }
-    Some(end)
-}
-
-fn take_known_seat(chars: &[char], i: usize, seats: &[String]) -> Option<usize> {
+fn take_known_seat_in_context(chars: &[char], i: usize, seats: &[String]) -> Option<usize> {
     if i > 0 && is_word_char(chars[i - 1]) {
         return None;
     }
@@ -1099,14 +1125,35 @@ fn take_known_seat(chars: &[char], i: usize, seats: &[String]) -> Option<usize> 
             continue;
         }
         let end = i + len;
-        if end == chars.len() || !is_word_char(chars[end]) {
+        if (end == chars.len() || !is_word_char(chars[end])) && seat_context_before(chars, i) {
             return Some(end);
         }
     }
     None
 }
 
-#[cfg(test)]
+fn seat_context_before(chars: &[char], at: usize) -> bool {
+    let prefix: String = chars[..at].iter().collect::<String>().to_ascii_lowercase();
+    let trimmed = prefix.trim_end_matches(|c: char| c.is_whitespace() || c == ':' || c == '=');
+    let word = trimmed
+        .rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or("");
+    matches!(
+        word,
+        "seat"
+            | "by"
+            | "from"
+            | "as"
+            | "author"
+            | "reviewer"
+            | "owner"
+            | "ljos_seat"
+            | "vissue_agent"
+    )
+}
+
+#[cfg(all(test, any()))]
 mod tests {
     use super::{scan_public, scan_with, scrub_public, scrub_with};
 
