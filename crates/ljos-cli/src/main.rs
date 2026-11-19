@@ -3820,13 +3820,16 @@ fn main() {
             } else {
                 println!("label {}: {}", label.label, label.detail);
             }
-            // A seat that was not resolved, or is not on the roster, is a
-            // failed command. 2 is the status a bad invocation already
-            // uses, so a script that checks the status sees the failure.
-            // Other labels are notes and still exit 0.
-            if matches!(label.label, "seat-unresolved" | "seat-unlisted")
-                || (label.label == "reopen-warning"
-                    && label.detail.contains("name different seats"))
+            // A seat that was not resolved or is not on the roster, and
+            // an unseen mail recipient, are failed commands. 2 is the
+            // status a bad invocation already uses, so a script that
+            // checks the status sees the failure. Other labels are notes
+            // and still exit 0.
+            if matches!(
+                label.label,
+                "seat-unresolved" | "seat-unlisted" | "recipient-unseen"
+            ) || (label.label == "reopen-warning"
+                && label.detail.contains("name different seats"))
             {
                 std::process::exit(USAGE_STATUS);
             }

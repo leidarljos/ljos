@@ -25,6 +25,7 @@ A writer that refuses kind =message= is an error too: the command exits
 non-zero, names packset 0.13.0, and does not print an empty inbox.
 =ljos send= names the packset version that keeps mail. =ljos read ID=
 writes one receipt. =ljos reply ID TEXT= writes back to the sender.
+Sending to a seat the pack has not seen exits non-zero and prints =recipient-unseen= with that seat's name; pass =--new-seat= only when the recipient has not started yet.
 
 =ljos hook --prompt= shows unread mail at the start of the next prompt,
 at most eight messages and interrupts first, and writes one receipt for
