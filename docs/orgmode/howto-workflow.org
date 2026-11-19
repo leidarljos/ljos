@@ -1,0 +1,64 @@
+#+title: Run a recurring release as a workflow
+#+description: Define a versioned Org skeleton, file one ticket per step, and close the release on a deed plus a ship consensus.
+#+options: toc:nil num:nil
+
+A release is the same DAG every time: changelog, version bump, tests, docs, tag, artifacts, a packaging notice, review, and a sign-off. The skeleton is an Org file in the repository. Each run is a parent ticket and one child per step.
+
+* Store the skeleton
+
+The file name is the skeleton name. =ljos workflow define docs/examples/workflows/release.org= checks the DAG and stores the bytes as a deed, with the sha256 and the =#+version=. The same bytes again change nothing. A changed body needs a higher =#+version=.
+
+#+begin_src console
+$ ljos workflow define docs/examples/workflows/release.org
+#+end_src
+
+* File a run
+
+File the parent, then start the skeleton under it. =--var version=1.2.0= fills ={{version}}= in the step titles and bodies. The tracker records a block edge for each =:DEPENDS:=. Running the same command again files nothing new and names the tickets already there.
+
+#+begin_src console
+$ ljos file "Release 1.2.0" -p demo
+$ ljos workflow --start release PARENT --var version=1.2.0
+#+end_src
+
+=ljos workflow PARENT= prints each step, the steps whose dependencies are done, the open blockers, and what the sign-off still needs. =ljos ready= lists those same unblocked steps, because a step waits on its dependencies.
+
+#+begin_src console
+$ ljos workflow PARENT
+$ ljos ready
+#+end_src
+
+A problem found while a step is open is a child of that step. The child blocks the step until it is closed.
+
+#+begin_src console
+$ ljos file "CI failed on the tag step" --parent STEP
+#+end_src
+
+* Sign off
+
+The sign-off step stays open until every other step is done, no blocker under any step is open, =ljos consensus STEP --quorum 2= settles ship, and at least one deed named on the step passes =ljos evidence=. The quorum is the =:QUORUM:= property, and 2 when the skeleton omits it. =:DEED: yes= is what asks for the deed. =ljos complete= and =ljos finish= both refuse, exit 1, and list what is still missing.
+
+#+begin_src console
+$ ljos consensus SIGNOFF --quorum 2
+$ ljos deed SIGNOFF --add ACCESSION
+$ ljos evidence ACCESSION
+#+end_src
+
+* Revise the skeleton
+
+Notes and blockers from a finished run become a proposal. The proposal is a decision whose options are keep and revise. After =ljos consensus= settles revise, applying a file stores the next version and notes the proposal.
+
+#+begin_src console
+$ ljos workflow revise release --from PARENT
+$ ljos consensus PROPOSAL
+$ ljos workflow revise release --apply FILE
+#+end_src
+
+* Publish the page
+
+=ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org= writes the steps in dependency order and a dot diagram. The page drops local absolute paths, seat names, agent ids and any line that names a bot. The same command with =--check= exits 1 when the committed file differs from a fresh render or still has one of those hits.
+
+#+begin_src console
+$ ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org
+$ ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org --check
+#+end_src

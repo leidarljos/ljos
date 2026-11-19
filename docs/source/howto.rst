@@ -25,6 +25,7 @@ Each page is one task. Start with the first two; the rest stand alone.
 - :doc:`Send mail between seats <howto-mail>`: write to another seat, read the inbox, and wake an idle seat when mail reaches it.
 - :doc:`Hand work to another seat <howto-handover>`: sign a handover bundle and receive from the same sender again.
 - :doc:`Vote and settle a decision <howto-vote>`: cast ballots as seats and personas, settle them, and set or move the trust rows.
+- :doc:`Run a recurring release as a workflow <howto-workflow>`: define a versioned Org skeleton, file one ticket per step, and close the release on a deed plus a ship consensus.
 - :doc:`Run personas in panes and subagents <howto-personas>`: open persona panes in another tool and spawn a persona as a subagent.
 - :doc:`Put the judgments to a model <howto-judge>`: turn on Jev, or point the same judgments at a local model or a runner, and cast persona ballots through it.
 - :doc:`Read the command check <howto-command-check>`: what the command check warns on, the rewrite, block-on-warning, and which branches the push check covers.
@@ -49,6 +50,7 @@ Each page is one task. Start with the first two; the rest stand alone.
    howto-mail
    howto-handover
    howto-vote
+   howto-workflow
    howto-personas
    howto-judge
    howto-command-check

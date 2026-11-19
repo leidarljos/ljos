@@ -1,0 +1,112 @@
+#+title: Release
+#+version: 1
+
+* Write the changelog
+:PROPERTIES:
+:STEP: changelog
+:DEPENDS:
+:KIND: do
+:ROLE: author
+:END:
+
+Write the changelog for {{version}}.
+
+* Bump the version
+:PROPERTIES:
+:STEP: version
+:DEPENDS: changelog
+:KIND: do
+:END:
+
+Set the package version to {{version}}.
+
+* Tests and CI green
+:PROPERTIES:
+:STEP: tests
+:DEPENDS: version
+:KIND: do
+:END:
+
+The tests pass and CI is green for {{version}}.
+
+* Build the docs
+:PROPERTIES:
+:STEP: docs
+:DEPENDS: tests
+:KIND: do
+:END:
+
+The documentation builds for {{version}}.
+
+* Tag the release
+:PROPERTIES:
+:STEP: tag
+:DEPENDS: docs
+:KIND: do
+:END:
+
+Tag {{version}}.
+
+* Release artifacts
+:PROPERTIES:
+:STEP: artifacts
+:DEPENDS: tag
+:KIND: do
+:END:
+
+Publish the release artifacts for {{version}}.
+
+* Downstream packaging notice
+:PROPERTIES:
+:STEP: packaging
+:DEPENDS: artifacts
+:KIND: do
+:END:
+
+Tell downstream packagers that {{version}} is out.
+
+* Review the release
+:PROPERTIES:
+:STEP: review
+:DEPENDS: packaging
+:KIND: review
+:ROLE: reviewer
+:END:
+
+Review the release of {{version}}.
+
+* Sign off the release
+:PROPERTIES:
+:STEP: signoff
+:DEPENDS: review
+:KIND: signoff
+:QUORUM: 2
+:DEED: yes
+:END:
+
+Options: ship, hold
+
+Sign off {{version}} when the deed and the votes agree.
+
+#+begin_src dot
+digraph workflow {
+  rankdir=LR;
+  "changelog" [label="Write the changelog"];
+  "version" [label="Bump the version"];
+  "tests" [label="Tests and CI green"];
+  "docs" [label="Build the docs"];
+  "tag" [label="Tag the release"];
+  "artifacts" [label="Release artifacts"];
+  "packaging" [label="Downstream packaging notice"];
+  "review" [label="Review the release"];
+  "signoff" [label="Sign off the release"];
+  "changelog" -> "version";
+  "version" -> "tests";
+  "tests" -> "docs";
+  "docs" -> "tag";
+  "tag" -> "artifacts";
+  "artifacts" -> "packaging";
+  "packaging" -> "review";
+  "review" -> "signoff";
+}
+#+end_src
