@@ -34,7 +34,7 @@ File the parent, then start the skeleton under it. ``--var version=1.2.0`` fills
    $ ljos workflow PARENT
    $ ljos ready
 
-A problem found while a step is open is a child of that step, or a ``ljos block`` edge to another ticket inside or outside the run. Both block the step, appear in ``ljos workflow PARENT``, and hold the sign-off until closed. Concurrent ``--start`` calls on the same parent wait on a per-run lock so each step is filed once.
+A problem found while a step is open is a child of that step, or a ``ljos block`` edge to another ticket inside or outside the run. Both block the step, appear in ``ljos workflow PARENT``, and hold the sign-off until closed. A ``:BLOCKED_BY:`` id that has no ticket is reported as missing but blocks nothing. This matches ``vissue ready``, and both ready lists still include the step. Concurrent ``--start`` calls on the same parent wait up to thirty seconds on a per-run lock so each step is filed once. ``LJOS_WORKFLOW_LOCK_WAIT`` is that wait in seconds when it is a positive integer. A caller that cannot acquire the lock exits with the parent and lock path.
 
 .. code:: console
 
@@ -66,7 +66,9 @@ Notes and blockers from a finished run become a proposal. The proposal is a deci
 Publish the page
 ================
 
-``ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org`` writes the steps in dependency order and a dot diagram. The page normalizes text, drops local paths, ``file:`` URLs, credentials, IP addresses, private hostnames, emails, Org link brackets, seat names, agent ids, and any line that names a model or tool. Render refuses to write a page its own check would reject, and ``--check`` exits 1 when the file differs from a fresh render or rescans with any hit.
+``ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org`` writes the steps in dependency order and a dot diagram. It emits author text unchanged. It normalizes a copy only to detect secrets, private paths, addresses, private hosts, email addresses, declared seat names, and product names with versions. It also detects phrases that identify generated work, and an invisible character on an author line. A hit names every source line and class, and render writes nothing. A ``--var`` value that contains a line break or a control character is refused before that copy is filled.
+
+An IPv4 address is sensitive when it is private, loopback, or link-local, when it has a CIDR or port, or when it follows an address context word such as host, server, address, IP, connect, listen or bind. Four-part versions in ordinary prose stay unchanged, including after ships or release. An IPv6 address needs at least two explicit groups; bracketed IPv6 with a port is also sensitive. Public Org links to https stay intact. A title or a body whose detection copy starts an Org heading, keyword or drawer is refused, including zero-width and full-width spellings. A ``:ROLE:`` value that names a declared seat is refused. Step keys are checked once when the skeleton is parsed. Renderer-owned properties and dot lines are not scanned for ordinary prose, and a secret on one of those lines is still a hit. ``--check`` exits 1 when the file differs from a fresh render or contains a detected line.
 
 .. code:: console
 

@@ -634,7 +634,7 @@ enum WorkflowCmd {
     },
     /// Write the public Org page for a skeleton, steps in dependency order.
     ///
-    /// The page is written with `--out`. A committed page is compared with `--check`, which exits 1 when the file differs from a fresh render or still has a local path, a seat token, an agent id, a model name, a seat name or a line that names a bot.
+    /// Author text is written unchanged. Render refuses the page when a detection copy finds a secret, a private path, an address, a private host, an email, an invisible character, a declared seat name, or a product or tool name. Each hit names the source line and the class, and nothing is written. `--check` exits 1 when `--out` differs from a fresh render or the file has a hit.
     ///
     /// Example: `ljos workflow render release --out page.org`
     Render {
@@ -646,7 +646,7 @@ enum WorkflowCmd {
         /// Write the page here. With `--check`, this is the committed file to compare.
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
-        /// Exit 1 when `--out` differs from a fresh render or still has scrub hits.
+        /// Exit 1 when `--out` differs from a fresh render or the file has a public-text hit.
         #[arg(long)]
         check: bool,
         /// Fill `{{key}}` before rendering. Repeat for each variable.
