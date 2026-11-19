@@ -180,6 +180,7 @@ pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
 pub mod scan;
+pub mod scrub;
 #[cfg(test)]
 mod seat_mcp_layout;
 pub mod seat_resolve;
@@ -212,6 +213,7 @@ mod verbatim;
 mod version_skew;
 pub mod wake;
 pub mod word_rank;
+pub mod workflow_skel;
 
 #[cfg(test)]
 mod cursor_event_scan;
@@ -26846,9 +26848,11 @@ pub fn latest_note_value(v: &Value, prefix: &str) -> Option<String> {
         dated.push((ts, live));
     }
     if dated.iter().any(|(ts, _)| !ts.is_empty()) {
+        // The logbook lists the newest note first. A shared minute keeps that
+        // first note. A greater timestamp replaces it.
         dated
             .into_iter()
-            .max_by_key(|(ts, _)| ts.clone())
+            .reduce(|best, next| if next.0 > best.0 { next } else { best })
             .and_then(|(_, n)| n)
     } else {
         dated.into_iter().next().and_then(|(_, n)| n)
@@ -27490,6 +27494,12 @@ pub(crate) fn workflow_child(
 pub fn workflow_start(parent: &str, name: &str, width: Width) -> Result<String> {
     let name = parse_workflow_name(name)?;
     let v = tracker_show_json(parent)?;
+    if let Some(have) = workflow_skel::bound_skeleton(&v) {
+        return Err(policy_label::labelled(
+            "workflow-warning",
+            format!("workflow: {parent} already runs the {have} skeleton; nothing was written"),
+        ));
+    }
     let mut out = String::new();
     match workflow_name_from_issue(&v) {
         Some(have) if have != name => {
@@ -48344,6 +48354,10 @@ pub fn complete(
     if node.trim().is_empty() {
         bail!("complete: the id is empty; pass a tracker id, or a 32-hex claim-graph id");
     }
+    // A signoff step stays open until the run, its blockers, a ship
+    // consensus and any required deed are in place. A claim id that is
+    // not a ticket is left to the claim graph.
+    workflow_skel::signoff_block(node)?;
     complete_as(node, status, assignee, gen, false)
 }
 
@@ -49393,6 +49407,9 @@ pub fn finish(
         }
         return Ok(ticked);
     }
+    // Before the person check, so a signoff that is still missing work
+    // names that work. The same check runs for a finish that does not close.
+    workflow_skel::signoff_block(issue)?;
     // A close asks whether a person is present, before any write. A
     // runner with no terminal is refused unless a standing grant covers
     // this seat and this ticket. The sitting can still end. A pending
@@ -72068,6 +72085,18 @@ mod tests {
         assert_eq!(
             playbook_name_from_issue(&playbook_only).as_deref(),
             Some("feature")
+        );
+    }
+
+    #[test]
+    fn the_newest_note_wins_when_the_minute_matches() {
+        let v = serde_json::json!({"logbook": [
+            {"note": "playbook: release", "timestamp": "[2026-11-19 Wed 12:00]"},
+            {"note": "playbook: feature", "timestamp": "[2026-11-19 Wed 12:00]"}
+        ]});
+        assert_eq!(
+            latest_note_value(&v, PLAYBOOK_NOTE_PREFIX).as_deref(),
+            Some("release")
         );
     }
 

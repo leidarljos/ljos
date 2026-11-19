@@ -3890,9 +3890,20 @@ mod tests {
         let screen = bare();
         for mark in ["[.]", "(.)", "{.}", "\\.", "[dot]", " dot "] {
             let prefix = format!("1{mark}2");
+            let address = format!("{prefix} ::a");
+            assert_eq!(
+                classify(&address, &screen),
+                Some(Class::Address),
+                "{address:?}"
+            );
+            assert!(
+                crate::scrub::scrub_public(&address) != address,
+                "{address:?}"
+            );
 
             let text = format!("{prefix} Face::Fade");
             assert_eq!(classify(&text, &screen), None, "{text:?}");
+            assert_eq!(crate::scrub::scrub_public(&text), text, "{text:?}");
         }
     }
 
