@@ -64,6 +64,7 @@ Set those and run the command again when the ballot has to reach the other runs.
 A machine that only needed the binaries can leave them unset.
 
 The run's harness id is the ballot's session, so two runs count twice and a run or subagent that votes again counts once.
+Two distinct =CLAUDE_CODE_SESSION_ID= values count as two sessions even when one parent shell starts both commands; repeated votes with the same value fold into one voice.
 When nothing names the run but the seat, =ljos vote= and the tally call the session unverified.
 Persona ballots and Jev ballots are advisory.
 The push check reads seat ballots only. See [[file:howto-command-check.org][Read the command check]].

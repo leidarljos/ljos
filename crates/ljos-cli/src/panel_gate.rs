@@ -525,6 +525,7 @@ static CAST: std::sync::Mutex<std::collections::BTreeSet<String>> =
 struct CastTree {
     shell: Option<String>,
     harness: Option<String>,
+    claude_session: bool,
 }
 
 impl CastTree {
@@ -544,6 +545,7 @@ impl CastTree {
         Self {
             shell: proc_tree::cast_shell(&chain, mine.as_deref()).map(proc_tree::token),
             harness: crate::subagent::taken_harness().map(|p| proc_tree::token(&p)),
+            claude_session: crate::own_session_id("CLAUDE_CODE_SESSION_ID").is_some(),
         }
     }
 }
@@ -590,14 +592,15 @@ impl TreeRow {
     }
 
     /// The earlier voice when a cast as `key` under `tree` repeats this
-    /// row. A shell runs one agent's commands, so any other session from
-    /// it is that voice. A runner row binds another root session. A
+    /// row. A shell runs one agent's commands, so another unverified
+    /// session from it is that voice. Distinct Claude Code session ids
+    /// are distinct invocations. A runner row binds another root session. A
     /// subagent of the same root is not bound here, and the parent fold
     /// counts it with that root. The pair is `(why, session key)`:
     /// `shell` or `harness`, and this row's session.
     fn binds(&self, key: &str, tree: &CastTree) -> Option<(&'static str, String)> {
         let same = |mine: &Option<String>, theirs: &str| mine.as_deref() == Some(theirs);
-        if same(&tree.shell, &self.shell) && self.session != key {
+        if same(&tree.shell, &self.shell) && self.session != key && !tree.claude_session {
             Some(("shell", self.session.clone()))
         } else if same(&tree.harness, &self.harness)
             && session_root(&self.session) != session_root(key)
@@ -1883,6 +1886,7 @@ mod tests {
         let tree = |shell: &str, harness: &str| CastTree {
             shell: Some(shell.into()),
             harness: Some(harness.into()),
+            claude_session: false,
         };
         assert_eq!(
             row.binds("sess-root:agent-b", &tree("b:10:1", "b:30:3")),
