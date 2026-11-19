@@ -5,10 +5,10 @@
 # found, the tracker, the memory writer and the deed store are still set up.
 #
 # One command for a new machine. It fetches the release assets, checks
-# each SHA-256, and sets up the tracker and memory. Search matches words.
-# The encoder is not downloaded:
+# each SHA-256, installs the encoder and its model, and sets up the tracker
+# and memory:
 #
-#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
+#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 #
 # Two commands, when registration should be its own step. The first
 # installs the programs. The second finds Claude Code, Cursor and Codex,
@@ -16,13 +16,12 @@
 # the skill for each. A second `ljos onboard` leaves those files as they
 # are. `--dry-run` writes nothing. `ljos offboard` removes the registration.
 #
-#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed --no-onboard
+#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-onboard
 #   export PATH="$HOME/.local/bin:$PATH" && ljos onboard
 #
-# With no flag the encoder is installed, as before. It fetches a model on
-# first use. `--with-embed` is that same install.
+# To skip the encoder and its model download:
 #
-#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+#   sh install.sh --no-embed
 #
 # Each ljos release attaches this script as the asset install.sh, from
 # the first release after 0.28.0 on. Before that release the URL is a 404.

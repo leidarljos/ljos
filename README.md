@@ -25,11 +25,11 @@ No model writes or rewrites a lesson. Every store is a file you can open.
 ## Install
 
 ```
-curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed --no-onboard
-export PATH="$HOME/.local/bin:$PATH" && ljos onboard
+curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-`--no-embed` leaves out the encoder, a model that lets search match meaning. Search then matches words. [Install in detail](#install-in-detail) covers the encoder, each runner and what to do when install stops.
+The installer includes the encoder and downloads its model, then onboards the coding runners it finds. Pass `--no-embed` to skip the encoder and its model download, or `--no-onboard` to register runners later. [Install in detail](#install-in-detail) covers each runner and what to do when install stops.
 
 ## First run
 
@@ -177,7 +177,7 @@ From a checkout of this repository:
 
 <!-- ljos-quickstart:start -->
 ```
-sh scripts/install.sh --no-embed
+curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 export PATH="$HOME/.local/bin:$PATH"
 cd "$HOME"
 git config --global user.name "Your Name"
@@ -188,15 +188,8 @@ ljos search "lexical default"
 ljos file "Pick a codec" -p demo
 ```
 
-`sh scripts/install.sh --no-embed` installs the published release.
-The release is a complete install of ljos and the sibling tools.
-To install this checkout onto PATH instead, run `sh scripts/install.sh --from-checkout --no-embed`.
-
-A release attaches that same script:
-
-```
-curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
-```
+The release is a complete install of ljos, the sibling tools and the encoder.
+To install this checkout onto PATH instead, run `sh scripts/install.sh --from-checkout`.
 
 The `install.sh` attached to the 0.41.1 release asked for `vissue-cli-<target>.tar.xz`. The 0.41.2 script fetches `vissue-v<version>-<target>.tar.gz`, the archive the vissue release publishes.
 

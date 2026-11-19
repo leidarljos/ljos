@@ -17,22 +17,15 @@ Install
 
 Linux and macOS are supported. Windows works through Windows Subsystem for Linux (WSL) and is untested.
 
-From a checkout of this repository:
-
 .. code:: console
 
-   $ sh scripts/install.sh --no-embed
+   $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
    $ export PATH="$HOME/.local/bin:$PATH"
 
-From a checkout, that command installs the published release.
-The release is a complete install of ljos and the sibling tools.
-To install this checkout onto PATH instead, run ``sh scripts/install.sh --from-checkout --no-embed``.
-
-A release attaches that script:
-
-.. code:: console
-
-   $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
+The release is a complete install of ljos, the sibling tools and the encoder.
+The installer downloads the encoder model and onboards the coding runners it finds.
+Pass ``--no-embed`` to skip the encoder and its model download, or ``--no-onboard`` to register runners later.
+From a checkout, ``sh scripts/install.sh --from-checkout`` installs that checkout instead.
 
 ``ljos`` with no arguments prints what ljos is, the seat it would use and where that came from, then ``install``, ``doctor``, ``remember`` and ``search``, and where the command reference is. The install line is left off when this binary is the installed program. A read with no seat named says it uses every seat, because no seat was named. ``ljos help`` lists the rest.
 
