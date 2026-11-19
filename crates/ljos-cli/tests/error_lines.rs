@@ -694,11 +694,21 @@ fn unknown_proposals_status_names_valid_values_and_exits_2() {
         assert_eq!(out.status.code(), Some(2), "{bad:?}\n{said}");
         assert!(out.stdout.is_empty(), "{bad:?}\n{said}");
         let want = if bad.is_empty() {
-            "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not an empty value."
+            "proposals: --status takes open, proposed, accepted, refused, already-in-pack, in-pack, or already in pack, not an empty value."
         } else {
-            "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not bogus."
+            "proposals: --status takes open, proposed, accepted, refused, already-in-pack, in-pack, or already in pack, not bogus."
         };
         assert_eq!(one_line(&out.stderr), want, "{bad:?}\n{said}");
+    }
+    for good in ["proposed", "already in pack", "open"] {
+        let out = home.run(&["proposals", "--status", good], &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_ne!(out.status.code(), Some(2), "{good}\n{said}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "no proposals\n",
+            "{good}\n{said}"
+        );
     }
 }
 

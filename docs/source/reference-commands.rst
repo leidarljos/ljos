@@ -208,7 +208,7 @@ The line says what went wrong and the command that fixes it.
 ``export --out FILE [--machine NAME] [--json]``
    Stores: pack, tracker. The same command as ``memory export``.
 ``proposals [--seat SEAT] [--status STATUS] [--settle]``
-   Stores: pack. List lesson proposals waiting on a review. ``--seat`` keeps one seat. ``--status`` is open, accepted, refused, already-in-pack, or in-pack. Unknown status values exit 2. ``--settle`` records already-in-pack on open rows the pack already holds, and deletes nothing.
+   Stores: pack. List lesson proposals waiting on a review. ``--seat`` keeps one seat. ``--status`` is open, proposed, accepted, refused, already-in-pack, in-pack, or already in pack. Unknown status values exit 2. ``--settle`` records already-in-pack on open rows the pack already holds, and deletes nothing.
 ``proposals amend ID --text TEXT``
    Stores: pack. Record a revised text and run the readability checks, without accepting. ``--text -`` reads stdin.
 ``merge-org BASE OURS THEIRS``

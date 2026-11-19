@@ -5293,7 +5293,8 @@ fn run_command() -> Result<()> {
                         trimmed
                     };
                     eprintln!(
-                        "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not {bad}."
+                        "proposals: --status takes {}, not {bad}.",
+                        ljos_cli::admit::proposal_status_list()
                     );
                     std::process::exit(USAGE_STATUS);
                 }
