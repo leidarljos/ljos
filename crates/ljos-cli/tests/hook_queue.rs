@@ -430,17 +430,26 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
 
 /// A pack that accepts and never answers costs a gate one short wait, and
 /// the rules kept on disk still warn. The next call does not wait at all.
+///
+/// What is checked is how many times the pack was asked, which the
+/// listener counts, so the result does not depend on how fast the machine
+/// is. The only time bound is an absolute ceiling of twenty-five short
+/// waits, there to catch a stall of seconds.
 #[test]
 fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_warn() {
     let hab = hab("hungpack");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&accepted);
     std::thread::spawn(move || {
         let mut held = Vec::new();
         for conn in listener.incoming().flatten() {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             held.push(conn);
         }
     });
+    let asked = || accepted.load(std::sync::atomic::Ordering::SeqCst);
     let rules = hab.home.join(".local/share/ljos/rules-probe.json");
     std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
     std::fs::write(
@@ -449,39 +458,59 @@ fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_warn() {
     )
     .unwrap();
     let url = format!("http://127.0.0.1:{port}");
-    let call = |conversation: &str, command: &str| {
+    let call = |pack: &str, conversation: &str, command: &str| {
         let mut cmd = ljos(&hab, &["hook"]);
-        cmd.env("PACKSET_URL", &url)
+        cmd.env("PACKSET_URL", pack)
             .env("PACKSET_WORKSPACE", "probe");
         let started = Instant::now();
         let out = within(
             feed(cmd, &cursor_shell(&hab, conversation, command)),
-            Duration::from_secs(10),
+            Duration::from_secs(30),
             command,
         );
         (
             started.elapsed(),
             String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
         )
     };
-    let (first, said) = call("hung-1", "ls");
-    assert!(said.contains("\"permission\":\"allow\""), "{said}");
-    assert!(
-        first < Duration::from_millis(1000),
-        "the first gate waited {first:?} on a hung pack"
+    let (_, said, err) = call("off", "bare", "curl https://example.invalid");
+    assert!(warns(&said), "{said}\n{err}");
+    // One short wait is HOOK_PACK_MS. The ceiling is many of them, so a
+    // loaded machine does not trip it and a stall of seconds still does.
+    let pack_wait = Duration::from_millis(ljos_cli::HOOK_PACK_MS);
+    let ceiling = pack_wait * 25;
+    assert_eq!(asked(), 0, "a call with the pack off asked the pack");
+
+    let (first, said, err) = call(&url, "hung-1", "ls");
+    assert!(said.contains("\"permission\":\"allow\""), "{said}\n{err}");
+    assert_eq!(
+        asked(),
+        1,
+        "a hung pack was asked more than once by one gate, so it cost more than one wait\n{err}"
     );
-    let (second, said) = call("hung-2", "ls");
-    assert!(said.contains("\"permission\":\"allow\""), "{said}");
     assert!(
-        second < Duration::from_millis(300),
-        "the next gate waited {second:?} on a pack already marked slow"
+        first < ceiling,
+        "the first gate took {first:?} on a hung pack, past the {ceiling:?} ceiling\n{err}"
     );
-    let (third, said) = call("hung-3", "curl https://example.invalid");
-    assert!(warns(&said), "{said}");
-    assert!(said.contains("no curl"), "{said}");
+    let (second, said, err) = call(&url, "hung-2", "ls");
+    assert!(said.contains("\"permission\":\"allow\""), "{said}\n{err}");
+    assert_eq!(asked(), 1, "a gate asked a pack already marked slow\n{err}");
     assert!(
-        third < Duration::from_millis(300),
-        "a kept rule took {third:?} to warn"
+        second < ceiling,
+        "the next gate took {second:?} with the pack marked slow, past the {ceiling:?} ceiling\n{err}"
+    );
+    let (third, said, err) = call(&url, "hung-3", "curl https://example.invalid");
+    assert!(warns(&said), "{said}\n{err}");
+    assert!(said.contains("no curl"), "{said}\n{err}");
+    assert_eq!(
+        asked(),
+        1,
+        "a kept rule was judged by asking the pack\n{err}"
+    );
+    assert!(
+        third < ceiling,
+        "a kept rule took {third:?} to warn, past the {ceiling:?} ceiling\n{err}"
     );
 }
 
