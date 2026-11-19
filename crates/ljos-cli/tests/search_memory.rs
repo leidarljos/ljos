@@ -506,7 +506,7 @@ fn a_search_past_the_wait_says_to_rerun_and_names_the_ranking() {
         .unwrap_or_else(|err| panic!("search json did not parse ({err}): {json_out}"));
     assert_eq!(doc["ranking"], "lexical", "{doc}");
     assert_eq!(
-        doc["reason"], "These are word matches, and meaning search will be ready shortly.",
+        doc["reason"], "These are word matches; the encoder is loading (about 4 s left).",
         "{doc}"
     );
     let hits = doc["hits"].as_array().unwrap_or_else(|| panic!("{doc}"));

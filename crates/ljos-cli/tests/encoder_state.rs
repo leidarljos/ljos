@@ -215,8 +215,11 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
         };
         let search_line = match *name {
             "ready" => ljos_cli::FUSED_RANK_LINE.to_string(),
-            "loading with remaining_ms" | "loading without remaining_ms" => {
-                "These are word matches, and meaning search will be ready shortly.".to_string()
+            "loading with remaining_ms" => {
+                "These are word matches; the encoder is loading (about 120 s left).".to_string()
+            }
+            "loading without remaining_ms" => {
+                "These are word matches; the encoder has not answered yet.".to_string()
             }
             "failed" => format!(
                 "The encoder failed (the runtime is missing), so these rows match words; run `{restart}`."
@@ -296,18 +299,24 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
 /// plain page and in `--json`. A remaining time does not add a rerun.
 #[test]
 fn a_loading_search_with_rows_says_they_are_word_matches() {
-    let line = "These are word matches, and meaning search will be ready shortly.";
     let cases = [
         (
             "with remaining_ms",
             r#"{"available":true,"answering":null,"enabled":true,"remaining_ms":120000}"#,
+            "These are word matches; the encoder is loading (about 120 s left).",
+        ),
+        (
+            "loading flag without remaining_ms",
+            r#"{"available":true,"answering":null,"enabled":true,"loading":true}"#,
+            "These are word matches; the encoder is loading.",
         ),
         (
             "without remaining_ms",
             r#"{"available":true,"answering":null,"enabled":true}"#,
+            "These are word matches; the encoder has not answered yet.",
         ),
     ];
-    for (name, embedder) in cases {
+    for (name, embedder, line) in cases {
         let seat = serve(embedder);
         let (code, stdout, stderr, _) = run(&seat, &["search", "kiln"]);
         assert!(code == 0, "{name}: {stdout}{stderr}");
@@ -317,7 +326,7 @@ fn a_loading_search_with_rows_says_they_are_word_matches() {
         );
         assert_search_line(&stderr, line, name);
         assert!(
-            !stderr.contains("rerun") && !stderr.contains("about"),
+            !stderr.contains("rerun") && !stderr.contains("shortly"),
             "{stderr}"
         );
         let (json_code, json_out, json_err, _) = run(&seat, &["search", "--json", "kiln"]);

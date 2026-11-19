@@ -15052,10 +15052,11 @@ fn ranking_sentence(ranking: &Ranking, shown: bool) -> String {
 /// word matches, and an empty page names the command to run again.
 fn lexical_reason(ranking: &Ranking, shown: bool) -> String {
     if ranking.reason == ENCODER_LOADING_REASON {
+        let status = read_encoder_status();
         if shown {
-            return WORD_MATCH_WHILE_LOADING.to_string();
+            return word_match_while_loading(status.as_ref());
         }
-        return encoder_loading_line(read_encoder_status().as_ref(), &current_invocation());
+        return encoder_loading_line(status.as_ref(), &current_invocation());
     }
     if ranking.reason == ENCODER_FAILED_REASON {
         let why = read_encoder_status()
@@ -15385,13 +15386,36 @@ pub fn encoder_retry_secs(status: Option<&Value>) -> Option<u64> {
         .map(|ms| ms.div_ceil(1000).max(1))
 }
 
-/// What a search prints when it shows rows while the encoder is loading.
+/// What a search prints when it shows rows while the encoder has not
+/// answered yet.
 ///
-/// One sentence. The rows are word matches, and meaning search will be
-/// ready shortly. It does not name a command to run again.
-/// An empty page uses [`encoder_loading_line`].
+/// One sentence. The rows are word matches. When the writer reports an
+/// active load or remaining seconds, the line says so; otherwise it says
+/// the encoder has not answered yet, without promising when it will be
+/// ready.
 pub const WORD_MATCH_WHILE_LOADING: &str =
-    "These are word matches, and meaning search will be ready shortly.";
+    "These are word matches; the encoder has not answered yet.";
+
+fn encoder_actively_loading(status: &Value) -> bool {
+    let embedder = &status["embedder"];
+    embedder["loading"].as_bool() == Some(true)
+        || embedder["state"]
+            .as_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case("loading"))
+        || embedder["load"].is_object()
+}
+
+/// What a search prints when it shows rows while the encoder is cold.
+#[must_use]
+pub fn word_match_while_loading(status: Option<&Value>) -> String {
+    if let Some(secs) = encoder_retry_secs(status) {
+        return format!("These are word matches; the encoder is loading (about {secs} s left).");
+    }
+    if status.is_some_and(encoder_actively_loading) {
+        return "These are word matches; the encoder is loading.".to_string();
+    }
+    WORD_MATCH_WHILE_LOADING.to_string()
+}
 
 /// What a search prints when the encoder is present and still loading
 /// and the page has no rows.
@@ -82141,6 +82165,18 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         let shown = search_rank_line(&loading, &[row]);
         assert_eq!(shown, format!("{WORD_MATCH_WHILE_LOADING}\n"));
         assert!(!shown.contains("rerun"), "{shown}");
+        assert!(!shown.contains("shortly"), "{shown}");
+        let with_eta = serde_json::json!({"embedder":{"available":true,"answering":null,"remaining_ms":12000}});
+        assert_eq!(
+            word_match_while_loading(Some(&with_eta)),
+            "These are word matches; the encoder is loading (about 12 s left)."
+        );
+        let active =
+            serde_json::json!({"embedder":{"available":true,"answering":null,"loading":true}});
+        assert_eq!(
+            word_match_while_loading(Some(&active)),
+            "These are word matches; the encoder is loading."
+        );
         let _guard = env_guard();
         let _off = HoldEnv::set(&[("PACKSET_URL", "off")]);
         let empty = search_rank_line(&loading, &[]);

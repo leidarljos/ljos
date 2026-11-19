@@ -874,9 +874,9 @@ enum Cmd {
     /// the line is `Memory is starting, so try again in a few seconds.` and
     /// the command exits non-zero. A remaining
     /// time that is absent or longer than that budget keeps `LJOS_SEARCH_WAIT`
-    /// (3 when unset). If it is still loading and rows
-    /// are shown, the line is `These are word matches, and meaning search
-    /// will be ready shortly.` When nothing is shown, one line names the command
+    /// (3 when unset). If the encoder is still not ready and rows
+    /// are shown, the line says they are word matches and names the reported
+    /// load time when one is sent. When nothing is shown, one line names the command
     /// to rerun and, when a remaining time is reported, about how many
     /// seconds are left. A failed or missing encoder
     /// names the command that fixes it. `--json` puts
