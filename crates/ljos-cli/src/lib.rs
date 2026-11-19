@@ -15003,17 +15003,56 @@ pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
         }
         return String::new();
     }
+    if ranking.mode != "lexical" {
+        return format!("{}\n", semantic_match_line(hits));
+    }
     ranking_sentence(ranking, true)
 }
 
-/// The stderr line when the rows are in the pack's fused order.
-///
-/// CombMNZ fuses the ballots, MMR diversifies them, and FSRS scales by
-/// retrievability. That is the order the page prints. The encoder's
-/// `dense_rank` is not this order.
-pub const FUSED_RANK_LINE: &str = "Matched by the fused rank, CombMNZ then MMR then FSRS.";
+/// The line when the shown rows came from both the meaning and the word
+/// retrievers.
+pub const MEANING_AND_WORDS_LINE: &str = "Matched by meaning and words.";
 
-/// One line for stderr: a word match, or the fused rank.
+/// The line for a fused page whose rows do not say which retrievers named
+/// them, such as rows from an older pack that sends no ballot counts.
+pub const NEUTRAL_MATCH_LINE: &str = "Matched by the memory search.";
+
+/// The default line when only the meaning retriever returned the shown rows.
+pub const MEANING_LINE: &str = "Matched by meaning.";
+
+/// The default line when only the word retriever returned the shown rows.
+pub const WORDS_LINE: &str = "Matched by words.";
+
+/// The fused page's line when the retrievers behind it are not known, kept
+/// as the public name older callers use.
+pub const FUSED_RANK_LINE: &str = NEUTRAL_MATCH_LINE;
+
+/// Describe which retrievers returned the hits on a semantic page.
+///
+/// A cosine is the meaning retriever's signal. Two or more ballots mean
+/// both retrievers named a hit; without a cosine, a hit came from words.
+/// A hit with no ballot count, as an older pack sends it, does not say
+/// which retrievers named it, so the page gets the neutral line.
+fn semantic_match_line(hits: &[Hit]) -> &'static str {
+    if hits.iter().any(|hit| hit.ballots.is_none()) {
+        return NEUTRAL_MATCH_LINE;
+    }
+    let mut meaning = false;
+    let mut words = false;
+    for hit in hits {
+        let from_meaning = hit_cosine(hit).is_some();
+        meaning |= from_meaning;
+        words |= hit.ballots.is_some_and(|ballots| ballots >= 2) || !from_meaning;
+    }
+    match (meaning, words) {
+        (true, true) => MEANING_AND_WORDS_LINE,
+        (true, false) => MEANING_LINE,
+        (false, true) => WORDS_LINE,
+        (false, false) => NEUTRAL_MATCH_LINE,
+    }
+}
+
+/// One line for stderr: a word match, or the retrievers behind the fused rank.
 /// `--json` keeps `mode` as `lexical` or `semantic`.
 ///
 /// A load is read as an empty page here. Search uses [`search_rank_line`],
@@ -15025,7 +15064,7 @@ pub fn ranking_line(ranking: &Ranking) -> String {
 
 fn ranking_sentence(ranking: &Ranking, shown: bool) -> String {
     if ranking.mode != "lexical" {
-        return format!("{FUSED_RANK_LINE}\n");
+        return format!("{NEUTRAL_MATCH_LINE}\n");
     }
     if matches!(
         ranking.reason,
@@ -50332,7 +50371,7 @@ pub fn search_reading(n: usize, seat_ahead: bool) -> &'static str {
     if n == 0 {
         "Nothing matched."
     } else if seat_ahead {
-        "The first row is the closest match, and this seat's rows come first. A score from 0 to 100 is how well the sentence matched. The fraction is how many stored checks picked this row. Neither says whether the text is true. A later line on the same matter replaces an earlier one."
+        "The first row is the closest match, and this seat's rows come first. CombMNZ fuses the word and meaning ballots, MMR diversifies them, and FSRS scales them by retrievability. A score from 0 to 100 is how well the sentence matched. The fraction is how many stored checks picked this row. Neither says whether the text is true. A later line on the same matter replaces an earlier one."
     } else {
         "The first row is the closest match. A score from 0 to 100 is how well the sentence matched. The fraction is how many stored checks picked this row. Neither says whether the text is true."
     }
@@ -82504,7 +82543,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 mode: "semantic",
                 reason: "",
             }),
-            format!("{FUSED_RANK_LINE}\n")
+            format!("{NEUTRAL_MATCH_LINE}\n")
         );
         let semantic = Ranking {
             mode: "semantic",
@@ -82515,6 +82554,80 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "",
             "an empty page does not say the rows were matched by the fused rank"
         );
+        let explained = search_reading(1, true);
+        for method in ["CombMNZ", "MMR", "FSRS"] {
+            assert!(explained.contains(method), "{explained}");
+        }
+    }
+
+    /// A semantic page names the retrievers its rows came from only when each
+    /// row carries a ballot count. An older pack sends none, so the page gets
+    /// the neutral line and not a claim about meaning or words.
+    #[test]
+    fn a_semantic_page_names_its_retrievers_only_when_the_rows_say_so() {
+        let semantic = Ranking {
+            mode: "semantic",
+            reason: "",
+        };
+        let hit = |id: &str, score: f64| Hit {
+            id: Some(id.into()),
+            text: "the morning plan".into(),
+            score,
+            kind: "lesson".into(),
+            ts: None,
+            entities: Vec::new(),
+            ballots: None,
+            of: None,
+            rerank_score: None,
+            labels: Vec::new(),
+        };
+        let counted = |id: &str, cosine: Option<f64>, ballots: Option<u32>| {
+            let mut row = hit(id, 0.8);
+            note_cosine(&mut row, cosine);
+            row.ballots = ballots;
+            row.of = ballots.map(|_| 3);
+            row
+        };
+        let meaning = counted("meaning", Some(0.8), Some(1));
+        assert_eq!(
+            search_rank_line(&semantic, std::slice::from_ref(&meaning)),
+            "Matched by meaning.\n"
+        );
+        let words = counted("words", None, Some(2));
+        assert_eq!(
+            search_rank_line(&semantic, std::slice::from_ref(&words)),
+            "Matched by words.\n"
+        );
+        let both = counted("both", Some(0.8), Some(2));
+        assert_eq!(
+            search_rank_line(&semantic, &[both]),
+            format!("{MEANING_AND_WORDS_LINE}\n")
+        );
+        assert_eq!(
+            search_rank_line(&semantic, &[words.clone(), meaning.clone()]),
+            format!("{MEANING_AND_WORDS_LINE}\n")
+        );
+        assert_eq!(
+            search_rank_line(
+                &semantic,
+                &[meaning.clone(), counted("more", Some(0.7), Some(1))]
+            ),
+            "Matched by meaning.\n"
+        );
+        let unknown_meaning = counted("old-meaning", Some(0.8), None);
+        let unknown_words = counted("old-words", None, None);
+        for page in [
+            vec![unknown_meaning.clone()],
+            vec![unknown_words],
+            vec![unknown_meaning.clone(), words.clone()],
+            vec![meaning, unknown_meaning],
+        ] {
+            assert_eq!(
+                search_rank_line(&semantic, &page),
+                format!("{NEUTRAL_MATCH_LINE}\n"),
+                "rows with no ballot count do not say which retrievers named them"
+            );
+        }
     }
 
     /// Rows on the page while the encoder loads are word matches. An empty

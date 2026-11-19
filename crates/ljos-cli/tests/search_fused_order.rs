@@ -148,7 +148,7 @@ fn the_page_follows_fused_order_when_dense_rank_disagrees() {
         "fused order puts this seat's earlier row first:\n{stdout}"
     );
     assert!(
-        stderr.contains(ljos_cli::FUSED_RANK_LINE),
+        stderr.contains(ljos_cli::MEANING_AND_WORDS_LINE),
         "the line should name the fused rank:\n{stderr}"
     );
     assert!(

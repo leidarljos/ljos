@@ -83,7 +83,7 @@ fn serve(busy: usize) -> (String, Arc<AtomicUsize>) {
                         write_http(&mut sock, 503, BUSY_BODY, false);
                     } else {
                         let body = format!(
-                            r#"{{"hits":[{{"id":"seam","kind":"lesson","text":"{HIT}","score":0.91,"cosine":0.8,"entities":["seat:ada"]}}],"rank":"relevance"}}"#
+                            r#"{{"hits":[{{"id":"seam","kind":"lesson","text":"{HIT}","score":0.91,"cosine":0.8,"entities":["seat:ada"],"ballots":1,"of":3}}],"rank":"relevance"}}"#
                         );
                         write_http(&mut sock, 200, &body, false);
                     }
@@ -160,7 +160,7 @@ fn a_busy_once_writer_still_answers_by_meaning() {
     assert!(out.status.success(), "{text}");
     assert!(String::from_utf8_lossy(&out.stdout).contains(HIT), "{text}");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains(ljos_cli::FUSED_RANK_LINE),
+        String::from_utf8_lossy(&out.stderr).contains(ljos_cli::MEANING_LINE),
         "{text}"
     );
     assert!(!text.contains(BUSY), "{text}");
@@ -249,7 +249,7 @@ fn words_in_a_hit_are_not_a_busy_pack() {
                 let path = path.split('?').next().unwrap_or(path);
                 let body = if path == "/v1/search" {
                     count.fetch_add(1, Ordering::SeqCst);
-                    r#"{"hits":[{"id":"seam","kind":"lesson","text":"packsetd is busy: every worker is answering and the queue is full; try again","score":0.91,"cosine":0.8,"entities":["seat:ada"]}],"rank":"relevance"}"#
+                    r#"{"hits":[{"id":"seam","kind":"lesson","text":"packsetd is busy: every worker is answering and the queue is full; try again","score":0.91,"cosine":0.8,"entities":["seat:ada"],"ballots":1,"of":3}],"rank":"relevance"}"#
                         .to_string()
                 } else if path == "/v1/status" {
                     r#"{"embedder":{"available":true,"answering":true,"enabled":true},"search":{"ranks":["relevance"]}}"#
@@ -266,7 +266,7 @@ fn words_in_a_hit_are_not_a_busy_pack() {
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains(ljos_cli::FUSED_RANK_LINE),
+        String::from_utf8_lossy(&out.stderr).contains(ljos_cli::MEANING_LINE),
         "{text}"
     );
     assert!(text.contains("queue is full"), "{text}");

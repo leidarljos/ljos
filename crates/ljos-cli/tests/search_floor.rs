@@ -84,7 +84,7 @@ fn empty_pack() -> String {
 const SAFETY: &str = "travel weighs safety at 1.000.";
 const WEBDAV: &str = "WebDAV drain delete keeps the previous copy until the new one is stored.";
 const SAFETY_ONLY: &str = r#"{"hits":[{"id":"travel-safety","kind":"lesson","text":"travel weighs safety at 1.000.","score":71.0,"ballots":2,"of":3,"cosine":0.71,"entities":["seat:travel"]}],"rank":"relevance"}"#;
-const SAFETY_AND_WEBDAV: &str = r#"{"hits":[{"id":"travel-safety","kind":"lesson","text":"travel weighs safety at 1.000.","score":71.0,"ballots":2,"of":3,"cosine":0.71,"entities":["seat:travel"]},{"id":"own-webdav","kind":"lesson","text":"WebDAV drain delete keeps the previous copy until the new one is stored.","score":0.91,"cosine":0.9,"entities":["seat:ada"]}],"rank":"relevance"}"#;
+const SAFETY_AND_WEBDAV: &str = r#"{"hits":[{"id":"travel-safety","kind":"lesson","text":"travel weighs safety at 1.000.","score":71.0,"ballots":2,"of":3,"cosine":0.71,"entities":["seat:travel"]},{"id":"own-webdav","kind":"lesson","text":"WebDAV drain delete keeps the previous copy until the new one is stored.","score":0.91,"ballots":1,"of":3,"cosine":0.9,"entities":["seat:ada"]}],"rank":"relevance"}"#;
 
 struct Seat {
     root: tempfile::TempDir,
@@ -310,7 +310,7 @@ fn a_cross_seat_meaning_hit_on_a_generic_word_is_not_an_answer() {
     assert!(kept.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains(WEBDAV), "{stdout}{stderr}");
     assert!(!stdout.contains("travel weighs"), "{stdout}{stderr}");
-    assert!(stderr.contains(ljos_cli::FUSED_RANK_LINE), "{stderr}");
+    assert!(stderr.contains(ljos_cli::MEANING_LINE), "{stderr}");
 }
 
 #[test]

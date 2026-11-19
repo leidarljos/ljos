@@ -438,7 +438,7 @@ fn xsxq_the_page_follows_the_fused_rank_and_not_the_cosine() {
     before(&stdout, MIDDLE, QUICK);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains(ljos_cli::FUSED_RANK_LINE),
+        stderr.contains(ljos_cli::MEANING_AND_WORDS_LINE),
         "the line should name the fused rank:\n{page}"
     );
     assert!(

@@ -71,7 +71,7 @@ fn pack(warm_after_search: bool, post_status: u16) -> Pack {
                     let body = if seen == 0 {
                         r#"{"hits":[{"id":"other","kind":"lesson","text":"a ferry timetable for the docks","score":0.2,"entities":["seat:other"]}],"rank":"fused"}"#
                     } else {
-                        r#"{"hits":[{"id":"oak","kind":"lesson","text":"Oak Tree on Nov 23 is the morning plan.","score":0.91,"entities":["seat:travel"],"dense_rank":1,"cosine":0.84}],"rank":"relevance"}"#
+                        r#"{"hits":[{"id":"oak","kind":"lesson","text":"Oak Tree on Nov 23 is the morning plan.","score":0.91,"entities":["seat:travel"],"dense_rank":1,"cosine":0.84,"ballots":1,"of":3}],"rank":"relevance"}"#
                     };
                     (200, body.to_string())
                 } else if path == "/v1/status" {
@@ -145,7 +145,7 @@ fn a_cold_encoder_is_asked_again_and_the_line_says_semantic() {
         pack.searches.load(Ordering::SeqCst) >= 2,
         "the cold search was not retried: {said}"
     );
-    assert!(stderr.contains(ljos_cli::FUSED_RANK_LINE), "{said}");
+    assert!(stderr.contains(ljos_cli::MEANING_LINE), "{said}");
     assert!(
         stdout.contains("Oak Tree on Nov 23 is the morning plan."),
         "{said}"
@@ -352,7 +352,7 @@ fn slow_pack(delay: Duration, stay_cold: bool, remaining_ms: Option<u64>) -> Pac
                     let body = if seen == 0 {
                         r#"{"hits":[{"id":"other","kind":"lesson","text":"a ferry timetable for the docks","score":0.2,"entities":["seat:other"]}],"rank":"fused"}"#
                     } else {
-                        r#"{"hits":[{"id":"oak","kind":"lesson","text":"Oak Tree on Nov 23 is the morning plan.","score":0.91,"entities":["seat:travel"],"dense_rank":1,"cosine":0.84}],"rank":"relevance"}"#
+                        r#"{"hits":[{"id":"oak","kind":"lesson","text":"Oak Tree on Nov 23 is the morning plan.","score":0.91,"entities":["seat:travel"],"dense_rank":1,"cosine":0.84,"ballots":1,"of":3}],"rank":"relevance"}"#
                     };
                     (200, body.to_string())
                 } else if path == "/v1/status" {
@@ -450,7 +450,7 @@ fn a_slow_encoder_is_waited_for_and_the_search_is_semantic() {
         pack.searches.load(Ordering::SeqCst) >= 2,
         "the search did not ask again after the encoder answered: {said}"
     );
-    assert!(stderr.contains(ljos_cli::FUSED_RANK_LINE), "{said}");
+    assert!(stderr.contains(ljos_cli::MEANING_LINE), "{said}");
     assert!(
         stdout.contains("Oak Tree on Nov 23 is the morning plan."),
         "{said}"
@@ -635,9 +635,9 @@ fn unrelated_cross_seat_hits_are_not_a_search_answer() {
     std::fs::create_dir_all(&state).unwrap();
     let body = format!(
         r#"{{"hits":[
-            {{"id":"disk","kind":"lesson","text":"{DISK_WATCH}","score":0.41,"cosine":0.41,"entities":["seat:disk-saver"]}},
-            {{"id":"travel","kind":"lesson","text":"A related stop on the morning train.","score":0.40,"cosine":0.40,"entities":["seat:travel"]}},
-            {{"id":"own","kind":"lesson","text":"{OWN_RINGS}","score":0.55,"cosine":0.55,"entities":["seat:dseams-paper"]}}
+            {{"id":"disk","kind":"lesson","text":"{DISK_WATCH}","score":0.41,"cosine":0.41,"entities":["seat:disk-saver"],"ballots":1,"of":3}},
+            {{"id":"travel","kind":"lesson","text":"A related stop on the morning train.","score":0.40,"cosine":0.40,"entities":["seat:travel"],"ballots":1,"of":3}},
+            {{"id":"own","kind":"lesson","text":"{OWN_RINGS}","score":0.55,"cosine":0.55,"entities":["seat:dseams-paper"],"ballots":1,"of":3}}
         ],"rank":"relevance"}}"#
     );
     let url = serve_search(Box::leak(body.into_boxed_str()), 200, r#"{"atoms":[]}"#);
@@ -649,7 +649,7 @@ fn unrelated_cross_seat_hits_are_not_a_search_answer() {
     assert!(stdout.contains(OWN_RINGS), "{said}");
     assert!(!stdout.contains("disk fill"), "{said}");
     assert!(!stdout.contains("morning train"), "{said}");
-    assert!(stderr.contains(ljos_cli::FUSED_RANK_LINE), "{said}");
+    assert!(stderr.contains(ljos_cli::MEANING_LINE), "{said}");
 }
 
 #[test]

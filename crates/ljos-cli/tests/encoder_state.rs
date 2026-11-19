@@ -214,7 +214,7 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
             _ => unreachable!(),
         };
         let search_line = match *name {
-            "ready" => ljos_cli::FUSED_RANK_LINE.to_string(),
+            "ready" => ljos_cli::WORDS_LINE.to_string(),
             "loading with remaining_ms" => {
                 "These are word matches; the encoder is loading (about 120 s left).".to_string()
             }

@@ -1,6 +1,6 @@
 status 0
 stderr:
-Matched by the fused rank, CombMNZ then MMR then FSRS.
+Matched by meaning and words.
 stdout:
 shown 10 of 19. Run `ljos search kiln -n 19` to see all 19.
 The first row is the closest match. This seat's rows come first.
