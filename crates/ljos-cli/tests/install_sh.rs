@@ -1307,6 +1307,7 @@ for a in "$@"; do
   esac
   prev=$a
 done
+[ -z "${LJOS_CURL_LOG:-}" ] || printf '%s\n' "$url" >> "$LJOS_CURL_LOG"
 case $url in
   */releases/tag/*|*/releases/tags/*)
     case "$LJOS_FAKE_TAG" in
@@ -1543,6 +1544,60 @@ fn a_pinned_version_with_no_release_says_how_to_list_versions() {
     assert!(
         !cargo_log.exists(),
         "a missing release started cargo:\n{text}"
+    );
+}
+
+/// A git tag page can answer 200 when no GitHub release was published.
+/// The releases API is the source, so that tag does not start cargo.
+#[test]
+fn a_bare_tag_without_a_release_does_not_start_a_source_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script(&bin, "curl", FAKE_CURL);
+    script(
+        &bin,
+        "cargo",
+        "#!/bin/sh\necho ran >> \"$LJOS_CARGO_LOG\"\nexit 1\n",
+    );
+    let cargo_log = dir.path().join("cargo.log");
+    let curl_log = dir.path().join("curl.log");
+    let home = dir.path().join("home");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .args([
+            "--no-embed",
+            "--no-onboard",
+            "--no-modify-path",
+            "--version",
+            "9.9.8",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--bin-dir",
+        ])
+        .arg(home.join(".local/bin"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .env("LJOS_FAKE_MODE", "missing")
+        .env("LJOS_CARGO_LOG", &cargo_log)
+        .env("LJOS_CURL_LOG", &curl_log)
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("ljos 9.9.8 has no release"), "{text}");
+    assert!(!text.contains("rustc"), "{text}");
+    assert!(!cargo_log.exists(), "a bare tag started cargo:\n{text}");
+    let calls = read(&curl_log);
+    assert!(
+        calls.contains("/repos/leidarljos/ljos/releases/tags/v9.9.8"),
+        "{calls}"
+    );
+    assert!(
+        !calls.contains("github.com/leidarljos/ljos/releases/tag/v9.9.8"),
+        "{calls}"
     );
 }
 

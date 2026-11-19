@@ -212,19 +212,23 @@ fake=$(mktemp -d "${TMPDIR:-/tmp}/ljos-release-fake.XXXXXX")
 trap 'rm -rf "$STAGE" "$ASSETS" "$fake"; rm -f "$PINS"' EXIT INT TERM
 printf '%s\n' '#!/bin/sh' 'echo rustc 1.83.0 \(fake\)' > "$fake/rustc"
 printf '%s\n' '#!/bin/sh' 'echo cargo-was-run >> "$CARGO_MARKER"' 'exit 1' > "$fake/cargo"
-# install.sh reads curl's stdout as the HTTP status. 404 on the archive
-# is a missing file. 200 on the tag page means the release exists, so
-# the script does not report a version that was never published.
+# install.sh reads curl's stdout as the HTTP status. The releases API
+# answers with a release that omits the archive for this target.
 cat > "$fake/curl" <<'EOF'
 #!/bin/sh
 url=
+out=
+prev=
 for a in "$@"; do
+  [ "$prev" = -o ] && out=$a
   case $a in
     http://*|https://*) url=$a ;;
   esac
+  prev=$a
 done
 case $url in
-  */releases/tag/*|*/releases/tags/*)
+  *api.github.com/repos/*/releases/tags/*)
+    printf '%s\n' '{"assets":[]}' > "$out"
     printf '%s' 200
     exit 0
     ;;
@@ -276,19 +280,18 @@ run_missing --asset-dir "$ASSETS" --target "$target" \
   --no-embed --no-onboard --no-modify-path --no-build $(cat "$PINS")
 expect_line "--no-build with --asset-dir" "$asset_line"
 
-# No --asset-dir. A 404 is the source-build path. The line names the
-# rustc a source build needs, and cargo is not started.
+# No --asset-dir. A release without this target's archive is a clear
+# version error, and cargo is not started.
 ljos_asset="ljos-v$LJOS_VER-$target.tar.gz"
-source_line="install.sh: no $ljos_asset for $target; a source build needs rustc $MIN_RUST or newer (found rustc 1.83.0). Install Rust from https://rustup.rs and run \`sh install.sh\` again."
+source_line="install.sh: ljos $LJOS_VER has no release archive $ljos_asset for $target. List versions at https://github.com/leidarljos/ljos/releases, then run \`sh install.sh --version VER\`."
 run_missing --target "$target" \
   --no-embed --no-onboard --no-modify-path $(cat "$PINS")
-expect_line "source build" "$source_line"
+expect_line "release without target archive" "$source_line"
 
-# --no-build on that download stops before any rustc question.
-nobuild_line="install.sh: no $ljos_asset for $target. The release has no archive for this machine. Supported archives: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin. To build from source, install Rust $MIN_RUST or newer from https://rustup.rs and run \`sh install.sh\` without --no-build."
+# --no-build gives the same version error.
 run_missing --target "$target" \
   --no-embed --no-onboard --no-modify-path --no-build $(cat "$PINS")
-expect_line "--no-build with no archive" "$nobuild_line"
+expect_line "--no-build with no archive" "$source_line"
 rm -rf "$home" "$fake"
 
 echo "release-install-check: install.sh matches the published archives for all 4 targets"
