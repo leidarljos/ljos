@@ -661,6 +661,15 @@ fn free_text_on_recall_points_at_search_and_exits_2() {
         assert!(out.stdout.is_empty(), "{args:?}\n{said}");
         assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
     }
+
+    // A 32-hex tracker id is an id. A missing one names ready, not search.
+    let hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let out = home.run(&["recall", hex], &[("LJOS_SEAT", "alice")]);
+    let said = text(&out);
+    assert_ne!(out.status.code(), Some(2), "{said}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("is not a ticket id"), "{said}");
+    assert!(err.contains("`ljos ready`"), "{said}");
 }
 
 #[test]

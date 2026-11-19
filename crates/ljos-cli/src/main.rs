@@ -3524,6 +3524,10 @@ fn looks_like_ticket_id(raw: &str) -> bool {
     if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
         return false;
     }
+    // A claim-graph node is 32 hex, the same form `ljos release` accepts.
+    if trimmed.len() == 32 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return true;
+    }
     if let Some((project, suffix)) = vissue_id_parts(trimmed) {
         return project.split('/').all(|seg| {
             !seg.is_empty()
