@@ -6,6 +6,6 @@
 # deedar at this commit writes bytes/ and a sources sidecar. deedar on main
 # writes neither, so a carried deed from a bag that does not hold the source
 # cannot be imported.
-vissue https://github.com/leidarljos/vissue.git 0d10113a9392a0625ecfb02d70224102e10aee3d 0.24.1
+vissue https://github.com/leidarljos/vissue.git 84697ee3a43cc1e48c382037f7969c81c752583d 0.25.0
 claimdag https://github.com/leidarljos/claimdag.git e0f79d7ee343a74819ccb7421bc9ac644c1d8479 0.8.0
 deedar https://github.com/leidarljos/deedar.git 57a32369ca0ab64553ea81058886021c6c79e8a4 0.4.0

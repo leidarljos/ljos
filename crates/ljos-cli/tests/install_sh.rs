@@ -79,12 +79,12 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-/// vissue, claimdag and deedar come from `.github/sibling-pin` unless
+/// vissue, claimdag and deedar come from `.github/release-pin` unless
 /// `--latest` or `--pin` names them.
 #[test]
-fn print_assets_uses_the_sibling_pin_unless_latest() {
+fn print_assets_uses_the_release_pin_unless_latest() {
     let pin = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/sibling-pin"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/release-pin"),
     )
     .unwrap();
     let mut pinned = Vec::new();
@@ -95,7 +95,7 @@ fn print_assets_uses_the_sibling_pin_unless_latest() {
         }
         let mut parts = line.split_whitespace();
         let name = parts.next().unwrap();
-        let ver = parts.nth(2).unwrap();
+        let ver = parts.next().unwrap();
         pinned.push((name.to_string(), ver.to_string()));
     }
     assert!(!pinned.is_empty());
@@ -158,7 +158,7 @@ fn print_assets_uses_the_sibling_pin_unless_latest() {
     );
     assert!(
         text.lines()
-            .all(|line| !line.starts_with("vissue-v0.24.1-")),
+            .all(|line| !line.starts_with("vissue-v0.25.0-")),
         "{text}"
     );
 }
@@ -1442,6 +1442,60 @@ fn a_truncated_download_removes_the_partial_file_and_says_to_rerun() {
     );
 }
 
+/// Where no release archive exists, each source build is announced on one
+/// line that says it is a build and that it is slow.
+#[test]
+fn a_source_build_is_announced_on_one_line_per_crate() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script(&bin, "rustc", "#!/bin/sh\necho rustc 1.99.0 \\(fake\\)\n");
+    script(
+        &bin,
+        "cargo",
+        "#!/bin/sh\nprev=\nroot=\nfor a in \"$@\"; do\n  [ \"$prev\" = --root ] && root=$a\n  prev=$a\ndone\necho \"$a\" >> \"$LJOS_CARGO_LOG\"\nmkdir -p \"$root/bin\"\nprintf '#!/bin/sh\\nexit 0\\n' > \"$root/bin/$a\"\nchmod 755 \"$root/bin/$a\"\n",
+    );
+    let cargo_log = dir.path().join("cargo.log");
+    let home = dir.path().join("home");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .args([
+            "--no-embed",
+            "--no-onboard",
+            "--no-modify-path",
+            "--target",
+            "riscv64gc-unknown-linux-gnu",
+            "--bin-dir",
+        ])
+        .arg(home.join(".local/bin"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .env("LJOS_CARGO_LOG", &cargo_log)
+        .output()
+        .unwrap();
+    let text = said(&out);
+    let built: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("from source with cargo, which is slow"))
+        .collect();
+    assert!(
+        built
+            .iter()
+            .any(|line| line.contains("building vissue-cli 0.25.0 from source")),
+        "{text}"
+    );
+    assert!(
+        built
+            .iter()
+            .all(|line| line.starts_with("  no release archive ")),
+        "{text}"
+    );
+    let ran = std::fs::read_to_string(&cargo_log).unwrap_or_default();
+    assert_eq!(ran.lines().count(), built.len(), "{text}\n{ran}");
+}
+
 /// `--version` for a release GitHub does not have names the releases page.
 #[test]
 fn a_pinned_version_with_no_release_says_how_to_list_versions() {
@@ -1492,7 +1546,7 @@ fn a_pinned_version_with_no_release_says_how_to_list_versions() {
     );
 }
 
-/// The sibling pin names vissue 0.24.1, and that version has a GitHub
+/// The release pin names vissue 0.25.0, and that version has a GitHub
 /// release. The script installs that archive. It does not build from
 /// source, and it does not fall back to another tag. Cargo is not started.
 #[test]
@@ -1507,7 +1561,7 @@ fn a_default_pin_installs_its_release_archive() {
             "packset-v0.17.10",
             &["packset", "packsetd", "packset-mcp"][..],
         ),
-        ("vissue-v0.24.1", &["vissue", "vissue-mcp"][..]),
+        ("vissue-v0.25.0", &["vissue", "vissue-mcp"][..]),
         ("deedar-v0.4.0", &["deedar"][..]),
         ("claimdag-v0.8.0", &["claimdag"][..]),
         ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
@@ -1567,7 +1621,7 @@ case $url in
     ver=0.42.1
     case $repo in
       packset) ver=0.17.10 ;;
-      vissue) ver=0.24.1 ;;
+      vissue) ver=0.25.0 ;;
       deedar) ver=0.4.0 ;;
       claimdag) ver=0.8.0 ;;
       ljos-policyd) ver=0.7.0 ;;
@@ -1633,7 +1687,7 @@ exit 0
         .unwrap();
     let text = said(&out);
     assert!(out.status.success(), "{text}");
-    assert!(text.contains("vissue v0.24.1"), "{text}");
+    assert!(text.contains("vissue v0.25.0"), "{text}");
     assert!(!text.contains("has no release archive"), "{text}");
     assert!(!text.contains("from source"), "{text}");
     assert!(!cargo_log.exists(), "cargo was started:\n{text}");
@@ -1703,7 +1757,7 @@ fn the_archive_name_is_printed_before_the_download() {
             "packset-v0.17.10",
             &["packset", "packsetd", "packset-mcp"][..],
         ),
-        ("vissue-v0.24.1", &["vissue", "vissue-mcp"][..]),
+        ("vissue-v0.25.0", &["vissue", "vissue-mcp"][..]),
         ("deedar-v0.4.0", &["deedar"][..]),
         ("claimdag-v0.8.0", &["claimdag"][..]),
         ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
@@ -1824,7 +1878,7 @@ exit 0
             "--pin",
             "packset=0.17.10",
             "--pin",
-            "vissue=0.24.1",
+            "vissue=0.25.0",
             "--pin",
             "deedar=0.4.0",
             "--pin",
@@ -1897,7 +1951,7 @@ fn from_checkout_installs_ljos_and_the_sibling_tools() {
             "packset-v0.18.2",
             &["packset", "packsetd", "packset-mcp"][..],
         ),
-        ("vissue-v0.24.1", &["vissue", "vissue-mcp"][..]),
+        ("vissue-v0.25.0", &["vissue", "vissue-mcp"][..]),
         ("deedar-v0.4.0", &["deedar"][..]),
         ("claimdag-v0.8.0", &["claimdag"][..]),
         ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
@@ -2058,7 +2112,7 @@ fn a_missing_attestation_is_not_a_failed_check() {
             "packset-v0.17.10",
             &["packset", "packsetd", "packset-mcp"][..],
         ),
-        ("vissue-v0.24.1", &["vissue", "vissue-mcp"][..]),
+        ("vissue-v0.25.0", &["vissue", "vissue-mcp"][..]),
         ("deedar-v0.4.0", &["deedar"][..]),
         ("claimdag-v0.8.0", &["claimdag"][..]),
         ("ljos-policyd-v0.7.0", &["ljos-policyd"][..]),
@@ -2112,7 +2166,7 @@ case $url in
     ver=0.42.1
     case $repo in
       packset) ver=0.17.10 ;;
-      vissue) ver=0.24.1 ;;
+      vissue) ver=0.25.0 ;;
       deedar) ver=0.4.0 ;;
       claimdag) ver=0.8.0 ;;
       ljos-policyd) ver=0.7.0 ;;

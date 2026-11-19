@@ -18,13 +18,14 @@ At release time `towncrier build --version X.Y.Z` collects the fragments into `C
 `scripts/sibling-tools.sh DEST` builds them into DEST, and the `cargo test` job runs that script.
 It reads `.github/sibling-pin` for `vissue`, `claimdag` and `deedar`, and the commits in the script for `packset`, `packsetd`, [phronesis](https://github.com/leidarljos/phronesis) and `ljos-policyd`.
 It installs the binaries into DEST and checks each `--version` against its pin.
+`scripts/install.sh` installs a different list: `.github/release-pin` names released versions of `vissue`, `claimdag` and `deedar`, and `scripts/release-pin-check.sh` asks GitHub that each archive is there.
 `ljos-policyd version` must contain `(phronesis)`, because the guard tests ask that build how a shell line reads.
 The script needs `git`, the Rust toolchain in `rust-toolchain.toml`, and the packages `g++`, `meson`, `ninja-build`, `capnproto` and `pkg-config`.
 `g++` is the C++ compiler phronesis's c-capnproto wrap needs; without it `meson setup` stops with `Compiler c++ cannot compile programs.`
 `age` and `age-keygen` 1.1.1 come from the `age` package.
 `apt-get install age` installs that package on Ubuntu 24.04, and `brew install age` installs it on macOS.
 The script does not build them.
-`source scripts/sibling-tools.sh` builds the pinned `vissue` 0.24.1 and `packsetd` 0.18.1 and puts them on `PATH`.
+`source scripts/sibling-tools.sh` builds the pinned `vissue` 0.25.0 and `packsetd` 0.18.1 and puts them on `PATH`.
 A test that needs `age-keygen`, `packsetd` or that `vissue` checks for the tool first.
 When it is missing the test prints one line naming the tool, the version and that command, and the test does not fail.
 `LJOS_TEST_REQUIRE_TOOLS=1` fails the test with that same line.

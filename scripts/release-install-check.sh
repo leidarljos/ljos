@@ -54,8 +54,23 @@ grep -F -q 'ljos-${TAG}-${{ matrix.target }}' "$REL" ||
   die "release.yml no longer names the archive ljos-TAG-target"
 
 # The versions install.sh uses when nobody passes --pin or --latest.
-# The file is the source. The fallback in the script is for a download
-# that does not sit next to this tree, and it has to name the same ones.
+# .github/release-pin is the source. The fallback in the script is for a
+# download that does not sit next to this tree, and it has to name the
+# same ones. release-pin-check.sh asks GitHub whether they are released.
+while IFS= read -r line || [ -n "$line" ]; do
+  trim=${line#"${line%%[![:space:]]*}"}
+  case "$trim" in
+    '' | \#*) continue ;;
+  esac
+  read -r name ver _extra <<EOF
+$trim
+EOF
+  grep -F -q "$name=$ver" "$INSTALL" ||
+    die "install.sh fallback does not pin $name=$ver from .github/release-pin"
+done < "$ROOT/.github/release-pin"
+
+# The tests build the commits in .github/sibling-pin. The install has to
+# run the same version of each tool, so the two files agree.
 while IFS= read -r line || [ -n "$line" ]; do
   trim=${line#"${line%%[![:space:]]*}"}
   case "$trim" in
@@ -64,8 +79,8 @@ while IFS= read -r line || [ -n "$line" ]; do
   read -r name _repo _commit ver _extra <<EOF
 $trim
 EOF
-  grep -F -q "$name=$ver" "$INSTALL" ||
-    die "install.sh fallback does not pin $name=$ver from .github/sibling-pin"
+  grep -E -q "^$name[[:space:]]+$ver\$" "$ROOT/.github/release-pin" ||
+    die ".github/release-pin does not name $name $ver, the version in .github/sibling-pin"
 done < "$ROOT/.github/sibling-pin"
 
 LJOS_VER=$(sed -n 's/^version *= *"\([0-9.]*\)".*/\1/p' "$ROOT/Cargo.toml" | head -n 1)
@@ -92,7 +107,7 @@ published() {
 
 # Versions fill the name. The shape is what the check holds.
 PACKSET_VER=0.17.7
-VISSUE_VER=0.24.1
+VISSUE_VER=0.25.0
 DEEDAR_VER=0.6.1
 CLAIMDAG_VER=0.8.0
 POLICYD_VER=0.7.0

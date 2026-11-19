@@ -68,6 +68,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Installer matches the published archives
         run: scripts/release-install-check.sh
+      - name: Pinned sibling releases have their archives
+        run: scripts/release-pin-check.sh
   # A push is before..sha. A new branch's before is all zeros, so the
   # commits are the ones on no other remote branch. A pull request is
   # base..head. Commits already on the base are outside the range.

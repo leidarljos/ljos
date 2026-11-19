@@ -77,7 +77,7 @@
 #   --version VER   install ljos VER (such as 0.29.0) instead of the latest
 #   --pin REPO=VER  install REPO at VER (such as packset=0.14.0); repeat
 #                   for each repository to hold. vissue, claimdag and deedar
-#                   default to the versions in .github/sibling-pin
+#                   default to the versions in .github/release-pin
 #   --latest        do not apply those default pins; each unpinned
 #                   repository is its latest release
 #   --attest        refuse a tarball whose GitHub build attestation is
@@ -236,7 +236,7 @@ pinned() {
 }
 
 # True when this run's arguments named REPO. A pin added from
-# .github/sibling-pin, or from the fallback list, is not one of these.
+# .github/release-pin, or from the fallback list, is not one of these.
 user_asked() {
   for pin in $USER_PINS; do
     case $pin in "$1="*) return 0 ;; esac
@@ -258,11 +258,12 @@ drop_pin() {
   printf '%s' "$out"
 }
 
-# vissue, claimdag and deedar follow .github/sibling-pin when this script
+# vissue, claimdag and deedar follow .github/release-pin when this script
 # sits in the repository. A downloaded script carries the same versions.
+# Each one is a release with an archive for every target.
 # --pin for one of them wins. --latest leaves every unpinned repository
 # at its latest release.
-# Three dot-separated numbers, such as 0.24.1. No grep: a PATH that
+# Three dot-separated numbers, such as 0.25.0. No grep: a PATH that
 # cannot fetch a release still has to name curl before anything else.
 version_ok() {
   case $1 in
@@ -281,18 +282,18 @@ version_ok() {
   esac
 }
 
-apply_sibling_pins() {
+apply_release_pins() {
   [ "$LATEST" = 1 ] && return 0
   here=${0%/*}
   [ "$here" = "$0" ] && here=.
-  pinfile=$here/../.github/sibling-pin
+  pinfile=$here/../.github/release-pin
   if [ -f "$pinfile" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       trim=${line#"${line%%[![:space:]]*}"}
       case "$trim" in
         '' | \#*) continue ;;
       esac
-      read -r name _repo _commit ver _extra <<EOF
+      read -r name ver _extra <<EOF
 $trim
 EOF
       [ -n "${ver:-}" ] || continue
@@ -301,17 +302,17 @@ EOF
     done < "$pinfile"
     return 0
   fi
-  # The versions in .github/sibling-pin. release-install-check.sh
+  # The versions in .github/release-pin. release-install-check.sh
   # refuses a copy that has drifted.
-  for item in vissue=0.24.1 claimdag=0.8.0 deedar=0.4.0; do
+  for item in vissue=0.25.0 claimdag=0.8.0 deedar=0.4.0; do
     name=${item%%=*}
     [ -z "$(pinned "$name")" ] || continue
     PINS="$PINS $item"
   done
 }
-# Pins from the command line. apply_sibling_pins adds the rest.
+# Pins from the command line. apply_release_pins adds the rest.
 USER_PINS=$PINS
-apply_sibling_pins
+apply_release_pins
 
 for pin in $PINS; do
   ver=${pin#*=}
@@ -572,10 +573,10 @@ source_build() {
   command -v cargo >/dev/null 2>&1 ||
     die "no $asset for $TARGET; rustc $have meets $MIN_RUST and cargo is not on PATH. Install cargo and run \`sh install.sh\` again."
   if [ -n "$ver" ]; then
-    say "  building $crate $ver from source (no $asset for $TARGET)"
+    say "  no release archive $asset for $TARGET: building $crate $ver from source with cargo, which is slow"
     cargo install --locked --quiet --root "$TMP/cargo" --version "=$ver" "$crate" >&2
   else
-    say "  building $crate from source (no $asset for $TARGET)"
+    say "  no release archive $asset for $TARGET: building $crate from source with cargo, which is slow"
     cargo install --locked --quiet --root "$TMP/cargo" "$crate" >&2
   fi
   for built in "$TMP"/cargo/bin/*; do
