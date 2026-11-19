@@ -151,6 +151,83 @@ pub fn define_file(path: &Path) -> Result<String> {
     define_named(&name, &text, &path.display().to_string(), None)
 }
 
+struct RunLock(std::fs::File);
+
+impl Drop for RunLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: descriptor owned by RunLock until drop.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+fn run_lock_dir(root: &Path) -> PathBuf {
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return dot_git.join("ljos-locks");
+    }
+    if dot_git.is_file() {
+        if let Ok(out) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "--git-common-dir"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            if out.status.success() {
+                let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !raw.is_empty() {
+                    let p = Path::new(&raw);
+                    return if p.is_absolute() {
+                        p.join("ljos-locks")
+                    } else {
+                        root.join(p).join("ljos-locks")
+                    };
+                }
+            }
+        }
+    }
+    root.join(".ljos-locks")
+}
+
+fn acquire_run_lock(parent: &str) -> Result<RunLock> {
+    use std::os::unix::io::AsRawFd;
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    layout.require_tracker()?;
+    let slug: String = parent
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let lock_dir = run_lock_dir(layout.root());
+    std::fs::create_dir_all(&lock_dir)
+        .with_context(|| format!("workflow: create {}", lock_dir.display()))?;
+    let lock_path = lock_dir.join(format!("workflow-start-{slug}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&lock_path)
+        .with_context(|| format!("workflow: open {}", lock_path.display()))?;
+    loop {
+        // SAFETY: `file` owns the open descriptor.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc == 0 {
+            return Ok(RunLock(file));
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return Err(err).with_context(|| format!("workflow: lock {}", lock_path.display()));
+    }
+}
+
 /// File the steps of `name` under `parent`.
 ///
 /// The run keeps the skeleton version from the first start. A later start
@@ -166,6 +243,7 @@ pub fn start_run(
     vars: &BTreeMap<String, String>,
     file: Option<&Path>,
 ) -> Result<String> {
+    let _lock = acquire_run_lock(parent)?;
     let latest = require_stored(name)?;
     let parent_card = crate::tracker_show_json(parent)
         .with_context(|| format!("workflow: {parent} is not a ticket"))?;
@@ -206,6 +284,11 @@ pub fn start_run(
         .iter()
         .map(|row| (row.key.clone(), row.id.clone()))
         .collect();
+    let filled = if skel.steps.iter().any(|step| !ids.contains_key(&step.key)) {
+        Some(fill_vars(&skel, vars)?)
+    } else {
+        None
+    };
     let mut out = String::new();
     if !already {
         write_note(parent, &format!("{NAME_NOTE}{name}"))?;
@@ -218,15 +301,14 @@ pub fn start_run(
         ));
     }
     let mut filed_any = false;
-    if skel.steps.iter().any(|step| !ids.contains_key(&step.key)) {
+    if let Some(filled) = &filled {
         let project = parent_card["project"]
             .as_str()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("workflow: {parent} has no project"))?
             .to_string();
-        let filled = fill_vars(&skel, vars)?;
-        let order = topo(&filled)?;
+        let order = topo(filled)?;
         for key in &order {
             if ids.contains_key(key) {
                 continue;

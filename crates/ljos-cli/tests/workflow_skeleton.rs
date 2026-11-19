@@ -82,9 +82,9 @@ impl Board {
         }
     }
 
-    fn ljos_as(&self, seat: &str, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
-            .args(args)
+    fn cmd_as(&self, seat: &str, args: &[&str]) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        cmd.args(args)
             .current_dir(self.dir.path())
             .env_clear()
             .env("PATH", &self.path)
@@ -104,9 +104,12 @@ impl Board {
             .env("DEEDAR_URL", format!("file://{}", self.store.display()))
             .env("DEEDAR_HOST_SIGNING_KEY", "off")
             .env("LANG", "C.UTF-8")
-            .env("LC_ALL", "C.UTF-8")
-            .output()
-            .unwrap()
+            .env("LC_ALL", "C.UTF-8");
+        cmd
+    }
+
+    fn ljos_as(&self, seat: &str, args: &[&str]) -> Output {
+        self.cmd_as(seat, args).output().unwrap()
     }
 
     fn ljos(&self, args: &[&str]) -> Output {
@@ -872,6 +875,73 @@ Options: ship, hold
         ]);
         assert!(!err.contains("matches"), "accepted {dirty_line:?}: {err}");
     }
+}
+
+#[test]
+fn concurrent_start_files_one_ticket_per_step() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Concurrent run", "--top", "-p", "demo"]));
+    let args = [
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ];
+    let first = board
+        .cmd_as("saddle", &args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let second = board
+        .cmd_as("saddle", &args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out1 = first.wait_with_output().unwrap();
+    let out2 = second.wait_with_output().unwrap();
+    assert!(out1.status.success(), "first failed:\n{}", text(&out1));
+    assert!(out2.status.success(), "second failed:\n{}", text(&out2));
+
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    let doc =
+        vissue_core::IssueDoc::parse_file("demo", &layout.project_issues_path("demo")).unwrap();
+    let children: Vec<_> = doc
+        .headings
+        .iter()
+        .filter(|h| h.parent().map(str::trim) == Some(parent.as_str()))
+        .collect();
+    assert_eq!(
+        children.len(),
+        3,
+        "expected 3 steps under {parent}, got {}:\nstdout1:\n{}\nstdout2:\n{}",
+        children.len(),
+        String::from_utf8_lossy(&out1.stdout),
+        String::from_utf8_lossy(&out2.stdout)
+    );
+    let mut step_tags: Vec<String> = children
+        .iter()
+        .filter_map(|h| {
+            h.tags()
+                .iter()
+                .find(|t| t.starts_with("step-"))
+                .map(|t| t.to_string())
+        })
+        .collect();
+    step_tags.sort();
+    assert_eq!(
+        step_tags,
+        vec![
+            "step-changelog".to_string(),
+            "step-signoff".to_string(),
+            "step-version".to_string()
+        ]
+    );
 }
 
 #[test]
