@@ -3133,6 +3133,13 @@ fn missing_cloud_age(path: &Path) -> crate::Habitat {
         NamedSecret::Name(name) => {
             let problem = secret_problem(&name);
             let state = match problem {
+                // A variable that is not there may never have been a name. A
+                // token pasted into the setting can be spelled like one, so
+                // the row does not repeat it.
+                Some("is unset") => format!(
+                    "{CLOUD_AGE_SECRET} names a variable that is unset, and {} is missing",
+                    path.display()
+                ),
                 Some(problem) => format!("{name} {problem}, and {} is missing", path.display()),
                 None => format!(
                     "{name} is set and {} is missing, so run `ljos cloud up`.",

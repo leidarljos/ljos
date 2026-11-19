@@ -1157,8 +1157,15 @@ fn show_value(value: &toml::Value) -> String {
     }
 }
 
+/// A variable whose value is a secret reads `set`. `LJOS_SEAT_KEY` names a
+/// key file, so its value shows only when it is a path.
 fn redact(name: &str, value: &str) -> String {
-    if name.contains("TOKEN") || name.contains("SECRET") || name.contains("PASSPHRASE") {
+    let secret = name.contains("TOKEN")
+        || name.contains("SECRET")
+        || name.contains("PASSPHRASE")
+        || name.ends_with("_KEY");
+    let path_only = name == "LJOS_SEAT_KEY" && crate::names_a_path(value);
+    if secret && !path_only {
         "set".to_string()
     } else {
         value.to_string()

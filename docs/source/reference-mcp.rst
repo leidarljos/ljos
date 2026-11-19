@@ -70,7 +70,7 @@ Most tools answer with ``text``, the answer as the command prints it, and ``asid
 
 ``ljos_policy`` prints an argument list as it would run, with the ruling a rule gives it, and runs nothing. It is not a check. ``ljos_guard_check`` takes a shell line and is the one to call before running a command. ``ljos_conflicts`` lists pairs of memories that may contradict each other and writes nothing. ``ljos_graded`` takes ``recalled``, which is true by default and pushes the next review out; false brings it back sooner.
 
-``ljos_doctor`` returns one row for each habitat with ``name``, ``state``, ``ok`` and ``optional``. A row with ``optional`` true is an extra the seat runs without, such as ``packset-embed``, ``ljos-hud``, the cloud guard, the runners or the git hooks, so ``ok`` false there is not a failure. It is the row ``ljos doctor`` prints as ``info``. A row with ``optional`` false and ``ok`` false needs a step. The install command a row names does not depend on the directory ``ljos mcp`` started in.
+``ljos_doctor`` returns one row for each habitat with ``name``, ``state``, ``ok`` and ``optional``. A row with ``optional`` true is an extra the seat runs without, such as ``packset-embed``, ``ljos-hud``, the cloud guard, the runners or the git hooks, so ``ok`` false there is not a failure. It is the row ``ljos doctor`` prints as ``info``. A row with ``optional`` false and ``ok`` false needs a step. The install command a row names does not depend on the directory ``ljos mcp`` started in. A row names a secret variable and says whether it is set; it never carries the value.
 
 ``ljos_recall`` adds a Code context section when ``graphify-out/graph.json`` is in the working directory's repository.
 

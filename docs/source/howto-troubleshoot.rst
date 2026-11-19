@@ -204,6 +204,35 @@ A command that exists and is not this install's ``ljos-mcp`` is a warning. The e
 
 On a cloud VM, a codespace, or CI the same rows say to run ``ljos cloud up`` instead of ``ljos onboard --harness cursor``.
 
+Secret variables
+================
+
+``ljos doctor`` and ``ljos_doctor`` name a secret variable and say whether it is set. They do not print its value. ``LJOS_CLOUD_AGE_SECRET`` names another variable, and a token pasted into it can read like a name, so the ``cloud age`` row says the variable is unset without repeating the name:
+
+..
+   # proseguard:off
+
+.. code:: text
+
+   no  cloud age   LJOS_CLOUD_AGE_SECRET names a variable that is unset, and /home/you/.config/ljos/cloud.age is missing
+
+..
+   # proseguard:on
+
+A value that is not an age identity, or an age identity pasted into the setting, is named by the problem and never printed. The ``signing key`` row prints ``DEEDAR_HOST_SIGNING_KEY`` only when its value is a path:
+
+..
+   # proseguard:off
+
+.. code:: text
+
+   no  signing key DEEDAR_HOST_SIGNING_KEY is set, but its value is not the path of a key file; set it to that path, or to off for no signing
+
+..
+   # proseguard:on
+
+The config rows show ``set`` for ``LJOS_TRACKER_TOKEN``, ``LJOS_WAKE_LAUNCHER_KEY`` and any other variable whose name has ``TOKEN``, ``SECRET`` or ``PASSPHRASE`` in it or ends in ``_KEY``. ``LJOS_SEAT_KEY`` shows its value when the value is a path, and ``set`` otherwise.
+
 The registry
 ============
 

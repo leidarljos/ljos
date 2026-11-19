@@ -19611,6 +19611,28 @@ fn host_key_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Whether `value` reads as a place on disk: it exists, or it sits in a
+/// directory that does. A secret pasted where a path belongs is neither, so
+/// a row that would print it says only that the value is not a path.
+pub(crate) fn names_a_path(value: &str) -> bool {
+    if value.is_empty() || value.contains(['\n', '\r', '\0']) {
+        return false;
+    }
+    let path = Path::new(value);
+    path.exists()
+        || path
+            .parent()
+            .is_some_and(|dir| !dir.as_os_str().is_empty() && dir.is_dir())
+}
+
+/// Whether a doctor row may print the host key's location. The default
+/// location is ours to print. A `DEEDAR_HOST_SIGNING_KEY` value is printed
+/// only when it is a path.
+fn host_key_shows(path: &Path) -> bool {
+    let from_env = std::env::var_os("DEEDAR_HOST_SIGNING_KEY").is_some_and(|v| !v.is_empty());
+    !from_env || names_a_path(&path.to_string_lossy())
+}
+
 /// Whether the tracker holds `voter`'s ballot for `choice` on `issue`,
 /// from `vissue vote --json` rows. The read-back after a cast: only the
 /// tracker is proof a ballot exists.
@@ -35572,18 +35594,30 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 } else {
                     None
                 };
-                Habitat {
-                    name: "host key",
-                    state: match (&unlisted, seed) {
-                        (Some(why), _) => format!(
-                            "{}, the signing key for deeds; {}",
-                            path.display(),
-                            why.lines().next().unwrap_or("").trim()
-                        ),
-                        (None, true) => format!("{}, the signing key for deeds", path.display()),
-                        (None, false) => format!("{} is not a signing key", path.display()),
-                    },
-                    ok: seed && unlisted.is_none(),
+                if !host_key_shows(&path) {
+                    Habitat {
+                        name: "host key",
+                        state: "DEEDAR_HOST_SIGNING_KEY is set, but its value is not the path \
+                            of a key file; set it to that path, or to off for no signing"
+                            .into(),
+                        ok: false,
+                    }
+                } else {
+                    Habitat {
+                        name: "host key",
+                        state: match (&unlisted, seed) {
+                            (Some(why), _) => format!(
+                                "{}, the signing key for deeds; {}",
+                                path.display(),
+                                why.lines().next().unwrap_or("").trim()
+                            ),
+                            (None, true) => {
+                                format!("{}, the signing key for deeds", path.display())
+                            }
+                            (None, false) => format!("{} is not a signing key", path.display()),
+                        },
+                        ok: seed && unlisted.is_none(),
+                    }
                 }
             }
             None => Habitat {

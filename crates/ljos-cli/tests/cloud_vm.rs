@@ -3299,7 +3299,12 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
     let row = ljos_cli::cloud::cloud_age_row();
     assert!(!row.ok, "{row:?}");
     assert_eq!(ljos_cli::doctor_word(&row), "no");
-    assert!(row.state.contains("LJOS_CLOUD_AGE_KEY"), "{row:?}");
+    assert!(
+        row.state
+            .starts_with("LJOS_CLOUD_AGE_SECRET names a variable that is unset"),
+        "{row:?}"
+    );
+    assert!(!row.state.contains("LJOS_CLOUD_AGE_KEY"), "{row:?}");
     assert!(!row.state.contains(&secret_line), "{row:?}");
     assert_eq!(
         ljos_cli::failing(std::slice::from_ref(&row)),
