@@ -1858,6 +1858,18 @@ fn mail_said(text: anyhow::Result<String>) -> Result<Json<Said>, McpError> {
         .map_err(refused)
 }
 
+fn mcp_doctor_state(name: &str, state: String) -> String {
+    if matches!(name, "packset-embed" | "encoder") && state.contains("install.sh") {
+        if let Some((context, _)) = state.rsplit_once("so run `") {
+            return format!(
+                "{context}so read {} or run `ljos doctor`.",
+                ljos_cli::INSTALL_PAGE
+            );
+        }
+    }
+    state
+}
+
 #[tool_router]
 impl LjosServer {
     /// Read the cards directory from `LJOS_CARDS_DIR`, or the working directory,
@@ -3314,7 +3326,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this first in a sitting, and again whenever another tool fails: which habitats answer (binaries, pack, host key, deed store, tracker, claim graph) and whether this client is onboarded. A row with optional true is an extra, so ok false there is no failure. A tool failing is a habitat down or refusing, never an empty answer.",
+        description = "Call this first in a sitting, and again whenever another tool fails: which habitats answer (binaries, pack, host key, deed store, tracker, claim graph) and whether this client is onboarded. A row with optional true is an extra, so ok false there is no failure. Encoder install rows point at the install page and `ljos doctor`; use the CLI to print an install command. A tool failing is a habitat down or refusing, never an empty answer.",
         annotations(title = "Doctor", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_doctor(&self) -> Result<Json<Rows<HabitatRow>>, McpError> {
@@ -3324,7 +3336,7 @@ impl LjosServer {
                 .map(|h| HabitatRow {
                     name: h.name.to_string(),
                     optional: doctor_word(&h) == "info",
-                    state: h.state,
+                    state: mcp_doctor_state(h.name, h.state),
                     ok: h.ok,
                 })
                 .collect(),

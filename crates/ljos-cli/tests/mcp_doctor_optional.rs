@@ -1,7 +1,7 @@
 //! `ljos_doctor` over `ljos mcp` marks the extras a seat runs without, so
 //! a client does not read an absent `ljos-hud` as a failure, and the
 //! encoder hint it carries does not depend on the directory the client
-//! started the server in.
+//! started the server in or print a downloaded shell command.
 
 ljos_test_boot::harness!();
 
@@ -122,10 +122,20 @@ fn the_encoder_hint_is_the_same_in_a_checkout_and_out_of_one() {
 
     let inside = rows(home.path(), &checkout);
     let outside = rows(home.path(), &bare);
-    let inside = row(&inside, "packset-embed")["state"].clone();
-    let outside = row(&outside, "packset-embed")["state"].clone();
-    assert_eq!(inside, outside);
-    let text = inside.as_str().unwrap();
-    assert!(!text.contains("scripts/install.sh"), "{text}");
-    assert!(text.contains("so run `"), "{text}");
+    for rows in [&inside, &outside] {
+        for found in rows {
+            let text = found["state"].as_str().unwrap();
+            assert!(
+                !text.contains("curl") && !text.contains("wget") && !text.contains("install.sh"),
+                "{text}"
+            );
+        }
+        let text = row(rows, "packset-embed")["state"].as_str().unwrap();
+        assert!(text.contains(ljos_cli::INSTALL_PAGE), "{text}");
+        assert!(text.contains("run `ljos doctor`"), "{text}");
+    }
+    assert_eq!(
+        row(&inside, "packset-embed")["state"],
+        row(&outside, "packset-embed")["state"]
+    );
 }
