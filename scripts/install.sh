@@ -5,10 +5,10 @@
 # found, the tracker, the memory writer and the deed store are still set up.
 #
 # One command for a new machine. It fetches the release assets, checks
-# each SHA-256, and sets up the tracker and memory. Search matches words.
-# The encoder is not downloaded:
+# each SHA-256, installs the encoder and its model, and sets up the tracker
+# and memory:
 #
-#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
+#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 #
 # Two commands, when registration should be its own step. The first
 # installs the programs. The second finds Claude Code, Cursor and Codex,
@@ -16,13 +16,12 @@
 # the skill for each. A second `ljos onboard` leaves those files as they
 # are. `--dry-run` writes nothing. `ljos offboard` removes the registration.
 #
-#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed --no-onboard
+#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-onboard
 #   export PATH="$HOME/.local/bin:$PATH" && ljos onboard
 #
-# With no flag the encoder is installed, as before. It fetches a model on
-# first use. `--with-embed` is that same install.
+# To skip the encoder and its model download:
 #
-#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+#   sh install.sh --no-embed
 #
 # Each ljos release attaches this script as the asset install.sh, from
 # the first release after 0.28.0 on. Before that release the URL is a 404.
@@ -788,13 +787,20 @@ wait_for_attests() {
   done < "$TMP/attest.pids"
 }
 
-# exists when the tag is published, missing when GitHub says it is not,
-# unknown when the question could not be asked.
+# exists only when GitHub published a release with ASSET, missing when it
+# published neither, noarchive when the release omits ASSET, and unknown
+# when the question could not be asked. A bare git tag is not a release.
 release_state() {
   repo=$1
   ver=$2
-  if fetch "https://github.com/$OWNER/$repo/releases/tag/v$ver" "$TMP/tag-$repo-$ver"; then
-    printf '%s' exists
+  asset=$3
+  answer="$TMP/release-$repo-$ver"
+  if fetch "https://api.github.com/repos/$OWNER/$repo/releases/tags/v$ver" "$answer"; then
+    if grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"$asset\"" "$answer"; then
+      printf '%s' exists
+    else
+      printf '%s' noarchive
+    fi
     return 0
   fi
   case $FETCH_KIND in
@@ -855,9 +861,15 @@ install_one() {
       missing)
         rm -f "$TMP/$asset"
         if [ -n "$ver" ]; then
-          rel=$(release_state "$repo" "$ver")
-          if [ "$rel" = missing ]; then
+          rel=$(release_state "$repo" "$ver" "$asset")
+          if [ "$rel" = missing ] || [ "$rel" = noarchive ]; then
             if user_asked "$repo"; then
+              if [ "$rel" = noarchive ]; then
+                if [ "$repo" = ljos ]; then
+                  die "$repo $ver has no release archive $asset for $TARGET. List versions at https://github.com/$OWNER/$repo/releases, then run \`sh install.sh --version VER\`."
+                fi
+                die "$repo $ver has no release archive $asset for $TARGET. List versions at https://github.com/$OWNER/$repo/releases, then run \`sh install.sh --pin $repo=VER\`."
+              fi
               if [ "$repo" = ljos ]; then
                 die "$repo $ver has no release. List versions at https://github.com/$OWNER/$repo/releases, then run \`sh install.sh --version VER\`."
               fi
@@ -1262,11 +1274,8 @@ if [ "$ONBOARD" = 1 ]; then
     fi
   done < "$TMP/runners"
   if [ "$found_any" = 0 ]; then
-    say "  none found. Setting up the ticket tracker, the memory writer, and the deed store."
-    say "  The deed store keeps signed records of the work."
-    say "  No coding tool is installed, so no runner was registered."
-    say "  After you install an agent, run \`ljos onboard\`."
-    say "  \`ljos onboard --example\` lists those tools. \`ljos onboard --harness NAME\` registers the one you name."
+    say "  No coding tool is installed."
+    say "  Setting up the ticket tracker, memory writer, and deed store."
     if ! ljos onboard --harness all > "$TMP/onboard-seat" 2>&1; then
       say "  seat setup reported a problem:"
       sed 's/^/    /' "$TMP/onboard-seat"
@@ -1306,26 +1315,8 @@ esac
 if [ -n "$root" ]; then
   say "memory and the command guard are off because the home is under ${root} (${home_real}); set HOME to a directory outside ${root}"
 fi
-# `--no-onboard` has not set up the guard or the pack home, so the
-# force-push sample would be a command the person did not ask to try.
 if [ "$ONBOARD" = 1 ]; then
-  say "The guard lets a force push run, with a warning:"
-  # A push onto main also trips the sitting gate, which hides this warning.
-  # A topic branch shows the force-push rule on its own. Ask from the home
-  # directory, and ignore a git dir the caller exported.
-  (
-    cd "$HOME" || exit 1
-    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX \
-      GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE
-    # The sample is a warning to read. It is not a command this person ran,
-    # so it does not land in their bypass log. The token stays in the pack
-    # home onboard made. Pointing the sample at the empty directory made
-    # the search say it had no token.
-    mkdir -p "$TMP/policy-demo"
-    pack_home=${XDG_DATA_HOME:-$HOME/.local/share}/packset
-    XDG_DATA_HOME="$TMP/policy-demo" PACKSET_HOME="$pack_home" \
-      ljos policy -- git push --force origin topic
-  ) || true
+  say "Command guard: run \`ljos policy --help\`."
 fi
 if [ "$CLOUD" = 1 ]; then
   if "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
@@ -1371,15 +1362,17 @@ if [ "$ONBOARD" = 1 ]; then
 else
   next_cmd="ljos onboard"
 fi
-if [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; then
+if [ "$ONBOARD" = 1 ] && [ "$found_any" = 0 ] \
+  && { [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; }; then
+  say "Done in $secs s. This shell does not run the ljos just installed until PATH is set."
+  say "Next: $PATH_LINE"
+  say "Then install Claude Code, Cursor or Codex, and run \`ljos onboard\`."
+elif [ "$ONBOARD" = 1 ] && [ "$found_any" = 0 ]; then
+  say "Done in $secs s. Next: install Claude Code, Cursor or Codex, then run \`ljos onboard\`."
+elif [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; then
   say "Done in $secs s. This shell does not run the ljos just installed until PATH is set."
   say "Next: $PATH_LINE && $next_cmd"
 else
   say "Done in $secs s. Next: \`$next_cmd\`."
 fi
-say "Shell completion is one line in the shell's startup file. This script does not write that file."
-say "  bash: source <(ljos completions bash)"
-say "  zsh: source <(ljos completions zsh)"
-say "  fish: ljos completions fish | source"
-say "  powershell: ljos completions powershell | Out-String | Invoke-Expression"
-say "  elvish: eval (ljos completions elvish)"
+say "Shell completion: run \`ljos completions --help\`."

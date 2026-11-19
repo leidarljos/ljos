@@ -1,9 +1,9 @@
 .. [[[cog import ljos_version as v; v.lines("", ":description: A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos {version}.", ":cover: https://leidarljos.github.io/ljos/_static/og.png", "", "A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos {version}.", "")]]]
 
-:description: A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.45.2.
+:description: A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.45.3.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.45.2.
+A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.45.3.
 
 .. [[[end]]]
 
@@ -17,22 +17,16 @@ Install
 
 Linux and macOS are supported. Windows works through Windows Subsystem for Linux (WSL) and is untested.
 
-From a checkout of this repository:
-
 .. code:: console
 
-   $ sh scripts/install.sh --no-embed
+   $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
    $ export PATH="$HOME/.local/bin:$PATH"
 
-From a checkout, that command installs the published release.
-The release is a complete install of ljos and the sibling tools.
-To install this checkout onto PATH instead, run ``sh scripts/install.sh --from-checkout --no-embed``.
-
-A release attaches that script:
-
-.. code:: console
-
-   $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
+The release is a complete install of ljos, the sibling tools and the encoder.
+The installer downloads the encoder model and onboards the coding runners it finds.
+Pass ``--no-embed`` to skip the encoder and its model download, or ``--no-onboard`` to register runners later.
+If you install Claude Code, Cursor or Codex afterwards, run ``ljos onboard``.
+From a checkout, ``sh scripts/install.sh --from-checkout`` installs that checkout instead.
 
 ``ljos`` with no arguments prints what ljos is, the seat it would use and where that came from, then ``install``, ``doctor``, ``remember`` and ``search``, and where the command reference is. The install line is left off when this binary is the installed program. A read with no seat named says it uses every seat, because no seat was named. ``ljos help`` lists the rest.
 
@@ -189,6 +183,7 @@ With no terminal, a script or cron as well as a runner, the preference row is ``
 Search matches words when the encoder is absent. ``ljos search fusing`` finds a preference that contains that word.
 ``ljos search "which fusion"`` shares no word with either sentence and prints ``Nothing matched "which fusion". Try a shorter query, such as: ljos search fusion``. A match-mode line is not printed.
 When the encoder ranked the page, this seat's hits come first. A word ranking gives this seat a small boost instead, and a closer row from another seat stays ahead. Another seat's lesson is printed when it names the subject, or when the encoder's cosine with the query is at least 0.66.
+The default line says whether the printed rows matched by meaning, words, or both. ``--explain`` names CombMNZ, MMR and FSRS.
 That floor is the one the prompt hook uses for a hit the encoder lists at the top.
 A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is ``Nothing relevant was found.`` A match-mode line is not printed on that empty page.
 A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, ``0`` does not wait), following ``Retry-After`` or a JSON ``retry_ms``, and a writer that becomes free still ranks by meaning. When that wait runs out, search ranks by words, keeps a hit that names the subject, and the one line is ``The memory pack was busy, so these rows are word matches; run the search again for ranked results.`` When no words match, the line is ``The memory pack was busy and no words matched.`` and the command exits 1. A writer that is not running names ``packset ensure``.

@@ -12,13 +12,13 @@ program used by ``ljos conflicts``. Its missing row links to the source.
 
 .. [[[cog import ljos_version as v; v.lines("", "The block is the ``ljos`` row from that command on a scratch seat, taken from ljos {version}.", "")]]]
 
-The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.45.2.
+The block is the ``ljos`` row from that command on a scratch seat, taken from ljos 0.45.3.
 
 .. [[[end]]]
 
 .. [[[cog import ljos_version as v; v.lines("", "``ljos --version`` printed ``ljos {version}``.", "")]]]
 
-``ljos --version`` printed ``ljos 0.45.2``.
+``ljos --version`` printed ``ljos 0.45.3``.
 
 .. [[[end]]]
 
@@ -39,9 +39,9 @@ runner above the shell it says the person's git is not gated.
 .. code:: text
 
    $ ljos --version
-   ljos 0.45.2
+   ljos 0.45.3
    $ ljos doctor --all
-   ok  ljos    /path/to/ljos  0.45.2  crates.io (cached) 0.45.2
+   ok  ljos    /path/to/ljos  0.45.3  crates.io (cached) 0.45.3
 
 .. END ljos-sample doctor
 

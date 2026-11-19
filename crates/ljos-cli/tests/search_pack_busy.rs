@@ -160,7 +160,7 @@ fn a_busy_once_writer_still_answers_by_meaning() {
     assert!(out.status.success(), "{text}");
     assert!(String::from_utf8_lossy(&out.stdout).contains(HIT), "{text}");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains(ljos_cli::FUSED_RANK_LINE),
+        String::from_utf8_lossy(&out.stderr).contains(ljos_cli::MEANING_LINE),
         "{text}"
     );
     assert!(!text.contains(BUSY), "{text}");
@@ -266,7 +266,7 @@ fn words_in_a_hit_are_not_a_busy_pack() {
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains(ljos_cli::FUSED_RANK_LINE),
+        String::from_utf8_lossy(&out.stderr).contains(ljos_cli::MEANING_LINE),
         "{text}"
     );
     assert!(text.contains("queue is full"), "{text}");
