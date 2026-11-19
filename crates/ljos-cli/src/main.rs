@@ -2695,8 +2695,110 @@ fn root_synonym(typed: &str) -> Option<&'static str> {
         "status" => Some("doctor"),
         "stats" => Some("digest"),
         "edit" => Some("memories"),
+        "memorize" | "memorise" => Some("remember"),
+        "review" => Some("proposals"),
         _ => None,
     }
+}
+
+/// `lessons` is what a person calls the thing ljos keeps. It is not a
+/// command, and no one verb is the right answer: finding one is `search`,
+/// saving one is `remember`, and the ones waiting on a yes are `proposals`.
+fn lessons_topic(typed: &str) -> bool {
+    matches!(
+        typed.to_ascii_lowercase().replace('_', "-").as_str(),
+        "lessons" | "lesson" | "learnings" | "learning" | "learned" | "lore"
+    )
+}
+
+/// The three verbs for a lessons word, each as a line that runs.
+///
+/// Words typed straight after it are the query: `ljos lessons kiln` is
+/// `ljos search kiln`. A flag ends them.
+fn lessons_sentence(typed: &str, args: &[String]) -> String {
+    let after: Vec<&String> = args
+        .iter()
+        .skip_while(|arg| arg.as_str() != typed)
+        .skip(1)
+        .take_while(|arg| !arg.starts_with('-'))
+        .collect();
+    let search = if after.is_empty() {
+        "ljos search \"lexical default\"".to_string()
+    } else {
+        let words: Vec<&str> = after.iter().map(|word| word.as_str()).collect();
+        recall_search_command(&words.join(" "))
+    };
+    format!(
+        "ljos: no command {typed}. To find lessons run `{search}`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`."
+    )
+}
+
+/// The verb a word that is not a command was reaching for.
+///
+/// The start of exactly one verb wins first, so `prop` is `proposals`
+/// and not the nearest short spelling. Then the nearest spelling, then
+/// [`near_verb`].
+fn pick_verb(typed: &str, names: &[String]) -> Option<String> {
+    let folded = typed.trim().to_ascii_lowercase().replace('_', "-");
+    start_of_verb(&folded, names)
+        .or_else(|| closest(typed, names))
+        .or_else(|| near_verb(typed, names))
+        .map(str::to_string)
+}
+
+/// A word that is not a command but names one by its stem or a part.
+///
+/// `remembering` and `searches` are the verb with an ending on it, and
+/// `search-lessons` carries one verb as a part. Aliases count as verbs.
+fn near_verb<'a>(typed: &str, names: &'a [String]) -> Option<&'a str> {
+    let folded = typed.trim().to_ascii_lowercase().replace('_', "-");
+    if folded.is_empty() {
+        return None;
+    }
+    let mut words = vec![folded.as_str()];
+    words.extend(
+        folded
+            .split('-')
+            .filter(|part| !part.is_empty() && *part != folded),
+    );
+    words.into_iter().find_map(|word| {
+        names
+            .iter()
+            .map(String::as_str)
+            .find(|name| *name == word && word.chars().count() >= 3)
+            .or_else(|| stem_verb(word, names))
+            .filter(|name| !name.eq_ignore_ascii_case(typed))
+    })
+}
+
+fn stem_verb<'a>(word: &str, names: &'a [String]) -> Option<&'a str> {
+    for ending in ["ing", "ed", "es", "er", "s"] {
+        let Some(stem) = word.strip_suffix(ending) else {
+            continue;
+        };
+        if stem.chars().count() < 3 {
+            continue;
+        }
+        let with_e = format!("{stem}e");
+        if let Some(name) = names
+            .iter()
+            .find(|name| name.as_str() == stem || name.as_str() == with_e)
+        {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn start_of_verb<'a>(word: &str, names: &'a [String]) -> Option<&'a str> {
+    if word.chars().count() < 3 {
+        return None;
+    }
+    let mut found = names
+        .iter()
+        .filter(|name| name.len() > word.len() && name.starts_with(word));
+    let first = found.next()?;
+    found.next().is_none().then_some(first.as_str())
 }
 
 /// `issues`, `tickets` and `todo` are not commands.
@@ -2722,12 +2824,15 @@ fn command_sentence(typed: &str, args: &[String]) -> String {
     if let Some(line) = listing_sentence(typed).filter(|_| here.at.is_empty()) {
         return line;
     }
+    if here.at.is_empty() && lessons_topic(typed) {
+        return lessons_sentence(typed, args);
+    }
     let picked = if here.at.is_empty() {
         root_synonym(typed).map(str::to_string)
     } else {
         None
     };
-    let picked = picked.or_else(|| closest(typed, &here.commands).map(str::to_string));
+    let picked = picked.or_else(|| pick_verb(typed, &here.commands));
     match picked {
         Some(name) => {
             let rewritten = rewrite_arg(args, typed, &name);
@@ -3854,6 +3959,10 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
             eprintln!("{line}");
             std::process::exit(USAGE_STATUS);
         }
+        if current.get_name() == "ljos" && lessons_topic(name) {
+            eprintln!("{}", lessons_sentence(name, &[]));
+            std::process::exit(USAGE_STATUS);
+        }
         let verb: Vec<String> = topic[..i].to_vec();
         if let Some(line) = ticket_id_sentence(name, &verb, ticket_form(current).as_ref()) {
             eprintln!("{line}");
@@ -3865,7 +3974,7 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
         } else {
             None
         };
-        let picked = picked.or_else(|| closest(name, &names).map(str::to_string));
+        let picked = picked.or_else(|| pick_verb(name, &names));
         let line = match picked {
             Some(real) => {
                 let mut fixed: Vec<&str> = topic.iter().map(String::as_str).collect();
@@ -8090,5 +8199,38 @@ mod usage_hint {
         let bare = flag_names(&search.flags);
         assert_eq!(closest("josn", &bare), Some("json"));
         assert_eq!(closest("x", &bare), None);
+    }
+
+    #[test]
+    fn a_verb_with_an_ending_or_a_start_is_picked() {
+        let here = words_at(&[]);
+        let pick = |word: &str| pick_verb(word, &here.commands);
+        assert_eq!(pick("prop").as_deref(), Some("proposals"));
+        assert_eq!(pick("sear").as_deref(), Some("search"));
+        assert_eq!(pick("remembering").as_deref(), Some("remember"));
+        assert_eq!(pick("searches").as_deref(), Some("search"));
+        assert_eq!(pick("search-lessons").as_deref(), Some("search"));
+        assert_eq!(pick("note_add").as_deref(), Some("note"));
+        assert_eq!(pick("serch").as_deref(), Some("search"));
+        assert_eq!(pick("mem"), None);
+        assert_eq!(pick("zzzzzz"), None);
+    }
+
+    #[test]
+    fn lessons_words_are_a_topic_and_other_words_are_not() {
+        for word in ["lessons", "Lesson", "learnings", "LORE"] {
+            assert!(lessons_topic(word), "{word}");
+        }
+        for word in ["learn", "search", "remember", "lessen"] {
+            assert!(!lessons_topic(word), "{word}");
+        }
+        let args: Vec<String> = ["lessons", "kiln", "-n", "3"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let line = lessons_sentence("lessons", &args);
+        assert!(line.contains("`ljos search \"kiln\"`"), "{line}");
+        assert!(line.contains("`ljos remember "), "{line}");
+        assert!(line.contains("`ljos proposals`"), "{line}");
     }
 }

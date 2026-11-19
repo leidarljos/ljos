@@ -302,3 +302,23 @@ Text with spaces, or a word that is not an id, exits 2 and points at the search 
 .. code:: text
 
    recall: "usability first-run ljos cli" is not a ticket id, so run `ljos search "usability first-run ljos cli"`.
+
+A word that is not a command
+============================
+
+``lessons`` is a natural guess, and it is not a command.
+The line exits 2 and names the three verbs that work with lessons, each as a command that runs:
+
+.. code:: text
+
+   ljos: no command lessons. To find lessons run `ljos search "lexical default"`, to save one run `ljos remember "The lexical default is BM25+."`, and to review the ones waiting run `ljos proposals`.
+
+Words typed after it become the query, so ``ljos lessons kiln`` names ``ljos search "kiln"``.
+Any other word that is near a verb names that verb.
+A name with an ending, the start of one verb and a name with a verb as a part are all near:
+
+.. code:: text
+
+   ljos: no command prop, and the closest is proposals, so run `ljos proposals`.
+
+A start that two verbs share, such as ``mem``, is not guessed, and the line names ``ljos help``.

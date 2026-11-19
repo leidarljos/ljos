@@ -16,6 +16,7 @@ The first line says why. A writer that is not running names =packset ensure=. A 
 A remember that queued the lesson exits 0.
 Every failure is one line on stderr.
 The line says what went wrong and the command that fixes it.
+A word that is not a command names the verb it was reaching for as a line that runs: a mistyped name, a name with an ending such as =searches=, the start of one verb such as =prop=, or a name with a part that is a verb such as =search-lessons=. A start that two verbs share is not guessed. =lessons=, =lesson= and =learnings= are not commands, and the line names =ljos search= to find a lesson, =ljos remember= to save one and =ljos proposals= to review the ones waiting. Words after =lessons= become the query of the search line.
 =-p= and =--project= name a project on =calibrate=, =claims=, =file=, =list=, =ready=, =remember=, =search= and =sitting --plan=. On another verb the error names those verbs.
 =LJOS_DEBUG=1= or =--verbose= prints the cause chain after that line.
 

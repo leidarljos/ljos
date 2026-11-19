@@ -411,3 +411,110 @@ fn close_create_delete_rm_status_and_stats_point_at_real_verbs() {
         assert_eq!(String::from_utf8_lossy(&out.stderr), want, "{args:?}");
     }
 }
+
+const LESSONS_LINE: &str = "To find lessons run `ljos search \"lexical default\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.";
+
+#[test]
+fn lessons_names_search_remember_and_proposals() {
+    let dir = tempfile::tempdir().unwrap();
+    for word in ["lessons", "lesson", "learnings", "Lessons"] {
+        let out = run(dir.path(), &[word], &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{word}\n{said}");
+        assert!(out.stdout.is_empty(), "{word}\n{said}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("ljos: no command {word}. {LESSONS_LINE}\n"),
+            "{word}"
+        );
+    }
+    let help = run(dir.path(), &["help", "lessons"], &[]);
+    assert_eq!(help.status.code(), Some(2), "{}", text(&help));
+    assert_eq!(
+        String::from_utf8_lossy(&help.stderr),
+        format!("ljos: no command lessons. {LESSONS_LINE}\n")
+    );
+}
+
+#[test]
+fn words_after_lessons_become_the_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let cases: [(&[&str], &str); 3] = [
+        (
+            &["lessons", "kiln"],
+            "ljos: no command lessons. To find lessons run `ljos search \"kiln\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+        ),
+        (
+            &["--seat", "ada", "lessons", "cold", "metal", "-p", "demo"],
+            "ljos: no command lessons. To find lessons run `ljos search \"cold metal\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+        ),
+        (
+            &["lessons", "--json"],
+            "ljos: no command lessons. To find lessons run `ljos search \"lexical default\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = run(dir.path(), args, &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), want, "{args:?}");
+    }
+}
+
+#[test]
+fn a_stem_a_start_or_a_part_of_a_verb_names_that_verb() {
+    let dir = tempfile::tempdir().unwrap();
+    let cases: [(&[&str], &str); 8] = [
+        (
+            &["prop"],
+            "ljos: no command prop, and the closest is proposals, so run `ljos proposals`.\n",
+        ),
+        (
+            &["remembering", "cold metal"],
+            "ljos: no command remembering, and the closest is remember, so run `ljos remember \"cold metal\"`.\n",
+        ),
+        (
+            &["searches", "kiln"],
+            "ljos: no command searches, and the closest is search, so run `ljos search kiln`.\n",
+        ),
+        (
+            &["search-lessons", "kiln"],
+            "ljos: no command search-lessons, and the closest is search, so run `ljos search kiln`.\n",
+        ),
+        (
+            &["note_add", "the door sticks"],
+            "ljos: no command note_add, and the closest is note, so run `ljos note \"the door sticks\"`.\n",
+        ),
+        (
+            &["memorize", "cold metal"],
+            "ljos: no command memorize, and the closest is remember, so run `ljos remember \"cold metal\"`.\n",
+        ),
+        (
+            &["review"],
+            "ljos: no command review, and the closest is proposals, so run `ljos proposals`.\n",
+        ),
+        (
+            &["help", "prop"],
+            "ljos: no command prop, and the closest is proposals, so run `ljos help proposals`.\n",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = run(dir.path(), args, &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), want, "{args:?}");
+    }
+}
+
+#[test]
+fn a_word_two_verbs_start_with_is_not_guessed() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(dir.path(), &["mem"], &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "ljos: no command mem, so run `ljos help`.\n"
+    );
+}

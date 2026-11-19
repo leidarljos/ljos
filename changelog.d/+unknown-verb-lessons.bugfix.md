@@ -1,0 +1,1 @@
+An unknown command now names the verb it was reaching for. `ljos lessons` names `ljos search`, `ljos remember` and `ljos proposals`. A verb with an ending, the start of one verb, or a word that contains a verb names that verb as a command to run.
