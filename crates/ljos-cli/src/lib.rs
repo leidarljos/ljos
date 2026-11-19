@@ -51379,6 +51379,12 @@ pub fn age_of(ts: Option<&str>, now: &str) -> String {
     }
 }
 
+/// Whether `ts` opens with a `YYYY-MM-DD` calendar date as `--as-of` expects.
+#[must_use]
+pub fn valid_as_of(ts: &str) -> bool {
+    days_of_stamp(Some(ts)).is_some()
+}
+
 /// Days since the epoch of an RFC 3339 stamp's date, or none when the
 /// first ten characters do not read as `YYYY-MM-DD`.
 fn days_of_stamp(ts: Option<&str>) -> Option<i64> {

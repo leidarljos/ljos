@@ -692,3 +692,49 @@ fn unknown_proposals_status_names_valid_values_and_exits_2() {
         assert_eq!(one_line(&out.stderr), want, "{bad:?}\n{said}");
     }
 }
+
+#[test]
+fn invalid_flag_values_on_search_and_remember_exit_2() {
+    let home = Home::new();
+    let cases: [(&[&str], &str); 5] = [
+        (
+            &["search", "kiln", "--min-score=-1"],
+            "search: --min-score takes a number from 0 up, not -1.",
+        ),
+        (
+            &["search", "kiln", "--as-of", "bogus"],
+            "search: --as-of \"bogus\" is not a date; write YYYY-MM-DD or RFC 3339.",
+        ),
+        (
+            &["search", "kiln", "--valid-at", "bogus"],
+            "search: --valid-at takes YYYY-MM-DD or any, not bogus.",
+        ),
+        (
+            &[
+                "remember",
+                "--transient",
+                "--standing",
+                "The kiln fires at dusk.",
+            ],
+            "remember: pass --transient or --standing, not both.",
+        ),
+        (
+            &[
+                "remember",
+                "--valid-from",
+                "2026-05-10",
+                "--valid-to",
+                "2026-05-01",
+                "The kiln fires at dusk.",
+            ],
+            "the window ends (2026-05-01) before it starts (2026-05-10)",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
+    }
+}

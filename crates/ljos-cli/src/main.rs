@@ -4967,7 +4967,8 @@ fn run_command() -> Result<()> {
         } => {
             ljos_cli::config_diag::emit();
             if transient && standing {
-                bail!("remember: pass --transient or --standing, not both");
+                eprintln!("remember: pass --transient or --standing, not both.");
+                std::process::exit(USAGE_STATUS);
             }
             let text = join(&text);
             if text.trim().is_empty() {
@@ -4987,7 +4988,10 @@ fn run_command() -> Result<()> {
                 None => None,
             };
             let _remember_project = ljos_cli::RememberProject::set(project);
-            ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
+            if let Err(err) = ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref()) {
+                eprintln!("{err}");
+                std::process::exit(USAGE_STATUS);
+            }
             // A paragraph or a session is several claims: each goes in on
             // its own, where the whole was refused at the pack's cap.
             // Two sentences stay one row. A longer text is split, and
@@ -5461,7 +5465,8 @@ fn run_command() -> Result<()> {
             project,
         } => {
             if !min_score.is_finite() || min_score < 0.0 {
-                bail!("search: --min-score takes a number from 0 up, not {min_score}.");
+                eprintln!("search: --min-score takes a number from 0 up, not {min_score}.");
+                std::process::exit(USAGE_STATUS);
             }
             if join(&query).trim().is_empty()
                 && source_machine.is_none()
@@ -5471,6 +5476,25 @@ fn run_command() -> Result<()> {
                 eprintln!("search: the query is empty, so run `ljos search \"QUERY\"`.");
                 std::process::exit(USAGE_STATUS);
             }
+            if let Some(at) = as_of.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if !ljos_cli::valid_as_of(at) {
+                    eprintln!(
+                        "search: --as-of {at:?} is not a date; write YYYY-MM-DD or RFC 3339."
+                    );
+                    std::process::exit(USAGE_STATUS);
+                }
+            }
+            let day = match valid_at.as_deref().map(str::trim) {
+                Some("any") => None,
+                Some(d) => {
+                    if chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_err() {
+                        eprintln!("search: --valid-at takes YYYY-MM-DD or any, not {d}.");
+                        std::process::exit(USAGE_STATUS);
+                    }
+                    Some(d.to_string())
+                }
+                None => Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
+            };
             let project = match project {
                 Some(name) => Some(ljos_cli::require_known_project(&name)?),
                 None => None,
@@ -5478,9 +5502,8 @@ fn run_command() -> Result<()> {
             ljos_cli::log_recall("search", &query.join(" "));
             // A cold encoder gets long enough to load and be asked again.
             // A warm pack keeps the short budget. Past it the word ranking
-            // prints. Rows say they are word matches and that meaning search
-            // will be ready shortly. An empty page names the command to run
-            // again.
+            // prints. Rows say they are word matches and name any reported
+            // load time. An empty page names the command to run again.
             // Held across the status probe that sizes the budget, so a pack
             // that accepts and stays silent spends one request, not one per
             // later read.
@@ -5493,16 +5516,6 @@ fn run_command() -> Result<()> {
             };
             let _deadline = ljos_cli::pack_link::CommandDeadline::enter(budget);
             let _pack_clock = ljos_cli::pack_link::PackClock::enter(budget);
-            let day = match valid_at.as_deref().map(str::trim) {
-                Some("any") => None,
-                Some(d) => {
-                    chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
-                        anyhow::anyhow!("search: --valid-at takes YYYY-MM-DD or any, not {d}.")
-                    })?;
-                    Some(d.to_string())
-                }
-                None => Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
-            };
             // Expired claims are dropped after the pack answers, so ask for
             // more than the limit and cut to it once they are gone. A day
             // filter is what drops them. With `--valid-at any` the fetch
