@@ -632,3 +632,33 @@ fn a_corrupt_tracker_config_names_doctor() {
         "the tracker config does not parse, so run `ljos doctor`."
     );
 }
+
+#[test]
+fn free_text_on_recall_points_at_search_and_exits_2() {
+    let home = Home::new();
+    let cases: [(&[&str], &str); 4] = [
+        (
+            &["recall", "usability first-run ljos cli"],
+            "recall: \"usability first-run ljos cli\" is not a ticket id, so run `ljos search \"usability first-run ljos cli\"`.",
+        ),
+        (
+            &["recall", "usability"],
+            "recall: \"usability\" is not a ticket id, so run `ljos search \"usability\"`.",
+        ),
+        (
+            &["recall", "   "],
+            "recall: the issue id is empty, so run `ljos recall proj-1a2b`.",
+        ),
+        (
+            &["recall", "--", "-flag"],
+            "recall: \"-flag\" is not a ticket id, so run `ljos search -- \"-flag\"`.",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
+    }
+}

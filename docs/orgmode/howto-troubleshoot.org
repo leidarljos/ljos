@@ -192,3 +192,12 @@ command shape, even when old queued lessons exist:
 search: the query is empty, so run `ljos search "QUERY"`.
 #+end_src
 
+* Free text on recall
+
+=ljos recall= takes one ticket id.
+Text with spaces or without a project prefix exits 2 and points at the search command:
+
+#+begin_src text
+recall: "usability first-run ljos cli" is not a ticket id, so run `ljos search "usability first-run ljos cli"`.
+#+end_src
+

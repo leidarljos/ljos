@@ -1544,6 +1544,7 @@ enum Cmd {
     /// Example: `ljos recall proj-1a2b`
     ///
     /// When no lesson is stored on the issue, the line names `ljos remember`.
+    /// Free text or an argument without a ticket id exits 2 and points at `ljos search`.
     /// A busy memory store is asked again for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset, `0` does not wait).
     /// The wait follows `Retry-After` or a JSON `retry_ms`.
     /// When it stays busy, the rows are ranked by words and one line says the memory pack was busy.
@@ -3516,6 +3517,48 @@ fn vissue_id_parts(word: &str) -> Option<(&str, &str)> {
             .bytes()
             .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase()))
     .then_some((project, suffix))
+}
+
+fn looks_like_ticket_id(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if let Some((project, suffix)) = vissue_id_parts(trimmed) {
+        return project.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        }) && !suffix.is_empty();
+    }
+    ticket_like(trimmed)
+}
+
+fn recall_search_command(text: &str) -> String {
+    let arg = if text
+        .chars()
+        .any(|ch| ch.is_control() || matches!(ch, '"' | '\\' | '$' | '`' | '!'))
+    {
+        if text.chars().any(char::is_control) {
+            let escaped = text
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t");
+            format!("$'{escaped}'")
+        } else {
+            format!("'{}'", text.replace('\'', "'\\''"))
+        }
+    } else {
+        format!("\"{text}\"")
+    };
+    if text.starts_with('-') {
+        format!("ljos search -- {arg}")
+    } else {
+        format!("ljos search {arg}")
+    }
 }
 
 /// A node named on the command line. A blank one is an error at once,
@@ -6315,8 +6358,24 @@ fn run_command() -> Result<()> {
             json,
             no_graph,
         } => {
-            stop_ticket(&issue);
             ljos_cli::config_diag::emit();
+            let trimmed = issue.trim();
+            if trimmed.is_empty() {
+                eprintln!("recall: the issue id is empty, so run `ljos recall proj-1a2b`.");
+                std::process::exit(USAGE_STATUS);
+            }
+            if !looks_like_ticket_id(trimmed) {
+                let search_cmd = recall_search_command(trimmed);
+                if search_cmd.contains('`') {
+                    eprintln!("recall: that text is not a ticket id, so run {search_cmd}.");
+                } else {
+                    let shown =
+                        format!("\"{}\"", trimmed.replace('\\', "\\\\").replace('"', "\\\""));
+                    eprintln!("recall: {shown} is not a ticket id, so run `{search_cmd}`.");
+                }
+                std::process::exit(USAGE_STATUS);
+            }
+            stop_ticket(&issue);
             ljos_cli::log_recall("recall", &issue);
             let said = ljos_cli::tracker_recall(&issue).map_err(ticket_error)?;
             eprint!("{}", ljos_cli::without_raw_rows(&said.stderr));

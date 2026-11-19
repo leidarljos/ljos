@@ -242,10 +242,10 @@ fn recall_of_an_unknown_id_names_search_and_file() {
         return;
     };
     let seat = Seat::on(daemon.url());
-    let (code, stdout, stderr) = seat.run(&["recall", "kiln"]);
+    let (code, stdout, stderr) = seat.run(&["recall", "demo-gone"]);
     assert_ne!(code, 0, "{stdout}{stderr}");
     let said = format!("{stdout}{stderr}");
-    assert!(said.contains("issue kiln not found"), "{said}");
+    assert!(said.contains("issue demo-gone not found"), "{said}");
     assert!(
         said.contains("`ljos ready` lists the open tickets"),
         "{said}"
