@@ -329,6 +329,8 @@ holds on Linux only. On macOS and other systems the hook's parent owns
 the sitting: a runner starts the hook through =sh -c=, which exits with
 it, so there the next MCP call finishes the hook's sitting, and
 =ljos_start= files a new claim instead of keeping the one a Write took.
+On Linux, a child of the recorded client does not keep the MCP connection
+alive after that client exits.
 
 * Sync files
 

@@ -641,10 +641,20 @@ mod tests {
         );
     }
 
+    /// Stay alive when a child test process selects only this test.
+    #[test]
+    fn child_pid_process_helper() {
+        if std::env::var_os("LJOS_CHILD_PID_TEST").is_some() {
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    /// Use this test binary by path because parallel tests can change `PATH`.
     #[test]
     fn child_pids_names_a_live_child() {
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "lifetime::tests::child_pid_process_helper"])
+            .env("LJOS_CHILD_PID_TEST", "1")
             .spawn()
             .unwrap();
         let pid = child.id();
