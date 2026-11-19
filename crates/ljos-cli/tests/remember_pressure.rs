@@ -58,13 +58,17 @@ std::thread_local! {
 }
 
 fn remember(port: u16, text: &str) -> std::process::Output {
+    remember_with(port, &["remember", text])
+}
+
+fn remember_with(port: u16, args: &[&str]) -> std::process::Output {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let state = root.path().join("state");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&state).unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
-        .args(["remember", text])
+        .args(args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
@@ -140,4 +144,30 @@ fn a_duplicate_lesson_prints_the_atom_id() {
     );
     let queued = LAST_QUEUE.with(|slot| slot.borrow().clone());
     assert!(queued.is_empty(), "a duplicate was queued:\n{queued}");
+}
+
+#[test]
+fn json_prints_a_claims_document_when_every_chunk_is_already_stored() {
+    let port = serve(400, r#"{"error":"duplicate of abcdef0123456789"}"#);
+    let out = remember_with(port, &["remember", "--json", "pin the fuse"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!(
+        "status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(out.status.success(), "{said}");
+    assert!(
+        stderr.contains("already stored as abcdef0123456789"),
+        "{said}"
+    );
+    let page: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|err| panic!("stdout is not one JSON document: {err}\n{said}"));
+    let claims = page["claims"]
+        .as_array()
+        .unwrap_or_else(|| panic!("stdout has no claims array:\n{said}"));
+    assert_eq!(claims.len(), 1, "{said}");
+    assert_eq!(claims[0]["id"], "abcdef0123456789", "{said}");
+    assert_eq!(claims[0]["duplicate"], true, "{said}");
+    assert_eq!(claims[0]["text"], "pin the fuse", "{said}");
 }
