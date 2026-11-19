@@ -486,7 +486,12 @@ pub fn session_start_for(session: Option<&str>) -> String {
     );
     // A guard that switched itself off says so where the session starts,
     // not only in `ljos doctor`.
-    if let Some(off) = bookkeep::guard_off_reason() {
+    if let Some(msg) = sandbox_memory_off() {
+        // Memory and the guard are both off. The preface is that one line.
+        line = msg;
+    } else if bookkeep::ljos_is_off() {
+        line = line.replace("command guard on", "command guard off: LJOS_OFF is set");
+    } else if let Some(off) = bookkeep::guard_off_reason() {
         line = line.replace("command guard on", &format!("command guard {off}"));
     }
     if let Some(issue) = bookkeep::session_issue(session) {
@@ -20725,19 +20730,20 @@ fn sandbox_root_label(home: &Path) -> String {
     }
 }
 
-/// One line: memory is off because `home` is a sandbox, and the directory
-/// to set instead.
+/// One line when a sandbox home has switched memory and the command guard
+/// off. It names the directory the home sits under and the `HOME` to set.
 fn memory_off_temp_line(home: &Path) -> String {
     let root = sandbox_root_label(home);
+    let shown = home.display().to_string();
     format!(
-        "memory is off because the home is under {root} ({}); set HOME to a directory outside {root}",
-        home.display()
+        "memory and the command guard are off because the home is under {root} ({}); set HOME to a directory outside {root}",
+        shown.escape_debug()
     )
 }
 
 /// That line when this process's `HOME` is a sandbox and no writer address
 /// was named. A named `PACKSET_URL`, including `off`, keeps its own line.
-pub(crate) fn sandbox_memory_off() -> Option<String> {
+pub fn sandbox_memory_off() -> Option<String> {
     if std::env::var("PACKSET_URL")
         .ok()
         .is_some_and(|url| !url.trim().is_empty())
@@ -20913,6 +20919,7 @@ fn text_is_down(text: &str) -> bool {
         || full.contains("packset ensure")
         || full.contains("packset is not on path")
         || full.contains("memory is off")
+        || full.contains("memory and the command guard are off")
 }
 
 fn writer_is_down(err: &anyhow::Error) -> bool {
@@ -23931,6 +23938,10 @@ pub fn user_fault_line(err: &anyhow::Error) -> String {
 pub fn user_fault_for(err: &anyhow::Error, again: &str) -> String {
     let top = flatten_line(&err.to_string());
     if top.contains(WRITER_PORT_FIX) {
+        return top;
+    }
+    // The sandbox line already names the cause and the directory to set.
+    if top.contains("set HOME to a directory outside") {
         return top;
     }
     if busy_queue_line().is_some()
@@ -34078,6 +34089,21 @@ fn doctor_extend(out: &mut Vec<Habitat>, rows: impl IntoIterator<Item = Habitat>
     }
 }
 
+/// A sandbox home with no writer address names that once, without a
+/// "does not answer" prefix.
+fn settle_pack_row(row: Habitat) -> Habitat {
+    if row.name == "pack" && !row.ok {
+        if let Some(line) = sandbox_memory_off() {
+            return Habitat {
+                name: "pack",
+                state: line,
+                ok: false,
+            };
+        }
+    }
+    row
+}
+
 /// Which habitats answer: binaries on `PATH`, the pack over `PACKSET_URL`, the
 /// deed store, the tracker, the claim graph.
 pub fn doctor() -> Vec<Habitat> {
@@ -34186,7 +34212,19 @@ fn git_identity_dir() -> PathBuf {
 /// temporary `HOME` with no `LJOS_GUARD=on`), so a person who tries ljos
 /// with a scratch home reads why a command it would stop runs.
 fn guard_off_row() -> Option<Habitat> {
-    bookkeep::guard_off_reason().map(|state| Habitat {
+    if !bookkeep::guard_suspended() {
+        return None;
+    }
+    // A sandbox with no writer address has switched memory off too. The
+    // memory row and this row say that with the same sentence.
+    let state = if bookkeep::ljos_is_off() {
+        "off: LJOS_OFF is set".to_string()
+    } else if let Some(line) = sandbox_memory_off() {
+        line
+    } else {
+        bookkeep::guard_off_reason()?
+    };
+    Some(Habitat {
         name: "guard",
         state,
         ok: false,
@@ -35499,86 +35537,84 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 }
                 Err(e) => Habitat {
                     name: "encoder",
-                    state: match pack_down_message(&e) {
-                        Some(line) => format!("pack does not answer. {line}"),
-                        None => format!("pack does not answer: {e}"),
+                    state: if let Some(line) = sandbox_memory_off() {
+                        line
+                    } else {
+                        match pack_down_message(&e) {
+                            Some(line) => format!("pack does not answer. {line}"),
+                            None => format!("pack does not answer: {e}"),
+                        }
                     },
                     ok: false,
                 },
             },
         );
-        doctor_push(
-            &mut out,
-            match pack() {
-                Ok(client) => {
-                    let started = std::time::Instant::now();
-                    let health = client.health().map_err(anyhow::Error::from);
-                    let took_ms = started.elapsed().as_millis();
-                    let slow = started.elapsed() >= PACK_SLOW_HEALTH;
-                    let admission = client.admission_line();
-                    let mut where_ = format!(
-                        "{} workspace {}; pack responded in {took_ms}ms{}",
-                        client.base(),
-                        client.workspace(),
-                        psi_suffix()
-                    );
-                    if let Some(line) = admission {
-                        where_.push_str("; ");
-                        where_.push_str(&line);
-                    }
-                    match health {
-                        Ok(body) if pack_warming(&body) => Habitat {
-                            name: "pack",
-                            state: warming_doctor_state(&body, &where_),
-                            ok: true,
-                        },
-                        Ok(_) if slow => Habitat {
-                            name: "pack",
-                            state: format!("{}; {}", pack_busy_sentence(), where_),
-                            ok: true,
-                        },
-                        Ok(_) => Habitat {
-                            name: "pack",
-                            state: where_,
-                            ok: true,
-                        },
-                        Err(e) if is_read_shed(&e) => Habitat {
-                            name: "pack",
-                            state: format!("{}; {where_}", pack_fault_line(&e)),
-                            ok: true,
-                        },
-                        Err(e) if writer_slow(&e) => Habitat {
-                            name: "pack",
-                            state: format!("{}; {}", pack_busy_sentence(), where_),
-                            ok: true,
-                        },
-                        Err(e) => Habitat {
-                            name: "pack",
-                            state: doctor_fix::hint_pack(match pack_down_message(&e) {
-                                Some(line) => format!("{} does not answer. {line}", client.base()),
-                                // Same line as a memory command. A temporary home
-                                // used to add a second sentence that named
-                                // `packset ensure` even when packset was missing.
-                                None if bookkeep::temp_home().is_some() => {
-                                    format!(
-                                        "{} does not answer. {}",
-                                        client.base(),
-                                        pack_down_line()
-                                    )
-                                }
-                                None => format!("{} does not answer: {e}", client.base()),
-                            }),
-                            ok: false,
-                        },
-                    }
+        let pack_row = match pack() {
+            Ok(client) => {
+                let started = std::time::Instant::now();
+                let health = client.health().map_err(anyhow::Error::from);
+                let took_ms = started.elapsed().as_millis();
+                let slow = started.elapsed() >= PACK_SLOW_HEALTH;
+                let admission = client.admission_line();
+                let mut where_ = format!(
+                    "{} workspace {}; pack responded in {took_ms}ms{}",
+                    client.base(),
+                    client.workspace(),
+                    psi_suffix()
+                );
+                if let Some(line) = admission {
+                    where_.push_str("; ");
+                    where_.push_str(&line);
                 }
-                Err(e) => Habitat {
-                    name: "pack",
-                    state: doctor_fix::hint_pack(e.to_string()),
-                    ok: false,
-                },
+                match health {
+                    Ok(body) if pack_warming(&body) => Habitat {
+                        name: "pack",
+                        state: warming_doctor_state(&body, &where_),
+                        ok: true,
+                    },
+                    Ok(_) if slow => Habitat {
+                        name: "pack",
+                        state: format!("{}; {}", pack_busy_sentence(), where_),
+                        ok: true,
+                    },
+                    Ok(_) => Habitat {
+                        name: "pack",
+                        state: where_,
+                        ok: true,
+                    },
+                    Err(e) if is_read_shed(&e) => Habitat {
+                        name: "pack",
+                        state: format!("{}; {where_}", pack_fault_line(&e)),
+                        ok: true,
+                    },
+                    Err(e) if writer_slow(&e) => Habitat {
+                        name: "pack",
+                        state: format!("{}; {}", pack_busy_sentence(), where_),
+                        ok: true,
+                    },
+                    Err(e) => Habitat {
+                        name: "pack",
+                        state: doctor_fix::hint_pack(match pack_down_message(&e) {
+                            Some(line) => format!("{} does not answer. {line}", client.base()),
+                            // Same line as a memory command. A temporary home
+                            // used to add a second sentence that named
+                            // `packset ensure` even when packset was missing.
+                            None if bookkeep::temp_home().is_some() => {
+                                format!("{} does not answer. {}", client.base(), pack_down_line())
+                            }
+                            None => format!("{} does not answer: {e}", client.base()),
+                        }),
+                        ok: false,
+                    },
+                }
+            }
+            Err(e) => Habitat {
+                name: "pack",
+                state: doctor_fix::hint_pack(e.to_string()),
+                ok: false,
             },
-        );
+        };
+        doctor_push(&mut out, settle_pack_row(pack_row));
         // The writer's token: packsetd 0.15 answers its owner only, and a seat
         // with no token meets a 401 on every memory, mail and recall call while
         // `/health` still says ok.
@@ -56279,11 +56315,12 @@ mod tests {
         let temp =
             std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
         let under_temp = format!("under {}", temp.display());
+        let refused = refused.to_string();
         assert!(
-            refused.to_string().contains("memory is off")
-                && refused.to_string().contains(&under_temp)
-                && refused.to_string().contains("set HOME")
-                && !refused.to_string().contains("packset ensure"),
+            refused.contains("memory and the command guard are off")
+                && refused.contains(&under_temp)
+                && refused.contains("set HOME")
+                && !refused.contains("packset ensure"),
             "{refused}"
         );
         assert!(!marker.exists(), "a temp HOME started the pack daemon");

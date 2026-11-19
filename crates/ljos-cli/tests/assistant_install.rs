@@ -481,6 +481,7 @@ fn a_lesson_comes_back_without_a_seat_sitting_or_ticket() {
             .env("XDG_RUNTIME_DIR", dir.path().join("run"))
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_PORT", daemon.port().to_string())
+            .env("PACKSET_URL", format!("http://127.0.0.1:{}", daemon.port()))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

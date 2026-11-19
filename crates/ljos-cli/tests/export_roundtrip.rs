@@ -70,6 +70,7 @@ impl Seat {
             .env("XDG_CACHE_HOME", home.join(".cache"))
             .env("XDG_RUNTIME_DIR", home.join("run"))
             .env("PACKSET_PORT", self.port.to_string())
+            .env("PACKSET_URL", format!("http://127.0.0.1:{}", self.port))
             .env("PACKSET_HOME", home.join(".local/share/packset"))
             .env("PACKSET_WORKSPACE", workspace)
             .env("VISSUE_ROOT", root)

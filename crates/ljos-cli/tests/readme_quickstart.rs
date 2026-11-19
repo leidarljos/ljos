@@ -401,6 +401,9 @@ fn promised_in_readme(cmd: &str) -> Vec<&'static str> {
 fn doctor_ready(output: &str) -> bool {
     const WITH_GUARD: &str = "ljos is ready: memory, tracker and command guard work";
     const SANDBOX: &str = "ljos is ready: memory and tracker work";
+    if output.contains("memory and the command guard are off because the home is under") {
+        return !output.contains("ljos is ready");
+    }
     if output.contains("ljos needs action:") {
         return !output.contains("ljos is ready");
     }

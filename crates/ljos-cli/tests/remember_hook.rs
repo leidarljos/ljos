@@ -78,6 +78,8 @@ fn seat_env(cmd: &mut Command, home: &Path, path: &str, port: Option<u16>) {
         .env("LJOS_TRACKER_GIT", "off");
     if let Some(port) = port {
         cmd.env("PACKSET_PORT", port.to_string());
+        // A temporary home leaves memory off until a writer address is set.
+        cmd.env("PACKSET_URL", format!("http://127.0.0.1:{port}"));
     }
 }
 

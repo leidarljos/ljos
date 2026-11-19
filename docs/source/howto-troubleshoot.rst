@@ -52,16 +52,16 @@ With ``packset`` on ``PATH`` and nothing listening, a home that is not a tempora
 
 That one command starts the writer. ``ljos doctor --fix`` runs ``packset ensure`` itself, and prints one line that says it did.
 
-Under a temporary home memory is off, and ``ljos doctor --fix`` does not start a writer.
+Under a temporary home memory and the command guard are off, and ``ljos doctor --fix`` does not start a writer.
 The home was ``/tmp/seat``.
-The printed row is one line:
+The printed row is one line, and ``ljos search`` and ``ljos consensus`` print that same line and exit 1:
 
 ..
    # proseguard:off
 
 .. code:: text
 
-   no  memory    http://127.0.0.1:8761 does not answer. memory is off because the home is under /tmp (/tmp/seat); set HOME to a directory outside /tmp
+   no  memory    memory and the command guard are off because the home is under /tmp (/tmp/seat); set HOME to a directory outside /tmp
 
 ..
    # proseguard:on

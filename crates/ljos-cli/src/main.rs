@@ -5624,6 +5624,10 @@ fn run_command() -> Result<()> {
                 eprintln!("search: the query is empty, so run `ljos search \"QUERY\"`.");
                 std::process::exit(USAGE_STATUS);
             }
+            if let Some(line) = ljos_cli::sandbox_memory_off() {
+                eprintln!("{line}");
+                std::process::exit(1);
+            }
             if let Some(at) = as_of.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 if !ljos_cli::valid_as_of(at) {
                     eprintln!(
@@ -7208,6 +7212,10 @@ fn run_command() -> Result<()> {
             quorum,
             deadline,
         } => {
+            if let Some(line) = ljos_cli::sandbox_memory_off() {
+                eprintln!("{line}");
+                std::process::exit(1);
+            }
             stop_ticket(&id);
             // One silent pack is waited out once, inside the command budget.
             // Trust, the roster and the listing each ask, and a second wait

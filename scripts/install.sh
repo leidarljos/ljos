@@ -1303,7 +1303,7 @@ case "${home_real}/" in
   "${tmp_root%/}"/*) root=${tmp_root%/} ;;
 esac
 if [ -n "$root" ]; then
-  say "memory is off because the home is under ${root} (${home_real}); set HOME to a directory outside ${root}"
+  say "memory and the command guard are off because the home is under ${root} (${home_real}); set HOME to a directory outside ${root}"
 fi
 # `--no-onboard` has not set up the guard or the pack home, so the
 # force-push sample would be a command the person did not ask to try.
